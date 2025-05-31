@@ -75,56 +75,102 @@ def fetch_live_odds(sport_key):
 
 def get_snapshot(data):
     return {g['id']: g for g in data}
-
 def detect_sharp_moves(current, previous, sport_key):
-    moves = []
+    opportunities = []
+    snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    previous_map = {g['id']: g for g in previous} if previous else {}
+
     for game in current:
-        gid = game['id']
         game_name = f"{game['home_team']} vs {game['away_team']}"
-        prev_game = previous.get(gid, {}) if previous else {}
+        gid = game['id']
+        prev_game = previous_map.get(gid, {})
+
+        # Organize bookmaker lines
+        sharp_lines = {}
+        rec_lines = []
 
         for book in game.get('bookmakers', []):
             book_key = book['key']
-            if book_key not in SHARP_BOOKS + REC_BOOKS:
-                continue
             region = BOOKMAKER_REGIONS.get(book_key, 'unknown')
             for market in book.get('markets', []):
                 mtype = market['key']
                 for o in market.get('outcomes', []):
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     limit = o.get('bet_limit')
-                    label = o.get('name')
-                    prev_val = None
+                    label = o['name']
+
+                    entry = {
+                        'Sport': sport_key,
+                        'Time': snapshot_time,
+                        'Game': game_name,
+                        'Market': mtype,
+                        'Outcome': label,
+                        'Bookmaker': book['title'],
+                        'Book': book_key,
+                        'Region': region,
+                        'Value': val,
+                        'Limit': limit,
+                        'Old Value': None,
+                        'Delta': None
+                    }
+
+                    # Optional: calculate delta if previous value exists
                     if prev_game:
-                        for b in prev_game.get('bookmakers', []):
-                            if b['key'] == book_key:
-                                for m in b.get('markets', []):
-                                    if m['key'] == mtype:
-                                        for po in m.get('outcomes', []):
-                                            if po['name'] == label:
-                                                prev_val = po.get('point') if mtype != 'h2h' else po.get('price')
-                    if prev_val is not None and val is not None:
-                        delta = round(val - prev_val, 2)
-                        is_valid_move = (
-                            (mtype == 'h2h' and abs(delta) >= ml_thresh) or
-                            (mtype in ['spreads', 'totals'] and abs(delta) >= spread_thresh)
-                        )
-                        if is_valid_move:
-                            moves.append({
-                                'Sport': sport_key,
-                                'Game': game_name,
-                                'Market': mtype,
-                                'Outcome': label,
-                                'Bookmaker': book['title'],
-                                'Book': book_key,
-                                'Region': region,
-                                'Old Value': prev_val,
-                                'New Value': val,
-                                'Delta': delta,
-                                'Limit': limit,
-                                'Time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            })
-    return pd.DataFrame(moves)
+                        for prev_b in prev_game.get('bookmakers', []):
+                            if prev_b['key'] == book_key:
+                                for prev_m in prev_b.get('markets', []):
+                                    if prev_m['key'] == mtype:
+                                        for prev_o in prev_m.get('outcomes', []):
+                                            if prev_o['name'] == label:
+                                                prev_val = prev_o.get('point') if mtype != 'h2h' else prev_o.get('price')
+                                                if prev_val is not None and val is not None:
+                                                    entry['Old Value'] = prev_val
+                                                    entry['Delta'] = round(val - prev_val, 2)
+
+                    if book_key in SHARP_BOOKS:
+                        sharp_lines[(mtype, label)] = entry
+                    elif book_key in REC_BOOKS:
+                        rec_lines.append(entry)
+
+        # Now compare rec books to sharp reference
+        for rec_entry in rec_lines:
+            key = (rec_entry['Market'], rec_entry['Outcome'])
+            sharp_entry = sharp_lines.get(key)
+
+            if sharp_entry and sharp_entry['Value'] is not None and rec_entry['Value'] is not None:
+                sharp_val = sharp_entry['Value']
+                rec_val = rec_entry['Value']
+                delta_from_sharp = round(rec_val - sharp_val, 2)
+
+                # Bias match = same side
+                bias_match = 1 if rec_val < sharp_val and "under" in rec_entry['Outcome'].lower() else 0
+                asymmetry = abs((sharp_entry['Limit'] or 0) - (rec_entry['Limit'] or 0)) >= 5000
+                limit_score = 1 if sharp_entry['Limit'] and sharp_entry['Limit'] >= 10000 else 0.5 if sharp_entry['Limit'] else 0
+
+                # Optional: use line movement delta if available
+                line_moved = 1 if rec_entry['Delta'] and abs(rec_entry['Delta']) >= (1 if rec_entry['Market'] != 'h2h' else 10) else 0
+
+                miller_score = (
+                    5 * bias_match +
+                    4 * limit_score +
+                    3 * line_moved +
+                    2 * asymmetry
+                )
+
+                combined = rec_entry.copy()
+                combined.update({
+                    'Ref Sharp Value': sharp_val,
+                    'Sharp Limit': sharp_entry['Limit'],
+                    'Delta vs Sharp': delta_from_sharp,
+                    'Bias Match': bias_match,
+                    'Asymmetry Flag': int(asymmetry),
+                    'MillerSharpScore': miller_score
+                })
+
+                opportunities.append(combined)
+
+    return pd.DataFrame(opportunities)
+
 
 def score_sharp_moves(df):
     df['Delta_Abs'] = df['Delta'].abs()
@@ -159,7 +205,7 @@ def render_scanner_tab(label, sport_key, container):
 
         df_moves = detect_sharp_moves(live, prev, label)
         if not df_moves.empty:
-            df_scored = score_sharp_moves(df_moves)
+            df_scored = score_sharp_moves(df_opportunities)
             df_display = df_scored.sort_values(by='MillerSharpScore', ascending=False)
 
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
