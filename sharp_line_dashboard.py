@@ -34,14 +34,15 @@ LOG_FOLDER = "/tmp/sharp_logs"
 def init_gdrive():
     import json
     gauth = GoogleAuth()
-    
-    # Write the secrets to a temporary service_creds.json file
-    with open("/tmp/service_creds.json", "w") as f:
-        json.dump(st.secrets["gdrive"], f)
 
-    gauth.LoadServiceConfigFile("/tmp/service_creds.json")
+    # Convert secrets to a real dict and save to a temp file
+    creds_path = "/tmp/service_creds.json"
+    with open(creds_path, "w") as f:
+        json.dump(dict(st.secrets["gdrive"]), f)
+
+    # Load into PyDrive2
+    gauth.LoadServiceConfigFile(creds_path)
     gauth.ServiceAuth()
-
     return GoogleDrive(gauth)
 
 # === PAGE ===
