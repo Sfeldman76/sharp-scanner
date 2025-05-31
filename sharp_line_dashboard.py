@@ -23,25 +23,32 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
-# === GOOGLE DRIVE AUTH ===
 def init_gdrive():
+    from pydrive2.auth import GoogleAuth
+    from pydrive2.drive import GoogleDrive
+    import json
+
     try:
         creds_path = "/tmp/service_creds.json"
+
+        # Write Streamlit secrets to file
         with open(creds_path, "w") as f:
             json.dump(dict(st.secrets["gdrive"]), f)
 
+        # Set up authentication
         gauth = GoogleAuth()
-        gauth.settings.update({
-            "client_config_backend": "service",
-            "service_config": {
-                "client_json_file_path": creds_path
-            }
-        })
+        gauth.settings["client_config_backend"] = "service"
+        gauth.settings["service_config"] = {
+            "client_json_file_path": creds_path
+        }
+
         gauth.ServiceAuth()
-        return GoogleDrive(gauth)
+        drive = GoogleDrive(gauth)
+        return drive
     except Exception as e:
-        st.warning(f"Google Drive setup failed: {e}")
+        st.error(f"❌ Google Drive auth failed: {e}")
         return None
+
 
 # === LIVE ODDS FETCH ===
 @st.cache_data(ttl=60)
