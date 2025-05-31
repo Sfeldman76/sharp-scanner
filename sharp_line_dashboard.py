@@ -205,7 +205,7 @@ def render_scanner_tab(label, sport_key, container):
 
         df_moves = detect_sharp_moves(live, prev, label)
         if not df_moves.empty:
-            df_scored = score_sharp_moves(df_opportunities)
+            df_scored = score_sharp_moves(df_moves)
             df_display = df_scored.sort_values(by='MillerSharpScore', ascending=False)
 
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
