@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "sharplogger",
+  "private_key_id": "cbeaebf7b96df17b1a71f2cff41de836e9b78a7f",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCYTd3ZA3JdE1k1\nM2vTldeQO1KLz5uwPN8AidhiMwQGS+0N/K4avYs4GaMp0MmmlyZv051a7se4NDLj\nUHvJvz7j7hTKB+cpxy98bV2zvUtOxuqgE/PJLrNWsWCgPYxAp3quBXyrGHUJ85bM\nyTtE9nL+yTCcNJjX5sSG38fcRSddBDuSzzmGKzq8wHotZIJf9a3dm2zkctWnoTSX\nzrkQnZ3LG4NQgZxyODCbKxaAp2AKucGVFTA2N/Eo2GhJV48Ps0rmN5+q5eqktlLu\n8pwE2ACUYDiixVZK1UhTNcRoRFCy9IYLclE6TIEnTsKCV15PhAvpC155ALHhoHha\nmYrT+H3xAgMBAAECggEACVRXvxfhdQce403jkIHwwvKHU24jtM99v4wyF43VdMdI\n3Z75UUUEFqsnXgPenlhK7/WwAWZ4EHYOGfOPqaOP6Clo15lVVS9Q3tfaMgzp5Ij1\nzVl7iPrV3H0gFKDAiyNXNfq7EMX+QV5NAf1fppFMKQRM+HyWUj9eEX76wKjxyNZF\n13RjrTstYO+ISTEhho3xodE06lnA7C8/damfGsiKE6eZsxBwt/2L2mfLfjr2/d8y\nn56t6msVR/i5NkaGP/mn9znu6qPTQFxQ7Sez5XEAaMCHeRpa2iI4xCNtrvw8Iwa6\nAlcvU0+Ps/fwtTmMr1NV4NT7oiJ+WKxiAXkRINPyEwKBgQDJ55FDKsX0bEbitjv0\nBmAvxiTebHpVyVt38mN4Mx/eWL1ZfEinqQBbc/PoHUv9pFse/06itgeTINQdJsPS\nZLHTMC/s+IYhRg+j6zCeVdB6HpcOhFJ4WwLnD0oi23Z4esW3rB+c3/JzX/PkzaRc\nGp/YT8j/kEDY42OypRGKOWfhiwKBgQDBHEHwg7TyYyo3m0ns1/Ggah4od3tNyCI9\nh1jGd4wrI9NAlX82HyE0ZSAqyJe6OFEFT5QkJfzszma9qfmjUeUP93adZLA0vp5w\nbWodPXavEI6DxP3zG9l29KSzF4nTzYGbk4Fnk1Yhk7mVWX5PNydmoovl/vb6HEIF\nlTIhlDcV8wKBgB39xucqSGNpXhI5Laiu9cTC8yETDg0GLw8fM0VcmsRFfEL5ojU9\ndm8fR0DYcTxJGLv/AqhKz888FiYKZxYunPeY9dWGiS4SISqhOgSbDK/HMXsXjsSQ\nCFtYOxP4c52r5wjEiaGc5n/a5fi7z0lbLxlLqLjFrcxJ4rpbqMJWiqbHAoGALWUl\nIxLzAF/LVtMMZ77DsEAB4uVjeP9o/SnJ9q23p5R+XppGE0TyG00CaMxKzp3affMd\nEfpUIJ7MjB1e78Oao0w69/jpaxy8RhWSclk2gyTTO6qdP/71+f68kNUhs0aGBzp/\nmweJoc8GO1OUW67NdlUTqfdru5PU+Vb/N+GNqX0CgYEAx6LY8LcylXwsWCLhMMbK\nkExi0jmpQA28ltFUpd/tnQHlszCM7bz63CzQTBKsGQ/KWMHllaldpMU3A+pKEqwo\ndHf338vylCND39VyLYTyE6sbAABRE81dx8gganxg7fHFXtjqu/E2tNuGf7dn4rJO\nJQSnYxMj1ZlH1+ba62RV7NE=\n-----END PRIVATE KEY-----\n",
+  "client_email": "sharpscannersf@sharplogger.iam.gserviceaccount.com",
+  "client_id": "105168985256309519048",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/sharpscannersf%40sharplogger.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
