@@ -33,17 +33,23 @@ LOG_FOLDER = "/tmp/sharp_logs"
 
 def init_gdrive():
     import json
-    gauth = GoogleAuth()
+    from pydrive2.auth import GoogleAuth
+    from pydrive2.drive import GoogleDrive
 
-    # Convert secrets to a real dict and save to a temp file
     creds_path = "/tmp/service_creds.json"
-    with open(creds_path, "w") as f:
-        json.dump(dict(st.secrets["gdrive"]), f)
 
-    # Load into PyDrive2
+    # Convert Streamlit secrets into valid JSON and write to temp file
+    creds_dict = dict(st.secrets["gdrive"])
+    with open(creds_path, "w") as f:
+        json.dump(creds_dict, f)
+
+    # Authenticate using PyDrive2
+    gauth = GoogleAuth()
     gauth.LoadServiceConfigFile(creds_path)
     gauth.ServiceAuth()
+
     return GoogleDrive(gauth)
+
 
 # === PAGE ===
 st.set_page_config(layout="wide")
