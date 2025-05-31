@@ -30,28 +30,20 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
-# === INIT GOOGLE DRIVE ===
 @st.cache_resource
 def init_gdrive():
     import json
     gauth = GoogleAuth()
+    
+    # Write the secrets to a temporary service_creds.json file
+    with open("/tmp/service_creds.json", "w") as f:
+        json.dump(st.secrets["gdrive"], f)
 
-    # Extract from Streamlit secrets into a dict
-    creds_dict = dict(st.secrets["gdrive"])
-
-    # Save to /tmp as a service_creds.json
-    temp_json_path = "/tmp/service_creds.json"
-    with open(temp_json_path, "w") as f:
-        json.dump(creds_dict, f)
-
-    # Configure PyDrive2 to load from that path
-    gauth.settings['client_config_backend'] = "service"
-    gauth.settings['service_config'] = {
-        "client_json_file_path": temp_json_path  # ✅ correct key for ServiceAuth
-    }
-
+    gauth.LoadServiceConfigFile("/tmp/service_creds.json")
     gauth.ServiceAuth()
-    return GoogleDri
+
+    return GoogleDrive(gauth
+
 # === PAGE ===
 st.set_page_config(layout="wide")
 st.title("📊 Sharp Edge Scanner with Region Tagging & Movement Graphs")
