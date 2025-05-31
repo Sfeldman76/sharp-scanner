@@ -155,9 +155,11 @@ def detect_sharp_moves(current, previous, sport_key):
                 bias_match = 1 if rec_val < sharp_val and "under" in rec_entry['Outcome'].lower() else 0
                 asymmetry = abs((sharp_entry['Limit'] or 0) - (rec_entry['Limit'] or 0)) >= 5000
                 limit_score = 1 if sharp_entry['Limit'] and sharp_entry['Limit'] >= 10000 else 0.5 if sharp_entry['Limit'] else 0
-
-                # Optional: use line movement delta if available
-                line_moved = 1 if rec_entry['Delta'] and abs(rec_entry['Delta']) >= (1 if rec_entry['Market'] != 'h2h' else 10) else 0
+                delta = rec_entry.get('Delta')
+                if isinstance(delta, (int, float)):
+                    line_moved = 1 if abs(delta) >= (1 if rec_entry['Market'] != 'h2h' else 10) else 0
+                else:
+                    line_moved = 0
 
                 miller_score = (
                     5 * bias_match +
@@ -182,7 +184,10 @@ def detect_sharp_moves(current, previous, sport_key):
 
 
 def score_sharp_moves(df):
+    df['Delta'] = pd.to_numeric(df['Delta'], errors='coerce')
     df['Delta_Abs'] = df['Delta'].abs()
+
+    
     df['Limit_Jump'] = (df['Limit'].fillna(0) >= 10000).astype(int)
     df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1 if 8 <= h <= 11 else 0.5 if h <= 6 else 0)
     df['Asymmetric_Limit'] = df.groupby(['Game', 'Market'])['Limit'].transform(lambda x: x.max() - x.min())
