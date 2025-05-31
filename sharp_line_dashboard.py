@@ -75,26 +75,11 @@ def get_snapshot(data):
     return {g['id']: g for g in data}
 
 # === SHARP MOVE SCORING ===
-def score_sharp_moves(df):
-    df['Delta'] = pd.to_numeric(df['Delta'], errors='coerce')
-    df['Delta_Abs'] = df['Delta'].abs()
-    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-    df['Limit_Jump'] = (df['Limit'] >= 10000).astype(int)
-    df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2)
-    df['Asymmetric_Limit'] = df.groupby(['Game', 'Market'])['Limit'].transform(lambda x: x.max() - x.min())
-    df['Asymmetry_Flag'] = (df['Asymmetric_Limit'] >= 5000).astype(int)
-    df['MillerSharpScore'] = (
-        5 * df['Bias Match'] +
-        3 * df['Limit_Jump'] +
-        2 * df['Delta_Abs'] +
-        2 * df['Sharp_Timing'] +
-        2 * df['Asymmetry_Flag']
-    ).round(2)
-    return df
-
-# === SHARP DETECTION ===
 def detect_sharp_moves(current, previous, sport_key):
-    opportunities = []
+    import pandas as pd
+    from datetime import datetime
+
+    rows = []
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     previous_map = {g['id']: g for g in previous} if previous else {}
 
@@ -148,40 +133,70 @@ def detect_sharp_moves(current, previous, sport_key):
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
-        for rec_entry in rec_lines:
-            key = (rec_entry['Market'], rec_entry['Outcome'])
-            sharp_entry = sharp_lines.get(key)
-            if sharp_entry and sharp_entry['Value'] is not None and rec_entry['Value'] is not None:
-                sharp_val = sharp_entry['Value']
-                rec_val = rec_entry['Value']
-                delta_vs_sharp = round(rec_val - sharp_val, 2)
+        for rec in rec_lines:
+            key = (rec['Market'], rec['Outcome'])
+            sharp = sharp_lines.get(key)
+            if not sharp:
+                continue
+            if sharp['Value'] is None or rec['Value'] is None:
+                continue
 
-                bias_match = 0
-                if rec_entry['Market'] == 'spreads':
-                    if sharp_val < 0 and rec_val > sharp_val:
-                        bias_match = 1
-                    elif sharp_val > 0 and rec_val > sharp_val:
-                        bias_match = 1
-                elif rec_entry['Market'] == 'totals':
-                    if "under" in rec_entry['Outcome'].lower() and rec_val > sharp_val:
-                        bias_match = 1
-                    elif "over" in rec_entry['Outcome'].lower() and rec_val < sharp_val:
-                        bias_match = 1
-                elif rec_entry['Market'] == 'h2h':
-                    if sharp_val < 0 and rec_val > sharp_val:
-                        bias_match = 1
-                    elif sharp_val > 0 and rec_val > sharp_val:
-                        bias_match = 1
+            delta_vs_sharp = round(rec['Value'] - sharp['Value'], 2)
 
-                combined = rec_entry.copy()
-                combined.update({
-                    'Ref Sharp Value': sharp_val,
-                    'Delta vs Sharp': delta_vs_sharp,
-                    'Bias Match': bias_match
-                })
-                opportunities.append(combined)
+            bias_match = 0
+            if rec['Market'] == 'spreads':
+                if sharp['Value'] < 0 and rec['Value'] > sharp['Value']:
+                    bias_match = 1
+                elif sharp['Value'] > 0 and rec['Value'] > sharp['Value']:
+                    bias_match = 1
+            elif rec['Market'] == 'totals':
+                if "under" in rec['Outcome'].lower() and rec['Value'] > sharp['Value']:
+                    bias_match = 1
+                elif "over" in rec['Outcome'].lower() and rec['Value'] < sharp['Value']:
+                    bias_match = 1
+            elif rec['Market'] == 'h2h':
+                if sharp['Value'] < 0 and rec['Value'] > sharp['Value']:
+                    bias_match = 1
+                elif sharp['Value'] > 0 and rec['Value'] > sharp['Value']:
+                    bias_match = 1
 
-    return pd.DataFrame(opportunities)
+            row = rec.copy()
+            row.update({
+                'Ref Sharp Value': sharp['Value'],
+                'Delta vs Sharp': delta_vs_sharp,
+                'Bias Match': bias_match,
+                'Delta': rec.get('Delta') or delta_vs_sharp,
+                'Limit': sharp.get('Limit') or 0,
+                'Time': snapshot_time,
+            })
+
+            rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        return df
+
+    # === SMART SHARP SCORING ===
+    df['Delta'] = pd.to_numeric(df['Delta'], errors='coerce')
+    df['Delta_Abs'] = df['Delta'].abs()
+    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+    df['Limit_Jump'] = (df['Limit'] >= 10000).astype(int)
+    df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(
+        lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2
+    )
+    df['Asymmetric_Limit'] = df.groupby(['Game', 'Market'])['Limit'].transform(lambda x: x.max() - x.min())
+    df['Asymmetry_Flag'] = (df['Asymmetric_Limit'] >= 5000).astype(int)
+
+    df['MillerSharpScore'] = (
+        5 * df['Bias Match'] +
+        3 * df['Limit_Jump'] +
+        2 * df['Delta_Abs'] +
+        2 * df['Sharp_Timing'] +
+        2 * df['Asymmetry_Flag']
+    ).round(2)
+
+    return df
 
 # === PAGE SETUP ===
 st.set_page_config(layout="wide")
