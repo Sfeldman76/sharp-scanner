@@ -26,21 +26,24 @@ MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
 def init_gdrive():
-    import json
     from pydrive2.auth import GoogleAuth
     from pydrive2.drive import GoogleDrive
+    import json
 
+    # Write gdrive secret from st.secrets to a temp file
     creds_path = "/tmp/service_creds.json"
-
-    # Save secret credentials to a secure temp file
     with open(creds_path, "w") as f:
         json.dump(dict(st.secrets["gdrive"]), f)
 
     gauth = GoogleAuth()
-    gauth.LoadClientConfigFile(creds_path)  # ✅ Corrected method
-    gauth.ServiceAuth()
+    gauth.settings["client_config_backend"] = "service"
+    gauth.settings["service_config"] = {
+        "client_json_file_path": creds_path
+    }
 
+    gauth.ServiceAuth()
     return GoogleDrive(gauth)
+
 
 
 # === HELPER FUNCTIONS ===
@@ -209,13 +212,18 @@ tab_nba, tab_mlb, tab_graphs = st.tabs(["🏀 NBA Scanner", "⚾ MLB Scanner", "
 def render_scanner_tab(label, sport_key, container):
     with container:
         os.makedirs(LOG_FOLDER, exist_ok=True)
+
+        # === Fetch live and previous data
         live = fetch_live_odds(sport_key)
         prev = st.session_state.previous_snapshots.get(sport_key, {})
         snapshot = get_snapshot(live)
+
         df_moves = detect_sharp_moves(live, prev, label)
+
         if not df_moves.empty:
-            
+            # === Sort by score and filter only strongest per Game × Market
             df_display = df_moves.sort_values(by='MillerSharpScore', ascending=False)
+            df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
 
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
             if region != "All":
@@ -224,6 +232,7 @@ def render_scanner_tab(label, sport_key, container):
             st.subheader("🚨 Detected Sharp Moves")
             st.dataframe(df_display, use_container_width=True)
 
+            # === Log + Upload
             fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             csv_path = os.path.join(LOG_FOLDER, fname)
             df_display.to_csv(csv_path, index=False)
@@ -238,6 +247,7 @@ def render_scanner_tab(label, sport_key, container):
         else:
             st.info("No sharp moves this cycle.")
 
+        # === Live Odds Table
         st.subheader("📋 Current Odds")
         odds = []
         for game in live:
@@ -259,10 +269,12 @@ def render_scanner_tab(label, sport_key, container):
             pivot = df_odds.pivot_table(index=['Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
             st.dataframe(pivot.reset_index(), use_container_width=True)
 
+        # === Manual Refresh Option
         if auto_mode == "Manual":
             if st.button(f"🔄 Refresh {label}"):
                 st.session_state.previous_snapshots[sport_key] = snapshot
                 st.rerun()
+
 
 # === RENDER TABS ===
 render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
