@@ -37,13 +37,18 @@ def init_gdrive():
     from pydrive2.drive import GoogleDrive
 
     creds_path = "/tmp/service_creds.json"
-
-    # Convert Streamlit secrets into valid JSON and write to temp file
     creds_dict = dict(st.secrets["gdrive"])
+
+    # Debug: show what's going into the file
+    st.write("🔒 GDrive Secret Keys:", list(creds_dict.keys()))
+
     with open(creds_path, "w") as f:
         json.dump(creds_dict, f)
 
-    # Authenticate using PyDrive2
+    # Show the file contents back just to confirm
+    with open(creds_path) as f:
+        st.code(f.read(), language="json")
+
     gauth = GoogleAuth()
     gauth.LoadServiceConfigFile(creds_path)
     gauth.ServiceAuth()
@@ -87,6 +92,8 @@ def fetch_live_odds(sport_key):
 
 def get_snapshot(data):
     return {g['id']: g for g in data}
+
+
 def detect_sharp_moves(current, previous, sport_key):
     opportunities = []
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -97,7 +104,6 @@ def detect_sharp_moves(current, previous, sport_key):
         gid = game['id']
         prev_game = previous_map.get(gid, {})
 
-        # Organize bookmaker lines
         sharp_lines = {}
         rec_lines = []
 
@@ -126,7 +132,7 @@ def detect_sharp_moves(current, previous, sport_key):
                         'Delta': None
                     }
 
-                    # Optional: calculate delta if previous value exists
+                    # Optional delta from previous snapshot
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'] == book_key:
@@ -144,7 +150,7 @@ def detect_sharp_moves(current, previous, sport_key):
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
-        # Now compare rec books to sharp reference
+        # Compare rec books to sharp lines
         for rec_entry in rec_lines:
             key = (rec_entry['Market'], rec_entry['Outcome'])
             sharp_entry = sharp_lines.get(key)
@@ -152,18 +158,34 @@ def detect_sharp_moves(current, previous, sport_key):
             if sharp_entry and sharp_entry['Value'] is not None and rec_entry['Value'] is not None:
                 sharp_val = sharp_entry['Value']
                 rec_val = rec_entry['Value']
-                delta_from_sharp = round(rec_val - sharp_val, 2)
+                delta_vs_sharp = round(rec_val - sharp_val, 2)
 
-                # Bias match = same side
-                bias_match = 1 if rec_val < sharp_val and "under" in rec_entry['Outcome'].lower() else 0
-                asymmetry = abs((sharp_entry['Limit'] or 0) - (rec_entry['Limit'] or 0)) >= 5000
-                limit_score = 1 if sharp_entry['Limit'] and sharp_entry['Limit'] >= 10000 else 0.5 if sharp_entry['Limit'] else 0
-                delta = rec_entry.get('Delta')
+                # === Compute components ===
+                # Bias match by meaningful advantage
+                bias_match = 0
+                if rec_entry['Market'] == 'spreads' and abs(delta_vs_sharp) >= 0.5:
+                    bias_match = 1
+                elif rec_entry['Market'] == 'totals' and abs(delta_vs_sharp) >= 1.0:
+                    bias_match = 1
+                elif rec_entry['Market'] == 'h2h' and abs(delta_vs_sharp) >= 10:
+                    bias_match = 1
+
+                # Line moved from previous
+                delta = rec_entry.get("Delta")
                 if isinstance(delta, (int, float)):
                     line_moved = 1 if abs(delta) >= (1 if rec_entry['Market'] != 'h2h' else 10) else 0
                 else:
                     line_moved = 0
 
+                # Limit asymmetry
+                sharp_limit = sharp_entry.get('Limit') or 0
+                rec_limit = rec_entry.get('Limit') or 0
+                asymmetry = 1 if abs(sharp_limit - rec_limit) >= 5000 else 0
+
+                # Sharp confidence
+                limit_score = 1 if sharp_limit >= 10000 else 0.5 if sharp_limit > 0 else 0
+
+                # Final score
                 miller_score = (
                     5 * bias_match +
                     4 * limit_score +
@@ -171,13 +193,24 @@ def detect_sharp_moves(current, previous, sport_key):
                     2 * asymmetry
                 )
 
+                # === Output debug trace ===
+                st.write(f"🧠 Scoring: {rec_entry['Game']} | {rec_entry['Outcome']}")
+                st.write(f"  - Delta vs Sharp: {delta_vs_sharp}")
+                st.write(f"  - Bias Match: {bias_match}")
+                st.write(f"  - Line Moved: {line_moved}")
+                st.write(f"  - Limit Asymmetry: {asymmetry} (Sharp: {sharp_limit}, Rec: {rec_limit})")
+                st.write(f"  - Limit Score: {limit_score}")
+                st.write(f"  => Final MillerSharpScore: {miller_score}")
+
                 combined = rec_entry.copy()
                 combined.update({
                     'Ref Sharp Value': sharp_val,
-                    'Sharp Limit': sharp_entry['Limit'],
-                    'Delta vs Sharp': delta_from_sharp,
+                    'Sharp Limit': sharp_limit,
+                    'Delta vs Sharp': delta_vs_sharp,
                     'Bias Match': bias_match,
-                    'Asymmetry Flag': int(asymmetry),
+                    'Line Moved': line_moved,
+                    'Asymmetry Flag': asymmetry,
+                    'Limit Score': limit_score,
                     'MillerSharpScore': miller_score
                 })
 
@@ -185,29 +218,6 @@ def detect_sharp_moves(current, previous, sport_key):
 
     return pd.DataFrame(opportunities)
 
-
-def score_sharp_moves(df):
-    df['Delta'] = pd.to_numeric(df['Delta'], errors='coerce')
-    df['Delta_Abs'] = df['Delta'].abs()
-
-    
-    df['Limit_Jump'] = (df['Limit'].fillna(0) >= 10000).astype(int)
-    df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1 if 8 <= h <= 11 else 0.5 if h <= 6 else 0)
-    df['Asymmetric_Limit'] = df.groupby(['Game', 'Market'])['Limit'].transform(lambda x: x.max() - x.min())
-    df['Asymmetric_Flag'] = (df['Asymmetric_Limit'] >= 5000).astype(int)
-    df['MillerSharpScore'] = (
-        5 * df['Limit_Jump'] +
-        3 * df['Delta_Abs'] +
-        2 * df['Sharp_Timing'] +
-        2 * df['Asymmetric_Flag']
-    )
-    df['Sharp Reason'] = df.apply(lambda r: ", ".join([
-        "Limit ≥ 10K" if r['Limit_Jump'] else "",
-        "Big Move" if r['Delta_Abs'] >= 1 else "",
-        "Morning Shaping" if r['Sharp_Timing'] >= 1 else "",
-        "Asymmetric Limit" if r['Asymmetric_Flag'] else ""
-    ]).strip(', '), axis=1)
-    return df
 # === TAB SETUP ===
 tab_nba, tab_mlb, tab_graphs = st.tabs(["🏀 NBA Scanner", "⚾ MLB Scanner", "📈 Sharp Movement Graphs"])
 
