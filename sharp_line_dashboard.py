@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from streamlit_autorefresh import st_autorefresh
 import altair as alt
 import glob
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
 
 # === CONFIG ===
 API_KEY = '4f95ea43cc1c29cd44c40fe59b6c14ce'
@@ -25,19 +27,31 @@ BOOKMAKER_REGIONS = {
     'ladbrokesau': 'au', 'neds': 'au'
 }
 MARKETS = ['spreads', 'totals', 'h2h']
-LOG_FOLDER = r"C:\Users\sfeldman\OneDrive\Betting files\NBA\Sharp Money tracker\SharpScannerLogs"
+LOG_FOLDER = "/tmp/sharp_logs"
+
+# === INIT GOOGLE DRIVE ===
+@st.cache_resource
+def init_gdrive():
+    gauth = GoogleAuth()
+    gauth.LoadCredentialsFile("mycreds.txt")
+    if gauth.credentials is None:
+        gauth.LocalWebserverAuth()
+    elif gauth.access_token_expired:
+        gauth.Refresh()
+    else:
+        gauth.Authorize()
+    gauth.SaveCredentialsFile("mycreds.txt")
+    return GoogleDrive(gauth)
 
 # === PAGE ===
 st.set_page_config(layout="wide")
 st.title("📊 Sharp Edge Scanner with Region Tagging & Movement Graphs")
 
-# === MODE TOGGLE ===
 auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"], index=0)
 if auto_mode == "Auto Refresh":
     st_autorefresh(interval=150000, key="autorefresh")
 st.caption(f"🕒 Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# === THRESHOLD CONTROLS ===
 st.sidebar.header("📏 Sharp Move Detection Thresholds")
 spread_thresh = st.sidebar.slider("Line Move (spread/total)", 0.1, 2.0, 0.5, 0.1)
 ml_thresh = st.sidebar.slider("Price Move (moneyline)", 1, 50, 10, 1)
@@ -45,7 +59,6 @@ ml_thresh = st.sidebar.slider("Price Move (moneyline)", 1, 50, 10, 1)
 if 'previous_snapshots' not in st.session_state:
     st.session_state.previous_snapshots = {}
 
-# === DATA HELPERS ===
 @st.cache_data(ttl=60)
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
@@ -136,16 +149,18 @@ def score_sharp_moves(df):
         "Asymmetric Limit" if r['Asymmetric_Flag'] else ""
     ]).strip(', '), axis=1)
     return df
-
-# === TABS ===
+# === TAB SETUP ===
 tab_nba, tab_mlb, tab_graphs = st.tabs(["🏀 NBA Scanner", "⚾ MLB Scanner", "📈 Sharp Movement Graphs"])
 
 # === SCANNER TAB DISPLAY FUNCTION ===
 def render_scanner_tab(label, sport_key, container):
     with container:
+        os.makedirs(LOG_FOLDER, exist_ok=True)
+
         live = fetch_live_odds(sport_key)
         prev = st.session_state.previous_snapshots.get(sport_key, {})
         snapshot = get_snapshot(live)
+
         df_moves = detect_sharp_moves(live, prev, label)
         if not df_moves.empty:
             df_scored = score_sharp_moves(df_moves)
@@ -157,14 +172,23 @@ def render_scanner_tab(label, sport_key, container):
 
             st.subheader("🚨 Detected Sharp Moves")
             st.dataframe(df_display, use_container_width=True)
-            os.makedirs(LOG_FOLDER, exist_ok=True)
+
             fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            df_display.to_csv(os.path.join(LOG_FOLDER, fname), index=False)
-            st.download_button("📥 Download CSV", df_display.to_csv(index=False).encode('utf-8'), f"{label}_sharp.csv", "text/csv")
+            csv_path = os.path.join(LOG_FOLDER, fname)
+            df_display.to_csv(csv_path, index=False)
+
+            drive = init_gdrive()
+            gfile = drive.CreateFile({'title': fname})
+            gfile.SetContentFile(csv_path)
+            gfile.Upload()
+            st.success(f"✅ Uploaded to Google Drive: {fname}")
+
+            st.download_button("📥 Download CSV", df_display.to_csv(index=False).encode('utf-8'), fname, "text/csv")
+
         else:
             st.info("No sharp moves this cycle.")
 
-        # Live odds
+        # LIVE ODDS
         st.subheader("📋 Current Odds")
         odds = []
         for game in live:
@@ -180,6 +204,7 @@ def render_scanner_tab(label, sport_key, container):
                             'Bookmaker': book['title'],
                             'Value': val
                         })
+
         df_odds = pd.DataFrame(odds)
         if not df_odds.empty:
             pivot = df_odds.pivot_table(index=['Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
@@ -190,14 +215,45 @@ def render_scanner_tab(label, sport_key, container):
                 st.session_state.previous_snapshots[sport_key] = snapshot
                 st.rerun()
 
-# === RENDER TABS ===
+# === RENDER NBA / MLB TABS ===
 render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
 render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb)
 
 # === GRAPH TAB ===
 with tab_graphs:
     st.header("📈 Sharp Line Movement Over Time")
+
+    os.makedirs(LOG_FOLDER, exist_ok=True)
     all_files = glob.glob(os.path.join(LOG_FOLDER, "*.csv"))
+
+    # If no logs yet, create starter CSV
+    if not all_files:
+        df_start = pd.DataFrame([{
+            'Time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'Game': 'Demo Team A vs Demo Team B',
+            'Market': 'spreads',
+            'Outcome': 'Demo',
+            'Bookmaker': 'Pinnacle',
+            'Book': 'pinnacle',
+            'Region': 'us',
+            'Old Value': -3.5,
+            'New Value': -4.0,
+            'Delta': 0.5,
+            'Limit': 10000,
+            'MillerSharpScore': 12,
+            'Sharp Reason': 'Limit ≥ 10K, Big Move'
+        }])
+        fname = "starter_demo_sharp_log.csv"
+        csv_path = os.path.join(LOG_FOLDER, fname)
+        df_start.to_csv(csv_path, index=False)
+
+        drive = init_gdrive()
+        gfile = drive.CreateFile({'title': fname})
+        gfile.SetContentFile(csv_path)
+        gfile.Upload()
+        all_files = [csv_path]
+        st.success("✅ Created and uploaded starter demo log.")
+
     df_all = pd.concat([pd.read_csv(f) for f in all_files], ignore_index=True)
     df_all['Time'] = pd.to_datetime(df_all['Time'], errors='coerce')
     df_all = df_all.dropna(subset=['Game', 'Market', 'Outcome', 'Time', 'New Value'])
