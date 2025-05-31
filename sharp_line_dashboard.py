@@ -30,13 +30,12 @@ def init_gdrive():
     from pydrive2.auth import GoogleAuth
     from pydrive2.drive import GoogleDrive
 
-    # Dump to temp file from Streamlit secrets
+    # Write the secrets to a temp JSON file
     creds_path = "/tmp/service_creds.json"
     with open(creds_path, "w") as f:
         json.dump(dict(st.secrets["gdrive"]), f)
 
     gauth = GoogleAuth()
-
     gauth.settings.update({
         "client_config_backend": "service",
         "service_config": {
@@ -46,6 +45,7 @@ def init_gdrive():
 
     gauth.ServiceAuth()
     return GoogleDrive(gauth)
+
 
 
 
@@ -152,62 +152,41 @@ def detect_sharp_moves(current, previous, sport_key):
                 rec_val = rec_entry['Value']
                 delta_vs_sharp = round(rec_val - sharp_val, 2)
 
-                # === Compute scoring components
                 bias_match = 0
-                market_type = rec_entry['Market'].lower()
 
-                if market_type == 'spreads':
-                    if sharp_val < 0 and rec_val > sharp_val:  # favorite with better number
+                if rec_entry['Market'] == 'spreads':
+                    # For favorites: rec should be less negative
+                    if sharp_val < 0 and rec_val > sharp_val:
                         bias_match = 1
-                    elif sharp_val > 0 and rec_val > sharp_val:  # dog with better number
+                    # For dogs: rec should be more positive
+                    elif sharp_val > 0 and rec_val > sharp_val:
                         bias_match = 1
 
-                elif market_type == 'totals':
+                elif rec_entry['Market'] == 'totals':
+                    # If the rec line favors the same side more than sharp line
                     if "under" in rec_entry['Outcome'].lower() and rec_val > sharp_val:
                         bias_match = 1
                     elif "over" in rec_entry['Outcome'].lower() and rec_val < sharp_val:
                         bias_match = 1
 
-                elif market_type == 'h2h':
-                    if sharp_val < 0 and rec_val > sharp_val:  # favorite price improving
+                elif rec_entry['Market'] == 'h2h':
+                    # For favorites (negative prices), rec line should be less negative
+                    if sharp_val < 0 and rec_val > sharp_val:
                         bias_match = 1
-                    elif sharp_val > 0 and rec_val > sharp_val:  # dog price improving
+                    # For underdogs (positive prices), rec line should be more positive
+                    elif sharp_val > 0 and rec_val > sharp_val:
                         bias_match = 1
 
-                # Line moved (from previous snapshot)
-                delta = rec_entry.get("Delta")
-                line_moved = 0
-                if isinstance(delta, (int, float)):
-                    if market_type == 'h2h' and abs(delta) >= 10:
-                        line_moved = 1
-                    elif market_type in ['spreads', 'totals'] and abs(delta) >= 0.5:
-                        line_moved = 1
-
-                # Asymmetry: sharp vs rec limit
-                sharp_limit = sharp_entry.get('Limit') or 0
-                rec_limit = rec_entry.get('Limit') or 0
-                asymmetry = 1 if abs(sharp_limit - rec_limit) >= 5000 else 0
-
-                # Limit score: sharp confidence
-                limit_score = 1 if sharp_limit >= 10000 else 0.5 if sharp_limit > 0 else 0
-
-                # Final score
                 miller_score = (
-                    5 * bias_match +
-                    4 * limit_score +
-                    3 * line_moved +
-                    2 * asymmetry
+                    5 * bias_match
+                    # Add other scoring components as needed
                 )
 
                 combined = rec_entry.copy()
                 combined.update({
                     'Ref Sharp Value': sharp_val,
-                    'Sharp Limit': sharp_limit,
                     'Delta vs Sharp': delta_vs_sharp,
                     'Bias Match': bias_match,
-                    'Line Moved': line_moved,
-                    'Limit Score': limit_score,
-                    'Asymmetry Flag': asymmetry,
                     'MillerSharpScore': miller_score
                 })
 
