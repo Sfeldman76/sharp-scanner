@@ -214,6 +214,7 @@ st.caption(f"🕒 Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 def render_scanner_tab(label, sport_key, container):
     with container:
         os.makedirs(LOG_FOLDER, exist_ok=True)
+
         live = fetch_live_odds(sport_key)
         prev = st.session_state.previous_snapshots.get(sport_key, {})
         snapshot = get_snapshot(live)
@@ -222,9 +223,9 @@ def render_scanner_tab(label, sport_key, container):
             st.warning(f"No odds returned for {label}.")
             return
 
-        #df_moves = detect_sharp_moves(live, prev, label)
-        if not df_moves.empty:
-            df_moves = score_sharp_moves(df_moves)
+        df_moves = detect_sharp_moves(live, prev, label)
+
+        if df_moves is not None and not df_moves.empty:
             df_display = df_moves.sort_values(by='MillerSharpScore', ascending=False)
             df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
 
@@ -235,6 +236,7 @@ def render_scanner_tab(label, sport_key, container):
 
             st.dataframe(df_display, use_container_width=True)
 
+            # === Save and Upload
             fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             csv_path = os.path.join(LOG_FOLDER, fname)
             df_display.to_csv(csv_path, index=False)
@@ -247,9 +249,11 @@ def render_scanner_tab(label, sport_key, container):
                 st.success(f"✅ Uploaded to Google Drive: {fname}")
 
             st.download_button("📥 Download CSV", df_display.to_csv(index=False).encode('utf-8'), fname, "text/csv")
+
         else:
             st.info("No sharp moves detected this cycle.")
 
+        # === Show Current Odds
         st.subheader("📋 Current Odds")
         odds = []
         for game in live:
@@ -270,10 +274,12 @@ def render_scanner_tab(label, sport_key, container):
             pivot = df_odds.pivot_table(index=['Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
             st.dataframe(pivot.reset_index(), use_container_width=True)
 
+        # === Manual Refresh Button
         if auto_mode == "Manual":
             if st.button(f"🔄 Refresh {label}"):
                 st.session_state.previous_snapshots[sport_key] = snapshot
                 st.rerun()
+
 
 # === TABS ===
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
