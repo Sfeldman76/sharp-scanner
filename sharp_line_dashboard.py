@@ -42,7 +42,7 @@ def init_gdrive():
     gauth.LoadServiceConfigFile("/tmp/service_creds.json")
     gauth.ServiceAuth()
 
-    return GoogleDrive(gauth
+    return GoogleDrive(gauth)
 
 # === PAGE ===
 st.set_page_config(layout="wide")
