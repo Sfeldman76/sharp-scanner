@@ -8,6 +8,7 @@ import altair as alt
 import glob
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
+import json
 
 # === CONFIG ===
 API_KEY = '4f95ea43cc1c29cd44c40fe59b6c14ce'
@@ -31,10 +32,18 @@ LOG_FOLDER = "/tmp/sharp_logs"
 
 # === INIT GOOGLE DRIVE ===
 
+
 @st.cache_resource
 def init_gdrive():
+    creds_dict = dict(st.secrets["gdrive"])
+    with open("/tmp/service_creds.json", "w") as f:
+        json.dump(creds_dict, f)
+
     gauth = GoogleAuth()
-    gauth.LoadServiceConfigFile("service_creds.json")
+    gauth.settings['client_config_backend'] = 'service'
+    gauth.settings['service_config'] = {
+        "client_service_account": "/tmp/service_creds.json"
+    }
     gauth.ServiceAuth()
     return GoogleDrive(gauth)
 
