@@ -30,7 +30,7 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
-@st.cache_resource
+
 def init_gdrive():
     import json
     gauth = GoogleAuth()
