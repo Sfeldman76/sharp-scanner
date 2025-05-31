@@ -30,18 +30,14 @@ MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
 # === INIT GOOGLE DRIVE ===
+
 @st.cache_resource
 def init_gdrive():
     gauth = GoogleAuth()
-    gauth.LoadCredentialsFile("mycreds.txt")
-    if gauth.credentials is None:
-        gauth.LocalWebserverAuth()
-    elif gauth.access_token_expired:
-        gauth.Refresh()
-    else:
-        gauth.Authorize()
-    gauth.SaveCredentialsFile("mycreds.txt")
+    gauth.LoadServiceConfigFile("service_creds.json")
+    gauth.ServiceAuth()
     return GoogleDrive(gauth)
+
 
 # === PAGE ===
 st.set_page_config(layout="wide")
