@@ -222,7 +222,7 @@ def render_scanner_tab(label, sport_key, container):
             st.warning(f"No odds returned for {label}.")
             return
 
-        df_moves = detect_sharp_moves(live, prev, label)
+        #df_moves = detect_sharp_moves(live, prev, label)
         if not df_moves.empty:
             df_moves = score_sharp_moves(df_moves)
             df_display = df_moves.sort_values(by='MillerSharpScore', ascending=False)
