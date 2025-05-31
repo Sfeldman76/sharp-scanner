@@ -84,7 +84,6 @@ def score_sharp_moves(df):
     )
     return df
 
-# === DETECT SHARP OPPORTUNITIES ===
 def detect_sharp_moves(current, previous, sport_key):
     opportunities = []
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -149,23 +148,46 @@ def detect_sharp_moves(current, previous, sport_key):
                 rec_val = rec_entry['Value']
                 delta_vs_sharp = round(rec_val - sharp_val, 2)
 
-                bias_match = 1 if (
-                    (rec_entry['Market'] == 'spreads' and abs(delta_vs_sharp) >= 0.5) or
-                    (rec_entry['Market'] == 'totals' and abs(delta_vs_sharp) >= 1.0) or
-                    (rec_entry['Market'] == 'h2h' and abs(delta_vs_sharp) >= 10)
-                ) else 0
+                # === Compute scoring components
+                bias_match = 0
+                market_type = rec_entry['Market'].lower()
 
+                if market_type == 'spreads':
+                    if sharp_val < 0 and rec_val > sharp_val:  # favorite with better number
+                        bias_match = 1
+                    elif sharp_val > 0 and rec_val > sharp_val:  # dog with better number
+                        bias_match = 1
+
+                elif market_type == 'totals':
+                    if "under" in rec_entry['Outcome'].lower() and rec_val > sharp_val:
+                        bias_match = 1
+                    elif "over" in rec_entry['Outcome'].lower() and rec_val < sharp_val:
+                        bias_match = 1
+
+                elif market_type == 'h2h':
+                    if sharp_val < 0 and rec_val > sharp_val:  # favorite price improving
+                        bias_match = 1
+                    elif sharp_val > 0 and rec_val > sharp_val:  # dog price improving
+                        bias_match = 1
+
+                # Line moved (from previous snapshot)
                 delta = rec_entry.get("Delta")
+                line_moved = 0
                 if isinstance(delta, (int, float)):
-                    line_moved = 1 if abs(delta) >= (1 if rec_entry['Market'] != 'h2h' else 10) else 0
-                else:
-                    line_moved = 0
+                    if market_type == 'h2h' and abs(delta) >= 10:
+                        line_moved = 1
+                    elif market_type in ['spreads', 'totals'] and abs(delta) >= 0.5:
+                        line_moved = 1
 
+                # Asymmetry: sharp vs rec limit
                 sharp_limit = sharp_entry.get('Limit') or 0
                 rec_limit = rec_entry.get('Limit') or 0
                 asymmetry = 1 if abs(sharp_limit - rec_limit) >= 5000 else 0
+
+                # Limit score: sharp confidence
                 limit_score = 1 if sharp_limit >= 10000 else 0.5 if sharp_limit > 0 else 0
 
+                # Final score
                 miller_score = (
                     5 * bias_match +
                     4 * limit_score +
