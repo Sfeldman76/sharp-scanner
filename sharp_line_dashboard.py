@@ -25,15 +25,23 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
-# === INIT GOOGLE DRIVE (secure + Streamlit-friendly) ===
 def init_gdrive():
+    import json
+    from pydrive2.auth import GoogleAuth
+    from pydrive2.drive import GoogleDrive
+
     creds_path = "/tmp/service_creds.json"
+
+    # Save secret credentials to a secure temp file
     with open(creds_path, "w") as f:
         json.dump(dict(st.secrets["gdrive"]), f)
+
     gauth = GoogleAuth()
-    gauth.LoadServiceConfigFile(creds_path)
+    gauth.LoadClientConfigFile(creds_path)  # ✅ Corrected method
     gauth.ServiceAuth()
+
     return GoogleDrive(gauth)
+
 
 # === HELPER FUNCTIONS ===
 @st.cache_data(ttl=60)
@@ -206,8 +214,8 @@ def render_scanner_tab(label, sport_key, container):
         snapshot = get_snapshot(live)
         df_moves = detect_sharp_moves(live, prev, label)
         if not df_moves.empty:
-            df_scored = score_sharp_moves(df_moves)
-            df_display = df_scored.sort_values(by='MillerSharpScore', ascending=False)
+            
+            df_display = df_moves.sort_values(by='MillerSharpScore', ascending=False)
 
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
             if region != "All":
