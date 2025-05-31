@@ -30,17 +30,20 @@ def init_gdrive():
     from pydrive2.drive import GoogleDrive
     import json
 
-    # Write gdrive secret from st.secrets to a temp file
+    # Save service credentials from secrets to a real JSON file
     creds_path = "/tmp/service_creds.json"
     with open(creds_path, "w") as f:
         json.dump(dict(st.secrets["gdrive"]), f)
 
+    # Proper config for service auth
     gauth = GoogleAuth()
-    gauth.settings["client_config_backend"] = "service"
-    gauth.settings["service_config"] = {
-        "client_json_file_path": creds_path
-    }
-
+    gauth.settings.update({
+        "client_config_backend": "service",
+        "service_config": {
+            "client_json_file_path": creds_path
+        }
+    })
+    
     gauth.ServiceAuth()
     return GoogleDrive(gauth)
 
