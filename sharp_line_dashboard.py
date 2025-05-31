@@ -25,6 +25,8 @@ LOG_FOLDER = "/tmp/sharp_logs"
 
 def init_gdrive():
     import json
+    import os
+    from oauth2client.service_account import ServiceAccountCredentials
     from pydrive2.auth import GoogleAuth
     from pydrive2.drive import GoogleDrive
 
@@ -33,19 +35,16 @@ def init_gdrive():
         with open(creds_path, "w") as f:
             json.dump(dict(st.secrets["gdrive"]), f)
 
-        gauth = GoogleAuth()
-        gauth.settings = {
-            'client_config_backend': 'service',
-            'service_config': {
-                'client_json_file_path': creds_path
-            },
-            'save_credentials': False,
-            'get_refresh_token': False,
-            'oauth_scope': ['https://www.googleapis.com/auth/drive'],
-        }
+        # Use oauth2client directly to bypass broken settings validation
+        scope = ['https://www.googleapis.com/auth/drive']
+        credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
 
-        gauth.ServiceAuth()
-        return GoogleDrive(gauth)
+        gauth = GoogleAuth()
+        gauth.auth_method = 'service'
+        gauth.credentials = credentials
+
+        drive = GoogleDrive(gauth)
+        return drive
 
     except Exception as e:
         st.error(f"❌ Google Drive auth failed: {e}")
