@@ -24,27 +24,29 @@ MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
 def init_gdrive():
+    import json
     from pydrive2.auth import GoogleAuth
     from pydrive2.drive import GoogleDrive
-    import json
 
     try:
         creds_path = "/tmp/service_creds.json"
-
-        # Write Streamlit secrets to file
         with open(creds_path, "w") as f:
             json.dump(dict(st.secrets["gdrive"]), f)
 
-        # Set up authentication
         gauth = GoogleAuth()
-        gauth.settings["client_config_backend"] = "service"
-        gauth.settings["service_config"] = {
-            "client_json_file_path": creds_path
+        gauth.settings = {
+            'client_config_backend': 'service',
+            'service_config': {
+                'client_json_file_path': creds_path
+            },
+            'save_credentials': False,
+            'get_refresh_token': False,
+            'oauth_scope': ['https://www.googleapis.com/auth/drive'],
         }
 
         gauth.ServiceAuth()
-        drive = GoogleDrive(gauth)
-        return drive
+        return GoogleDrive(gauth)
+
     except Exception as e:
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
