@@ -2,13 +2,11 @@ import streamlit as st
 import pandas as pd
 import requests
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
-import altair as alt
-import glob
-import json
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
+import json
 
 # === CONFIG ===
 API_KEY = '4f95ea43cc1c29cd44c40fe59b6c14ce'
@@ -25,32 +23,27 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 
+# === GOOGLE DRIVE AUTH ===
 def init_gdrive():
-    import json
-    from pydrive2.auth import GoogleAuth
-    from pydrive2.drive import GoogleDrive
+    try:
+        creds_path = "/tmp/service_creds.json"
+        with open(creds_path, "w") as f:
+            json.dump(dict(st.secrets["gdrive"]), f)
 
-    # Write the secrets to a temp JSON file
-    creds_path = "/tmp/service_creds.json"
-    with open(creds_path, "w") as f:
-        json.dump(dict(st.secrets["gdrive"]), f)
+        gauth = GoogleAuth()
+        gauth.settings.update({
+            "client_config_backend": "service",
+            "service_config": {
+                "client_json_file_path": creds_path
+            }
+        })
+        gauth.ServiceAuth()
+        return GoogleDrive(gauth)
+    except Exception as e:
+        st.warning(f"Google Drive setup failed: {e}")
+        return None
 
-    gauth = GoogleAuth()
-    gauth.settings.update({
-        "client_config_backend": "service",
-        "service_config": {
-            "client_json_file_path": creds_path
-        }
-    })
-
-    gauth.ServiceAuth()
-    return GoogleDrive(gauth)
-
-
-
-
-
-# === HELPER FUNCTIONS ===
+# === LIVE ODDS FETCH ===
 @st.cache_data(ttl=60)
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
@@ -64,30 +57,34 @@ def fetch_live_odds(sport_key):
     try:
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        return data
     except Exception as e:
-        st.error(f"Error fetching odds: {e}")
+        st.error(f"❌ Odds API Error: {e}")
         return []
 
 def get_snapshot(data):
     return {g['id']: g for g in data}
 
-# === SCORE SHARP MOVES ===
+# === SHARP MOVE SCORING ===
 def score_sharp_moves(df):
     df['Delta'] = pd.to_numeric(df['Delta'], errors='coerce')
     df['Delta_Abs'] = df['Delta'].abs()
-    df['Limit_Jump'] = (df['Limit'].fillna(0) >= 10000).astype(int)
-    df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1 if 8 <= h <= 11 else 0.5 if h <= 6 else 0)
+    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+    df['Limit_Jump'] = (df['Limit'] >= 10000).astype(int)
+    df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2)
     df['Asymmetric_Limit'] = df.groupby(['Game', 'Market'])['Limit'].transform(lambda x: x.max() - x.min())
-    df['Asymmetric_Flag'] = (df['Asymmetric_Limit'] >= 5000).astype(int)
+    df['Asymmetry_Flag'] = (df['Asymmetric_Limit'] >= 5000).astype(int)
     df['MillerSharpScore'] = (
         5 * df['Bias Match'] +
-        4 * df['Limit Score'] +
-        3 * df['Line Moved'] +
-        2 * df['Asymmetry Flag']
-    )
+        3 * df['Limit_Jump'] +
+        2 * df['Delta_Abs'] +
+        2 * df['Sharp_Timing'] +
+        2 * df['Asymmetry_Flag']
+    ).round(2)
     return df
 
+# === SHARP DETECTION ===
 def detect_sharp_moves(current, previous, sport_key):
     opportunities = []
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -146,113 +143,90 @@ def detect_sharp_moves(current, previous, sport_key):
         for rec_entry in rec_lines:
             key = (rec_entry['Market'], rec_entry['Outcome'])
             sharp_entry = sharp_lines.get(key)
-
             if sharp_entry and sharp_entry['Value'] is not None and rec_entry['Value'] is not None:
                 sharp_val = sharp_entry['Value']
                 rec_val = rec_entry['Value']
                 delta_vs_sharp = round(rec_val - sharp_val, 2)
 
                 bias_match = 0
-
                 if rec_entry['Market'] == 'spreads':
-                    # For favorites: rec should be less negative
                     if sharp_val < 0 and rec_val > sharp_val:
                         bias_match = 1
-                    # For dogs: rec should be more positive
                     elif sharp_val > 0 and rec_val > sharp_val:
                         bias_match = 1
-
                 elif rec_entry['Market'] == 'totals':
-                    # If the rec line favors the same side more than sharp line
                     if "under" in rec_entry['Outcome'].lower() and rec_val > sharp_val:
                         bias_match = 1
                     elif "over" in rec_entry['Outcome'].lower() and rec_val < sharp_val:
                         bias_match = 1
-
                 elif rec_entry['Market'] == 'h2h':
-                    # For favorites (negative prices), rec line should be less negative
                     if sharp_val < 0 and rec_val > sharp_val:
                         bias_match = 1
-                    # For underdogs (positive prices), rec line should be more positive
                     elif sharp_val > 0 and rec_val > sharp_val:
                         bias_match = 1
-
-                miller_score = (
-                    5 * bias_match
-                    # Add other scoring components as needed
-                )
 
                 combined = rec_entry.copy()
                 combined.update({
                     'Ref Sharp Value': sharp_val,
                     'Delta vs Sharp': delta_vs_sharp,
-                    'Bias Match': bias_match,
-                    'MillerSharpScore': miller_score
+                    'Bias Match': bias_match
                 })
-
                 opportunities.append(combined)
 
     return pd.DataFrame(opportunities)
 
-# === STREAMLIT PAGE SETUP ===
+# === PAGE SETUP ===
 st.set_page_config(layout="wide")
-st.title("📊 Sharp Edge Scanner with Region Tagging & Movement Graphs")
-
+st.title("📊 Sharp Edge Scanner")
 auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"], index=0)
 if auto_mode == "Auto Refresh":
-    st_autorefresh(interval=150000, key="autorefresh")
-st.caption(f"🕒 Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-st.sidebar.header("📏 Sharp Move Detection Thresholds")
-spread_thresh = st.sidebar.slider("Line Move (spread/total)", 0.1, 2.0, 0.5, 0.1)
-ml_thresh = st.sidebar.slider("Price Move (moneyline)", 1, 50, 10, 1)
+    st_autorefresh(interval=120000, key="autorefresh")
 
 if 'previous_snapshots' not in st.session_state:
     st.session_state.previous_snapshots = {}
 
-# === TAB SETUP ===
-tab_nba, tab_mlb, tab_graphs = st.tabs(["🏀 NBA Scanner", "⚾ MLB Scanner", "📈 Sharp Movement Graphs"])
+st.caption(f"🕒 Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# === TAB FUNCTION ===
+# === SCANNER TAB FUNCTION ===
 def render_scanner_tab(label, sport_key, container):
     with container:
         os.makedirs(LOG_FOLDER, exist_ok=True)
-
-        # === Fetch live and previous data
         live = fetch_live_odds(sport_key)
         prev = st.session_state.previous_snapshots.get(sport_key, {})
         snapshot = get_snapshot(live)
 
-        df_moves = detect_sharp_moves(live, prev, label)
+        if not live:
+            st.warning(f"No odds returned for {label}.")
+            return
 
+        df_moves = detect_sharp_moves(live, prev, label)
         if not df_moves.empty:
-            # === Sort by score and filter only strongest per Game × Market
+            df_moves = score_sharp_moves(df_moves)
             df_display = df_moves.sort_values(by='MillerSharpScore', ascending=False)
             df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
 
+            st.subheader("🚨 Detected Sharp Moves")
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
             if region != "All":
                 df_display = df_display[df_display['Region'] == region]
 
-            st.subheader("🚨 Detected Sharp Moves")
             st.dataframe(df_display, use_container_width=True)
 
-            # === Log + Upload
             fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             csv_path = os.path.join(LOG_FOLDER, fname)
             df_display.to_csv(csv_path, index=False)
 
             drive = init_gdrive()
-            gfile = drive.CreateFile({'title': fname})
-            gfile.SetContentFile(csv_path)
-            gfile.Upload()
-            st.success(f"✅ Uploaded to Google Drive: {fname}")
+            if drive:
+                gfile = drive.CreateFile({'title': fname})
+                gfile.SetContentFile(csv_path)
+                gfile.Upload()
+                st.success(f"✅ Uploaded to Google Drive: {fname}")
 
             st.download_button("📥 Download CSV", df_display.to_csv(index=False).encode('utf-8'), fname, "text/csv")
         else:
-            st.info("No sharp moves this cycle.")
+            st.info("No sharp moves detected this cycle.")
 
-        # === Live Odds Table
         st.subheader("📋 Current Odds")
         odds = []
         for game in live:
@@ -268,19 +242,18 @@ def render_scanner_tab(label, sport_key, container):
                             'Bookmaker': book['title'],
                             'Value': val
                         })
-
         df_odds = pd.DataFrame(odds)
         if not df_odds.empty:
             pivot = df_odds.pivot_table(index=['Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
             st.dataframe(pivot.reset_index(), use_container_width=True)
 
-        # === Manual Refresh Option
         if auto_mode == "Manual":
             if st.button(f"🔄 Refresh {label}"):
                 st.session_state.previous_snapshots[sport_key] = snapshot
                 st.rerun()
 
-
-# === RENDER TABS ===
+# === TABS ===
+tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
 render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb)
+
