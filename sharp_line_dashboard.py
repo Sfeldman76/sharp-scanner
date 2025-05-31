@@ -11,7 +11,7 @@ from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
 # === CONFIG ===
-API_KEY = 'YOUR_ODDS_API_KEY'
+API_KEY = '4f95ea43cc1c29cd44c40fe59b6c14ce'
 SPORTS = {"NBA": "basketball_nba", "MLB": "baseball_mlb"}
 SHARP_BOOKS = ['pinnacle', 'bookmaker', 'betonlineag']
 REC_BOOKS = ['bovada', 'heritagesports', 'betus', 'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers', 'pointsbetus']
