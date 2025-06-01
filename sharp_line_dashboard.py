@@ -248,13 +248,16 @@ def render_scanner_tab(label, sport_key, container, drive):
             
             if region != "All":
                 df_display = df_display[df_display['Region'] == region]
-
+            if market != "All":
+                df_display = df_display[df_display['Market'] == market] 
             st.dataframe(df_display, use_container_width=True)
 
+            # === Save + Upload CSV ===
             # === Save + Upload CSV ===
             fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             csv_path = os.path.join(LOG_FOLDER, fname)
             df_display.to_csv(csv_path, index=False)
+
 
             try:
                 gfile = drive.CreateFile({
