@@ -169,7 +169,6 @@ def detect_sharp_moves(current, previous, sport_key):
                 time_score = 0
 
                 for limit, current_val, old_val in entries:
-                    # 1. Line Movement
                     if old_val is not None and current_val is not None:
                         if market_type == "totals":
                             if "under" in label and current_val < old_val:
@@ -182,21 +181,14 @@ def detect_sharp_moves(current, previous, sport_key):
                         elif market_type == "h2h":
                             imp_now = implied_prob(current_val)
                             imp_old = implied_prob(old_val)
-                            if imp_now is not None and imp_old is not None and imp_now > imp_old:
+                            if imp_now and imp_old and imp_now > imp_old:
                                 prob_shift_signal += 1
 
-                    # 2. Limit Jump
                     if limit and limit >= 5000:
                         limit_jump += 1
 
-                    # 3. Time Scoring
                     hour = datetime.now().hour
-                    if 6 <= hour <= 11:
-                        time_score += 1
-                    elif hour <= 15:
-                        time_score += 0.5
-                    else:
-                        time_score += 0.2
+                    time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
 
                 score = (
                     2.0 * move_signal +
@@ -210,45 +202,61 @@ def detect_sharp_moves(current, previous, sport_key):
                 best_label = max(label_scores, key=label_scores.get)
                 sharp_side_flags[(game_name, market_type, best_label)] = 1
 
-        # === Compare rec book lines to sharp side
+        # === Evaluate rec books against sharp side
         for rec in rec_lines:
-            outcome_key = (rec['Game'], rec['Market'], normalize_label(rec['Outcome']))
-            sharp = sharp_lines.get((rec['Market'], normalize_label(rec['Outcome'])))
-            is_sharp_side = 1 if outcome_key in sharp_side_flags else 0
-            if not is_sharp_side:
+            rec_label = normalize_label(rec['Outcome'])
+            market_type = rec['Market']
+            sharp = None
+            is_sharp_side = 0
+
+            # === Loose match for totals
+            if market_type == 'totals':
+                rec_dir = 'under' if 'under' in rec_label else 'over'
+                for (g_name, mkt, label), _ in sharp_side_flags.items():
+                    if g_name == rec['Game'] and mkt == market_type and rec_dir in label:
+                        sharp = sharp_lines.get((market_type, label))
+                        is_sharp_side = 1
+                        break
+            else:
+                outcome_key = (rec['Game'], rec['Market'], rec_label)
+                if outcome_key in sharp_side_flags:
+                    is_sharp_side = 1
+                    sharp = sharp_lines.get((rec['Market'], rec_label))
+
+            if not is_sharp_side or not sharp:
                 continue
 
             row = rec.copy()
-            implied_rec = implied_prob(rec['Value']) if rec['Market'] == 'h2h' else None
+            implied_rec = implied_prob(rec['Value']) if market_type == 'h2h' else None
             implied_sharp = implied_prob(sharp['Value']) if sharp and sharp['Market'] == 'h2h' else None
             delta_vs_sharp = rec['Value'] - sharp['Value'] if sharp and rec['Value'] is not None and sharp['Value'] is not None else None
 
-            # Bias Match
             bias_match = 0
-            if rec['Market'] == 'spreads' and sharp and abs(rec['Value']) < abs(sharp['Value']):
+            if market_type == 'spreads' and abs(rec['Value']) < abs(sharp['Value']):
                 bias_match = 1
-            elif rec['Market'] == 'totals' and "under" in rec['Outcome'] and rec['Value'] > sharp['Value']:
-                bias_match = 1
-            elif rec['Market'] == 'totals' and "over" in rec['Outcome'] and rec['Value'] < sharp['Value']:
-                bias_match = 1
-            elif rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None and implied_rec < implied_sharp:
+            elif market_type == 'totals':
+                if "under" in rec['Outcome'] and rec['Value'] > sharp['Value']:
+                    bias_match = 1
+                elif "over" in rec['Outcome'] and rec['Value'] < sharp['Value']:
+                    bias_match = 1
+            elif market_type == 'h2h' and implied_rec and implied_sharp and implied_rec < implied_sharp:
                 bias_match = 1
 
-            # Sharp Alignment (final tiered result)
+            # === Alignment tag
             alignment = "⚠️ Worse than sharps"
-            if rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None:
+            if market_type == 'h2h' and implied_rec is not None and implied_sharp is not None:
                 if implied_rec < implied_sharp:
                     alignment = "🚨 Edge (better than sharps)"
                 elif abs(implied_rec - implied_sharp) < 0.005:
                     alignment = "✅ Matched with sharps"
-            elif rec['Market'] == 'spreads' and sharp:
+            elif market_type == 'spreads' and sharp:
                 if sharp['Value'] > 0 and rec['Value'] > sharp['Value']:
                     alignment = "🚨 Edge (better than sharps)"
                 elif sharp['Value'] < 0 and rec['Value'] < sharp['Value']:
                     alignment = "🚨 Edge (better than sharps)"
                 elif rec['Value'] == sharp['Value']:
                     alignment = "✅ Matched with sharps"
-            elif rec['Market'] == 'totals' and sharp:
+            elif market_type == 'totals' and sharp:
                 if "under" in rec['Outcome'] and rec['Value'] > sharp['Value']:
                     alignment = "🚨 Edge (better than sharps)"
                 elif "over" in rec['Outcome'] and rec['Value'] < sharp['Value']:
@@ -315,7 +323,6 @@ def detect_sharp_moves(current, previous, sport_key):
 
     print("✅ Final sharp-backed rows:", len(df))
     return df
-
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
