@@ -424,12 +424,12 @@ def render_scanner_tab(label, sport_key, container, drive):
                     for o in market.get('outcomes', []):
                         val = o.get('point') if market['key'] != 'h2h' else o.get('price')               
                         odds.append({
+                            'Event_Date': event_date,
                             'Game': game_name,
                             'Market': market['key'],
                             'Outcome': o['name'],
                             'Bookmaker': book['title'],
-                            'Value': val,
-                            'Event_Date': event_date
+                            'Value': val
                         })
 
         df_odds = pd.DataFrame(odds)
