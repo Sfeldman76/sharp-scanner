@@ -169,12 +169,9 @@ def detect_sharp_moves(current, previous, sport_key):
         avg0 = round(sum(prices0) / len(prices0), 2)
         avg1 = round(sum(prices1) / len(prices1), 2)
 
-        # Special logic for totals: only assign sharp side if lines are different
         if mtype == 'totals' and avg0 == avg1:
-            # Still store a SHARP_REASON later, but do NOT assign SHARP_SIDE
-            continue
+            continue  # don't pick sharp side when both totals are same
 
-        # General logic (totals, spreads, h2h)
         if mtype == 'totals':
             l0_under = 'under' in l0.lower()
             l1_under = 'under' in l1.lower()
@@ -188,7 +185,6 @@ def detect_sharp_moves(current, previous, sport_key):
             else:
                 sharp_side_label = l1
         else:
-            # Use combined price & sharp consensus logic for spreads and h2h
             score0 = sum([x[0] for x in label_map[l0]]) + avg0 * 2
             score1 = sum([x[0] for x in label_map[l1]]) + avg1 * 2
             sharp_side_label = l0 if score0 > score1 else l1
@@ -200,7 +196,6 @@ def detect_sharp_moves(current, previous, sport_key):
         key = (rec['Market'], rec['Outcome'])
         sharp = sharp_lines.get(key)
 
-        # fallback to alt outcome
         if not sharp:
             alt_outcome = None
             if rec['Market'] == 'totals':
@@ -214,11 +209,10 @@ def detect_sharp_moves(current, previous, sport_key):
             if alt_outcome:
                 sharp = sharp_lines.get((rec['Market'], alt_outcome))
 
-        if not sharp or sharp['Outcome'] != rec['Outcome']:
+        if not sharp:
             continue
 
         delta_vs_sharp = rec['Value'] - sharp['Value']
-
         implied_rec = implied_prob(rec['Value']) if rec['Market'] == 'h2h' else None
         implied_sharp = implied_prob(sharp['Value']) if sharp['Market'] == 'h2h' else None
         bias_match = 0
@@ -247,17 +241,10 @@ def detect_sharp_moves(current, previous, sport_key):
                 'Implied_Prob_Sharp': implied_sharp,
                 'Implied_Prob_Diff': (implied_sharp - implied_rec) if implied_rec and implied_sharp else None,
                 'Limit': sharp.get('Limit') or 0,
-                'SHARP_SIDE_TO_BET': sharp_side_flag,
-                'Time': snapshot_time
+                'SHARP_SIDE_TO_BET': 1,
+                'Time': snapshot_time,
+                'SharpAlignment': "✅ Aligned with sharps" if abs(delta_vs_sharp) < 0.01 else "🚨 Edge vs sharps"
             })
-
-            # ✅ Sharp Alignment Label
-            if abs(delta_vs_sharp) < 0.01:
-                alignment = "✅ Aligned with sharps"
-            else:
-                alignment = "🚨 Edge vs sharps"
-
-            row['SharpAlignment'] = alignment
 
             # === SHARP REASON GENERATOR
             side_label = rec['Outcome']
@@ -303,9 +290,7 @@ def detect_sharp_moves(current, previous, sport_key):
                 matchup_tag
             ]
             row['SHARP_REASON'] = ", ".join([r for r in reason_parts if r])
-
-            rows.append(row)  # ✅ Make sure this happens inside the if-block
-
+            rows.append(row)
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -317,7 +302,6 @@ def detect_sharp_moves(current, previous, sport_key):
     )
 
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
-    df = df[df['Delta'].abs() > 0.01]
     df['Delta_Abs'] = df['Delta'].abs()
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Limit_Jump'] = (df['Limit'] >= 5000).astype(int)
@@ -346,9 +330,6 @@ def detect_sharp_moves(current, previous, sport_key):
             return "⚠️ Low"
 
     df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
-
-    # Final filter: only show smart sharp-backed moves
-    df = df[df['SHARP_SIDE_TO_BET'] == 1]
 
     return df
 
