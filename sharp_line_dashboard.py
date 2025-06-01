@@ -74,6 +74,15 @@ def load_snapshot(sport_key):
             return {}
     return {}
 
+def implied_prob(odds):
+    try:
+        if odds < 0:
+            return -odds / (-odds + 100)
+        else:
+            return 100 / (odds + 100)
+    except:
+        return None
+
 
 @st.cache_data(ttl=60)
 def fetch_live_odds(sport_key):
@@ -93,24 +102,20 @@ def fetch_live_odds(sport_key):
         st.error(f"❌ Odds API Error: {e}")
         return []
 def detect_sharp_moves(current, previous, sport_key):
+    from collections import defaultdict
     rows = []
+    sharp_limit_map = defaultdict(lambda: defaultdict(list))
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     # Build previous game map
-    previous_map = {}
-    if isinstance(previous, dict):
-        previous_map = previous
-    elif isinstance(previous, list):
-        try:
-            previous_map = {g['id']: g for g in previous}
-        except Exception as e:
-            st.warning(f"⚠️ Snapshot format error: {e}")
+    previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
         gid = game['id']
         prev_game = previous_map.get(gid, {})
-        sharp_lines, rec_lines = {}, []
+        sharp_lines = {}
+        rec_lines = []
 
         for book in game.get('bookmakers', []):
             book_key = book['key']
@@ -120,7 +125,7 @@ def detect_sharp_moves(current, previous, sport_key):
                 for o in market.get('outcomes', []):
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     label = o['name']
-                    limit = o.get('bet_limit')
+                    limit = o.get('bet_limit') if book_key in SHARP_BOOKS else None
                     entry = {
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
@@ -128,7 +133,7 @@ def detect_sharp_moves(current, previous, sport_key):
                         'Old Value': None, 'Delta': None
                     }
 
-                    # Pull previous value if available
+                    # Pull previous value
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'] == book_key:
@@ -143,48 +148,78 @@ def detect_sharp_moves(current, previous, sport_key):
 
                     if book_key in SHARP_BOOKS:
                         sharp_lines[(mtype, label)] = entry
+                        sharp_limit_map[(game_name, mtype)][label].append((limit or 0, val))
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
-        # Compare rec vs sharp
+        # Determine SHARP_SIDE_TO_BET per game/market
+        sharp_side_flags = {}
+        for (game_mkt, label_map) in sharp_limit_map.items():
+            label_scores = {}
+            for label, entries in label_map.items():
+                limits = [x[0] for x in entries if x[0] is not None]
+                prices = [x[1] for x in entries if x[1] is not None]
+                avg_limit = sum(limits) / len(limits) if limits else 0
+                implied_probs = [implied_prob(p) for p in prices if p is not None]
+                avg_prob = sum(implied_probs) / len(implied_probs) if implied_probs else None
+                label_scores[label] = {
+                    'avg_limit': avg_limit,
+                    'avg_prob': avg_prob,
+                    'count': len(entries)
+                }
+
+            # Pick the sharp side = higher limit + worse price for bettor (higher implied prob)
+            if len(label_scores) == 2:
+                labels = list(label_scores.keys())
+                l0, l1 = labels[0], labels[1]
+                s0, s1 = label_scores[l0], label_scores[l1]
+
+                # Scoring logic
+                score0 = s0['avg_limit'] + (s0['avg_prob'] or 0) * 100
+                score1 = s1['avg_limit'] + (s1['avg_prob'] or 0) * 100
+                sharp_side_label = l0 if score0 > score1 else l1
+                sharp_side_flags[(game_mkt[0], game_mkt[1], sharp_side_label)] = 1
+
+        # Build move rows
         for rec in rec_lines:
             key = (rec['Market'], rec['Outcome'])
             sharp = sharp_lines.get(key)
             if not sharp or rec['Value'] is None or sharp['Value'] is None:
                 continue
-
             if rec['Outcome'] != sharp['Outcome']:
-                continue  # mismatch
+                continue
 
-            delta_vs_sharp = round(rec['Value'] - sharp['Value'], 2)
+            delta_vs_sharp = rec['Value'] - sharp['Value']
+            implied_rec = implied_prob(rec['Value']) if rec['Market'] == 'h2h' else None
+            implied_sharp = implied_prob(sharp['Value']) if sharp['Market'] == 'h2h' else None
             bias_match = 0
 
             if rec['Market'] == 'spreads':
-                if abs(rec['Value']) < abs(sharp['Value']):  # better spread
+                if abs(rec['Value']) < abs(sharp['Value']):
                     bias_match = 1
-
             elif rec['Market'] == 'totals':
                 if "under" in rec['Outcome'].lower() and rec['Value'] > sharp['Value']:
                     bias_match = 1
                 elif "over" in rec['Outcome'].lower() and rec['Value'] < sharp['Value']:
                     bias_match = 1
+            elif rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None:
+                if implied_rec < implied_sharp:
+                    bias_match = 1
 
-            elif rec['Market'] == 'h2h':
-                if sharp['Value'] < 0:
-                    bias_match = 1 if rec['Value'] < sharp['Value'] else 0  # More negative = better
-                else:
-                    bias_match = 1 if rec['Value'] > sharp['Value'] else 0  # Higher positive = better
+            sharp_side_flag = sharp_side_flags.get((rec['Game'], rec['Market'], rec['Outcome']), 0)
 
-            # Only log rows where the price differs
             if rec['Value'] != sharp['Value']:
                 row = rec.copy()
                 row.update({
                     'Ref Sharp Value': sharp['Value'],
-                    'Delta vs Sharp': delta_vs_sharp,
+                    'Delta vs Sharp': round(delta_vs_sharp, 2),
                     'Bias Match': bias_match,
-                    'Delta': rec.get('Delta') or delta_vs_sharp,
+                    'Implied_Prob_Rec': implied_rec,
+                    'Implied_Prob_Sharp': implied_sharp,
+                    'Implied_Prob_Diff': (implied_sharp - implied_rec) if implied_rec and implied_sharp else None,
                     'Limit': sharp.get('Limit') or 0,
-                    'Time': snapshot_time,
+                    'SHARP_SIDE_TO_BET': sharp_side_flag,
+                    'Time': snapshot_time
                 })
                 rows.append(row)
 
@@ -192,20 +227,21 @@ def detect_sharp_moves(current, previous, sport_key):
     if df.empty:
         return df
 
-    # Filter out any rows with no meaningful delta
-    df['Delta'] = pd.to_numeric(df['Delta'], errors='coerce')
+    # Final scoring
+    df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df = df[df['Delta'].abs() > 0.05]
-
-    # Add scoring components
     df['Delta_Abs'] = df['Delta'].abs()
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Limit_Jump'] = (df['Limit'] >= 10000).astype(int)
     df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2)
-    df['Asymmetric_Limit'] = df.groupby(['Game', 'Market'])['Limit'].transform(lambda x: x.max() - x.min())
-    df['Asymmetry_Flag'] = (df['Asymmetric_Limit'] >= 5000).astype(int)
+    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
+    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
+    df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
+    df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 5000).astype(int)
 
-    df['MillerSharpScore'] = (
+    df['SmartSharpScore'] = (
         5 * df['Bias Match'] +
+        4 * df['SHARP_SIDE_TO_BET'] +
         3 * df['Limit_Jump'] +
         2 * df['Delta_Abs'] +
         2 * df['Sharp_Timing'] +
