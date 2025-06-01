@@ -115,6 +115,8 @@ def detect_sharp_moves(current, previous, sport_key):
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
+        event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if "commence_time" in game else ""
+
         gid = game['id']
         prev_game = previous_map.get(gid, {})
         sharp_lines = {}
@@ -133,7 +135,8 @@ def detect_sharp_moves(current, previous, sport_key):
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
                         'Book': book_key, 'Region': region, 'Value': val, 'Limit': limit,
-                        'Old Value': None, 'Delta': None
+                        'Old Value': None, 'Delta': None, 'Event_Date': event_date,
+
                     }
 
                     if prev_game:
@@ -259,6 +262,7 @@ def detect_sharp_moves(current, previous, sport_key):
                             alignment = "⚠️ Worse than sharps"
 
                 row.update({
+                    'Event_Date': rec.get('Event_Date', ""),
                     'Ref Sharp Value': sharp['Value'] if sharp else None,
                     'Delta vs Sharp': round(delta_vs_sharp, 2) if delta_vs_sharp is not None else None,
                     'Bias Match': bias_match,
@@ -364,10 +368,11 @@ def render_scanner_tab(label, sport_key, container, drive):
             # === Final displayed columns (safe fallback)
             available_cols = df_display.columns.tolist()
             safe_cols = [col for col in [
-                'Game', 'Market', 'Outcome', 'Bookmaker',
+                'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
                 'Value', 'Ref Sharp Value', 'LineMove',
                 'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SharpAlignment', 'SHARP_REASON'
             ] if col in available_cols]
+
 
             print("🧪 Displaying columns:", safe_cols)
 
@@ -412,17 +417,21 @@ def render_scanner_tab(label, sport_key, container, drive):
         odds = []
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
+            event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if "commence_time" in game else ""
+
             for book in game.get('bookmakers', []):
                 for market in book.get('markets', []):
                     for o in market.get('outcomes', []):
-                        val = o.get('point') if market['key'] != 'h2h' else o.get('price')
+                        val = o.get('point') if market['key'] != 'h2h' else o.get('price')               
                         odds.append({
                             'Game': game_name,
                             'Market': market['key'],
                             'Outcome': o['name'],
                             'Bookmaker': book['title'],
-                            'Value': val
+                            'Value': val,
+                            'Event_Date': event_date
                         })
+
         df_odds = pd.DataFrame(odds)
         if not df_odds.empty:
             pivot = df_odds.pivot_table(index=['Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
