@@ -236,7 +236,7 @@ def detect_sharp_moves(current, previous, sport_key):
 
         sharp_side_flag = sharp_side_flags.get((rec['Game'], rec['Market'], rec['Outcome']), 0)
 
-        if sharp_side_flag == 1
+        if sharp_side_flag == 1:
             row = rec.copy()
             row.update({
                 'Ref Sharp Value': sharp['Value'],
