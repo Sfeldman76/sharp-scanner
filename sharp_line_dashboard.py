@@ -232,17 +232,18 @@ def render_scanner_tab(label, sport_key, container):
             csv_path = os.path.join(LOG_FOLDER, fname)
             df_display.to_csv(csv_path, index=False)
 
-            drive = init_gdrive()
-            if drive:
-                gfile = drive.CreateFile({'title': fname, 'parents': [{'id': FOLDER_ID}]})
+            try:
+                gfile = drive.CreateFile({
+                    'title': fname,
+                    'parents': [{'id': FOLDER_ID}]
+                })
                 gfile.SetContentFile(csv_path)
                 gfile.Upload()
                 st.success(f"✅ Uploaded to Google Drive: {fname}")
-                st.caption(f"📁 [Open in Sharp Logs Folder](https://drive.google.com/drive/folders/{FOLDER_ID})")
+                st.caption(f"📁 [Sharp Logs Folder](https://drive.google.com/drive/folders/{FOLDER_ID})")
+            except Exception as e:
+                st.error(f"❌ Google Drive Upload Failed: {e}")
 
-            st.download_button("📥 Download CSV", df_display.to_csv(index=False).encode('utf-8'), fname, "text/csv")
-        else:
-            st.info("No sharp moves detected this cycle.")
 
         # === Current Odds View ===
         st.subheader("📋 Current Odds")
