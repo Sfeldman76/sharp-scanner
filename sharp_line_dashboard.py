@@ -340,7 +340,7 @@ def detect_sharp_moves(current, previous, sport_key):
     df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
 
     # Final filter: show only sharp-backed sides
-    df = df[df['SHARP_SIDE_TO_BET'] == 1]
+    #df = df[df['SHARP_SIDE_TO_BET'] == 1]
 
     return df
 
