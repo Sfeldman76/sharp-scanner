@@ -37,7 +37,7 @@ def init_gdrive():
         with open(creds_path, "w") as f:
             json.dump(dict(st.secrets["gdrive"]), f)
 
-        # Use oauth2client directly to bypass broken settings validation
+        # Use oauth2client to load credentials
         scope = ['https://www.googleapis.com/auth/drive']
         credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
 
@@ -45,12 +45,27 @@ def init_gdrive():
         gauth.auth_method = 'service'
         gauth.credentials = credentials
 
-        drive = GoogleDrive(gauth)
-        return drive
+        return GoogleDrive(gauth)
 
     except Exception as e:
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
+
+
+FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+drive = init_gdrive()
+
+if drive:
+    gfile = drive.CreateFile({
+        'title': fname,
+        'parents': [{'id': FOLDER_ID}]
+    })
+    gfile.SetContentFile(csv_path)
+    gfile.Upload()
+
+    st.success(f"✅ Uploaded to Google Drive: {fname}")
+    st.caption(f"📁 Uploaded to: [Sharp Logs Folder](https://drive.google.com/drive/folders/{FOLDER_ID})")
+
 
 import pickle
 
