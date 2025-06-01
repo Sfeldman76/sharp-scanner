@@ -363,14 +363,18 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning(f"No odds returned for {label}.")
             return
 
+        # === Process sharp moves
         df_moves = detect_sharp_moves(live, prev, label)
-        save_snapshot(sport_key, get_snapshot(live))  # Persist current odds snapshot for next run
+        save_snapshot(sport_key, get_snapshot(live))  # persist new snapshot
+
+        print(f"📊 {label} rows returned:", len(df_moves) if df_moves is not None else "None")
 
         if df_moves is not None and not df_moves.empty:
             df_display = df_moves.sort_values(by='SmartSharpScore', ascending=False)
             df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
 
             st.subheader("🚨 Detected Sharp Moves")
+
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
             market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()))
 
@@ -385,24 +389,30 @@ def render_scanner_tab(label, sport_key, container, drive):
                 'Value', 'Ref Sharp Value', 'LineMove',
                 'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SHARP_REASON'
             ]
-            st.dataframe(df_display[cols_to_display], use_container_width=True)
 
-            # === Save + Upload CSV ===
-            fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            csv_path = os.path.join(LOG_FOLDER, fname)
-            df_display.to_csv(csv_path, index=False)
+            if not df_display.empty:
+                st.dataframe(df_display[cols_to_display], use_container_width=True)
 
-            try:
-                gfile = drive.CreateFile({
-                    'title': fname,
-                    'parents': [{'id': FOLDER_ID}]
-                })
-                gfile.SetContentFile(csv_path)
-                gfile.Upload()
-                st.success(f"✅ Uploaded to Google Drive: {fname}")
-                st.caption(f"📁 [Sharp Logs Folder](https://drive.google.com/drive/folders/{FOLDER_ID})")
-            except Exception as e:
-                st.error(f"❌ Google Drive Upload Failed: {e}")
+                # === Save + Upload CSV ===
+                fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                csv_path = os.path.join(LOG_FOLDER, fname)
+                df_display.to_csv(csv_path, index=False)
+
+                try:
+                    gfile = drive.CreateFile({
+                        'title': fname,
+                        'parents': [{'id': FOLDER_ID}]
+                    })
+                    gfile.SetContentFile(csv_path)
+                    gfile.Upload()
+                    st.success(f"✅ Uploaded to Google Drive: {fname}")
+                    st.caption(f"📁 [Sharp Logs Folder](https://drive.google.com/drive/folders/{FOLDER_ID})")
+                except Exception as e:
+                    st.error(f"❌ Google Drive Upload Failed: {e}")
+            else:
+                st.info(f"⚠️ No qualifying sharp moves for {label} after filters.")
+        else:
+            st.info(f"⚠️ No sharp moves detected for {label}.")
 
 
         # === Current Odds View ===
