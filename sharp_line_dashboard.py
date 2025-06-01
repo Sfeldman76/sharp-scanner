@@ -316,9 +316,10 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.subheader("🚨 Detected Sharp Moves")
 
             # === Filters
-            region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
-            market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()))
-            alignment_filter = st.selectbox("🧭 Sharp Alignment Filter", ["All", "✅ Aligned with sharps", "🚨 Edge vs sharps"])
+           
+            region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()), key=f"{label}_region")
+            market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()), key=f"{label}_market")
+            alignment_filter = st.selectbox("🧭 Sharp Alignment Filter", ["All", "✅ Aligned with sharps", "🚨 Edge vs sharps"], key=f"{label}_alignment")
 
             if region != "All":
                 df_display = df_display[df_display['Region'] == region]
