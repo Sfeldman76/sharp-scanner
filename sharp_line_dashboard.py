@@ -339,11 +339,11 @@ def render_scanner_tab(label, sport_key, container, drive):
                 def highlight_edge(row):
                     delta = row.get('Delta vs Sharp', 0)
                     if abs(delta) >= 2:
-                        return ['background-color: #ffcccc'] * len(row)
+                        return ['background-color: #ffcccc; color: black'] * len(row)
                     elif abs(delta) >= 1:
-                        return ['background-color: #fff3cd'] * len(row)
+                        return ['background-color: #fff3cd; color: black'] * len(row)
                     else:
-                        return ['background-color: #d4edda'] * len(row)
+                        return ['background-color: #d4edda; color: black'] * len(row)
 
                 styled_df = df_display[safe_cols].style.apply(highlight_edge, axis=1)
                 st.dataframe(styled_df, use_container_width=True)
