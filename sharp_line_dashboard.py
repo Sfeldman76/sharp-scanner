@@ -221,7 +221,52 @@ def detect_sharp_moves(current, previous, sport_key):
                     'SHARP_SIDE_TO_BET': sharp_side_flag,
                     'Time': snapshot_time
                 })
+
+                # === SHARP REASON GENERATOR
+                side_label = rec['Outcome']
+                game_key = (rec['Game'], rec['Market'])
+
+                sharp_side_metrics = sharp_limit_map.get(game_key, {})
+                side_limits = [x[0] for x in sharp_side_metrics.get(side_label, []) if x[0]]
+                side_prices = [x[1] for x in sharp_side_metrics.get(side_label, []) if x[1]]
+                side_count = len(side_limits)
+
+                limit_tag = f"{max(side_limits):,.0f}" if side_limits else "unknown"
+                implied = implied_prob(rec['Value'])
+                price_tag = f"{round(implied * 100, 1)}%" if implied else "N/A"
+
+                # === Advanced Tags
+                anchor_tag = ""
+                fade_tag = ""
+
+                # Check for price anchor (all sharp books posted same value)
+                if len(side_prices) > 1 and max(side_prices) - min(side_prices) < 0.01:
+                    anchor_tag = "💰 Anchor price at all sharp books"
+
+                # Check for sharp fade on opponent
+                labels = list(sharp_side_metrics.keys())
+                opp_label = next((l for l in labels if l != side_label), None)
+                opp_limits = [x[0] for x in sharp_side_metrics.get(opp_label, []) if x[0]] if opp_label else []
+
+                if not opp_limits or sum(opp_limits) == 0:
+                    fade_tag = "📉 Sharp fade: opponent has no limit"
+
+                # Build reason string
+                reason_parts = [
+                    f"📈 Sharp limit ${limit_tag}",
+                    f"🧮 implied prob {price_tag}",
+                    f"🧠 {side_count} sharp book(s)",
+                    anchor_tag,
+                    fade_tag
+                ]
+                reason = ", ".join([r for r in reason_parts if r])  # remove empties
+                row['SHARP_REASON'] = reason
+
+
+                # ✅ Now append after SHARP_REASON is added
                 rows.append(row)
+
+
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -247,6 +292,7 @@ def detect_sharp_moves(current, previous, sport_key):
         2 * df['Sharp_Timing'] +
         2 * df['Asymmetry_Flag']
     ).round(2)
+    df = df[df['SHARP_SIDE_TO_BET'] == 1]
 
     return df
 
@@ -274,8 +320,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         save_snapshot(sport_key, get_snapshot(live))  # Persist current odds snapshot for next run
 
         if df_moves is not None and not df_moves.empty:
-            sort_col = 'SmartSharpScore' if 'SmartSharpScore' in df_moves.columns else 'MillerSharpScore'
-            df_display = df_moves.sort_values(by=sort_col, ascending=False)
+            df_display = df_moves.sort_values(by='MillerSharpScore', ascending=False)
             df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
 
             st.subheader("🚨 Detected Sharp Moves")
