@@ -116,7 +116,6 @@ def detect_sharp_moves(current, previous, sport_key):
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
         event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if "commence_time" in game else ""
-
         gid = game['id']
         prev_game = previous_map.get(gid, {})
         sharp_lines = {}
@@ -135,8 +134,7 @@ def detect_sharp_moves(current, previous, sport_key):
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
                         'Book': book_key, 'Region': region, 'Value': val, 'Limit': limit,
-                        'Old Value': None, 'Delta': None, 'Event_Date': event_date,
-
+                        'Old Value': None, 'Delta': None, 'Event_Date': event_date
                     }
 
                     if prev_game:
@@ -153,129 +151,126 @@ def detect_sharp_moves(current, previous, sport_key):
 
                     if book_key in SHARP_BOOKS:
                         sharp_lines[(mtype, label)] = entry
-                        sharp_limit_map[(game_name, mtype)][label].append((limit or 0, val))
+                        sharp_limit_map[(game_name, mtype)][label].append((limit or 0, val, entry.get("Old Value")))
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
-        # === Sharp side assignment logic
+        # === Determine sharp side based on movement + limit + time
         sharp_side_flags = {}
-        for (game_mkt, label_map) in sharp_limit_map.items():
-            labels = list(label_map.keys())
-            if len(labels) == 1:
-                sharp_side_flags[(game_mkt[0], game_mkt[1], labels[0])] = 1
-                continue
 
-            l0, l1 = labels[0], labels[1]
-            prices0 = [x[1] for x in label_map[l0] if x[1] is not None]
-            prices1 = [x[1] for x in label_map[l1] if x[1] is not None]
-            mtype = game_mkt[1]
+        for (game_name, market_type), label_map in sharp_limit_map.items():
+            label_scores = {}
 
-            if not prices0 or not prices1:
-                fallback_label = l0 if prices0 else l1
-                sharp_side_flags[(game_mkt[0], mtype, fallback_label)] = 1
-                continue
+            for label, entries in label_map.items():
+                score_total = 0
+                move_signal = 0
+                limit_jump = 0
+                prob_shift_signal = 0
+                time_score = 0
 
-            avg0 = round(sum(prices0) / len(prices0), 2)
-            avg1 = round(sum(prices1) / len(prices1), 2)
+                for limit, current_val, old_val in entries:
+                    # 1. Line Movement
+                    if old_val is not None and current_val is not None:
+                        if market_type == "totals":
+                            if "under" in label and current_val < old_val:
+                                move_signal += 1
+                            elif "over" in label and current_val > old_val:
+                                move_signal += 1
+                        elif market_type == "spreads":
+                            if abs(current_val) > abs(old_val):
+                                move_signal += 1
+                        elif market_type == "h2h":
+                            imp_now = implied_prob(current_val)
+                            imp_old = implied_prob(old_val)
+                            if imp_now is not None and imp_old is not None and imp_now > imp_old:
+                                prob_shift_signal += 1
 
-            if mtype == 'totals' and avg0 == avg1:
-                continue
+                    # 2. Limit Jump
+                    if limit and limit >= 5000:
+                        limit_jump += 1
 
-            if mtype == 'totals':
-                l0_under = 'under' in l0
-                l1_under = 'under' in l1
-                if l0_under and avg0 < avg1:
-                    sharp_side_label = l0
-                elif l1_under and avg1 < avg0:
-                    sharp_side_label = l1
-                elif not l0_under and avg0 > avg1:
-                    sharp_side_label = l0
-                else:
-                    sharp_side_label = l1
-            else:
-                score0 = sum([x[0] for x in label_map[l0]]) + avg0 * 2
-                score1 = sum([x[0] for x in label_map[l1]]) + avg1 * 2
-                sharp_side_label = l0 if score0 > score1 else l1
+                    # 3. Time Scoring
+                    hour = datetime.now().hour
+                    if 6 <= hour <= 11:
+                        time_score += 1
+                    elif hour <= 15:
+                        time_score += 0.5
+                    else:
+                        time_score += 0.2
 
-            sharp_side_flags[(game_mkt[0], mtype, sharp_side_label)] = 1
+                score = (
+                    2.0 * move_signal +
+                    2.0 * limit_jump +
+                    1.5 * time_score +
+                    1.0 * prob_shift_signal
+                )
+                label_scores[label] = score
 
-        # === Final build
+            if label_scores:
+                best_label = max(label_scores, key=label_scores.get)
+                sharp_side_flags[(game_name, market_type, best_label)] = 1
+
+        # === Compare rec book lines to sharp side
         for rec in rec_lines:
-            key = (rec['Market'], normalize_label(rec['Outcome']))
-            sharp = sharp_lines.get(key)
+            outcome_key = (rec['Game'], rec['Market'], normalize_label(rec['Outcome']))
+            sharp = sharp_lines.get((rec['Market'], normalize_label(rec['Outcome'])))
+            is_sharp_side = 1 if outcome_key in sharp_side_flags else 0
+            if not is_sharp_side:
+                continue
 
-            if (rec['Game'], rec['Market'], normalize_label(rec['Outcome'])) in sharp_side_flags:
-                row = rec.copy()
+            row = rec.copy()
+            implied_rec = implied_prob(rec['Value']) if rec['Market'] == 'h2h' else None
+            implied_sharp = implied_prob(sharp['Value']) if sharp and sharp['Market'] == 'h2h' else None
+            delta_vs_sharp = rec['Value'] - sharp['Value'] if sharp and rec['Value'] is not None and sharp['Value'] is not None else None
 
-                implied_rec = implied_prob(rec['Value']) if rec['Market'] == 'h2h' else None
-                implied_sharp = implied_prob(sharp['Value']) if sharp and sharp['Market'] == 'h2h' else None
+            # Bias Match
+            bias_match = 0
+            if rec['Market'] == 'spreads' and sharp and abs(rec['Value']) < abs(sharp['Value']):
+                bias_match = 1
+            elif rec['Market'] == 'totals' and "under" in rec['Outcome'] and rec['Value'] > sharp['Value']:
+                bias_match = 1
+            elif rec['Market'] == 'totals' and "over" in rec['Outcome'] and rec['Value'] < sharp['Value']:
+                bias_match = 1
+            elif rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None and implied_rec < implied_sharp:
+                bias_match = 1
 
-                delta_vs_sharp = rec['Value'] - sharp['Value'] if sharp and rec['Value'] is not None and sharp['Value'] is not None else None
-                bias_match = 0
+            # Sharp Alignment (final tiered result)
+            alignment = "⚠️ Worse than sharps"
+            if rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None:
+                if implied_rec < implied_sharp:
+                    alignment = "🚨 Edge (better than sharps)"
+                elif abs(implied_rec - implied_sharp) < 0.005:
+                    alignment = "✅ Matched with sharps"
+            elif rec['Market'] == 'spreads' and sharp:
+                if sharp['Value'] > 0 and rec['Value'] > sharp['Value']:
+                    alignment = "🚨 Edge (better than sharps)"
+                elif sharp['Value'] < 0 and rec['Value'] < sharp['Value']:
+                    alignment = "🚨 Edge (better than sharps)"
+                elif rec['Value'] == sharp['Value']:
+                    alignment = "✅ Matched with sharps"
+            elif rec['Market'] == 'totals' and sharp:
+                if "under" in rec['Outcome'] and rec['Value'] > sharp['Value']:
+                    alignment = "🚨 Edge (better than sharps)"
+                elif "over" in rec['Outcome'] and rec['Value'] < sharp['Value']:
+                    alignment = "🚨 Edge (better than sharps)"
+                elif rec['Value'] == sharp['Value']:
+                    alignment = "✅ Matched with sharps"
 
-                if rec['Market'] == 'spreads':
-                    if sharp and abs(rec['Value']) < abs(sharp['Value']):
-                        bias_match = 1
-                elif rec['Market'] == 'totals':
-                    if "under" in rec['Outcome'] and sharp and rec['Value'] > sharp['Value']:
-                        bias_match = 1
-                    elif "over" in rec['Outcome'] and sharp and rec['Value'] < sharp['Value']:
-                        bias_match = 1
-                elif rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None:
-                    if implied_rec < implied_sharp:
-                        bias_match = 1
+            row.update({
+                'Event_Date': rec.get('Event_Date', ""),
+                'Ref Sharp Value': sharp['Value'] if sharp else None,
+                'Delta vs Sharp': round(delta_vs_sharp, 2) if delta_vs_sharp is not None else None,
+                'Bias Match': bias_match,
+                'Implied_Prob_Rec': implied_rec,
+                'Implied_Prob_Sharp': implied_sharp,
+                'Implied_Prob_Diff': (implied_sharp - implied_rec) if implied_rec and implied_sharp else None,
+                'Limit': sharp.get('Limit') if sharp and sharp.get('Limit') is not None else 0,
+                'SHARP_SIDE_TO_BET': is_sharp_side,
+                'SharpAlignment': alignment,
+                'SHARP_REASON': "📈 Sharp side backed by movement, limit, and timing"
+            })
 
-                # === Direction-aware sharp alignment logic
-                # === Upgraded 3-way sharp alignment logic
-                alignment = "⚠️ Worse than sharps"  # default fallback
-
-                if rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None:
-                    if implied_rec < implied_sharp:
-                        alignment = "🚨 Edge (better than sharps)"
-                    elif abs(implied_rec - implied_sharp) < 0.005:
-                        alignment = "✅ Matched with sharps"
-                    else:
-                        alignment = "⚠️ Worse than sharps"
-
-                elif rec['Market'] == 'spreads' and sharp and rec['Value'] is not None and sharp['Value'] is not None:
-                    if abs(rec['Value']) < abs(sharp['Value']):
-                        alignment = "🚨 Edge (better than sharps)"
-                    elif abs(rec['Value']) == abs(sharp['Value']):
-                        alignment = "✅ Matched with sharps"
-                    else:
-                        alignment = "⚠️ Worse than sharps"
-
-                elif rec['Market'] == 'totals' and sharp and rec['Value'] is not None and sharp['Value'] is not None:
-                    if "under" in rec['Outcome']:
-                        if rec['Value'] > sharp['Value']:
-                            alignment = "🚨 Edge (better than sharps)"
-                        elif rec['Value'] == sharp['Value']:
-                            alignment = "✅ Matched with sharps"
-                        else:
-                            alignment = "⚠️ Worse than sharps"
-                    elif "over" in rec['Outcome']:
-                        if rec['Value'] < sharp['Value']:
-                            alignment = "🚨 Edge (better than sharps)"
-                        elif rec['Value'] == sharp['Value']:
-                            alignment = "✅ Matched with sharps"
-                        else:
-                            alignment = "⚠️ Worse than sharps"
-
-                row.update({
-                    'Event_Date': rec.get('Event_Date', ""),
-                    'Ref Sharp Value': sharp['Value'] if sharp else None,
-                    'Delta vs Sharp': round(delta_vs_sharp, 2) if delta_vs_sharp is not None else None,
-                    'Bias Match': bias_match,
-                    'Implied_Prob_Rec': implied_rec,
-                    'Implied_Prob_Sharp': implied_sharp,
-                    'Implied_Prob_Diff': (implied_sharp - implied_rec) if implied_rec and implied_sharp else None,
-                    'Limit': sharp.get('Limit') if sharp and sharp.get('Limit') is not None else 0,
-                    'SHARP_SIDE_TO_BET': 1,
-                    'SharpAlignment': alignment,
-                    'SHARP_REASON': "📈 Sharp side backed by limit bias, price delta, and alignment"
-                })
-
-                rows.append(row)
+            rows.append(row)
 
     df = pd.DataFrame(rows)
     if df.empty:
