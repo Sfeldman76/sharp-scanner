@@ -223,16 +223,40 @@ def detect_sharp_moves(current, previous, sport_key):
                         bias_match = 1
 
                 # === Direction-aware sharp alignment logic
-                alignment = "🚨 Edge vs sharps"  # default
+                # === Upgraded 3-way sharp alignment logic
+                alignment = "⚠️ Worse than sharps"  # default fallback
+
                 if rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None:
-                    alignment = "✅ Aligned with sharps" if implied_rec <= implied_sharp else "🚨 Edge vs sharps"
+                    if implied_rec < implied_sharp:
+                        alignment = "🚨 Edge (better than sharps)"
+                    elif abs(implied_rec - implied_sharp) < 0.005:
+                        alignment = "✅ Matched with sharps"
+                    else:
+                        alignment = "⚠️ Worse than sharps"
+
                 elif rec['Market'] == 'spreads' and sharp and rec['Value'] is not None and sharp['Value'] is not None:
-                    alignment = "✅ Aligned with sharps" if abs(rec['Value']) <= abs(sharp['Value']) else "🚨 Edge vs sharps"
+                    if abs(rec['Value']) < abs(sharp['Value']):
+                        alignment = "🚨 Edge (better than sharps)"
+                    elif abs(rec['Value']) == abs(sharp['Value']):
+                        alignment = "✅ Matched with sharps"
+                    else:
+                        alignment = "⚠️ Worse than sharps"
+
                 elif rec['Market'] == 'totals' and sharp and rec['Value'] is not None and sharp['Value'] is not None:
                     if "under" in rec['Outcome']:
-                        alignment = "✅ Aligned with sharps" if rec['Value'] >= sharp['Value'] else "🚨 Edge vs sharps"
+                        if rec['Value'] > sharp['Value']:
+                            alignment = "🚨 Edge (better than sharps)"
+                        elif rec['Value'] == sharp['Value']:
+                            alignment = "✅ Matched with sharps"
+                        else:
+                            alignment = "⚠️ Worse than sharps"
                     elif "over" in rec['Outcome']:
-                        alignment = "✅ Aligned with sharps" if rec['Value'] <= sharp['Value'] else "🚨 Edge vs sharps"
+                        if rec['Value'] < sharp['Value']:
+                            alignment = "🚨 Edge (better than sharps)"
+                        elif rec['Value'] == sharp['Value']:
+                            alignment = "✅ Matched with sharps"
+                        else:
+                            alignment = "⚠️ Worse than sharps"
 
                 row.update({
                     'Ref Sharp Value': sharp['Value'] if sharp else None,
@@ -350,13 +374,14 @@ def render_scanner_tab(label, sport_key, container, drive):
             # === Display logic
             if not df_display.empty:
                 def highlight_edge(row):
-                    delta = row.get('Delta vs Sharp', 0)
-                    if abs(delta) >= 2:
-                        return ['background-color: #ffcccc; color: black'] * len(row)
-                    elif abs(delta) >= 1:
-                        return ['background-color: #fff3cd; color: black'] * len(row)
+                    if row.get('SharpAlignment') == "🚨 Edge (better than sharps)":
+                        return ['background-color: #d4edda; color: black'] * len(row)  # green
+                    elif row.get('SharpAlignment') == "⚠️ Worse than sharps":
+                        return ['background-color: #ffcccc; color: black'] * len(row)  # red
+                    elif row.get('SharpAlignment') == "✅ Matched with sharps":
+                        return ['background-color: #fff3cd; color: black'] * len(row)  # yellow
                     else:
-                        return ['background-color: #d4edda; color: black'] * len(row)
+                        return ['background-color: white; color: black'] * len(row)
 
                 styled_df = df_display[safe_cols].style.apply(highlight_edge, axis=1)
                 st.dataframe(styled_df, use_container_width=True)
