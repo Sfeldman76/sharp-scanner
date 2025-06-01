@@ -91,7 +91,7 @@ def fetch_live_odds(sport_key):
     except Exception as e:
         st.error(f"❌ Odds API Error: {e}")
         return []
-ddef detect_sharp_moves(current, previous, sport_key):
+def detect_sharp_moves(current, previous, sport_key):
     rows = []
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
