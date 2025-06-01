@@ -360,7 +360,9 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         if df_moves is not None and not df_moves.empty:
             df_display = df_moves.sort_values(by='SmartSharpScore', ascending=False)
-            df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
+            df_display = df_display.sort_values(by='SmartSharpScore', ascending=False)
+            df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
+
 
             st.subheader("🚨 Detected Sharp Moves")
 
