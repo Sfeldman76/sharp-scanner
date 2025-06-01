@@ -91,10 +91,22 @@ def fetch_live_odds(sport_key):
     except Exception as e:
         st.error(f"❌ Odds API Error: {e}")
         return []
-def detect_sharp_moves(current, previous, sport_key):
+ddef detect_sharp_moves(current, previous, sport_key):
     rows = []
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    previous_map = {g['id']: g for g in previous} if previous else {}
+
+    # ✅ Properly indented snapshot format safety
+    if isinstance(previous, dict):
+        previous_map = previous
+    elif isinstance(previous, list):
+        try:
+            previous_map = {g['id']: g for g in previous}
+        except Exception as e:
+            st.warning(f"⚠️ Snapshot format error: {e}")
+            previous_map = {}
+    else:
+        previous_map = {}
+
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
