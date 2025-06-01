@@ -327,14 +327,16 @@ def render_scanner_tab(label, sport_key, container, drive):
                 df_display = df_display[df_display['Market'] == market]
             if alignment_filter != "All" and 'SharpAlignment' in df_display.columns:
                 df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
-            print("🧪 df_display.columns:", df_display.columns.tolist())
-
-            # === Final displayed columns
-            cols_to_display = [
+           
+            available_cols = df_display.columns.tolist()
+            safe_cols = [col for col in [
                 'Game', 'Market', 'Outcome', 'Bookmaker',
                 'Value', 'Ref Sharp Value', 'LineMove',
                 'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SharpAlignment', 'SHARP_REASON'
-            ]
+            ] if col in available_cols]
+
+            print("🧪 Displaying columns:", safe_cols)
+
 
             # === Display
             if not df_display.empty:
@@ -347,10 +349,11 @@ def render_scanner_tab(label, sport_key, container, drive):
                     else:
                         return ['background-color: #d4edda'] * len(row)  # green for aligned
 
-                st.dataframe(
-                    df_display[cols_to_display].style.apply(highlight_edge, axis=1),
-                    use_container_width=True
-                )
+               
+            st.dataframe(
+                df_display[safe_cols].style.apply(highlight_edge, axis=1),
+                use_container_width=True
+            )
             else:
                 st.info("⚠️ No results match the selected filters.")
 
