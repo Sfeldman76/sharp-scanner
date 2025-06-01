@@ -22,6 +22,8 @@ BOOKMAKER_REGIONS = {
 }
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
+SNAPSHOT_DIR = "/tmp/sharp_snapshots"
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
 def init_gdrive():
     import json
@@ -50,6 +52,22 @@ def init_gdrive():
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
 
+import pickle
+
+def get_snapshot(data):
+    return {g['id']: g for g in data}
+
+def save_snapshot(sport_key, snapshot):
+    path = os.path.join(SNAPSHOT_DIR, f"{sport_key}_snapshot.pkl")
+    with open(path, "wb") as f:
+        pickle.dump(snapshot, f)
+
+def load_snapshot(sport_key):
+    path = os.path.join(SNAPSHOT_DIR, f"{sport_key}_snapshot.pkl")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return {}
 
 # === LIVE ODDS FETCH ===
 @st.cache_data(ttl=60)
@@ -216,8 +234,12 @@ def render_scanner_tab(label, sport_key, container):
         os.makedirs(LOG_FOLDER, exist_ok=True)
 
         live = fetch_live_odds(sport_key)
-        prev = st.session_state.previous_snapshots.get(sport_key, {})
+        prev = load_snapshot(sport_key)
+        df_moves = detect_sharp_moves(live, prev, label)
+
+        # Save this snapshot for the next cycle
         snapshot = get_snapshot(live)
+        save_snapshot(sport_key, snapshot)
 
         if not live:
             st.warning(f"No odds returned for {label}.")
