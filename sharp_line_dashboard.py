@@ -216,7 +216,8 @@ def detect_sharp_moves(current, previous, sport_key):
         if not sharp or sharp['Outcome'] != rec['Outcome']:
             continue
 
-        delta_vs_sharp = rec['Value'] - sharp['Value']
+        'Delta vs Sharp': round(delta_vs_sharp, 2),
+
         implied_rec = implied_prob(rec['Value']) if rec['Market'] == 'h2h' else None
         implied_sharp = implied_prob(sharp['Value']) if sharp['Market'] == 'h2h' else None
         bias_match = 0
@@ -235,7 +236,7 @@ def detect_sharp_moves(current, previous, sport_key):
 
         sharp_side_flag = sharp_side_flags.get((rec['Game'], rec['Market'], rec['Outcome']), 0)
 
-        if rec['Value'] != sharp['Value']:
+        if sharp_side_flag == 1
             row = rec.copy()
             row.update({
                 'Ref Sharp Value': sharp['Value'],
