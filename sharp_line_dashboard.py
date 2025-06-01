@@ -311,12 +311,11 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         if df_moves is not None and not df_moves.empty:
             df_display = df_moves.sort_values(by='SmartSharpScore', ascending=False)
-            df_display = df_display.sort_values(by='SmartSharpScore', ascending=False)
             df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
-
 
             st.subheader("🚨 Detected Sharp Moves")
 
+            # === Filters
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
             market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()))
             alignment_filter = st.selectbox("🧭 Sharp Alignment Filter", ["All", "✅ Aligned with sharps", "🚨 Edge vs sharps"])
@@ -327,7 +326,8 @@ def render_scanner_tab(label, sport_key, container, drive):
                 df_display = df_display[df_display['Market'] == market]
             if alignment_filter != "All" and 'SharpAlignment' in df_display.columns:
                 df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
-           
+
+            # === Final displayed columns (safe fallback)
             available_cols = df_display.columns.tolist()
             safe_cols = [col for col in [
                 'Game', 'Market', 'Outcome', 'Bookmaker',
@@ -337,34 +337,24 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             print("🧪 Displaying columns:", safe_cols)
 
-
-            # === Display
+            # === Display logic
             if not df_display.empty:
                 def highlight_edge(row):
-                    delta = row['Delta vs Sharp']
+                    delta = row.get('Delta vs Sharp', 0)
                     if abs(delta) >= 2:
-                        return ['background-color: #ffcccc'] * len(row)  # red for large edge
+                        return ['background-color: #ffcccc'] * len(row)
                     elif abs(delta) >= 1:
-                        return ['background-color: #fff3cd'] * len(row)  # yellow for moderate
+                        return ['background-color: #fff3cd'] * len(row)
                     else:
-                        return ['background-color: #d4edda'] * len(row)  # green for aligned
+                        return ['background-color: #d4edda'] * len(row)
 
-               
-            st.dataframe(
-                df_display[safe_cols].style.apply(highlight_edge, axis=1),
-                use_container_width=True
-            )
-            else:
-                st.info("⚠️ No results match the selected filters.")
+                styled_df = df_display[safe_cols].style.apply(highlight_edge, axis=1)
+                st.dataframe(styled_df, use_container_width=True)
 
-
-            if not df_display.empty:
-                st.dataframe(df_display[cols_to_display], use_container_width=True)
-
-                # === Save + Upload CSV ===
+                # === Save + Upload CSV
                 fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                 csv_path = os.path.join(LOG_FOLDER, fname)
-                df_display.to_csv(csv_path, index=False)
+                df_display[safe_cols].to_csv(csv_path, index=False)
 
                 try:
                     gfile = drive.CreateFile({
@@ -378,12 +368,11 @@ def render_scanner_tab(label, sport_key, container, drive):
                 except Exception as e:
                     st.error(f"❌ Google Drive Upload Failed: {e}")
             else:
-                st.info(f"⚠️ No qualifying sharp moves for {label} after filters.")
+                st.info(f"⚠️ No results match the selected filters.")
         else:
             st.info(f"⚠️ No sharp moves detected for {label}.")
 
-
-        # === Current Odds View ===
+        # === Current Odds View
         st.subheader("📋 Current Odds")
         odds = []
         for game in live:
@@ -404,10 +393,11 @@ def render_scanner_tab(label, sport_key, container, drive):
             pivot = df_odds.pivot_table(index=['Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
             st.dataframe(pivot.reset_index(), use_container_width=True)
 
-        # === Manual Refresh Button ===
+        # === Manual Refresh Button
         if auto_mode == "Manual":
             if st.button(f"🔄 Refresh {label}"):
                 st.rerun()
+
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
