@@ -27,7 +27,8 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 SNAPSHOT_DIR = "/tmp/sharp_snapshots"
-FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+FOLDER_ID = '1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+
 
 os.makedirs(LOG_FOLDER, exist_ok=True)
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -95,7 +96,8 @@ def detect_sharp_moves(current, previous, sport_key):
     rows = []
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # ✅ Properly indented snapshot format safety
+    # Build previous game map
+    previous_map = {}
     if isinstance(previous, dict):
         previous_map = previous
     elif isinstance(previous, list):
@@ -103,10 +105,6 @@ def detect_sharp_moves(current, previous, sport_key):
             previous_map = {g['id']: g for g in previous}
         except Exception as e:
             st.warning(f"⚠️ Snapshot format error: {e}")
-            previous_map = {}
-    else:
-        previous_map = {}
-
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
@@ -121,14 +119,16 @@ def detect_sharp_moves(current, previous, sport_key):
                 mtype = market['key']
                 for o in market.get('outcomes', []):
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
-                    limit = o.get('bet_limit')
                     label = o['name']
+                    limit = o.get('bet_limit')
                     entry = {
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
                         'Book': book_key, 'Region': region, 'Value': val, 'Limit': limit,
                         'Old Value': None, 'Delta': None
                     }
+
+                    # Pull previous value if available
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'] == book_key:
@@ -140,56 +140,70 @@ def detect_sharp_moves(current, previous, sport_key):
                                                 if prev_val is not None and val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2)
+
                     if book_key in SHARP_BOOKS:
                         sharp_lines[(mtype, label)] = entry
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
+        # Compare rec vs sharp
         for rec in rec_lines:
             key = (rec['Market'], rec['Outcome'])
             sharp = sharp_lines.get(key)
-            if not sharp or sharp['Value'] is None or rec['Value'] is None:
+            if not sharp or rec['Value'] is None or sharp['Value'] is None:
                 continue
+
+            if rec['Outcome'] != sharp['Outcome']:
+                continue  # mismatch
+
             delta_vs_sharp = round(rec['Value'] - sharp['Value'], 2)
             bias_match = 0
+
             if rec['Market'] == 'spreads':
-                if sharp['Value'] < 0 and rec['Value'] > sharp['Value']:
+                if abs(rec['Value']) < abs(sharp['Value']):  # better spread
                     bias_match = 1
-                elif sharp['Value'] > 0 and rec['Value'] > sharp['Value']:
-                    bias_match = 1
+
             elif rec['Market'] == 'totals':
                 if "under" in rec['Outcome'].lower() and rec['Value'] > sharp['Value']:
                     bias_match = 1
                 elif "over" in rec['Outcome'].lower() and rec['Value'] < sharp['Value']:
                     bias_match = 1
-            elif rec['Market'] == 'h2h':
-                if sharp['Value'] < 0 and rec['Value'] > sharp['Value']:
-                    bias_match = 1
-                elif sharp['Value'] > 0 and rec['Value'] > sharp['Value']:
-                    bias_match = 1
 
-            row = rec.copy()
-            row.update({
-                'Ref Sharp Value': sharp['Value'],
-                'Delta vs Sharp': delta_vs_sharp,
-                'Bias Match': bias_match,
-                'Delta': rec.get('Delta') or delta_vs_sharp,
-                'Limit': sharp.get('Limit') or 0,
-                'Time': snapshot_time,
-            })
-            rows.append(row)
+            elif rec['Market'] == 'h2h':
+                if sharp['Value'] < 0:
+                    bias_match = 1 if rec['Value'] < sharp['Value'] else 0  # More negative = better
+                else:
+                    bias_match = 1 if rec['Value'] > sharp['Value'] else 0  # Higher positive = better
+
+            # Only log rows where the price differs
+            if rec['Value'] != sharp['Value']:
+                row = rec.copy()
+                row.update({
+                    'Ref Sharp Value': sharp['Value'],
+                    'Delta vs Sharp': delta_vs_sharp,
+                    'Bias Match': bias_match,
+                    'Delta': rec.get('Delta') or delta_vs_sharp,
+                    'Limit': sharp.get('Limit') or 0,
+                    'Time': snapshot_time,
+                })
+                rows.append(row)
 
     df = pd.DataFrame(rows)
     if df.empty:
         return df
 
+    # Filter out any rows with no meaningful delta
     df['Delta'] = pd.to_numeric(df['Delta'], errors='coerce')
+    df = df[df['Delta'].abs() > 0.05]
+
+    # Add scoring components
     df['Delta_Abs'] = df['Delta'].abs()
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Limit_Jump'] = (df['Limit'] >= 10000).astype(int)
     df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2)
     df['Asymmetric_Limit'] = df.groupby(['Game', 'Market'])['Limit'].transform(lambda x: x.max() - x.min())
     df['Asymmetry_Flag'] = (df['Asymmetric_Limit'] >= 5000).astype(int)
+
     df['MillerSharpScore'] = (
         5 * df['Bias Match'] +
         3 * df['Limit_Jump'] +
@@ -197,7 +211,9 @@ def detect_sharp_moves(current, previous, sport_key):
         2 * df['Sharp_Timing'] +
         2 * df['Asymmetry_Flag']
     ).round(2)
+
     return df
+
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
@@ -227,6 +243,9 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             st.subheader("🚨 Detected Sharp Moves")
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
+            market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()))
+
+            
             if region != "All":
                 df_display = df_display[df_display['Region'] == region]
 
