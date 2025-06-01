@@ -84,6 +84,7 @@ def implied_prob(odds):
         return None
 
 
+
 @st.cache_data(ttl=60)
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
@@ -250,6 +251,14 @@ def detect_sharp_moves(current, previous, sport_key):
                 'Time': snapshot_time
             })
 
+            # ✅ Sharp Alignment Label
+            if abs(delta_vs_sharp) < 0.01:
+                alignment = "✅ Aligned with sharps"
+            else:
+                alignment = "🚨 Edge vs sharps"
+
+            row['SharpAlignment'] = alignment
+
             # === SHARP REASON GENERATOR
             side_label = rec['Outcome']
             game_key = (rec['Game'], rec['Market'])
@@ -294,7 +303,9 @@ def detect_sharp_moves(current, previous, sport_key):
                 matchup_tag
             ]
             row['SHARP_REASON'] = ", ".join([r for r in reason_parts if r])
-            rows.append(row)
+
+            rows.append(row)  # ✅ Make sure this happens inside the if-block
+
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -374,18 +385,40 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
             market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()))
+            alignment_filter = st.selectbox("🧭 Sharp Alignment Filter", ["All", "✅ Aligned with sharps", "🚨 Edge vs sharps"])
 
             if region != "All":
                 df_display = df_display[df_display['Region'] == region]
             if market != "All":
                 df_display = df_display[df_display['Market'] == market]
+            if alignment_filter != "All" and 'SharpAlignment' in df_display.columns:
+                df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
 
             # === Final displayed columns
             cols_to_display = [
                 'Game', 'Market', 'Outcome', 'Bookmaker',
                 'Value', 'Ref Sharp Value', 'LineMove',
-                'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SHARP_REASON'
+                'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SharpAlignment', 'SHARP_REASON'
             ]
+
+            # === Display
+            if not df_display.empty:
+                def highlight_edge(row):
+                    delta = row['Delta vs Sharp']
+                    if abs(delta) >= 2:
+                        return ['background-color: #ffcccc'] * len(row)  # red for large edge
+                    elif abs(delta) >= 1:
+                        return ['background-color: #fff3cd'] * len(row)  # yellow for moderate
+                    else:
+                        return ['background-color: #d4edda'] * len(row)  # green for aligned
+
+                st.dataframe(
+                    df_display[cols_to_display].style.apply(highlight_edge, axis=1),
+                    use_container_width=True
+                )
+            else:
+                st.info("⚠️ No results match the selected filters.")
+
 
             if not df_display.empty:
                 st.dataframe(df_display[cols_to_display], use_container_width=True)
