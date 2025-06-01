@@ -341,11 +341,11 @@ def detect_sharp_moves(current, previous, sport_key):
 
     # Final filter: show only sharp-backed sides
     #df = df[df['SHARP_SIDE_TO_BET'] == 1]
-    print("📊 Final sharp-side rows (before filter):", len(df))
-    print("🧠 Confidence tiers:\n", df['SharpConfidenceTier'].value_counts())
-    print("💥 LineMove stats:\n", df['LineMove'].describe())
 
     return df
+print("📊 Final sharp-side rows (before filter):", len(df))
+print("🧠 Confidence tiers:\n", df['SharpConfidenceTier'].value_counts())
+print("💥 LineMove stats:\n", df['LineMove'].describe())
 
 
 st.set_page_config(layout="wide")
