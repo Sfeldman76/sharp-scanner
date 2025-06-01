@@ -262,13 +262,32 @@ def detect_sharp_moves(current, previous, sport_key):
             if not opp_limits or sum(opp_limits) == 0:
                 fade_tag = "📉 Sharp fade: opponent has no limit"
 
-            # Totals sharp line narrative
+            # === Matchup Protection Tag
+            matchup_tag = ""
+
             if rec['Market'] == 'totals' and opp_label:
+                side_vals = [x[1] for x in sharp_side_metrics.get(side_label, []) if x[1]]
                 opp_vals = [x[1] for x in sharp_side_metrics.get(opp_label, []) if x[1]]
-                if side_prices and opp_vals:
-                    side_avg = round(sum(side_prices) / len(side_prices), 2)
+                if side_vals and opp_vals:
+                    side_avg = round(sum(side_vals) / len(side_vals), 2)
                     opp_avg = round(sum(opp_vals) / len(opp_vals), 2)
                     matchup_tag = f"🔍 Sharps protecting {side_label} at {side_avg} vs {opp_label} {opp_avg}"
+
+            elif rec['Market'] == 'spreads' and opp_label:
+                side_vals = [x[1] for x in sharp_side_metrics.get(side_label, []) if x[1]]
+                opp_vals = [x[1] for x in sharp_side_metrics.get(opp_label, []) if x[1]]
+                if side_vals and opp_vals:
+                    side_avg = round(sum(side_vals) / len(side_vals), 1)
+                    opp_avg = round(sum(opp_vals) / len(opp_vals), 1)
+                    matchup_tag = f"🛡️ Sharps protecting {side_label} {side_avg} vs {opp_label} {opp_avg}"
+
+            elif rec['Market'] == 'h2h' and opp_label:
+                side_vals = [x[1] for x in sharp_side_metrics.get(side_label, []) if x[1]]
+                opp_vals = [x[1] for x in sharp_side_metrics.get(opp_label, []) if x[1]]
+                if side_vals and opp_vals:
+                    side_avg = round(sum(side_vals) / len(side_vals))
+                    opp_avg = round(sum(opp_vals) / len(opp_vals))
+                    matchup_tag = f"🏆 Sharps favoring {side_label} ({side_avg}) vs {opp_label} ({opp_avg})"
 
             reason_parts = [
                 f"📈 Sharp limit ${limit_tag}",
@@ -279,11 +298,16 @@ def detect_sharp_moves(current, previous, sport_key):
                 matchup_tag
             ]
             row['SHARP_REASON'] = ", ".join([r for r in reason_parts if r])
+
             rows.append(row)
 
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+    df['LineMove'] = df.apply(
+        lambda r: round(r['Value'] - r['Old Value'], 2) if pd.notnull(r['Old Value']) else None,
+        axis=1
+    )
 
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df = df[df['Delta'].abs() > 0.05]
@@ -303,6 +327,17 @@ def detect_sharp_moves(current, previous, sport_key):
         2 * df['Sharp_Timing'] +
         2 * df['Asymmetry_Flag']
     ).round(2)
+    def assign_confidence_tier(score):
+        if score >= 40:
+            return "🔥 Steam"
+        elif score >= 25:
+            return "⭐ High"
+        elif score >= 15:
+            return "✅ Moderate"
+        else:
+            return "⚠️ Low"
+
+    df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
 
     # Final filter: show only sharp-backed sides
     df = df[df['SHARP_SIDE_TO_BET'] == 1]
@@ -320,7 +355,6 @@ if auto_mode == "Auto Refresh":
     st_autorefresh(interval=120000, key="autorefresh")
 
 def render_scanner_tab(label, sport_key, container, drive):
-
     with container:
         live = fetch_live_odds(sport_key)
         prev = load_snapshot(sport_key)
@@ -333,29 +367,30 @@ def render_scanner_tab(label, sport_key, container, drive):
         save_snapshot(sport_key, get_snapshot(live))  # Persist current odds snapshot for next run
 
         if df_moves is not None and not df_moves.empty:
-            
             df_display = df_moves.sort_values(by='SmartSharpScore', ascending=False)
-
-
             df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
 
             st.subheader("🚨 Detected Sharp Moves")
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()))
             market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()))
 
-            
             if region != "All":
                 df_display = df_display[df_display['Region'] == region]
             if market != "All":
-                df_display = df_display[df_display['Market'] == market] 
-            st.dataframe(df_display, use_container_width=True)
+                df_display = df_display[df_display['Market'] == market]
 
-            # === Save + Upload CSV ===
+            # === Final displayed columns
+            cols_to_display = [
+                'Game', 'Market', 'Outcome', 'Bookmaker',
+                'Value', 'Ref Sharp Value', 'LineMove',
+                'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SHARP_REASON'
+            ]
+            st.dataframe(df_display[cols_to_display], use_container_width=True)
+
             # === Save + Upload CSV ===
             fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             csv_path = os.path.join(LOG_FOLDER, fname)
             df_display.to_csv(csv_path, index=False)
-
 
             try:
                 gfile = drive.CreateFile({
@@ -399,4 +434,3 @@ def render_scanner_tab(label, sport_key, container, drive):
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
-
