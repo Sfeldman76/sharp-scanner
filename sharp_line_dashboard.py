@@ -343,9 +343,6 @@ def detect_sharp_moves(current, previous, sport_key):
     #df = df[df['SHARP_SIDE_TO_BET'] == 1]
 
     return df
-print("📊 Final sharp-side rows (before filter):", len(df))
-print("🧠 Confidence tiers:\n", df['SharpConfidenceTier'].value_counts())
-print("💥 LineMove stats:\n", df['LineMove'].describe())
 
 
 st.set_page_config(layout="wide")
