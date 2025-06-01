@@ -52,6 +52,12 @@ def init_gdrive():
         return None
 
 
+from datetime import datetime
+
+fname = f"sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+csv_path = os.path.join("/tmp", fname)
+df_display.to_csv(csv_path, index=False)
+
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 drive = init_gdrive()
 
