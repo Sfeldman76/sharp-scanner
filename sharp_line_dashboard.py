@@ -327,6 +327,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                 df_display = df_display[df_display['Market'] == market]
             if alignment_filter != "All" and 'SharpAlignment' in df_display.columns:
                 df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
+            print("🧪 df_display.columns:", df_display.columns.tolist())
 
             # === Final displayed columns
             cols_to_display = [
