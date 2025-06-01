@@ -310,10 +310,10 @@ def detect_sharp_moves(current, previous, sport_key):
     )
 
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
-    df = df[df['Delta'].abs() > 0.05]
+    df = df[df['Delta'].abs() > 0.01]
     df['Delta_Abs'] = df['Delta'].abs()
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-    df['Limit_Jump'] = (df['Limit'] >= 10000).astype(int)
+    df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
     df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2)
     df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
