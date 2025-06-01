@@ -222,6 +222,18 @@ def detect_sharp_moves(current, previous, sport_key):
                     if implied_rec < implied_sharp:
                         bias_match = 1
 
+                # === Direction-aware sharp alignment logic
+                alignment = "🚨 Edge vs sharps"  # default
+                if rec['Market'] == 'h2h' and implied_rec is not None and implied_sharp is not None:
+                    alignment = "✅ Aligned with sharps" if implied_rec <= implied_sharp else "🚨 Edge vs sharps"
+                elif rec['Market'] == 'spreads' and sharp and rec['Value'] is not None and sharp['Value'] is not None:
+                    alignment = "✅ Aligned with sharps" if abs(rec['Value']) <= abs(sharp['Value']) else "🚨 Edge vs sharps"
+                elif rec['Market'] == 'totals' and sharp and rec['Value'] is not None and sharp['Value'] is not None:
+                    if "under" in rec['Outcome']:
+                        alignment = "✅ Aligned with sharps" if rec['Value'] >= sharp['Value'] else "🚨 Edge vs sharps"
+                    elif "over" in rec['Outcome']:
+                        alignment = "✅ Aligned with sharps" if rec['Value'] <= sharp['Value'] else "🚨 Edge vs sharps"
+
                 row.update({
                     'Ref Sharp Value': sharp['Value'] if sharp else None,
                     'Delta vs Sharp': round(delta_vs_sharp, 2) if delta_vs_sharp is not None else None,
@@ -231,9 +243,10 @@ def detect_sharp_moves(current, previous, sport_key):
                     'Implied_Prob_Diff': (implied_sharp - implied_rec) if implied_rec and implied_sharp else None,
                     'Limit': sharp.get('Limit') if sharp and sharp.get('Limit') is not None else 0,
                     'SHARP_SIDE_TO_BET': 1,
-                    'SharpAlignment': "✅ Aligned with sharps" if delta_vs_sharp is not None and abs(delta_vs_sharp) < 0.01 else "🚨 Edge vs sharps",
+                    'SharpAlignment': alignment,
                     'SHARP_REASON': "📈 Sharp side backed by limit bias, price delta, and alignment"
                 })
+
                 rows.append(row)
 
     df = pd.DataFrame(rows)
