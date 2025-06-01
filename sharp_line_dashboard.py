@@ -274,7 +274,8 @@ def render_scanner_tab(label, sport_key, container, drive):
         save_snapshot(sport_key, get_snapshot(live))  # Persist current odds snapshot for next run
 
         if df_moves is not None and not df_moves.empty:
-            df_display = df_moves.sort_values(by='MillerSharpScore', ascending=False)
+            sort_col = 'SmartSharpScore' if 'SmartSharpScore' in df_moves.columns else 'MillerSharpScore'
+            df_display = df_moves.sort_values(by=sort_col, ascending=False)
             df_display = df_display.drop_duplicates(subset=['Game', 'Market'], keep='first')
 
             st.subheader("🚨 Detected Sharp Moves")
