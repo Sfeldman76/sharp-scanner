@@ -200,11 +200,16 @@ def detect_sharp_moves(current, previous, sport_key):
     return df
 
 st.set_page_config(layout="wide")
+# === Initialize Google Drive once ===
+drive = init_gdrive()
+
 st.title("📊 Sharp Edge Scanner")
 auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"], index=0)
 if auto_mode == "Auto Refresh":
     st_autorefresh(interval=120000, key="autorefresh")
-def render_scanner_tab(label, sport_key, container):
+
+def render_scanner_tab(label, sport_key, container, drive):
+
     with container:
         live = fetch_live_odds(sport_key)
         prev = load_snapshot(sport_key)
@@ -272,5 +277,6 @@ def render_scanner_tab(label, sport_key, container):
                 st.rerun()
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
-render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
-render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb)
+render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
+render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
+
