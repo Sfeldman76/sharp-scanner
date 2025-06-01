@@ -27,7 +27,7 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
 SNAPSHOT_DIR = "/tmp/sharp_snapshots"
-FOLDER_ID = '1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 
 os.makedirs(LOG_FOLDER, exist_ok=True)
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
