@@ -318,7 +318,7 @@ def detect_sharp_moves(current, previous, sport_key):
     df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
-    df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 5000).astype(int)
+    df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 1000).astype(int)
     df['SmartSharpScore'] = (
         5 * df['Bias Match'] +
         4 * df['SHARP_SIDE_TO_BET'] +
