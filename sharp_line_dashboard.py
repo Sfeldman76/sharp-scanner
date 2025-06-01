@@ -60,9 +60,19 @@ def save_snapshot(sport_key, snapshot):
 def load_snapshot(sport_key):
     path = os.path.join(SNAPSHOT_DIR, f"{sport_key}_snapshot.pkl")
     if os.path.exists(path):
-        with open(path, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+                if isinstance(data, dict):
+                    return data
+                else:
+                    st.warning(f"⚠️ Snapshot file for {sport_key} is invalid (not a dict). Resetting...")
+                    return {}
+        except Exception as e:
+            st.error(f"❌ Failed to load snapshot for {sport_key}: {e}")
+            return {}
     return {}
+
 
 @st.cache_data(ttl=60)
 def fetch_live_odds(sport_key):
