@@ -434,7 +434,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_odds = pd.DataFrame(odds)
         if not df_odds.empty:
-            pivot = df_odds.pivot_table(index=['Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
+            pivot = df_odds.pivot_table(index=['Event_Date','Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
             st.dataframe(pivot.reset_index(), use_container_width=True)
 
         # === Manual Refresh Button
