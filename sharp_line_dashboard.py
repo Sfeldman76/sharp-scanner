@@ -298,9 +298,6 @@ def detect_sharp_moves(current, previous, sport_key):
                 matchup_tag
             ]
             row['SHARP_REASON'] = ", ".join([r for r in reason_parts if r])
-            print("📊 Final sharp-side rows (before filter):", len(df))
-            print("🧠 Confidence tiers:\n", df['SharpConfidenceTier'].value_counts())
-            print("💥 LineMove stats:\n", df['LineMove'].describe())
 
             rows.append(row)
 
@@ -344,6 +341,9 @@ def detect_sharp_moves(current, previous, sport_key):
 
     # Final filter: show only sharp-backed sides
     #df = df[df['SHARP_SIDE_TO_BET'] == 1]
+    print("📊 Final sharp-side rows (before filter):", len(df))
+    print("🧠 Confidence tiers:\n", df['SharpConfidenceTier'].value_counts())
+    print("💥 LineMove stats:\n", df['LineMove'].describe())
 
     return df
 
