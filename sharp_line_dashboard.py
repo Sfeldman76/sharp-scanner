@@ -216,7 +216,7 @@ def detect_sharp_moves(current, previous, sport_key):
         if not sharp or sharp['Outcome'] != rec['Outcome']:
             continue
 
-        'Delta vs Sharp': round(delta_vs_sharp, 2),
+        Delta vs Sharp: round(delta_vs_sharp, 2),
 
         implied_rec = implied_prob(rec['Value']) if rec['Market'] == 'h2h' else None
         implied_sharp = implied_prob(sharp['Value']) if sharp['Market'] == 'h2h' else None
