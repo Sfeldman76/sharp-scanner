@@ -107,7 +107,6 @@ def detect_sharp_moves(current, previous, sport_key):
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
     for game in current:
@@ -151,11 +150,16 @@ def detect_sharp_moves(current, previous, sport_key):
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
-    # === Determine SHARP_SIDE_TO_BET per market
+    # === SHARP SIDE FLAGS
     sharp_side_flags = {}
     for (game_mkt, label_map) in sharp_limit_map.items():
-        if len(label_map) != 2:
-            continue  # need both sides to compare
+        if len(label_map) < 1:
+            continue
+
+        if len(label_map) == 1:
+            sole_label = list(label_map.keys())[0]
+            sharp_side_flags[(game_mkt[0], game_mkt[1], sole_label)] = 1
+            continue
 
         labels = list(label_map.keys())
         l0, l1 = labels[0], labels[1]
@@ -170,12 +174,11 @@ def detect_sharp_moves(current, previous, sport_key):
         avg1 = round(sum(prices1) / len(prices1), 2)
 
         if mtype == 'totals' and avg0 == avg1:
-            continue  # don't pick sharp side when both totals are same
+            continue
 
         if mtype == 'totals':
             l0_under = 'under' in l0.lower()
             l1_under = 'under' in l1.lower()
-
             if l0_under and avg0 < avg1:
                 sharp_side_label = l0
             elif l1_under and avg1 < avg0:
@@ -191,7 +194,7 @@ def detect_sharp_moves(current, previous, sport_key):
 
         sharp_side_flags[(game_mkt[0], game_mkt[1], sharp_side_label)] = 1
 
-    # === Build final rows
+    # === Build rows
     for rec in rec_lines:
         key = (rec['Market'], rec['Outcome'])
         sharp = sharp_lines.get(key)
@@ -229,8 +232,6 @@ def detect_sharp_moves(current, previous, sport_key):
             if implied_rec < implied_sharp:
                 bias_match = 1
 
-        sharp_side_flag = sharp_side_flags.get((rec['Game'], rec['Market'], rec['Outcome']), 0)
-
         if (rec['Game'], rec['Market'], rec['Outcome']) in sharp_side_flags:
             row = rec.copy()
             row.update({
@@ -260,7 +261,6 @@ def detect_sharp_moves(current, previous, sport_key):
             anchor_tag = ""
             fade_tag = ""
             matchup_tag = ""
-
             labels = list(sharp_side_metrics.keys())
             opp_label = next((l for l in labels if l != side_label), None)
             opp_vals = [x[1] for x in sharp_side_metrics.get(opp_label, []) if x[1]] if opp_label else []
@@ -330,9 +330,7 @@ def detect_sharp_moves(current, previous, sport_key):
             return "⚠️ Low"
 
     df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
-
     return df
-
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
