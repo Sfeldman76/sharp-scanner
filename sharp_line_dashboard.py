@@ -413,12 +413,6 @@ def render_scanner_tab(label, sport_key, container, drive):
         try:
             df_moves, df_audit = detect_sharp_moves(live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS)
 
-            # ✅ DEBUG INSIDE TRY
-            st.write("🔍 DEBUG SHARP MOVES:", len(df_moves))
-            if not df_moves.empty:
-                st.dataframe(df_moves[['Game', 'Market', 'Outcome', 'Value', 'Ref Sharp Value', 'SharpBetScore']])
-            st.write("🧪 DEBUG SNAPSHOT GAMES:", len(prev))
-
         except Exception as e:
             st.error(f"❌ Error in detect_sharp_moves: {e}")
             return pd.DataFrame()
