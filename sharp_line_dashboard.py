@@ -598,40 +598,44 @@ df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 if df_nba is not None and not df_nba.empty:
     df_nba_bt = fetch_scores_and_backtest(df_nba, sport_key='basketball_nba')
 
-    # 🔧 Create SharpConfidenceTier from SharpBetScore
-    df_nba_bt['SharpConfidenceTier'] = pd.cut(
-        df_nba_bt['SharpBetScore'],
-        bins=[0, 15, 25, 40, 100],
-        labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
-    )
+    if 'SHARP_HIT_BOOL' in df_nba_bt.columns:
+        df_nba_bt['SharpConfidenceTier'] = pd.cut(
+            df_nba_bt['SharpBetScore'],
+            bins=[0, 15, 25, 40, 100],
+            labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+        )
 
-    st.subheader("📊 NBA Sharp Signal Performance")
-    st.dataframe(
-        df_nba_bt.groupby('SharpConfidenceTier').agg(
-            Total_Picks=('SHARP_HIT_BOOL', 'count'),
-            Hits=('SHARP_HIT_BOOL', 'sum'),
-            Win_Rate=('SHARP_HIT_BOOL', 'mean')
-        ).round(3).reset_index()
-    )
+        st.subheader("📊 NBA Sharp Signal Performance")
+        st.dataframe(
+            df_nba_bt.groupby('SharpConfidenceTier').agg(
+                Total_Picks=('SHARP_HIT_BOOL', 'count'),
+                Hits=('SHARP_HIT_BOOL', 'sum'),
+                Win_Rate=('SHARP_HIT_BOOL', 'mean')
+            ).round(3).reset_index()
+        )
+    else:
+        st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
 
 if df_mlb is not None and not df_mlb.empty:
     df_mlb_bt = fetch_scores_and_backtest(df_mlb, sport_key='baseball_mlb')
 
-    # 🔧 Create SharpConfidenceTier from SharpBetScore
-    df_mlb_bt['SharpConfidenceTier'] = pd.cut(
-        df_mlb_bt['SharpBetScore'],
-        bins=[0, 15, 25, 40, 100],
-        labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
-    )
+    if 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
+        df_mlb_bt['SharpConfidenceTier'] = pd.cut(
+            df_mlb_bt['SharpBetScore'],
+            bins=[0, 15, 25, 40, 100],
+            labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+        )
 
-    st.subheader("📊 MLB Sharp Signal Performance")
-    st.dataframe(
-        df_mlb_bt.groupby('SharpConfidenceTier').agg(
-            Total_Picks=('SHARP_HIT_BOOL', 'count'),
-            Hits=('SHARP_HIT_BOOL', 'sum'),
-            Win_Rate=('SHARP_HIT_BOOL', 'mean')
-        ).round(3).reset_index()
-    )
+        st.subheader("📊 MLB Sharp Signal Performance")
+        st.dataframe(
+            df_mlb_bt.groupby('SharpConfidenceTier').agg(
+                Total_Picks=('SHARP_HIT_BOOL', 'count'),
+                Hits=('SHARP_HIT_BOOL', 'sum'),
+                Win_Rate=('SHARP_HIT_BOOL', 'mean')
+            ).round(3).reset_index()
+        )
+    else:
+        st.warning("⚠️ MLB backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
 
 # 🧠 Sharp Signal Learning (Component Breakdown)
 if df_nba_bt is not None and not df_nba_bt.empty:
