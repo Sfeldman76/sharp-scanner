@@ -570,12 +570,13 @@ def render_scanner_tab(label, sport_key, container, drive):
             sharp_books = ['Pinnacle', 'Bookmaker', 'BetOnline']
 
             # Highlight sharp book columns with a light green background
-            def highlight_sharp_cols(col):
-                return ['background-color: #d0f0c0'] * len(df_combined_display) if col in sharp_books else [''] * len(df_combined_display)
-
-            styled_df = df_combined_display.style.apply(highlight_sharp_cols, axis=0)
-
-            st.dataframe(styled_df, use_container_width=True)
+            # Highlight columns if their name is in sharp_books
+            def highlight_sharp_columns(df):
+                styles = pd.DataFrame('', index=df.index, columns=df.columns)
+                for col in df.columns:
+                    if col in sharp_books:
+                        styles[col] = 'background-color: #d0f0c0'
+                return styles
 
 
         # === Automatically backtest sharp picks (no button)
@@ -584,10 +585,10 @@ def render_scanner_tab(label, sport_key, container, drive):
         if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
             st.subheader(f"📊 Backtest Results – {label}")
             st.dataframe(
-                df_bt[['Event_Date','Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
-                       'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
+                df_combined_display.style.apply(highlight_sharp_columns, axis=None),
+                use_container_width=True
             )
-        else:
+
             st.warning("⚠️ No results available for backtest yet.")
            
 
