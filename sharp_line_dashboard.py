@@ -629,11 +629,46 @@ def render_scanner_tab(label, sport_key, container, drive):
 
 
 
+
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
 # Get sharp edges
 df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
+
+# Save NBA sharp moves
+if df_nba is not None and not df_nba.empty:
+    nba_file_name = f"NBA_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    nba_path = f"/tmp/sharp_logs/{nba_file_name}"
+    os.makedirs(os.path.dirname(nba_path), exist_ok=True)
+    df_nba.to_csv(nba_path, index=False)
+    print(f"📦 NBA sharp moves saved to: {nba_path}")
+
+    if drive:
+        try:
+            file_drive = drive.CreateFile({'title': nba_file_name, "parents": [{"id": FOLDER_ID}]})
+            file_drive.SetContentFile(nba_path)
+            file_drive.Upload()
+            print(f"☁️ NBA sharp moves uploaded to Google Drive as: {nba_file_name}")
+        except Exception as e:
+            print(f"❌ Failed to upload NBA sharp moves to Drive: {e}")
+
+# Save MLB sharp moves
+if df_mlb is not None and not df_mlb.empty:
+    mlb_file_name = f"MLB_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    mlb_path = f"/tmp/sharp_logs/{mlb_file_name}"
+    os.makedirs(os.path.dirname(mlb_path), exist_ok=True)
+    df_mlb.to_csv(mlb_path, index=False)
+    print(f"📦 MLB sharp moves saved to: {mlb_path}")
+
+    if drive:
+        try:
+            file_drive = drive.CreateFile({'title': mlb_file_name, "parents": [{"id": FOLDER_ID}]})
+            file_drive.SetContentFile(mlb_path)
+            file_drive.Upload()
+            print(f"☁️ MLB sharp moves uploaded to Google Drive as: {mlb_file_name}")
+        except Exception as e:
+            print(f"❌ Failed to upload MLB sharp moves to Drive: {e}")
 
 
 # Backtest and show performance
