@@ -154,42 +154,53 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df = df_moves.merge(df_results, on='Game', how='left')
 
     def calc_cover(row):
-        team = row['Outcome'].lower()
-        mkt = row['Market']
+        team = row['Outcome'].strip().lower()
+        home = row['Home'].strip().lower()
+        away = row['Away'].strip().lower()
         hscore = row['Home_Score']
         ascore = row['Away_Score']
+        mkt = row['Market'].strip().lower()
+
         if pd.isna(hscore) or pd.isna(ascore):
             return None, None
 
-        team_score = hscore if team in row['Home'].lower() else ascore
-        opp_score = ascore if team in row['Home'].lower() else hscore
+        # === Match sharp side to home or away
+        if team == home:
+            team_score, opp_score = hscore, ascore
+        elif team == away:
+            team_score, opp_score = ascore, hscore
+        else:
+            return None, None  # Couldn't match sharp team
+
         margin = team_score - opp_score
 
-        # === Determine cover result
+        # === h2h result
         if mkt == 'h2h':
             hit = int(team_score > opp_score)
             return 'Win' if hit else 'Loss', hit
-        elif mkt == 'spreads':
+
+        # === spread result
+        if mkt == 'spreads':
             spread = row.get('Ref Sharp Value')
-            if spread is None:
+            if spread is None or not isinstance(spread, (int, float)):
                 return None, None
-            if spread < 0:  # favorite
-                hit = int(margin > abs(spread))
-            else:  # underdog
-                hit = int(margin + spread > 0)
+            hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
             return 'Win' if hit else 'Loss', hit
-        elif mkt == 'totals':
+
+        # === total result
+        if mkt == 'totals':
             total = row.get('Ref Sharp Value')
-            if total is None:
+            if total is None or not isinstance(total, (int, float)):
                 return None, None
             total_points = hscore + ascore
-            if 'under' in row['Outcome'].lower():
+            if 'under' in team:
                 hit = int(total_points < total)
-            elif 'over' in row['Outcome'].lower():
+            elif 'over' in team:
                 hit = int(total_points > total)
             else:
                 return None, None
             return 'Win' if hit else 'Loss', hit
+
         return None, None
 
     # Apply backtest
