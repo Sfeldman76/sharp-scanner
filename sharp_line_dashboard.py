@@ -546,14 +546,14 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             # Pivot values and limits
             df_pivot_value = df_odds_raw.pivot_table(
-                index=["Game", "Market", "Outcome"],
+                index=["Event_Date","Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value",
                 aggfunc="first"
             )
 
             df_pivot_limit = df_odds_raw.pivot_table(
-                index=["Game", "Market", "Outcome"],
+                index=["Event_Date","Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Limit",
                 aggfunc="first"
