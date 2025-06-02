@@ -630,46 +630,49 @@ def render_scanner_tab(label, sport_key, container, drive):
 
 
 
+from io import StringIO
+
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
-# Get sharp edges
+# === Get sharp edges
 df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 
-# Save NBA sharp moves
+# === Upload NBA sharp moves to Google Drive (no local save)
 if df_nba is not None and not df_nba.empty:
-    nba_file_name = f"NBA_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    nba_path = f"/tmp/sharp_logs/{nba_file_name}"
-    os.makedirs(os.path.dirname(nba_path), exist_ok=True)
-    df_nba.to_csv(nba_path, index=False)
-    print(f"📦 NBA sharp moves saved to: {nba_path}")
+    try:
+        nba_file_name = f"NBA_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        csv_buffer = StringIO()
+        df_nba.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
 
-    if drive:
-        try:
+        if drive:
             file_drive = drive.CreateFile({'title': nba_file_name, "parents": [{"id": FOLDER_ID}]})
-            file_drive.SetContentFile(nba_path)
+            file_drive.SetContentString(csv_buffer.getvalue())
             file_drive.Upload()
-            print(f"☁️ NBA sharp moves uploaded to Google Drive as: {nba_file_name}")
-        except Exception as e:
-            print(f"❌ Failed to upload NBA sharp moves to Drive: {e}")
+            print(f"☁️ NBA sharp moves uploaded directly to Google Drive: {nba_file_name}")
+    except Exception as e:
+        print(f"❌ Error uploading NBA sharp moves to Drive: {e}")
+else:
+    print("⚠️ NBA dataframe is empty or None — not uploading.")
 
-# Save MLB sharp moves
+# === Upload MLB sharp moves to Google Drive (no local save)
 if df_mlb is not None and not df_mlb.empty:
-    mlb_file_name = f"MLB_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    mlb_path = f"/tmp/sharp_logs/{mlb_file_name}"
-    os.makedirs(os.path.dirname(mlb_path), exist_ok=True)
-    df_mlb.to_csv(mlb_path, index=False)
-    print(f"📦 MLB sharp moves saved to: {mlb_path}")
+    try:
+        mlb_file_name = f"MLB_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        csv_buffer = StringIO()
+        df_mlb.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
 
-    if drive:
-        try:
+        if drive:
             file_drive = drive.CreateFile({'title': mlb_file_name, "parents": [{"id": FOLDER_ID}]})
-            file_drive.SetContentFile(mlb_path)
+            file_drive.SetContentString(csv_buffer.getvalue())
             file_drive.Upload()
-            print(f"☁️ MLB sharp moves uploaded to Google Drive as: {mlb_file_name}")
-        except Exception as e:
-            print(f"❌ Failed to upload MLB sharp moves to Drive: {e}")
-
+            print(f"☁️ MLB sharp moves uploaded directly to Google Drive: {mlb_file_name}")
+    except Exception as e:
+        print(f"❌ Error uploading MLB sharp moves to Drive: {e}")
+else:
+    print("⚠️ MLB dataframe is empty or None — not uploading.")
 
 # Backtest and show performance
 if df_nba is not None and not df_nba.empty:
