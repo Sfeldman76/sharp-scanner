@@ -344,7 +344,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
 
     print(f"✅ Final sharp-backed rows: {len(df)}")
-    return df, pd.DataFrame(sharp_audit_rows)
+    return df, pd.DataFrame()
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
