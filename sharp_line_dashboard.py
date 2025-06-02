@@ -545,9 +545,12 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
 
             # Format odds and limit into a single string with 1 decimal for odds
-            df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Value']) else "", axis=1
-            )
+        df_odds_raw['Value_Limit'] = df_odds_raw.apply(
+            lambda r: f"{round(float(r['Value']), 1)} ({int(r['Limit'])})" 
+            if pd.notnull(r['Value']) and r['Value'] != '' 
+            else "", 
+            axis=1
+        )
 
             # Pivot to show books as columns with odds + limit
             df_combined_display = df_odds_raw.pivot_table(
@@ -559,13 +562,23 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             # === OPTIONAL: highlight sharp book columns
             sharp_books = ['Pinnacle', 'Bookmaker', 'BetOnline']
-            sharp_cols = [col for col in df_combined_display.columns if col in sharp_books]
+      
 
-            def highlight_sharp_cols(val):
-                return ['background-color: #d0f0c0' if col in sharp_cols else '' for col in df_combined_display.columns]
+                def highlight_sharp_columns(dataframe):
+                return dataframe.style.apply(lambda row: [
+                    'background-color: #d0f0c0' if col in sharp_books else '' 
+                    for col in dataframe.columns
+                ], axis=0)
+
 
             # Display new table
-            st.dataframe(df_combined_display, use_container_width=True)
+             st.dataframe(
+                df_combined_display.style.apply(
+                    lambda df: ['background-color: #d0f0c0' if col in sharp_books else '' for col in df_combined_display.columns],
+                    axis=1
+                ),
+                use_container_width=True
+            )
 
         # === Automatically backtest sharp picks (no button)
         df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
