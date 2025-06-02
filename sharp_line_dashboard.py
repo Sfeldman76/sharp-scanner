@@ -108,12 +108,9 @@ def fetch_live_odds(sport_key):
 
 def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key='3879659fe861d68dfa2866c211294684'):
     print(f"🔁 Fetching scores for {sport_key} (last {days_back} days)...")
-    
+
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-    params = {
-        'daysFrom': days_back,
-        'apiKey': api_key
-    }
+    params = {'daysFrom': days_back, 'apiKey': api_key}
 
     try:
         response = requests.get(url, params=params)
@@ -121,7 +118,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         score_data = response.json()
     except Exception as e:
         print(f"❌ Failed to fetch scores: {e}")
-        return df_moves.copy()
+        return pd.DataFrame()
 
     # Build results table
     result_rows = []
@@ -132,10 +129,10 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         away = game.get("away_team")
         scores = game.get("scores", [])
         team_scores = {s["name"]: s["score"] for s in scores if "name" in s and "score" in s}
-        
+
         if home not in team_scores or away not in team_scores:
             continue
-        
+
         game_name = f"{home} vs {away}"
         result_rows.append({
             'Game': game_name,
@@ -145,82 +142,77 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             'Away_Score': team_scores[away]
         })
 
-     # Step 1: Build results table
     df_results = pd.DataFrame(result_rows)
-
-    # Step 2: If empty, exit early
     if df_results.empty:
         print("⚠️ No completed games found.")
-        return df_moves.copy()
+        return pd.DataFrame()
 
-    # ✅ Step 3: Rename only now that df_results exists
-    df_results = df_results.rename(columns={
-        'Home': 'Home_Team',
-        'Away': 'Away_Team'
-    })
-
-    # Step 4: Deduplicate sharp picks and merge
+    # Deduplicate and merge
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome'])
     df = df_moves.merge(df_results, on='Game', how='left')
 
+    # === Refactored cover logic
+    def calc_cover(row):
+        team = row['Outcome'].strip().lower()
+        home = row['Home_Team'].strip().lower()
+        away = row['Away_Team'].strip().lower()
+        hscore = row['Home_Score']
+        ascore = row['Away_Score']
+        market = row['Market'].strip().lower()
 
-def calc_cover(row):
-    team = row['Outcome'].strip().lower()
-    home = row['Home_Team'].strip().lower()
-    away = row['Away_Team'].strip().lower()
-    hscore = row['Home_Score']
-    ascore = row['Away_Score']
-    market = row['Market'].strip().lower()
-
-    if pd.isna(hscore) or pd.isna(ascore):
-        return None, None
-
-    # === Match sharp side to home or away with partial match tolerance
-    if team in home:
-        team_score, opp_score = hscore, ascore
-    elif team in away:
-        team_score, opp_score = ascore, hscore
-    else:
-        if market in ['spreads', 'h2h']:
-            print(f"❌ Could not match team: '{team}' with Home: '{home}' or Away: '{away}'")
-        return None, None
-
-    margin = team_score - opp_score
-
-    # === h2h result
-    if market == 'h2h':
-        hit = int(team_score > opp_score)
-        return 'Win' if hit else 'Loss', hit
-
-    # === spread result
-    if market == 'spreads':
-        spread = row.get('Ref Sharp Value')
-        if spread is None or not isinstance(spread, (int, float)):
+        if pd.isna(hscore) or pd.isna(ascore):
             return None, None
-        hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
-        return 'Win' if hit else 'Loss', hit
 
-    # === total result
-    if market == 'totals':
-        total = row.get('Ref Sharp Value')
-        if total is None or not isinstance(total, (int, float)):
-            return None, None
-        total_points = hscore + ascore
-        if 'under' in team:
-            hit = int(total_points < total)
-        elif 'over' in team:
-            hit = int(total_points > total)
+        if team in home:
+            team_score, opp_score = hscore, ascore
+        elif team in away:
+            team_score, opp_score = ascore, hscore
         else:
+            if market in ['spreads', 'h2h']:
+                print(f"❌ Could not match team: '{team}' with Home: '{home}' or Away: '{away}'")
             return None, None
-        return 'Win' if hit else 'Loss', hit
 
-    return None, None
+        margin = team_score - opp_score
+
+        if market == 'h2h':
+            hit = int(team_score > opp_score)
+            return 'Win' if hit else 'Loss', hit
+
+        if market == 'spreads':
+            spread = row.get('Ref Sharp Value')
+            if spread is None or not isinstance(spread, (int, float)):
+                return None, None
+            hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
+            return 'Win' if hit else 'Loss', hit
+
+        if market == 'totals':
+            total = row.get('Ref Sharp Value')
+            if total is None or not isinstance(total, (int, float)):
+                return None, None
+            total_points = hscore + ascore
+            if 'under' in team:
+                hit = int(total_points < total)
+            elif 'over' in team:
+                hit = int(total_points > total)
+            else:
+                return None, None
+            return 'Win' if hit else 'Loss', hit
+
+        return None, None
+
+    # Apply result scoring
+    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
+
+    print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
+    return df
+
 
 
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
 
     print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
-    return df
+    return pd.DataFrame()
+
 
     
 import pandas as pd
