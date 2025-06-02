@@ -529,14 +529,6 @@ tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 
-# === Defensive defaults
-df_nba_bt = None
-df_mlb_bt = None
-
-# Get sharp edges
-df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
-df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
-
 
 # Backtest and show performance
 if df_nba is not None and not df_nba.empty:
