@@ -557,36 +557,16 @@ def render_scanner_tab(label, sport_key, container, drive):
                 aggfunc="first"
             ).reset_index()
 
+            # === OPTIONAL: highlight sharp book columns
+            sharp_books = ['Pinnacle', 'Bookmaker', 'BetOnline']
+            sharp_cols = [col for col in df_combined_display.columns if col in sharp_books]
+
+            def highlight_sharp_cols(val):
+                return ['background-color: #d0f0c0' if col in sharp_cols else '' for col in df_combined_display.columns]
+
+            # Display new table
             st.dataframe(df_combined_display, use_container_width=True)
 
-
-
-            # Highlight best value per row (min for spreads/h2h, max for totals)
-            def highlight_best(row):
-                all_cols = df_combined.columns.tolist()
-                price_cols = df_pivot_value.columns.tolist()
-
-                try:
-                    values = row[price_cols].astype(float)
-                    if row["Market"] in ["spreads", "h2h"]:
-                        best_col = values.idxmin()
-                    else:  # totals
-                        best_col = values.idxmax()
-
-                    return [
-                        'background-color: #d0f0c0' if col == best_col else ''
-                        if col in price_cols else '' for col in all_cols
-                    ]
-                except:
-                    return [''] * len(all_cols)
-
-                
-            st.dataframe(
-                df_combined.style.apply(highlight_best, axis=1),
-                use_container_width=True
-            )
-        else:
-            st.warning("⚠️ No odds to display for this sport.")
         # === Automatically backtest sharp picks (no button)
         df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
 
