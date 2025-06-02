@@ -409,7 +409,7 @@ def detect_sharp_moves(current, previous, sport_key):
                     2.0 * limit_jump +
                     1.5 * time_score +
                     1.0 * prob_shift_signal, 2
-                        )
+                        })
 
             rows.append(row)
 
