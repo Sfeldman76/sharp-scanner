@@ -247,8 +247,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 for o in market.get('outcomes', []):
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
-                    if val is None:
-                        continue
                     limit = o.get('bet_limit') if book_key in SHARP_BOOKS else None
 
                     entry = {
@@ -272,7 +270,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Limit': limit,
                         'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown')
                     })
-
+                    if val is None:
+                        continue
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'] == book_key:
@@ -388,17 +387,45 @@ auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"],
 if auto_mode == "Auto Refresh":
     st_autorefresh(interval=220000, key="autorefresh")
 
-def log_rec_snapshot(df_moves, sport_key):
+def log_rec_snapshot(df_moves, sport_key, drive=None):
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    path = f"/tmp/rec_snapshots/{sport_key}_snapshot_{now}.csv"
+    file_name = f"{sport_key}_snapshot_{now}.csv"
+    path = f"/tmp/rec_snapshots/{file_name}"
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    clean_old_snapshots()
 
     df_snapshot = df_moves[
         ['Game', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Time']
     ].copy()
     df_snapshot.to_csv(path, index=False)
-    print(f"📦 Snapshot saved to: {path}")
+    print(f"📦 Rec snapshot saved to: {path}")
+
+    # Upload to Google Drive if available
+    if drive:
+        try:
+            file_drive = drive.CreateFile({'title': file_name, "parents": [{"id": FOLDER_ID}]})
+            file_drive.SetContentFile(path)
+            file_drive.Upload()
+            print(f"☁️ Rec snapshot uploaded to Google Drive as: {file_name}")
+        except Exception as e:
+            print(f"❌ Failed to upload rec snapshot to Drive: {e}")
+import time
+
+def clean_old_snapshots(snapshot_dir="/tmp/rec_snapshots", max_age_hours=120):
+    now = time.time()
+    cutoff = now - (max_age_hours * 3600)
+
+    deleted = 0
+    for fname in os.listdir(snapshot_dir):
+        path = os.path.join(snapshot_dir, fname)
+        if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+            try:
+                os.remove(path)
+                deleted += 1
+            except Exception as e:
+                print(f"⚠️ Failed to delete {path}: {e}")
+    print(f"🧹 Pruned {deleted} old snapshots.")
+
 
 def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", minutes=30):
     import glob
@@ -517,7 +544,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             else:
                 st.warning(f"⚠️ No sharp edges match your filters for {label}.")
 
-            log_rec_snapshot(df_moves, sport_key)
+            log_rec_snapshot(df_moves, sport_key, drive)
+
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
         raw_odds_table = []
