@@ -258,72 +258,72 @@ def detect_sharp_moves(current, previous, sport_key):
         sharp_side_flags = {}
         sharp_audit_rows = []
 
-            for (game_name, market_type), label_map in sharp_limit_map.items():
-                label_scores = {}
-                move_signals_dict = {}
-                limit_jumps_dict = {}
-                prob_shifts_dict = {}
-                time_scores_dict = {}
+        for (game_name, market_type), label_map in sharp_limit_map.items():
+            label_scores = {}
+            move_signals_dict = {}
+            limit_jumps_dict = {}
+            prob_shifts_dict = {}
+            time_scores_dict = {}
 
-                for label, entries in label_map.items():
-                    move_signal = 0
-                    limit_jump = 0
-                    prob_shift_signal = 0
-                    time_score = 0
+            for label, entries in label_map.items():
+                move_signal = 0
+                limit_jump = 0
+                prob_shift_signal = 0
+                time_score = 0
 
-                    for limit, current_val, old_val in entries:
-                        if old_val is not None and current_val is not None:
-                            if market_type == "totals":
-                                if "under" in label and current_val < old_val:
-                                    move_signal += 1
-                                elif "over" in label and current_val > old_val:
-                                    move_signal += 1
-                            elif market_type == "spreads":
-                                if abs(current_val) > abs(old_val):
-                                    move_signal += 1
-                            elif market_type == "h2h":
-                                imp_now = implied_prob(current_val)
-                                imp_old = implied_prob(old_val)
-                                if imp_now and imp_old and imp_now > imp_old:
-                                    prob_shift_signal += 1
+                for limit, current_val, old_val in entries:
+                    if old_val is not None and current_val is not None:
+                        if market_type == "totals":
+                            if "under" in label and current_val < old_val:
+                                move_signal += 1
+                            elif "over" in label and current_val > old_val:
+                                move_signal += 1
+                        elif market_type == "spreads":
+                            if abs(current_val) > abs(old_val):
+                                move_signal += 1
+                        elif market_type == "h2h":
+                            imp_now = implied_prob(current_val)
+                            imp_old = implied_prob(old_val)
+                            if imp_now and imp_old and imp_now > imp_old:
+                                prob_shift_signal += 1
 
-                        if limit and limit >= 5000:
-                            limit_jump += 1
+                    if limit and limit >= 5000:
+                        limit_jump += 1
 
-                        hour = datetime.now().hour
-                        time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
+                    hour = datetime.now().hour
+                    time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
 
-                    score = (
-                        2.0 * move_signal +
-                        2.0 * limit_jump +
-                        1.5 * time_score +
-                        1.0 * prob_shift_signal
-                    )
+                score = (
+                    2.0 * move_signal +
+                    2.0 * limit_jump +
+                    1.5 * time_score +
+                    1.0 * prob_shift_signal
+                )
 
-                    label_scores[label] = score
-                    move_signals_dict[label] = move_signal
-                    limit_jumps_dict[label] = limit_jump
-                    prob_shifts_dict[label] = prob_shift_signal
-                    time_scores_dict[label] = round(time_score, 2)
+                label_scores[label] = score
+                move_signals_dict[label] = move_signal
+                limit_jumps_dict[label] = limit_jump
+                prob_shifts_dict[label] = prob_shift_signal
+                time_scores_dict[label] = round(time_score, 2)
 
-                if label_scores:
-                    best_label = max(label_scores, key=label_scores.get)
-                    sharp_side_flags[(game_name, market_type, best_label)] = 1
+            if label_scores:
+                best_label = max(label_scores, key=label_scores.get)
+                sharp_side_flags[(game_name, market_type, best_label)] = 1
 
-                    # === Log audit for all candidates
-                    for label in label_scores:
-                        sharp_audit_rows.append({
-                            'Game': game_name,
-                            'Market': market_type,
-                            'Outcome': label,
-                            'Sharp_Score': round(label_scores[label], 2),
-                            'Selected': label == best_label,
-                            'Move_Signal': move_signals_dict[label],
-                            'Limit_Jump': limit_jumps_dict[label],
-                            'Time_Score': time_scores_dict[label],
-                            'Prob_Shift': prob_shifts_dict[label],
-                            'Reason': f"{move_signals_dict[label]}x move, {limit_jumps_dict[label]}x limit, {time_scores_dict[label]}x time, {prob_shifts_dict[label]}x prob"
-                        })
+                # === Log audit for all candidates
+                for label in label_scores:
+                    sharp_audit_rows.append({
+                        'Game': game_name,
+                        'Market': market_type,
+                        'Outcome': label,
+                        'Sharp_Score': round(label_scores[label], 2),
+                        'Selected': label == best_label,
+                        'Move_Signal': move_signals_dict[label],
+                        'Limit_Jump': limit_jumps_dict[label],
+                        'Time_Score': time_scores_dict[label],
+                        'Prob_Shift': prob_shifts_dict[label],
+                        'Reason': f"{move_signals_dict[label]}x move, {limit_jumps_dict[label]}x limit, {time_scores_dict[label]}x time, {prob_shifts_dict[label]}x prob"
+                    })
 
 
         # === Evaluate rec books against sharp side
@@ -409,7 +409,7 @@ def detect_sharp_moves(current, previous, sport_key):
                     2.0 * limit_jump +
                     1.5 * time_score +
                     1.0 * prob_shift_signal, 2
-                        })
+                        )
 
             rows.append(row)
 
@@ -426,12 +426,12 @@ def detect_sharp_moves(current, previous, sport_key):
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Delta_Abs'] = df['Delta'].abs()
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-    df['Limit_Jump'] = (df['Limit'] >= 5000).astype(int)
+    df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
     df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2)
     df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
-    df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 5000).astype(int)
+    df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
 
     df['SmartSharpScore'] = (
         5 * df['Bias Match'] +
