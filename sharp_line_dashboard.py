@@ -514,17 +514,23 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             # Highlight best value per row (min for spreads/h2h, max for totals)
             def highlight_best(row):
-                cols = df_pivot_value.columns.tolist()
-                values = row[cols]
+                all_cols = df_combined.columns.tolist()
+                price_cols = df_pivot_value.columns.tolist()
+
                 try:
-                    values = values.astype(float)
+                    values = row[price_cols].astype(float)
                     if row["Market"] in ["spreads", "h2h"]:
-                        best_idx = values.astype(float).idxmin()
+                        best_col = values.idxmin()
                     else:  # totals
-                        best_idx = values.astype(float).idxmax()
-                    return ['background-color: #d0f0c0' if i == best_idx else '' for i in values.index] + [''] * len(df_pivot_limit.columns)
+                        best_col = values.idxmax()
+
+                    return [
+                        'background-color: #d0f0c0' if col == best_col else ''
+                        if col in price_cols else '' for col in all_cols
+                    ]
                 except:
-                    return [''] * len(df_combined.columns)
+                    return [''] * len(all_cols)
+
                 
             st.dataframe(
                 df_combined.style.apply(highlight_best, axis=1),
