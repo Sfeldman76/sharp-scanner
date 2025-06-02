@@ -145,19 +145,24 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             'Away_Score': team_scores[away]
         })
 
-  # Rename first to ensure keys survive merge without conflict
-    df_results = df_results.rename(columns={
-        'Home': 'Home_Team',
-        'Away': 'Away_Team'
-    })
-   
+     # Step 1: Build results table
+    df_results = pd.DataFrame(result_rows)
+
+    # Step 2: If empty, exit early
     if df_results.empty:
         print("⚠️ No completed games found.")
         return df_moves.copy()
 
-    # Merge and deduplicate
+    # ✅ Step 3: Rename only now that df_results exists
+    df_results = df_results.rename(columns={
+        'Home': 'Home_Team',
+        'Away': 'Away_Team'
+    })
+
+    # Step 4: Deduplicate sharp picks and merge
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome'])
     df = df_moves.merge(df_results, on='Game', how='left')
+
 
 def calc_cover(row):
     team = row['Outcome'].strip().lower()
