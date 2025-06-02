@@ -424,9 +424,11 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
 
 def render_scanner_tab(label, sport_key, container, drive):
     with container:
+        df_bt = pd.DataFrame()  # ✅ define this early
+        df_moves = pd.DataFrame()
+
         live = fetch_live_odds(sport_key)
         prev = load_snapshot(sport_key)
-        df_bt = pd.DataFrame()  # ✅ declare safely at top
 
         if not prev:
             st.info("🟡 First run detected — saving snapshot and skipping detection.")
@@ -444,6 +446,19 @@ def render_scanner_tab(label, sport_key, container, drive):
             return pd.DataFrame()
 
         save_snapshot(sport_key, get_snapshot(live))
+
+        if not df_moves.empty:
+            df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
+
+            if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
+                st.subheader(f"📊 Backtest Results – {label}")
+                st.dataframe(
+                    df_bt[['Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
+                           'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
+                )
+
+      
+
 
         # ✅ Run backtest only if we got sharp picks
         if not df_moves.empty:
