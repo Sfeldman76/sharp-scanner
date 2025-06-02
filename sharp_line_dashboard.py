@@ -237,7 +237,8 @@ def detect_sharp_moves(current, previous, sport_key):
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
                         'Book': book_key, 'Value': val, 'Limit': limit,
-                        'Old Value': None, 'Delta': None, 'Event_Date': event_date
+                        'Old Value': None, 'Delta': None, 'Event_Date': event_date, 'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
+
                     }
 
                     if prev_game:
@@ -473,7 +474,18 @@ def render_scanner_tab(label, sport_key, container, drive):
         st.subheader(f"🚨 Detected Sharp Moves – {label}")
 
         # === Filters
-        region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].dropna().unique()), key=f"{label}_region_main")
+        region_options = ["All"]
+        if 'Region' in df_display.columns:
+            region_options += sorted(df_display['Region'].dropna().unique())
+
+        region = st.selectbox(
+            f"🌍 Filter {label} by Region",
+            region_options,
+            key=f"{label}_region_main"
+        )
+        if region != "All":
+            df_display = df_display[df_display['Region'] == region]
+
         market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].dropna().unique()), key=f"{label}_market_main")
         alignment_filter = st.selectbox(
             f"🧭 Sharp Alignment Filter ({label})",
