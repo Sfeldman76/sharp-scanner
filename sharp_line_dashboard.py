@@ -152,53 +152,54 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df = df_moves.merge(df_results, on='Game', how='left')
 
     # === Refactored cover logic
-    def calc_cover(row):
-        team = row['Outcome'].strip().lower()
-        home = row['Home_Team'].strip().lower()
-        away = row['Away_Team'].strip().lower()
-        hscore = row['Home_Score']
-        ascore = row['Away_Score']
-        market = row['Market'].strip().lower()
+   def calc_cover(row):
+    team = str(row['Outcome']).strip().lower()
+    home = str(row['Home_Team']).strip().lower()
+    away = str(row['Away_Team']).strip().lower()
+    hscore = row['Home_Score']
+    ascore = row['Away_Score']
+    market = str(row['Market']).strip().lower()
 
-        if pd.isna(hscore) or pd.isna(ascore):
-            return None, None
-
-        if team in home:
-            team_score, opp_score = hscore, ascore
-        elif team in away:
-            team_score, opp_score = ascore, hscore
-        else:
-            if market in ['spreads', 'h2h']:
-                print(f"❌ Could not match team: '{team}' with Home: '{home}' or Away: '{away}'")
-            return None, None
-
-        margin = team_score - opp_score
-
-        if market == 'h2h':
-            hit = int(team_score > opp_score)
-            return 'Win' if hit else 'Loss', hit
-
-        if market == 'spreads':
-            spread = row.get('Ref Sharp Value')
-            if spread is None or not isinstance(spread, (int, float)):
-                return None, None
-            hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
-            return 'Win' if hit else 'Loss', hit
-
-        if market == 'totals':
-            total = row.get('Ref Sharp Value')
-            if total is None or not isinstance(total, (int, float)):
-                return None, None
-            total_points = hscore + ascore
-            if 'under' in team:
-                hit = int(total_points < total)
-            elif 'over' in team:
-                hit = int(total_points > total)
-            else:
-                return None, None
-            return 'Win' if hit else 'Loss', hit
-
+    if pd.isna(hscore) or pd.isna(ascore):
         return None, None
+
+    if team in home:
+        team_score, opp_score = hscore, ascore
+    elif team in away:
+        team_score, opp_score = ascore, hscore
+    else:
+        if market in ['spreads', 'h2h']:
+            print(f"❌ Could not match team: '{team}' with Home: '{home}' or Away: '{away}'")
+        return None, None
+
+    margin = team_score - opp_score
+
+    if market == 'h2h':
+        hit = int(team_score > opp_score)
+        return 'Win' if hit else 'Loss', hit
+
+    if market == 'spreads':
+        spread = row.get('Ref Sharp Value')
+        if spread is None or not isinstance(spread, (int, float)):
+            return None, None
+        hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
+        return 'Win' if hit else 'Loss', hit
+
+    if market == 'totals':
+        total = row.get('Ref Sharp Value')
+        if total is None or not isinstance(total, (int, float)):
+            return None, None
+        total_points = hscore + ascore
+        if 'under' in team:
+            hit = int(total_points < total)
+        elif 'over' in team:
+            hit = int(total_points > total)
+        else:
+            return None, None
+        return 'Win' if hit else 'Loss', hit
+
+    return None, None
+
 
     # Apply result scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
