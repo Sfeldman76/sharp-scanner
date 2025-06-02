@@ -345,10 +345,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, pd.DataFrame()
-st.write("🔍 DEBUG SHARP MOVES:", len(df_moves))
-if not df_moves.empty:
-    st.dataframe(df_moves[['Game', 'Market', 'Outcome', 'Value', 'Ref Sharp Value', 'SharpBetScore']])
-st.write("🧪 DEBUG SNAPSHOT GAMES:", len(prev))
+
 
 
 
@@ -398,7 +395,6 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
 
     return pd.DataFrame(drift_rows).sort_values(by='Snapshot_Time')
 
-
 def render_scanner_tab(label, sport_key, container, drive):
     with container:
         live = fetch_live_odds(sport_key)
@@ -406,7 +402,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         if not prev:
             st.info("🟡 First run detected — saving snapshot and skipping detection.")
             save_snapshot(sport_key, get_snapshot(live))
-            return pd.DataFrame()  # skip sharp detection completely
+            return pd.DataFrame()
 
         if not live or not isinstance(live, list) or len(live) == 0:
             st.warning(f"⚠️ No live odds returned for {label}.")
@@ -414,11 +410,19 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         try:
             df_moves, df_audit = detect_sharp_moves(live, prev, label)
+
+            # ✅ DEBUG INSIDE TRY
+            st.write("🔍 DEBUG SHARP MOVES:", len(df_moves))
+            if not df_moves.empty:
+                st.dataframe(df_moves[['Game', 'Market', 'Outcome', 'Value', 'Ref Sharp Value', 'SharpBetScore']])
+            st.write("🧪 DEBUG SNAPSHOT GAMES:", len(prev))
+
         except Exception as e:
             st.error(f"❌ Error in detect_sharp_moves: {e}")
             return pd.DataFrame()
 
         save_snapshot(sport_key, get_snapshot(live))
+ 
 
         # === Show raw odds snapshot (always)
         raw_odds_table = []
