@@ -388,17 +388,13 @@ def detect_sharp_moves(current, previous, sport_key):
                 1.0 * prob_shift, 2
             )
         })
-
+        rows.append(row)
 
     # === Finalize DataFrame
     df = pd.DataFrame(rows)
     df_audit = pd.DataFrame(sharp_audit_rows)
 
-    if df.empty:
-        print("⚠️ No sharp-backed rec lines made it through.")
-        return df, df_audit
-
-    # === Compute Drift Metrics (optional)
+    # === Compute Drift Metrics (even if empty)
     df['LineMove'] = df.apply(
         lambda r: round(r['Value'] - r['Old Value'], 2) if pd.notnull(r['Old Value']) else None,
         axis=1
@@ -408,18 +404,18 @@ def detect_sharp_moves(current, previous, sport_key):
     df['Delta_Abs'] = df['Delta'].abs()
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
-    df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(
+    df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
         lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2
     )
-    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
-    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
+    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max') if not df.empty else 0
+    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min') if not df.empty else 0
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
 
-    # === Smart Sharp Score
+    # === Smart Sharp Score (safe default)
     df['SmartSharpScore'] = (
-        5 * df['Bias Match'] +
-        4 * df['SHARP_SIDE_TO_BET'] +
+        5 * df.get('Bias Match', 0) +
+        4 * df.get('SHARP_SIDE_TO_BET', 0) +
         2 * df['Limit_Jump'] +
         2 * df['Delta_Abs'] +
         2 * df['Sharp_Timing'] +
@@ -427,23 +423,20 @@ def detect_sharp_moves(current, previous, sport_key):
     ).round(2)
 
     # === SharpConfidenceTier assignment
-    if 'SmartSharpScore' in df.columns:
-        def assign_confidence_tier(score):
-            if score >= 40:
-                return "🔥 Steam"
-            elif score >= 25:
-                return "⭐ High"
-            elif score >= 15:
-                return "✅ Moderate"
-            else:
-                return "⚠️ Low"
-        df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
-    else:
-        df['SharpConfidenceTier'] = "❓ Not Scored"
+    def assign_confidence_tier(score):
+        if score >= 40:
+            return "🔥 Steam"
+        elif score >= 25:
+            return "⭐ High"
+        elif score >= 15:
+            return "✅ Moderate"
+        else:
+            return "⚠️ Low"
+
+    df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
 
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, df_audit
-
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
@@ -614,4 +607,3 @@ if df_mlb_bt is not None and not df_mlb_bt.empty:
     st.subheader("🧠 Sharp Component Learning – MLB")
     st.dataframe(df_mlb_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'}))
     st.dataframe(df_mlb_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'}))
-
