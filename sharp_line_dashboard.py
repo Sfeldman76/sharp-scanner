@@ -575,7 +575,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                 styles = pd.DataFrame('', index=df.index, columns=df.columns)
                 for col in df.columns:
                     if col in sharp_books:
-                        styles[col] = 'background-color: #d0f0c0'
+                        styles[col] = 'background-color: #d0f0c0; color: black'
                 return styles
             st.dataframe(
                 df_combined_display.style.apply(highlight_sharp_columns, axis=None),
