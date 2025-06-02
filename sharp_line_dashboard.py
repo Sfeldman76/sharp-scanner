@@ -413,7 +413,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         save_snapshot(sport_key, get_snapshot(live))
 
-        # === Always show raw odds snapshot
+        # === Show raw odds snapshot (always)
         raw_odds_table = []
         for game in live:
             for book in game.get("bookmakers", []):
@@ -434,7 +434,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         else:
             st.warning("No raw odds to display.")
 
-        # === Sharp Moves Section
+        # === Show sharp moves only if found
         if df_moves is None or df_moves.empty:
             st.info(f"⚠️ No sharp moves detected for {label}.")
             return df_moves
@@ -453,6 +453,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
 
+        # === Filters
         region_options = ["All"] + sorted(df_display['Region'].dropna().unique())
         region = st.selectbox(f"🌍 Filter {label} by Region", region_options, key=f"{label}_region_main")
         if region != "All":
@@ -471,6 +472,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         if alignment_filter != "All":
             df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
 
+        # === Display columns
         display_cols = [
             'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
             'Value', 'Ref Sharp Value', 'LineMove',
@@ -484,8 +486,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning(f"⚠️ No sharp edges match your filters for {label}.")
 
         log_rec_snapshot(df_moves, sport_key)
-
         return df_moves
+
 
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
