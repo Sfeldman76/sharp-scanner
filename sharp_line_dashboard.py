@@ -522,9 +522,9 @@ def render_scanner_tab(label, sport_key, container, drive):
                         best_idx = values.astype(float).idxmin()
                     else:  # totals
                         best_idx = values.astype(float).idxmax()
-                return ['background-color: #d0f0c0' if i == best_idx else '' for i in values.index] + [''] * len(df_pivot_limit.columns)
-            except:
-                return [''] * len(df_combined.columns)
+                    return ['background-color: #d0f0c0' if i == best_idx else '' for i in values.index] + [''] * len(df_pivot_limit.columns)
+                except:
+                    return [''] * len(df_combined.columns)
                 
             st.dataframe(
                 df_combined.style.apply(highlight_best, axis=1),
