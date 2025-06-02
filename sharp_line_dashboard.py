@@ -201,20 +201,30 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
     
-def detect_sharp_moves(current, previous, sport_key):
-    from collections import defaultdict
+import pandas as pd
+from datetime import datetime
+from collections import defaultdict
 
+def implied_prob(price):
+    try:
+        price = float(price)
+        if price > 0:
+            return 100 / (price + 100)
+        elif price < 0:
+            return -price / (-price + 100)
+        return None
+    except:
+        return None
+
+def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS):
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
-    rows = []
+    rows, sharp_audit_rows, rec_lines = [], [], []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
-    snapshot_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
+    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
-    sharp_side_flags = {}
-    sharp_lines = {}
-    sharp_audit_rows = []
-    rec_lines = []
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
@@ -237,8 +247,8 @@ def detect_sharp_moves(current, previous, sport_key):
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
                         'Book': book_key, 'Value': val, 'Limit': limit,
-                        'Old Value': None, 'Delta': None, 'Event_Date': event_date, 'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
-
+                        'Old Value': None, 'Delta': None, 'Event_Date': event_date,
+                        'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
                     }
 
                     if prev_game:
@@ -259,146 +269,105 @@ def detect_sharp_moves(current, previous, sport_key):
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
-    # === Determine sharp side
     for (game_name, mtype), label_map in sharp_limit_map.items():
         scores = {}
-        move_signal, limit_jump, prob_shift, time_score = 0, 0, 0, 0
+        label_signals = {}
         for label, entries in label_map.items():
             move_signal = limit_jump = prob_shift = time_score = 0
             for limit, curr, old in entries:
                 if old is not None and curr is not None:
                     if mtype == 'totals':
-                        if 'under' in label and curr < old:
-                            move_signal += 1
-                        elif 'over' in label and curr > old:
-                            move_signal += 1
-                    elif mtype == 'spreads' and abs(curr) > abs(old):
-                        move_signal += 1
+                        if 'under' in label and curr < old: move_signal += 1
+                        elif 'over' in label and curr > old: move_signal += 1
+                    elif mtype == 'spreads' and abs(curr) > abs(old): move_signal += 1
                     elif mtype == 'h2h':
-                        imp_now = implied_prob(curr)
-                        imp_old = implied_prob(old)
-                        if imp_now and imp_old and imp_now > imp_old:
-                            prob_shift += 1
-                if limit and limit >= 5000:
-                    limit_jump += 1
+                        imp_now, imp_old = implied_prob(curr), implied_prob(old)
+                        if imp_now and imp_old and imp_now > imp_old: prob_shift += 1
+                if limit and limit >= 5000: limit_jump += 1
                 hour = datetime.now().hour
                 time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
 
             score = 2 * move_signal + 2 * limit_jump + 1.5 * time_score + 1.0 * prob_shift
             scores[label] = score
+            label_signals[label] = {
+                'Sharp_Move_Signal': move_signal,
+                'Sharp_Limit_Jump': limit_jump,
+                'Sharp_Time_Score': time_score,
+                'Sharp_Prob_Shift': prob_shift
+            }
 
         if scores:
             best_label = max(scores, key=scores.get)
             sharp_side_flags[(game_name, mtype, best_label)] = 1
+            sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
-    # === Rec Book Evaluation
     for rec in rec_lines:
         rec_label = normalize_label(rec['Outcome'])
         market_type = rec['Market']
         rec_key = (rec['Game'], market_type, rec_label)
 
-        # Smart sharp-side comparison (exact outcome match only)
-        is_sharp_side = 0
-        sharp_outcome = None
-        rec_key = (rec['Game'], market_type, normalize_label(rec['Outcome']))
-
-        for key in sharp_side_flags:
-            if rec_key == key:
-                is_sharp_side = 1
-                sharp_outcome = key[2]
-                break
-
-        if not is_sharp_side:
-            continue  # skip all non-sharp-side outcomes
+        if not sharp_side_flags.get(rec_key, 0):
+            continue
 
         sharp = sharp_lines.get(rec_key)
         if not sharp:
             continue
 
         implied_rec = implied_prob(rec['Value']) if market_type == 'h2h' else None
-
-        # === No-Vig Sharp Implied Probability (H2H only)
         implied_sharp = None
         if market_type == 'h2h':
-            this_price = sharp['Value']
-            other_label = None
-            for (g, m, lbl) in sharp_lines:
-                if g == rec['Game'] and m == market_type and lbl != rec_label:
-                    other_label = lbl
-                    break
+            other_label = next((lbl for (g, m, lbl) in sharp_lines if g == rec['Game'] and m == market_type and lbl != rec_label), None)
             other_price = sharp_lines.get((rec['Game'], market_type, other_label), {}).get('Value')
-            if this_price and other_price:
-                p1 = implied_prob(this_price)
-                p2 = implied_prob(other_price)
+            if sharp['Value'] and other_price:
+                p1, p2 = implied_prob(sharp['Value']), implied_prob(other_price)
                 total = p1 + p2
                 implied_sharp = p1 / total if total > 0 else None
-
-        elif market_type != 'h2h':
+        else:
             implied_sharp = implied_prob(sharp['Value'])
 
-        delta_vs_sharp = rec['Value'] - sharp['Value'] if sharp and rec['Value'] is not None and sharp['Value'] is not None else None
-
-        # === Bias Match
+        delta_vs_sharp = rec['Value'] - sharp['Value'] if rec['Value'] is not None and sharp['Value'] is not None else None
         bias_match = 0
-        if market_type == 'spreads' and abs(rec['Value']) < abs(sharp['Value']):
-            bias_match = 1
+        if market_type == 'spreads' and abs(rec['Value']) < abs(sharp['Value']): bias_match = 1
         elif market_type == 'totals':
-            if 'under' in rec['Outcome'] and rec['Value'] > sharp['Value']:
-                bias_match = 1
-            elif 'over' in rec['Outcome'] and rec['Value'] < sharp['Value']:
-                bias_match = 1
-        elif market_type == 'h2h' and implied_rec and implied_sharp and implied_rec < implied_sharp:
-            bias_match = 1
+            if 'under' in rec_label and rec['Value'] > sharp['Value']: bias_match = 1
+            elif 'over' in rec_label and rec['Value'] < sharp['Value']: bias_match = 1
+        elif market_type == 'h2h' and implied_rec and implied_sharp and implied_rec < implied_sharp: bias_match = 1
 
-        # === Alignment & Reason
         delta = round(delta_vs_sharp, 2) if delta_vs_sharp is not None else None
-        if delta is None:
-            alignment = "❓ Unknown or Incomplete"
-            reason = "Insufficient pricing data"
-        elif abs(delta) >= 0.01:
-            alignment = "Sharp move, Rec books not reponded"
-            reason = "Sharp move, Rec books not reponded"
-        else:
-            alignment = "Aligned with Sharps"
-            reason = "Rec book has adjusted to sharp line"
+        alignment = "❓ Unknown or Incomplete" if delta is None else (
+            "Sharp move, Rec books not reponded" if abs(delta) >= 0.01 else "Aligned with Sharps"
+        )
+        reason = "Insufficient pricing data" if delta is None else alignment
 
-        # === Final output row
+        metrics = sharp_metrics_map.get(rec_key, {})
         row = rec.copy()
         row.update({
-            'Event_Date': rec.get('Event_Date', ""),
-            'Ref Sharp Value': sharp['Value'] if sharp else None,
+            'Ref Sharp Value': sharp['Value'],
             'Delta vs Sharp': delta,
             'Bias Match': bias_match,
             'Implied_Prob_Rec': implied_rec,
             'Implied_Prob_Sharp': implied_sharp,
             'Implied_Prob_Diff': (implied_sharp - implied_rec) if implied_rec and implied_sharp else None,
-            'Limit': sharp.get('Limit') if sharp and sharp.get('Limit') is not None else 0,
+            'Limit': sharp.get('Limit') or 0,
             'SHARP_SIDE_TO_BET': 1,
             'SharpAlignment': alignment,
             'SHARP_REASON': reason,
-            'Sharp_Move_Signal': move_signal,
-            'Sharp_Limit_Jump': limit_jump,
-            'Sharp_Time_Score': time_score,
-            'Sharp_Prob_Shift': prob_shift,
-            'Sharp_Outcome_Key': sharp_outcome,
+            'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
+            'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
+            'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
+            'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0),
             'SharpBetScore': round(
-                2.0 * move_signal +
-                2.0 * limit_jump +
-                1.5 * time_score +
-                1.0 * prob_shift, 2
+                2.0 * metrics.get('Sharp_Move_Signal', 0) +
+                2.0 * metrics.get('Sharp_Limit_Jump', 0) +
+                1.5 * metrics.get('Sharp_Time_Score', 0) +
+                1.0 * metrics.get('Sharp_Prob_Shift', 0), 2
             )
         })
         rows.append(row)
 
-    # === Finalize DataFrame
     df = pd.DataFrame(rows)
-    df_audit = pd.DataFrame(sharp_audit_rows)
-
-    # === Compute Drift Metrics (even if empty)
-    df['LineMove'] = df.apply(
-        lambda r: round(r['Value'] - r['Old Value'], 2) if pd.notnull(r['Old Value']) else None,
-        axis=1
-    )
+    if df.empty:
+        return df, pd.DataFrame()
 
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Delta_Abs'] = df['Delta'].abs()
@@ -407,36 +376,30 @@ def detect_sharp_moves(current, previous, sport_key):
     df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
         lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2
     )
-    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max') if not df.empty else 0
-    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min') if not df.empty else 0
+    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
+    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
 
-    # === Smart Sharp Score (safe default)
     df['SmartSharpScore'] = (
-        5 * df.get('Bias Match', 0) +
-        4 * df.get('SHARP_SIDE_TO_BET', 0) +
+        5 * df['Bias Match'] +
+        4 * df['SHARP_SIDE_TO_BET'] +
         2 * df['Limit_Jump'] +
         2 * df['Delta_Abs'] +
         2 * df['Sharp_Timing'] +
         1 * df['Asymmetry_Flag']
     ).round(2)
 
-    # === SharpConfidenceTier assignment
     def assign_confidence_tier(score):
-        if score >= 40:
-            return "🔥 Steam"
-        elif score >= 25:
-            return "⭐ High"
-        elif score >= 15:
-            return "✅ Moderate"
-        else:
-            return "⚠️ Low"
+        if score >= 40: return "🔥 Steam"
+        elif score >= 25: return "⭐ High"
+        elif score >= 15: return "✅ Moderate"
+        else: return "⚠️ Low"
 
     df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
 
     print(f"✅ Final sharp-backed rows: {len(df)}")
-    return df, df_audit
+    return df, pd.DataFrame(sharp_audit_rows)
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
