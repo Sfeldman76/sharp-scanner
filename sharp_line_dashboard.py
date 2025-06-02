@@ -67,13 +67,10 @@ def load_snapshot(sport_key):
                 data = pickle.load(f)
                 if isinstance(data, dict):
                     return data
-                else:
-                    st.warning(f"⚠️ Snapshot file for {sport_key} is invalid (not a dict). Resetting...")
-                    return {}
         except Exception as e:
-            st.error(f"❌ Failed to load snapshot for {sport_key}: {e}")
-            return {}
-    return {}
+            st.error(f"❌ Failed to load snapshot: {e}")
+    return {}  # return empty dict safely
+
 
 def implied_prob(odds):
     try:
@@ -400,6 +397,10 @@ def render_scanner_tab(label, sport_key, container, drive):
     with container:
         live = fetch_live_odds(sport_key)
         prev = load_snapshot(sport_key)
+        if not prev:
+            st.info("🟡 First run detected — saving current odds as initial snapshot.")
+            save_snapshot(sport_key, get_snapshot(live))
+            prev = get_snapshot(live)  # use current odds for now to avoid empty comparisons
 
         if not live or not isinstance(live, list) or len(live) == 0:
             st.warning(f"⚠️ No live odds returned for {label}.")
