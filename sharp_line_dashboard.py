@@ -545,12 +545,18 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
 
             # Safely format odds + limit into one string like "-110.0 (20000)"
-            df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-                lambda r: f"{round(float(r['Value']), 1)} ({int(r['Limit'])})" 
-                if pd.notnull(r['Value']) and r['Value'] != '' 
-                else "", 
-                axis=1
-            )
+            import math
+
+        def safe_format_value_limit(row):
+            try:
+                val = float(row['Value'])
+                lim = int(row['Limit']) if pd.notnull(row['Limit']) and not math.isnan(row['Limit']) else 0
+                return f"{round(val, 1)} ({lim})"
+            except:
+                return ""
+
+        df_odds_raw['Value_Limit'] = df_odds_raw.apply(safe_format_value_limit, axis=1)
+
 
             # Pivot to wide format by bookmaker
             df_combined_display = df_odds_raw.pivot_table(
