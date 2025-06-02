@@ -389,10 +389,58 @@ def detect_sharp_moves(current, previous, sport_key):
             )
         })
 
-        rows.append(row)
 
+    # === Finalize DataFrame
     df = pd.DataFrame(rows)
     df_audit = pd.DataFrame(sharp_audit_rows)
+
+    if df.empty:
+        print("⚠️ No sharp-backed rec lines made it through.")
+        return df, df_audit
+
+    # === Compute Drift Metrics (optional)
+    df['LineMove'] = df.apply(
+        lambda r: round(r['Value'] - r['Old Value'], 2) if pd.notnull(r['Old Value']) else None,
+        axis=1
+    )
+
+    df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
+    df['Delta_Abs'] = df['Delta'].abs()
+    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+    df['Limit_Jump'] = (df['Limit'] >= 5000).astype(int)
+    df['Sharp_Timing'] = pd.to_datetime(df['Time']).dt.hour.apply(
+        lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2
+    )
+    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
+    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
+    df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
+    df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 5000).astype(int)
+
+    # === Smart Sharp Score
+    df['SmartSharpScore'] = (
+        5 * df['Bias Match'] +
+        4 * df['SHARP_SIDE_TO_BET'] +
+        2 * df['Limit_Jump'] +
+        2 * df['Delta_Abs'] +
+        2 * df['Sharp_Timing'] +
+        1 * df['Asymmetry_Flag']
+    ).round(2)
+
+    # === SharpConfidenceTier assignment
+    if 'SmartSharpScore' in df.columns:
+        def assign_confidence_tier(score):
+            if score >= 40:
+                return "🔥 Steam"
+            elif score >= 25:
+                return "⭐ High"
+            elif score >= 15:
+                return "✅ Moderate"
+            else:
+                return "⚠️ Low"
+        df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
+    else:
+        df['SharpConfidenceTier'] = "❓ Not Scored"
+
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, df_audit
 
