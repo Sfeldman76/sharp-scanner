@@ -406,9 +406,10 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
 
     return pd.DataFrame(drift_rows).sort_values(by='Snapshot_Time')
 
+
 def render_scanner_tab(label, sport_key, container, drive):
     with container:
-        df_bt = pd.DataFrame()  # ✅ define this early
+        df_bt = pd.DataFrame()
         df_moves = pd.DataFrame()
 
         live = fetch_live_odds(sport_key)
@@ -434,28 +435,18 @@ def render_scanner_tab(label, sport_key, container, drive):
         if not df_moves.empty:
             df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
 
-            if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
+            # ✅ SAFETY CHECK: Avoid KeyError
+            if 'SHARP_HIT_BOOL' not in df_bt.columns:
+                st.warning(f"⚠️ No backtested results found for {label}. Check score availability or formatting.")
+            else:
                 st.subheader(f"📊 Backtest Results – {label}")
                 st.dataframe(
                     df_bt[['Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
                            'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
                 )
 
-      
-
-
-        # ✅ Run backtest only if we got sharp picks
-        if not df_moves.empty:
-            df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
-
-        # ✅ Safe condition check to display results
-        if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
-            st.subheader(f"📊 Backtest Results – {label}")
-            st.dataframe(
-                df_bt[['Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
-                       'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
-            )
-
+  
+     
 
         # === Show sharp moves first
         if df_moves is None or df_moves.empty:
