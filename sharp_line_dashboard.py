@@ -593,7 +593,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
             st.subheader(f"📊 Backtest Results – {label}")
             st.dataframe(
-                df_bt[['Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
+                df_bt[['Event_Date','Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
                        'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
             )
         else:
