@@ -549,7 +549,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             )
         else:
             st.warning("⚠️ No results available for backtest yet.")
-        )    
+           
 
         
         return df_moves
