@@ -544,15 +544,15 @@ def render_scanner_tab(label, sport_key, container, drive):
         if not df_odds_raw.empty:
             st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
 
-            # Format odds and limit into a single string with 1 decimal for odds
-        df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-            lambda r: f"{round(float(r['Value']), 1)} ({int(r['Limit'])})" 
-            if pd.notnull(r['Value']) and r['Value'] != '' 
-            else "", 
-            axis=1
-        )
+            # Safely format odds + limit into one string like "-110.0 (20000)"
+            df_odds_raw['Value_Limit'] = df_odds_raw.apply(
+                lambda r: f"{round(float(r['Value']), 1)} ({int(r['Limit'])})" 
+                if pd.notnull(r['Value']) and r['Value'] != '' 
+                else "", 
+                axis=1
+            )
 
-            # Pivot to show books as columns with odds + limit
+            # Pivot to wide format by bookmaker
             df_combined_display = df_odds_raw.pivot_table(
                 index=["Event_Date", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
@@ -560,25 +560,17 @@ def render_scanner_tab(label, sport_key, container, drive):
                 aggfunc="first"
             ).reset_index()
 
-            # === OPTIONAL: highlight sharp book columns
+            # List of sharp books to highlight
             sharp_books = ['Pinnacle', 'Bookmaker', 'BetOnline']
-      
 
-                def highlight_sharp_columns(dataframe):
-                return dataframe.style.apply(lambda row: [
-                    'background-color: #d0f0c0' if col in sharp_books else '' 
-                    for col in dataframe.columns
-                ], axis=0)
+            # Highlight sharp book columns with a light green background
+            def highlight_sharp_cols(col):
+                return ['background-color: #d0f0c0'] * len(df_combined_display) if col in sharp_books else [''] * len(df_combined_display)
 
+            styled_df = df_combined_display.style.apply(highlight_sharp_cols, axis=0)
 
-            # Display new table
-             st.dataframe(
-                df_combined_display.style.apply(
-                    lambda df: ['background-color: #d0f0c0' if col in sharp_books else '' for col in df_combined_display.columns],
-                    axis=1
-                ),
-                use_container_width=True
-            )
+            st.dataframe(styled_df, use_container_width=True)
+
 
         # === Automatically backtest sharp picks (no button)
         df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
