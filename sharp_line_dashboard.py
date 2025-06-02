@@ -103,9 +103,6 @@ def fetch_live_odds(sport_key):
         return []
 
 
-
-
-
 def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key='3879659fe861d68dfa2866c211294684'):
     print(f"🔁 Fetching scores for {sport_key} (last {days_back} days)...")
 
@@ -151,6 +148,8 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome'])
     df = df_moves.merge(df_results, on='Game', how='left')
 
+
+    return df  # ✅ THIS LINE IS REQUIRED
     # === Refactored cover logic
 def calc_cover(row):
     team = str(row['Outcome']).strip().lower()
@@ -206,14 +205,6 @@ def calc_cover(row):
 
     print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
-
-
-
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
-
-    print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
-    return pd.DataFrame()
-
 
     
 import pandas as pd
