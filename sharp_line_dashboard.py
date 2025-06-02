@@ -367,31 +367,24 @@ def detect_sharp_moves(current, previous, sport_key):
                 bias_match = 1
 
             # === Alignment tag
-            alignment = "⚠️ Worse than sharps"
-            if market_type == 'h2h' and implied_rec is not None and implied_sharp is not None:
-                if implied_rec < implied_sharp:
-                    alignment = "🚨 Edge (better than sharps)"
-                elif abs(implied_rec - implied_sharp) < 0.005:
-                    alignment = "✅ Matched with sharps"
-            elif market_type == 'spreads' and sharp:
-                if sharp['Value'] > 0 and rec['Value'] > sharp['Value']:
-                    alignment = "🚨 Edge (better than sharps)"
-                elif sharp['Value'] < 0 and rec['Value'] < sharp['Value']:
-                    alignment = "🚨 Edge (better than sharps)"
-                elif rec['Value'] == sharp['Value']:
-                    alignment = "✅ Matched with sharps"
-            elif market_type == 'totals' and sharp:
-                if "under" in rec['Outcome'] and rec['Value'] > sharp['Value']:
-                    alignment = "🚨 Edge (better than sharps)"
-                elif "over" in rec['Outcome'] and rec['Value'] < sharp['Value']:
-                    alignment = "🚨 Edge (better than sharps)"
-                elif rec['Value'] == sharp['Value']:
-                    alignment = "✅ Matched with sharps"
+          
+            delta = round(rec['Value'] - sharp['Value'], 2) if sharp and rec['Value'] is not None and sharp['Value'] is not None else None
+
+            # === SharpAlignment and SHARP_REASON logic
+            if delta is None:
+                alignment = "❓ Unknown or Incomplete"
+                reason = "Insufficient pricing data"
+            elif abs(delta) >= 0.01:
+                alignment = "Sharp move, Rec books not reponded"
+                reason = "Sharp move, Rec books not reponded"
+            else:
+                alignment = "Aligned with Sharps"
+                reason = "Rec book has adjusted to sharp line"
 
             row.update({
                 'Event_Date': rec.get('Event_Date', ""),
                 'Ref Sharp Value': sharp['Value'] if sharp else None,
-                'Delta vs Sharp': round(delta_vs_sharp, 2) if delta_vs_sharp is not None else None,
+                'Delta vs Sharp': delta,
                 'Bias Match': bias_match,
                 'Implied_Prob_Rec': implied_rec,
                 'Implied_Prob_Sharp': implied_sharp,
@@ -399,7 +392,7 @@ def detect_sharp_moves(current, previous, sport_key):
                 'Limit': sharp.get('Limit') if sharp and sharp.get('Limit') is not None else 0,
                 'SHARP_SIDE_TO_BET': is_sharp_side,
                 'SharpAlignment': alignment,
-                'SHARP_REASON': "📈 Sharp side backed by movement, limit, and timing",
+                'SHARP_REASON': reason,
                 'Sharp_Move_Signal': move_signal,
                 'Sharp_Limit_Jump': limit_jump,
                 'Sharp_Time_Score': time_score,
@@ -408,8 +401,7 @@ def detect_sharp_moves(current, previous, sport_key):
                     2.0 * move_signal +
                     2.0 * limit_jump +
                     1.5 * time_score +
-                    1.0 * prob_shift_signal,
-                    2
+                    1.0 * prob_shift_signal, 2
                 )
             })
 
@@ -680,4 +672,3 @@ if df_mlb_bt is not None and not df_mlb_bt.empty:
     st.subheader("🧠 Sharp Component Learning – MLB")
     st.dataframe(df_mlb_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'}))
     st.dataframe(df_mlb_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'}))
-
