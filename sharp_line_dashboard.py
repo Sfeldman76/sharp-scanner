@@ -639,11 +639,35 @@ if df_mlb is not None and not df_mlb.empty:
 
 # 🧠 Sharp Signal Learning (Component Breakdown)
 if df_nba_bt is not None and not df_nba_bt.empty:
-    st.subheader("🧠 Sharp Component Learning – NBA")
-    st.dataframe(df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'}))
-    st.dataframe(df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'}))
+    if 'SHARP_HIT_BOOL' in df_nba_bt.columns:
+        st.subheader("🧠 Sharp Component Learning – NBA")
+        st.dataframe(
+            df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
+            .mean().reset_index()
+            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
+        )
+        st.dataframe(
+            df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
+            .mean().reset_index()
+            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
+        )
+    else:
+        st.warning("⚠️ NBA component breakdown skipped — SHARP_HIT_BOOL missing.")
 
 if df_mlb_bt is not None and not df_mlb_bt.empty:
-    st.subheader("🧠 Sharp Component Learning – MLB")
-    st.dataframe(df_mlb_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'}))
-    st.dataframe(df_mlb_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'}))
+    if 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
+        st.subheader("🧠 Sharp Component Learning – MLB")
+        st.dataframe(
+            df_mlb_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
+            .mean().reset_index()
+            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
+        )
+        st.dataframe(
+            df_mlb_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
+            .mean().reset_index()
+            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
+        )
+    else:
+        st.warning("⚠️ MLB component breakdown skipped — SHARP_HIT_BOOL missing.")
+
+
