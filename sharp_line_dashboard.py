@@ -409,7 +409,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             return pd.DataFrame()
 
         try:
-            df_moves, df_audit = detect_sharp_moves(live, prev, label)
+            df_moves, df_audit = detect_sharp_moves(live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS)
 
             # ✅ DEBUG INSIDE TRY
             st.write("🔍 DEBUG SHARP MOVES:", len(df_moves))
