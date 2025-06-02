@@ -229,6 +229,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     rows, sharp_audit_rows, rec_lines = [], [], []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
+    line_history_log = []  # ✅ New: to track all line data historically
+
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
@@ -257,6 +259,20 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
                     }
 
+                    # ✅ Historical line logging (every book, every line)
+                    line_history_log.append({
+                        'Snapshot_Time': snapshot_time,
+                        'Game': game_name,
+                        'Event_Date': event_date,
+                        'Market': mtype,
+                        'Outcome': label,
+                        'Book': book_key,
+                        'Bookmaker': book['title'],
+                        'Value': val,
+                        'Limit': limit,
+                        'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown')
+                    })
+
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'] == book_key:
@@ -275,6 +291,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     elif book_key in REC_BOOKS:
                         rec_lines.append(entry)
 
+    # === Scoring logic for sharp book signals
     for (game_name, mtype), label_map in sharp_limit_map.items():
         scores = {}
         label_signals = {}
@@ -307,6 +324,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             sharp_side_flags[(game_name, mtype, best_label)] = 1
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
+    # === Attach sharp scoring and edge detection
     for rec in rec_lines:
         rec_label = normalize_label(rec['Outcome'])
         market_type = rec['Market']
@@ -322,7 +340,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         metrics = sharp_metrics_map.get(rec_key, {})
         row = rec.copy()
         row.update({
-            'Ref Sharp Value': sharp['Value'],
+            'Ref Sharp Value': sharp['Value'],'Ref Sharp Old Value': sharp.get('Old Value'),
             'Delta vs Sharp': rec['Value'] - sharp['Value'] if sharp and rec['Value'] is not None and sharp['Value'] is not None else None,
             'SHARP_SIDE_TO_BET': 1,
             'SharpBetScore': round(
@@ -337,10 +355,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0)
         })
         rows.append(row)
-         
+
+    # === Final output
     df = pd.DataFrame(rows)
+    df_history = pd.DataFrame(line_history_log)  # ✅ All historical lines
+
     if df.empty:
-        return df, pd.DataFrame()
+        return df, df_history
 
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
@@ -354,9 +375,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
 
     print(f"✅ Final sharp-backed rows: {len(df)}")
-    return df, pd.DataFrame()
-
-
+    return df, df_history
 
 
 
@@ -488,7 +507,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             # === Display columns
             display_cols = [
                 'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
-                'Value', 'Ref Sharp Value', 'LineMove',
+                'Value','Old Value', 'Ref Sharp Value','Ref Sharp Old Value',  'LineMove',
                 'Delta vs Sharp', 'Limit', 'SharpAlignment', 'SHARP_REASON', 'SharpBetScore'
             ]
             safe_cols = [col for col in display_cols if col in df_display.columns]
