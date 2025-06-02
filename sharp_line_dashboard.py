@@ -577,23 +577,23 @@ def render_scanner_tab(label, sport_key, container, drive):
                     if col in sharp_books:
                         styles[col] = 'background-color: #d0f0c0'
                 return styles
+           st.dataframe(
+                df_combined_display.style.apply(highlight_sharp_columns, axis=None),
+                use_container_width=True
+            )
 
-
+        # === Automatically backtest sharp picks (no button)
         # === Automatically backtest sharp picks (no button)
         df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
 
         if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
             st.subheader(f"📊 Backtest Results – {label}")
             st.dataframe(
-                df_combined_display.style.apply(highlight_sharp_columns, axis=None),
-                use_container_width=True
+                df_bt[['Event_Date', 'Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
+                       'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
             )
-
+        else:
             st.warning("⚠️ No results available for backtest yet.")
-           
-
-        
-        return df_moves
 
 
 
