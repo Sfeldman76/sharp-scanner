@@ -9,7 +9,7 @@ from streamlit_autorefresh import st_autorefresh
 from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-
+from io import StringIO
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
@@ -27,7 +27,7 @@ BOOKMAKER_REGIONS = {
 
 MARKETS = ['spreads', 'totals', 'h2h']
 LOG_FOLDER = "/tmp/sharp_logs"
-SNAPSHOT_DIR = "/tmp/sharp_snapshots"
+
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 
 
@@ -54,22 +54,6 @@ def init_gdrive():
 def get_snapshot(data):
     return {g['id']: g for g in data}
 
-def save_snapshot(sport_key, snapshot):
-    path = os.path.join(SNAPSHOT_DIR, f"{sport_key}_snapshot.pkl")
-    with open(path, "wb") as f:
-        pickle.dump(snapshot, f)
-
-def load_snapshot(sport_key):
-    path = os.path.join(SNAPSHOT_DIR, f"{sport_key}_snapshot.pkl")
-    if os.path.exists(path):
-        try:
-            with open(path, "rb") as f:
-                data = pickle.load(f)
-                if isinstance(data, dict):
-                    return data
-        except Exception as e:
-            st.error(f"❌ Failed to load snapshot: {e}")
-    return {}  # return empty dict safely
 
 
 def implied_prob(odds):
@@ -102,6 +86,94 @@ def fetch_live_odds(sport_key):
 
         return []
 
+
+
+def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
+    try:
+        # Try to find the file on Drive
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+
+        if file_list:
+            print(f"📂 Found existing {filename} on Drive.")
+            file_drive = file_list[0]
+            existing_data = StringIO(file_drive.GetContentString())
+            df_existing = pd.read_csv(existing_data)
+            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+        else:
+            print(f"📄 {filename} does not exist on Drive. Creating new one.")
+            df_combined = df_new
+        df_combined.drop_duplicates(
+            subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
+            keep='last',
+            inplace=True
+        )
+
+        # Write combined data to string
+        csv_buffer = StringIO()
+        df_combined.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+
+        # Save/upload to Drive
+        file_drive = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
+        file_drive.SetContentString(csv_buffer.getvalue())
+        file_drive.Upload()
+        print(f"✅ Master CSV updated: {filename}")
+    except Exception as e:
+        print(f"❌ Error updating master CSV: {e}")
+
+def load_master_sharp_moves(drive, filename="sharp_moves_master.csv"):
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{FOLDER_ID}' in parents and trashed=false"
+        }).GetList()
+        if not file_list:
+            print("⚠️ No master file found.")
+            return pd.DataFrame()
+
+        file_drive = file_list[0]
+        csv_buffer = StringIO(file_drive.GetContentString())
+        return pd.read_csv(csv_buffer)
+    except Exception as e:
+        print(f"❌ Failed to load master file: {e}")
+        return pd.DataFrame()
+
+def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
+    from io import StringIO
+    import json
+
+    filename = f"{sport_key}_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    buffer = StringIO()
+    json.dump(snapshot, buffer)
+    buffer.seek(0)
+
+    try:
+        file_drive = drive.CreateFile({'title': filename, 'parents': [{'id': folder_id}]})
+        file_drive.SetContentString(buffer.getvalue())
+        file_drive.Upload()
+        print(f"✅ Snapshot uploaded to Google Drive: {filename}")
+    except Exception as e:
+        print(f"❌ Failed to upload snapshot: {e}")
+
+
+        
+def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
+    try:
+        file_list = drive.ListFile({
+            'q': f"title contains '{sport_key}_snapshot_' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+
+        if not file_list:
+            print(f"⚠️ No previous snapshot found for {sport_key}")
+            return {}
+
+        latest_file = sorted(file_list, key=lambda f: f['title'], reverse=True)[0]
+        content = latest_file.GetContentString()
+        return json.loads(content)
+    except Exception as e:
+        print(f"❌ Failed to load snapshot from Drive: {e}")
+        return {}
 
 def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key='3879659fe861d68dfa2866c211294684'):
     print(f"🔁 Fetching scores for {sport_key} (last {days_back} days)...")
@@ -455,7 +527,7 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
 
 def render_scanner_tab(label, sport_key, container, drive):
     with container:
-        df_bt = pd.DataFrame()
+        
         df_moves = pd.DataFrame()
 
         live = fetch_live_odds(sport_key)
@@ -472,27 +544,17 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         try:
             df_moves, df_audit = detect_sharp_moves(live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS)
+            if not df_moves.empty:
+                df_moves['Sport'] = label
+                append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+
         except Exception as e:
             st.error(f"❌ Error in detect_sharp_moves: {e}")
             return pd.DataFrame()
 
-        save_snapshot(sport_key, get_snapshot(live))
+        upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-        if not df_moves.empty:
-            df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
-
-            # ✅ SAFETY CHECK: Avoid KeyError
-            if 'SHARP_HIT_BOOL' not in df_bt.columns:
-                st.warning(f"⚠️ No backtested results found for {label}. Check score availability or formatting.")
-            else:
-                st.subheader(f"📊 Backtest Results – {label}")
-                st.dataframe(
-                    df_bt[['Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
-                           'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
-                )
-
-  
-     
+    
 
         # === Show sharp moves first
         if df_moves is None or df_moves.empty:
@@ -544,7 +606,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             else:
                 st.warning(f"⚠️ No sharp edges match your filters for {label}.")
 
-            log_rec_snapshot(df_moves, sport_key, drive)
+            prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
 
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
@@ -638,45 +700,46 @@ tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 
+
+
 # === Upload NBA sharp moves to Google Drive (no local save)
 if df_nba is not None and not df_nba.empty:
-    try:
-        nba_file_name = f"NBA_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        csv_buffer = StringIO()
-        df_nba.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
+    df_nba['Sport'] = 'NBA'
+    append_to_master_csv_on_drive(df_nba, "sharp_moves_master.csv", drive, FOLDER_ID)
 
-        if drive:
-            file_drive = drive.CreateFile({'title': nba_file_name, "parents": [{"id": FOLDER_ID}]})
-            file_drive.SetContentString(csv_buffer.getvalue())
-            file_drive.Upload()
-            print(f"☁️ NBA sharp moves uploaded directly to Google Drive: {nba_file_name}")
-    except Exception as e:
-        print(f"❌ Error uploading NBA sharp moves to Drive: {e}")
-else:
-    print("⚠️ NBA dataframe is empty or None — not uploading.")
+
+
 
 # === Upload MLB sharp moves to Google Drive (no local save)
 if df_mlb is not None and not df_mlb.empty:
-    try:
-        mlb_file_name = f"MLB_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        csv_buffer = StringIO()
-        df_mlb.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
+    df_mlb['Sport'] = 'MLB'
+    append_to_master_csv_on_drive(df_mlb, "sharp_moves_master.csv", drive, FOLDER_ID)
 
-        if drive:
-            file_drive = drive.CreateFile({'title': mlb_file_name, "parents": [{"id": FOLDER_ID}]})
-            file_drive.SetContentString(csv_buffer.getvalue())
-            file_drive.Upload()
-            print(f"☁️ MLB sharp moves uploaded directly to Google Drive: {mlb_file_name}")
-    except Exception as e:
-        print(f"❌ Error uploading MLB sharp moves to Drive: {e}")
+df_master = load_master_sharp_moves(drive)
+
+if df_master.empty:
+    st.warning("⚠️ No historical sharp picks found in Google Drive yet. Make a scan to begin logging.")
 else:
-    print("⚠️ MLB dataframe is empty or None — not uploading.")
+    # Proceed with backtest and component summaries
+    df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
+    df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
+
+    # === NBA summaries
+    if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
+        ...
+    else:
+        st.warning("⚠️ No NBA backtest results available yet.")
+
+    # === MLB summaries
+    if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
+        ...
+    else:
+        st.warning("⚠️ No MLB backtest results available yet.")
+
 
 # Backtest and show performance
 if df_nba is not None and not df_nba.empty:
-    df_nba_bt = fetch_scores_and_backtest(df_nba, sport_key='basketball_nba')
+    df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
 
     if 'SHARP_HIT_BOOL' in df_nba_bt.columns:
         df_nba_bt['SharpConfidenceTier'] = pd.cut(
@@ -697,7 +760,7 @@ if df_nba is not None and not df_nba.empty:
         st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
 
 if df_mlb is not None and not df_mlb.empty:
-    df_mlb_bt = fetch_scores_and_backtest(df_mlb, sport_key='baseball_mlb')
+    df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
 
     if 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
         df_mlb_bt['SharpConfidenceTier'] = pd.cut(
@@ -749,5 +812,4 @@ if df_mlb_bt is not None and not df_mlb_bt.empty:
         )
     else:
         st.warning("⚠️ MLB component breakdown skipped — SHARP_HIT_BOOL missing.")
-
 
