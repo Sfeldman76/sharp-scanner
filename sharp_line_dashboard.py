@@ -152,7 +152,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df = df_moves.merge(df_results, on='Game', how='left')
 
     # === Refactored cover logic
-   def calc_cover(row):
+def calc_cover(row):
     team = str(row['Outcome']).strip().lower()
     home = str(row['Home_Team']).strip().lower()
     away = str(row['Away_Team']).strip().lower()
