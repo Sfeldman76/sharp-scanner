@@ -345,6 +345,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, pd.DataFrame()
+st.write("🔍 DEBUG SHARP MOVES:", len(df_moves))
+if not df_moves.empty:
+    st.dataframe(df_moves[['Game', 'Market', 'Outcome', 'Value', 'Ref Sharp Value', 'SharpBetScore']])
+
+
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
