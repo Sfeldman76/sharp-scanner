@@ -542,20 +542,23 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_odds_raw = pd.DataFrame(raw_odds_table)
 
         if not df_odds_raw.empty:
-            st.subheader(f"📋 Live Odds Snapshot – {label}")
+            st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
 
-            # Pivot values and limits
-            # Build formatted odds + limit table
+            # Format odds and limit into a single string with 1 decimal for odds
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-                lambda r: f"{r['Value']} ({int(r['Limit'])})" if pd.notnull(r['Value']) else "", axis=1
+                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Value']) else "", axis=1
             )
 
+            # Pivot to show books as columns with odds + limit
             df_combined_display = df_odds_raw.pivot_table(
-               index=["Event_Date", "Game", "Market", "Outcome"],
+                index=["Event_Date", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
+
+            st.dataframe(df_combined_display, use_container_width=True)
+
 
 
             # Highlight best value per row (min for spreads/h2h, max for totals)
