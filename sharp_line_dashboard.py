@@ -152,11 +152,17 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     # Merge with detected sharp moves
     df = df_moves.merge(df_results, on='Game', how='left')
+    df = df.rename(columns={
+        'Home': 'Home_Team',
+        'Away': 'Away_Team',
+        'Home_Score': 'Home_Score',
+        'Away_Score': 'Away_Score'
+    })
 
     def calc_cover(row):
         team = row['Outcome'].strip().lower()
-        home = row['Home'].strip().lower()
-        away = row['Away'].strip().lower()
+        home = row['Home_Team'].strip().lower()
+        away = row['Away_Team'].strip().lower()
         hscore = row['Home_Score']
         ascore = row['Away_Score']
         mkt = row['Market'].strip().lower()
