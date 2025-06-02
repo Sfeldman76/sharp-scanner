@@ -314,6 +314,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         row = rec.copy()
         row.update({
             'Ref Sharp Value': sharp['Value'],
+            'Delta vs Sharp': delta,
             'SHARP_SIDE_TO_BET': 1,
             'SharpBetScore': round(
                 2.0 * metrics.get('Sharp_Move_Signal', 0) +
