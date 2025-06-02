@@ -398,9 +398,9 @@ def render_scanner_tab(label, sport_key, container, drive):
         live = fetch_live_odds(sport_key)
         prev = load_snapshot(sport_key)
         if not prev:
-            st.info("🟡 First run detected — saving current odds as initial snapshot.")
+            st.info("🟡 First run detected — saving snapshot and skipping detection.")
             save_snapshot(sport_key, get_snapshot(live))
-            prev = get_snapshot(live)  # use current odds for now to avoid empty comparisons
+            return pd.DataFrame()  # skip sharp detection completely
 
         if not live or not isinstance(live, list) or len(live) == 0:
             st.warning(f"⚠️ No live odds returned for {label}.")
