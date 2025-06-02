@@ -10,6 +10,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
+
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
 SPORTS = {"NBA": "basketball_nba", "MLB": "baseball_mlb"}
@@ -101,7 +102,105 @@ def fetch_live_odds(sport_key):
         return r.json()
     except Exception as e:
         st.error(f"❌ Odds API Error: {e}")
+
         return []
+
+
+
+
+
+def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key='3879659fe861d68dfa2866c211294684'):
+    print(f"🔁 Fetching scores for {sport_key} (last {days_back} days)...")
+    
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
+    params = {
+        'daysFrom': days_back,
+        'apiKey': api_key
+    }
+
+    try:
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        score_data = response.json()
+    except Exception as e:
+        print(f"❌ Failed to fetch scores: {e}")
+        return df_moves.copy()
+
+    # Build results table
+    result_rows = []
+    for game in score_data:
+        if not game.get("completed"):
+            continue
+        home = game.get("home_team")
+        away = game.get("away_team")
+        scores = game.get("scores", [])
+        team_scores = {s["name"]: s["score"] for s in scores if "name" in s and "score" in s}
+        
+        if home not in team_scores or away not in team_scores:
+            continue
+        
+        game_name = f"{home} vs {away}"
+        result_rows.append({
+            'Game': game_name,
+            'Home': home,
+            'Away': away,
+            'Home_Score': team_scores[home],
+            'Away_Score': team_scores[away]
+        })
+
+    df_results = pd.DataFrame(result_rows)
+    if df_results.empty:
+        print("⚠️ No completed games found.")
+        return df_moves.copy()
+
+    # Merge with detected sharp moves
+    df = df_moves.merge(df_results, on='Game', how='left')
+
+    def calc_cover(row):
+        team = row['Outcome'].lower()
+        mkt = row['Market']
+        hscore = row['Home_Score']
+        ascore = row['Away_Score']
+        if pd.isna(hscore) or pd.isna(ascore):
+            return None, None
+
+        team_score = hscore if team in row['Home'].lower() else ascore
+        opp_score = ascore if team in row['Home'].lower() else hscore
+        margin = team_score - opp_score
+
+        # === Determine cover result
+        if mkt == 'h2h':
+            hit = int(team_score > opp_score)
+            return 'Win' if hit else 'Loss', hit
+        elif mkt == 'spreads':
+            spread = row.get('Ref Sharp Value')
+            if spread is None:
+                return None, None
+            if spread < 0:  # favorite
+                hit = int(margin > abs(spread))
+            else:  # underdog
+                hit = int(margin + spread > 0)
+            return 'Win' if hit else 'Loss', hit
+        elif mkt == 'totals':
+            total = row.get('Ref Sharp Value')
+            if total is None:
+                return None, None
+            total_points = hscore + ascore
+            if 'under' in row['Outcome'].lower():
+                hit = int(total_points < total)
+            elif 'over' in row['Outcome'].lower():
+                hit = int(total_points > total)
+            else:
+                return None, None
+            return 'Win' if hit else 'Loss', hit
+        return None, None
+
+    # Apply backtest
+    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
+
+    print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
+    return df
+    
 def detect_sharp_moves(current, previous, sport_key):
     from collections import defaultdict
 
@@ -157,50 +256,75 @@ def detect_sharp_moves(current, previous, sport_key):
 
         # === Determine sharp side based on movement + limit + time
         sharp_side_flags = {}
+        sharp_audit_rows = []
 
-        for (game_name, market_type), label_map in sharp_limit_map.items():
-            label_scores = {}
+            for (game_name, market_type), label_map in sharp_limit_map.items():
+                label_scores = {}
+                move_signals_dict = {}
+                limit_jumps_dict = {}
+                prob_shifts_dict = {}
+                time_scores_dict = {}
 
-            for label, entries in label_map.items():
-                score_total = 0
-                move_signal = 0
-                limit_jump = 0
-                prob_shift_signal = 0
-                time_score = 0
+                for label, entries in label_map.items():
+                    move_signal = 0
+                    limit_jump = 0
+                    prob_shift_signal = 0
+                    time_score = 0
 
-                for limit, current_val, old_val in entries:
-                    if old_val is not None and current_val is not None:
-                        if market_type == "totals":
-                            if "under" in label and current_val < old_val:
-                                move_signal += 1
-                            elif "over" in label and current_val > old_val:
-                                move_signal += 1
-                        elif market_type == "spreads":
-                            if abs(current_val) > abs(old_val):
-                                move_signal += 1
-                        elif market_type == "h2h":
-                            imp_now = implied_prob(current_val)
-                            imp_old = implied_prob(old_val)
-                            if imp_now and imp_old and imp_now > imp_old:
-                                prob_shift_signal += 1
+                    for limit, current_val, old_val in entries:
+                        if old_val is not None and current_val is not None:
+                            if market_type == "totals":
+                                if "under" in label and current_val < old_val:
+                                    move_signal += 1
+                                elif "over" in label and current_val > old_val:
+                                    move_signal += 1
+                            elif market_type == "spreads":
+                                if abs(current_val) > abs(old_val):
+                                    move_signal += 1
+                            elif market_type == "h2h":
+                                imp_now = implied_prob(current_val)
+                                imp_old = implied_prob(old_val)
+                                if imp_now and imp_old and imp_now > imp_old:
+                                    prob_shift_signal += 1
 
-                    if limit and limit >= 5000:
-                        limit_jump += 1
+                        if limit and limit >= 5000:
+                            limit_jump += 1
 
-                    hour = datetime.now().hour
-                    time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
+                        hour = datetime.now().hour
+                        time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
 
-                score = (
-                    2.0 * move_signal +
-                    2.0 * limit_jump +
-                    1.5 * time_score +
-                    1.0 * prob_shift_signal
-                )
-                label_scores[label] = score
+                    score = (
+                        2.0 * move_signal +
+                        2.0 * limit_jump +
+                        1.5 * time_score +
+                        1.0 * prob_shift_signal
+                    )
 
-            if label_scores:
-                best_label = max(label_scores, key=label_scores.get)
-                sharp_side_flags[(game_name, market_type, best_label)] = 1
+                    label_scores[label] = score
+                    move_signals_dict[label] = move_signal
+                    limit_jumps_dict[label] = limit_jump
+                    prob_shifts_dict[label] = prob_shift_signal
+                    time_scores_dict[label] = round(time_score, 2)
+
+                if label_scores:
+                    best_label = max(label_scores, key=label_scores.get)
+                    sharp_side_flags[(game_name, market_type, best_label)] = 1
+
+                    # === Log audit for all candidates
+                    for label in label_scores:
+                        sharp_audit_rows.append({
+                            'Game': game_name,
+                            'Market': market_type,
+                            'Outcome': label,
+                            'Sharp_Score': round(label_scores[label], 2),
+                            'Selected': label == best_label,
+                            'Move_Signal': move_signals_dict[label],
+                            'Limit_Jump': limit_jumps_dict[label],
+                            'Time_Score': time_scores_dict[label],
+                            'Prob_Shift': prob_shifts_dict[label],
+                            'Reason': f"{move_signals_dict[label]}x move, {limit_jumps_dict[label]}x limit, {time_scores_dict[label]}x time, {prob_shifts_dict[label]}x prob"
+                        })
+
 
         # === Evaluate rec books against sharp side
         for rec in rec_lines:
@@ -275,8 +399,17 @@ def detect_sharp_moves(current, previous, sport_key):
                 'Limit': sharp.get('Limit') if sharp and sharp.get('Limit') is not None else 0,
                 'SHARP_SIDE_TO_BET': is_sharp_side,
                 'SharpAlignment': alignment,
-                'SHARP_REASON': "📈 Sharp side backed by movement, limit, and timing"
-            })
+                'SHARP_REASON': "📈 Sharp side backed by movement, limit, and timing",
+                'Sharp_Move_Signal': move_signal,
+                'Sharp_Limit_Jump': limit_jump,
+                'Sharp_Time_Score': time_score,
+                'Sharp_Prob_Shift': prob_shift_signal,
+                'SharpBetScore': round(
+                    2.0 * move_signal +
+                    2.0 * limit_jump +
+                    1.5 * time_score +
+                    1.0 * prob_shift_signal, 2
+                        })
 
             rows.append(row)
 
@@ -322,7 +455,10 @@ def detect_sharp_moves(current, previous, sport_key):
     df['SharpConfidenceTier'] = df['SmartSharpScore'].apply(assign_confidence_tier)
 
     print("✅ Final sharp-backed rows:", len(df))
-    return df
+
+    df_audit = pd.DataFrame(sharp_audit_rows)
+    return df, df_audit
+
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
@@ -331,7 +467,44 @@ drive = init_gdrive()
 st.title("📊 Sharp Edge Scanner")
 auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"], index=0)
 if auto_mode == "Auto Refresh":
-    st_autorefresh(interval=120000, key="autorefresh")
+    st_autorefresh(interval=220000, key="autorefresh")
+
+def log_rec_snapshot(df_moves, sport_key):
+    now = datetime.now().strftime("%Y%m%d_%H%M")
+    path = f"/tmp/rec_snapshots/{sport_key}_snapshot_{now}.csv"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    df_snapshot = df_moves[
+        ['Game', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Time']
+    ].copy()
+    df_snapshot.to_csv(path, index=False)
+    print(f"📦 Snapshot saved to: {path}")
+
+def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", minutes=30):
+    import glob
+    from datetime import timedelta
+
+    files = sorted(glob.glob(os.path.join(snapshot_dir, "*.csv")))
+    drift_rows = []
+
+    for f in files:
+        df = pd.read_csv(f)
+        df = df[df['Game'] == game_key]
+        df = df[df['Outcome'].str.lower() == outcome_key.lower()]
+
+        if df.empty:
+            continue
+
+        for _, row in df.iterrows():
+            drift_rows.append({
+                'Snapshot_Time': f.split('_')[-1].replace('.csv', ''),
+                'Value': row['Value'],
+                'Bookmaker': row['Bookmaker'],
+                'Market': row['Market']
+            })
+
+    return pd.DataFrame(drift_rows).sort_values(by='Snapshot_Time')
+
 
 def render_scanner_tab(label, sport_key, container, drive):
     with container:
@@ -343,7 +516,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             return
 
         # === Process sharp moves
-        df_moves = detect_sharp_moves(live, prev, label)
+        df_moves, df_audit = detect_sharp_moves(live, prev, label)
+
         save_snapshot(sport_key, get_snapshot(live))  # persist new snapshot
 
         print(f"📊 {label} rows returned:", len(df_moves) if df_moves is not None else "None")
@@ -355,10 +529,13 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.subheader("🚨 Detected Sharp Moves")
 
             # === Filters
-           
             region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()), key=f"{label}_region")
             market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()), key=f"{label}_market")
-            alignment_filter = st.selectbox("🧭 Sharp Alignment Filter", ["All", "✅ Aligned with sharps", "🚨 Edge vs sharps"], key=f"{label}_alignment")
+            alignment_filter = st.selectbox(
+                "🧭 Sharp Alignment Filter",
+                ["All", "🚨 Edge (better than sharps)", "✅ Matched with sharps", "⚠️ Worse than sharps"],
+                key=f"{label}_alignment"
+            )
 
             if region != "All":
                 df_display = df_display[df_display['Region'] == region]
@@ -375,18 +552,16 @@ def render_scanner_tab(label, sport_key, container, drive):
                 'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SharpAlignment', 'SHARP_REASON'
             ] if col in available_cols]
 
-
             print("🧪 Displaying columns:", safe_cols)
 
-            # === Display logic
             if not df_display.empty:
                 def highlight_edge(row):
                     if row.get('SharpAlignment') == "🚨 Edge (better than sharps)":
-                        return ['background-color: #d4edda; color: black'] * len(row)  # green
+                        return ['background-color: #d4edda; color: black'] * len(row)
                     elif row.get('SharpAlignment') == "⚠️ Worse than sharps":
-                        return ['background-color: #ffcccc; color: black'] * len(row)  # red
+                        return ['background-color: #ffcccc; color: black'] * len(row)
                     elif row.get('SharpAlignment') == "✅ Matched with sharps":
-                        return ['background-color: #fff3cd; color: black'] * len(row)  # yellow
+                        return ['background-color: #fff3cd; color: black'] * len(row)
                     else:
                         return ['background-color: white; color: black'] * len(row)
 
@@ -397,6 +572,21 @@ def render_scanner_tab(label, sport_key, container, drive):
                 fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                 csv_path = os.path.join(LOG_FOLDER, fname)
                 df_display[safe_cols].to_csv(csv_path, index=False)
+
+                audit_fname = f"{label}_sharp_audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                audit_path = os.path.join(LOG_FOLDER, audit_fname)
+                df_audit.to_csv(audit_path, index=False)
+
+                try:
+                    gfile_audit = drive.CreateFile({
+                        'title': audit_fname,
+                        'parents': [{'id': FOLDER_ID}]
+                    })
+                    gfile_audit.SetContentFile(audit_path)
+                    gfile_audit.Upload()
+                    st.success(f"📄 Sharp audit uploaded: {audit_fname}")
+                except Exception as e:
+                    st.error(f"❌ Audit upload failed: {e}")
 
                 try:
                     gfile = drive.CreateFile({
@@ -409,10 +599,22 @@ def render_scanner_tab(label, sport_key, container, drive):
                     st.caption(f"📁 [Sharp Logs Folder](https://drive.google.com/drive/folders/{FOLDER_ID})")
                 except Exception as e:
                     st.error(f"❌ Google Drive Upload Failed: {e}")
-            else:
-                st.info(f"⚠️ No results match the selected filters.")
         else:
             st.info(f"⚠️ No sharp moves detected for {label}.")
+
+        # === Drift Viewer ===
+        with st.expander("🔍 Drift Tracker (Rec Book Lag)"):
+            if not df_moves.empty:
+                game_opts = sorted(df_moves['Game'].unique())
+                selected_game = st.selectbox("Select game", game_opts, key=f"{label}_drift_game")
+                selected_outcome = st.selectbox(
+                    "Select outcome", 
+                    sorted(df_moves[df_moves['Game'] == selected_game]['Outcome'].unique()),
+                    key=f"{label}_drift_outcome"
+                )
+                if st.button("Show Drift", key=f"{label}_drift_btn"):
+                    drift_df = track_rec_drift(selected_game, selected_outcome)
+                    st.dataframe(drift_df)
 
         # === Current Odds View
         st.subheader("📋 Current Odds")
@@ -420,11 +622,10 @@ def render_scanner_tab(label, sport_key, container, drive):
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
             event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if "commence_time" in game else ""
-
             for book in game.get('bookmakers', []):
                 for market in book.get('markets', []):
                     for o in market.get('outcomes', []):
-                        val = o.get('point') if market['key'] != 'h2h' else o.get('price')               
+                        val = o.get('point') if market['key'] != 'h2h' else o.get('price')
                         odds.append({
                             'Event_Date': event_date,
                             'Game': game_name,
@@ -433,7 +634,6 @@ def render_scanner_tab(label, sport_key, container, drive):
                             'Bookmaker': book['title'],
                             'Value': val
                         })
-
         df_odds = pd.DataFrame(odds)
         if not df_odds.empty:
             pivot = df_odds.pivot_table(index=['Event_Date','Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
@@ -444,7 +644,221 @@ def render_scanner_tab(label, sport_key, container, drive):
             if st.button(f"🔄 Refresh {label}"):
                 st.rerun()
 
+        # === Save rec snapshot for drift tracking
+        log_rec_snapshot(df_moves, sport_key)
+
+    return df_moves
+
+
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
-render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
-render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
+
+# Get sharp edges
+df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
+df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
+
+# Backtest and show performance
+if df_nba is not None and not df_nba.empty:
+    df_nba_bt = fetch_scores_and_backtest(df_nba, sport_key='basketball_nba')
+    st.subheader("📊 NBA Sharp Signal Performance")
+    st.dataframe(
+        df_nba_bt.groupby('SharpConfidenceTier').agg(
+            Total_Picks=('SHARP_HIT_BOOL', 'count'),
+            Hits=('SHARP_HIT_BOOL', 'sum'),
+            Win_Rate=('SHARP_HIT_BOOL', 'mean')
+        ).round(3).reset_index()
+    )
+
+if df_mlb is not None and not df_mlb.empty:
+    df_mlb_bt = fetch_scores_and_backtest(df_mlb, sport_key='baseball_mlb')
+    st.subheader("📊 MLB Sharp Signal Performance")
+    st.dataframe(
+        df_mlb_bt.groupby('SharpConfidenceTier').agg(
+            Total_Picks=('SHARP_HIT_BOOL', 'count'),
+            Hits=('SHARP_HIT_BOOL', 'sum'),
+            Win_Rate=('SHARP_HIT_BOOL', 'mean')
+        ).round(3).reset_index()
+    )
+def render_scanner_tab(label, sport_key, container, drive):
+    with container:
+        live = fetch_live_odds(sport_key)
+        prev = load_snapshot(sport_key)
+
+        if not live:
+            st.warning(f"No odds returned for {label}.")
+            return
+
+        # === Process sharp moves
+        df_moves, df_audit = detect_sharp_moves(live, prev, label)
+
+        save_snapshot(sport_key, get_snapshot(live))  # persist new snapshot
+
+        print(f"📊 {label} rows returned:", len(df_moves) if df_moves is not None else "None")
+
+        if df_moves is not None and not df_moves.empty:
+            df_display = df_moves.sort_values(by='SmartSharpScore', ascending=False)
+            df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
+
+            st.subheader("🚨 Detected Sharp Moves")
+
+            # === Filters
+            region = st.selectbox(f"🌍 Filter {label} by Region", ["All"] + sorted(df_display['Region'].unique()), key=f"{label}_region")
+            market = st.selectbox(f"📊 Filter {label} by Market", ["All"] + sorted(df_display['Market'].unique()), key=f"{label}_market")
+            alignment_filter = st.selectbox(
+                "🧭 Sharp Alignment Filter",
+                ["All", "🚨 Edge (better than sharps)", "✅ Matched with sharps", "⚠️ Worse than sharps"],
+                key=f"{label}_alignment"
+            )
+
+            if region != "All":
+                df_display = df_display[df_display['Region'] == region]
+            if market != "All":
+                df_display = df_display[df_display['Market'] == market]
+            if alignment_filter != "All" and 'SharpAlignment' in df_display.columns:
+                df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
+
+            # === Final displayed columns (safe fallback)
+            available_cols = df_display.columns.tolist()
+            safe_cols = [col for col in [
+                'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
+                'Value', 'Ref Sharp Value', 'LineMove',
+                'Delta vs Sharp', 'Limit', 'SharpConfidenceTier', 'SharpAlignment', 'SHARP_REASON'
+            ] if col in available_cols]
+
+            print("🧪 Displaying columns:", safe_cols)
+
+            if not df_display.empty:
+                def highlight_edge(row):
+                    if row.get('SharpAlignment') == "🚨 Edge (better than sharps)":
+                        return ['background-color: #d4edda; color: black'] * len(row)
+                    elif row.get('SharpAlignment') == "⚠️ Worse than sharps":
+                        return ['background-color: #ffcccc; color: black'] * len(row)
+                    elif row.get('SharpAlignment') == "✅ Matched with sharps":
+                        return ['background-color: #fff3cd; color: black'] * len(row)
+                    else:
+                        return ['background-color: white; color: black'] * len(row)
+
+                styled_df = df_display[safe_cols].style.apply(highlight_edge, axis=1)
+                st.dataframe(styled_df, use_container_width=True)
+
+                # === Save + Upload CSV
+                fname = f"{label}_sharp_moves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                csv_path = os.path.join(LOG_FOLDER, fname)
+                df_display[safe_cols].to_csv(csv_path, index=False)
+
+                audit_fname = f"{label}_sharp_audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                audit_path = os.path.join(LOG_FOLDER, audit_fname)
+                df_audit.to_csv(audit_path, index=False)
+
+                try:
+                    gfile_audit = drive.CreateFile({
+                        'title': audit_fname,
+                        'parents': [{'id': FOLDER_ID}]
+                    })
+                    gfile_audit.SetContentFile(audit_path)
+                    gfile_audit.Upload()
+                    st.success(f"📄 Sharp audit uploaded: {audit_fname}")
+                except Exception as e:
+                    st.error(f"❌ Audit upload failed: {e}")
+
+                try:
+                    gfile = drive.CreateFile({
+                        'title': fname,
+                        'parents': [{'id': FOLDER_ID}]
+                    })
+                    gfile.SetContentFile(csv_path)
+                    gfile.Upload()
+                    st.success(f"✅ Uploaded to Google Drive: {fname}")
+                    st.caption(f"📁 [Sharp Logs Folder](https://drive.google.com/drive/folders/{FOLDER_ID})")
+                except Exception as e:
+                    st.error(f"❌ Google Drive Upload Failed: {e}")
+        else:
+            st.info(f"⚠️ No sharp moves detected for {label}.")
+
+        # === Drift Viewer ===
+        with st.expander("🔍 Drift Tracker (Rec Book Lag)"):
+            if not df_moves.empty:
+                game_opts = sorted(df_moves['Game'].unique())
+                selected_game = st.selectbox("Select game", game_opts, key=f"{label}_drift_game")
+                selected_outcome = st.selectbox(
+                    "Select outcome", 
+                    sorted(df_moves[df_moves['Game'] == selected_game]['Outcome'].unique()),
+                    key=f"{label}_drift_outcome"
+                )
+                if st.button("Show Drift", key=f"{label}_drift_btn"):
+                    drift_df = track_rec_drift(selected_game, selected_outcome)
+                    st.dataframe(drift_df)
+
+        # === Current Odds View
+        st.subheader("📋 Current Odds")
+        odds = []
+        for game in live:
+            game_name = f"{game['home_team']} vs {game['away_team']}"
+            event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if "commence_time" in game else ""
+            for book in game.get('bookmakers', []):
+                for market in book.get('markets', []):
+                    for o in market.get('outcomes', []):
+                        val = o.get('point') if market['key'] != 'h2h' else o.get('price')
+                        odds.append({
+                            'Event_Date': event_date,
+                            'Game': game_name,
+                            'Market': market['key'],
+                            'Outcome': o['name'],
+                            'Bookmaker': book['title'],
+                            'Value': val
+                        })
+        df_odds = pd.DataFrame(odds)
+        if not df_odds.empty:
+            pivot = df_odds.pivot_table(index=['Event_Date','Game', 'Market', 'Outcome'], columns='Bookmaker', values='Value')
+            st.dataframe(pivot.reset_index(), use_container_width=True)
+
+        # === Manual Refresh Button
+        if auto_mode == "Manual":
+            if st.button(f"🔄 Refresh {label}"):
+                st.rerun()
+
+        # === Save rec snapshot for drift tracking
+        log_rec_snapshot(df_moves, sport_key)
+
+    return df_moves
+
+
+
+tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
+
+# Get sharp edges
+df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
+df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
+
+# Backtest and show performance
+if df_nba is not None and not df_nba.empty:
+    df_nba_bt = fetch_scores_and_backtest(df_nba, sport_key='basketball_nba')
+    st.subheader("📊 NBA Sharp Signal Performance")
+    st.dataframe(
+        df_nba_bt.groupby('SharpConfidenceTier').agg(
+            Total_Picks=('SHARP_HIT_BOOL', 'count'),
+            Hits=('SHARP_HIT_BOOL', 'sum'),
+            Win_Rate=('SHARP_HIT_BOOL', 'mean')
+        ).round(3).reset_index()
+    )
+
+if df_mlb is not None and not df_mlb.empty:
+    df_mlb_bt = fetch_scores_and_backtest(df_mlb, sport_key='baseball_mlb')
+    st.subheader("📊 MLB Sharp Signal Performance")
+    st.dataframe(
+        df_mlb_bt.groupby('SharpConfidenceTier').agg(
+            Total_Picks=('SHARP_HIT_BOOL', 'count'),
+            Hits=('SHARP_HIT_BOOL', 'sum'),
+            Win_Rate=('SHARP_HIT_BOOL', 'mean')
+        ).round(3).reset_index()
+    )
+# 🧠 Sharp Signal Learning (Component Breakdown)
+if df_nba_bt is not None and not df_nba_bt.empty:
+    st.subheader("🧠 Sharp Component Learning – NBA")
+    st.dataframe(df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'}))
+    st.dataframe(df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'}))
+
+if df_mlb_bt is not None and not df_mlb_bt.empty:
+    st.subheader("🧠 Sharp Component Learning – MLB")
+    st.dataframe(df_mlb_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'}))
+    st.dataframe(df_mlb_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL'].mean().reset_index().rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'}))
