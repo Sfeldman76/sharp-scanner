@@ -405,7 +405,6 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning(f"⚠️ No live odds returned for {label}.")
             return pd.DataFrame()
 
-        # === Run Detection
         try:
             df_moves, df_audit = detect_sharp_moves(live, prev, label)
         except Exception as e:
@@ -414,27 +413,46 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         save_snapshot(sport_key, get_snapshot(live))
 
+        # === Always show raw odds snapshot
+        raw_odds_table = []
+        for game in live:
+            for book in game.get("bookmakers", []):
+                for market in book.get("markets", []):
+                    for outcome in market.get("outcomes", []):
+                        raw_odds_table.append({
+                            "Game": f"{game['home_team']} vs {game['away_team']}",
+                            "Bookmaker": book["title"],
+                            "Market": market["key"],
+                            "Outcome": outcome["name"],
+                            "Value": outcome.get("point") if market["key"] != "h2h" else outcome.get("price")
+                        })
+
+        df_odds_snapshot = pd.DataFrame(raw_odds_table)
+        st.subheader(f"📋 Live Odds Snapshot – {label}")
+        if not df_odds_snapshot.empty:
+            st.dataframe(df_odds_snapshot, use_container_width=True)
+        else:
+            st.warning("No raw odds to display.")
+
+        # === Sharp Moves Section
         if df_moves is None or df_moves.empty:
             st.info(f"⚠️ No sharp moves detected for {label}.")
-            return pd.DataFrame()
+            return df_moves
 
-        # === Safe fallback values
-        df_moves['SmartSharpScore'] = df_moves.get('SmartSharpScore', 0)
+        df_moves['SharpBetScore'] = df_moves.get('SharpBetScore', 0)
         df_moves['SharpAlignment'] = df_moves.get('SharpAlignment', "Unknown")
         df_moves['SHARP_REASON'] = df_moves.get('SHARP_REASON', "Reason not available")
         df_moves['Region'] = df_moves.get('Region', "unknown")
 
-        # === Display Table
         st.subheader(f"🚨 Detected Sharp Moves – {label}")
         try:
-            df_display = df_moves.sort_values(by='SmartSharpScore', ascending=False)
+            df_display = df_moves.sort_values(by='SharpBetScore', ascending=False)
         except Exception as e:
-            st.error(f"❌ Failed to sort by SmartSharpScore: {e}")
+            st.error(f"❌ Failed to sort by SharpBetScore: {e}")
             df_display = df_moves
 
         df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
 
-        # === Filters
         region_options = ["All"] + sorted(df_display['Region'].dropna().unique())
         region = st.selectbox(f"🌍 Filter {label} by Region", region_options, key=f"{label}_region_main")
         if region != "All":
@@ -442,30 +460,29 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         market_options = ["All"] + sorted(df_display['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_main")
+        if market != "All":
+            df_display = df_display[df_display['Market'] == market]
+
         alignment_filter = st.selectbox(
             f"🧭 Sharp Alignment Filter ({label})",
             ["All", "Sharp move, Rec books not reponded", "Aligned with Sharps", "❓ Unknown or Incomplete"],
             key=f"{label}_alignment_main"
         )
-        if market != "All":
-            df_display = df_display[df_display['Market'] == market]
         if alignment_filter != "All":
             df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
 
-        # === Display columns
         display_cols = [
             'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
             'Value', 'Ref Sharp Value', 'LineMove',
-            'Delta vs Sharp', 'Limit', 'SharpAlignment', 'SHARP_REASON'
+            'Delta vs Sharp', 'Limit', 'SharpAlignment', 'SHARP_REASON', 'SharpBetScore'
         ]
         safe_cols = [col for col in display_cols if col in df_display.columns]
 
         if not df_display.empty:
             st.dataframe(df_display[safe_cols], use_container_width=True)
         else:
-            st.warning(f"⚠️ No results to display after filtering for {label}.")
+            st.warning(f"⚠️ No sharp edges match your filters for {label}.")
 
-        # === Snapshot Logging
         log_rec_snapshot(df_moves, sport_key)
 
         return df_moves
@@ -476,10 +493,6 @@ tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 # Get sharp edges
 df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
-
-# === Defensive defaults
-df_nba_bt = None
-df_mlb_bt = None
 
 
 # Backtest and show performance
