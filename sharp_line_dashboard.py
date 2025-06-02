@@ -145,7 +145,12 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             'Away_Score': team_scores[away]
         })
 
-    df_results = pd.DataFrame(result_rows)
+  # Rename first to ensure keys survive merge without conflict
+    df_results = df_results.rename(columns={
+        'Home': 'Home_Team',
+        'Away': 'Away_Team'
+    })
+   
     if df_results.empty:
         print("⚠️ No completed games found.")
         return df_moves.copy()
