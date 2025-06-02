@@ -412,88 +412,124 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         try:
             df_moves, df_audit = detect_sharp_moves(live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS)
-
         except Exception as e:
             st.error(f"❌ Error in detect_sharp_moves: {e}")
             return pd.DataFrame()
 
         save_snapshot(sport_key, get_snapshot(live))
- 
 
-        # === Show raw odds snapshot (always)
-        raw_odds_table = []
-        for game in live:
-            for book in game.get("bookmakers", []):
-                for market in book.get("markets", []):
-                    for outcome in market.get("outcomes", []):
-                        raw_odds_table.append({
-                            "Game": f"{game['home_team']} vs {game['away_team']}",
-                            "Bookmaker": book["title"],
-                            "Market": market["key"],
-                            "Outcome": outcome["name"],
-                            "Value": outcome.get("point") if market["key"] != "h2h" else outcome.get("price")
-                        })
-
-        df_odds_snapshot = pd.DataFrame(raw_odds_table)
-        st.subheader(f"📋 Live Odds Snapshot – {label}")
-        if not df_odds_snapshot.empty:
-            st.dataframe(df_odds_snapshot, use_container_width=True)
-        else:
-            st.warning("No raw odds to display.")
-
-        # === Show sharp moves only if found
+        # === Show sharp moves first
         if df_moves is None or df_moves.empty:
             st.info(f"⚠️ No sharp moves detected for {label}.")
-            return df_moves
-
-        df_moves['SharpBetScore'] = df_moves.get('SharpBetScore', 0)
-        df_moves['SharpAlignment'] = df_moves.get('SharpAlignment', "Unknown")
-        df_moves['SHARP_REASON'] = df_moves.get('SHARP_REASON', "Reason not available")
-        df_moves['Region'] = df_moves.get('Region', "unknown")
-
-        st.subheader(f"🚨 Detected Sharp Moves – {label}")
-        try:
-            df_display = df_moves.sort_values(by='SharpBetScore', ascending=False)
-        except Exception as e:
-            st.error(f"❌ Failed to sort by SharpBetScore: {e}")
-            df_display = df_moves
-
-        df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
-
-        # === Filters
-        region_options = ["All"] + sorted(df_display['Region'].dropna().unique())
-        region = st.selectbox(f"🌍 Filter {label} by Region", region_options, key=f"{label}_region_main")
-        if region != "All":
-            df_display = df_display[df_display['Region'] == region]
-
-        market_options = ["All"] + sorted(df_display['Market'].dropna().unique())
-        market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_main")
-        if market != "All":
-            df_display = df_display[df_display['Market'] == market]
-
-        alignment_filter = st.selectbox(
-            f"🧭 Sharp Alignment Filter ({label})",
-            ["All", "Sharp move, Rec books not reponded", "Aligned with Sharps", "❓ Unknown or Incomplete"],
-            key=f"{label}_alignment_main"
-        )
-        if alignment_filter != "All":
-            df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
-
-        # === Display columns
-        display_cols = [
-            'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
-            'Value', 'Ref Sharp Value', 'LineMove',
-            'Delta vs Sharp', 'Limit', 'SharpAlignment', 'SHARP_REASON', 'SharpBetScore'
-        ]
-        safe_cols = [col for col in display_cols if col in df_display.columns]
-
-        if not df_display.empty:
-            st.dataframe(df_display[safe_cols], use_container_width=True)
         else:
-            st.warning(f"⚠️ No sharp edges match your filters for {label}.")
+            df_moves['SharpBetScore'] = df_moves.get('SharpBetScore', 0)
+            df_moves['SharpAlignment'] = df_moves.get('SharpAlignment', "Unknown")
+            df_moves['SHARP_REASON'] = df_moves.get('SHARP_REASON', "Reason not available")
+            df_moves['Region'] = df_moves.get('Region', "unknown")
 
-        log_rec_snapshot(df_moves, sport_key)
+            st.subheader(f"🚨 Detected Sharp Moves – {label}")
+            try:
+                df_display = df_moves.sort_values(by='SharpBetScore', ascending=False)
+            except Exception as e:
+                st.error(f"❌ Failed to sort by SharpBetScore: {e}")
+                df_display = df_moves
+
+            df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
+
+            # === Filters
+            region_options = ["All"] + sorted(df_display['Region'].dropna().unique())
+            region = st.selectbox(f"🌍 Filter {label} by Region", region_options, key=f"{label}_region_main")
+            if region != "All":
+                df_display = df_display[df_display['Region'] == region]
+
+            market_options = ["All"] + sorted(df_display['Market'].dropna().unique())
+            market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_main")
+            if market != "All":
+                df_display = df_display[df_display['Market'] == market]
+
+            alignment_filter = st.selectbox(
+                f"🧭 Sharp Alignment Filter ({label})",
+                ["All", "Sharp move, Rec books not reponded", "Aligned with Sharps", "❓ Unknown or Incomplete"],
+                key=f"{label}_alignment_main"
+            )
+            if alignment_filter != "All":
+                df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
+
+            # === Display columns
+            display_cols = [
+                'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
+                'Value', 'Ref Sharp Value', 'LineMove',
+                'Delta vs Sharp', 'Limit', 'SharpAlignment', 'SHARP_REASON', 'SharpBetScore'
+            ]
+            safe_cols = [col for col in display_cols if col in df_display.columns]
+
+            if not df_display.empty:
+                st.dataframe(df_display[safe_cols], use_container_width=True)
+            else:
+                st.warning(f"⚠️ No sharp edges match your filters for {label}.")
+
+            log_rec_snapshot(df_moves, sport_key)
+
+        # === Odds snapshot (pivoted, with limits, highlighted best lines)
+        raw_odds_table = []
+        for game in live:
+            game_name = f"{game['home_team']} vs {game['away_team']}"
+            for book in game.get("bookmakers", []):
+                book_title = book["title"]
+                for market in book.get("markets", []):
+                    mtype = market.get("key")
+                    for outcome in market.get("outcomes", []):
+                        price = outcome.get("point") if mtype != "h2h" else outcome.get("price")
+                        raw_odds_table.append({
+                            "Game": game_name,
+                            "Market": mtype,
+                            "Outcome": outcome["name"],
+                            "Bookmaker": book_title,
+                            "Value": price,
+                            "Limit": outcome.get("bet_limit", 0)
+                        })
+
+        df_odds_raw = pd.DataFrame(raw_odds_table)
+
+        if not df_odds_raw.empty:
+            st.subheader(f"📋 Live Odds Snapshot – {label}")
+
+            # Pivot values and limits
+            df_pivot_value = df_odds_raw.pivot_table(
+                index=["Game", "Market", "Outcome"],
+                columns="Bookmaker",
+                values="Value",
+                aggfunc="first"
+            )
+
+            df_pivot_limit = df_odds_raw.pivot_table(
+                index=["Game", "Market", "Outcome"],
+                columns="Bookmaker",
+                values="Limit",
+                aggfunc="first"
+            ).add_suffix(" (Limit)")
+
+            # Combine both
+            df_combined = pd.concat([df_pivot_value, df_pivot_limit], axis=1).reset_index()
+
+            # Highlight best value per row (min for spreads/h2h, max for totals)
+            def highlight_best(row):
+                values = row.iloc[3:(3+len(df_pivot_value.columns))]
+                if row["Market"] in ["spreads", "h2h"]:
+                    best_idx = values.astype(float).idxmin()
+                else:  # totals
+                    best_idx = values.astype(float).idxmax()
+                return ['background-color: #d0f0c0' if i == best_idx else '' for i in values.index] + [''] * len(df_pivot_limit.columns)
+
+            st.dataframe(
+                df_combined.style.apply(highlight_best, axis=1),
+                use_container_width=True
+            )
+        else:
+            st.warning("⚠️ No odds to display for this sport.")
+
         return df_moves
+
 
 
 
