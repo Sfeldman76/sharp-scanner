@@ -418,6 +418,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     if df.empty:
         return df, df_history
+    if 'Delta vs Sharp' not in df.columns:
+        df['Delta vs Sharp'] = 0.0  # fill default for safety
 
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
@@ -669,120 +671,34 @@ from io import StringIO
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
-# === Get sharp edges
 df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 
-
-
-# === Upload NBA sharp moves to Google Drive (no local save)
+# Upload sharp moves to master file
 if df_nba is not None and not df_nba.empty:
     df_nba['Sport'] = 'NBA'
     append_to_master_csv_on_drive(df_nba, "sharp_moves_master.csv", drive, FOLDER_ID)
-
-
-
-
-# === Upload MLB sharp moves to Google Drive (no local save)
 if df_mlb is not None and not df_mlb.empty:
     df_mlb['Sport'] = 'MLB'
     append_to_master_csv_on_drive(df_mlb, "sharp_moves_master.csv", drive, FOLDER_ID)
 
+# Safe predefinition
+df_nba_bt = pd.DataFrame()
+df_mlb_bt = pd.DataFrame()
+
+# Load and evaluate full history
 df_master = load_master_sharp_moves(drive)
 
 if df_master.empty:
-    st.warning("⚠️ No historical sharp picks found in Google Drive yet. Make a scan to begin logging.")
+    st.warning("⚠️ No historical sharp picks found in Google Drive yet.")
 else:
-    # Proceed with backtest and component summaries
     df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
     df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
 
-    # === NBA summaries
+    # Show summaries (NBA and MLB)
     if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
-        ...
-    else:
-        st.warning("⚠️ No NBA backtest results available yet.")
-
-    # === MLB summaries
+        # performance table + signal learning
     if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
-        ...
-    else:
-        st.warning("⚠️ No MLB backtest results available yet.")
+        # performance table + signal learning
 
-
-# Backtest and show performance
-if df_nba is not None and not df_nba.empty:
-    df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
-
-    if 'SHARP_HIT_BOOL' in df_nba_bt.columns:
-        df_nba_bt['SharpConfidenceTier'] = pd.cut(
-            df_nba_bt['SharpBetScore'],
-            bins=[0, 15, 25, 40, 100],
-            labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
-        )
-
-        st.subheader("📊 NBA Sharp Signal Performance")
-        st.dataframe(
-            df_nba_bt.groupby('SharpConfidenceTier').agg(
-                Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                Hits=('SHARP_HIT_BOOL', 'sum'),
-                Win_Rate=('SHARP_HIT_BOOL', 'mean')
-            ).round(3).reset_index()
-        )
-    else:
-        st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
-
-if df_mlb is not None and not df_mlb.empty:
-    df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
-
-    if 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
-        df_mlb_bt['SharpConfidenceTier'] = pd.cut(
-            df_mlb_bt['SharpBetScore'],
-            bins=[0, 15, 25, 40, 100],
-            labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
-        )
-
-        st.subheader("📊 MLB Sharp Signal Performance")
-        st.dataframe(
-            df_mlb_bt.groupby('SharpConfidenceTier').agg(
-                Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                Hits=('SHARP_HIT_BOOL', 'sum'),
-                Win_Rate=('SHARP_HIT_BOOL', 'mean')
-            ).round(3).reset_index()
-        )
-    else:
-        st.warning("⚠️ MLB backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
-
-# 🧠 Sharp Signal Learning (Component Breakdown)
-if df_nba_bt is not None and not df_nba_bt.empty:
-    if 'SHARP_HIT_BOOL' in df_nba_bt.columns:
-        st.subheader("🧠 Sharp Component Learning – NBA")
-        st.dataframe(
-            df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
-            .mean().reset_index()
-            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
-        )
-        st.dataframe(
-            df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
-            .mean().reset_index()
-            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
-        )
-    else:
-        st.warning("⚠️ NBA component breakdown skipped — SHARP_HIT_BOOL missing.")
-
-if df_mlb_bt is not None and not df_mlb_bt.empty:
-    if 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
-        st.subheader("🧠 Sharp Component Learning – MLB")
-        st.dataframe(
-            df_mlb_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
-            .mean().reset_index()
-            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
-        )
-        st.dataframe(
-            df_mlb_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
-            .mean().reset_index()
-            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
-        )
-    else:
-        st.warning("⚠️ MLB component breakdown skipped — SHARP_HIT_BOOL missing.")
 
