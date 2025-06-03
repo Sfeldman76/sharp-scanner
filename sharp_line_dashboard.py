@@ -786,10 +786,12 @@ def render_scanner_tab(label, sport_key, container, drive):
                     df_existing = pd.DataFrame()
                     if file_list:
                         file_drive = file_list[0]
-                        existing_data = StringIO(file_drive.GetContentString())
-                        df_existing = pd.read_csv(existing_data)
-                        file_drive.Delete()
-                        print("🗑️ Deleted old line_history_master.csv")
+                        try:
+                            existing_data = StringIO(file_drive.GetContentString())
+                            df_existing = pd.read_csv(existing_data)
+                        except Exception as read_error:
+                            print(f"⚠️ Could not read existing file: {read_error}")
+                            df_existing = pd.DataFrame()
 
                     df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
 
