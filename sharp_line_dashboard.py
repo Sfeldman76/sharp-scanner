@@ -31,6 +31,8 @@ MARKETS = ['spreads', 'totals', 'h2h']
 
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 
+def get_snapshot(data):
+    return {g['id']: g for g in data}
 
 def init_gdrive():
     try:
