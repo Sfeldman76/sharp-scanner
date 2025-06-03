@@ -376,7 +376,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     key = (game_name, mtype, label)
                     if key not in line_open_map and val is not None:
                         line_open_map[key] = (val, snapshot_time)
-
+                    
                     entry = {
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
@@ -421,9 +421,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         label_signals = {}
         for label, entries in label_map.items():
             move_signal = limit_jump = prob_shift = time_score = 0
+            move_magnitude_score = 0
+    
             for limit, curr, _ in entries:
                 open_val, _ = line_open_map.get((game_name, mtype, label), (None, None))
                 if open_val is not None and curr is not None:
+                    sharp_move_delta = abs(curr - open_val)
+                    if sharp_move_delta >= 0.01:
+                        move_signal += 1
+                        move_magnitude_score += sharp_move_delta
+    
                     if mtype == 'totals':
                         if 'under' in label and curr < open_val: move_signal += 1
                         elif 'over' in label and curr > open_val: move_signal += 1
@@ -431,26 +438,33 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     elif mtype == 'h2h':
                         imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
                         if imp_now and imp_open and imp_now > imp_open: prob_shift += 1
-
-                if limit and limit >= 100: limit_jump += 1
+    
+                if limit and limit >= 100:
+                    limit_jump += 1
+    
                 hour = datetime.now().hour
                 time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
-
+    
+            # Optional: cap magnitude boost
+            move_magnitude_score = min(move_magnitude_score, 5.0)
+    
             total_limit = sharp_total_limit_map.get((game_name, mtype, label), 0)
             scores[label] = (
                 2 * move_signal +
                 2 * limit_jump +
                 1.5 * time_score +
                 1.0 * prob_shift +
-                0.001 * total_limit  # adjust this weight if needed
+                0.001 * total_limit +
+                3.0 * move_magnitude_score  # ← weighted boost
             )
-            
+    
             label_signals[label] = {
                 'Sharp_Move_Signal': move_signal,
                 'Sharp_Limit_Jump': limit_jump,
                 'Sharp_Time_Score': time_score,
                 'Sharp_Prob_Shift': prob_shift,
-                'Sharp_Limit_Total': total_limit
+                'Sharp_Limit_Total': total_limit,
+                'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2)  # ← optional tracking
             }
 
      
