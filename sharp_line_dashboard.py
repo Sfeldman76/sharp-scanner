@@ -53,8 +53,6 @@ def init_gdrive():
         return None
 
 
-
-
 def implied_prob(odds):
     try:
         if odds < 0:
@@ -400,12 +398,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 'Sharp_Limit_Total': total_limit
             }
 
-        print(f"🎯 Candidate scores for {game_name} / {mtype}:", scores)
+     
 
         if scores:
             best_label = max(scores, key=scores.get)
             sharp_side_flags[(game_name, mtype, best_label)] = 1
-            print(f"✅ Flagged sharp side: {game_name} / {mtype} / {best_label}")
+            
 
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
@@ -757,13 +755,6 @@ tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
 df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 
-# Upload sharp moves to master file
-if df_nba is not None and not df_nba.empty:
-    df_nba['Sport'] = 'NBA'
-    append_to_master_csv_on_drive(df_nba, "sharp_moves_master.csv", drive, FOLDER_ID)
-if df_mlb is not None and not df_mlb.empty:
-    df_mlb['Sport'] = 'MLB'
-    append_to_master_csv_on_drive(df_mlb, "sharp_moves_master.csv", drive, FOLDER_ID)
 
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
