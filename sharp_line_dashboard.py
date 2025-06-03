@@ -283,6 +283,64 @@ def calc_cover(row):
     print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
 
+def detect_market_leaders(df_history, sharp_books, rec_books):
+    df_history = df_history.copy()
+    df_history['Time'] = pd.to_datetime(df_history['Time'])
+    df_history['Book'] = df_history['Book'].str.lower()
+
+    # Detect open value per Book
+    df_open = (
+        df_history
+        .sort_values('Time')
+        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
+        .first()
+        .reset_index()
+        .rename(columns={'Value': 'Open_Value'})
+    )
+
+    df_history = df_history.merge(df_open, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+    df_history['Has_Moved'] = (df_history['Value'] != df_history['Open_Value']) & df_history['Value'].notna()
+
+    first_moves = (
+        df_history[df_history['Has_Moved']]
+        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Time']
+        .min()
+        .reset_index()
+        .rename(columns={'Time': 'First_Move_Time'})
+    )
+
+    first_moves['Book_Type'] = first_moves['Book'].map(
+        lambda b: 'Sharp' if b in sharp_books else ('Rec' if b in rec_books else 'Other')
+    )
+    first_moves['Move_Rank'] = first_moves.groupby(
+        ['Game', 'Market', 'Outcome']
+    )['First_Move_Time'].rank(method='first')
+
+    first_moves['Market_Leader'] = (
+        (first_moves['Book_Type'] == 'Sharp') & (first_moves['Move_Rank'] == 1)
+    )
+
+    return first_moves
+
+
+def detect_cross_market_sharp_support(df_moves):
+    df = df_moves.copy()
+    df['SupportKey'] = df['Game'].astype(str) + " | " + df['Outcome'].astype(str)
+
+    df_sharp = df[df['SharpBetScore'] >= 25].copy()
+
+    market_counts = (
+        df_sharp.groupby('SupportKey')['Market']
+        .nunique()
+        .reset_index()
+        .rename(columns={'Market': 'CrossMarketSharpSupport'})
+    )
+
+    df = df.merge(market_counts, on='SupportKey', how='left')
+    df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
+    df['Is_Reinforced_MultiMarket'] = df['CrossMarketSharpSupport'] >= 2
+
+    return df
 
 
 
@@ -489,6 +547,21 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Asymmetry_Flag'] = ((df['Limit_Imbalance'] >= 2500) & (limit_reporting_count >= 2)).astype(int)
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
     
+    df['True_Sharp_Confidence_Score'] = (
+        1.5 * df['SharpBetScore'].fillna(0) +
+        1.0 * df['Sharp_Timing'].fillna(0) +
+        10 * df['Is_Reinforced_MultiMarket'].astype(int) +
+        10 * df['Market_Leader'].fillna(False).astype(int) +
+        5 * df['Asymmetry_Flag'].astype(int)
+    )
+    
+    df['Sharp_Confidence_Tier'] = pd.cut(
+        df['True_Sharp_Confidence_Score'],
+        bins=[-1, 25, 50, 75, float('inf')],
+        labels=['⚠️ Low', '✅ Medium', '⭐ High', '🔥 Steam']
+    )
+    
+    
     # === Sharp vs Rec Book Consensus Summary ===
     rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
     sharp_df = df[df['Book'].isin(SHARP_BOOKS)].copy()
@@ -507,32 +580,25 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .reset_index()
     )
     
-    # ✅ Extract sharp-backed rows only (those that had SharpBetScore assigned)
-    sharp_scores = df[df['SharpBetScore'].notnull()][['Event_Date', 'Game', 'Market', 'Outcome', 'SharpBetScore']].drop_duplicates()
+    # ✅ Merge full sharp scoring block into summary_df
+    sharp_scores = df[df['SharpBetScore'].notnull()][[
+        'Event_Date', 'Game', 'Market', 'Outcome',
+        'SharpBetScore', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier'
+    ]].drop_duplicates()
+    
     summary_df = summary_df.merge(
         sharp_scores,
         on=['Event_Date', 'Game', 'Market', 'Outcome'],
         how='left'
     )
+    
+    summary_df[['SharpBetScore', 'True_Sharp_Confidence_Score']] = summary_df[[
+        'SharpBetScore', 'True_Sharp_Confidence_Score'
+    ]].fillna(0)
+    
+    summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
 
-    summary_df['SharpBetScore'] = summary_df['SharpBetScore'].fillna(0)
-    
-    # Compute consensus deltas from open
-    summary_df['Move_From_Open_Rec'] = summary_df['Rec_Book_Consensus'] - summary_df['Rec_Open']
-    summary_df['Move_From_Open_Sharp'] = summary_df['Sharp_Book_Consensus'] - summary_df['Sharp_Open']
-    
-    # Round for clarity
-    summary_df = summary_df.round({
-        'Rec_Book_Consensus': 2,
-        'Sharp_Book_Consensus': 2,
-        'Move_From_Open_Rec': 2,
-        'Move_From_Open_Sharp': 2,
-        'SharpBetScore': 2
-    })
-    
-    summary_df['Recommended_Outcome'] = summary_df['Outcome']
-    
-    
+  
    
     return df, df_history, summary_df
     
@@ -667,7 +733,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                 [
                     'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
                     'Rec_Book_Consensus', 'Sharp_Book_Consensus',
-                    'Move_From_Open_Rec', 'Move_From_Open_Sharp', 'SharpBetScore'
+                    'Move_From_Open_Rec', 'Move_From_Open_Sharp', 'SharpBetScore','True_Sharp_Confidence_Score'
                 ]
             ], use_container_width=True)
 
