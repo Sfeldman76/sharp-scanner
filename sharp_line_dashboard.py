@@ -89,38 +89,42 @@ def fetch_live_odds(sport_key):
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     try:
-        # Try to find the file on Drive
+        # Check for existing file(s)
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
 
+        df_combined = df_new
         if file_list:
-            print(f"📂 Found existing {filename} on Drive.")
             file_drive = file_list[0]
             existing_data = StringIO(file_drive.GetContentString())
             df_existing = pd.read_csv(existing_data)
             df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        else:
-            print(f"📄 {filename} does not exist on Drive. Creating new one.")
-            df_combined = df_new
-        df_combined.drop_duplicates(
-            subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
-            keep='last',
-            inplace=True
-        )
 
-        # Write combined data to string
+            # ✅ Clean up duplicates BEFORE re-uploading
+            df_combined.drop_duplicates(
+                subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
+                keep='last',
+                inplace=True
+            )
+
+            # ✅ DELETE ALL OLD COPIES
+            for f in file_list:
+                f.Delete()
+                print(f"🗑️ Deleted old version of {filename}")
+
+        # Write new combined version
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
 
-        # Save/upload to Drive
         file_drive = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
         file_drive.SetContentString(csv_buffer.getvalue())
         file_drive.Upload()
-        print(f"✅ Master CSV updated: {filename}")
+        print(f"✅ Uploaded updated {filename}")
+
     except Exception as e:
-        print(f"❌ Error updating master CSV: {e}")
+        print(f"❌ Error updating {filename}: {e}")
 
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv"):
     try:
