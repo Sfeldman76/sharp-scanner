@@ -400,10 +400,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 'Sharp_Limit_Total': total_limit
             }
 
+        print(f"🎯 Candidate scores for {game_name} / {mtype}:", scores)
 
         if scores:
             best_label = max(scores, key=scores.get)
             sharp_side_flags[(game_name, mtype, best_label)] = 1
+            print(f"✅ Flagged sharp side: {game_name} / {mtype} / {best_label}")
+
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
     # === Append sharp-sided bets with scores
@@ -450,11 +453,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'SharpIntelligenceScore': min(score, 100),
             'SharpIntelReasons': ", ".join(reasons) if reasons else "No clear signal"
         })
+    # DEBUG: Check if any enriched sharp rows were added
+    print("🔍 Number of enriched sharp rows with SharpBetScore:",
+          sum([1 for r in rows if isinstance(r, dict) and 'SharpBetScore' in r]))
 
     # === Final DataFrame output
     df = pd.DataFrame(rows)
     df_history = pd.DataFrame(line_history_log)
-    
+    print("📋 Columns in df:", df.columns.tolist())
+    print("🟢 Sharp rows with score:\n", df[df['SharpBetScore'].notnull()][['Game', 'Market', 'Outcome', 'SharpBetScore']])
+
     # Sort history and extract true opening line per Game × Market × Outcome
     df_history_sorted = df_history.sort_values('Time')
     line_open_df = (
