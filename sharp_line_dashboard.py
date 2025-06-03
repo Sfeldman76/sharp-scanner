@@ -546,7 +546,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     limit_reporting_count = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('count')
     df['Asymmetry_Flag'] = ((df['Limit_Imbalance'] >= 2500) & (limit_reporting_count >= 2)).astype(int)
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
-    
+    df['Book'] = df['Book'].str.lower()  # normalize casing
+    market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
+    df = df.merge(market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
+              on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+
+    df = detect_cross_market_sharp_support(df)
+ 
+ 
     df['True_Sharp_Confidence_Score'] = (
         1.5 * df['SharpBetScore'].fillna(0) +
         1.0 * df['Sharp_Timing'].fillna(0) +
@@ -560,7 +567,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         bins=[-1, 25, 50, 75, float('inf')],
         labels=['⚠️ Low', '✅ Medium', '⭐ High', '🔥 Steam']
     )
-    
+    df['True_Sharp_Confidence_Score'] = df['True_Sharp_Confidence_Score'].round(2)
+
     
     # === Sharp vs Rec Book Consensus Summary ===
     rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
