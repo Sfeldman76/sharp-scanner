@@ -89,42 +89,46 @@ def fetch_live_odds(sport_key):
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     try:
-        # Check for existing file(s)
+        # 🔍 Step 1: Find all files with the same name
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
 
+        # 🔁 Step 2: Load and merge with existing file(s)
         df_combined = df_new
         if file_list:
-            file_drive = file_list[0]
-            existing_data = StringIO(file_drive.GetContentString())
-            df_existing = pd.read_csv(existing_data)
-            df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+            print(f"📂 Found {len(file_list)} existing file(s) for {filename}. Merging contents.")
+            for file_drive in file_list:
+                try:
+                    existing_data = StringIO(file_drive.GetContentString())
+                    df_existing = pd.read_csv(existing_data)
+                    df_combined = pd.concat([df_existing, df_combined], ignore_index=True)
+                except Exception as read_error:
+                    print(f"⚠️ Could not read one file: {read_error}")
+                # Always delete old files to prevent duplicates
+                file_drive.Delete()
+                print(f"🗑️ Deleted old {filename} from Drive")
 
-            # ✅ Clean up duplicates BEFORE re-uploading
-            df_combined.drop_duplicates(
-                subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
-                keep='last',
-                inplace=True
-            )
+        # 🧼 Step 3: Remove duplicates
+        df_combined.drop_duplicates(
+            subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
+            keep='last',
+            inplace=True
+        )
 
-            # ✅ DELETE ALL OLD COPIES
-            for f in file_list:
-                f.Delete()
-                print(f"🗑️ Deleted old version of {filename}")
-
-        # Write new combined version
+        # 💾 Step 4: Save to buffer and upload to Drive
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
 
-        file_drive = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
-        file_drive.SetContentString(csv_buffer.getvalue())
-        file_drive.Upload()
-        print(f"✅ Uploaded updated {filename}")
+        new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
+        new_file.SetContentString(csv_buffer.getvalue())
+        new_file.Upload()
+        print(f"✅ {filename} uploaded to Drive with {len(df_combined)} total rows.")
 
     except Exception as e:
-        print(f"❌ Error updating {filename}: {e}")
+        print(f"❌ Error appending to {filename}: {e}")
+
 
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv"):
     try:
@@ -522,15 +526,12 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
 
     return pd.DataFrame(drift_rows).sort_values(by='Snapshot_Time')
 
-
 def render_scanner_tab(label, sport_key, container, drive):
     with container:
-        
-        df_moves = pd.DataFrame()
 
+        df_moves = pd.DataFrame()
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
-
 
         if not prev:
             st.info("🟡 First run detected — saving snapshot and skipping detection.")
@@ -543,10 +544,15 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         try:
             df_moves, df_audit = detect_sharp_moves(live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS)
+
+            # ✅ Add timestamp to both dataframes
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if not df_moves.empty:
+                df_moves['Snapshot_Timestamp'] = timestamp
                 df_moves['Sport'] = label
                 append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
             if not df_audit.empty:
+                df_audit['Snapshot_Timestamp'] = timestamp
                 append_to_master_csv_on_drive(df_audit, "line_history_master.csv", drive, FOLDER_ID)
 
         except Exception as e:
@@ -555,7 +561,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-    
+
 
         # === Show sharp moves first
         if df_moves is None or df_moves.empty:
