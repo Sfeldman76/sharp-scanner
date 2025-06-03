@@ -515,11 +515,12 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves = pd.DataFrame()
 
         live = fetch_live_odds(sport_key)
-        prev = load_snapshot(sport_key)
+        prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
+
 
         if not prev:
             st.info("🟡 First run detected — saving snapshot and skipping detection.")
-            save_snapshot(sport_key, get_snapshot(live))
+            upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
             return pd.DataFrame()
 
         if not live or not isinstance(live, list) or len(live) == 0:
@@ -590,7 +591,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             else:
                 st.warning(f"⚠️ No sharp edges match your filters for {label}.")
 
-            prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
+    
 
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
@@ -656,20 +657,6 @@ def render_scanner_tab(label, sport_key, container, drive):
                 use_container_width=True
             )
 
-       # === Automatically backtest sharp picks (no button)
-        df_bt = fetch_scores_and_backtest(df_moves, sport_key=sport_key)
-
-        if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
-            st.subheader(f"📊 Backtest Results – {label}")
-            st.dataframe(
-                df_bt[['Event_Date','Game', 'Market', 'Outcome', 'SharpBetScore', 'Ref Sharp Value',
-                       'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']]
-            )
-        else:
-            st.warning("⚠️ No results available for backtest yet.")
-           
-
-        
         return df_moves
 
 
