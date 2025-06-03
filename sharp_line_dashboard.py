@@ -700,5 +700,66 @@ else:
         # performance table + signal learning
     if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
         # performance table + signal learning
+# === NBA Sharp Signal Performance
+if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
+    df_nba_bt['SharpConfidenceTier'] = pd.cut(
+        df_nba_bt['SharpBetScore'],
+        bins=[0, 15, 25, 40, 100],
+        labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+    )
+
+    st.subheader("📊 NBA Sharp Signal Performance")
+    st.dataframe(
+        df_nba_bt.groupby('SharpConfidenceTier').agg(
+            Total_Picks=('SHARP_HIT_BOOL', 'count'),
+            Hits=('SHARP_HIT_BOOL', 'sum'),
+            Win_Rate=('SHARP_HIT_BOOL', 'mean')
+        ).round(3).reset_index()
+    )
+
+    st.subheader("🧠 Sharp Component Learning – NBA")
+    st.dataframe(
+        df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
+        .mean().reset_index()
+        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
+    )
+    st.dataframe(
+        df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
+        .mean().reset_index()
+        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
+    )
+else:
+    st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
+
+# === MLB Sharp Signal Performance
+if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
+    df_mlb_bt['SharpConfidenceTier'] = pd.cut(
+        df_mlb_bt['SharpBetScore'],
+        bins=[0, 15, 25, 40, 100],
+        labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+    )
+
+    st.subheader("📊 MLB Sharp Signal Performance")
+    st.dataframe(
+        df_mlb_bt.groupby('SharpConfidenceTier').agg(
+            Total_Picks=('SHARP_HIT_BOOL', 'count'),
+            Hits=('SHARP_HIT_BOOL', 'sum'),
+            Win_Rate=('SHARP_HIT_BOOL', 'mean')
+        ).round(3).reset_index()
+    )
+
+    st.subheader("🧠 Sharp Component Learning – MLB")
+    st.dataframe(
+        df_mlb_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
+        .mean().reset_index()
+        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
+    )
+    st.dataframe(
+        df_mlb_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
+        .mean().reset_index()
+        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
+    )
+else:
+    st.warning("⚠️ MLB backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
 
 
