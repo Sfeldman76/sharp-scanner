@@ -364,6 +364,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     line_history_log = []
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
+
     previous_odds_map = {}
     for g in previous.values():
         for book in g.get('bookmakers', []):
@@ -393,7 +395,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     key = (game_name, mtype, label)
                     prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
-
+                    
                     if key not in line_open_map and val is not None:
                         line_open_map[key] = (val, snapshot_time)
                     
@@ -429,9 +431,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                             if normalize_label(prev_o['name']) == label:
                                                 prev_val = prev_o.get('point') if mtype != 'h2h' else prev_o.get('price')
                                                 if prev_val is not None:
-                                                    open_val, _ = line_open_map.get((game_name, mtype, label), (None, None))
-                                                    entry['Old Value'] = open_val
-                                                    entry['Delta'] = round(val - open_val, 2) if open_val is not None else None
+                                                    entry['Old Value'] = prev_val
+                                                    entry['Delta'] = round(val - prev_val, 2) if prev_val is not None and val is not None else None
+
 
 
                     rows.append(entry)
