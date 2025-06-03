@@ -279,21 +279,25 @@ def calc_cover(row):
 
 
 
+from collections import defaultdict
+import pandas as pd
+from datetime import datetime
+
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS):
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
-    rows, sharp_audit_rows, rec_lines = [], [], []
+    rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
-    line_history_log = []  # ✅ New: to track all line data historically
+    line_history_log = []
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
-        event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if "commence_time" in game else ""
+        event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if game.get("commence_time") else ""
         gid = game['id']
         prev_game = previous_map.get(gid, {})
 
@@ -305,7 +309,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     limit = o.get('bet_limit') if 'bet_limit' in o and o.get('bet_limit') is not None else None
-        
+
                     entry = {
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
@@ -313,28 +317,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Old Value': None, 'Delta': None, 'Event_Date': event_date,
                         'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
                     }
-        
-                    # ✅ Always append line entry
-                    rows.append(entry)
-        
-                    # ✅ Audit log
-                    line_history_log.append({
-                        'Snapshot_Time': snapshot_time,
-                        'Game': game_name,
-                        'Event_Date': event_date,
-                        'Market': mtype,
-                        'Outcome': label,
-                        'Book': book_key,
-                        'Bookmaker': book['title'],
-                        'Value': val,
-                        'Limit': limit,
-                        'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown')
-                    })
-        
+
+                    # Add historical audit entry
+                    line_history_log.append(entry.copy())
+
                     if val is None:
                         continue
-        
-                    # === Look up previous value
+
+                    # Previous value lookup
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'] == book_key:
@@ -346,13 +336,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2)
-        
-                    # ✅ Add to sharp limit map if limit exists
+
+                    rows.append(entry)
+
+                    # Track sharp data if limit is present
                     if limit is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
-                        sharp_limit_map[(game_name, mtype)][label].append((limit, val, entry.get("Old Value")))
+                        sharp_limit_map[(game_name, mtype)][label].append((limit, val, entry.get('Old Value')))
 
-    # === Scoring logic for sharp book signals
+    # === Sharp scoring logic
     for (game_name, mtype), label_map in sharp_limit_map.items():
         scores = {}
         label_signals = {}
@@ -371,8 +363,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 hour = datetime.now().hour
                 time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
 
-            score = 2 * move_signal + 2 * limit_jump + 1.5 * time_score + 1.0 * prob_shift
-            scores[label] = score
+            scores[label] = 2 * move_signal + 2 * limit_jump + 1.5 * time_score + 1.0 * prob_shift
             label_signals[label] = {
                 'Sharp_Move_Signal': move_signal,
                 'Sharp_Limit_Jump': limit_jump,
@@ -385,41 +376,56 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             sharp_side_flags[(game_name, mtype, best_label)] = 1
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
+    # === Append sharp-sided bets with scores
+    for (game_name, mtype, label), entry in sharp_lines.items():
+        if sharp_side_flags.get((game_name, mtype, label), 0):
+            metrics = sharp_metrics_map.get((game_name, mtype, label), {})
+            enriched = entry.copy()
+            enriched.update({
+                'Ref Sharp Value': entry['Value'],
+                'Ref Sharp Old Value': entry.get('Old Value'),
+                'Delta vs Sharp': 0.0,
+                'SHARP_SIDE_TO_BET': 1,
+                'SharpBetScore': round(
+                    2.0 * metrics.get('Sharp_Move_Signal', 0) +
+                    2.0 * metrics.get('Sharp_Limit_Jump', 0) +
+                    1.5 * metrics.get('Sharp_Time_Score', 0) +
+                    1.0 * metrics.get('Sharp_Prob_Shift', 0), 2
+                ),
+                'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
+                'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
+                'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
+                'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0)
+            })
+            rows.append(enriched)
 
-
-    
+    # === Intelligence scoring
     def compute_intelligence_score(row):
         score = 0
         reasons = []
-    
         if row.get('Limit_Imbalance', 0) >= 2500:
             score += 15
             reasons.append("💰 High limit spread")
-    
         if abs(row.get('Delta vs Sharp', 0)) >= 0.5:
             score += 10
             reasons.append("📈 Price moved from sharp baseline")
-    
         if row.get('Limit_Jump', 0) == 1 and abs(row.get('Delta vs Sharp', 0)) == 0:
             score += 15
             reasons.append("🤫 Limit ↑, price ↔")
-    
         return pd.Series({
             'SharpIntelligenceScore': min(score, 100),
             'SharpIntelReasons': ", ".join(reasons) if reasons else "No clear signal"
         })
-    
-   
 
-
-    # === Final output
+    # === Final DataFrame output
     df = pd.DataFrame(rows)
-    df_history = pd.DataFrame(line_history_log)  # ✅ All historical lines
+    df_history = pd.DataFrame(line_history_log)
 
     if df.empty:
         return df, df_history
+
     if 'Delta vs Sharp' not in df.columns:
-        df['Delta vs Sharp'] = 0.0  # fill default for safety
+        df['Delta vs Sharp'] = 0.0
 
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
@@ -431,8 +437,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
-     # Apply intelligence scoring to full DataFrame
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
+
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, df_history
 
