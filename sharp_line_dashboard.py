@@ -27,13 +27,10 @@ BOOKMAKER_REGIONS = {
 }
 
 MARKETS = ['spreads', 'totals', 'h2h']
-LOG_FOLDER = "/tmp/sharp_logs"
+
 
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 
-
-os.makedirs(LOG_FOLDER, exist_ok=True)
-os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
 def init_gdrive():
     try:
@@ -52,8 +49,7 @@ def init_gdrive():
     except Exception as e:
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
-def get_snapshot(data):
-    return {g['id']: g for g in data}
+
 
 
 
