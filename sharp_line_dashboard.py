@@ -553,22 +553,22 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     df = detect_cross_market_sharp_support(df)
  
- 
+
+
+    # === Final sharp confidence score
     df['True_Sharp_Confidence_Score'] = (
         1.5 * df['SharpBetScore'].fillna(0) +
         1.0 * df['Sharp_Timing'].fillna(0) +
         10 * df['Is_Reinforced_MultiMarket'].astype(int) +
         10 * df['Market_Leader'].fillna(False).astype(int) +
         5 * df['Asymmetry_Flag'].astype(int)
-    )
+    ).round(2)
     
     df['Sharp_Confidence_Tier'] = pd.cut(
         df['True_Sharp_Confidence_Score'],
         bins=[-1, 25, 50, 75, float('inf')],
         labels=['⚠️ Low', '✅ Medium', '⭐ High', '🔥 Steam']
     )
-    df['True_Sharp_Confidence_Score'] = df['True_Sharp_Confidence_Score'].round(2)
-
     
     # === Sharp vs Rec Book Consensus Summary ===
     rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
@@ -588,7 +588,19 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .reset_index()
     )
     
-    # ✅ Merge full sharp scoring block into summary_df
+    # Restore 'Recommended_Outcome'
+    summary_df['Recommended_Outcome'] = summary_df['Outcome']
+    
+    # Compute move deltas
+    summary_df['Move_From_Open_Rec'] = (
+        summary_df['Rec_Book_Consensus'] - summary_df['Rec_Open']
+    ).fillna(0)
+    
+    summary_df['Move_From_Open_Sharp'] = (
+        summary_df['Sharp_Book_Consensus'] - summary_df['Sharp_Open']
+    ).fillna(0)
+    
+    # Merge sharp scoring values
     sharp_scores = df[df['SharpBetScore'].notnull()][[
         'Event_Date', 'Game', 'Market', 'Outcome',
         'SharpBetScore', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier'
@@ -605,11 +617,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     ]].fillna(0)
     
     summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
-
-  
-   
-    return df, df_history, summary_df
     
+    return df, df_history, summary_df
+        
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
