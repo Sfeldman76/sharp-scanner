@@ -364,7 +364,17 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     line_history_log = []
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
+    previous_odds_map = {}
+    for g in previous.values():
+        for book in g.get('bookmakers', []):
+            book_key = book['key']
+            for market in book.get('markets', []):
+                mtype = market.get('key')
+                for outcome in market.get('outcomes', []):
+                    label = str(outcome['name']).strip().lower()
+                    price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
+                    previous_odds_map[(g['home_team'], g['away_team'], mtype, label, book_key)] = price
+
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
@@ -381,14 +391,25 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     limit = o.get('bet_limit') if 'bet_limit' in o and o.get('bet_limit') is not None else None
                     key = (game_name, mtype, label)
+                    prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
+                    old_val = previous_odds_map.get(prev_key)
+
                     if key not in line_open_map and val is not None:
                         line_open_map[key] = (val, snapshot_time)
                     
                     entry = {
-                        'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
-                        'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
-                        'Book': book_key, 'Value': val, 'Limit': limit,
-                        'Old Value': None, 'Delta': None, 'Event_Date': event_date,
+                        'Sport': sport_key,
+                        'Time': snapshot_time,
+                        'Game': game_name,
+                        'Market': mtype,
+                        'Outcome': label,
+                        'Bookmaker': book['title'],
+                        'Book': book_key,
+                        'Value': val,
+                        'Limit': limit,
+                        'Old Value': old_val,
+                        'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
+                        'Event_Date': event_date,
                         'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
                     }
 
