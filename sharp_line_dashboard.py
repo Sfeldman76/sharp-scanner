@@ -487,9 +487,41 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
     
+       # === Sharp vs Rec Book Consensus Summary ===
+    rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
+    sharp_df = df[df['Book'].isin(SHARP_BOOKS)].copy()
+    
+    def summarize_group(g):
+        return pd.Series({
+            'Rec_Book_Consensus': g[g['Book'].isin(REC_BOOKS)]['Value'].mean(),
+            'Sharp_Book_Consensus': g[g['Book'].isin(SHARP_BOOKS)]['Value'].mean(),
+            'Rec_Open': g[g['Book'].isin(REC_BOOKS)]['Open_Value'].mean(),
+            'Sharp_Open': g[g['Book'].isin(SHARP_BOOKS)]['Open_Value'].mean()
+        })
+    
+    summary_df = (
+        df.groupby(['Event_Date', 'Game', 'Market', 'Outcome'])
+        .apply(summarize_group)
+        .reset_index()
+    )
+    
+    # Compute consensus deltas from open
+    summary_df['Move_From_Open_Rec'] = summary_df['Rec_Book_Consensus'] - summary_df['Rec_Open']
+    summary_df['Move_From_Open_Sharp'] = summary_df['Sharp_Book_Consensus'] - summary_df['Sharp_Open']
+    
+    # Round for clarity
+    summary_df = summary_df.round({
+        'Rec_Book_Consensus': 2,
+        'Sharp_Book_Consensus': 2,
+        'Move_From_Open_Rec': 2,
+        'Move_From_Open_Sharp': 2
+    })
+    
+    summary_df['Recommended_Outcome'] = summary_df['Outcome']
+    
+    # ✅ Return all three
     print(f"✅ Final sharp-backed rows: {len(df)}")
-    return df, df_history
-
+    return df, df_history, summary_df
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
@@ -582,7 +614,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             return pd.DataFrame()
 
         try:
-            df_moves, df_audit = detect_sharp_moves(live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS)
+            df_moves, df_audit, summary_df = detect_sharp_moves(live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS)
+
 
             # ✅ Add timestamp to both dataframes
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -603,56 +636,27 @@ def render_scanner_tab(label, sport_key, container, drive):
 
 
         # === Show sharp moves first
-        if df_moves is None or df_moves.empty:
-            st.info(f"⚠️ No sharp moves detected for {label}.")
+        # === Show summarized sharp consensus movement table instead
+        if summary_df is None or summary_df.empty:
+            st.info(f"⚠️ No sharp consensus movements detected for {label}.")
         else:
-            df_moves['SharpBetScore'] = df_moves.get('SharpBetScore', 0)
-            df_moves['SharpAlignment'] = df_moves.get('SharpAlignment', "Unknown")
-            df_moves['SHARP_REASON'] = df_moves.get('SHARP_REASON', "Reason not available")
-            df_moves['Region'] = df_moves.get('Region', "unknown")
-
-            st.subheader(f"🚨 Detected Sharp Moves – {label}")
-            try:
-                df_display = df_moves.sort_values(by='SharpBetScore', ascending=False)
-            except Exception as e:
-                st.error(f"❌ Failed to sort by SharpBetScore: {e}")
-                df_display = df_moves
-
-            df_display = df_display.drop_duplicates(subset=['Game', 'Market', 'Outcome'], keep='first')
-
-            # === Filters
-            region_options = ["All"] + sorted(df_display['Region'].dropna().unique())
-            region = st.selectbox(f"🌍 Filter {label} by Region", region_options, key=f"{label}_region_main")
-            if region != "All":
-                df_display = df_display[df_display['Region'] == region]
-
-            market_options = ["All"] + sorted(df_display['Market'].dropna().unique())
-            market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_main")
+            st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
+            
+            market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
+            market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
+        
+            filtered_df = summary_df.copy()
             if market != "All":
-                df_display = df_display[df_display['Market'] == market]
+                filtered_df = filtered_df[filtered_df['Market'] == market]
+        
+            st.dataframe(filtered_df[
+                [
+                    'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
+                    'Rec_Book_Consensus', 'Sharp_Book_Consensus',
+                    'Move_From_Open_Rec', 'Move_From_Open_Sharp'
+                ]
+            ], use_container_width=True)
 
-            alignment_filter = st.selectbox(
-                f"🧭 Sharp Alignment Filter ({label})",
-                ["All", "Sharp move, Rec books not reponded", "Aligned with Sharps", "❓ Unknown or Incomplete"],
-                key=f"{label}_alignment_main"
-            )
-            if alignment_filter != "All":
-                df_display = df_display[df_display['SharpAlignment'] == alignment_filter]
-
-            # === Display columns
-            display_cols = [
-                'Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker',
-                'Value','Old Value', 'Ref Sharp Value','Ref Sharp Old Value',  'LineMove',
-                'Delta vs Sharp', 'Limit', 'SharpAlignment', 'SHARP_REASON', 'SharpBetScore'
-            ]
-            safe_cols = [col for col in display_cols if col in df_display.columns]
-
-            if not df_display.empty:
-                st.dataframe(df_display[safe_cols], use_container_width=True)
-            else:
-                st.warning(f"⚠️ No sharp edges match your filters for {label}.")
-
-    
 
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
