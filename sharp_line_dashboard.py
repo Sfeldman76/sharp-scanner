@@ -775,7 +775,6 @@ def render_scanner_tab(label, sport_key, container, drive):
             if not df_audit.empty:
                 df_audit['Snapshot_Timestamp'] = timestamp
             
-                # 🔁 Load existing full history
                 try:
                     file_list = drive.ListFile({
                         'q': f"title='line_history_master.csv' and '{FOLDER_ID}' in parents and trashed=false"
@@ -789,11 +788,11 @@ def render_scanner_tab(label, sport_key, container, drive):
                         file_drive.Delete()
                         print("🗑️ Deleted old line_history_master.csv")
             
-                    # 🧠 Append new audit logs
                     df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
             
-                   
-                    # 💾 Upload final version
+                    # ❌ REMOVE deduplication to preserve every line
+                    # df_combined.drop_duplicates(...)
+            
                     csv_buffer = StringIO()
                     df_combined.to_csv(csv_buffer, index=False)
                     csv_buffer.seek(0)
@@ -804,10 +803,10 @@ def render_scanner_tab(label, sport_key, container, drive):
                     print(f"✅ line_history_master.csv uploaded with {len(df_combined)} total rows.")
                 except Exception as e:
                     st.error(f"❌ Failed to append to line history: {e}")
-
-
-        upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
-
+            
+            # ✅ Move this back out of the try block
+            upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
+            
 
 
         # === Show sharp moves first
