@@ -15,7 +15,7 @@ from collections import defaultdict
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
 SPORTS = {"NBA": "basketball_nba", "MLB": "baseball_mlb"}
-SHARP_BOOKS = ['pinnacle', 'bookmaker', 'betonlineag']
+SHARP_BOOKS = ['pinnacle', 'bookmaker', 'betonlineag','betfair_ex_eu','smarkets','matchbook']
 REC_BOOKS = ['bovada', 'heritagesports', 'betus', 'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers', 'pointsbetus']
 
 BOOKMAKER_REGIONS = {
@@ -542,6 +542,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             if not df_moves.empty:
                 df_moves['Sport'] = label
                 append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+            if not df_audit.empty:
+                append_to_master_csv_on_drive(df_audit, "line_history_master.csv", drive, FOLDER_ID)
 
         except Exception as e:
             st.error(f"❌ Error in detect_sharp_moves: {e}")
