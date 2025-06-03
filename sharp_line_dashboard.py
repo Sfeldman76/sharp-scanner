@@ -517,14 +517,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     )
     
     # ✅ Extract sharp-backed rows only (those that had SharpBetScore assigned)
-    sharp_scores = df[df['SharpBetScore'].notnull()][['Game', 'Market', 'Outcome', 'SharpBetScore']].drop_duplicates()
-    
-    # ✅ Merge with summary table
+    sharp_scores = df[df['SharpBetScore'].notnull()][['Event_Date', 'Game', 'Market', 'Outcome', 'SharpBetScore']].drop_duplicates()
     summary_df = summary_df.merge(
         sharp_scores,
-        on=['Game', 'Market', 'Outcome'],
+        on=['Event_Date', 'Game', 'Market', 'Outcome'],
         how='left'
     )
+
     summary_df['SharpBetScore'] = summary_df['SharpBetScore'].fillna(0)
     
     # Compute consensus deltas from open
