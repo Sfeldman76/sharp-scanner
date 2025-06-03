@@ -775,14 +775,15 @@ def render_scanner_tab(label, sport_key, container, drive):
                 df_moves['Sport'] = label
                 append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
+         
             if not df_audit.empty:
                 df_audit['Snapshot_Timestamp'] = timestamp
-
+            
                 try:
                     file_list = drive.ListFile({
                         'q': f"title='line_history_master.csv' and '{FOLDER_ID}' in parents and trashed=false"
                     }).GetList()
-
+            
                     df_existing = pd.DataFrame()
                     if file_list:
                         file_drive = file_list[0]
@@ -792,27 +793,30 @@ def render_scanner_tab(label, sport_key, container, drive):
                         except Exception as read_error:
                             print(f"⚠️ Could not read existing file: {read_error}")
                             df_existing = pd.DataFrame()
-
+            
+                        # ✅ Explicitly delete the file so upload replaces it
+                        try:
+                            file_drive.Delete()
+                            print("🗑️ Deleted old line_history_master.csv")
+                        except Exception as delete_error:
+                            print(f"⚠️ Could not delete old file: {delete_error}")
+            
+                    # 🧠 Append new snapshot to history
                     df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
-
-                    # ❌ No deduplication — retain all line history
+            
+                    # ❌ No deduplication — keep all line snapshots
                     # df_combined.drop_duplicates(...)
-
+            
                     csv_buffer = StringIO()
                     df_combined.to_csv(csv_buffer, index=False)
                     csv_buffer.seek(0)
-
+            
                     new_file = drive.CreateFile({'title': "line_history_master.csv", "parents": [{"id": FOLDER_ID}]})
                     new_file.SetContentString(csv_buffer.getvalue())
                     new_file.Upload()
                     print(f"✅ line_history_master.csv uploaded with {len(df_combined)} total rows.")
                 except Exception as e:
                     st.error(f"❌ Failed to append to line history: {e}")
-
-        except Exception as e:
-            st.error(f"❌ Error in detect_sharp_moves: {e}")
-            return pd.DataFrame()
-
         # ✅ Move this fully outside of try block
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
