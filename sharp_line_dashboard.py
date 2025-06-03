@@ -15,8 +15,10 @@ from collections import defaultdict
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
 SPORTS = {"NBA": "basketball_nba", "MLB": "baseball_mlb"}
-SHARP_BOOKS = ['pinnacle', 'bookmaker', 'betonlineag','betfair_ex_eu','smarkets','matchbook']
-REC_BOOKS = ['bovada', 'heritagesports', 'betus', 'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers', 'pointsbetus']
+SHARP_BOOKS_FOR_LIMITS = ['pinnacle', 'bookmaker', 'betonlineag']
+SHARP_BOOKS_FOR_PRICING = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','smarkets','matchbook']
+
+REC_BOOKS = [ 'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers', 'fanatics','ESPNBet','Hard Rock Bet']
 
 BOOKMAKER_REGIONS = {
     'pinnacle': 'us', 'bookmaker': 'us', 'betonlineag': 'us',
@@ -412,7 +414,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     if limit is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, val, entry.get('Old Value')))
-                        if book_key in SHARP_BOOKS:
+                        if book_key in SHARP_BOOKS_FOR_LIMITS:
                             sharp_total_limit_map[(game_name, mtype, label)] += limit
 
     # === Sharp scoring logic
@@ -507,9 +509,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     def compute_intelligence_score(row):
         score = 0
         reasons = []
-        if row.get('Limit_Imbalance', 0) >= 2500:
+        if row.get('LimitUp_NoMove_Flag', 0) == 1:
             score += 15
-            reasons.append("💰 High limit spread")
+            reasons.append("🤫 Limit ↑, price ↔ (Position signal)")
         if abs(row.get('Delta vs Sharp', 0)) >= 0.5:
             score += 10
             reasons.append("📈 Price moved from sharp baseline")
@@ -556,14 +558,20 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('max')
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('min')
-    df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
     limit_reporting_count = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('count')
-    df['Asymmetry_Flag'] = ((df['Limit_Imbalance'] >= 2500) & (limit_reporting_count >= 2)).astype(int)
+    #df['Asymmetry_Flag'] = ((df['Limit_Imbalance'] >= 2500) & (limit_reporting_count >= 2)).astype(int)
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
     df['Book'] = df['Book'].str.lower()  # normalize casing
     market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
     df = df.merge(market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
               on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+    df['Is_Pinnacle'] = df['Book'] == 'pinnacle'
+
+    df['LimitUp_NoMove_Flag'] = (
+        (df['Is_Pinnacle']) &
+        (df['Limit'] >= 2500) &  # or use > opening limit if stored
+        (df['Value'] == df['Open_Value'])  # price hasn't changed
+    ).astype(int)
 
     df = detect_cross_market_sharp_support(df)
  
@@ -575,8 +583,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         1.0 * df['Sharp_Timing'].fillna(0) +
         10 * df['Is_Reinforced_MultiMarket'].astype(int) +
         10 * df['Market_Leader'].fillna(False).astype(int) +
-        5 * df['Asymmetry_Flag'].astype(int)
+        5 * df['LimitUp_NoMove_Flag']  # <-- New signal
     ).round(2)
+
     
     df['Sharp_Confidence_Tier'] = pd.cut(
         df['True_Sharp_Confidence_Score'],
