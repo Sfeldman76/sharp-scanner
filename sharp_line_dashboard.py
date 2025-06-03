@@ -792,13 +792,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                     # 🧠 Append new audit logs
                     df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
             
-                    # 🔍 Deduplicate only if needed (optional)
-                    df_combined.drop_duplicates(
-                        subset=["Time", "Game", "Market", "Outcome", "Bookmaker"],
-                        keep='last',
-                        inplace=True
-                    )
-            
+                   
                     # 💾 Upload final version
                     csv_buffer = StringIO()
                     df_combined.to_csv(csv_buffer, index=False)
