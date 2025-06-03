@@ -285,9 +285,6 @@ def calc_cover(row):
 
 
 
-from collections import defaultdict
-import pandas as pd
-from datetime import datetime
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS):
     def normalize_label(label):
