@@ -451,15 +451,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'SharpIntelligenceScore': min(score, 100),
             'SharpIntelReasons': ", ".join(reasons) if reasons else "No clear signal"
         })
-    # DEBUG: Check if any enriched sharp rows were added
-    print("🔍 Number of enriched sharp rows with SharpBetScore:",
-          sum([1 for r in rows if isinstance(r, dict) and 'SharpBetScore' in r]))
-
+   
     # === Final DataFrame output
     df = pd.DataFrame(rows)
     df_history = pd.DataFrame(line_history_log)
-    print("📋 Columns in df:", df.columns.tolist())
-    print("🟢 Sharp rows with score:\n", df[df['SharpBetScore'].notnull()][['Game', 'Market', 'Outcome', 'SharpBetScore']])
+    
 
     # Sort history and extract true opening line per Game × Market × Outcome
     df_history_sorted = df_history.sort_values('Time')
@@ -539,8 +535,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     summary_df['Recommended_Outcome'] = summary_df['Outcome']
     
-    # ✅ Return all three
-    print(f"✅ Final sharp-backed rows: {len(df)}")
+    
+   
     return df, df_history, summary_df
     
 
