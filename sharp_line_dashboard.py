@@ -15,8 +15,8 @@ from collections import defaultdict
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
 SPORTS = {"NBA": "basketball_nba", "MLB": "baseball_mlb"}
-SHARP_BOOKS_FOR_LIMITS = ['pinnacle', 'bookmaker', 'betonlineag']
-SHARP_BOOKS_FOR_PRICING = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','smarkets','matchbook']
+SHARP_BOOKS_LIMITS = ['pinnacle', 'bookmaker', 'betonlineag']
+SHARP_BOOKS= SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','smarkets','matchbook']
 
 REC_BOOKS = [ 'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers', 'fanatics','ESPNBet','Hard Rock Bet']
 
