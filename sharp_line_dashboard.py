@@ -10,6 +10,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 from io import StringIO
+from collections import defaultdict
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
@@ -278,21 +279,7 @@ def calc_cover(row):
     print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
 
-    
-import pandas as pd
-from datetime import datetime
-from collections import defaultdict
 
-def implied_prob(price):
-    try:
-        price = float(price)
-        if price > 0:
-            return 100 / (price + 100)
-        elif price < 0:
-            return -price / (-price + 100)
-        return None
-    except:
-        return None
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS):
     def normalize_label(label):
@@ -319,8 +306,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 for o in market.get('outcomes', []):
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
-                    limit = o.get('bet_limit') if book_key in SHARP_BOOKS else None
-
+                    limit = o.get('bet_limit') if 'bet_limit' in o and o.get('bet_limit') is not None else None
+        
                     entry = {
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
                         'Market': mtype, 'Outcome': label, 'Bookmaker': book['title'],
@@ -328,8 +315,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Old Value': None, 'Delta': None, 'Event_Date': event_date,
                         'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
                     }
-
-                    # ✅ Historical line logging (every book, every line)
+        
+                    # ✅ Always append line entry
+                    rows.append(entry)
+        
+                    # ✅ Audit log
                     line_history_log.append({
                         'Snapshot_Time': snapshot_time,
                         'Game': game_name,
@@ -342,8 +332,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Limit': limit,
                         'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown')
                     })
+        
                     if val is None:
                         continue
+        
+                    # === Look up previous value
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'] == book_key:
@@ -355,12 +348,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2)
-
-                    if book_key in SHARP_BOOKS:
+        
+                    # ✅ Add to sharp limit map if limit exists
+                    if limit is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
-                        sharp_limit_map[(game_name, mtype)][label].append((limit or 0, val, entry.get("Old Value")))
-                    elif book_key in REC_BOOKS:
-                        rec_lines.append(entry)
+                        sharp_limit_map[(game_name, mtype)][label].append((limit, val, entry.get("Old Value")))
 
     # === Scoring logic for sharp book signals
     for (game_name, mtype), label_map in sharp_limit_map.items():
@@ -377,7 +369,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     elif mtype == 'h2h':
                         imp_now, imp_old = implied_prob(curr), implied_prob(old)
                         if imp_now and imp_old and imp_now > imp_old: prob_shift += 1
-                if limit and limit >= 5000: limit_jump += 1
+                if limit and limit >= 100: limit_jump += 1
                 hour = datetime.now().hour
                 time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
 
@@ -395,37 +387,32 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             sharp_side_flags[(game_name, mtype, best_label)] = 1
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
-    # === Attach sharp scoring and edge detection
-    for rec in rec_lines:
-        rec_label = normalize_label(rec['Outcome'])
-        market_type = rec['Market']
-        rec_key = (rec['Game'], market_type, rec_label)
 
-        if not sharp_side_flags.get(rec_key, 0):
-            continue
 
-        sharp = sharp_lines.get(rec_key)
-        if not sharp:
-            continue
-
-        metrics = sharp_metrics_map.get(rec_key, {})
-        row = rec.copy()
-        row.update({
-            'Ref Sharp Value': sharp['Value'],'Ref Sharp Old Value': sharp.get('Old Value'),
-            'Delta vs Sharp': rec['Value'] - sharp['Value'] if sharp and rec['Value'] is not None and sharp['Value'] is not None else None,
-            'SHARP_SIDE_TO_BET': 1,
-            'SharpBetScore': round(
-                2.0 * metrics.get('Sharp_Move_Signal', 0) +
-                2.0 * metrics.get('Sharp_Limit_Jump', 0) +
-                1.5 * metrics.get('Sharp_Time_Score', 0) +
-                1.0 * metrics.get('Sharp_Prob_Shift', 0), 2
-            ),
-            'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
-            'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
-            'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
-            'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0)
+    
+    def compute_intelligence_score(row):
+        score = 0
+        reasons = []
+    
+        if row.get('Limit_Imbalance', 0) >= 2500:
+            score += 15
+            reasons.append("💰 High limit spread")
+    
+        if abs(row.get('Delta vs Sharp', 0)) >= 0.5:
+            score += 10
+            reasons.append("📈 Price moved from sharp baseline")
+    
+        if row.get('Limit_Jump', 0) == 1 and abs(row.get('Delta vs Sharp', 0)) == 0:
+            score += 15
+            reasons.append("🤫 Limit ↑, price ↔")
+    
+        return pd.Series({
+            'SharpIntelligenceScore': min(score, 100),
+            'SharpIntelReasons': ", ".join(reasons) if reasons else "No clear signal"
         })
-        rows.append(row)
+    
+   
+
 
     # === Final output
     df = pd.DataFrame(rows)
@@ -444,7 +431,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
-
+     # Apply intelligence scoring to full DataFrame
+    df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, df_history
 
