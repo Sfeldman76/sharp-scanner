@@ -499,6 +499,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'Sharp_Open': g[g['Book'].isin(SHARP_BOOKS)]['Open_Value'].mean()
         })
     
+    
     summary_df = (
         df.groupby(['Event_Date', 'Game', 'Market', 'Outcome'])
         .apply(summarize_group)
@@ -519,6 +520,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     summary_df['Recommended_Outcome'] = summary_df['Outcome']
     
+    # ✅ Merge SharpBetScore only for sharp-backed outcomes
+    sharp_scores = df_moves[['Game', 'Market', 'Outcome', 'SharpBetScore']].drop_duplicates()
+    summary_df = summary_df.merge(
+        sharp_scores,
+        on=['Game', 'Market', 'Outcome'],
+        how='left'
+    )
+    
+    # (Optional) Fill empty scores with 0 or drop them
+    summary_df['SharpBetScore'] = summary_df['SharpBetScore'].fillna(0)
+    
+        
     # ✅ Return all three
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, df_history, summary_df
