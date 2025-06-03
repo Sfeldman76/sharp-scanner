@@ -481,13 +481,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
         lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2
     )
-    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit'].transform('max')
-    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit'].transform('min')
+    df['Limit_NonZero'] = df['Limit'].where(df['Limit'] > 0)
+
+    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('max')
+    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('min')
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
-    df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
+    limit_reporting_count = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('count')
+    df['Asymmetry_Flag'] = ((df['Limit_Imbalance'] >= 2500) & (limit_reporting_count >= 2)).astype(int)
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
     
-       # === Sharp vs Rec Book Consensus Summary ===
+    # === Sharp vs Rec Book Consensus Summary ===
     rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
     sharp_df = df[df['Book'].isin(SHARP_BOOKS)].copy()
     
@@ -499,12 +502,22 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'Sharp_Open': g[g['Book'].isin(SHARP_BOOKS)]['Open_Value'].mean()
         })
     
-    
     summary_df = (
         df.groupby(['Event_Date', 'Game', 'Market', 'Outcome'])
         .apply(summarize_group)
         .reset_index()
     )
+    
+    # ✅ Extract sharp-backed rows only (those that had SharpBetScore assigned)
+    sharp_scores = df[df['SharpBetScore'].notnull()][['Game', 'Market', 'Outcome', 'SharpBetScore']].drop_duplicates()
+    
+    # ✅ Merge with summary table
+    summary_df = summary_df.merge(
+        sharp_scores,
+        on=['Game', 'Market', 'Outcome'],
+        how='left'
+    )
+    summary_df['SharpBetScore'] = summary_df['SharpBetScore'].fillna(0)
     
     # Compute consensus deltas from open
     summary_df['Move_From_Open_Rec'] = summary_df['Rec_Book_Consensus'] - summary_df['Rec_Open']
@@ -515,26 +528,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         'Rec_Book_Consensus': 2,
         'Sharp_Book_Consensus': 2,
         'Move_From_Open_Rec': 2,
-        'Move_From_Open_Sharp': 2
+        'Move_From_Open_Sharp': 2,
+        'SharpBetScore': 2
     })
     
     summary_df['Recommended_Outcome'] = summary_df['Outcome']
     
-    # ✅ Merge SharpBetScore only for sharp-backed outcomes
-    sharp_scores = df_moves[['Game', 'Market', 'Outcome', 'SharpBetScore']].drop_duplicates()
-    summary_df = summary_df.merge(
-        sharp_scores,
-        on=['Game', 'Market', 'Outcome'],
-        how='left'
-    )
-    
-    # (Optional) Fill empty scores with 0 or drop them
-    summary_df['SharpBetScore'] = summary_df['SharpBetScore'].fillna(0)
-    
-        
     # ✅ Return all three
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, df_history, summary_df
+    
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
