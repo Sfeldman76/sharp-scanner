@@ -695,11 +695,6 @@ else:
     df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
     df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
 
-    # Show summaries (NBA and MLB)
-    if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
-        # performance table + signal learning
-    if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
-        # performance table + signal learning
 # === NBA Sharp Signal Performance
 if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
     df_nba_bt['SharpConfidenceTier'] = pd.cut(
