@@ -296,7 +296,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         return str(label).strip().lower().replace('.0', '')
 
     rows = []
+    line_open_map = {}  # {(game, market, label): (open_val, open_time)}
+
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
+    sharp_total_limit_map = defaultdict(int)  # NEW: Track summed limits across SHARP_BOOKS
     sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
     line_history_log = []
 
@@ -317,6 +320,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     limit = o.get('bet_limit') if 'bet_limit' in o and o.get('bet_limit') is not None else None
+                    key = (game_name, mtype, label)
+                    if key not in line_open_map and val is not None:
+                        line_open_map[key] = (val, snapshot_time)
 
                     entry = {
                         'Sport': sport_key, 'Time': snapshot_time, 'Game': game_name,
@@ -342,8 +348,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                             if normalize_label(prev_o['name']) == label:
                                                 prev_val = prev_o.get('point') if mtype != 'h2h' else prev_o.get('price')
                                                 if prev_val is not None:
-                                                    entry['Old Value'] = prev_val
-                                                    entry['Delta'] = round(val - prev_val, 2)
+                                                    open_val, _ = line_open_map.get((game_name, mtype, label), (None, None))
+                                                    entry['Old Value'] = open_val
+                                                    entry['Delta'] = round(val - open_val, 2) if open_val is not None else None
+
 
                     rows.append(entry)
 
@@ -351,6 +359,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     if limit is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, val, entry.get('Old Value')))
+                        if book_key in SHARP_BOOKS:
+                            sharp_total_limit_map[(game_name, mtype, label)] += limit
 
     # === Sharp scoring logic
     for (game_name, mtype), label_map in sharp_limit_map.items():
@@ -358,26 +368,38 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         label_signals = {}
         for label, entries in label_map.items():
             move_signal = limit_jump = prob_shift = time_score = 0
-            for limit, curr, old in entries:
-                if old is not None and curr is not None:
+            for limit, curr, _ in entries:
+                open_val, _ = line_open_map.get((game_name, mtype, label), (None, None))
+                if open_val is not None and curr is not None:
                     if mtype == 'totals':
-                        if 'under' in label and curr < old: move_signal += 1
-                        elif 'over' in label and curr > old: move_signal += 1
-                    elif mtype == 'spreads' and abs(curr) > abs(old): move_signal += 1
+                        if 'under' in label and curr < open_val: move_signal += 1
+                        elif 'over' in label and curr > open_val: move_signal += 1
+                    elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
                     elif mtype == 'h2h':
-                        imp_now, imp_old = implied_prob(curr), implied_prob(old)
-                        if imp_now and imp_old and imp_now > imp_old: prob_shift += 1
+                        imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
+                        if imp_now and imp_open and imp_now > imp_open: prob_shift += 1
+
                 if limit and limit >= 100: limit_jump += 1
                 hour = datetime.now().hour
                 time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
 
-            scores[label] = 2 * move_signal + 2 * limit_jump + 1.5 * time_score + 1.0 * prob_shift
+            total_limit = sharp_total_limit_map.get((game_name, mtype, label), 0)
+            scores[label] = (
+                2 * move_signal +
+                2 * limit_jump +
+                1.5 * time_score +
+                1.0 * prob_shift +
+                0.001 * total_limit  # adjust this weight if needed
+            )
+            
             label_signals[label] = {
                 'Sharp_Move_Signal': move_signal,
                 'Sharp_Limit_Jump': limit_jump,
                 'Sharp_Time_Score': time_score,
-                'Sharp_Prob_Shift': prob_shift
+                'Sharp_Prob_Shift': prob_shift,
+                'Sharp_Limit_Total': total_limit
             }
+
 
         if scores:
             best_label = max(scores, key=scores.get)
@@ -398,12 +420,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     2.0 * metrics.get('Sharp_Move_Signal', 0) +
                     2.0 * metrics.get('Sharp_Limit_Jump', 0) +
                     1.5 * metrics.get('Sharp_Time_Score', 0) +
-                    1.0 * metrics.get('Sharp_Prob_Shift', 0), 2
+                    1.0 * metrics.get('Sharp_Prob_Shift', 0) +
+                    0.001 * metrics.get('Sharp_Limit_Total', 0), 2
                 ),
+
                 'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
                 'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
                 'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
-                'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0)
+                'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0),
+                'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0),
+
             })
             rows.append(enriched)
 
@@ -428,13 +454,27 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # === Final DataFrame output
     df = pd.DataFrame(rows)
     df_history = pd.DataFrame(line_history_log)
-
+    
+    # Sort history and extract true opening line per Game × Market × Outcome
+    df_history_sorted = df_history.sort_values('Time')
+    line_open_df = (
+        df_history_sorted
+        .dropna(subset=['Value'])
+        .groupby(['Game', 'Market', 'Outcome'])['Value']
+        .first()
+        .reset_index()
+        .rename(columns={'Value': 'Open_Value'})
+    )
+    
+    # Don't return early before merging!
     if df.empty:
         return df, df_history
-
-    if 'Delta vs Sharp' not in df.columns:
-        df['Delta vs Sharp'] = 0.0
-
+    
+    # Merge in opening line value and compute true market delta
+    df = df.merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
+    df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
+    
+    # Additional computed fields
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
@@ -446,10 +486,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Limit_Imbalance'] = df['Limit_Max'] - df['Limit_Min']
     df['Asymmetry_Flag'] = (df['Limit_Imbalance'] >= 2500).astype(int)
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
-
+    
     print(f"✅ Final sharp-backed rows: {len(df)}")
     return df, df_history
-
 
 
 st.set_page_config(layout="wide")
