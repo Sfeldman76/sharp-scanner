@@ -190,8 +190,6 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         return {}
 
 def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key='3879659fe861d68dfa2866c211294684'):
-    st.write(f"🔁 Fetching scores for {sport_key} (last {days_back} days)...")
-
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'daysFrom': days_back, 'apiKey': api_key}
 
@@ -230,29 +228,25 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         st.warning("⚠️ No completed games found.")
         return pd.DataFrame()
 
-    # 🧠 Ensure Home/Away columns are present in df_moves
+    # Prepare sharp data
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome']).copy()
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
         df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
-    # Add extracted teams from sharp picks
-    utc = pytz.UTC
+
+    import pytz
     df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce')
     if df_moves['Snapshot_Timestamp'].dt.tz is None:
         df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_localize('US/Eastern')
     df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_convert('UTC')
-    
+
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce')
     if df_moves['Game_Start'].dt.tz is None:
         df_moves['Game_Start'] = df_moves['Game_Start'].dt.tz_localize('UTC')
 
-
-    # 🔒 Filter for pregame sharp entries only
+    # Filter for pregame entries only
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
-    # Optional: check how many were filtered out
-    st.write(f"✅ Pregame sharp entries retained: {len(df_moves)}")
-    
-    # Rename score columns so they don’t overwrite your extracted teams
+    # Rename scores to avoid conflict
     df_results.rename(columns={
         'Home_Team': 'Score_Home_Team',
         'Away_Team': 'Score_Away_Team',
@@ -260,51 +254,9 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         'Away_Score': 'Score_Away_Score'
     }, inplace=True)
 
-
+    # Merge and score
     df = df_moves.merge(df_results, on='Game', how='left')
-    
-    # ✅ Totals Debug AFTER df is defined
-    totals_debug = df[
-        (df['Market'].str.lower() == 'totals') &
-        (df['Ref Sharp Value'].notna())
-    ].copy()
-    
-    st.subheader("🧪 Totals Debug — Unscored Rows")
-    st.write("Candidate totals rows with Ref Sharp Value:", len(totals_debug))
-    if not totals_debug.empty:
-        st.dataframe(totals_debug[[
-            'Game', 'Outcome', 'Ref Sharp Value', 'Score_Home_Score', 'Score_Away_Score'
-        ]].head(10))
-    
-    # ✅ Apply result scoring
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
-    # 🔍 Totals Outcome Check — after scoring
-    st.subheader("🔍 Totals Outcome Check")
-    
-    totals_unscored = df[
-        (df['Market'].str.lower() == 'totals') &
-        (df['Ref Sharp Value'].notna()) &
-        (df['SHARP_HIT_BOOL'].isna())
-    ]
-    
-    st.write("Unscored totals rows:", len(totals_unscored))
-    
-    if not totals_unscored.empty:
-        st.dataframe(totals_unscored[[
-            'Game', 'Outcome', 'Ref Sharp Value', 'Score_Home_Score', 'Score_Away_Score'
-        ]].head(10))
-
-    # ✅ Final diagnostics
-    st.subheader("🧪 Merge Validation – MLB")
-    debug_cols = [col for col in [
-        'Game', 'Home_Team', 'Away_Team',
-        'Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value'
-    ] if col in df.columns]
-    st.dataframe(df[debug_cols].head(10))
-    
-    st.success(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
-    return df
-    
+    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cove_
 
 
     # === Refactored cover logic
