@@ -205,6 +205,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     for game in score_data:
         if not game.get("completed"):
             continue
+
         home = game.get("home_team")
         away = game.get("away_team")
         scores = game.get("scores", [])
@@ -228,13 +229,19 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         return pd.DataFrame()
 
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome'])
+
+    # ✅ Extract Home/Away teams from Game column if needed
+    if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
+        df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
+
     df = df_moves.merge(df_results, on='Game', how='left')
 
-    # ✅ Apply cover result scoring *before* returning
+    # ✅ Apply cover result scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
 
     print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
+
 
     # === Refactored cover logic
 def calc_cover(row):
