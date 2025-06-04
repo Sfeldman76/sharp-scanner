@@ -256,8 +256,9 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     # Merge and score
     df = df_moves.merge(df_results, on='Game', how='left')
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cove_
+    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
 
+return df
 
     # === Refactored cover logic
 def calc_cover(row):
