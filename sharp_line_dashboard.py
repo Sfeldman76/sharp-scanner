@@ -309,14 +309,10 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     # === Refactored cover logic
 def calc_cover(row):
-    team = str(row['Outcome']).strip().lower()
-    home = str(row['Home_Team']).strip().lower()
-    away = str(row['Away_Team']).strip().lower()
-    hscore = row['Score_Home_Score']
-    ascore = row['Score_Away_Score']
-
     market = str(row['Market']).strip().lower()
 
+    hscore = row['Score_Home_Score']
+    ascore = row['Score_Away_Score']
     if pd.isna(hscore) or pd.isna(ascore):
         return None, None
 
@@ -325,6 +321,31 @@ def calc_cover(row):
         ascore = float(ascore)
     except ValueError:
         return None, None
+
+    if market == 'totals':
+        try:
+            total = float(row.get('Ref Sharp Value'))
+        except (TypeError, ValueError):
+            print(f"❌ Invalid total value: {row.get('Ref Sharp Value')}")
+            return None, None
+
+        total_points = hscore + ascore
+        outcome = str(row['Outcome']).strip().lower()
+
+        if 'under' in outcome:
+            hit = int(total_points < total)
+            return 'Win' if hit else 'Loss', hit
+        elif 'over' in outcome:
+            hit = int(total_points > total)
+            return 'Win' if hit else 'Loss', hit
+        else:
+            print(f"❓ Unknown totals outcome: '{outcome}'")
+            return None, None
+
+    # === H2H / Spreads logic only applies if not totals
+    team = str(row['Outcome']).strip().lower()
+    home = str(row['Home_Team']).strip().lower()
+    away = str(row['Away_Team']).strip().lower()
 
     if team in home:
         team_score, opp_score = hscore, ascore
@@ -342,37 +363,13 @@ def calc_cover(row):
         return 'Win' if hit else 'Loss', hit
 
     if market == 'spreads':
-        spread = row.get('Ref Sharp Value')
-        if spread is None or not isinstance(spread, (int, float)):
-            try:
-                spread = float(spread)
-            except:
-                return None, None
+        try:
+            spread = float(row.get('Ref Sharp Value'))
+        except (TypeError, ValueError):
+            return None, None
+
         hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
         return 'Win' if hit else 'Loss', hit
-
-
-    
-    if market == 'totals':
-        try:
-            total = float(row.get('Ref Sharp Value'))
-        except (TypeError, ValueError):
-            print(f"❌ Failed to parse total: {row.get('Ref Sharp Value')}")
-            return None, None
-    
-        total_points = hscore + ascore
-        outcome = str(row['Outcome']).strip().lower()
-    
-        if 'under' in outcome:
-            hit = int(total_points < total)
-            return 'Win' if hit else 'Loss', hit
-        elif 'over' in outcome:
-            hit = int(total_points > total)
-            return 'Win' if hit else 'Loss', hit
-        else:
-            print(f"❓ Unknown totals outcome: '{outcome}' | total={total} | points={total_points}")
-            return None, None
-    
 
     return None, None
 
