@@ -232,6 +232,17 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome']).copy()
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
         df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
+    # Add extracted teams from sharp picks
+ 
+    
+    # Rename score columns so they don’t overwrite your extracted teams
+    df_results.rename(columns={
+        'Home_Team': 'Score_Home_Team',
+        'Away_Team': 'Score_Away_Team',
+        'Home_Score': 'Score_Home_Score',
+        'Away_Score': 'Score_Away_Score'
+    }, inplace=True)
+
 
     df = df_moves.merge(df_results, on='Game', how='left')
 
@@ -252,8 +263,9 @@ def calc_cover(row):
     team = str(row['Outcome']).strip().lower()
     home = str(row['Home_Team']).strip().lower()
     away = str(row['Away_Team']).strip().lower()
-    hscore = row['Home_Score']
-    ascore = row['Away_Score']
+    hscore = row['Score_Home_Score']
+    ascore = row['Score_Away_Score']
+
     market = str(row['Market']).strip().lower()
 
     if pd.isna(hscore) or pd.isna(ascore):
