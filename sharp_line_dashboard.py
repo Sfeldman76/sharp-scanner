@@ -1091,10 +1091,12 @@ else:
 
        
         st.subheader("🧠 Sharp Component Learning – MLB")
-
+        
+    
+        # Use once, reuse below
         scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
         
-        # Define all sharp signal components to learn from
+        # Define all sharp signal components
         component_fields = {
             'Sharp_Move_Signal': 'Win Rate by Move Signal',
             'Sharp_Time_Score': 'Win Rate by Time Score',
@@ -1105,8 +1107,10 @@ else:
             'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
         }
         
+        # Overall learning
         for col, label in component_fields.items():
             if col in scored.columns:
+                st.markdown(f"**📊 {label} (All Markets)**")
                 result = (
                     scored.groupby(col)['SHARP_HIT_BOOL']
                     .mean().reset_index()
@@ -1114,6 +1118,16 @@ else:
                     .sort_values(by=col)
                 )
                 st.dataframe(result)
-            else:
-                st.warning(f"⚠️ Missing column: {col}")
-
+        
+        # Learning by Market
+        st.subheader("🧠 Sharp Component Learning by Market")
+        for col, label in component_fields.items():
+            if col in scored.columns:
+                st.markdown(f"**📊 {label} by Market**")
+                result = (
+                    scored.groupby(['Market', col])['SHARP_HIT_BOOL']
+                    .mean().reset_index()
+                    .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
+                    .sort_values(by=['Market', col])
+                )
+                st.dataframe(result)
