@@ -946,15 +946,20 @@ df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
 
-# Load and evaluate full history
 df_master = load_master_sharp_moves(drive)
-print("📊 Total sharp picks loaded:", len(df_master))
-print("📊 MLB picks loaded:", len(df_master[df_master['Sport'] == 'MLB']))
-df_check = df_master[df_master['Sport'] == 'MLB']
-print("📌 Example Ref Sharp Values:", df_check['Ref Sharp Value'].dropna().head())
 
-if df_master.empty:
-    st.warning("⚠️ No historical sharp picks found in Google Drive yet.")
+st.write("📊 Total sharp picks loaded:", len(df_master))
+if not df_master.empty:
+    st.write("📊 Columns in df_master:", df_master.columns.tolist())
+    df_check = df_master[df_master['Sport'] == 'MLB']
+    st.write("📊 MLB picks loaded:", len(df_check))
+    st.write("📌 Example rows for MLB:")
+    st.dataframe(df_check.head(10))
+    st.write("📌 Non-null Ref Sharp Values:")
+    st.dataframe(df_check['Ref Sharp Value'].dropna().head(10))
+else:
+    st.warning("❌ df_master is empty!")
+
 else:
     df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
     df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
