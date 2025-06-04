@@ -245,7 +245,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         df['Away_Score'].notna() &
         df['Ref Sharp Value'].notna()
     ]
-st.write("✅ Rows eligible for scoring:", len(valid_rows), "/", len(df))
+    st.write("✅ Rows eligible for scoring:", len(valid_rows), "/", len(df))
 
     # ✅ Apply cover result scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
