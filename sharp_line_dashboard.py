@@ -248,6 +248,12 @@ def calc_cover(row):
     if pd.isna(hscore) or pd.isna(ascore):
         return None, None
 
+    try:
+        hscore = float(hscore)
+        ascore = float(ascore)
+    except ValueError:
+        return None, None  # fail-safe if score is not numeric
+
     if team in home:
         team_score, opp_score = hscore, ascore
     elif team in away:
@@ -266,14 +272,20 @@ def calc_cover(row):
     if market == 'spreads':
         spread = row.get('Ref Sharp Value')
         if spread is None or not isinstance(spread, (int, float)):
-            return None, None
+            try:
+                spread = float(spread)
+            except:
+                return None, None
         hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
         return 'Win' if hit else 'Loss', hit
 
     if market == 'totals':
         total = row.get('Ref Sharp Value')
         if total is None or not isinstance(total, (int, float)):
-            return None, None
+            try:
+                total = float(total)
+            except:
+                return None, None
         total_points = hscore + ascore
         if 'under' in team:
             hit = int(total_points < total)
