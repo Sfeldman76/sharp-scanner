@@ -948,6 +948,10 @@ df_mlb_bt = pd.DataFrame()
 
 # Load and evaluate full history
 df_master = load_master_sharp_moves(drive)
+print("📊 Total sharp picks loaded:", len(df_master))
+print("📊 MLB picks loaded:", len(df_master[df_master['Sport'] == 'MLB']))
+df_check = df_master[df_master['Sport'] == 'MLB']
+print("📌 Example Ref Sharp Values:", df_check['Ref Sharp Value'].dropna().head())
 
 if df_master.empty:
     st.warning("⚠️ No historical sharp picks found in Google Drive yet.")
