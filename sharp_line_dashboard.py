@@ -1072,6 +1072,21 @@ else:
             )
             st.subheader("📊 Sharp Signal Performance by Market + Tier")
             st.dataframe(df_market_tier_summary)
+        st.subheader("🔍 Totals Presence Check")
+        
+        totals_rows = df_mlb_bt[
+            (df_mlb_bt['Market'].str.lower() == 'totals') &
+            (df_mlb_bt['SHARP_HIT_BOOL'].notna())
+        ]
+        
+        st.write("✅ Totals backtest rows found:", len(totals_rows))
+        
+        if not totals_rows.empty:
+            st.dataframe(totals_rows[[
+                'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
+            ]].head(10))
+        else:
+            st.warning("❌ No scored totals rows found.")
 
 
        
