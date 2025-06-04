@@ -214,31 +214,42 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         return pd.DataFrame()
 
     result_rows = []
+    completed_games = 0
+    
     for game in score_data:
         if not game.get("completed"):
             continue
-
-        home = game.get("home_team")
-        away = game.get("away_team")
+    
+        completed_games += 1
+    
+        home = game.get("home_team", "").strip().lower()
+        away = game.get("away_team", "").strip().lower()
         scores = game.get("scores", [])
-        team_scores = {s["name"]: s["score"] for s in scores if "name" in s and "score" in s}
-
+        team_scores = {
+            s["name"].strip().lower(): s["score"]
+            for s in scores if "name" in s and "score" in s
+        }
+    
         if home not in team_scores or away not in team_scores:
+            print(f"❌ Skipped — Missing score: {home=} {away=} vs {team_scores}")
             continue
-
-        game_name = f"{home} vs {away}"
+    
+        game_name = f"{game['home_team']} vs {game['away_team']}"  # keep display casing
         result_rows.append({
             'Game': game_name,
-            'Home_Team': home,
-            'Away_Team': away,
+            'Home_Team': game['home_team'],
+            'Away_Team': game['away_team'],
             'Home_Score': team_scores[home],
             'Away_Score': team_scores[away]
         })
-
+    
     df_results = pd.DataFrame(result_rows)
+    st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
+    
     if df_results.empty:
-        st.warning("⚠️ No completed games found.")
+        st.warning("⚠️ No parsed scores matched your games, even though API reported completed games.")
         return pd.DataFrame()
+
 
     # Prepare sharp data
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome']).copy()
