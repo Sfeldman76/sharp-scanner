@@ -235,10 +235,15 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
 
     df = df_moves.merge(df_results, on='Game', how='left')
-    # Diagnostic: inspect a few merged rows
+
+    # ✅ Now safe to debug
     st.subheader("🧪 Merge Validation – MLB")
-    st.dataframe(df[['Game', 'Home_Team', 'Away_Team', 'Home_Score', 'Away_Score', 'Ref Sharp Value']].head(10))
-    
+    st.dataframe(df[[
+        'Game', 'Home_Team', 'Away_Team',
+        'Home_Score', 'Away_Score',
+        'Ref Sharp Value'
+    ]].head(10))
+
     # Check how many actually have scores and valid Ref Sharp Value
     valid_rows = df[
         df['Home_Score'].notna() &
