@@ -188,7 +188,7 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         return {}
 
 def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key='3879659fe861d68dfa2866c211294684'):
-    print(f"🔁 Fetching scores for {sport_key} (last {days_back} days)...")
+    st.write(f"🔁 Fetching scores for {sport_key} (last {days_back} days)...")
 
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'daysFrom': days_back, 'apiKey': api_key}
@@ -198,7 +198,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         response.raise_for_status()
         score_data = response.json()
     except Exception as e:
-        print(f"❌ Failed to fetch scores: {e}")
+        st.error(f"❌ Failed to fetch scores: {e}")
         return pd.DataFrame()
 
     result_rows = []
@@ -225,37 +225,25 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     df_results = pd.DataFrame(result_rows)
     if df_results.empty:
-        print("⚠️ No completed games found.")
+        st.warning("⚠️ No completed games found.")
         return pd.DataFrame()
 
-    df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome'])
-
-    # ✅ Extract Home/Away teams from Game column if needed
+    # 🧠 Ensure Home/Away columns are present in df_moves
+    df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome']).copy()
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
         df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
 
     df = df_moves.merge(df_results, on='Game', how='left')
 
-    # ✅ Now safe to debug
-    st.subheader("🧪 Merge Validation – MLB")
-    st.dataframe(df[[
-        'Game', 'Home_Team', 'Away_Team',
-        'Home_Score', 'Away_Score',
-        'Ref Sharp Value'
-    ]].head(10))
-
-    # Check how many actually have scores and valid Ref Sharp Value
-    valid_rows = df[
-        df['Home_Score'].notna() &
-        df['Away_Score'].notna() &
-        df['Ref Sharp Value'].notna()
-    ]
-    st.write("✅ Rows eligible for scoring:", len(valid_rows), "/", len(df))
-
-    # ✅ Apply cover result scoring
+    # ✅ Apply result scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
 
-    print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
+    # ✅ Diagnostic: Show merge results
+    st.subheader("🧪 Merge Validation – MLB")
+    debug_cols = [col for col in ['Game', 'Home_Team', 'Away_Team', 'Home_Score', 'Away_Score', 'Ref Sharp Value'] if col in df.columns]
+    st.dataframe(df[debug_cols].head(10))
+
+    st.success(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
 
 
