@@ -40,7 +40,6 @@ MARKETS = ['spreads', 'totals', 'h2h']
 
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 
-
 # 🔁 Shared list of components used for scoring, learning, and tiering
 component_fields = OrderedDict({
     'Sharp_Move_Signal': 'Win Rate by Move Signal',
@@ -51,14 +50,8 @@ component_fields = OrderedDict({
     'Market_Leader': 'Win Rate by Market Leader',
     'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
 })
+
 market_component_win_rates = {}
-try:
-    with open("/mnt/data/market_weights.json", "r") as f:
-        market_component_win_rates = json.load(f)
-        print("✅ Loaded market weights from /mnt/data/market_weights.json")
-except FileNotFoundError:
-    print("⚠️ No saved market weights found. Using neutral weights.")
-    market_component_win_rates = {}
 
 def get_snapshot(data):
     return {g['id']: g for g in data}
@@ -80,7 +73,6 @@ def init_gdrive():
     except Exception as e:
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
-
 
 def implied_prob(odds):
     try:
@@ -486,15 +478,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     }.get(sport_key.upper(), sport_key.lower())  # fallback safe
     
     
-    all_weights = globals().get('market_component_win_rates', {})
     print("🔍 Weights structure preview:", json.dumps(weights, indent=2))
     print("🧠 Extracting weights for:", sport_scope_key)
     confidence_weights = weights.get(sport_scope_key, {})
-
-    confidence_weights = weights.get(sport_scope_key, {})
     print(f"✅ Using weights for {sport_scope_key} — Available markets: {list(confidence_weights.keys())}")
-
-
 
     # === Component fields for confidence scoring
     local_components = list(component_fields.keys())
