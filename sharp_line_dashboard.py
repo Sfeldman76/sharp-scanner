@@ -264,19 +264,21 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df = df_moves.merge(df_results, on='Game', how='left')
 
     # ✅ Apply result scoring
+    # ✅ Apply result scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
-
+    
     # ✅ Diagnostic: Show merge results
     st.subheader("🧪 Merge Validation – MLB")
-   debug_cols = [col for col in [
+    debug_cols = [col for col in [
         'Game', 'Home_Team', 'Away_Team',
         'Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value'
     ] if col in df.columns]
-
+    
     st.dataframe(df[debug_cols].head(10))
-
+    
     st.success(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
+
 
 
     # === Refactored cover logic
