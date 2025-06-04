@@ -51,6 +51,7 @@ component_fields = OrderedDict({
     'Market_Leader': 'Win Rate by Market Leader',
     'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
 })
+market_component_win_rates = {}
 
 def get_snapshot(data):
     return {g['id']: g for g in data}
@@ -408,6 +409,13 @@ def detect_cross_market_sharp_support(df_moves):
     df['Is_Reinforced_MultiMarket'] = df['CrossMarketSharpSupport'] >= 2
 
     return df
+
+
+try:
+    with open("market_weights.json", "r") as f:
+        market_component_win_rates = json.load(f)
+except FileNotFoundError:
+    market_component_win_rates = {}
 
 
 
@@ -1166,3 +1174,13 @@ with tab_mlb:
                         val = row[comp]
                         win_rate = row['Win_Rate']
                         market_component_win_rates.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
+            # Make weights globally available to detect_sharp_moves
+            globals()["market_component_win_rates"] = market_component_win_rates
+            
+            # Save learned weights to disk
+            with open("market_weights.json", "w") as f:
+                json.dump(market_component_win_rates, f, indent=2)
+
+
+
+
