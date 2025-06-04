@@ -860,8 +860,6 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
 
 def render_scanner_tab(label, sport_key, container, drive):
     with container:
-
-        df_moves = pd.DataFrame()
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
 
@@ -874,97 +872,91 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning(f"⚠️ No live odds returned for {label}.")
             return pd.DataFrame()
 
-        try:
-            df_moves, df_audit, summary_df = detect_sharp_moves(
-                live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
-                weights=market_component_win_rates
-            )
+        # ✅ Defer sharp move detection until learned weights are available
+        # This placeholder is just for structure; no detection yet
+        df_moves = pd.DataFrame()
+        df_audit = pd.DataFrame()
+        summary_df = pd.DataFrame()
 
-
-            # ✅ Add timestamp to both dataframes
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            if not df_moves.empty:
-                df_moves['Snapshot_Timestamp'] = timestamp
-                df_moves['Sport'] = label
-                append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
-
-            if not df_audit.empty:
-                df_audit['Snapshot_Timestamp'] = timestamp
-
-                try:
-                    file_list = drive.ListFile({
-                        'q': f"title='line_history_master.csv' and '{FOLDER_ID}' in parents and trashed=false"
-                    }).GetList()
-
-                    df_existing = pd.DataFrame()
-                    if file_list:
-                        file_drive = file_list[0]
-                        try:
-                            existing_data = StringIO(file_drive.GetContentString())
-                            df_existing = pd.read_csv(existing_data)
-                        except Exception as read_error:
-                            print(f"⚠️ Could not read existing file: {read_error}")
-                            df_existing = pd.DataFrame()
-
-                        # ✅ Explicitly delete the file so upload replaces it
-                        try:
-                            file_drive.Delete()
-                            print("🗑️ Deleted old line_history_master.csv")
-                        except Exception as delete_error:
-                            print(f"⚠️ Could not delete old file: {delete_error}")
-
-                    # 🧠 Append new snapshot to history
-                    df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
-
-                    # ❌ No deduplication — keep all line snapshots
-                    # df_combined.drop_duplicates(...)
-
-                    csv_buffer = StringIO()
-                    df_combined.to_csv(csv_buffer, index=False)
-                    csv_buffer.seek(0)
-
-                    new_file = drive.CreateFile({'title': "line_history_master.csv", "parents": [{"id": FOLDER_ID}]})
-                    new_file.SetContentString(csv_buffer.getvalue())
-                    new_file.Upload()
-                    print(f"✅ line_history_master.csv uploaded with {len(df_combined)} total rows.")
-
-                except Exception as e:
-                    st.error(f"❌ Failed to append to line history: {e}")
-
-        except Exception as e:
-            st.error(f"❌ Error in detect_sharp_moves: {e}")
-            return pd.DataFrame()
-
-        
-        # ✅ Move this fully outside of try block
+        # === Snapshot live odds (before sharp detection)
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-     
+        # ✅ CALCULATE SPORT KEY LOWER
+        sport_key_lower = sport_key.lower()
 
-        # === Show sharp moves first
-        # === Show summarized sharp consensus movement table instead
+        # ✅ USE LEARNED WEIGHTS FROM GLOBAL DICT
+        confidence_weights = market_component_win_rates.get(sport_key_lower, {})
+        if not confidence_weights:
+            st.warning(f"⚠️ No learned weights found for {sport_key_lower} — fallback weights will apply.")
+
+        # ✅ DETECT SHARP MOVES with latest weights
+        df_moves, df_audit, summary_df = detect_sharp_moves(
+            live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
+            weights=market_component_win_rates
+        )
+
+        # ✅ Add timestamps and append if needed
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if not df_moves.empty:
+            df_moves['Snapshot_Timestamp'] = timestamp
+            df_moves['Sport'] = label
+            append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+
+        if not df_audit.empty:
+            df_audit['Snapshot_Timestamp'] = timestamp
+            try:
+                file_list = drive.ListFile({
+                    'q': f"title='line_history_master.csv' and '{FOLDER_ID}' in parents and trashed=false"
+                }).GetList()
+
+                df_existing = pd.DataFrame()
+                if file_list:
+                    file_drive = file_list[0]
+                    try:
+                        existing_data = StringIO(file_drive.GetContentString())
+                        df_existing = pd.read_csv(existing_data)
+                    except Exception as read_error:
+                        print(f"⚠️ Could not read existing file: {read_error}")
+                        df_existing = pd.DataFrame()
+
+                    # Delete old file before uploading new
+                    try:
+                        file_drive.Delete()
+                        print("🗑️ Deleted old line_history_master.csv")
+                    except Exception as delete_error:
+                        print(f"⚠️ Could not delete old file: {delete_error}")
+
+                df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
+                csv_buffer = StringIO()
+                df_combined.to_csv(csv_buffer, index=False)
+                csv_buffer.seek(0)
+
+                new_file = drive.CreateFile({'title': "line_history_master.csv", "parents": [{"id": FOLDER_ID}]})
+                new_file.SetContentString(csv_buffer.getvalue())
+                new_file.Upload()
+                print(f"✅ line_history_master.csv uploaded with {len(df_combined)} total rows.")
+
+            except Exception as e:
+                st.error(f"❌ Failed to append to line history: {e}")
+
+        # === Sharp Summary
         if summary_df is None or summary_df.empty:
             st.info(f"⚠️ No sharp consensus movements detected for {label}.")
         else:
             st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
-            
             market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
             market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
-        
-            filtered_df = summary_df.copy()
-            if market != "All":
-                filtered_df = filtered_df[filtered_df['Market'] == market]
-        
-            st.dataframe(filtered_df[
-                [
-                    'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
-                    'Rec_Book_Consensus', 'Sharp_Book_Consensus',
-                    'Move_From_Open_Rec', 'Move_From_Open_Sharp', 'SharpBetScore','True_Sharp_Confidence_Score'
-                ]
-            ], use_container_width=True)
+            filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
+            st.dataframe(filtered_df[[
+                'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
+                'Rec_Book_Consensus', 'Sharp_Book_Consensus',
+                'Move_From_Open_Rec', 'Move_From_Open_Sharp',
+                'SharpBetScore', 'True_Sharp_Confidence_Score'
+            ]], use_container_width=True)
 
-
+      
+       
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
         raw_odds_table = []
@@ -1308,6 +1300,9 @@ with tab_mlb:
                 'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
             ]].head())
 
-      
+   df_moves, df_audit, summary_df = detect_sharp_moves(
+    live, prev, sport_key_lower, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
+    weights=market_component_win_rates
+)   
 
 
