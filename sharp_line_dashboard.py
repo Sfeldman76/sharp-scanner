@@ -1060,19 +1060,24 @@ else:
     
         st.subheader("📊 MLB Sharp Signal Performance by Market + Confidence Tier")
     
-        df_market_tier_summary = (
-            df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
-            .groupby(['Market', 'SharpConfidenceTier'])
-            .agg(
-                Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                Hits=('SHARP_HIT_BOOL', 'sum'),
-                Win_Rate=('SHARP_HIT_BOOL', 'mean')
+        if 'Market' not in df_mlb_bt.columns:
+            st.warning("⚠️ 'Market' column missing from df_mlb_bt!")
+            st.write("📋 Available columns:", df_mlb_bt.columns.tolist())
+        else:
+            df_market_tier_summary = (
+                df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
+                .groupby(['Market', 'SharpConfidenceTier'])
+                .agg(
+                    Total_Picks=('SHARP_HIT_BOOL', 'count'),
+                    Hits=('SHARP_HIT_BOOL', 'sum'),
+                    Win_Rate=('SHARP_HIT_BOOL', 'mean')
+                )
+                .reset_index()
+                .round(3)
             )
-            .reset_index()
-            .round(3)
-        )
-    
-        st.dataframe(df_market_tier_summary)
+            st.subheader("📊 Sharp Signal Performance by Market + Tier")
+            st.dataframe(df_market_tier_summary)
+
 
        
         st.subheader("🧠 Sharp Component Learning – MLB")
