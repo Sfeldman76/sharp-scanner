@@ -391,23 +391,25 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
 
     return first_moves
 
-def load_weights_from_drive(drive, folder_id=FOLDER_ID):
+def save_weights_to_drive(weights, drive, folder_id=FOLDER_ID):
     try:
+        # Delete old file
         file_list = drive.ListFile({
             'q': f"title='market_weights.json' and '{folder_id}' in parents and trashed=false"
         }).GetList()
+        for file in file_list:
+            file.Delete()
 
-        if not file_list:
-            print("⚠️ No saved market weights found on Google Drive.")
-            return {}
+        buffer = StringIO()
+        json.dump(weights, buffer, indent=2)
+        buffer.seek(0)
 
-        file_drive = file_list[0]
-        content = file_drive.GetContentString()
-        print("✅ Loaded market weights from Google Drive.")
-        return json.loads(content)
+        new_file = drive.CreateFile({'title': "market_weights.json", "parents": [{"id": folder_id}]})
+        new_file.SetContentString(buffer.getvalue())
+        new_file.Upload()
+        print("✅ Saved market weights to Google Drive.")
     except Exception as e:
-        print(f"❌ Failed to load weights from Drive: {e}")
-        return {}
+        print(f"❌ Failed to save market weights to Drive: {e}")
 
 
 def save_weights_to_drive(weights, drive, folder_id=FOLDER_ID):
