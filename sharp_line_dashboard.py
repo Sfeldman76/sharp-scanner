@@ -1299,10 +1299,3 @@ with tab_mlb:
             st.dataframe(df_mlb_bt[[
                 'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
             ]].head())
-
-   df_moves, df_audit, summary_df = detect_sharp_moves(
-    live, prev, sport_key_lower, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
-    weights=market_component_win_rates
-)   
-
-
