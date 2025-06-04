@@ -262,23 +262,34 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
 
     df = df_moves.merge(df_results, on='Game', how='left')
-
-    # ✅ Apply result scoring
+    
+    # ✅ Totals Debug AFTER df is defined
+    totals_debug = df[
+        (df['Market'].str.lower() == 'totals') &
+        (df['Ref Sharp Value'].notna())
+    ].copy()
+    
+    st.subheader("🧪 Totals Debug — Unscored Rows")
+    st.write("Candidate totals rows with Ref Sharp Value:", len(totals_debug))
+    if not totals_debug.empty:
+        st.dataframe(totals_debug[[
+            'Game', 'Outcome', 'Ref Sharp Value', 'Score_Home_Score', 'Score_Away_Score'
+        ]].head(10))
+    
     # ✅ Apply result scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
     
-    # ✅ Diagnostic: Show merge results
+    # ✅ Final diagnostics
     st.subheader("🧪 Merge Validation – MLB")
     debug_cols = [col for col in [
         'Game', 'Home_Team', 'Away_Team',
         'Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value'
     ] if col in df.columns]
-    
     st.dataframe(df[debug_cols].head(10))
     
     st.success(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
     return df
-
+    
 
 
     # === Refactored cover logic
@@ -325,21 +336,24 @@ def calc_cover(row):
         hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
         return 'Win' if hit else 'Loss', hit
 
+
     if market == 'totals':
         try:
             total = float(row.get('Ref Sharp Value'))
         except (TypeError, ValueError):
             return None, None
-
+    
         total_points = hscore + ascore
-        if 'under' in team:
+        outcome = str(row['Outcome']).strip().lower()
+    
+        if 'under' in outcome:
             hit = int(total_points < total)
             return 'Win' if hit else 'Loss', hit
-        elif 'over' in team:
+        elif 'over' in outcome:
             hit = int(total_points > total)
             return 'Win' if hit else 'Loss', hit
         else:
-            print(f"❓ Unknown totals outcome: '{team}' | total={total} | points={total_points}")
+            print(f"❓ Unknown totals outcome: '{outcome}' | total={total} | points={total_points}")
             return None, None
 
     return None, None
