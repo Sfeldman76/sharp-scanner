@@ -436,13 +436,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
     # Use learned weights if available, else fallback to default neutral confidence
-    sport_key_lower = sport_key.lower()
-    all_weights = globals().get('market_component_win_rates', {})
+    # Normalize to consistent keys used in weights
+    sport_scope_key = {
+        'MLB': 'baseball_mlb',
+        'NBA': 'basketball_nba'
+    }.get(sport_key.upper(), sport_key.lower())  # fallback safe
     
-    if isinstance(all_weights, dict) and sport_key_lower in all_weights:
-        confidence_weights = all_weights[sport_key_lower]
-    else:
-        confidence_weights = {}  # fallback
+    all_weights = globals().get('market_component_win_rates', {})
+    confidence_weights = all_weights.get(sport_scope_key, {})
 
 
     # === Component fields for confidence scoring
@@ -642,13 +643,17 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         max_score = 0
         for comp in component_fields:
             val = row.get(comp)
+            market = str(market).lower()
+            
             try:
-                val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val)
+                val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val).lower()
                 weight = market_weights.get(market, {}).get(comp, {}).get(val_key, 0.5)
-                score += weight * 10
-                max_score += 10
             except:
-                continue
+                weight = 0.5
+        if score == 35:
+            st.warning(f"⚠️ Fallback weights used — Market: {market}, Comp: {comp}, Val: {val_key}")
+      
+
         return round(score, 2) if max_score > 0 else None
     
     # === Create base DataFrame
