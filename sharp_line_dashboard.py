@@ -52,7 +52,13 @@ component_fields = OrderedDict({
     'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
 })
 market_component_win_rates = {}
-
+try:
+    with open("/mnt/data/market_weights.json", "r") as f:
+        market_component_win_rates = json.load(f)
+        print("✅ Loaded market weights from file.")
+except FileNotFoundError:
+    print("⚠️ No saved market weights found. Using neutral weights.")
+    market_component_win_rates = {}
 def get_snapshot(data):
     return {g['id']: g for g in data}
 
@@ -202,7 +208,7 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
 
-def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key='3879659fe861d68dfa2866c211294684'):
+def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=90, api_key='3879659fe861d68dfa2866c211294684'):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'daysFrom': days_back, 'apiKey': api_key}
 
@@ -1138,15 +1144,21 @@ with tab_nba:
             market_component_win_rates = globals().get("market_component_win_rates", {})
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
             globals()["market_component_win_rates"] = market_component_win_rates
-
-            # Save to file
-            with open("market_weights.json", "w") as f:
-                json.dump(market_component_win_rates, f, indent=2)
-
-            st.subheader("📥 Learned Weights for NBA (Debug)")
+            
+            # 💾 Save weights to disk (match load path)
+            try:
+                with open("/mnt/data/market_weights.json", "w") as f:
+                    json.dump(market_component_win_rates, f, indent=2)
+                print("✅ Saved market weights to /mnt/data/market_weights.json")
+            except Exception as e:
+                print(f"❌ Failed to save market weights: {e}")
+            
+            # 📥 Show learned weights in UI
+            st.subheader(f"📥 Learned Weights for {sport_key} (Debug)")
             st.json(market_component_win_rates.get(sport_key_lower, {}))
             
-            st.subheader("🧪 Sample NBA Confidence Inputs")
+            # 🧪 Sample confidence scores for inspection
+            st.subheader(f"🧪 Sample {sport_key} Confidence Inputs")
             st.dataframe(df_nba_bt[[
                 'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
             ]].head())
@@ -1262,20 +1274,25 @@ with tab_mlb:
             
             # 🔁 Update global scoped object
             # 🔁 Update global scoped object
+            # 🔁 Update global scoped object
             market_component_win_rates = globals().get("market_component_win_rates", {})
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
             globals()["market_component_win_rates"] = market_component_win_rates
             
-            # 💾 Save weights to disk
-            with open("market_weights.json", "w") as f:
-                json.dump(market_component_win_rates, f, indent=2)
-
+            # 💾 Save weights to disk (match load path)
+            try:
+                with open("/mnt/data/market_weights.json", "w") as f:
+                    json.dump(market_component_win_rates, f, indent=2)
+                print("✅ Saved market weights to /mnt/data/market_weights.json")
+            except Exception as e:
+                print(f"❌ Failed to save market weights: {e}")
+            
             # 📥 Show learned weights in UI
-            st.subheader("📥 Learned Weights for MLB (Debug)")
+            st.subheader(f"📥 Learned Weights for {sport_key} (Debug)")
             st.json(market_component_win_rates.get(sport_key_lower, {}))
             
             # 🧪 Sample confidence scores for inspection
-            st.subheader("🧪 Sample MLB Confidence Inputs")
+            st.subheader(f"🧪 Sample {sport_key} Confidence Inputs")
             st.dataframe(df_mlb_bt[[
                 'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
             ]].head())
