@@ -311,10 +311,10 @@ def calc_cover(row):
 
         if 'under' in outcome:
             hit = int(total_points < total)
-            return 'Win' if hit else 'Loss', hit
+            return ('Win', hit) if hit else ('Loss', hit)
         elif 'over' in outcome:
             hit = int(total_points > total)
-            return 'Win' if hit else 'Loss', hit
+            return ('Win', hit) if hit else ('Loss', hit)
         else:
             print(f"❓ Unknown totals outcome: '{outcome}'")
             return None, None
@@ -337,7 +337,7 @@ def calc_cover(row):
 
     if market == 'h2h':
         hit = int(team_score > opp_score)
-        return 'Win' if hit else 'Loss', hit
+        return ('Win', hit) if hit else ('Loss', hit)
 
     if market == 'spreads':
         try:
@@ -346,9 +346,11 @@ def calc_cover(row):
             return None, None
 
         hit = int((margin > abs(spread)) if spread < 0 else (margin + spread > 0))
-        return 'Win' if hit else 'Loss', hit
+        return ('Win', hit) if hit else ('Loss', hit)
 
+    # If market is unrecognized
     return None, None
+
 
 
 def detect_market_leaders(df_history, sharp_books, rec_books):
