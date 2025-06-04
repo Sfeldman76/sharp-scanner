@@ -73,7 +73,7 @@ def init_gdrive():
     except Exception as e:
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
-
+drive = init_gdrive()
 def implied_prob(odds):
     try:
         if odds < 0:
@@ -811,7 +811,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
 
-drive = init_gdrive()
+
 market_component_win_rates = load_weights_from_drive(drive)
 
 st.title("📊 Sharp Edge Scanner")
