@@ -1012,27 +1012,6 @@ df_master = load_master_sharp_moves(drive)
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
 
-if df_master.empty:
-    st.warning("⚠️ No historical sharp picks found in Google Drive yet.")
-else:
-    # Run backtesting for NBA and MLB
-    df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
-    df_mlb_bt = fetch_scores_and_backtest(df_master[(df_master['Sport'] == 'MLB') & (df_master['SHARP_SIDE_TO_BET'] == 1)])
-
-
-    # === SHARP SCORE DEBUG ===
-    st.subheader("🧪 Sharp Score Debug")
-    if 'SHARP_HIT_BOOL' not in df_mlb_bt.columns:
-        st.warning("❌ SHARP_HIT_BOOL column not found in df_mlb_bt.")
-    else:
-        scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
-        if scored.empty:
-            st.warning("❌ No scored rows found.")
-        else:
-            st.write("✅ Total scored rows:", len(scored))
-            st.write("🔍 Rows with SharpBetScore > 0:", len(scored[scored['SharpBetScore'] > 0]))
-            st.dataframe(scored[['Game', 'Outcome', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore']].head(10))
-
 
     # === NBA Sharp Signal Performance
     # === NBA Sharp Signal Performance
