@@ -1172,11 +1172,18 @@ with tab_nba:
                         market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
 
             # Store globally and persist
+            global market_component_win_rates
             market_component_win_rates = globals().get("market_component_win_rates", {})
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
             globals()["market_component_win_rates"] = market_component_win_rates
+
             
-            save_weights_to_drive(market_component_win_rates, drive)
+            try:
+                save_weights_to_drive(market_component_win_rates, drive)
+                print(f"✅ Saved weights for {sport_key_lower} to Google Drive.")
+            except Exception as e:
+                print(f"❌ Failed to save weights for {sport_key_lower}: {e}")
+
 
             
             # 📥 Show learned weights in UI
