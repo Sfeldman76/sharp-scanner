@@ -638,23 +638,28 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     # === Confidence scoring using learned weights
     def compute_confidence(row, market_weights):
-        market = row.get('Market', '').lower()
+        market = str(row.get('Market', '')).lower()
         score = 0
         max_score = 0
+    
         for comp in component_fields:
             val = row.get(comp)
-            market = str(market).lower()
-            
+    
             try:
                 val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val).lower()
                 weight = market_weights.get(market, {}).get(comp, {}).get(val_key, 0.5)
             except:
                 weight = 0.5
-        if score == 35:
-            st.warning(f"⚠️ Fallback weights used — Market: {market}, Comp: {comp}, Val: {val_key}")
-      
-
+    
+            score += weight * 10
+            max_score += 10
+    
+        # Optional warning if all fallback weights were used (score stuck at neutral)
+        if score == 35 and max_score == 70:
+            st.warning(f"⚠️ All fallback weights used for {market} — full neutral confidence")
+    
         return round(score, 2) if max_score > 0 else None
+
     
     # === Create base DataFrame
     df = pd.DataFrame(rows)
