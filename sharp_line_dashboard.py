@@ -55,10 +55,11 @@ market_component_win_rates = {}
 try:
     with open("/mnt/data/market_weights.json", "r") as f:
         market_component_win_rates = json.load(f)
-        print("✅ Loaded market weights from file.")
+        print("✅ Loaded market weights from /mnt/data/market_weights.json")
 except FileNotFoundError:
     print("⚠️ No saved market weights found. Using neutral weights.")
     market_component_win_rates = {}
+
 def get_snapshot(data):
     return {g['id']: g for g in data}
 
@@ -447,6 +448,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         'MLB': 'baseball_mlb',
         'NBA': 'basketball_nba'
     }.get(sport_key.upper(), sport_key.lower())  # fallback safe
+    
     
     all_weights = globals().get('market_component_win_rates', {})
     confidence_weights = all_weights.get(sport_scope_key, {})
@@ -1251,7 +1253,7 @@ with tab_mlb:
 
             # Learning blocks
             # Store weights scoped by sport
-            sport_key_lower = 'baseball_mlb'  # or 'basketball_nba' dynamically based on loop context
+            sport_key_lower = 'baseball_mlb'  
             market_component_win_rates_sport = {}
             
             st.subheader("🧠 Sharp Component Learning by Market")
