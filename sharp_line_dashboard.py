@@ -81,10 +81,6 @@ def init_gdrive():
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
 
-drive = init_gdrive()
-market_component_win_rates = load_weights_from_drive(drive)
-
-
 
 def implied_prob(odds):
     try:
