@@ -298,7 +298,7 @@ def calc_cover(row):
         hscore = float(hscore)
         ascore = float(ascore)
     except ValueError:
-        return None, None  # fail-safe if score is not numeric
+        return None, None
 
     if team in home:
         team_score, opp_score = hscore, ascore
@@ -326,29 +326,24 @@ def calc_cover(row):
         return 'Win' if hit else 'Loss', hit
 
     if market == 'totals':
-        total = row.get('Ref Sharp Value')
-        if total is None or not isinstance(total, (int, float)):
-            try:
-                total = float(total)
-            except:
-                return None, None
+        try:
+            total = float(row.get('Ref Sharp Value'))
+        except (TypeError, ValueError):
+            return None, None
+
         total_points = hscore + ascore
         if 'under' in team:
             hit = int(total_points < total)
+            return 'Win' if hit else 'Loss', hit
         elif 'over' in team:
             hit = int(total_points > total)
+            return 'Win' if hit else 'Loss', hit
         else:
+            print(f"❓ Unknown totals outcome: '{team}' | total={total} | points={total_points}")
             return None, None
-        return 'Win' if hit else 'Loss', hit
 
     return None, None
 
-
-    # Apply result scoring
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
-
-    print(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
-    return df
 
 def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
