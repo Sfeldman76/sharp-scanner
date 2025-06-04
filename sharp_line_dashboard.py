@@ -11,6 +11,8 @@ from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 from io import StringIO
 from collections import defaultdict
+import pytz
+
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
@@ -233,7 +235,22 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
         df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
     # Add extracted teams from sharp picks
- 
+    utc = pytz.UTC
+    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce')
+    if df_moves['Snapshot_Timestamp'].dt.tz is None:
+        df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_localize('US/Eastern')
+    df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_convert('UTC')
+    
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce')
+    if df_moves['Game_Start'].dt.tz is None:
+        df_moves['Game_Start'] = df_moves['Game_Start'].dt.tz_localize('UTC')
+
+
+    # 🔒 Filter for pregame sharp entries only
+    df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
+
+    # Optional: check how many were filtered out
+    st.write(f"✅ Pregame sharp entries retained: {len(df_moves)}")
     
     # Rename score columns so they don’t overwrite your extracted teams
     df_results.rename(columns={
@@ -251,7 +268,11 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     # ✅ Diagnostic: Show merge results
     st.subheader("🧪 Merge Validation – MLB")
-    debug_cols = [col for col in ['Game', 'Home_Team', 'Away_Team', 'Home_Score', 'Away_Score', 'Ref Sharp Value'] if col in df.columns]
+   debug_cols = [col for col in [
+        'Game', 'Home_Team', 'Away_Team',
+        'Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value'
+    ] if col in df.columns]
+
     st.dataframe(df[debug_cols].head(10))
 
     st.success(f"✅ Backtested {df['SHARP_HIT_BOOL'].notna().sum()} sharp edges with game results.")
@@ -976,7 +997,8 @@ if df_master.empty:
 else:
     # Run backtesting for NBA and MLB
     df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
-    df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
+    df_mlb_bt = fetch_scores_and_backtest(df_master[(df_master['Sport'] == 'MLB') & (df_master['SHARP_SIDE_TO_BET'] == 1)])
+
 
     # === SHARP SCORE DEBUG ===
     st.subheader("🧪 Sharp Score Debug")
