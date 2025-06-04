@@ -1131,9 +1131,14 @@ with tab_nba:
             with open("market_weights.json", "w") as f:
                 json.dump(market_component_win_rates, f, indent=2)
 
-            print(json.dumps(market_component_win_rates.get(sport_key_lower, {}), indent=2))
-            test = df_nba_bt[['Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score']].head()
-            print(test)
+            st.subheader("📥 Learned Weights for NBA (Debug)")
+            st.json(market_component_win_rates.get(sport_key_lower, {}))
+            
+            st.subheader("🧪 Sample NBA Confidence Inputs")
+            st.dataframe(df_nba_bt[[
+                'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
+            ]].head())
+
 
         else:
             st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
@@ -1244,18 +1249,25 @@ with tab_mlb:
                         market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
             
             # 🔁 Update global scoped object
+            # 🔁 Update global scoped object
             market_component_win_rates = globals().get("market_component_win_rates", {})
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
             globals()["market_component_win_rates"] = market_component_win_rates
-            
-            # 🔍 Optional debug print
-            print(json.dumps(market_component_win_rates.get(sport_key_lower, {}), indent=2))
-            test = df_mlb_bt[['Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score']].head()
-            print(test)
             
             # 💾 Save weights to disk
             with open("market_weights.json", "w") as f:
                 json.dump(market_component_win_rates, f, indent=2)
 
+            # 📥 Show learned weights in UI
+            st.subheader("📥 Learned Weights for MLB (Debug)")
+            st.json(market_component_win_rates.get(sport_key_lower, {}))
+            
+            # 🧪 Sample confidence scores for inspection
+            st.subheader("🧪 Sample MLB Confidence Inputs")
+            st.dataframe(df_mlb_bt[[
+                'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
+            ]].head())
+
+      
 
 
