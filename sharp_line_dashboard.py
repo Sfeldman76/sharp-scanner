@@ -452,6 +452,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     
     all_weights = globals().get('market_component_win_rates', {})
+    print("🔍 Weights structure preview:", json.dumps(weights, indent=2))
+    print("🧠 Extracting weights for:", sport_scope_key)
+    confidence_weights = weights.get(sport_scope_key, {})
+
     confidence_weights = weights.get(sport_scope_key, {})
     print(f"✅ Using weights for {sport_scope_key} — Available markets: {list(confidence_weights.keys())}")
 
