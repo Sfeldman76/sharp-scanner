@@ -464,11 +464,6 @@ def detect_cross_market_sharp_support(df_moves):
     return df
 
 
-try:
-    with open("market_weights.json", "r") as f:
-        market_component_win_rates = json.load(f)
-except FileNotFoundError:
-    market_component_win_rates = {}
 
 
 
@@ -830,7 +825,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
+
 drive = init_gdrive()
+market_component_win_rates = load_weights_from_drive(drive)
 
 st.title("📊 Sharp Edge Scanner")
 auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"], index=0)
