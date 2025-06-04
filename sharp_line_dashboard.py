@@ -441,6 +441,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
         event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if game.get("commence_time") else ""
+        event_time = pd.to_datetime(game.get("commence_time"))
         gid = game['id']
         prev_game = previous_map.get(gid, {})
 
@@ -463,6 +464,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Sport': sport_key,
                         'Time': snapshot_time,
                         'Game': game_name,
+                        'Game_Start': event_time,
                         'Market': mtype,
                         'Outcome': label,
                         'Bookmaker': book['title'],
