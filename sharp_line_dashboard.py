@@ -402,6 +402,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
+    # Use learned weights if available, else fallback to default neutral confidence
+    if 'market_component_win_rates' in globals():
+        confidence_weights = market_component_win_rates
+    else:
+        confidence_weights = {}  # fallback neutral
 
     previous_odds_map = {}
     for g in previous.values():
@@ -652,9 +657,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     # ✅ Compute dynamic, market-calibrated confidence
     df['True_Sharp_Confidence_Score'] = df.apply(
-        lambda r: compute_confidence(r, market_component_win_rates),
-        axis=1
+        lambda r: compute_confidence(r, confidence_weights), axis=1
     )
+
     
     # Confidence tiering
     df['Sharp_Confidence_Tier'] = pd.cut(
