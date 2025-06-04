@@ -643,8 +643,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         for comp in component_fields:
             val = row.get(comp)
             try:
-                val = int(val) if isinstance(val, float) and val.is_integer() else val
-                weight = market_weights.get(market, {}).get(comp, {}).get(val, 0.5)  # fallback neutral
+                val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val)
+                weight = market_weights.get(market, {}).get(comp, {}).get(val_key, 0.5)
                 score += weight * 10
                 max_score += 10
             except:
