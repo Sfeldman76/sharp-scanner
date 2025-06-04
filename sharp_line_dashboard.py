@@ -434,10 +434,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
     # Use learned weights if available, else fallback to default neutral confidence
-    if 'market_component_win_rates' in globals():
-        confidence_weights = market_component_win_rates
+    sport_key_lower = sport_key.lower()
+    all_weights = globals().get('market_component_win_rates', {})
+    
+    if isinstance(all_weights, dict) and sport_key_lower in all_weights:
+        confidence_weights = all_weights[sport_key_lower]
     else:
-        confidence_weights = {}  # fallback neutral
+        confidence_weights = {}  # fallback
 
 
     # === Component fields for confidence scoring
@@ -1023,10 +1026,14 @@ df_mlb_bt = pd.DataFrame()
 
 # === NBA Sharp Signal Performance
 # === NBA Sharp Signal Performance
+# === NBA Sharp Signal Performance
 with tab_nba:
     if not df_master.empty:
         df_nba_bt = fetch_scores_and_backtest(
-            df_master[df_master['Sport'] == 'NBA'],
+            df_master[
+                (df_master['Sport'] == 'NBA') &
+                (df_master['SHARP_SIDE_TO_BET'] == 1)
+            ],
             sport_key='basketball_nba'
         )
 
@@ -1037,26 +1044,97 @@ with tab_nba:
                 labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
             )
 
-            st.subheader("📊 NBA Sharp Signal Performance")
-            st.dataframe(
-                df_nba_bt.groupby('SharpConfidenceTier').agg(
-                    Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                    Hits=('SHARP_HIT_BOOL', 'sum'),
-                    Win_Rate=('SHARP_HIT_BOOL', 'mean')
-                ).round(3).reset_index()
-            )
+            scored = df_nba_bt[df_nba_bt['SHARP_HIT_BOOL'].notna()]
+            st.subheader("🏆 Top Sharp Signal Performers by Market")
 
-            st.subheader("🧠 Sharp Component Learning – NBA")
-            st.dataframe(
-                df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
-                .mean().reset_index()
-                .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
-            )
-            st.dataframe(
-                df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
-                .mean().reset_index()
-                .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
-            )
+            leaderboard_rows = []
+            for comp in component_fields:
+                if comp in scored.columns:
+                    group = (
+                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                        .agg(['count', 'mean'])
+                        .reset_index()
+                        .rename(columns={
+                            'count': 'Signal_Count',
+                            'mean': 'Win_Rate',
+                            comp: 'Component_Value'
+                        })
+                    )
+                    group['Component'] = comp
+                    leaderboard_rows.append(group)
+
+            leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
+            leaderboard_df = leaderboard_df[[
+                'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
+            ]].sort_values(by='Win_Rate', ascending=False)
+
+            st.dataframe(leaderboard_df.head(50))
+
+            # Tier performance
+            st.subheader("📊 NBA Sharp Signal Performance by Market + Confidence Tier")
+            if 'Market' not in df_nba_bt.columns:
+                st.warning("⚠️ 'Market' column missing from df_nba_bt!")
+                st.write("📋 Available columns:", df_nba_bt.columns.tolist())
+            else:
+                df_market_tier_summary = (
+                    scored
+                    .groupby(['Market', 'SharpConfidenceTier'])
+                    .agg(
+                        Total_Picks=('SHARP_HIT_BOOL', 'count'),
+                        Hits=('SHARP_HIT_BOOL', 'sum'),
+                        Win_Rate=('SHARP_HIT_BOOL', 'mean')
+                    )
+                    .reset_index()
+                    .round(3)
+                )
+                st.dataframe(df_market_tier_summary)
+
+            # Totals check
+            st.subheader("🔍 Totals Presence Check")
+            totals_rows = scored[scored['Market'].str.lower() == 'totals']
+            st.write("✅ Totals backtest rows found:", len(totals_rows))
+            if not totals_rows.empty:
+                st.dataframe(totals_rows[[
+                    'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
+                ]].head(10))
+            else:
+                st.warning("❌ No scored totals rows found.")
+
+            # Component Learning
+            sport_key_lower = 'basketball_nba'
+            market_component_win_rates_sport = {}
+
+            st.subheader("🧠 Sharp Component Learning by Market")
+            for comp, label in component_fields.items():
+                if comp in scored.columns:
+                    result = (
+                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                        .mean().reset_index()
+                        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
+                        .sort_values(by=['Market', comp])
+                    )
+                    st.markdown(f"**📊 {label} by Market**")
+                    st.dataframe(result)
+
+                    for _, row in result.iterrows():
+                        market = row['Market'].lower()
+                        val = row[comp]
+                        win_rate = row['Win_Rate']
+                        market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
+
+            # Store globally and persist
+            market_component_win_rates = globals().get("market_component_win_rates", {})
+            market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
+            globals()["market_component_win_rates"] = market_component_win_rates
+
+            # Save to file
+            with open("market_weights.json", "w") as f:
+                json.dump(market_component_win_rates, f, indent=2)
+
+            print(json.dumps(market_component_win_rates.get(sport_key_lower, {}), indent=2))
+            test = df_nba_bt[['Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score']].head()
+            print(test)
+
         else:
             st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
     else:
@@ -1143,20 +1221,10 @@ with tab_mlb:
                 st.warning("❌ No scored totals rows found.")
 
             # Learning blocks
-            market_component_win_rates = {}
-
-            st.subheader("🧠 Sharp Component Learning – MLB")
-            for comp, label in component_fields.items():
-                if comp in scored.columns:
-                    result = (
-                        scored.groupby(comp)['SHARP_HIT_BOOL']
-                        .mean().reset_index()
-                        .rename(columns={'SHARP_HIT_BOOL': label})
-                        .sort_values(by=comp)
-                    )
-                    st.markdown(f"**📊 {label} (All Markets)**")
-                    st.dataframe(result)
-
+            # Store weights scoped by sport
+            sport_key_lower = 'baseball_mlb'  # or 'basketball_nba' dynamically based on loop context
+            market_component_win_rates_sport = {}
+            
             st.subheader("🧠 Sharp Component Learning by Market")
             for comp, label in component_fields.items():
                 if comp in scored.columns:
@@ -1168,19 +1236,26 @@ with tab_mlb:
                     )
                     st.markdown(f"**📊 {label} by Market**")
                     st.dataframe(result)
-
+            
                     for _, row in result.iterrows():
                         market = row['Market'].lower()
                         val = row[comp]
                         win_rate = row['Win_Rate']
-                        market_component_win_rates.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
-            # Make weights globally available to detect_sharp_moves
+                        market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
+            
+            # 🔁 Update global scoped object
+            market_component_win_rates = globals().get("market_component_win_rates", {})
+            market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
             globals()["market_component_win_rates"] = market_component_win_rates
             
-            # Save learned weights to disk
+            # 🔍 Optional debug print
+            print(json.dumps(market_component_win_rates.get(sport_key_lower, {}), indent=2))
+            test = df_mlb_bt[['Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score']].head()
+            print(test)
+            
+            # 💾 Save weights to disk
             with open("market_weights.json", "w") as f:
                 json.dump(market_component_win_rates, f, indent=2)
-
 
 
 
