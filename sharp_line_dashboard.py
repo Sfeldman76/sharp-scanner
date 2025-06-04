@@ -896,7 +896,7 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
     return pd.DataFrame(drift_rows).sort_values(by='Snapshot_Time')
 
 def render_scanner_tab(label, sport_key, container, drive):
-    global market_component_win_rate
+    global market_component_win_rates  # ✅ FIXED HERE
     with container:
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
