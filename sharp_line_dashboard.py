@@ -1172,10 +1172,12 @@ with tab_nba:
                         market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
 
             # Store globally and persist
-            global market_component_win_rates
+            
+            globals()["market_component_win_rates"] = market_component_win_rates
+
             market_component_win_rates = globals().get("market_component_win_rates", {})
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
-            globals()["market_component_win_rates"] = market_component_win_rates
+         
 
             
             try:
@@ -1309,10 +1311,11 @@ with tab_mlb:
             # 🔁 Update global scoped object
             # 🔁 Update global scoped object
             # 🔁 Update global scoped object
-            global market_component_win_rates
+           
+            globals()["market_component_win_rates"] = market_component_win_rates
             market_component_win_rates = globals().get("market_component_win_rates", {})
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
-            globals()["market_component_win_rates"] = market_component_win_rates
+          
 
             
             try:
