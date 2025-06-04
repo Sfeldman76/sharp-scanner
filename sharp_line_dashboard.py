@@ -81,6 +81,10 @@ def init_gdrive():
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
 
+drive = init_gdrive()
+market_component_win_rates = load_weights_from_drive(drive)
+
+
 
 def implied_prob(odds):
     try:
@@ -398,6 +402,46 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     )
 
     return first_moves
+
+def load_weights_from_drive(drive, folder_id=FOLDER_ID):
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='market_weights.json' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+
+        if not file_list:
+            print("⚠️ No saved market weights found on Google Drive.")
+            return {}
+
+        file_drive = file_list[0]
+        content = file_drive.GetContentString()
+        print("✅ Loaded market weights from Google Drive.")
+        return json.loads(content)
+    except Exception as e:
+        print(f"❌ Failed to load weights from Drive: {e}")
+        return {}
+
+
+def save_weights_to_drive(weights, drive, folder_id=FOLDER_ID):
+    try:
+        # Delete old if exists
+        file_list = drive.ListFile({
+            'q': f"title='market_weights.json' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+        for file in file_list:
+            file.Delete()
+
+        buffer = StringIO()
+        json.dump(weights, buffer, indent=2)
+        buffer.seek(0)
+
+        new_file = drive.CreateFile({'title': "market_weights.json", "parents": [{"id": folder_id}]})
+        new_file.SetContentString(buffer.getvalue())
+        new_file.Upload()
+        print("✅ Saved market weights to Google Drive.")
+    except Exception as e:
+        print(f"❌ Failed to save market weights to Drive: {e}")
+
 
 
 def detect_cross_market_sharp_support(df_moves):
@@ -1159,13 +1203,8 @@ with tab_nba:
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
             globals()["market_component_win_rates"] = market_component_win_rates
             
-            # 💾 Save weights to disk (match load path)
-            try:
-                with open("/mnt/data/market_weights.json", "w") as f:
-                    json.dump(market_component_win_rates, f, indent=2)
-                print("✅ Saved market weights to /mnt/data/market_weights.json")
-            except Exception as e:
-                print(f"❌ Failed to save market weights: {e}")
+            save_weights_to_drive(market_component_win_rates, drive)
+
             
             # 📥 Show learned weights in UI
             st.subheader(f"📥 Learned Weights for {sport_key} (Debug)")
@@ -1293,13 +1332,7 @@ with tab_mlb:
             market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
             globals()["market_component_win_rates"] = market_component_win_rates
             
-            # 💾 Save weights to disk (match load path)
-            try:
-                with open("/mnt/data/market_weights.json", "w") as f:
-                    json.dump(market_component_win_rates, f, indent=2)
-                print("✅ Saved market weights to /mnt/data/market_weights.json")
-            except Exception as e:
-                print(f"❌ Failed to save market weights: {e}")
+            save_weights_to_drive(market_component_win_rates, drive)
             
             # 📥 Show learned weights in UI
             st.subheader(f"📥 Learned Weights for {sport_key} (Debug)")
