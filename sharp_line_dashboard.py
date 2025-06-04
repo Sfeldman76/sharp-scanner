@@ -412,25 +412,26 @@ def save_weights_to_drive(weights, drive, folder_id=FOLDER_ID):
         print(f"❌ Failed to save market weights to Drive: {e}")
 
 
-def save_weights_to_drive(weights, drive, folder_id=FOLDER_ID):
+def load_weights_from_drive(drive, folder_id=FOLDER_ID):
     try:
-        # Delete old if exists
         file_list = drive.ListFile({
             'q': f"title='market_weights.json' and '{folder_id}' in parents and trashed=false"
         }).GetList()
-        for file in file_list:
-            file.Delete()
 
-        buffer = StringIO()
-        json.dump(weights, buffer, indent=2)
-        buffer.seek(0)
+        if not file_list:
+            print("⚠️ No saved market weights found on Google Drive.")
+            return {}
 
-        new_file = drive.CreateFile({'title': "market_weights.json", "parents": [{"id": folder_id}]})
-        new_file.SetContentString(buffer.getvalue())
-        new_file.Upload()
-        print("✅ Saved market weights to Google Drive.")
+        file_drive = file_list[0]
+        content = file_drive.GetContentString()
+        print("✅ Loaded market weights from Google Drive.")
+        return json.loads(content)
+
     except Exception as e:
-        print(f"❌ Failed to save market weights to Drive: {e}")
+        print(f"❌ Failed to load weights from Drive: {e}")
+        return {}
+
+market_component_win_rates = load_weights_from_drive(drive)
 
 
 
@@ -812,7 +813,7 @@ st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
 
 
-market_component_win_rates = load_weights_from_drive(drive)
+
 
 st.title("📊 Sharp Edge Scanner")
 auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"], index=0)
