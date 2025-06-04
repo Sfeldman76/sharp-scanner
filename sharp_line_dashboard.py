@@ -545,7 +545,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
-    # === Append sharp-sided bets with scores
+    # === Append sharp-sided bets with enriched component scores
     for (game_name, mtype, label), entry in sharp_lines.items():
         if sharp_side_flags.get((game_name, mtype, label), 0):
             metrics = sharp_metrics_map.get((game_name, mtype, label), {})
@@ -555,23 +555,22 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 'Ref Sharp Old Value': entry.get('Old Value'),
                 'Delta vs Sharp': 0.0,
                 'SHARP_SIDE_TO_BET': 1,
-                'SharpBetScore': round(
-                    2.0 * metrics.get('Sharp_Move_Signal', 0) +
-                    2.0 * metrics.get('Sharp_Limit_Jump', 0) +
-                    1.5 * metrics.get('Sharp_Time_Score', 0) +
-                    1.0 * metrics.get('Sharp_Prob_Shift', 0) +
-                    0.001 * metrics.get('Sharp_Limit_Total', 0), 2
-                ),
-
                 'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
                 'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
                 'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
                 'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0),
-                'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0),
-
+                'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0)
             })
+            # Calculate basic SharpBetScore (used for legacy tiering if needed)
+            enriched['SharpBetScore'] = round(
+                2.0 * enriched['Sharp_Move_Signal'] +
+                2.0 * enriched['Sharp_Limit_Jump'] +
+                1.5 * enriched['Sharp_Time_Score'] +
+                1.0 * enriched['Sharp_Prob_Shift'] +
+                0.001 * enriched['Sharp_Limit_Total'], 2
+            )
             rows.append(enriched)
-
+    
     # === Intelligence scoring
     def compute_intelligence_score(row):
         score = 0
@@ -589,32 +588,42 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'SharpIntelligenceScore': min(score, 100),
             'SharpIntelReasons': ", ".join(reasons) if reasons else "No clear signal"
         })
-   
-    # === Final DataFrame output
+    
+    # === Confidence scoring using learned weights
+    def compute_confidence(row, market_weights):
+        market = row.get('Market', '').lower()
+        score = 0
+        max_score = 0
+        for comp in component_fields:
+            val = row.get(comp)
+            try:
+                val = int(val) if isinstance(val, float) and val.is_integer() else val
+                weight = market_weights.get(market, {}).get(comp, {}).get(val, 0.5)  # fallback neutral
+                score += weight * 10
+                max_score += 10
+            except:
+                continue
+        return round(score, 2) if max_score > 0 else None
+    
+    # === Create base DataFrame
     df = pd.DataFrame(rows)
     df_history = pd.DataFrame(line_history_log)
     
-
-    # Sort history and extract true opening line per Game × Market × Outcome
+    # Open line merge
     df_history_sorted = df_history.sort_values('Time')
     line_open_df = (
-        df_history_sorted
-        .dropna(subset=['Value'])
+        df_history_sorted.dropna(subset=['Value'])
         .groupby(['Game', 'Market', 'Outcome'])['Value']
         .first()
         .reset_index()
         .rename(columns={'Value': 'Open_Value'})
     )
     
-    # Don't return early before merging!
     if df.empty:
         return df, df_history
     
-    # Merge in opening line value and compute true market delta
     df = df.merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
     df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
-    
-    # Additional computed fields
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
@@ -622,44 +631,37 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2
     )
     df['Limit_NonZero'] = df['Limit'].where(df['Limit'] > 0)
-
     df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('max')
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('min')
-    limit_reporting_count = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('count')
-    #df['Asymmetry_Flag'] = ((df['Limit_Imbalance'] >= 2500) & (limit_reporting_count >= 2)).astype(int)
+    
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
-    df['Book'] = df['Book'].str.lower()  # normalize casing
+    df['Book'] = df['Book'].str.lower()
     market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
-    df = df.merge(market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
-              on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+    df = df.merge(
+        market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
+        on=['Game', 'Market', 'Outcome', 'Book'],
+        how='left'
+    )
     df['Is_Pinnacle'] = df['Book'] == 'pinnacle'
-
     df['LimitUp_NoMove_Flag'] = (
         (df['Is_Pinnacle']) &
-        (df['Limit'] >= 2500) &  # or use > opening limit if stored
-        (df['Value'] == df['Open_Value'])  # price hasn't changed
+        (df['Limit'] >= 2500) &
+        (df['Value'] == df['Open_Value'])
     ).astype(int)
-
     df = detect_cross_market_sharp_support(df)
- 
-
-
-    # === Final sharp confidence score
-    df['True_Sharp_Confidence_Score'] = (
-        1.5 * df['SharpBetScore'].fillna(0) +
-        1.0 * df['Sharp_Timing'].fillna(0) +
-        10 * df['Is_Reinforced_MultiMarket'].astype(int) +
-        10 * df['Market_Leader'].fillna(False).astype(int) +
-        5 * df['LimitUp_NoMove_Flag']  # <-- New signal
-    ).round(2)
-
     
+    # ✅ Compute dynamic, market-calibrated confidence
+    df['True_Sharp_Confidence_Score'] = df.apply(
+        lambda r: compute_confidence(r, market_component_win_rates),
+        axis=1
+    )
+    
+    # Confidence tiering
     df['Sharp_Confidence_Tier'] = pd.cut(
         df['True_Sharp_Confidence_Score'],
         bins=[-1, 25, 50, 75, float('inf')],
         labels=['⚠️ Low', '✅ Medium', '⭐ High', '🔥 Steam']
     )
-    
     # === Sharp vs Rec Book Consensus Summary ===
     rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
     sharp_df = df[df['Book'].isin(SHARP_BOOKS)].copy()
@@ -1027,13 +1029,17 @@ else:
         st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
 
     # === MLB Sharp Signal Performance
-    # Create performance summary by Market × Confidence Tier
+    # === MLB Sharp Signal Performance
     if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
+        # Create tier
         df_mlb_bt['SharpConfidenceTier'] = pd.cut(
             df_mlb_bt['SharpBetScore'],
             bins=[0, 15, 25, 40, 100],
             labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
         )
+    
+        # Filter scored rows once for reuse
+        scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
     
         st.subheader("📊 MLB Sharp Signal Performance by Market + Confidence Tier")
     
@@ -1042,7 +1048,7 @@ else:
             st.write("📋 Available columns:", df_mlb_bt.columns.tolist())
         else:
             df_market_tier_summary = (
-                df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
+                scored
                 .groupby(['Market', 'SharpConfidenceTier'])
                 .agg(
                     Total_Picks=('SHARP_HIT_BOOL', 'count'),
@@ -1052,34 +1058,24 @@ else:
                 .reset_index()
                 .round(3)
             )
-            st.subheader("📊 Sharp Signal Performance by Market + Tier")
             st.dataframe(df_market_tier_summary)
+    
+        # 🔍 Totals Check
         st.subheader("🔍 Totals Presence Check")
-        
-        totals_rows = df_mlb_bt[
-            (df_mlb_bt['Market'].str.lower() == 'totals') &
-            (df_mlb_bt['SHARP_HIT_BOOL'].notna())
+        totals_rows = scored[
+            scored['Market'].str.lower() == 'totals'
         ]
-        
         st.write("✅ Totals backtest rows found:", len(totals_rows))
-        
         if not totals_rows.empty:
             st.dataframe(totals_rows[[
                 'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
             ]].head(10))
         else:
             st.warning("❌ No scored totals rows found.")
-
-
-       
-        st.subheader("🧠 Sharp Component Learning – MLB")
-        
     
-        # Use once, reuse below
-        scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
-        
-        # Define all sharp signal components
-        component_fields = {
+        # 🧠 Sharp Component Learning
+        from collections import OrderedDict
+        component_fields = OrderedDict({
             'Sharp_Move_Signal': 'Win Rate by Move Signal',
             'Sharp_Time_Score': 'Win Rate by Time Score',
             'Sharp_Limit_Jump': 'Win Rate by Limit Jump',
@@ -1087,29 +1083,38 @@ else:
             'Is_Reinforced_MultiMarket': 'Win Rate by Cross-Market Reinforcement',
             'Market_Leader': 'Win Rate by Market Leader',
             'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
-        }
-        
-        # Overall learning
-        for col, label in component_fields.items():
-            if col in scored.columns:
-                st.markdown(f"**📊 {label} (All Markets)**")
+        })
+    
+        market_component_win_rates = {}
+    
+        st.subheader("🧠 Sharp Component Learning – MLB")
+        for comp, label in component_fields.items():
+            if comp in scored.columns:
                 result = (
-                    scored.groupby(col)['SHARP_HIT_BOOL']
+                    scored.groupby(comp)['SHARP_HIT_BOOL']
                     .mean().reset_index()
                     .rename(columns={'SHARP_HIT_BOOL': label})
-                    .sort_values(by=col)
+                    .sort_values(by=comp)
                 )
+                st.markdown(f"**📊 {label} (All Markets)**")
                 st.dataframe(result)
-        
-        # Learning by Market
+    
         st.subheader("🧠 Sharp Component Learning by Market")
-        for col, label in component_fields.items():
-            if col in scored.columns:
-                st.markdown(f"**📊 {label} by Market**")
+        for comp, label in component_fields.items():
+            if comp in scored.columns:
                 result = (
-                    scored.groupby(['Market', col])['SHARP_HIT_BOOL']
+                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
                     .mean().reset_index()
                     .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
-                    .sort_values(by=['Market', col])
+                    .sort_values(by=['Market', comp])
                 )
+                st.markdown(f"**📊 {label} by Market**")
                 st.dataframe(result)
+    
+                # Store learned win rates for scoring
+                for _, row in result.iterrows():
+                    market = row['Market'].lower()
+                    val = row[comp]
+                    win_rate = row['Win_Rate']
+                    market_component_win_rates.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
+    
