@@ -960,9 +960,9 @@ if not df_master.empty:
 else:
     st.warning("❌ df_master is empty!")
 
-else:
-    df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
-    df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
+#else:
+    #df_nba_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'NBA'], sport_key='basketball_nba')
+    #df_mlb_bt = fetch_scores_and_backtest(df_master[df_master['Sport'] == 'MLB'], sport_key='baseball_mlb')
 
     # === NBA Sharp Signal Performance
     if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
