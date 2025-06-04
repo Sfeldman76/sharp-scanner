@@ -12,7 +12,7 @@ from pydrive2.drive import GoogleDrive
 from io import StringIO
 from collections import defaultdict
 import pytz
-
+from collections import OrderedDict
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
@@ -39,6 +39,18 @@ MARKETS = ['spreads', 'totals', 'h2h']
 
 
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+
+
+# 🔁 Shared list of components used for scoring, learning, and tiering
+component_fields = OrderedDict({
+    'Sharp_Move_Signal': 'Win Rate by Move Signal',
+    'Sharp_Time_Score': 'Win Rate by Time Score',
+    'Sharp_Limit_Jump': 'Win Rate by Limit Jump',
+    'Sharp_Prob_Shift': 'Win Rate by Prob Shift',
+    'Is_Reinforced_MultiMarket': 'Win Rate by Cross-Market Reinforcement',
+    'Market_Leader': 'Win Rate by Market Leader',
+    'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
+})
 
 def get_snapshot(data):
     return {g['id']: g for g in data}
@@ -408,6 +420,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     else:
         confidence_weights = {}  # fallback neutral
 
+
+    # === Component fields for confidence scoring
+    local_components = list(component_fields.keys())
+
+    
     previous_odds_map = {}
     for g in previous.values():
         for book in g.get('bookmakers', []):
@@ -1045,7 +1062,39 @@ else:
     
         # Filter scored rows once for reuse
         scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
-    
+        st.subheader("🏆 Top Sharp Signal Performers by Market")
+
+        leaderboard_rows = []
+        
+        for comp in component_fields:
+            if comp in scored.columns:
+                group = (
+                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                    .agg(['count', 'mean'])
+                    .reset_index()
+                    .rename(columns={
+                        'count': 'Signal_Count',
+                        'mean': 'Win_Rate',
+                        comp: 'Component_Value'
+                    })
+                )
+                group['Component'] = comp
+                leaderboard_rows.append(group)
+        
+        # Combine all component groupings into one leaderboard
+        leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
+        
+        # Reorder columns
+        leaderboard_df = leaderboard_df[[
+            'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
+        ]]
+        
+        # Sort leaderboard
+        leaderboard_df = leaderboard_df.sort_values(by='Win_Rate', ascending=False)
+        
+        # Display it
+        st.dataframe(leaderboard_df.head(50))  # Top 50 signals by hit rate
+
         st.subheader("📊 MLB Sharp Signal Performance by Market + Confidence Tier")
     
         if 'Market' not in df_mlb_bt.columns:
@@ -1077,18 +1126,7 @@ else:
             ]].head(10))
         else:
             st.warning("❌ No scored totals rows found.")
-    
-        # 🧠 Sharp Component Learning
-        from collections import OrderedDict
-        component_fields = OrderedDict({
-            'Sharp_Move_Signal': 'Win Rate by Move Signal',
-            'Sharp_Time_Score': 'Win Rate by Time Score',
-            'Sharp_Limit_Jump': 'Win Rate by Limit Jump',
-            'Sharp_Prob_Shift': 'Win Rate by Prob Shift',
-            'Is_Reinforced_MultiMarket': 'Win Rate by Cross-Market Reinforcement',
-            'Market_Leader': 'Win Rate by Market Leader',
-            'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
-        })
+        
     
         market_component_win_rates = {}
     
