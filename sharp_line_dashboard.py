@@ -428,7 +428,8 @@ except FileNotFoundError:
 
 
 
-def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS):
+def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
+
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
@@ -451,7 +452,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     
     all_weights = globals().get('market_component_win_rates', {})
-    confidence_weights = all_weights.get(sport_scope_key, {})
+    confidence_weights = weights.get(sport_scope_key, {})
+    print(f"✅ Using weights for {sport_scope_key} — Available markets: {list(confidence_weights.keys())}")
+
 
 
     # === Component fields for confidence scoring
@@ -869,7 +872,8 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         try:
             df_moves, df_audit, summary_df = detect_sharp_moves(
-                live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS
+                live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
+                weights=market_component_win_rates
             )
 
 
