@@ -1035,158 +1035,155 @@ else:
 
 
     # === NBA Sharp Signal Performance
+    # === NBA Sharp Signal Performance
     with tab_nba:
         if not df_master.empty:
             df_nba_bt = fetch_scores_and_backtest(
                 df_master[df_master['Sport'] == 'NBA'],
                 sport_key='basketball_nba'
             )
-        
-        if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
-            df_nba_bt['SharpConfidenceTier'] = pd.cut(
-                df_nba_bt['SharpBetScore'],
-                bins=[0, 15, 25, 40, 100],
-                labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
-            )
     
-            st.subheader("📊 NBA Sharp Signal Performance")
-            st.dataframe(
-                df_nba_bt.groupby('SharpConfidenceTier').agg(
-                    Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                    Hits=('SHARP_HIT_BOOL', 'sum'),
-                    Win_Rate=('SHARP_HIT_BOOL', 'mean')
-                ).round(3).reset_index()
-            )
+            if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
+                df_nba_bt['SharpConfidenceTier'] = pd.cut(
+                    df_nba_bt['SharpBetScore'],
+                    bins=[0, 15, 25, 40, 100],
+                    labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+                )
     
-            st.subheader("🧠 Sharp Component Learning – NBA")
-            st.dataframe(
-                df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
-                .mean().reset_index()
-                .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
-            )
-            st.dataframe(
-                df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
-                .mean().reset_index()
-                .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
-            )
+                st.subheader("📊 NBA Sharp Signal Performance")
+                st.dataframe(
+                    df_nba_bt.groupby('SharpConfidenceTier').agg(
+                        Total_Picks=('SHARP_HIT_BOOL', 'count'),
+                        Hits=('SHARP_HIT_BOOL', 'sum'),
+                        Win_Rate=('SHARP_HIT_BOOL', 'mean')
+                    ).round(3).reset_index()
+                )
+    
+                st.subheader("🧠 Sharp Component Learning – NBA")
+                st.dataframe(
+                    df_nba_bt.groupby('Sharp_Move_Signal')['SHARP_HIT_BOOL']
+                    .mean().reset_index()
+                    .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Move_Signal'})
+                )
+                st.dataframe(
+                    df_nba_bt.groupby('Sharp_Time_Score')['SHARP_HIT_BOOL']
+                    .mean().reset_index()
+                    .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate_By_Time_Score'})
+                )
+            else:
+                st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
         else:
-            st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
+            st.warning("⚠️ No historical sharp picks found in Google Drive yet.")
 
+    # === MLB Sharp Signal Performance
     # === MLB Sharp Signal Performance
     # === MLB Sharp Signal Performance
     with tab_mlb:
         if not df_master.empty:
-        df_mlb_bt = fetch_scores_and_backtest(
-            df_master[(df_master['Sport'] == 'MLB') & (df_master['SHARP_SIDE_TO_BET'] == 1)],
-            sport_key='baseball_mlb'
-        )
-   
-        if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
-            # Create tier
-            df_mlb_bt['SharpConfidenceTier'] = pd.cut(
-                df_mlb_bt['SharpBetScore'],
-                bins=[0, 15, 25, 40, 100],
-                labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+            df_mlb_bt = fetch_scores_and_backtest(
+                df_master[
+                    (df_master['Sport'] == 'MLB') &
+                    (df_master['SHARP_SIDE_TO_BET'] == 1)
+                ],
+                sport_key='baseball_mlb'
             )
-        
-            # Filter scored rows once for reuse
-            scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
-            st.subheader("🏆 Top Sharp Signal Performers by Market")
     
-            leaderboard_rows = []
-            
-            for comp in component_fields:
-                if comp in scored.columns:
-                    group = (
-                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                        .agg(['count', 'mean'])
-                        .reset_index()
-                        .rename(columns={
-                            'count': 'Signal_Count',
-                            'mean': 'Win_Rate',
-                            comp: 'Component_Value'
-                        })
-                    )
-                    group['Component'] = comp
-                    leaderboard_rows.append(group)
-            
-            # Combine all component groupings into one leaderboard
-            leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
-            
-            # Reorder columns
-            leaderboard_df = leaderboard_df[[
-                'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
-            ]]
-            
-            # Sort leaderboard
-            leaderboard_df = leaderboard_df.sort_values(by='Win_Rate', ascending=False)
-            
-            # Display it
-            st.dataframe(leaderboard_df.head(50))  # Top 50 signals by hit rate
-    
-            st.subheader("📊 MLB Sharp Signal Performance by Market + Confidence Tier")
-        
-            if 'Market' not in df_mlb_bt.columns:
-                st.warning("⚠️ 'Market' column missing from df_mlb_bt!")
-                st.write("📋 Available columns:", df_mlb_bt.columns.tolist())
-            else:
-                df_market_tier_summary = (
-                    scored
-                    .groupby(['Market', 'SharpConfidenceTier'])
-                    .agg(
-                        Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                        Hits=('SHARP_HIT_BOOL', 'sum'),
-                        Win_Rate=('SHARP_HIT_BOOL', 'mean')
-                    )
-                    .reset_index()
-                    .round(3)
+            if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
+                # Create tier
+                df_mlb_bt['SharpConfidenceTier'] = pd.cut(
+                    df_mlb_bt['SharpBetScore'],
+                    bins=[0, 15, 25, 40, 100],
+                    labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
                 )
-                st.dataframe(df_market_tier_summary)
-        
-            # 🔍 Totals Check
-            st.subheader("🔍 Totals Presence Check")
-            totals_rows = scored[
-                scored['Market'].str.lower() == 'totals'
-            ]
-            st.write("✅ Totals backtest rows found:", len(totals_rows))
-            if not totals_rows.empty:
-                st.dataframe(totals_rows[[
-                    'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
-                ]].head(10))
-            else:
-                st.warning("❌ No scored totals rows found.")
-            
-        
-            market_component_win_rates = {}
-        
-            st.subheader("🧠 Sharp Component Learning – MLB")
-            for comp, label in component_fields.items():
-                if comp in scored.columns:
-                    result = (
-                        scored.groupby(comp)['SHARP_HIT_BOOL']
-                        .mean().reset_index()
-                        .rename(columns={'SHARP_HIT_BOOL': label})
-                        .sort_values(by=comp)
+    
+                # Filter scored rows once for reuse
+                scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
+                st.subheader("🏆 Top Sharp Signal Performers by Market")
+    
+                leaderboard_rows = []
+                for comp in component_fields:
+                    if comp in scored.columns:
+                        group = (
+                            scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                            .agg(['count', 'mean'])
+                            .reset_index()
+                            .rename(columns={
+                                'count': 'Signal_Count',
+                                'mean': 'Win_Rate',
+                                comp: 'Component_Value'
+                            })
+                        )
+                        group['Component'] = comp
+                        leaderboard_rows.append(group)
+    
+                leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
+                leaderboard_df = leaderboard_df[[
+                    'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
+                ]].sort_values(by='Win_Rate', ascending=False)
+    
+                st.dataframe(leaderboard_df.head(50))
+    
+                # Tier performance
+                st.subheader("📊 MLB Sharp Signal Performance by Market + Confidence Tier")
+                if 'Market' not in df_mlb_bt.columns:
+                    st.warning("⚠️ 'Market' column missing from df_mlb_bt!")
+                    st.write("📋 Available columns:", df_mlb_bt.columns.tolist())
+                else:
+                    df_market_tier_summary = (
+                        scored
+                        .groupby(['Market', 'SharpConfidenceTier'])
+                        .agg(
+                            Total_Picks=('SHARP_HIT_BOOL', 'count'),
+                            Hits=('SHARP_HIT_BOOL', 'sum'),
+                            Win_Rate=('SHARP_HIT_BOOL', 'mean')
+                        )
+                        .reset_index()
+                        .round(3)
                     )
-                    st.markdown(f"**📊 {label} (All Markets)**")
-                    st.dataframe(result)
-        
-            st.subheader("🧠 Sharp Component Learning by Market")
-            for comp, label in component_fields.items():
-                if comp in scored.columns:
-                    result = (
-                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                        .mean().reset_index()
-                        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
-                        .sort_values(by=['Market', comp])
-                    )
-                    st.markdown(f"**📊 {label} by Market**")
-                    st.dataframe(result)
-        
-                    # Store learned win rates for scoring
-                    for _, row in result.iterrows():
-                        market = row['Market'].lower()
-                        val = row[comp]
-                        win_rate = row['Win_Rate']
-                        market_component_win_rates.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
-        
+                    st.dataframe(df_market_tier_summary)
+    
+                # Totals check
+                st.subheader("🔍 Totals Presence Check")
+                totals_rows = scored[
+                    scored['Market'].str.lower() == 'totals'
+                ]
+                st.write("✅ Totals backtest rows found:", len(totals_rows))
+                if not totals_rows.empty:
+                    st.dataframe(totals_rows[[
+                        'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
+                    ]].head(10))
+                else:
+                    st.warning("❌ No scored totals rows found.")
+    
+                # Learning blocks
+                market_component_win_rates = {}
+    
+                st.subheader("🧠 Sharp Component Learning – MLB")
+                for comp, label in component_fields.items():
+                    if comp in scored.columns:
+                        result = (
+                            scored.groupby(comp)['SHARP_HIT_BOOL']
+                            .mean().reset_index()
+                            .rename(columns={'SHARP_HIT_BOOL': label})
+                            .sort_values(by=comp)
+                        )
+                        st.markdown(f"**📊 {label} (All Markets)**")
+                        st.dataframe(result)
+    
+                st.subheader("🧠 Sharp Component Learning by Market")
+                for comp, label in component_fields.items():
+                    if comp in scored.columns:
+                        result = (
+                            scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                            .mean().reset_index()
+                            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
+                            .sort_values(by=['Market', comp])
+                        )
+                        st.markdown(f"**📊 {label} by Market**")
+                        st.dataframe(result)
+    
+                        for _, row in result.iterrows():
+                            market = row['Market'].lower()
+                            val = row[comp]
+                            win_rate = row['Win_Rate']
+                            market_component_win_rates.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
