@@ -869,8 +869,9 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         try:
             df_moves, df_audit, summary_df = detect_sharp_moves(
-                live, prev, label, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS
+                live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS
             )
+
 
             # ✅ Add timestamp to both dataframes
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
