@@ -278,7 +278,22 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     
     # ✅ Apply result scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(lambda r: pd.Series(calc_cover(r)), axis=1)
+    # 🔍 Totals Outcome Check — after scoring
+    st.subheader("🔍 Totals Outcome Check")
     
+    totals_unscored = df[
+        (df['Market'].str.lower() == 'totals') &
+        (df['Ref Sharp Value'].notna()) &
+        (df['SHARP_HIT_BOOL'].isna())
+    ]
+    
+    st.write("Unscored totals rows:", len(totals_unscored))
+    
+    if not totals_unscored.empty:
+        st.dataframe(totals_unscored[[
+            'Game', 'Outcome', 'Ref Sharp Value', 'Score_Home_Score', 'Score_Away_Score'
+        ]].head(10))
+
     # ✅ Final diagnostics
     st.subheader("🧪 Merge Validation – MLB")
     debug_cols = [col for col in [
@@ -337,10 +352,12 @@ def calc_cover(row):
         return 'Win' if hit else 'Loss', hit
 
 
+    
     if market == 'totals':
         try:
             total = float(row.get('Ref Sharp Value'))
         except (TypeError, ValueError):
+            print(f"❌ Failed to parse total: {row.get('Ref Sharp Value')}")
             return None, None
     
         total_points = hscore + ascore
@@ -355,6 +372,7 @@ def calc_cover(row):
         else:
             print(f"❓ Unknown totals outcome: '{outcome}' | total={total} | points={total_points}")
             return None, None
+    
 
     return None, None
 
