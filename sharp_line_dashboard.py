@@ -927,16 +927,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         if not confidence_weights:
             st.warning(f"⚠️ No learned weights found for {sport_key_lower} — fallback weights will apply.")
         # ✅ Re-load weights if not already in memory
-        if not confidence_weights:
-            try:
-                with open("/mnt/data/market_weights.json", "r") as f:
-                    market_component_win_rates = json.load(f)
-                    confidence_weights = market_component_win_rates.get(sport_key_lower, {})
-                    globals()["market_component_win_rates"] = market_component_win_rates
-                    print(f"✅ Reloaded weights from file for {sport_key_lower}")
-            except Exception as e:
-                st.warning(f"⚠️ Could not reload updated weights: {e}")
-
+        
         # ✅ DETECT SHARP MOVES with latest weights
         df_moves, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
