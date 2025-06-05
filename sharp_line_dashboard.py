@@ -1118,7 +1118,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         
         if model is None or should_retrain_model(drive):
             print("🔁 Retraining sharp win model...")
-            model_input = fetch_scores_and_backtest(df_master, sport_key)
+            model_input = fetch_scores_and_backtest(df_moves, sport_key)
             model = train_sharp_win_model(model_input)
             save_model_to_drive(model, drive)
             save_model_timestamp(drive)
