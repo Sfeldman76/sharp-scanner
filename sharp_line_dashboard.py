@@ -221,9 +221,9 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         return pd.DataFrame()
 
     result_rows = []
-    st.write("📦 Parsed score entries:", pd.DataFrame(result_rows).head())
+   
     completed_games = 0
-
+    
     for game in score_data:
         if not game.get("completed"):
             continue
@@ -253,7 +253,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             'Home_Score': team_scores[home],
             'Away_Score': team_scores[away]
         })
-   
+       st.write("📦 Parsed score entries:", pd.DataFrame(result_rows).head())
 
     df_results = pd.DataFrame(result_rows)
     st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
