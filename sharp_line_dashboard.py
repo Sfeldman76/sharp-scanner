@@ -271,6 +271,9 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
     # Merge with df_results on Game_ID
     df = df_moves.merge(df_results, on='Game_ID', how='left')
+    # 🔍 Inspect Game_IDs on both sides
+    st.write("🔎 First 5 Game_IDs in df_moves:", df_moves['Game_ID'].dropna().unique()[:5])
+    st.write("🔎 First 5 Game_IDs in df_results:", df_results['Game_ID'].dropna().unique()[:5])
 
     # Remove duplicate columns if any
     if df.columns.duplicated().any():
