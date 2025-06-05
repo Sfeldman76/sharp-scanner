@@ -1262,6 +1262,18 @@ def render_scanner_tab(label, sport_key, container, drive):
             save_model_timestamp(drive)
         else:
             print("✅ Using cached sharp win model.")
+        if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns:
+            try:
+                # Pick best merge keys
+                merge_cols = ['Game_ID', 'Market', 'Outcome'] if 'Game_ID' in df_moves.columns else ['Game', 'Market', 'Outcome']
+                if all(col in df_moves_raw.columns for col in merge_cols + ['Enhanced_Sharp_Confidence_Score']):
+                    df_moves = df_moves.merge(
+                        df_moves_raw[merge_cols + ['Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
+                        on=merge_cols,
+                        how='left'
+                    )
+            except Exception as e:
+                st.warning(f"⚠️ Could not merge Enhanced_Sharp_Confidence_Score: {e}")
 
         # Final model scoring
         df_moves = apply_blended_sharp_score(df_moves, model)
