@@ -1020,7 +1020,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                 'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
                 'Rec_Book_Consensus', 'Sharp_Book_Consensus',
                 'Move_From_Open_Rec', 'Move_From_Open_Sharp',
-                'SharpBetScore', 'True_Sharp_Confidence_Score'
+                'SharpBetScore', 'Enhanced_Sharp_Confidence_Score'
             ]], use_container_width=True)
 
       
