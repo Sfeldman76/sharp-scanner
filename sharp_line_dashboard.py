@@ -1200,5 +1200,16 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
 df_master = load_master_sharp_moves(drive)
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
-render_sharp_signal_analysis_tab(tab_nba, "NBA", "basketball_nba", df_master, drive)
-render_sharp_signal_analysis_tab(tab_mlb, "MLB", "baseball_mlb", df_master, drive)
+
+with tab_nba:
+    with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
+        df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
+    with st.expander("📈 Backtest Performance", expanded=False):
+        render_sharp_signal_analysis_tab(tab_nba, "NBA", SPORTS["NBA"], df_master, drive)
+
+with tab_mlb:
+    with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
+        df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
+    with st.expander("📈 Backtest Performance", expanded=False):
+        render_sharp_signal_analysis_tab(tab_mlb, "MLB", SPORTS["MLB"], df_master, drive)
+
