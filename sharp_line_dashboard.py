@@ -1158,6 +1158,14 @@ def render_scanner_tab(label, sport_key, container, drive):
         # 🧪 Backtest: merge actual results and compute SHARP_HIT_BOOL
         df_moves = fetch_scores_and_backtest(df_moves, sport_key)
 
+        # Ensure Game_ID is present after backtest (re-merge if needed)
+        if 'Game_ID' not in df_moves.columns and 'Game_ID' in df_moves_raw.columns:
+            df_moves = df_moves.merge(
+                df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
+                on=['Game', 'Market', 'Outcome'],
+                how='left'
+            )
+
         # 🧩 Merge back Enhanced_Sharp_Confidence_Score
         if 'Enhanced_Sharp_Confidence_Score' in df_moves_raw.columns:
             df_moves = df_moves.merge(
