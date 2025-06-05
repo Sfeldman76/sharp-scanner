@@ -228,18 +228,16 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             continue
 
         completed_games += 1
-        
         game_id = game.get("id")
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
         scores = game.get("scores", [])
         team_scores = {}
+
         for s in scores:
             try:
                 name = s.get("name", "").strip().lower()
-                score = s.get("score")
-                if score is None:  # fallback to other fields
-                    score = s.get("runs") or s.get("points")
+                score = s.get("score") or s.get("runs") or s.get("points")
                 if name and score is not None:
                     team_scores[name] = score
             except Exception as e:
@@ -249,13 +247,10 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             st.warning(f"⚠️ Missing score for: {home=} {away=} vs {team_scores}")
             continue
 
-       
         result_rows.append({
             'Game_ID': game_id,
-            'Score_Home_Team': game['home_team'],
-            'Score_Away_Team': game['away_team'],
-            'Score_Home_Score': team_scores[home],
-            'Score_Away_Score': team_scores[away]
+            'Home_Score': team_scores[home],
+            'Away_Score': team_scores[away]
         })
 
     df_results = pd.DataFrame(result_rows)
@@ -265,32 +260,25 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         st.warning("⚠️ No parsed scores matched your games, even though API reported completed games.")
         return pd.DataFrame()
 
-    # Prepare sharp data
+    # === Prepare df_moves ===
     df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome']).copy()
-    if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
-        df_moves[['Home_Team', 'Away_Team']] = df_moves['Game_ID'].str.extract(r'^(.*?) vs (.*?)$')
 
-
-    # ⏱ Consistent timestamp parsing without localization
-    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce')
-    if df_moves['Snapshot_Timestamp'].dt.tz is None:
-        df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_localize('US/Eastern')
-    df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_convert('UTC')
-
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce')
-    if df_moves['Game_Start'].dt.tz is None:
-        df_moves['Game_Start'] = df_moves['Game_Start'].dt.tz_localize('UTC')
-
-
+    # Time consistency
+    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
     # === Merge on Game_ID
     df = df_moves.merge(df_results, on='Game_ID', how='left')
+    df.rename(columns={
+        'Home_Score': 'Score_Home_Score',
+        'Away_Score': 'Score_Away_Score'
+    }, inplace=True)
 
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Score_Home_Score', 'Score_Away_Score']].head(10))
 
-    # === Safe calc_cover
+    # === Scoring logic
     def safe_calc_cover(r):
         try:
             result = calc_cover(r)
@@ -304,7 +292,6 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(safe_calc_cover, axis=1)
 
     return df
-
 
 
     # === Refactored cover logic
