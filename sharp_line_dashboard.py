@@ -858,7 +858,7 @@ def train_sharp_win_model(df):
     # Filter only sharp sides with known outcomes and valid sharp book
     df_labeled = df[
         (df['SHARP_HIT_BOOL'].notna()) &
-        (df['Blended_Sharp_Score'].notna()) &
+        (df['Enhanced_Sharp_Confidence_Score'].notna()) &
         (df['Book'].isin(SHARP_BOOKS)) &
         (df['Limit'] > 0)
     ].copy()
