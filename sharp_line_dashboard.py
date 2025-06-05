@@ -855,6 +855,22 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     return df, df_history, summary_df
 
 def train_sharp_win_model(df):
+    st.subheader("🔍 Sharp Model Training Debug")
+    st.write(f"Total rows: {len(df)}")
+
+    st.write("With SHARP_HIT_BOOL:", len(df[df['SHARP_HIT_BOOL'].notna()]))
+    st.write("With Enhanced_Sharp_Confidence_Score:", len(df[df['Enhanced_Sharp_Confidence_Score'].notna()]))
+    st.write("Book in SHARP_BOOKS:", len(df[df['Book'].isin(SHARP_BOOKS)]))
+    st.write("With Limit > 0:", len(df[df['Limit'] > 0]))
+
+    df_filtered = df[
+        df['SHARP_HIT_BOOL'].notna() &
+        df['Enhanced_Sharp_Confidence_Score'].notna() &
+        df['Book'].isin(SHARP_BOOKS) &
+        (df['Limit'] > 0)
+    ]
+    st.write("Rows passing all filters:", len(df_filtered))
+
     # === Filter only usable rows ===
     df_labeled = df[
         (df['SHARP_HIT_BOOL'].notna()) &
@@ -862,12 +878,6 @@ def train_sharp_win_model(df):
         (df['Book'].isin(SHARP_BOOKS)) &
         (df['Limit'] > 0)
     ].copy()
-    st.subheader("🔍 Sharp Model Training Debug")
-    st.write(f"Total input rows: {len(df)}")
-    st.write(f"With SHARP_HIT_BOOL: {len(df[df['SHARP_HIT_BOOL'].notna()])}")
-    st.write(f"With Enhanced_Sharp_Confidence_Score: {len(df[df['Enhanced_Sharp_Confidence_Score'].notna()])}")
-    st.write(f"Book in SHARP_BOOKS: {len(df[df['Book'].isin(SHARP_BOOKS)])}")
-    st.write(f"With Limit > 0: {len(df[df['Limit'] > 0])}")
 
     if df_labeled.empty:
         raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
@@ -907,6 +917,7 @@ def train_sharp_win_model(df):
     print(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_labeled)} samples")
 
     return model
+
 
 
 
