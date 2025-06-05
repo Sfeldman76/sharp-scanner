@@ -1246,27 +1246,55 @@ def render_scanner_tab(label, sport_key, container, drive):
                 on=['Game', 'Market', 'Outcome'],
                 how='left'
             )
+                # Ensure Game_Start is datetime
+        # Convert and display time
+        summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
+        eastern = pytz.timezone('US/Eastern')
+        summary_df['Game_Time_EST'] = summary_df['Game_Start'].dt.tz_convert(eastern).dt.strftime('%Y-%m-%d %I:%M %p')
+        # Create combined datetime display column
+        summary_df['Date + Time'] = summary_df['Date'].astype(str) + ' ' + summary_df['Time\n(EST)']
+
+        # Drop separate columns if desired
+        summary_df.drop(columns=['Date', 'Time\n(EST)'], inplace=True)
+        # Rename for wrapping
+        summary_df.rename(columns={
+            #'Event_Date': 'Date',
+            'Date + Time': 'Date\n+ Time (EST)',
+            'Game': 'Matchup',
+            #'Game_Time_EST': 'Time\n(EST)',
+            
+            'Market': 'Market',
+            'Recommended_Outcome': 'Pick\nSide',
+            'Rec_Book_Consensus': 'Rec\nConsensus',
+            'Sharp_Book_Consensus': 'Sharp\nConsensus',
+            'Move_From_Open_Rec': 'Rec\nMove',
+            'Move_From_Open_Sharp': 'Sharp\nMove',
+            'SharpBetScore': 'Sharp\nScore',
+            'Enhanced_Sharp_Confidence_Score': 'Conf.\nScore',
+            'Model_Sharp_Win_Prob': 'Model\nProb',
+            'Blended_Sharp_Score': 'Final\nScore',
+            'Opening_Limit': 'Opening\nLimit'
+        }, inplace=True)
         
-        # Show table
-        display_cols = [
-            'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
-            'Rec_Book_Consensus', 'Sharp_Book_Consensus',
-            'Move_From_Open_Rec', 'Move_From_Open_Sharp',
-            'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
-            'Model_Sharp_Win_Prob', 'Blended_Sharp_Score'
+        # Define column order
+        frozen_cols = [
+            'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide'
         ]
+        scroll_cols = [
+            'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
+            'Sharp\nScore', 'Conf.\nScore', 'Model\nProb', 'Final\nScore', 'Opening\nLimit'
+        ]
+        final_cols = frozen_cols + scroll_cols
         
-        available_cols = [col for col in display_cols if col in filtered_df.columns]
+        # Filter to available columns
+        available_cols = [col for col in final_cols if col in summary_df.columns]
+        sort_col = 'Final\nScore' if 'Final\nScore' in summary_df.columns else available_cols[-1]
         
-        # Determine sorting column
-        sort_col = 'Blended_Sharp_Score' if 'Blended_Sharp_Score' in filtered_df.columns else available_cols[0]
-        
+        # Display
         st.dataframe(
-            filtered_df[available_cols].sort_values(by=sort_col, ascending=False, na_position='last'),
+            summary_df[available_cols].sort_values(by=sort_col, ascending=False, na_position='last'),
             use_container_width=True
         )
-
-      
        
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
