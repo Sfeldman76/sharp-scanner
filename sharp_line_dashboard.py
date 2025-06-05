@@ -1170,20 +1170,24 @@ def render_scanner_tab(label, sport_key, container, drive):
                     how='left'
                 )
         
-        # Ensure Enhanced_Sharp_Confidence_Score exists before scoring
+        # ✅ Ensure Enhanced_Sharp_Confidence_Score exists before scoring
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns:
-            if 'Game_ID' in df_moves.columns and 'Game_ID' in df_moves_raw.columns:
-                df_moves = df_moves.merge(
-                    df_moves_raw[['Game_ID', 'Market', 'Outcome', 'Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
-                    on=['Game_ID', 'Market', 'Outcome'],
-                    how='left'
-                )
-            elif all(col in df_moves.columns for col in ['Game', 'Market', 'Outcome']):
-                df_moves = df_moves.merge(
-                    df_moves_raw[['Game', 'Market', 'Outcome', 'Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
-                    on=['Game', 'Market', 'Outcome'],
-                    how='left'
-                )
+            try:
+                merge_cols = ['Market', 'Outcome']
+                if 'Game_ID' in df_moves.columns and 'Game_ID' in df_moves_raw.columns:
+                    merge_cols = ['Game_ID', 'Market', 'Outcome']
+                elif 'Game' in df_moves.columns and 'Game' in df_moves_raw.columns:
+                    merge_cols = ['Game', 'Market', 'Outcome']
+                
+                if all(col in df_moves_raw.columns for col in merge_cols + ['Enhanced_Sharp_Confidence_Score']):
+                    df_moves = df_moves.merge(
+                        df_moves_raw[merge_cols + ['Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
+                        on=merge_cols,
+                        how='left'
+                    )
+            except Exception as e:
+                st.error(f"❌ Failed to merge Enhanced_Sharp_Confidence_Score: {e}")
+
 
         # Append sharp moves
         if not df_moves.empty:
