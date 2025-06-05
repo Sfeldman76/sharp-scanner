@@ -1152,33 +1152,35 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
 
-        # 🧹 Deduplicate BEFORE backtest and scoring
+        # Deduplicate BEFORE scoring
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
 
-        # 🧪 Backtest: merge actual results and compute SHARP_HIT_BOOL
+        # Backtest
         df_moves = fetch_scores_and_backtest(df_moves, sport_key)
 
-        # Ensure Game_ID is present after backtest (re-merge if needed)
+        # Restore Game_ID if lost
         if 'Game_ID' not in df_moves.columns and 'Game_ID' in df_moves_raw.columns:
-            df_moves = df_moves.merge(
-                df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
-                on=['Game', 'Market', 'Outcome'],
-                how='left'
-            )
+            if all(col in df_moves_raw.columns for col in ['Game', 'Market', 'Outcome', 'Game_ID']):
+                df_moves = df_moves.merge(
+                    df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
+                    on=['Game', 'Market', 'Outcome'],
+                    how='left'
+                )
 
-        # 🧩 Merge back Enhanced_Sharp_Confidence_Score
+        # Restore Enhanced_Sharp_Confidence_Score if lost
         if 'Enhanced_Sharp_Confidence_Score' in df_moves_raw.columns:
-            df_moves = df_moves.merge(
-                df_moves_raw[['Game_ID', 'Market', 'Outcome', 'Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
-                on=['Game_ID', 'Market', 'Outcome'],
-                how='left'
-            )
+            if all(col in df_moves_raw.columns for col in ['Game_ID', 'Market', 'Outcome']):
+                df_moves = df_moves.merge(
+                    df_moves_raw[['Game_ID', 'Market', 'Outcome', 'Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
+                    on=['Game_ID', 'Market', 'Outcome'],
+                    how='left'
+                )
 
-        # 💾 Append to sharp move logs
+        # Append sharp moves
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
-        # 💾 Append to line history
+        # Append audit log
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             try:
@@ -1204,11 +1206,10 @@ def render_scanner_tab(label, sport_key, container, drive):
                 new_file.SetContentString(csv_buffer.getvalue())
                 new_file.Upload()
                 print(f"✅ Uploaded line_history_master.csv with {len(df_combined)} rows.")
-
             except Exception as e:
                 st.error(f"❌ Failed to append to line history: {e}")
 
-        # 🤖 Load or train sharp win model
+        # Train or load sharp win model
         model = load_model_from_drive(drive)
         if model is None or should_retrain_model(drive):
             print("🔁 Retraining sharp win model...")
@@ -1227,7 +1228,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         else:
             print("✅ Using cached sharp win model.")
 
-        # ✅ Apply sharp score model AFTER backtest and re-merging
+        # Apply model
         df_moves = apply_blended_sharp_score(df_moves, model)
 
         return df_moves
