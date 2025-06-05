@@ -286,6 +286,10 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     }, inplace=True)
 
     # Merge and score
+    # Standardize casing and whitespace before merge
+    df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
+    df_results['Game'] = df_results['Game'].str.strip().str.lower()
+
     df = df_moves.merge(df_results, on='Game', how='left')
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Score_Home_Score', 'Score_Away_Score']].head(10))
