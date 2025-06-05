@@ -862,6 +862,12 @@ def train_sharp_win_model(df):
         (df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)) &
         (df['Limit'] > 0)
     ].copy()
+    st.markdown("### 🔍 Sharp Training Data Debug")
+    st.write(f"Total sharp records: {len(df)}")
+    st.write(f"SHARP_SIDE_TO_BET == 1: {len(df[df['SHARP_SIDE_TO_BET'] == 1])}")
+    st.write(f"With SHARP_HIT_BOOL: {len(df[df['SHARP_HIT_BOOL'].notna()])}")
+    st.write(f"SHARP_BOOKS_FOR_LIMITS only: {len(df[df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)])}")
+    st.write(f"With Limit > 0: {len(df[df['Limit'] > 0])}")
 
     if df_labeled.empty:
         raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
