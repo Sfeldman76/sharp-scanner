@@ -1169,9 +1169,14 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
                             market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
 
                 # Update and save global weights
-                globals()["market_component_win_rates"] = market_component_win_rates
+                # Step 1: Safely load or create the global container
                 market_component_win_rates = globals().get("market_component_win_rates", {})
+                
+                # Step 2: Add/Update weights for this sport
                 market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
+                
+                # Step 3: Re-assign to global scope
+                globals()["market_component_win_rates"] = market_component_win_rates
 
                 try:
                     save_weights_to_drive(market_component_win_rates, drive)
