@@ -1173,9 +1173,10 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_bt = fetch_scores_and_backtest(df_moves, sport_key)
         if not df_bt.empty:
             df_moves = df_bt
-            st.success("✅ Backtest succeeded and df_moves updated.")
+            st.success("✅ Backtest succeeded — df_moves updated.")
         else:
             st.warning("⚠️ Backtest returned empty — keeping original df_moves.")
+
         
         # ✅ Restore 'Game' and 'Game_ID' safely BEFORE attempting merge
         restore_keys = ['Game', 'Market', 'Outcome']
