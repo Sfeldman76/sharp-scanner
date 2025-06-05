@@ -694,9 +694,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             score += weight * 10
             max_score += 10
     
-        # Optional warning if all fallback weights were used (score stuck at neutral)
-        if score == 35 and max_score == 70:
-            st.warning(f"⚠️ All fallback weights used for {market} — full neutral confidence")
     
         return round(score, 2) if max_score > 0 else None
 
