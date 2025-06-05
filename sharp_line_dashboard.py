@@ -1160,7 +1160,10 @@ def render_scanner_tab(label, sport_key, container, drive):
         # Run backtest
         # Run backtest
         df_moves = fetch_scores_and_backtest(df_moves, sport_key)
-        
+        st.write("✅ df_moves columns after backtest:", df_moves.columns.tolist())
+        st.write("✅ df_moves_raw columns:", df_moves_raw.columns.tolist())
+        st.write("✅ Sample of df_moves head:", df_moves.head(2))
+
         # ✅ Safely restore missing 'Game'
         if 'Game' not in df_moves.columns and 'Game_ID' in df_moves.columns:
             if 'Game_ID' in df_moves_raw.columns and 'Game' in df_moves_raw.columns:
