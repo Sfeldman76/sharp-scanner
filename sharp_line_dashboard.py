@@ -1270,7 +1270,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning("⚠️ 'Game_Start' column missing from summary_df after merge. Cannot display EST time.")
             summary_df['Game_Time_EST'] = None
 
-        summary_df['Date + Time (EST)'] = summary_df['Game_Time_EST'].dt.strftime('%Y-%m-%d %I:%M %p')
+        summary_df['Date + Time (EST)'] = summary_df['Game_Time_EST']
+
 
         # Drop separate columns if desired
         cols_to_drop = [col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns]
