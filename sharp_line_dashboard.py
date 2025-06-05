@@ -847,6 +847,81 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     return df, df_history, summary_df
 
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+def train_sharp_win_model(df):
+    # Use only rows where we know sharp bet result
+    df_labeled = df[(df['SHARP_SIDE_TO_BET'] == 1) & (df['SHARP_HIT_BOOL'].notna())].copy()
+    df_labeled['target'] = df_labeled['SHARP_HIT_BOOL'].astype(int)
+
+    feature_cols = [
+        'Sharp_Move_Signal',
+        'Sharp_Limit_Jump',
+        'Sharp_Time_Score',
+        'Sharp_Prob_Shift',
+        'Sharp_Limit_Total',
+        'Limit',
+        'Delta vs Sharp',
+        'LimitUp_NoMove_Flag'
+    ]
+    
+    df_labeled = df_labeled.dropna(subset=feature_cols)
+    X = df_labeled[feature_cols].astype(float)
+    y = df_labeled['target'].astype(int)
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
+
+    model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+    model.fit(X_train, y_train)
+
+    y_pred_proba = model.predict_proba(X_test)[:, 1]
+    auc = roc_auc_score(y_test, y_pred_proba)
+    print(f"✅ Trained Sharp Win Model — AUC: {auc:.3f}")
+
+    return model
+# Predict if the sharp bet will win
+def predict_sharp_win_probability(df, model):
+    feature_cols = [
+        'Sharp_Move_Signal',
+        'Sharp_Limit_Jump',
+        'Sharp_Time_Score',
+        'Sharp_Prob_Shift',
+        'Sharp_Limit_Total',
+        'Limit',
+        'Delta vs Sharp',
+        'LimitUp_NoMove_Flag'
+    ]
+    df = df.dropna(subset=feature_cols).copy()
+    X = df[feature_cols].astype(float)
+    df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
+    return df
+
+def apply_blended_sharp_score(df, model):
+    feature_cols = [
+        'Sharp_Move_Signal',
+        'Sharp_Limit_Jump',
+        'Sharp_Time_Score',
+        'Sharp_Prob_Shift',
+        'Sharp_Limit_Total',
+        'Limit',
+        'Delta vs Sharp',
+        'LimitUp_NoMove_Flag'
+    ]
+    
+    df = df.copy()
+    df = df.dropna(subset=feature_cols)
+
+    X = df[feature_cols].astype(float)
+    df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
+
+    # Normalize Enhanced score from 0–100 → 0–1
+    df['Enhanced_Sharp_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score'].fillna(50)
+    df['Blended_Sharp_Score'] = 0.5 * (df['Enhanced_Sharp_Confidence_Score'] / 100) + \
+                                0.5 * df['Model_Sharp_Win_Prob']
+    return df
+
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
@@ -962,6 +1037,11 @@ def render_scanner_tab(label, sport_key, container, drive):
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
+        # Train the model using recent backtested results
+        model = train_sharp_win_model(df_master)  # df_master must include SHARP_HIT_BOOL
+        
+        # Apply to current sharp signals
+        df_moves = apply_blended_sharp_score(df_moves, model)
 
         # ✅ Add timestamps and append if needed
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1009,19 +1089,27 @@ def render_scanner_tab(label, sport_key, container, drive):
                 st.error(f"❌ Failed to append to line history: {e}")
 
         # === Sharp Summary
-        if summary_df is None or summary_df.empty:
-            st.info(f"⚠️ No sharp consensus movements detected for {label}.")
-        else:
-            st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
-            market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
-            market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
-            filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
-            st.dataframe(filtered_df[[
-                'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
-                'Rec_Book_Consensus', 'Sharp_Book_Consensus',
-                'Move_From_Open_Rec', 'Move_From_Open_Sharp',
-                'SharpBetScore', 'Enhanced_Sharp_Confidence_Score'
-            ]], use_container_width=True)
+        st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
+        market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
+        market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
+        filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
+        
+        # Merge back predictions if available
+        if 'Blended_Sharp_Score' in df_moves.columns:
+            summary_df = summary_df.merge(
+                df_moves[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']],
+                on=['Game', 'Market', 'Outcome'],
+                how='left'
+            )
+        
+        # Show table
+        st.dataframe(filtered_df[[
+            'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
+            'Rec_Book_Consensus', 'Sharp_Book_Consensus',
+            'Move_From_Open_Rec', 'Move_From_Open_Sharp',
+            'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
+            'Model_Sharp_Win_Prob', 'Blended_Sharp_Score'
+        ]].sort_values(by='Blended_Sharp_Score', ascending=False), use_container_width=True)
 
       
        
@@ -1094,11 +1182,6 @@ def render_scanner_tab(label, sport_key, container, drive):
 
 
 
-
-
-
-
-
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
@@ -1166,18 +1249,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
                     .round(3)
                 )
                 st.dataframe(df_market_tier_summary)
-
-                # Totals Market Check
-                st.subheader("🔍 Totals Presence Check")
-                totals_rows = scored[scored['Market'].str.lower() == 'totals']
-                st.write(f"✅ Totals backtest rows found: {len(totals_rows)}")
-                if not totals_rows.empty:
-                    st.dataframe(totals_rows[[
-                        'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
-                    ]].head(10))
-                else:
-                    st.warning("❌ No scored totals rows found.")
-
+                
                 # Component Learning & Weight Storage
                 st.subheader("🧠 Sharp Component Learning by Market")
                 market_component_win_rates_sport = {}
