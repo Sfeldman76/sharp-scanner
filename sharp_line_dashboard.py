@@ -855,7 +855,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     return df, df_history, summary_df
 
 def train_sharp_win_model(df):
-    # Filter only sharp sides with known outcomes
+    # Filter only sharp sides with known outcomes and valid sharp book
     df_labeled = df[
         (df['SHARP_SIDE_TO_BET'] == 1) &
         (df['SHARP_HIT_BOOL'].notna()) &
@@ -863,10 +863,6 @@ def train_sharp_win_model(df):
         (df['Limit'] > 0)
     ].copy()
 
-if df_labeled.empty:
-    raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
-
-    
     if df_labeled.empty:
         raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
 
@@ -884,7 +880,7 @@ if df_labeled.empty:
     ]
     
     df_labeled = df_labeled.dropna(subset=feature_cols)
-    
+
     if len(df_labeled) < 5:
         raise ValueError(f"❌ Not enough samples to train model — only {len(df_labeled)} rows.")
 
@@ -902,22 +898,6 @@ if df_labeled.empty:
 
     return model
 
-# Predict if the sharp bet will win
-def predict_sharp_win_probability(df, model):
-    feature_cols = [
-        'Sharp_Move_Signal',
-        'Sharp_Limit_Jump',
-        'Sharp_Time_Score',
-        'Sharp_Prob_Shift',
-        'Sharp_Limit_Total',
-        'Limit',
-        'Delta vs Sharp',
-        'LimitUp_NoMove_Flag'
-    ]
-    df = df.dropna(subset=feature_cols).copy()
-    X = df[feature_cols].astype(float)
-    df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
-    return df
 
 def apply_blended_sharp_score(df, model):
     feature_cols = [
