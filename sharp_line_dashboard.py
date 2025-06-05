@@ -876,7 +876,7 @@ def train_sharp_win_model(df):
     st.write("With Enhanced_Sharp_Confidence_Score:", len(df[df['Enhanced_Sharp_Confidence_Score'].notna()]))
     st.write("With True_Sharp_Confidence_Score:", len(df[df['True_Sharp_Confidence_Score'].notna()]))
     st.write("Book in SHARP_BOOKS_FOR_LIMITS:", len(df[df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)]))
-    st.write("With Limit > 0:", len(df[df['Limit'] > 0]))
+    
 
     # === Fallback logic: use Enhanced if available, else True_Sharp_Confidence_Score
     df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
@@ -887,7 +887,7 @@ def train_sharp_win_model(df):
         df['SHARP_HIT_BOOL'].notna() &
         df['Final_Confidence_Score'].notna() &
         df['Book'].isin(SHARP_BOOKS_FOR_LIMITS) &
-        (df['Limit'] > 0)
+        
     ]
     st.write("Rows passing all filters:", len(df_filtered))
 
