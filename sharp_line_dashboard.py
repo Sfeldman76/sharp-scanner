@@ -1252,7 +1252,8 @@ def render_scanner_tab(label, sport_key, container, drive):
         eastern = pytz.timezone('US/Eastern')
         summary_df['Game_Time_EST'] = summary_df['Game_Start'].dt.tz_convert(eastern).dt.strftime('%Y-%m-%d %I:%M %p')
         # Create combined datetime display column
-        summary_df['Date + Time'] = summary_df['Date'].astype(str) + ' ' + summary_df['Time\n(EST)']
+        summary_df['Date + Time'] = summary_df['Event_Date'].astype(str) + ' ' + summary_df['Game_Time_EST']
+
 
         # Drop separate columns if desired
         summary_df.drop(columns=['Date', 'Time\n(EST)'], inplace=True)
@@ -1334,11 +1335,20 @@ def render_scanner_tab(label, sport_key, container, drive):
                     return ""
 
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(safe_format_value_limit, axis=1)
+            # Ensure commence_time is parsed
+            df_odds_raw['Commence_DT'] = pd.to_datetime(df_odds_raw['Event_Date'], errors='coerce')
+            
+            # Add EST display time
+            eastern = pytz.timezone('US/Eastern')
+            df_odds_raw['Time_EST'] = df_odds_raw['Commence_DT'].dt.tz_localize('UTC').dt.tz_convert(eastern).dt.strftime('%I:%M %p')
+            
+            # Combine into final display column
+            df_odds_raw['Date + Time (EST)'] = df_odds_raw['Commence_DT'].dt.date.astype(str) + ' ' + df_odds_raw['Time_EST']
 
 
             # Pivot to wide format by bookmaker
             df_combined_display = df_odds_raw.pivot_table(
-                index=["Event_Date", "Game", "Market", "Outcome"],
+                index=["Date + Time (EST)", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value_Limit",
                 aggfunc="first"
