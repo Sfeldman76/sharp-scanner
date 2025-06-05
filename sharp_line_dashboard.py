@@ -1249,8 +1249,11 @@ def render_scanner_tab(label, sport_key, container, drive):
         
         available_cols = [col for col in display_cols if col in filtered_df.columns]
         
+        # Determine sorting column
+        sort_col = 'Blended_Sharp_Score' if 'Blended_Sharp_Score' in filtered_df.columns else available_cols[0]
+        
         st.dataframe(
-            filtered_df[available_cols].sort_values(by='Blended_Sharp_Score', ascending=False, na_position='last'),
+            filtered_df[available_cols].sort_values(by=sort_col, ascending=False, na_position='last'),
             use_container_width=True
         )
 
