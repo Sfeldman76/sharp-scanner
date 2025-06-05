@@ -737,14 +737,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             print(f"⚠️ Confidence scoring error: {e}")
             return 50.0  # fallback neutral score
     
-        
-    # === Create base DataFrame
+  
     # === Create base DataFrame
     df = pd.DataFrame(rows)
     df_history = pd.DataFrame(line_history_log)
     
-    # Open line merge
+    # === Sort by timestamp and extract open lines
     df_history_sorted = df_history.sort_values('Time')
+    
+    # Global open per market/outcome (first ever seen)
     line_open_df = (
         df_history_sorted.dropna(subset=['Value'])
         .groupby(['Game', 'Market', 'Outcome'])['Value']
@@ -753,10 +754,23 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .rename(columns={'Value': 'Open_Value'})
     )
     
+    # Per-book open value (first seen per book)
+    line_open_per_book = (
+        df_history_sorted.dropna(subset=['Value'])
+        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
+        .first()
+        .reset_index()
+        .rename(columns={'Value': 'Open_Book_Value'})
+    )
+    
+    # === Early exit if empty
     if df.empty:
         return df, df_history
     
+    # === Merge opening lines into live odds
     df = df.merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
+    df = df.merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+
     df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
@@ -860,58 +874,48 @@ def train_sharp_win_model(df):
 
     st.write("With SHARP_HIT_BOOL:", len(df[df['SHARP_HIT_BOOL'].notna()]))
     st.write("With Enhanced_Sharp_Confidence_Score:", len(df[df['Enhanced_Sharp_Confidence_Score'].notna()]))
-    st.write("Book in SHARP_BOOKS:", len(df[df['Book'].isin(SHARP_BOOKS)]))
+    st.write("With True_Sharp_Confidence_Score:", len(df[df['True_Sharp_Confidence_Score'].notna()]))
+    st.write("Book in SHARP_BOOKS_FOR_LIMITS:", len(df[df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)]))
     st.write("With Limit > 0:", len(df[df['Limit'] > 0]))
+
+    # === Fallback logic: use Enhanced if available, else True_Sharp_Confidence_Score
+    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
+    if 'True_Sharp_Confidence_Score' in df.columns:
+        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
     df_filtered = df[
         df['SHARP_HIT_BOOL'].notna() &
-        df['Enhanced_Sharp_Confidence_Score'].notna() &
-        df['Book'].isin(SHARP_BOOKS) &
+        df['Final_Confidence_Score'].notna() &
+        df['Book'].isin(SHARP_BOOKS_FOR_LIMITS) &
         (df['Limit'] > 0)
     ]
     st.write("Rows passing all filters:", len(df_filtered))
 
-    # === Filter only usable rows ===
-    df_labeled = df[
-        (df['SHARP_HIT_BOOL'].notna()) &
-        (df['Enhanced_Sharp_Confidence_Score'].notna()) &
-        (df['Book'].isin(SHARP_BOOKS)) &
-        (df['Limit'] > 0)
-    ].copy()
-
+    df_labeled = df_filtered.copy()
     if df_labeled.empty:
         raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
 
     df_labeled['target'] = df_labeled['SHARP_HIT_BOOL'].astype(int)
 
-    # === Normalize confidence score
-    df_labeled['Enhanced_Sharp_Confidence_Score'] = df_labeled['Enhanced_Sharp_Confidence_Score'] / 100
+    # Normalize score to 0–1 range
+    df_labeled['Final_Confidence_Score'] = df_labeled['Final_Confidence_Score'] / 100
 
-    # === Optional: include reinforcement indicator if available
+    feature_cols = ['Final_Confidence_Score']
     if 'CrossMarketSharpSupport' in df_labeled.columns:
-        feature_cols = [
-            'Enhanced_Sharp_Confidence_Score',
-            'CrossMarketSharpSupport'
-        ]
-    else:
-        feature_cols = ['Enhanced_Sharp_Confidence_Score']
+        feature_cols.append('CrossMarketSharpSupport')
 
     df_labeled = df_labeled.dropna(subset=feature_cols)
-
     if len(df_labeled) < 5:
         raise ValueError(f"❌ Not enough samples to train model — only {len(df_labeled)} rows.")
 
-    # === Train/test split
     X = df_labeled[feature_cols].astype(float)
     y = df_labeled['target'].astype(int)
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
-    # === Fit XGBoost model
     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     model.fit(X_train, y_train)
 
-    # === Evaluate
     y_pred_proba = model.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_pred_proba)
     print(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_labeled)} samples")
