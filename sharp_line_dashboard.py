@@ -244,12 +244,11 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
         result_rows.append({
             'Game_ID': game_id,
-            'Score_Home_Team': home,
-            'Score_Away_Team': away,
-            'Score_Home_Score': team_scores[home],
-            'Score_Away_Score': team_scores[away]
+            'Home_Team': game['home_team'],
+            'Away_Team': game['away_team'],
+            'Home_Score': team_scores[home],
+            'Away_Score': team_scores[away]
         })
-
     df_results = pd.DataFrame(result_rows)
     st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
 
