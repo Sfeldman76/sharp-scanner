@@ -1239,13 +1239,20 @@ def render_scanner_tab(label, sport_key, container, drive):
             )
         
         # Show table
-        st.dataframe(filtered_df[[
+        display_cols = [
             'Event_Date', 'Game', 'Market', 'Recommended_Outcome',
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
             'Move_From_Open_Rec', 'Move_From_Open_Sharp',
             'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
             'Model_Sharp_Win_Prob', 'Blended_Sharp_Score'
-        ]].sort_values(by='Blended_Sharp_Score', ascending=False), use_container_width=True)
+        ]
+        
+        available_cols = [col for col in display_cols if col in filtered_df.columns]
+        
+        st.dataframe(
+            filtered_df[available_cols].sort_values(by='Blended_Sharp_Score', ascending=False, na_position='last'),
+            use_container_width=True
+        )
 
       
        
