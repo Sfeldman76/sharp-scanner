@@ -1257,9 +1257,13 @@ def render_scanner_tab(label, sport_key, container, drive):
             )
         
         # Convert Game_Start to EST for display only
-        summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
-        eastern = pytz.timezone('US/Eastern')
-        summary_df['Game_Time_EST'] = summary_df['Game_Start'].dt.tz_localize('UTC').dt.tz_convert(eastern).dt.strftime('%Y-%m-%d %I:%M %p')
+        if 'Game_Start' in summary_df.columns:
+            summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
+            eastern = pytz.timezone('US/Eastern')
+            summary_df['Game_Time_EST'] = summary_df['Game_Start'].dt.tz_localize('UTC').dt.tz_convert(eastern).dt.strftime('%Y-%m-%d %I:%M %p')
+        else:
+            st.warning("⚠️ 'Game_Start' column missing from summary_df after merge. Cannot display EST time.")
+            summary_df['Game_Time_EST'] = None
 
 
         # Drop separate columns if desired
