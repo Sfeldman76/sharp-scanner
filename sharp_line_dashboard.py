@@ -287,7 +287,9 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     # Merge and score
     df = df_moves.merge(df_results, on='Game', how='left')
-    
+    st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
+    st.write(df[['Game', 'Score_Home_Score', 'Score_Away_Score']].head(10))
+
      # With this safe version:
     def safe_calc_cover(r):
         try:
