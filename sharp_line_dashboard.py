@@ -258,7 +258,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         return pd.DataFrame()
 
     # === Prepare sharp move data ===
-   df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
+    df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
 
 
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
@@ -1119,7 +1119,7 @@ def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOL
 
 
 def render_scanner_tab(label, sport_key, container, drive):
-    global market_component_win_rates  # ✅ FIXED HERE
+    global market_component_win_rates
     with container:
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
@@ -1133,37 +1133,37 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning(f"⚠️ No live odds returned for {label}.")
             return pd.DataFrame()
 
-        # ✅ Defer sharp move detection until learned weights are available
-        # This placeholder is just for structure; no detection yet
-        df_moves = pd.DataFrame()
-        df_audit = pd.DataFrame()
-        summary_df = pd.DataFrame()
-
-        # === Snapshot live odds (before sharp detection)
+        # Snapshot current odds
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-        # ✅ CALCULATE SPORT KEY LOWER
         sport_key_lower = sport_key.lower()
-
-        # ✅ USE LEARNED WEIGHTS FROM GLOBAL DICT
         confidence_weights = market_component_win_rates.get(sport_key_lower, {})
         if not confidence_weights:
             st.warning(f"⚠️ No learned weights found for {sport_key_lower} — fallback weights will apply.")
-        # ✅ Re-load weights if not already in memory
-        
-        # ✅ DETECT SHARP MOVES with latest weights
+
+        # Run sharp detection
         df_moves, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
-          # ✅ Add timestamps and append if needed
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # Add timestamp + label
+        timestamp = pd.Timestamp.utcnow()
         df_moves['Snapshot_Timestamp'] = timestamp
         df_moves['Sport'] = label
 
+        # Deduplicate (ensure Game_ID is preserved!)
+        df_moves = df_moves.drop_duplicates(
+            subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker']
+        )
+
+        # Backtest: merge scores and evaluate outcomes
+        df_moves = fetch_scores_and_backtest(df_moves, sport_key)
+
+        # Append to Google Drive logs
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             try:
@@ -1177,16 +1177,9 @@ def render_scanner_tab(label, sport_key, container, drive):
                     try:
                         existing_data = StringIO(file_drive.GetContentString())
                         df_existing = pd.read_csv(existing_data)
-                    except Exception as read_error:
-                        print(f"⚠️ Could not read existing file: {read_error}")
-                        df_existing = pd.DataFrame()
-
-                    # Delete old file before uploading new
-                    try:
                         file_drive.Delete()
-                        print("🗑️ Deleted old line_history_master.csv")
-                    except Exception as delete_error:
-                        print(f"⚠️ Could not delete old file: {delete_error}")
+                    except Exception as e:
+                        print(f"⚠️ Could not read or delete previous audit file: {e}")
 
                 df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
                 csv_buffer = StringIO()
@@ -1196,46 +1189,34 @@ def render_scanner_tab(label, sport_key, container, drive):
                 new_file = drive.CreateFile({'title': "line_history_master.csv", "parents": [{"id": FOLDER_ID}]})
                 new_file.SetContentString(csv_buffer.getvalue())
                 new_file.Upload()
-                print(f"✅ line_history_master.csv uploaded with {len(df_combined)} total rows.")
+                print(f"✅ Uploaded line_history_master.csv with {len(df_combined)} rows.")
 
             except Exception as e:
                 st.error(f"❌ Failed to append to line history: {e}")
-        # Train the model using recent backtested results
-        ## === Load model from Drive
-               # Load or retrain model
+
+        # Train model if needed
         model = load_model_from_drive(drive)
-        
-        # === Retrain if needed
         if model is None or should_retrain_model(drive):
             print("🔁 Retraining sharp win model...")
-        
             if df_moves.empty or 'SHARP_SIDE_TO_BET' not in df_moves.columns:
-                st.warning("⚠️ No sharp bets detected or SHARP_SIDE_TO_BET missing — skipping model training.")
+                st.warning("⚠️ No sharp bets to train on.")
                 return df_moves
-        
-            model_input = fetch_scores_and_backtest(df_moves, sport_key)
-        
+
+            model_input = df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1].copy()
             if model_input.empty or 'SHARP_HIT_BOOL' not in model_input.columns:
-                st.warning("⚠️ No backtest results with SHARP_HIT_BOOL — model training skipped.")
+                st.warning("⚠️ No backtest results available — skipping training.")
                 return df_moves
-        
+
             model = train_sharp_win_model(model_input)
             save_model_to_drive(model, drive)
             save_model_timestamp(drive)
         else:
             print("✅ Using cached sharp win model.")
-        
-        # ✅ Apply sharp score model
+
+        # Apply sharp scoring model
         df_moves = apply_blended_sharp_score(df_moves, model)
-        # Grade sharp bets and log outcomes
-        df_moves = fetch_scores_and_backtest(df_moves, sport_key)
-        
-        # Optional: clean to avoid duplicates or double-calculation
-        df_moves = df_moves.drop_duplicates(
-            subset=['Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker']
-        )
 
-
+        return df_moves
 
       
 
