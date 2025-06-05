@@ -1065,75 +1065,64 @@ def render_scanner_tab(label, sport_key, container, drive):
 
 
 
-tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
-
-with tab_nba:
-    df_nba = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
-
-with tab_mlb:
-    df_mlb = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
 
 
-# Load sharp picks from Drive
-df_master = load_master_sharp_moves(drive)
 
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
 
 
-# === NBA Sharp Signal Performance
-# === NBA Sharp Signal Performance
-# === NBA Sharp Signal Performance
-with tab_nba:
-    if not df_master.empty:
-        df_nba_bt = fetch_scores_and_backtest(
-            df_master[
-                (df_master['Sport'] == 'NBA') &
-                (df_master['SHARP_SIDE_TO_BET'] == 1)
-            ],
-            sport_key='basketball_nba'
-        )
 
-        if not df_nba_bt.empty and 'SHARP_HIT_BOOL' in df_nba_bt.columns:
-            df_nba_bt['SharpConfidenceTier'] = pd.cut(
-                df_nba_bt['SharpBetScore'],
-                bins=[0, 15, 25, 40, 100],
-                labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master, drive):
+    with tab:
+        sport_key_lower = sport_key_api  # e.g., "basketball_nba" or "baseball_mlb"
+
+        if not df_master.empty:
+            df_bt = fetch_scores_and_backtest(
+                df_master[
+                    (df_master['Sport'] == sport_label) &
+                    (df_master['SHARP_SIDE_TO_BET'] == 1)
+                ],
+                sport_key=sport_key_api
             )
 
-            scored = df_nba_bt[df_nba_bt['SHARP_HIT_BOOL'].notna()]
-            st.subheader("🏆 Top Sharp Signal Performers by Market")
+            if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
+                # Tier classification
+                df_bt['SharpConfidenceTier'] = pd.cut(
+                    df_bt['SharpBetScore'],
+                    bins=[0, 15, 25, 40, 100],
+                    labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+                )
 
-            leaderboard_rows = []
-            for comp in component_fields:
-                if comp in scored.columns:
-                    group = (
-                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                        .agg(['count', 'mean'])
-                        .reset_index()
-                        .rename(columns={
-                            'count': 'Signal_Count',
-                            'mean': 'Win_Rate',
-                            comp: 'Component_Value'
-                        })
-                    )
-                    group['Component'] = comp
-                    leaderboard_rows.append(group)
+                scored = df_bt[df_bt['SHARP_HIT_BOOL'].notna()]
+                st.subheader(f"🏆 Top Sharp Signal Performers by Market ({sport_label})")
 
-            leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
-            leaderboard_df = leaderboard_df[[
-                'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
-            ]].sort_values(by='Win_Rate', ascending=False)
+                leaderboard_rows = []
+                for comp in component_fields:
+                    if comp in scored.columns:
+                        group = (
+                            scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                            .agg(['count', 'mean'])
+                            .reset_index()
+                            .rename(columns={
+                                'count': 'Signal_Count',
+                                'mean': 'Win_Rate',
+                                comp: 'Component_Value'
+                            })
+                        )
+                        group['Component'] = comp
+                        leaderboard_rows.append(group)
 
-            st.dataframe(leaderboard_df.head(50))
+                leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
+                leaderboard_df = leaderboard_df[[
+                    'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
+                ]].sort_values(by='Win_Rate', ascending=False)
 
-            # Tier performance
-            st.subheader("📊 NBA Sharp Signal Performance by Market + Confidence Tier")
-            if 'Market' not in df_nba_bt.columns:
-                st.warning("⚠️ 'Market' column missing from df_nba_bt!")
-                st.write("📋 Available columns:", df_nba_bt.columns.tolist())
-            else:
+                st.dataframe(leaderboard_df.head(50))
+
+                # Tier Performance
+                st.subheader(f"📊 {sport_label} Sharp Signal Performance by Market + Confidence Tier")
                 df_market_tier_summary = (
                     scored
                     .groupby(['Market', 'SharpConfidenceTier'])
@@ -1147,199 +1136,64 @@ with tab_nba:
                 )
                 st.dataframe(df_market_tier_summary)
 
-            # Totals check
-            st.subheader("🔍 Totals Presence Check")
-            totals_rows = scored[scored['Market'].str.lower() == 'totals']
-            st.write("✅ Totals backtest rows found:", len(totals_rows))
-            if not totals_rows.empty:
-                st.dataframe(totals_rows[[
-                    'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
-                ]].head(10))
+                # Totals Market Check
+                st.subheader("🔍 Totals Presence Check")
+                totals_rows = scored[scored['Market'].str.lower() == 'totals']
+                st.write(f"✅ Totals backtest rows found: {len(totals_rows)}")
+                if not totals_rows.empty:
+                    st.dataframe(totals_rows[[
+                        'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
+                    ]].head(10))
+                else:
+                    st.warning("❌ No scored totals rows found.")
+
+                # Component Learning & Weight Storage
+                st.subheader("🧠 Sharp Component Learning by Market")
+                market_component_win_rates_sport = {}
+
+                for comp in component_fields:
+                    if comp in scored.columns:
+                        result = (
+                            scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                            .mean().reset_index()
+                            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
+                            .sort_values(by=['Market', comp])
+                        )
+                        st.markdown(f"**📊 {comp} by Market**")
+                        st.dataframe(result)
+
+                        for _, row in result.iterrows():
+                            market = row['Market'].lower()
+                            val = row[comp]
+                            win_rate = row['Win_Rate']
+                            market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
+
+                # Update and save global weights
+                globals()["market_component_win_rates"] = market_component_win_rates
+                market_component_win_rates = globals().get("market_component_win_rates", {})
+                market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
+
+                try:
+                    save_weights_to_drive(market_component_win_rates, drive)
+                    print(f"✅ Saved weights for {sport_key_lower} to Google Drive.")
+                except Exception as e:
+                    print(f"❌ Failed to save weights for {sport_key_lower}: {e}")
+
+                # Debug Displays
+                st.subheader(f"📥 Learned Weights for {sport_label}")
+                st.json(market_component_win_rates.get(sport_key_lower, {}))
+
+                st.subheader(f"🧪 Sample {sport_label} Confidence Inputs")
+                st.dataframe(df_bt[[
+                    'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
+                ]].head())
             else:
-                st.warning("❌ No scored totals rows found.")
-
-            # Component Learning
-            sport_key_lower = 'basketball_nba'
-            market_component_win_rates_sport = {}
-
-            st.subheader("🧠 Sharp Component Learning by Market")
-            for comp, label in component_fields.items():
-                if comp in scored.columns:
-                    result = (
-                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                        .mean().reset_index()
-                        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
-                        .sort_values(by=['Market', comp])
-                    )
-                    st.markdown(f"**📊 {label} by Market**")
-                    st.dataframe(result)
-
-                    for _, row in result.iterrows():
-                        market = row['Market'].lower()
-                        val = row[comp]
-                        win_rate = row['Win_Rate']
-                        market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
-
-            # Store globally and persist
-            
-            globals()["market_component_win_rates"] = market_component_win_rates
-
-            market_component_win_rates = globals().get("market_component_win_rates", {})
-            market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
-         
-
-            
-            try:
-                save_weights_to_drive(market_component_win_rates, drive)
-                print(f"✅ Saved weights for {sport_key_lower} to Google Drive.")
-            except Exception as e:
-                print(f"❌ Failed to save weights for {sport_key_lower}: {e}")
-
-
-            
-            # 📥 Show learned weights in UI
-            st.subheader(f"📥 Learned Weights for {sport_key} (Debug)")
-            st.json(market_component_win_rates.get(sport_key_lower, {}))
-            
-            # 🧪 Sample confidence scores for inspection
-            st.subheader(f"🧪 Sample {sport_key} Confidence Inputs")
-            st.dataframe(df_nba_bt[[
-                'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
-            ]].head())
-
-
+                st.warning(f"⚠️ {sport_label} backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
         else:
-            st.warning("⚠️ NBA backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
-    else:
-        st.warning("⚠️ No historical sharp picks found in Google Drive yet.")
+            st.warning(f"⚠️ No historical sharp picks found for {sport_label}.")
 
-# === MLB Sharp Signal Performance
-# === MLB Sharp Signal Performance
-# === MLB Sharp Signal Performance
-with tab_mlb:
-    if not df_master.empty:
-        df_mlb_bt = fetch_scores_and_backtest(
-            df_master[
-                (df_master['Sport'] == 'MLB') &
-                (df_master['SHARP_SIDE_TO_BET'] == 1)
-            ],
-            sport_key='baseball_mlb'
-        )
+df_master = load_master_sharp_moves(drive)
 
-        if not df_mlb_bt.empty and 'SHARP_HIT_BOOL' in df_mlb_bt.columns:
-            # Create tier
-            df_mlb_bt['SharpConfidenceTier'] = pd.cut(
-                df_mlb_bt['SharpBetScore'],
-                bins=[0, 15, 25, 40, 100],
-                labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
-            )
-
-            # Filter scored rows once for reuse
-            scored = df_mlb_bt[df_mlb_bt['SHARP_HIT_BOOL'].notna()]
-            st.subheader("🏆 Top Sharp Signal Performers by Market")
-
-            leaderboard_rows = []
-            for comp in component_fields:
-                if comp in scored.columns:
-                    group = (
-                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                        .agg(['count', 'mean'])
-                        .reset_index()
-                        .rename(columns={
-                            'count': 'Signal_Count',
-                            'mean': 'Win_Rate',
-                            comp: 'Component_Value'
-                        })
-                    )
-                    group['Component'] = comp
-                    leaderboard_rows.append(group)
-
-            leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
-            leaderboard_df = leaderboard_df[[
-                'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
-            ]].sort_values(by='Win_Rate', ascending=False)
-
-            st.dataframe(leaderboard_df.head(50))
-
-            # Tier performance
-            st.subheader("📊 MLB Sharp Signal Performance by Market + Confidence Tier")
-            if 'Market' not in df_mlb_bt.columns:
-                st.warning("⚠️ 'Market' column missing from df_mlb_bt!")
-                st.write("📋 Available columns:", df_mlb_bt.columns.tolist())
-            else:
-                df_market_tier_summary = (
-                    scored
-                    .groupby(['Market', 'SharpConfidenceTier'])
-                    .agg(
-                        Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                        Hits=('SHARP_HIT_BOOL', 'sum'),
-                        Win_Rate=('SHARP_HIT_BOOL', 'mean')
-                    )
-                    .reset_index()
-                    .round(3)
-                )
-                st.dataframe(df_market_tier_summary)
-
-            # Totals check
-            st.subheader("🔍 Totals Presence Check")
-            totals_rows = scored[
-                scored['Market'].str.lower() == 'totals'
-            ]
-            st.write("✅ Totals backtest rows found:", len(totals_rows))
-            if not totals_rows.empty:
-                st.dataframe(totals_rows[[
-                    'Game', 'Outcome', 'Market', 'Ref Sharp Value', 'SHARP_HIT_BOOL', 'SharpBetScore'
-                ]].head(10))
-            else:
-                st.warning("❌ No scored totals rows found.")
-
-            # Learning blocks
-            # Store weights scoped by sport
-            sport_key_lower = 'baseball_mlb'  
-            market_component_win_rates_sport = {}
-            
-            st.subheader("🧠 Sharp Component Learning by Market")
-            for comp, label in component_fields.items():
-                if comp in scored.columns:
-                    result = (
-                        scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                        .mean().reset_index()
-                        .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
-                        .sort_values(by=['Market', comp])
-                    )
-                    st.markdown(f"**📊 {label} by Market**")
-                    st.dataframe(result)
-            
-                    for _, row in result.iterrows():
-                        market = row['Market'].lower()
-                        val = row[comp]
-                        win_rate = row['Win_Rate']
-                        market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
-            
-            # 🔁 Update global scoped object
-            # 🔁 Update global scoped object
-            # 🔁 Update global scoped object
-            # 🔁 Update global scoped object
-           
-            globals()["market_component_win_rates"] = market_component_win_rates
-            market_component_win_rates = globals().get("market_component_win_rates", {})
-            market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
-          
-
-            
-            try:
-                save_weights_to_drive(market_component_win_rates, drive)
-                print(f"✅ Saved weights for {sport_key_lower} to Google Drive.")
-            except Exception as e:
-                print(f"❌ Failed to save weights for {sport_key_lower}: {e}")
-
-            
-            # 📥 Show learned weights in UI
-            st.subheader(f"📥 Learned Weights for {sport_key} (Debug)")
-            st.json(market_component_win_rates.get(sport_key_lower, {}))
-            
-            # 🧪 Sample confidence scores for inspection
-            st.subheader(f"🧪 Sample {sport_key} Confidence Inputs")
-            st.dataframe(df_mlb_bt[[
-                'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
-            ]].head())
+tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
+render_sharp_signal_analysis_tab(tab_nba, "NBA", "basketball_nba", df_master, drive)
+render_sharp_signal_analysis_tab(tab_mlb, "MLB", "baseball_mlb", df_master, drive)
