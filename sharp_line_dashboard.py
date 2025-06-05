@@ -265,17 +265,22 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         st.warning("⚠️ No parsed scores matched your games, even though API reported completed games.")
         return pd.DataFrame()
 
-    # === Prepare sharp move data ===
-    df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
-
-
+    # Prepare sharp data
+    df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome']).copy()
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
-        df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
+        df_moves[['Home_Team', 'Away_Team']] = df_moves['Game_ID'].str.extract(r'^(.*?) vs (.*?)$')
 
 
     # ⏱ Consistent timestamp parsing without localization
-    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
+    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce')
+    if df_moves['Snapshot_Timestamp'].dt.tz is None:
+        df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_localize('US/Eastern')
+    df_moves['Snapshot_Timestamp'] = df_moves['Snapshot_Timestamp'].dt.tz_convert('UTC')
+
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce')
+    if df_moves['Game_Start'].dt.tz is None:
+        df_moves['Game_Start'] = df_moves['Game_Start'].dt.tz_localize('UTC')
+
 
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
