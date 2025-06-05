@@ -1358,9 +1358,16 @@ def render_scanner_tab(label, sport_key, container, drive):
         
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(safe_format_value_limit, axis=1)
         
-            df_odds_raw['Game_Start'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce')
-            df_odds_raw['Game_Time_EST'] = df_odds_raw['Game_Start'].dt.tz_localize('UTC').dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
+            
+            eastern = timezone('US/Eastern')
+            
+            df_odds_raw['Game_Time_EST'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
+                lambda dt: dt.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(dt) and dt.tzinfo else
+                           pd.to_datetime(dt).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(dt) else ""
+            )
+            
             df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Time_EST']
+        
         
             df_combined_display = df_odds_raw.pivot_table(
                 index=["Date + Time (EST)", "Game", "Market", "Outcome"],
