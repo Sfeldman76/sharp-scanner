@@ -1111,37 +1111,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
-        # Train the model using recent backtested results
-        ## === Load model from Drive
-               # Load or retrain model
-        model = load_model_from_drive(drive)
-        
-        # === Retrain if needed
-        if model is None or should_retrain_model(drive):
-            print("🔁 Retraining sharp win model...")
-        
-            if df_moves.empty or 'SHARP_SIDE_TO_BET' not in df_moves.columns:
-                st.warning("⚠️ No sharp bets detected or SHARP_SIDE_TO_BET missing — skipping model training.")
-                return df_moves
-        
-            model_input = fetch_scores_and_backtest(df_moves, sport_key)
-        
-            if model_input.empty or 'SHARP_HIT_BOOL' not in model_input.columns:
-                st.warning("⚠️ No backtest results with SHARP_HIT_BOOL — model training skipped.")
-                return df_moves
-        
-            model = train_sharp_win_model(model_input)
-            save_model_to_drive(model, drive)
-            save_model_timestamp(drive)
-        else:
-            print("✅ Using cached sharp win model.")
-        
-        # ✅ Apply sharp score model
-        df_moves = apply_blended_sharp_score(df_moves, model)
-
-
-
-        # ✅ Add timestamps and append if needed
+          # ✅ Add timestamps and append if needed
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         if not df_moves.empty:
@@ -1185,6 +1155,37 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             except Exception as e:
                 st.error(f"❌ Failed to append to line history: {e}")
+        # Train the model using recent backtested results
+        ## === Load model from Drive
+               # Load or retrain model
+        model = load_model_from_drive(drive)
+        
+        # === Retrain if needed
+        if model is None or should_retrain_model(drive):
+            print("🔁 Retraining sharp win model...")
+        
+            if df_moves.empty or 'SHARP_SIDE_TO_BET' not in df_moves.columns:
+                st.warning("⚠️ No sharp bets detected or SHARP_SIDE_TO_BET missing — skipping model training.")
+                return df_moves
+        
+            model_input = fetch_scores_and_backtest(df_moves, sport_key)
+        
+            if model_input.empty or 'SHARP_HIT_BOOL' not in model_input.columns:
+                st.warning("⚠️ No backtest results with SHARP_HIT_BOOL — model training skipped.")
+                return df_moves
+        
+            model = train_sharp_win_model(model_input)
+            save_model_to_drive(model, drive)
+            save_model_timestamp(drive)
+        else:
+            print("✅ Using cached sharp win model.")
+        
+        # ✅ Apply sharp score model
+        df_moves = apply_blended_sharp_score(df_moves, model)
+
+
+
+      
 
         # === Sharp Summary
         st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
