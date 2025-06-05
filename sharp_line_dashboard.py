@@ -855,8 +855,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     return df, df_history, summary_df
 
 def train_sharp_win_model(df):
-    # Use only rows where we know sharp bet result
+    # Filter only sharp sides with known outcomes
     df_labeled = df[(df['SHARP_SIDE_TO_BET'] == 1) & (df['SHARP_HIT_BOOL'].notna())].copy()
+    
+    if df_labeled.empty:
+        raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
+
     df_labeled['target'] = df_labeled['SHARP_HIT_BOOL'].astype(int)
 
     feature_cols = [
@@ -871,6 +875,10 @@ def train_sharp_win_model(df):
     ]
     
     df_labeled = df_labeled.dropna(subset=feature_cols)
+    
+    if len(df_labeled) < 5:
+        raise ValueError(f"❌ Not enough samples to train model — only {len(df_labeled)} rows.")
+
     X = df_labeled[feature_cols].astype(float)
     y = df_labeled['target'].astype(int)
 
@@ -884,6 +892,7 @@ def train_sharp_win_model(df):
     print(f"✅ Trained Sharp Win Model — AUC: {auc:.3f}")
 
     return model
+
 # Predict if the sharp bet will win
 def predict_sharp_win_probability(df, model):
     feature_cols = [
