@@ -1234,87 +1234,80 @@ def render_scanner_tab(label, sport_key, container, drive):
       
 
         # === Sharp Summary
+     
+        # === Sharp Summary
         st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
-        market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
-        market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
-        filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
         
-        # Merge back predictions if available
+        # 🔁 Merge model predictions
         if 'Blended_Sharp_Score' in df_moves.columns:
             summary_df = summary_df.merge(
                 df_moves[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']],
                 on=['Game', 'Market', 'Outcome'],
                 how='left'
             )
-                # Ensure Game_Start is datetime
-        # Convert and display time
-        # Ensure Game_Start exists in summary_df (merge from df_moves if needed)
-        if 'Game_Start' not in summary_df.columns and 'Game_Start' in df_moves.columns:
+        
+        # 🔁 Merge Game_Start from df_moves to summary_df
+        if 'Game_Start' in df_moves.columns:
             summary_df = summary_df.merge(
-                df_moves[['Game', 'Market', 'Outcome', 'Game_Start']],
+                df_moves[['Game', 'Market', 'Outcome', 'Game_Start']].drop_duplicates(),
                 on=['Game', 'Market', 'Outcome'],
                 how='left'
             )
         
-        # ✅ Use this once, safely
-        eastern = timezone('US/Eastern')
+        # 📅 Parse Game_Start
+        summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
         
-        if 'Game_Start' in summary_df.columns:
-            summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
-            
-            summary_df['Game_Time_EST'] = summary_df['Game_Start'].apply(
-                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo else
-                          pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) else ""
-            )
-        else:
-            st.warning("⚠️ 'Game_Start' column missing from summary_df after merge. Cannot display EST time.")
-            summary_df['Game_Time_EST'] = None
-
+        # 🕒 Filter out games that already started
+        now_utc = datetime.now(pytz.utc)
+        summary_df = summary_df[summary_df['Game_Start'] > now_utc]
+        
+        # 🕰️ Convert Game_Start to EST
+        eastern = timezone('US/Eastern')
+        summary_df['Game_Time_EST'] = summary_df['Game_Start'].apply(
+            lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo else
+                      pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) else ""
+        )
         summary_df['Date + Time (EST)'] = summary_df['Game_Time_EST']
-
-
-        # Drop separate columns if desired
-        cols_to_drop = [col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns]
-        if cols_to_drop:
-            summary_df.drop(columns=cols_to_drop, inplace=True)
-
-        # Rename for wrapping
+        
+        # 🧹 Drop outdated columns
+        summary_df.drop(columns=[col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns], inplace=True)
+        
+        # 🏷️ Rename for wrapping
         summary_df.rename(columns={
-            #'Event_Date': 'Date',
-            'Date + Time': 'Date\n+ Time (EST)',
+            'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
-            #'Game_Time_EST': 'Time\n(EST)',
-            
-            'Market': 'Market',
             'Recommended_Outcome': 'Pick\nSide',
             'Rec_Book_Consensus': 'Rec\nConsensus',
             'Sharp_Book_Consensus': 'Sharp\nConsensus',
             'Move_From_Open_Rec': 'Rec\nMove',
             'Move_From_Open_Sharp': 'Sharp\nMove',
-            'SharpBetScore': 'Sharp\nBet\nScore',
-            'Enhanced_Sharp_Confidence_Score': 'Enhanced\nConf.\nScore'            
+            'SharpBetScore': 'Sharp\nScore',
+            'Enhanced_Sharp_Confidence_Score': 'Conf.\nScore',
+            'Model_Sharp_Win_Prob': 'Model\nProb',
+            'Blended_Sharp_Score': 'Final\nScore'
         }, inplace=True)
         
-        # Define column order
-        frozen_cols = [
-            'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide'
-        ]
+        # 🔽 Market filter (AFTER filtering out old games)
+        market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
+        market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
+        filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
+        
+        # 📊 Column setup
+        frozen_cols = ['Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide']
         scroll_cols = [
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
             'Sharp\nScore', 'Conf.\nScore', 'Model\nProb', 'Final\nScore', 'Opening\nLimit'
         ]
         final_cols = frozen_cols + scroll_cols
+        available_cols = [col for col in final_cols if col in filtered_df.columns]
+        sort_col = 'Final\nScore' if 'Final\nScore' in filtered_df.columns else available_cols[-1]
         
-        # Filter to available columns
-        available_cols = [col for col in final_cols if col in summary_df.columns]
-        sort_col = 'Final\nScore' if 'Final\nScore' in summary_df.columns else available_cols[-1]
-        
-        # Display
+        # 📋 Display
         st.dataframe(
-            summary_df[available_cols].sort_values(by=sort_col, ascending=False, na_position='last'),
+            filtered_df[available_cols].sort_values(by=sort_col, ascending=False, na_position='last'),
             use_container_width=True
         )
-       
+
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
         #=== Odds snapshot (pivoted, with limits, highlighted best lines)
