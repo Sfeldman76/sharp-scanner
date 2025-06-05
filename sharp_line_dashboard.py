@@ -1254,20 +1254,24 @@ def render_scanner_tab(label, sport_key, container, drive):
                 how='left'
             )
         
-        # 📅 Parse Game_Start
-        summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
+        if 'Game_Start' in summary_df.columns:
+            summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
         
-        # 🕒 Filter out games that already started
-        now_utc = datetime.now(pytz.utc)
-        summary_df = summary_df[summary_df['Game_Start'] > now_utc]
+            # ✅ Filter out games that have already started
+            now_utc = datetime.now(pytz.utc)
+            summary_df = summary_df[summary_df['Game_Start'] > now_utc]
         
-        # 🕰️ Convert Game_Start to EST
-        eastern = timezone('US/Eastern')
-        summary_df['Game_Time_EST'] = summary_df['Game_Start'].apply(
-            lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo else
-                      pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) else ""
-        )
-        summary_df['Date + Time (EST)'] = summary_df['Game_Time_EST']
+            # Convert Game_Start to EST for display
+            eastern = timezone('US/Eastern')
+            summary_df['Game_Time_EST'] = summary_df['Game_Start'].apply(
+                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo else
+                          pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) else ""
+            )
+            summary_df['Date + Time (EST)'] = summary_df['Game_Time_EST']
+        else:
+            st.warning("⚠️ 'Game_Start' missing — no time filtering or EST display will apply.")
+            summary_df['Date + Time (EST)'] = None
+
         
         # 🧹 Drop outdated columns
         summary_df.drop(columns=[col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns], inplace=True)
