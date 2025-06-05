@@ -729,7 +729,27 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         except Exception as e:
             print(f"⚠️ Confidence scoring error: {e}")
             return 50.0  # fallback neutral score
+    def compute_intelligence_score(row):
+        score = 0
+        reasons = []
     
+        if row.get('LimitUp_NoMove_Flag', 0) == 1:
+            score += 15
+            reasons.append("🤫 Limit ↑, price ↔ (Position signal)")
+    
+        if abs(row.get('Delta vs Sharp', 0)) >= 0.5:
+            score += 10
+            reasons.append("📈 Price moved from sharp baseline")
+    
+        if row.get('Limit_Jump', 0) == 1 and abs(row.get('Delta vs Sharp', 0)) == 0:
+            score += 15
+            reasons.append("🤫 Limit ↑, price ↔")
+    
+        return pd.Series({
+            'SharpIntelligenceScore': min(score, 100),
+            'SharpIntelReasons': ", ".join(reasons) if reasons else "No clear signal"
+        })
+
         
     # === Create base DataFrame
     # === Create base DataFrame
