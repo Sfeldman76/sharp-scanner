@@ -1313,18 +1313,23 @@ def render_scanner_tab(label, sport_key, container, drive):
        
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
+        #=== Odds snapshot (pivoted, with limits, highlighted best lines)
         raw_odds_table = []
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
+            commence = game.get("commence_time")
+            game_start = pd.to_datetime(commence) if commence else pd.NaT
+        
             for book in game.get("bookmakers", []):
                 book_title = book["title"]
                 for market in book.get("markets", []):
                     mtype = market.get("key")
                     for outcome in market.get("outcomes", []):
                         price = outcome.get("point") if mtype != "h2h" else outcome.get("price")
+        
                         raw_odds_table.append({
-                            'Event_Date': pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if game.get("commence_time") else "",
-                            'Game_Start': pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT,
+                            'Event_Date': game_start.strftime("%Y-%m-%d") if pd.notnull(game_start) else "",
+                            'Game_Start': game_start,
                             "Game": game_name,
                             "Market": mtype,
                             "Outcome": outcome["name"],
@@ -1332,15 +1337,17 @@ def render_scanner_tab(label, sport_key, container, drive):
                             "Value": price,
                             "Limit": outcome.get("bet_limit", 0)
                         })
-
-
+        
         df_odds_raw = pd.DataFrame(raw_odds_table)
-
+        
+        # === Safe fallback if 'Game_Start' was entirely missing
+        if 'Game_Start' not in df_odds_raw.columns:
+            df_odds_raw['Game_Start'] = pd.NaT
+        
         if not df_odds_raw.empty:
             st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
         
             import math
-        
             def safe_format_value_limit(row):
                 try:
                     val = float(row['Value'])
@@ -1361,8 +1368,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
-        
-         
+
 
 
             # List of sharp books to highlight
