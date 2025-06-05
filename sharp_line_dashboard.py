@@ -1267,7 +1267,10 @@ def render_scanner_tab(label, sport_key, container, drive):
 
 
         # Drop separate columns if desired
-        summary_df.drop(columns=['Date', 'Time\n(EST)'], inplace=True)
+        cols_to_drop = [col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns]
+        if cols_to_drop:
+            summary_df.drop(columns=cols_to_drop, inplace=True)
+
         # Rename for wrapping
         summary_df.rename(columns={
             #'Event_Date': 'Date',
