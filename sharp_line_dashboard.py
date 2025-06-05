@@ -1137,7 +1137,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             print("✅ Using cached sharp win model.")
         
         # ✅ Apply sharp score model
-        df_moves = apply_blended_sharp_score(df_moves, model
+        df_moves = apply_blended_sharp_score(df_moves, model)
 
 
 
