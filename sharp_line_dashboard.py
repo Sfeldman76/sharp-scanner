@@ -645,56 +645,52 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     # === Append sharp-sided bets with enriched component scores
     for (game_name, mtype, label), entry in sharp_lines.items():
-        if sharp_side_flags.get((game_name, mtype, label), 0):
-            metrics = sharp_metrics_map.get((game_name, mtype, label), {})
-            enriched = entry.copy()
-            enriched.update({
-                'Ref Sharp Value': entry['Value'],
-                'Ref Sharp Old Value': entry.get('Old Value'),
-                'Delta vs Sharp': 0.0,
-                'SHARP_SIDE_TO_BET': 1,
-                'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
-                'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
-                'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
-                'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0),
-                'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0)
-            })
-            # Calculate basic SharpBetScore (used for legacy tiering if needed)
-            enriched['SharpBetScore'] = round(
-                2.0 * enriched['Sharp_Move_Signal'] +
-                2.0 * enriched['Sharp_Limit_Jump'] +
-                1.5 * enriched['Sharp_Time_Score'] +
-                1.0 * enriched['Sharp_Prob_Shift'] +
-                0.001 * enriched['Sharp_Limit_Total'], 2
-            )
-            rows.append(enriched)
+        metrics = sharp_metrics_map.get((game_name, mtype, label), {})
+        enriched = entry.copy()
+        enriched.update({
+            'Ref Sharp Value': entry['Value'],
+            'Ref Sharp Old Value': entry.get('Old Value'),
+            'Delta vs Sharp': 0.0,
+            'SHARP_SIDE_TO_BET': int(sharp_side_flags.get((game_name, mtype, label), 0)),
     
-    # === Intelligence scoring
-    def compute_intelligence_score(row):
-        score = 0
-        reasons = []
-        if row.get('LimitUp_NoMove_Flag', 0) == 1:
-            score += 15
-            reasons.append("🤫 Limit ↑, price ↔ (Position signal)")
-        if abs(row.get('Delta vs Sharp', 0)) >= 0.5:
-            score += 10
-            reasons.append("📈 Price moved from sharp baseline")
-        if row.get('Limit_Jump', 0) == 1 and abs(row.get('Delta vs Sharp', 0)) == 0:
-            score += 15
-            reasons.append("🤫 Limit ↑, price ↔")
-        return pd.Series({
-            'SharpIntelligenceScore': min(score, 100),
-            'SharpIntelReasons': ", ".join(reasons) if reasons else "No clear signal"
+            # Always attach metrics — even if not sharp-side
+            'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
+            'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
+            'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
+            'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0),
+            'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0)
         })
     
-    # === Confidence scoring using learned weights
-    def compute_confidence(row, market_weights):
-        market = str(row.get('Market', '')).lower()
-        score = 0
-        max_score = 0
+        # Optional: basic score even if not best side
+        enriched['SharpBetScore'] = round(
+            2.0 * enriched['Sharp_Move_Signal'] +
+            2.0 * enriched['Sharp_Limit_Jump'] +
+            1.5 * enriched['Sharp_Time_Score'] +
+            1.0 * enriched['Sharp_Prob_Shift'] +
+            0.001 * enriched['Sharp_Limit_Total'], 2
+        )
     
-        for comp in component_fields:
+        rows.append(enriched)
+
+    
+    # === Intelligence scoring
+    def compute_weighted_signal(row, market_weights):
+        market = str(row.get('Market', '')).lower()
+        total_score = 0
+        max_possible = 0
+    
+        component_importance = {
+            'Sharp_Move_Signal': 2.0,
+            'Sharp_Limit_Jump': 2.0,
+            'Sharp_Time_Score': 1.5,
+            'Sharp_Prob_Shift': 1.0,
+            'Sharp_Limit_Total': 0.001
+        }
+    
+        for comp, importance in component_importance.items():
             val = row.get(comp)
+            if val is None:
+                continue
     
             try:
                 val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val).lower()
@@ -702,13 +698,40 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             except:
                 weight = 0.5
     
-            score += weight * 10
-            max_score += 10
+            total_score += weight * importance
+            max_possible += importance
+    
+        return round((total_score / max_possible) * 100 if max_possible else 50, 2)
     
     
-        return round(score, 2) if max_score > 0 else None
-
+    def compute_confidence(row, market_weights):
+        try:
+            # Base scaled sharp signal
+            base_score = min(row.get('SharpBetScore', 0) / 50, 1.0) * 50
     
+            # Empirical weight signal
+            weight_score = compute_weighted_signal(row, market_weights)
+    
+            # Limit positioning bonus
+            limit_position_bonus = 0
+            if row.get('LimitUp_NoMove_Flag') == 1:
+                limit_position_bonus = 15
+            elif row.get('Limit_Jump') == 1 and abs(row.get('Delta vs Sharp', 0)) > 0.25:
+                limit_position_bonus = 5
+    
+            # Market leadership bonus
+            market_lead_bonus = 5 if row.get('Market_Leader') else 0
+    
+            # Final blended score
+            final_conf = base_score + weight_score + limit_position_bonus + market_lead_bonus
+            return round(min(final_conf, 100), 2)
+    
+        except Exception as e:
+            print(f"⚠️ Confidence scoring error: {e}")
+            return 50.0  # fallback neutral score
+    
+        
+    # === Create base DataFrame
     # === Create base DataFrame
     df = pd.DataFrame(rows)
     df_history = pd.DataFrame(line_history_log)
@@ -740,33 +763,39 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     df[['SharpIntelligenceScore', 'SharpIntelReasons']] = df.apply(compute_intelligence_score, axis=1)
     df['Book'] = df['Book'].str.lower()
+    
     market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
     df = df.merge(
         market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
         on=['Game', 'Market', 'Outcome', 'Book'],
         how='left'
     )
+    
     df['Is_Pinnacle'] = df['Book'] == 'pinnacle'
     df['LimitUp_NoMove_Flag'] = (
         (df['Is_Pinnacle']) &
         (df['Limit'] >= 2500) &
         (df['Value'] == df['Open_Value'])
     ).astype(int)
+    
     df = detect_cross_market_sharp_support(df)
     
     # ✅ Compute dynamic, market-calibrated confidence
     df['True_Sharp_Confidence_Score'] = df.apply(
+        lambda r: compute_weighted_signal(r, confidence_weights), axis=1
+    )
+    df['Enhanced_Sharp_Confidence_Score'] = df.apply(
         lambda r: compute_confidence(r, confidence_weights), axis=1
     )
-
     
-    # Confidence tiering
+    # ✅ Tiering based on enhanced score
     df['Sharp_Confidence_Tier'] = pd.cut(
-        df['True_Sharp_Confidence_Score'],
+        df['Enhanced_Sharp_Confidence_Score'],
         bins=[-1, 25, 50, 75, float('inf')],
         labels=['⚠️ Low', '✅ Medium', '⭐ High', '🔥 Steam']
     )
-    # === Sharp vs Rec Book Consensus Summary ===
+    
+    # === Sharp vs Rec Book Consensus Summary
     rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
     sharp_df = df[df['Book'].isin(SHARP_BOOKS)].copy()
     
@@ -799,7 +828,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # Merge sharp scoring values
     sharp_scores = df[df['SharpBetScore'].notnull()][[
         'Event_Date', 'Game', 'Market', 'Outcome',
-        'SharpBetScore', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier'
+        'SharpBetScore',
+        'Enhanced_Sharp_Confidence_Score',
+        'Sharp_Confidence_Tier'
     ]].drop_duplicates()
     
     summary_df = summary_df.merge(
@@ -808,14 +839,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         how='left'
     )
     
-    summary_df[['SharpBetScore', 'True_Sharp_Confidence_Score']] = summary_df[[
-        'SharpBetScore', 'True_Sharp_Confidence_Score'
+    summary_df[['SharpBetScore', 'Enhanced_Sharp_Confidence_Score']] = summary_df[[
+        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score'
     ]].fillna(0)
     
     summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
     
     return df, df_history, summary_df
-        
+
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
