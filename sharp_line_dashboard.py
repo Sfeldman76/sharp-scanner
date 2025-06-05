@@ -1160,13 +1160,20 @@ def render_scanner_tab(label, sport_key, container, drive):
         # Run backtest
         df_moves = fetch_scores_and_backtest(df_moves, sport_key)
 
-        # Ensure Game_ID exists
-        if 'Game_ID' not in df_moves.columns and all(col in df_moves_raw.columns for col in ['Game', 'Market', 'Outcome', 'Game_ID']):
-            df_moves = df_moves.merge(
-                df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
-                on=['Game', 'Market', 'Outcome'],
-                how='left'
-            )
+        # 🧩 Restore Game_ID if missing
+        if 'Game_ID' not in df_moves.columns:
+            potential_keys = ['Game', 'Market', 'Outcome']
+            if all(k in df_moves.columns for k in potential_keys) and \
+               all(k in df_moves_raw.columns for k in potential_keys + ['Game_ID']):
+                try:
+                    df_moves = df_moves.merge(
+                        df_moves_raw[potential_keys + ['Game_ID']].drop_duplicates(),
+                        on=potential_keys,
+                        how='left'
+                    )
+                except Exception as e:
+                    st.warning(f"⚠️ Failed to merge Game_ID: {e}")
+
 
         # Ensure Enhanced Score is present
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns:
