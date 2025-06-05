@@ -13,6 +13,10 @@ from io import StringIO
 from collections import defaultdict
 import pytz
 from collections import OrderedDict
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
@@ -846,10 +850,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
     
     return df, df_history, summary_df
-
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
 
 def train_sharp_win_model(df):
     # Use only rows where we know sharp bet result
