@@ -228,27 +228,36 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             continue
 
         completed_games += 1
-
+        
         game_id = game.get("id")
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
         scores = game.get("scores", [])
-        team_scores = {
-            s["name"].strip().lower(): s["score"]
-            for s in scores if "name" in s and "score" in s
-        }
+        team_scores = {}
+        for s in scores:
+            try:
+                name = s.get("name", "").strip().lower()
+                score = s.get("score")
+                if score is None:  # fallback to other fields
+                    score = s.get("runs") or s.get("points")
+                if name and score is not None:
+                    team_scores[name] = score
+            except Exception as e:
+                print(f"⚠️ Could not parse score from entry: {s} — {e}")
 
         if home not in team_scores or away not in team_scores:
-            print(f"❌ Skipped — Missing score: {home=} {away=} vs {team_scores}")
+            st.warning(f"⚠️ Missing score for: {home=} {away=} vs {team_scores}")
             continue
 
+       
         result_rows.append({
             'Game_ID': game_id,
-            'Home_Team': game['home_team'],
-            'Away_Team': game['away_team'],
-            'Home_Score': team_scores[home],
-            'Away_Score': team_scores[away]
+            'Score_Home_Team': game['home_team'],
+            'Score_Away_Team': game['away_team'],
+            'Score_Home_Score': team_scores[home],
+            'Score_Away_Score': team_scores[away]
         })
+
     df_results = pd.DataFrame(result_rows)
     st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
 
@@ -267,8 +276,8 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves['Away_Team'] = df_moves['Away_Team'].str.strip().str.lower()
 
     # ⏱ Consistent timestamp parsing without localization
-    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
+    #df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
+    #df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
 
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
