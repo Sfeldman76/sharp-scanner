@@ -1248,11 +1248,18 @@ def render_scanner_tab(label, sport_key, container, drive):
             )
                 # Ensure Game_Start is datetime
         # Convert and display time
+        # Ensure Game_Start exists in summary_df (merge from df_moves if needed)
+        if 'Game_Start' not in summary_df.columns and 'Game_Start' in df_moves.columns:
+            summary_df = summary_df.merge(
+                df_moves[['Game', 'Market', 'Outcome', 'Game_Start']],
+                on=['Game', 'Market', 'Outcome'],
+                how='left'
+            )
+        
+        # Convert Game_Start to EST for display only
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
         eastern = pytz.timezone('US/Eastern')
-        summary_df['Game_Time_EST'] = summary_df['Game_Start'].dt.tz_convert(eastern).dt.strftime('%Y-%m-%d %I:%M %p')
-        # Create combined datetime display column
-        summary_df['Date + Time'] = summary_df['Event_Date'].astype(str) + ' ' + summary_df['Game_Time_EST']
+        summary_df['Game_Time_EST'] = summary_df['Game_Start'].dt.tz_localize('UTC').dt.tz_convert(eastern).dt.strftime('%Y-%m-%d %I:%M %p')
 
 
         # Drop separate columns if desired
@@ -1322,10 +1329,9 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         if not df_odds_raw.empty:
             st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
-
-            # Safely format odds + limit into one string like "-110.0 (20000)"
+        
             import math
-
+        
             def safe_format_value_limit(row):
                 try:
                     val = float(row['Value'])
@@ -1333,26 +1339,22 @@ def render_scanner_tab(label, sport_key, container, drive):
                     return f"{round(val, 1)} ({lim})"
                 except:
                     return ""
-
+        
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(safe_format_value_limit, axis=1)
-            # Ensure commence_time is parsed
-            df_odds_raw['Commence_DT'] = pd.to_datetime(df_odds_raw['Event_Date'], errors='coerce')
-            
-            # Add EST display time
-            eastern = pytz.timezone('US/Eastern')
-            df_odds_raw['Time_EST'] = df_odds_raw['Commence_DT'].dt.tz_localize('UTC').dt.tz_convert(eastern).dt.strftime('%I:%M %p')
-            
-            # Combine into final display column
-            df_odds_raw['Date + Time (EST)'] = df_odds_raw['Commence_DT'].dt.date.astype(str) + ' ' + df_odds_raw['Time_EST']
-
-
-            # Pivot to wide format by bookmaker
+        
+            df_odds_raw['Game_Start'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce')
+            df_odds_raw['Game_Time_EST'] = df_odds_raw['Game_Start'].dt.tz_localize('UTC').dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
+            df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Time_EST']
+        
             df_combined_display = df_odds_raw.pivot_table(
                 index=["Date + Time (EST)", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
+        
+         
+
 
             # List of sharp books to highlight
             sharp_books = ['Pinnacle', 'Bookmaker', 'BetOnline']
