@@ -547,6 +547,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         line_open_map[key] = (val, snapshot_time)
                     
                     entry = {
+                        'Game_ID': gid,  # ✅ Add this line
                         'Sport': sport_key,
                         'Time': snapshot_time,
                         'Game': game_name,
