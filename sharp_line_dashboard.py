@@ -1285,10 +1285,9 @@ def render_scanner_tab(label, sport_key, container, drive):
             'Sharp_Book_Consensus': 'Sharp\nConsensus',
             'Move_From_Open_Rec': 'Rec\nMove',
             'Move_From_Open_Sharp': 'Sharp\nMove',
-            'SharpBetScore': 'Sharp\nScore',
-            'Enhanced_Sharp_Confidence_Score': 'Conf.\nScore',
-            'Model_Sharp_Win_Prob': 'Model\nProb',
-            'Blended_Sharp_Score': 'Final\nScore'
+            'SharpBetScore': 'Sharp\nBet\nScore',
+            'Enhanced_Sharp_Confidence_Score': 'Enchanced\nConf.\nScore',
+          
         }, inplace=True)
         
         # 🔽 Market filter (AFTER filtering out old games)
