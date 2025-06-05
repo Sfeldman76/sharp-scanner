@@ -1170,7 +1170,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                     how='left'
                 )
         
-        # 🧩 Merge Enhanced_Sharp_Confidence_Score safely
+        # Ensure Enhanced_Sharp_Confidence_Score exists before scoring
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns:
             if 'Game_ID' in df_moves.columns and 'Game_ID' in df_moves_raw.columns:
                 df_moves = df_moves.merge(
@@ -1184,11 +1184,6 @@ def render_scanner_tab(label, sport_key, container, drive):
                     on=['Game', 'Market', 'Outcome'],
                     how='left'
                 )
-              
-        
-           
-
-       
 
         # Append sharp moves
         if not df_moves.empty:
