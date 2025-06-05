@@ -1324,6 +1324,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                         price = outcome.get("point") if mtype != "h2h" else outcome.get("price")
                         raw_odds_table.append({
                             'Event_Date': pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if game.get("commence_time") else "",
+                            'Game_Start': pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT,
                             "Game": game_name,
                             "Market": mtype,
                             "Outcome": outcome["name"],
@@ -1331,6 +1332,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                             "Value": price,
                             "Limit": outcome.get("bet_limit", 0)
                         })
+
 
         df_odds_raw = pd.DataFrame(raw_odds_table)
 
