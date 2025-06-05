@@ -856,7 +856,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
 def train_sharp_win_model(df):
     # Filter only sharp sides with known outcomes
-    df_labeled = df[(df['SHARP_SIDE_TO_BET'] == 1) & (df['SHARP_HIT_BOOL'].notna())].copy()
+    df_labeled = df[
+        (df['SHARP_SIDE_TO_BET'] == 1) &
+        (df['SHARP_HIT_BOOL'].notna()) &
+        (df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)) &
+        (df['Limit'] > 0)
+    ].copy()
+
+if df_labeled.empty:
+    raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
+
     
     if df_labeled.empty:
         raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
@@ -1191,6 +1200,13 @@ def render_scanner_tab(label, sport_key, container, drive):
         
         # ✅ Apply sharp score model
         df_moves = apply_blended_sharp_score(df_moves, model)
+        # Grade sharp bets and log outcomes
+        df_moves = fetch_scores_and_backtest(df_moves, sport_key)
+        
+        # Optional: clean to avoid duplicates or double-calculation
+        df_moves = df_moves.drop_duplicates(
+            subset=['Event_Date', 'Game', 'Market', 'Outcome', 'Bookmaker']
+        )
 
 
 
