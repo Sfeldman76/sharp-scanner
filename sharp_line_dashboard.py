@@ -859,9 +859,15 @@ def train_sharp_win_model(df):
     df_labeled = df[
         (df['SHARP_HIT_BOOL'].notna()) &
         (df['Enhanced_Sharp_Confidence_Score'].notna()) &
-        (df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)) &
+        (df['Book'].isin(SHARP_BOOKS)) &
         (df['Limit'] > 0)
     ].copy()
+    st.subheader("🔍 Sharp Model Training Debug")
+    st.write(f"Total input rows: {len(df)}")
+    st.write(f"With SHARP_HIT_BOOL: {len(df[df['SHARP_HIT_BOOL'].notna()])}")
+    st.write(f"With Enhanced_Sharp_Confidence_Score: {len(df[df['Enhanced_Sharp_Confidence_Score'].notna()])}")
+    st.write(f"Book in SHARP_BOOKS: {len(df[df['Book'].isin(SHARP_BOOKS)])}")
+    st.write(f"With Limit > 0: {len(df[df['Limit'] > 0])}")
 
     if df_labeled.empty:
         raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
