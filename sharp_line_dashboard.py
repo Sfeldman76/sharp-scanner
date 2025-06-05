@@ -1162,13 +1162,20 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         # Deduplicate before model scoring
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
-
-        # Run backtest
-        st.write("✅ df_moves columns after backtest:", df_moves.columns.tolist())
-        st.write("✅ df_moves_raw columns:", df_moves_raw.columns.tolist())
-        st.write("✅ Sample of df_moves head:", df_moves.head(2))
-        # Run backtest
-        df_moves = fetch_scores_and_backtest(df_moves, sport_key)
+        st.write("✅ Final df_moves shape:", df_moves.shape)
+        st.write("✅ Final df_moves columns before backtest:", df_moves.columns.tolist())
+        
+        if df_moves.empty:
+            st.error("❌ df_moves is unexpectedly EMPTY before backtest — investigate filters.")
+            st.stop()
+        
+        # Run backtest (safely)
+        df_bt = fetch_scores_and_backtest(df_moves, sport_key)
+        if not df_bt.empty:
+            df_moves = df_bt
+            st.success("✅ Backtest succeeded and df_moves updated.")
+        else:
+            st.warning("⚠️ Backtest returned empty — keeping original df_moves.")
         
         # ✅ Restore 'Game' and 'Game_ID' safely BEFORE attempting merge
         restore_keys = ['Game', 'Market', 'Outcome']
@@ -1188,8 +1195,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                     how='left'
                 )
         
-        # ✅ Final attempt to merge Enhanced Score
-        # ✅ Enhanced score is already present — do not re-merge
+        # ✅ Final check before model scoring
         st.write("✅ Final df_moves columns before scoring:", df_moves.columns.tolist())
 
         
