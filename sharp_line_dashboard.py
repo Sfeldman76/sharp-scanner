@@ -1201,7 +1201,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.warning(f"⚠️ Final merge attempt failed: {e}")
         
-                        st.error(f"❌ Failed to merge Enhanced_Sharp_Confidence_Score: {e}")
+                
                 
         # ✅ Save moves if available
         if not df_moves.empty:
