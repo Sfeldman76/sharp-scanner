@@ -943,27 +943,29 @@ def train_sharp_win_model(df):
 def apply_blended_sharp_score(df, model):
     df = df.copy()
 
-    # Fallback confidence
+    # ✅ Safe fallback if column missing
+    if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
+        print("⚠️ Enhanced_Sharp_Confidence_Score not found. Defaulting to 50.")
+        df['Enhanced_Sharp_Confidence_Score'] = 50.0
+
     df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
+
     if 'True_Sharp_Confidence_Score' in df.columns:
         df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
     # Normalize
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
 
-    # === Features used in training
+    # Features
     feature_cols = ['Final_Confidence_Score']
     if 'CrossMarketSharpSupport' in df.columns:
         feature_cols.append('CrossMarketSharpSupport')
 
-    # Drop rows missing required fields
     df = df.dropna(subset=feature_cols)
     X = df[feature_cols].astype(float)
 
-    # Predict
     df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
 
-    # Blended score: 50/50 model and confidence
     df['Blended_Sharp_Score'] = (
         0.5 * df['Model_Sharp_Win_Prob'] +
         0.5 * df['Final_Confidence_Score']
@@ -1133,7 +1135,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning(f"⚠️ No live odds returned for {label}.")
             return pd.DataFrame()
 
-        # Save snapshot first
+        # Save live snapshot
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
         sport_key_lower = sport_key.lower()
@@ -1141,36 +1143,32 @@ def render_scanner_tab(label, sport_key, container, drive):
         if not confidence_weights:
             st.warning(f"⚠️ No learned weights found for {sport_key_lower} — fallback weights will apply.")
 
-        # Run sharp move detection
+        # Run detection
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
 
-        # Add metadata
+        # Add timestamp + label
         timestamp = pd.Timestamp.utcnow()
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
 
-        # Deduplicate BEFORE scoring
+        # Deduplicate before model scoring
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
 
-        # Backtest
-       
+        # Run backtest
         df_moves = fetch_scores_and_backtest(df_moves, sport_key)
-        
-        
-          # 🧩 Restore Game_ID if missing
-        if 'Game_ID' not in df_moves.columns:
-            if all(col in df_moves.columns for col in ['Game', 'Market', 'Outcome']) and \
-               all(col in df_moves_raw.columns for col in ['Game', 'Market', 'Outcome', 'Game_ID']):
-                df_moves = df_moves.merge(
-                    df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
-                    on=['Game', 'Market', 'Outcome'],
-                    how='left'
-                )
-        
-        # ✅ Ensure Enhanced_Sharp_Confidence_Score exists before scoring
+
+        # Ensure Game_ID exists
+        if 'Game_ID' not in df_moves.columns and all(col in df_moves_raw.columns for col in ['Game', 'Market', 'Outcome', 'Game_ID']):
+            df_moves = df_moves.merge(
+                df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
+                on=['Game', 'Market', 'Outcome'],
+                how='left'
+            )
+
+        # Ensure Enhanced Score is present
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns:
             try:
                 merge_cols = ['Market', 'Outcome']
@@ -1188,12 +1186,11 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Failed to merge Enhanced_Sharp_Confidence_Score: {e}")
 
-
-        # Append sharp moves
+        # Save moves
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
-        # Append audit log
+        # Save audit
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             try:
@@ -1222,7 +1219,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Failed to append to line history: {e}")
 
-        # Train or load sharp win model
+        # Train or load model
         model = load_model_from_drive(drive)
         if model is None or should_retrain_model(drive):
             print("🔁 Retraining sharp win model...")
@@ -1241,10 +1238,11 @@ def render_scanner_tab(label, sport_key, container, drive):
         else:
             print("✅ Using cached sharp win model.")
 
-        # Apply model
+        # Final model scoring
         df_moves = apply_blended_sharp_score(df_moves, model)
 
         return df_moves
+
 
 
       
