@@ -1156,16 +1156,19 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
 
         # Backtest
+       
         df_moves = fetch_scores_and_backtest(df_moves, sport_key)
-
-        # Restore Game_ID if lost
+        
+        # ✅ Safe fallback to restore Game_ID if needed
         if 'Game_ID' not in df_moves.columns and 'Game_ID' in df_moves_raw.columns:
-            if all(col in df_moves_raw.columns for col in ['Game', 'Market', 'Outcome', 'Game_ID']):
+            if all(k in df_moves.columns for k in ['Market', 'Outcome']) and all(k in df_moves_raw.columns for k in ['Game_ID', 'Market', 'Outcome']):
                 df_moves = df_moves.merge(
-                    df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
-                    on=['Game', 'Market', 'Outcome'],
+                    df_moves_raw[['Game_ID', 'Market', 'Outcome']].drop_duplicates(),
+                    on=['Market', 'Outcome'],
                     how='left'
                 )
+
+   
 
         # Restore Enhanced_Sharp_Confidence_Score if lost
         if 'Enhanced_Sharp_Confidence_Score' in df_moves_raw.columns:
