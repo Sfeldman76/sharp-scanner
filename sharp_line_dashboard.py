@@ -1419,7 +1419,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
             )
 
             if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
-                # Tier classification
                 df_bt['SharpConfidenceTier'] = pd.cut(
                     df_bt['SharpBetScore'],
                     bins=[0, 15, 25, 40, 100],
@@ -1452,7 +1451,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
 
                 st.dataframe(leaderboard_df.head(50))
 
-                # Tier Performance
                 st.subheader(f"📊 {sport_label} Sharp Signal Performance by Market + Confidence Tier")
                 df_market_tier_summary = (
                     scored
@@ -1466,8 +1464,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
                     .round(3)
                 )
                 st.dataframe(df_market_tier_summary)
-                
-                # Component Learning & Weight Storage
+
+                # === Component Learning & Weight Storage ===
                 st.subheader("🧠 Sharp Component Learning by Market")
                 market_component_win_rates_sport = {}
 
@@ -1475,27 +1473,37 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
                     if comp in scored.columns:
                         result = (
                             scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                            .mean().reset_index()
+                            .mean()
+                            .reset_index()
                             .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
                             .sort_values(by=['Market', comp])
                         )
+
                         st.markdown(f"**📊 {comp} by Market**")
                         st.dataframe(result)
 
                         for _, row in result.iterrows():
-                            market = row['Market'].lower()
+                            market = str(row['Market']).lower()
                             val = row[comp]
-                            win_rate = row['Win_Rate']
-                            market_component_win_rates_sport.setdefault(market, {}).setdefault(comp, {})[val] = win_rate
+                            win_rate = max(0.5, row['Win_Rate'])  # ✅ clamp at 0.5
 
-                # Update and save global weights
-                # Step 1: Safely load or create the global container
+                            # ✅ normalize value keys
+                            if pd.isna(val):
+                                continue  # skip NaNs
+                            elif isinstance(val, bool):
+                                val_key = str(val).lower()  # 'true'/'false'
+                            elif isinstance(val, float) and val.is_integer():
+                                val_key = str(int(val))  # 2.0 → '2'
+                            else:
+                                val_key = str(val).lower()
+
+                            market_component_win_rates_sport \
+                                .setdefault(market, {}) \
+                                .setdefault(comp, {})[val_key] = win_rate
+
+                # 🔁 Update and save to global + Drive
                 market_component_win_rates = globals().get("market_component_win_rates", {})
-                
-                # Step 2: Add/Update weights for this sport
                 market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
-                
-                # Step 3: Re-assign to global scope
                 globals()["market_component_win_rates"] = market_component_win_rates
 
                 try:
@@ -1504,7 +1512,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
                 except Exception as e:
                     print(f"❌ Failed to save weights for {sport_key_lower}: {e}")
 
-                # Debug Displays
+                # 🔍 Debug View
                 st.subheader(f"📥 Learned Weights for {sport_label}")
                 st.json(market_component_win_rates.get(sport_key_lower, {}))
 
@@ -1516,6 +1524,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
                 st.warning(f"⚠️ {sport_label} backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
         else:
             st.warning(f"⚠️ No historical sharp picks found for {sport_label}.")
+
 
 df_master = load_master_sharp_moves(drive)
 
