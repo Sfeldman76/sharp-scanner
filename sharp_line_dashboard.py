@@ -926,29 +926,35 @@ def train_sharp_win_model(df):
 
 
 def apply_blended_sharp_score(df, model):
-    feature_cols = [
-        'Sharp_Move_Signal',
-        'Sharp_Limit_Jump',
-        'Sharp_Time_Score',
-        'Sharp_Prob_Shift',
-        'Sharp_Limit_Total',
-        'Limit',
-        'Delta vs Sharp',
-        'LimitUp_NoMove_Flag'
-    ]
-    
     df = df.copy()
-    df = df.dropna(subset=feature_cols)
 
+    # Fallback confidence
+    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
+    if 'True_Sharp_Confidence_Score' in df.columns:
+        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
+
+    # Normalize
+    df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
+
+    # === Features used in training
+    feature_cols = ['Final_Confidence_Score']
+    if 'CrossMarketSharpSupport' in df.columns:
+        feature_cols.append('CrossMarketSharpSupport')
+
+    # Drop rows missing required fields
+    df = df.dropna(subset=feature_cols)
     X = df[feature_cols].astype(float)
+
+    # Predict
     df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
 
-    # Normalize Enhanced score from 0–100 → 0–1
-    df['Enhanced_Sharp_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score'].fillna(50)
-    df['Blended_Sharp_Score'] = 0.5 * (df['Enhanced_Sharp_Confidence_Score'] / 100) + \
-                                0.5 * df['Model_Sharp_Win_Prob']
-    return df
+    # Blended score: 50/50 model and confidence
+    df['Blended_Sharp_Score'] = (
+        0.5 * df['Model_Sharp_Win_Prob'] +
+        0.5 * df['Final_Confidence_Score']
+    )
 
+    return df
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
