@@ -4,3 +4,4 @@ pandas
 requests
 altair
 PyDrive2
+xgboost
