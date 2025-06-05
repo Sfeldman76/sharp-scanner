@@ -1190,8 +1190,8 @@ def render_scanner_tab(label, sport_key, container, drive):
         
         # ✅ Final attempt to merge Enhanced Score
         # ✅ Enhanced score is already present — do not re-merge
-        if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns:
-            raise ValueError("❌ Enhanced_Sharp_Confidence_Score missing from df_moves — check upstream logic.")
+        st.write("✅ Final df_moves columns before scoring:", df_moves.columns.tolist())
+
         
                         
                 
