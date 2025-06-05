@@ -258,7 +258,8 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         return pd.DataFrame()
 
     # === Prepare sharp move data ===
-    df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome']).copy()
+   df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
+
 
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
         df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
