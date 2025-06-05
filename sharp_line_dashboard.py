@@ -762,7 +762,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .reset_index()
         .rename(columns={'Value': 'Open_Book_Value'})
     )
-    
+    # === Extract opening limit for each (Game, Market, Outcome, Book)
+    open_limit_df = (
+        df_history_sorted
+        .dropna(subset=['Limit'])
+        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Limit']
+        .first()
+        .reset_index()
+        .rename(columns={'Limit': 'Opening_Limit'})
+    )
+
     # === Early exit if empty
     if df.empty:
         return df, df_history
@@ -770,7 +779,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # === Merge opening lines into live odds
     df = df.merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
     df = df.merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-
+    df = df.merge(open_limit_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
     df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
