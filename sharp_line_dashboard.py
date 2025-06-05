@@ -201,7 +201,7 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
 
-def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=90, api_key='3879659fe861d68dfa2866c211294684'):
+def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=15, api_key='3879659fe861d68dfa2866c211294684'):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'daysFrom': days_back, 'apiKey': api_key}
 
