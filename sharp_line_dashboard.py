@@ -1114,11 +1114,11 @@ def render_scanner_tab(label, sport_key, container, drive):
           # ✅ Add timestamps and append if needed
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        if not df_moves.empty:
-            df_moves['Snapshot_Timestamp'] = timestamp
-            df_moves['Sport'] = label
-            append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+        df_moves['Snapshot_Timestamp'] = timestamp
+        df_moves['Sport'] = label
 
+        if not df_moves.empty:
+            append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             try:
