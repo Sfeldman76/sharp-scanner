@@ -886,8 +886,7 @@ def train_sharp_win_model(df):
     df_filtered = df[
         df['SHARP_HIT_BOOL'].notna() &
         df['Final_Confidence_Score'].notna() &
-        df['Book'].isin(SHARP_BOOKS_FOR_LIMITS) &
-        
+        df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)      
     ]
     st.write("Rows passing all filters:", len(df_filtered))
 
