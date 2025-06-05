@@ -470,14 +470,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)  # NEW: Track summed limits across SHARP_BOOKS
     sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
-    component_fields = [
-        'Sharp_Move_Signal',
-        'Sharp_Limit_Jump',
-        'Sharp_Time_Score',
-        'Sharp_Prob_Shift',
-        'Sharp_Limit_Total'
-    ]
-
     line_history_log = []
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -496,7 +488,17 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     print(f"✅ Using weights for {sport_scope_key} — Available markets: {list(confidence_weights.keys())}")
 
     # === Component fields for confidence scoring
-    local_components = list(component_fields.keys())
+    component_fields = [
+        'Sharp_Move_Signal',
+        'Sharp_Limit_Jump',
+        'Sharp_Time_Score',
+        'Sharp_Prob_Shift',
+        'Sharp_Limit_Total'
+    ]
+    
+    # Incorrect: local_components = list(component_fields.keys())
+    local_components = component_fields  # ✅ Fix
+
 
     
     previous_odds_map = {}
