@@ -1142,21 +1142,29 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning(f"⚠️ No learned weights found for {sport_key_lower} — fallback weights will apply.")
 
         # Run sharp move detection
-        df_moves, df_audit, summary_df = detect_sharp_moves(
+        df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
 
         # Add metadata
         timestamp = pd.Timestamp.utcnow()
-        df_moves['Snapshot_Timestamp'] = timestamp
-        df_moves['Sport'] = label
+        df_moves_raw['Snapshot_Timestamp'] = timestamp
+        df_moves_raw['Sport'] = label
 
         # 🧹 Deduplicate BEFORE backtest and scoring
-        df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
+        df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
 
         # 🧪 Backtest: merge actual results and compute SHARP_HIT_BOOL
         df_moves = fetch_scores_and_backtest(df_moves, sport_key)
+
+        # 🧩 Merge back Enhanced_Sharp_Confidence_Score
+        if 'Enhanced_Sharp_Confidence_Score' in df_moves_raw.columns:
+            df_moves = df_moves.merge(
+                df_moves_raw[['Game_ID', 'Market', 'Outcome', 'Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
+                on=['Game_ID', 'Market', 'Outcome'],
+                how='left'
+            )
 
         # 💾 Append to sharp move logs
         if not df_moves.empty:
@@ -1211,7 +1219,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         else:
             print("✅ Using cached sharp win model.")
 
-        # ✅ Apply sharp score model AFTER backtest is merged
+        # ✅ Apply sharp score model AFTER backtest and re-merging
         df_moves = apply_blended_sharp_score(df_moves, model)
 
         return df_moves
