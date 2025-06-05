@@ -4,7 +4,7 @@ import requests
 import os
 import json
 import pickle
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
@@ -16,6 +16,9 @@ from collections import OrderedDict
 from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
+from io import BytesIO  # ✅ Use BytesIO for binary models
+import pickle
+from datetime import datetime, timedelta
 
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
@@ -999,6 +1002,77 @@ def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", mi
 
     return pd.DataFrame(drift_rows).sort_values(by='Snapshot_Time')
 
+def save_model_to_drive(model, drive, filename='sharp_win_model.pkl', folder_id=FOLDER_ID):
+    buffer = BytesIO()
+    pickle.dump(model, buffer)
+    buffer.seek(0)
+    
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+        for file in file_list:
+            file.Delete()  # delete old model
+
+        file_drive = drive.CreateFile({'title': filename, 'parents': [{"id": folder_id}]})
+        file_drive.SetContentString(buffer.read().decode('latin1'))  # Save as encoded string
+        file_drive.Upload()
+        print(f"✅ Model saved to Google Drive as {filename}")
+    except Exception as e:
+        print(f"❌ Failed to save model to Google Drive: {e}")
+
+def load_model_from_drive(drive, filename='sharp_win_model.pkl', folder_id=FOLDER_ID):
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+        if not file_list:
+            return None
+
+        content = file_list[0].GetContentString()
+        buffer = BytesIO(content.encode('latin1'))
+        model = pickle.load(buffer)
+        print(f"✅ Loaded model from Google Drive: {filename}")
+        return model
+    except Exception as e:
+        print(f"❌ Failed to load model: {e}")
+        return None
+
+def should_retrain_model(drive, filename='model_last_updated.txt', folder_id=FOLDER_ID):
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+        
+        if not file_list:
+            return True  # No record yet = retrain
+
+        file = file_list[0]
+        last_updated_str = file.GetContentString().strip()
+        last_updated = datetime.strptime(last_updated_str, "%Y-%m-%d")
+        return (datetime.utcnow() - last_updated) > timedelta(days=14)
+
+    except Exception as e:
+        print(f"⚠️ Failed to check model timestamp: {e}")
+        return True
+
+def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOLDER_ID):
+    timestamp_str = datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+        for file in file_list:
+            file.Delete()
+
+        file_drive = drive.CreateFile({'title': filename, 'parents': [{"id": folder_id}]})
+        file_drive.SetContentString(timestamp_str)
+        file_drive.Upload()
+        print(f"✅ Model timestamp updated: {timestamp_str}")
+    except Exception as e:
+        print(f"❌ Failed to save timestamp: {e}")
+
+
 def render_scanner_tab(label, sport_key, container, drive):
     global market_component_win_rates  # ✅ FIXED HERE
     with container:
@@ -1038,10 +1112,23 @@ def render_scanner_tab(label, sport_key, container, drive):
             weights=market_component_win_rates
         )
         # Train the model using recent backtested results
-        model = train_sharp_win_model(df_master)  # df_master must include SHARP_HIT_BOOL
+        ## === Load model from Drive
+               # Load or retrain model
+        model = load_model_from_drive(drive)
+        
+        if model is None or should_retrain_model(drive):
+            print("🔁 Retraining sharp win model...")
+            model_input = fetch_scores_and_backtest(df_master, sport_key)
+            model = train_sharp_win_model(model_input)
+            save_model_to_drive(model, drive)
+            save_model_timestamp(drive)
+        else:
+            print("✅ Using cached sharp win model.")
         
         # Apply to current sharp signals
         df_moves = apply_blended_sharp_score(df_moves, model)
+
+
 
         # ✅ Add timestamps and append if needed
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
