@@ -267,27 +267,29 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
-
-    # === Merge on Game_ID
+    # Merge with df_results on Game_ID
     df = df_moves.merge(df_results, on='Game_ID', how='left')
+
+    # Remove duplicate columns if any
+    if df.columns.duplicated().any():
+        st.warning(f"⚠️ Duplicate columns found after merge: {df.columns[df.columns.duplicated()].tolist()}")
+        df = df.loc[:, ~df.columns.duplicated()]
+
+    # Rename score columns for clarity
     df.rename(columns={
         'Home_Score': 'Score_Home_Score',
         'Away_Score': 'Score_Away_Score'
     }, inplace=True)
 
+    # Optional: Add Game label if missing for reporting
+    if 'Game' not in df.columns and 'Home_Team' in df_moves.columns and 'Away_Team' in df_moves.columns:
+        df['Game'] = df['Home_Team'].str.title() + ' vs ' + df['Away_Team'].str.title()
+
+    # Debug print
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Score_Home_Score', 'Score_Away_Score']].head(10))
 
-    # === Scoring logic
-    def safe_calc_cover(r):
-        try:
-            result = calc_cover(r)
-            if isinstance(result, (list, tuple)) and len(result) == 2:
-                return pd.Series(result)
-            return pd.Series([None, None])
-        except Exception as e:
-            print(f"❌ calc_cover() error for row: {r.get('Game', '')} – {e}")
-            return pd.Series([None, None])
+
 
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(safe_calc_cover, axis=1)
 
