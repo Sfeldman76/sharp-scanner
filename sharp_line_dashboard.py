@@ -943,27 +943,28 @@ def train_sharp_win_model(df):
 def apply_blended_sharp_score(df, model):
     df = df.copy()
 
-    # ✅ Safe fallback if column missing
+    # Fallback confidence
     if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
-        print("⚠️ Enhanced_Sharp_Confidence_Score not found. Defaulting to 50.")
-        df['Enhanced_Sharp_Confidence_Score'] = 50.0
+        raise ValueError("❌ Missing Enhanced_Sharp_Confidence_Score in df")
 
     df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
-
     if 'True_Sharp_Confidence_Score' in df.columns:
         df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
-    # Normalize
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
 
-    # Features
-    feature_cols = ['Final_Confidence_Score']
-    if 'CrossMarketSharpSupport' in df.columns:
-        feature_cols.append('CrossMarketSharpSupport')
+    # === Use only features the model expects
+    model_features = model.get_booster().feature_names
+    feature_cols = [col for col in model_features if col in df.columns]
 
-    df = df.dropna(subset=feature_cols)
+    # Ensure all required features are present
+    missing = set(model_features) - set(feature_cols)
+    if missing:
+        raise ValueError(f"❌ Missing model feature columns: {missing}")
+
     X = df[feature_cols].astype(float)
 
+    # Predict
     df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
 
     df['Blended_Sharp_Score'] = (
@@ -972,6 +973,7 @@ def apply_blended_sharp_score(df, model):
     )
 
     return df
+
 
 st.set_page_config(layout="wide")
 # === Initialize Google Drive once ===
