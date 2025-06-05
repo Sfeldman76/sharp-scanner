@@ -1306,7 +1306,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         
         # 📋 Display
         st.dataframe(
-            filtered_df[available_cols].sort_values(by=sort_col, ascending=False, na_position='last'),
+            filtered_df[available_cols].sort_values(by=sort_col, ascending=True, na_position='last'),
             use_container_width=True
         )
 
