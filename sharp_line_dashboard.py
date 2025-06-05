@@ -1150,7 +1150,11 @@ def render_scanner_tab(label, sport_key, container, drive):
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
-
+        if 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
+            st.error("❌ detect_sharp_moves() did NOT return Enhanced_Sharp_Confidence_Score!")
+            st.stop()
+        else:
+            st.success("✅ detect_sharp_moves() includes Enhanced_Sharp_Confidence_Score")
         # Add timestamp + label
         timestamp = pd.Timestamp.utcnow()
         df_moves_raw['Snapshot_Timestamp'] = timestamp
