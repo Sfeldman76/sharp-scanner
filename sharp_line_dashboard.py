@@ -1286,7 +1286,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             'Move_From_Open_Rec': 'Rec\nMove',
             'Move_From_Open_Sharp': 'Sharp\nMove',
             'SharpBetScore': 'Sharp\nBet\nScore',
-            'Enhanced_Sharp_Confidence_Score': 'Enchanced\nConf.\nScore',
+            'Enhanced_Sharp_Confidence_Score': 'Enhanced\nConf.\nScore',
           
         }, inplace=True)
         
@@ -1299,16 +1299,17 @@ def render_scanner_tab(label, sport_key, container, drive):
         frozen_cols = ['Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide']
         scroll_cols = [
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Sharp\nBet\nScore', 'Enchanced\nConf.\nScore']
+            'Sharp\nBet\nScore', 'Enhanced\nConf.\nScore']
         final_cols = frozen_cols + scroll_cols
         available_cols = [col for col in final_cols if col in filtered_df.columns]
-        sort_col = 'Final\nScore' if 'Final\nScore' in filtered_df.columns else available_cols[-1]
+        sort_col = 'Date\n+ Time (EST)' if 'Date\n+ Time (EST)' in filtered_df.columns else available_cols[-1]
         
         # 📋 Display
         st.dataframe(
             filtered_df[available_cols].sort_values(by=sort_col, ascending=False, na_position='last'),
             use_container_width=True
         )
+
 
 
         # === Odds snapshot (pivoted, with limits, highlighted best lines)
