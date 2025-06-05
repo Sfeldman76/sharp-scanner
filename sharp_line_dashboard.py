@@ -1270,6 +1270,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning("⚠️ 'Game_Start' column missing from summary_df after merge. Cannot display EST time.")
             summary_df['Game_Time_EST'] = None
 
+        summary_df['Date + Time (EST)'] = summary_df['Game_Time_EST'].dt.strftime('%Y-%m-%d %I:%M %p')
 
         # Drop separate columns if desired
         cols_to_drop = [col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns]
@@ -1289,11 +1290,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             'Sharp_Book_Consensus': 'Sharp\nConsensus',
             'Move_From_Open_Rec': 'Rec\nMove',
             'Move_From_Open_Sharp': 'Sharp\nMove',
-            'SharpBetScore': 'Sharp\nScore',
-            'Enhanced_Sharp_Confidence_Score': 'Conf.\nScore',
-            'Model_Sharp_Win_Prob': 'Model\nProb',
-            'Blended_Sharp_Score': 'Final\nScore',
-            'Opening_Limit': 'Opening\nLimit'
+            'SharpBetScore': 'Sharp\nBet\nScore',
+            'Enhanced_Sharp_Confidence_Score': 'Enhanced\nConf.\nScore'            
         }, inplace=True)
         
         # Define column order
