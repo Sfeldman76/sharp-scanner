@@ -209,7 +209,6 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         return {}
 
 def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key=API_KEY):
-
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'daysFrom': days_back, 'apiKey': api_key}
 
@@ -223,13 +222,13 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     result_rows = []
     completed_games = 0
-    
+
     for game in score_data:
         if not game.get("completed"):
             continue
-    
+
         completed_games += 1
-    
+
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
         scores = game.get("scores", [])
@@ -237,32 +236,35 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             s["name"].strip().lower(): s["score"]
             for s in scores if "name" in s and "score" in s
         }
-    
+
         if home not in team_scores or away not in team_scores:
             print(f"❌ Skipped — Missing score: {home=} {away=} vs {team_scores}")
             continue
-    
-        game_name = f"{game['home_team']} vs {game['away_team']}"  # keep display casing
+
         result_rows.append({
-            'Game': game_name,
-            'Home_Team': game['home_team'],
-            'Away_Team': game['away_team'],
-            'Home_Score': team_scores[home],
-            'Away_Score': team_scores[away]
+            'Score_Home_Team': home,
+            'Score_Away_Team': away,
+            'Score_Home_Score': team_scores[home],
+            'Score_Away_Score': team_scores[away]
         })
-    
+
     df_results = pd.DataFrame(result_rows)
     st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
-    
+
     if df_results.empty:
         st.warning("⚠️ No parsed scores matched your games, even though API reported completed games.")
         return pd.DataFrame()
 
-
     # Prepare sharp data
     df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome']).copy()
+
+    # Extract Home/Away from Game string
     if 'Home_Team' not in df_moves.columns or 'Away_Team' not in df_moves.columns:
         df_moves[['Home_Team', 'Away_Team']] = df_moves['Game'].str.extract(r'^(.*?) vs (.*?)$')
+
+    # Normalize for merging
+    df_moves['Home_Team'] = df_moves['Home_Team'].str.strip().str.lower()
+    df_moves['Away_Team'] = df_moves['Away_Team'].str.strip().str.lower()
 
     import pytz
     df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce')
@@ -274,27 +276,21 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     if df_moves['Game_Start'].dt.tz is None:
         df_moves['Game_Start'] = df_moves['Game_Start'].dt.tz_localize('UTC')
 
-    # Filter for pregame entries only
+    # Only pregame entries
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
-    # Rename scores to avoid conflict
-    df_results.rename(columns={
-        'Home_Team': 'Score_Home_Team',
-        'Away_Team': 'Score_Away_Team',
-        'Home_Score': 'Score_Home_Score',
-        'Away_Score': 'Score_Away_Score'
-    }, inplace=True)
+    # Merge on normalized home/away team
+    df = df_moves.merge(
+        df_results,
+        left_on=['Home_Team', 'Away_Team'],
+        right_on=['Score_Home_Team', 'Score_Away_Team'],
+        how='left'
+    )
 
-    # Merge and score
-    # Standardize casing and whitespace before merge
-    df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
-    df_results['Game'] = df_results['Game'].str.strip().str.lower()
-
-    df = df_moves.merge(df_results, on='Game', how='left')
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Score_Home_Score', 'Score_Away_Score']].head(10))
 
-     # With this safe version:
+    # === Safe cover evaluation
     def safe_calc_cover(r):
         try:
             result = calc_cover(r)
@@ -308,6 +304,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(safe_calc_cover, axis=1)
 
     return df
+
 
     # === Refactored cover logic
 def calc_cover(row):
