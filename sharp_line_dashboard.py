@@ -857,11 +857,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 def train_sharp_win_model(df):
     # Filter only sharp sides with known outcomes and valid sharp book
     df_labeled = df[
-        (df['SHARP_SIDE_TO_BET'] == 1) &
         (df['SHARP_HIT_BOOL'].notna()) &
-        (df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)) &
+        (df['Blended_Sharp_Score'].notna()) &
+        (df['Book'].isin(SHARP_BOOKS)) &
         (df['Limit'] > 0)
     ].copy()
+
     st.markdown("### 🔍 Sharp Training Data Debug")
     st.write(f"Total sharp records: {len(df)}")
     st.write(f"SHARP_SIDE_TO_BET == 1: {len(df[df['SHARP_SIDE_TO_BET'] == 1])}")
