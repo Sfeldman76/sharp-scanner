@@ -221,20 +221,19 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         return pd.DataFrame()
 
     result_rows = []
-   
     completed_games = 0
     
     for game in score_data:
         if not game.get("completed"):
             continue
-
+    
         completed_games += 1
         game_id = game.get("id")
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
         scores = game.get("scores", [])
         team_scores = {}
-
+    
         for s in scores:
             try:
                 name = s.get("name", "").strip().lower()
@@ -243,18 +242,19 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
                     team_scores[name] = score
             except Exception as e:
                 print(f"⚠️ Could not parse score from entry: {s} — {e}")
-
+    
         if home not in team_scores or away not in team_scores:
             st.warning(f"⚠️ Missing score for: {home=} {away=} vs {team_scores}")
             continue
-
+    
         result_rows.append({
             'Game_ID': game_id,
             'Home_Score': team_scores[home],
             'Away_Score': team_scores[away]
         })
-            st.write("📦 Parsed score entries:", pd.DataFrame(result_rows).head())
-
+    
+    # ✅ This should go *after* the loop
+    st.write("📦 Parsed score entries:", pd.DataFrame(result_rows).head())
     df_results = pd.DataFrame(result_rows)
     st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
 
