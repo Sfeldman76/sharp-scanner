@@ -855,55 +855,54 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     return df, df_history, summary_df
 
 def train_sharp_win_model(df):
-    # Filter only sharp sides with known outcomes and valid sharp book
+    # === Filter only usable rows ===
     df_labeled = df[
         (df['SHARP_HIT_BOOL'].notna()) &
         (df['Enhanced_Sharp_Confidence_Score'].notna()) &
-        (df['Book'].isin(SHARP_BOOKS)) &
+        (df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)) &
         (df['Limit'] > 0)
     ].copy()
-
-    st.markdown("### 🔍 Sharp Training Data Debug")
-    st.write(f"Total sharp records: {len(df)}")
-    st.write(f"SHARP_SIDE_TO_BET == 1: {len(df[df['SHARP_SIDE_TO_BET'] == 1])}")
-    st.write(f"With SHARP_HIT_BOOL: {len(df[df['SHARP_HIT_BOOL'].notna()])}")
-    st.write(f"SHARP_BOOKS_FOR_LIMITS only: {len(df[df['Book'].isin(SHARP_BOOKS_FOR_LIMITS)])}")
-    st.write(f"With Limit > 0: {len(df[df['Limit'] > 0])}")
 
     if df_labeled.empty:
         raise ValueError("❌ No data available for sharp model training — df_labeled is empty.")
 
     df_labeled['target'] = df_labeled['SHARP_HIT_BOOL'].astype(int)
 
-    feature_cols = [
-        'Sharp_Move_Signal',
-        'Sharp_Limit_Jump',
-        'Sharp_Time_Score',
-        'Sharp_Prob_Shift',
-        'Sharp_Limit_Total',
-        'Limit',
-        'Delta vs Sharp',
-        'LimitUp_NoMove_Flag'
-    ]
-    
+    # === Normalize confidence score
+    df_labeled['Enhanced_Sharp_Confidence_Score'] = df_labeled['Enhanced_Sharp_Confidence_Score'] / 100
+
+    # === Optional: include reinforcement indicator if available
+    if 'CrossMarketSharpSupport' in df_labeled.columns:
+        feature_cols = [
+            'Enhanced_Sharp_Confidence_Score',
+            'CrossMarketSharpSupport'
+        ]
+    else:
+        feature_cols = ['Enhanced_Sharp_Confidence_Score']
+
     df_labeled = df_labeled.dropna(subset=feature_cols)
 
     if len(df_labeled) < 5:
         raise ValueError(f"❌ Not enough samples to train model — only {len(df_labeled)} rows.")
 
+    # === Train/test split
     X = df_labeled[feature_cols].astype(float)
     y = df_labeled['target'].astype(int)
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
+    # === Fit XGBoost model
     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     model.fit(X_train, y_train)
 
+    # === Evaluate
     y_pred_proba = model.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_pred_proba)
-    print(f"✅ Trained Sharp Win Model — AUC: {auc:.3f}")
+    print(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_labeled)} samples")
 
     return model
+
+
 
 
 def apply_blended_sharp_score(df, model):
