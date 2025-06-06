@@ -209,138 +209,70 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
 
-def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, api_key=API_KEY):
-    import requests
-    from datetime import datetime
-    import pandas as pd
+def fetch_scores_and_backtest((sport_key, drive, days_back=5):
+    # 1. Load historical sharp moves
+    df_moves = load_master_sharp_moves(drive)
 
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-    params = {'daysFrom': days_back, 'apiKey': api_key}
-
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        score_data = response.json()
-    except Exception as e:
-        st.error(f"❌ Failed to fetch scores: {e}")
+    if df_moves.empty:
+        st.warning("⚠️ No historical sharp moves found.")
         return pd.DataFrame()
 
-    result_rows = []
-    completed_games = 0
-
-    for game in score_data:
-        if not game.get("completed"):
-            continue
-
-        completed_games += 1
-        game_time = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_hour = game_time.hour
-        event_date = game_time.strftime("%Y-%m-%d")
-
-        home = game.get("home_team", "").strip().lower()
-        away = game.get("away_team", "").strip().lower()
-        scores = game.get("scores", [])
-        team_scores = {}
-
-        for s in scores:
-            try:
-                name = s.get("name", "").strip().lower()
-                score = s.get("score") or s.get("runs") or s.get("points")
-                if name and score is not None:
-                    team_scores[name] = score
-            except Exception as e:
-                print(f"⚠️ Could not parse score from entry: {s} — {e}")
-
-        if home not in team_scores or away not in team_scores:
-            st.warning(f"⚠️ Missing score for: {home=} {away=} vs {team_scores}")
-            continue
-
-        result_rows.append({
-            'Game': f"{home} vs {away}",
-            'Event_Date': event_date,
-            'Game_Hour': game_hour,
-            'Score_Home_Score': team_scores[home],
-            'Score_Away_Score': team_scores[away]
-        })
-
-    df_results = pd.DataFrame(result_rows)
-    st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
-    st.write("📦 Parsed score entries:", df_results.head())
-
-    if df_results.empty:
-        st.warning("⚠️ No parsed scores matched your games.")
-        return pd.DataFrame()
-
-    # === Prepare df_moves ===
-    df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome']).copy()
-    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
-    df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
+    # 2. Only keep moves with a Game_Start in the past N days
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
+    cutoff = datetime.now(dt_timezone.utc) - timedelta(days=days_back)
     df_moves = df_moves[df_moves['Game_Start'] < datetime.now(dt_timezone.utc)]
+    df_moves = df_moves[df_moves['Game_Start'] > cutoff]
 
+    if df_moves.empty:
+        st.warning("⚠️ No sharp moves in the past few days to backtest.")
+        return pd.DataFrame()
 
-    # ✅ Normalize team names and build Game_Key in both dfs
+    # 3. Pull scores from Odds API
+    df_scores = fetch_score_results(sport_key=sport_key, days_back=days_back)
+
+    if df_scores.empty:
+        st.warning("⚠️ No scores found to backtest.")
+        return df_moves
+
+    # 4. Build Game_Key in both
     def normalize_team(t): return str(t).strip().lower()
 
-    # --- Build Game_Key in df_moves ---
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('H')
+    df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce').dt.floor('H')
     df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
 
-    # --- Build Game_Key in df_results ---
-    df_results['Home_Team_Norm'] = df_results['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
-    df_results['Away_Team_Norm'] = df_results['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_results['Commence_Hour'] = pd.to_datetime(
-        df_results['Event_Date'] + " " + df_results['Game_Hour'].astype(str) + ":00",
-        utc=True, errors='coerce'
-    )
-    df_results['Game_Key'] = df_results['Home_Team_Norm'] + "_" + df_results['Away_Team_Norm'] + "_" + df_results['Commence_Hour'].astype(str)
-    st.write("🔍 Pre-merge df_moves shape:", df_moves.shape)
-    st.write("🔍 Pre-merge df_results shape:", df_results.shape)
+    df_scores['Home_Team_Norm'] = df_scores['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
+    df_scores['Away_Team_Norm'] = df_scores['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
+    df_scores['Commence_Hour'] = pd.to_datetime(df_scores['Event_Date'] + " " + df_scores['Game_Hour'].astype(str) + ":00", utc=True)
+    df_scores['Game_Key'] = df_scores['Home_Team_Norm'] + "_" + df_scores['Away_Team_Norm'] + "_" + df_scores['Commence_Hour'].astype(str)
 
-    # === Merge on Game_Key
-    if 'Game_Key' not in df_results.columns or 'Game_Key' not in df_moves.columns:
-        st.error("❌ Cannot merge: 'Game_Key' missing in df_results or df_moves.")
-        return pd.DataFrame()
-
+    # 5. Merge
     df = df_moves.merge(
-        df_results[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
+        df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
         on='Game_Key',
         how='left'
     )
-    st.write("🔍 Post-merge df shape:", df.shape)
-    st.write("🔍 Rows with non-null scores:", df[df['Score_Home_Score'].notna()].shape)
 
-    # Warn if missing scores
-    st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
-    st.write(df[['Game', 'Game_Key', 'Score_Home_Score', 'Score_Away_Score']].head(10))
-
-    # === Cover calculation
+    # 6. Apply cover calc (guarded)
     def safe_calc_cover(r):
         try:
             result = calc_cover(r)
-    
-            # Validate output
             if isinstance(result, (list, tuple)) and len(result) == 2:
                 return pd.Series(result)
-    
-            # Log unexpected output
-            print(f"⚠️ Unexpected result from calc_cover for {r.get('Game', '')}: {result}")
             return pd.Series([None, None])
-    
         except Exception as e:
             print(f"❌ calc_cover error for {r.get('Game', '')}: {e}")
             return pd.Series([None, None])
-    test = df.apply(safe_calc_cover, axis=1)
-    st.write("✅ Shape of safe_calc_cover output:", test.shape)
 
+    df_valid = df[df['Score_Home_Score'].notna()].copy()
 
-
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = test
-
+    if not df_valid.empty:
+        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(safe_calc_cover, axis=1)
+        df.update(df_valid)
 
     return df
+
 
 
 
