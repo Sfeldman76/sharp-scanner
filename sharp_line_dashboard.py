@@ -336,7 +336,7 @@ def fetch_backtest_from_master(sport_key, drive, days_back=3):
         return pd.DataFrame()
 
 
-def fetch_scores_and_backtest(sport_key, drive, days_back=5):
+def fetch_scores_and_backtest(sport_key, drive, days_back=3):
     # 1. Load historical sharp moves
     df_moves = load_master_sharp_moves(drive)
 
