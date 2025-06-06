@@ -280,13 +280,22 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     # Merge scores
     # Overwrite to ensure consistent time anchor from Odds API
+    merge_keys = ['Game', 'Event_Date', 'Game_Hour']
+    if not all(col in df_results.columns for col in merge_keys):
+        st.error(f"❌ df_results missing merge keys: {merge_keys}")
+        return pd.DataFrame()
+    
     df = df_moves.merge(
-        df_results,
-        on='Game',  # Already lowercased & normalized
+        df_results.rename(columns={
+            'Home_Score': 'Score_Home_Score',
+            'Away_Score': 'Score_Away_Score'
+        }),
+        on=merge_keys,
         how='left',
         suffixes=('', '_score')
     )
     
+        
     # Overwrite these directly from df_results to avoid Game_Start issues
     df['Event_Date'] = df['Event_Date'].fillna(df['Event_Date_score'])
     df['Game_Hour'] = df['Game_Hour'].fillna(df['Game_Hour_score'])
