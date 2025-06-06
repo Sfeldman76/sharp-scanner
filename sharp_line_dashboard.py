@@ -280,11 +280,11 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     # Merge without Game_Hour first, then resolve ties
     df = df_moves.merge(
-        df_results,
-        on=['Game', 'Event_Date'],
-        how='left',
-        suffixes=('', '_score')
-    )
+    df_results,
+    on=['Game', 'Event_Date', 'Game_Hour'],
+    how='left'
+)
+
 
     df['Hour_Diff'] = abs(df['Game_Hour'] - df['Game_Hour_score'])
     df = df.sort_values('Hour_Diff').drop_duplicates(subset=['Game_ID', 'Market', 'Outcome'])
