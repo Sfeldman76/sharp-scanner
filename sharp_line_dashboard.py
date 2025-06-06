@@ -1159,7 +1159,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
 
         # === Backtest recent sharp moves
-       if not df_bt.empty:
+        if not df_bt.empty:
             merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             available = [col for col in confidence_cols if col in df_moves_raw.columns]
