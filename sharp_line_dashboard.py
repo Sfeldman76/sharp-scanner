@@ -1415,7 +1415,11 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         
         # Only keep scores for games with results
         df_scored = df_scored[df_scored['Score_Home_Score'].notna()]
-        
+        st.write("🔍 df_master columns:", df_master.columns.tolist())
+        st.write("🔍 df_scored columns:", df_scored.columns.tolist())
+        st.write("🔍 Rows in df_master:", len(df_master))
+        st.write("🔍 Rows in df_scored:", len(df_scored))
+
         # Merge back into master — only overwrite scores where Game_Key matches
         # ✅ Safe merge of updated score columns
         required_cols = [
