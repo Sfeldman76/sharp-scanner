@@ -119,7 +119,7 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             print(f"⚠️ Skipping append — {filename} input is empty.")
             return
 
-        # Step 1: Try to load existing master
+        # Step 1: Load existing master
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
@@ -129,27 +129,29 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             file_drive = file_list[0]
             existing_data = StringIO(file_drive.GetContentString())
             df_existing = pd.read_csv(existing_data)
-            file_drive.Delete()  # Delete old file only after loading
+            file_drive.Delete()
             print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
-        # Step 2: Merge old + new
+        # Step 2: Clean up columns
+        cols_to_drop = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Game_ID']
+        df_existing.drop(columns=[c for c in cols_to_drop if c in df_existing.columns], inplace=True, errors='ignore')
+        df_new.drop(columns=[c for c in cols_to_drop if c in df_new.columns], inplace=True, errors='ignore')
+
+        # ✅ Step 3: Ensure Commence_Hour is built in df_new if missing
+        if 'Commence_Hour' not in df_new.columns and 'Game_Start' in df_new.columns:
+            df_new['Commence_Hour'] = pd.to_datetime(df_new['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+
+        # Step 4: Combine
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
 
-        # Step 3: Drop duplicates (Game_Key + Market + Outcome most safely)
-        if 'Game_Key' in df_combined.columns:
-            df_combined.drop_duplicates(
-                subset=["Game_Key", "Market", "Outcome", "Bookmaker"],
-                keep='last',
-                inplace=True
-            )
-        else:
-            df_combined.drop_duplicates(
-                subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
-                keep='last',
-                inplace=True
-            )
+        # ✅ Step 5: Deduplicate but keep Commence_Hour
+        df_combined.drop_duplicates(
+            subset=["Game_Key", "Market", "Outcome"],
+            keep='last',
+            inplace=True
+        )
 
-        # Step 4: Upload new master
+        # Step 6: Upload
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -157,10 +159,12 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
         new_file.SetContentString(csv_buffer.getvalue())
         new_file.Upload()
+
         print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
 
     except Exception as e:
         print(f"❌ Failed to append to {filename}: {e}")
+
 
 
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv"):
