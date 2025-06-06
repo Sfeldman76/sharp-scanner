@@ -112,96 +112,116 @@ def fetch_live_odds(sport_key):
 
         return []
 
-def recover_from_line_history_full(drive, folder_id=FOLDER_ID):
-
-    """
-    Restore missing rows into sharp_moves_master.csv using full line history,
-    using the same logic as detect_sharp_moves() — no SHARP_SIDE_TO_BET filter.
-    """
+def rebuild_missing_games_in_sharp_master(drive, folder_id=FOLDER_ID):
     try:
-        # === Load current master ===
+        from io import StringIO
+        from datetime import datetime
+
+        # === Load current sharp_moves_master
         file_list_master = drive.ListFile({
             'q': f"title='sharp_moves_master.csv' and '{folder_id}' in parents and trashed=false"
         }).GetList()
-
         df_master = pd.DataFrame()
         if file_list_master:
-            file_drive_master = file_list_master[0]
-            df_master = pd.read_csv(StringIO(file_drive_master.GetContentString()), low_memory=False)
-            file_drive_master.Delete()  # Safe to overwrite after patching
+            file_drive = file_list_master[0]
+            df_master = pd.read_csv(StringIO(file_drive.GetContentString()), low_memory=False)
+            df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
 
-        # === Load line history ===
+        # === Load line history
         file_list_history = drive.ListFile({
             'q': f"title='line_history_master.csv' and '{folder_id}' in parents and trashed=false"
         }).GetList()
-
         if not file_list_history:
             print("⚠️ No line_history_master.csv found.")
             return
-
         file_drive_history = file_list_history[0]
         df_history = pd.read_csv(StringIO(file_drive_history.GetContentString()), low_memory=False)
+        df_history['Game_Start'] = pd.to_datetime(df_history['Game_Start'], errors='coerce', utc=True)
 
-        if df_history.empty:
-            print("⚠️ Line history is empty.")
-            return
+        # === Filter to supported books
+        df_history = df_history[df_history['Book'].isin(SHARP_BOOKS + REC_BOOKS)].copy()
 
-        # === Filter for entries that were scored — i.e., Value and SharpBetScore present
-        df_scored = df_history.copy()
-
-        df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], utc=True, errors='coerce')
-        df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], utc=True, errors='coerce')
-
-        # Fill columns if missing (Ref Sharp Value, confidence)
-        if 'Ref Sharp Value' not in df_scored.columns and 'Value' in df_scored.columns:
-            df_scored['Ref Sharp Value'] = df_scored['Value']
-        if 'SharpBetScore' not in df_scored.columns:
-            df_scored['SharpBetScore'] = None
-        if 'Enhanced_Sharp_Confidence_Score' not in df_scored.columns:
-            df_scored['Enhanced_Sharp_Confidence_Score'] = None
-        if 'SHARP_SIDE_TO_BET' not in df_scored.columns:
-            df_scored['SHARP_SIDE_TO_BET'] = 0
-
-        # Build merge key
-        key_cols = ['Game', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']
-        df_scored['merge_key'] = df_scored[key_cols].astype(str).agg('|'.join, axis=1)
-
+        # === Build game keys
+        df_history['Game_Key'] = df_history['Game'].str.lower().str.strip() + "_" + df_history['Game_Start'].dt.floor('H').astype(str)
         if not df_master.empty:
-            df_master['Snapshot_Timestamp'] = pd.to_datetime(df_master['Snapshot_Timestamp'], utc=True, errors='coerce')
-            df_master['merge_key'] = df_master[key_cols].astype(str).agg('|'.join, axis=1)
-            known_keys = set(df_master['merge_key'])
+            df_master['Game_Key'] = df_master['Game'].str.lower().str.strip() + "_" + df_master['Game_Start'].dt.floor('H').astype(str)
+            known_keys = set(df_master['Game_Key'].unique())
         else:
             known_keys = set()
 
-        df_missing = df_scored[~df_scored['merge_key'].isin(known_keys)].copy()
-        if df_missing.empty:
-            print("✅ No new rows to add — sharp_moves_master is complete.")
+        # === Find missing games
+        missing_games = df_history[~df_history['Game_Key'].isin(known_keys)]
+        if missing_games.empty:
+            print("✅ No missing games to rebuild.")
             return
 
-        # Prepare final columns
-        final_cols = [
-            'Game', 'Game_ID', 'Game_Start', 'Snapshot_Timestamp',
-            'Market', 'Outcome', 'Bookmaker', 'Book',
-            'Ref Sharp Value', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
-            'SHARP_SIDE_TO_BET'
-        ]
+        print(f"🔁 Rebuilding {missing_games['Game_Key'].nunique()} missing games...")
 
-        df_missing_final = df_missing[[col for col in final_cols if col in df_missing.columns]]
-        df_patched = pd.concat([df_master, df_missing_final], ignore_index=True).drop_duplicates()
+        # === Rebuild detect_sharp_moves() snapshots for missing games
+        all_detected = []
+        grouped = missing_games.groupby('Game_Key')
 
-        # Upload updated master
+        for key, group in grouped:
+            snapshot_data = group.to_dict(orient='records')
+            fake_snapshot = {}
+            for row in snapshot_data:
+                gid = row.get('Game_ID', 'no_id_' + row['Game'])
+                fake_snapshot.setdefault(gid, {
+                    'id': gid,
+                    'home_team': row['Game'].split(' vs ')[0].strip(),
+                    'away_team': row['Game'].split(' vs ')[1].strip(),
+                    'commence_time': row['Game_Start'],
+                    'bookmakers': []
+                })
+                book_key = row['Book']
+                book_entry = next((b for b in fake_snapshot[gid]['bookmakers'] if b['key'] == book_key), None)
+                if not book_entry:
+                    book_entry = {'key': book_key, 'title': row['Bookmaker'], 'markets': []}
+                    fake_snapshot[gid]['bookmakers'].append(book_entry)
+
+                mtype = row['Market']
+                market_entry = next((m for m in book_entry['markets'] if m['key'] == mtype), None)
+                if not market_entry:
+                    market_entry = {'key': mtype, 'outcomes': []}
+                    book_entry['markets'].append(market_entry)
+
+                market_entry['outcomes'].append({
+                    'name': row['Outcome'],
+                    'price': row['Value'] if mtype == 'h2h' else None,
+                    'point': row['Value'] if mtype != 'h2h' else None,
+                    'bet_limit': row.get('Limit', 0)
+                })
+
+            # Run detection
+            df_detected, _, _ = detect_sharp_moves(
+                current=list(fake_snapshot.values()),
+                previous={},
+                sport_key='basketball_nba',  # You can customize per game if needed
+                SHARP_BOOKS=SHARP_BOOKS,
+                REC_BOOKS=REC_BOOKS,
+                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
+                weights=market_component_win_rates
+            )
+
+            all_detected.append(df_detected)
+
+        # Combine and append only new games
+        df_new = pd.concat(all_detected, ignore_index=True)
+        df_final = pd.concat([df_master, df_new], ignore_index=True)
+        df_final.drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp'], keep='last', inplace=True)
+
+        # Save back to Drive
         csv_buffer = StringIO()
-        df_patched.to_csv(csv_buffer, index=False)
+        df_final.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
+        new_file = drive.CreateFile({'title': 'sharp_moves_master.csv', "parents": [{"id": folder_id}]})
+        new_file.SetContentString(csv_buffer.getvalue())
+        new_file.Upload()
 
-        file_drive_new = drive.CreateFile({'title': 'sharp_moves_master.csv', "parents": [{"id": folder_id}]})
-        file_drive_new.SetContentString(csv_buffer.getvalue())
-        file_drive_new.Upload()
-
-        print(f"✅ Recovered and added {len(df_missing_final)} new rows — total now: {len(df_patched)}")
+        print(f"✅ Rebuilt and appended {len(df_new)} new rows — total now: {len(df_final)}")
 
     except Exception as e:
-        print(f"❌ Failed to recover sharp moves: {e}")
+        print(f"❌ Failed to rebuild missing sharp games: {e}")
 
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
@@ -1202,7 +1222,6 @@ def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOL
 
 def render_scanner_tab(label, sport_key, container, drive):
     global market_component_win_rates
-    recover_from_line_history_full(drive)
     df_master = load_master_sharp_moves(drive)
     
     with container:
@@ -1530,11 +1549,18 @@ df_mlb_bt = pd.DataFrame()
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master, drive):
     with tab:
-        sport_key_lower = sport_key_api  # e.g., "basketball_nba" or "baseball_mlb"
+        # Sidebar rebuild button
+        with st.sidebar:
+            if st.button("🔁 Rebuild Missing Sharp Moves from Line History"):
+                with st.spinner("Rebuilding sharp_moves_master.csv from line_history_master.csv..."):
+                    rows_added = rebuild_missing_games_in_sharp_master(drive)
+                st.success(f"✅ Added {rows_added} new rows to sharp_moves_master.csv.")
+
+        # Now load master AFTER optional patch
+        sport_key_lower = sport_key_api
+        df_master = load_master_sharp_moves(drive)
 
         if not df_master.empty:
-            recover_from_line_history_full(drive)  # optional safety
-            df_master = load_master_sharp_moves(drive)
             df_bt = fetch_backtest_from_master(sport_key_api, drive)
 
 
@@ -1572,6 +1598,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
                 ]].sort_values(by='Win_Rate', ascending=False)
 
                 st.dataframe(leaderboard_df.head(50))
+           
 
                 st.subheader(f"📊 {sport_label} Sharp Signal Performance by Market + Confidence Tier")
                 df_market_tier_summary = (
