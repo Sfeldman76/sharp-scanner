@@ -493,64 +493,55 @@ def detect_cross_market_sharp_support(df_moves):
 
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
-    import json  # for printing weights
+    import json
+    from collections import defaultdict
 
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
     rows = []
     line_open_map = {}  # {(game, market, label): (open_val, open_time)}
-
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
-    sharp_total_limit_map = defaultdict(int)  # NEW: Track summed limits across SHARP_BOOKS
+    sharp_total_limit_map = defaultdict(int)
     sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
     line_history_log = []
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    
-
-    # === Extract weights
-    sport_scope_key = {
-        'MLB': 'baseball_mlb',
-        'NBA': 'basketball_nba'
-    }.get(sport_key.upper(), sport_key.lower())  # fallback safe
-
+    # === Weight extraction
+    sport_scope_key = {"MLB": "baseball_mlb", "NBA": "basketball_nba"}.get(sport_key.upper(), sport_key.lower())
     print("🔍 Weights structure preview:", json.dumps(weights, indent=2))
     print("🧠 Extracting weights for:", sport_scope_key)
     confidence_weights = weights.get(sport_scope_key, {})
     print(f"✅ Using weights for {sport_scope_key} — Available markets: {list(confidence_weights.keys())}")
 
-    # === Component fields for confidence scoring
+    # === Component fields
     component_fields = [
-        'Sharp_Move_Signal',
-        'Sharp_Limit_Jump',
-        'Sharp_Time_Score',
-        'Sharp_Prob_Shift',
-        'Sharp_Limit_Total'
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score',
+        'Sharp_Prob_Shift', 'Sharp_Limit_Total'
     ]
-    local_components = component_fields  # ✅ corrected
 
-
-    
+    # === Flatten previous snapshot odds
     previous_odds_map = {}
-    for g in previous.values():
-        for book in g.get('bookmakers', []):
-            book_key = book['key']
-            for market in book.get('markets', []):
-                mtype = market.get('key')
-                for outcome in market.get('outcomes', []):
-                    label = str(outcome['name']).strip().lower()
-                    price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
-                    previous_odds_map[(g['home_team'], g['away_team'], mtype, label, book_key)] = price
-    
+    if isinstance(previous, list):
+        for g in previous:
+            for book in g.get('bookmakers', []):
+                book_key = book['key']
+                for market in book.get('markets', []):
+                    mtype = market.get('key')
+                    for outcome in market.get('outcomes', []):
+                        label = normalize_label(outcome.get('name'))
+                        price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
+                        key = (g['home_team'], g['away_team'], mtype, label, book_key)
+                        previous_odds_map[key] = price
 
+    # === Process current odds
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
-        event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if game.get("commence_time") else ""
-        event_time = pd.to_datetime(game.get("commence_time"))
-       
-       
+        event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
+        event_date = event_time.strftime("%Y-%m-%d") if pd.notnull(event_time) else ""
+        game_hour = event_time.floor('H') if pd.notnull(event_time) else pd.NaT
+        game_key = f"{game['home_team'].strip().lower()}_{game['away_team'].strip().lower()}_{game_hour}"
 
         for book in game.get('bookmakers', []):
             book_key = book['key']
@@ -560,19 +551,20 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     limit = o.get('bet_limit') if 'bet_limit' in o and o.get('bet_limit') is not None else None
-                    key = (game_name, mtype, label)
                     prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
-                    
+                    key = (game_name, mtype, label)
+
                     if key not in line_open_map and val is not None:
                         line_open_map[key] = (val, snapshot_time)
-                    
+
                     entry = {
-                        
                         'Sport': sport_key,
+                        'Game_Key': game_key,
                         'Time': snapshot_time,
                         'Game': game_name,
                         'Game_Start': event_time,
+                        'Event_Date': event_date,
                         'Market': mtype,
                         'Outcome': label,
                         'Bookmaker': book['title'],
@@ -581,25 +573,24 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Limit': limit,
                         'Old Value': old_val,
                         'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
-                        'Event_Date': event_date,
                         'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
                     }
 
-                    # Add historical audit entry
+                    # Historical audit tracking
                     line_history_log.append(entry.copy())
 
                     if val is None:
                         continue
 
-              
                     rows.append(entry)
 
-                    # Track sharp data if limit is present
                     if limit is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
-                        sharp_limit_map[(game_name, mtype)][label].append((limit, val, entry.get('Old Value')))
+                        sharp_limit_map[(game_name, mtype)][label].append((limit, val, old_val))
                         if book_key in SHARP_BOOKS_FOR_LIMITS:
                             sharp_total_limit_map[(game_name, mtype, label)] += limit
+
+             
 
     # === Sharp scoring logic
     for (game_name, mtype), label_map in sharp_limit_map.items():
