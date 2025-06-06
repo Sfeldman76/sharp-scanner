@@ -328,10 +328,13 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         except Exception as e:
             print(f"❌ calc_cover error for {r.get('Game', '')}: {e}")
             return pd.Series([None, None])
+    test = df.apply(safe_calc_cover, axis=1)
+    st.write("✅ Shape of safe_calc_cover output:", test.shape)
 
 
 
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(safe_calc_cover, axis=1)
+    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = test
+
 
     return df
 
