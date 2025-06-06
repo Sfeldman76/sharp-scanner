@@ -1226,8 +1226,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         # Deduplicate before model scoring
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
-        st.write("✅ Final df_moves shape:", df_moves.shape)
-        st.write("✅ Final df_moves columns before backtest:", df_moves.columns.tolist())
+        
         
         if df_moves.empty:
             st.error("❌ df_moves is unexpectedly EMPTY before backtest — investigate filters.")
@@ -1260,12 +1259,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                     how='left'
                 )
         
-        # ✅ Final check before model scoring
-        st.write("✅ Final df_moves columns before scoring:", df_moves.columns.tolist())
-
-        
-                        
-                
+                    
         # ✅ Save moves if available
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
