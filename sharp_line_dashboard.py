@@ -978,89 +978,7 @@ def apply_blended_sharp_score(df, model):
 
 
 st.set_page_config(layout="wide")
-# === Auto-update sharp master results (NBA + MLB) ===
-for sport_label, sport_key in {"NBA": SPORTS["NBA"], "MLB": SPORTS["MLB"]}.items():
-    df_master = load_master_sharp_moves(drive)
 
-    if df_master.empty or 'Sport' not in df_master.columns:
-        continue
-
-    df_filtered = df_master[df_master['Sport'].str.lower() == sport_label.lower()]
-    if df_filtered.empty:
-        continue
-
-    df_scored = fetch_scores_and_backtest(sport_key, df_filtered, api_key=API_KEY)
-
-    if not df_scored.empty and 'Score_Home_Score' in df_scored.columns:
-        df_scored = df_scored[df_scored['Score_Home_Score'].notna()]
-        if df_scored.empty:
-            continue
-
-        # Drop old results before merge
-        df_master = df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'], errors='ignore')
-
-        # === SAFELY BUILD MERGE KEYS
-        required_cols = [
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
-        ]
-        
-        # Check what columns are in both
-        merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-                      if col in df_scored.columns and col in df_master.columns]
-        value_cols = [col for col in required_cols if col in df_scored.columns and col not in merge_keys]
-        
-        # 🔍 Log what's available
-        st.write("✅ df_master columns:", df_master.columns.tolist())
-        st.write("✅ df_scored columns:", df_scored.columns.tolist())
-        st.write("🧪 merge_keys:", merge_keys)
-        st.write("🧪 value_cols:", value_cols)
-        
-        # 🛠 If 'Game_Key' is missing, create it in df_master
-        if 'Game_Key' not in df_master.columns:
-            if all(col in df_master.columns for col in ['Game', 'Game_Start']):
-                df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-                df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
-                df_master['Game_Key'] = (
-                    df_master['Home_Team_Norm'] + "_" +
-                    df_master['Away_Team_Norm'] + "_" +
-                    df_master['Commence_Hour'].astype(str)
-                )
-                st.success("✅ Rebuilt Game_Key in df_master")
-            else:
-                st.error("❌ Cannot create 'Game_Key' — missing 'Game' or 'Game_Start'")
-                st.stop()
-        
-        # ✅ Final safe merge
-        if merge_keys and value_cols:
-            df_master = df_master.drop(columns=value_cols, errors='ignore')
-            df_master = df_master.merge(
-                df_scored[merge_keys + value_cols],
-                on=merge_keys,
-                how='left'
-            )
-        else:
-            st.warning("⚠️ Skipping merge — no valid keys or values to merge.")
-
-        available_cols = [col for col in required_cols if col in df_scored.columns]
-        
-        if available_cols:
-            df_master = df_master.drop(columns=available_cols, errors='ignore')
-            df_master = df_master.merge(
-                df_scored[available_cols],
-                on=[col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in available_cols],
-                how='left'
-            )
-        else:
-            st.warning("⚠️ No available score columns in df_scored to merge.")
-
-        for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
-            if f'{col}_new' in df_updated.columns:
-                df_updated[col] = df_updated[col].fillna(df_updated[f'{col}_new'])
-                df_updated.drop(columns=[f'{col}_new'], inplace=True)
-
-        append_to_master_csv_on_drive(df_updated, "sharp_moves_master.csv", drive, FOLDER_ID)
 
 # === Initialize Google Drive once ===
 
@@ -1273,6 +1191,11 @@ def render_scanner_tab(label, sport_key, container, drive):
                     model = train_sharp_win_model(model_input)
                     save_model_to_drive(model, drive)
                     save_model_timestamp(drive)
+        for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
+            if f'{col}_new' in df_master.columns:
+                df_master[col] = df_master[col].fillna(df_master[f'{col}_new'])
+                df_master.drop(columns=[f'{col}_new'], inplace=True)
+        append_to_master_csv_on_drive(df_master, "sharp_moves_master.csv", drive, FOLDER_ID)
 
         # === Apply scoring
         if model is not None:
@@ -1308,7 +1231,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
 
-        return df_moves
+      
 
 
         # === Sharp Summary Table
