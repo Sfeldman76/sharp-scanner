@@ -1202,7 +1202,7 @@ def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOL
 
 def render_scanner_tab(label, sport_key, container, drive):
     global market_component_win_rates
-    recover_missing_sharp_moves(drive)
+    recover_from_line_history_full(drive)
     df_master = load_master_sharp_moves(drive)
     
     with container:
