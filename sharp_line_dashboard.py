@@ -18,8 +18,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from io import BytesIO  # ✅ Use BytesIO for binary models
 import pickle
-from datetime import datetime, timedelta
-from pytz import timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
+from pytz import timezone as pytz_timezone
+
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
 
@@ -275,7 +276,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
-    df_moves = df_moves[df_moves['Game_Start'] < datetime.now(timezone.utc)]
+    df_moves = df_moves[df_moves['Game_Start'] < datetime.now(dt_timezone.utc)
 
 
     # ✅ Normalize team names and build Game_Key in both dfs
@@ -1336,7 +1337,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             summary_df = summary_df[summary_df['Game_Start'] > now_utc]
         
             # Convert Game_Start to EST for display
-            eastern = timezone('US/Eastern')
+            eastern = pytz_timezone('US/Eastern')
             summary_df['Game_Time_EST'] = summary_df['Game_Start'].apply(
                 lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo else
                           pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) else ""
@@ -1433,7 +1434,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(safe_format_value_limit, axis=1)
         
             
-            eastern = timezone('US/Eastern')
+            eastern = pytz_timezone('US/Eastern')
             
             df_odds_raw['Game_Time_EST'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
                 lambda dt: dt.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(dt) and dt.tzinfo else
