@@ -1408,12 +1408,23 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         df_scored = df_scored[df_scored['Score_Home_Score'].notna()]
         
         # Merge back into master — only overwrite scores where Game_Key matches
-        df_master = df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore')
-        df_master = df_master.merge(
-            df_scored[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
-            on='Game_Key',
-            how='left'
-        )
+        required_cols = [
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+            'Score_Home_Score', 'Score_Away_Score',
+            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
+        ]
+        available_cols = [col for col in required_cols if col in df_scored.columns]
+        
+        if available_cols:
+            df_master = df_master.drop(columns=available_cols, errors='ignore')
+            df_master = df_master.merge(
+                df_scored[available_cols],
+                on=[col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in df_scored.columns],
+                how='left'
+            )
+        else:
+            st.warning("⚠️ No score columns found in df_scored for update.")
+        
 
 
         if not df_master.empty:
