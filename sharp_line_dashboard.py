@@ -247,6 +247,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
                 print(f"⚠️ Could not parse score from entry: {s} — {e}")
 
         if home not in team_scores or away not in team_scores:
+            st.warning(f"⚠️ Missing score for: {home=} {away=} vs {team_scores}")
             continue
 
         result_rows.append({
@@ -265,40 +266,34 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         st.warning("⚠️ No parsed scores matched your games.")
         return pd.DataFrame()
 
-    # Normalize and prepare df_moves
+    # === Prepare df_moves ===
     df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome']).copy()
-    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], utc=True, errors='coerce')
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
+    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
     df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
     df_moves['Event_Date'] = df_moves['Game_Start'].dt.strftime("%Y-%m-%d")
     df_moves['Game_Hour'] = df_moves['Game_Start'].dt.hour
 
+    # Ensure correct data types for matching
     df_results['Game'] = df_results['Game'].str.strip().str.lower()
     df_results['Event_Date'] = df_results['Event_Date'].astype(str)
+    df_results['Game_Hour'] = pd.to_numeric(df_results['Game_Hour'], errors='coerce')
 
-    # Merge without Game_Hour first, then resolve ties
+    # Merge with time-aware join
     df = df_moves.merge(
-    df_results,
-    on=['Game', 'Event_Date', 'Game_Hour'],
-    how='left'
-)
+        df_results,
+        on=['Game', 'Event_Date', 'Game_Hour'],
+        how='left',
+        suffixes=('', '_score')
+    )
 
-
-    df['Hour_Diff'] = abs(df['Game_Hour'] - df['Game_Hour_score'])
-    df = df.sort_values('Hour_Diff').drop_duplicates(subset=['Game_ID', 'Market', 'Outcome'])
-
-    df.rename(columns={
-        'Score_Home_Score': 'Score_Home_Score',
-        'Score_Away_Score': 'Score_Away_Score'
-    }, inplace=True)
-
-    df.drop(columns=[col for col in df.columns if col.endswith('_score') or col == 'Hour_Diff'], inplace=True)
-
+    # Warn if missing scores
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Event_Date', 'Game_Hour', 'Score_Home_Score', 'Score_Away_Score']].head(10))
 
+    # Cover calc
     def safe_calc_cover(r):
         try:
             result = calc_cover(r)
