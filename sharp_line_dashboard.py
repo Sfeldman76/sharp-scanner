@@ -216,6 +216,53 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
 
+def fetch_score_results(sport_key='basketball_nba', days_back=5, api_key=API_KEY):
+    import requests
+
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
+    params = {
+        'apiKey': api_key,
+        'daysFrom': days_back
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        games = response.json()
+    except Exception as e:
+        st.error(f"❌ Failed to fetch scores: {e}")
+        return pd.DataFrame()
+
+    result_rows = []
+    for game in games:
+        if not game.get("completed"):
+            continue
+
+        home = game.get("home_team", "").strip().lower()
+        away = game.get("away_team", "").strip().lower()
+        game_name = f"{home} vs {away}"
+        game_start = pd.to_datetime(game.get("commence_time"), utc=True)
+        event_date = game_start.strftime("%Y-%m-%d")
+        game_hour = game_start.hour
+
+        scores = game.get("scores", [])
+        score_dict = {s["name"].strip().lower(): s["score"] for s in scores if "name" in s and "score" in s}
+
+        home_score = score_dict.get(home)
+        away_score = score_dict.get(away)
+
+        if home_score is None or away_score is None:
+            continue
+
+        result_rows.append({
+            'Game': game_name,
+            'Event_Date': event_date,
+            'Game_Hour': game_hour,
+            'Score_Home_Score': home_score,
+            'Score_Away_Score': away_score
+        })
+
+    return pd.DataFrame(result_rows)
 
 
 
