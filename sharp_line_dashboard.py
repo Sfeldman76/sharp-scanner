@@ -272,26 +272,26 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
-    df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
-    df_moves['Event_Date'] = df_moves['Game_Start'].dt.strftime("%Y-%m-%d")
-    df_moves['Game_Hour'] = df_moves['Game_Start'].dt.hour
+    # Normalize and reconstruct Game_Key for df_moves
+    def normalize_team(t): return str(t).strip().lower()
+    
+    df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
+    df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
+    df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('H')
+    df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
 
-    # Ensure correct data types for matching
-    df_results['Game'] = df_results['Game'].str.strip().str.lower()
-    df_results['Event_Date'] = df_results['Event_Date'].astype(str)
-    df_results['Game_Hour'] = pd.to_numeric(df_results['Game_Hour'], errors='coerce')
 
     # Merge with time-aware join
     df = df_moves.merge(
-        df_results,
-        on=['Game', 'Event_Date', 'Game_Hour'],
-        how='left',
-        suffixes=('', '_score')
+        df_results[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
+        on='Game_Key',
+        how='left'
     )
-
+   
     # Warn if missing scores
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Event_Date', 'Game_Hour', 'Score_Home_Score', 'Score_Away_Score']].head(10))
+    df.drop(columns=['Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour'], inplace=True, errors='ignore')
 
     # Cover calc
     def safe_calc_cover(r):
@@ -507,7 +507,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         'MLB': 'baseball_mlb',
         'NBA': 'basketball_nba'
     }.get(sport_key.upper(), sport_key.lower())  # fallback safe
+    # Normalize names + truncate time to the hour
+    def normalize_team(t): return str(t).strip().lower()
     
+    df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
+    df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
+    df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce').dt.floor('H')
+    df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
+
     
     print("🔍 Weights structure preview:", json.dumps(weights, indent=2))
     print("🧠 Extracting weights for:", sport_scope_key)
