@@ -1167,6 +1167,10 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             df_bt = df_bt.merge(df_moves_raw[merge_cols + available].drop_duplicates(), on=merge_cols, how='left')
             df_moves = df_bt
+            # 🔁 Forward-fill any missing confidence values from the original df_moves_raw
+            for col in ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']:
+                if col in df_moves.columns and col in df_moves_raw.columns:
+                    df_moves[col] = df_moves[col].fillna(df_moves_raw[col])
 
             if df_moves['Score_Home_Score'].notna().any():
                 st.success("✅ Backtest succeeded — score data added.")
