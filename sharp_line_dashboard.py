@@ -1418,24 +1418,28 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         
         # Merge back into master — only overwrite scores where Game_Key matches
         # ✅ Safe merge of updated score columns
-        required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']
-        merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in df_scored.columns]
-        available_cols = [col for col in required_cols if col in df_scored.columns]
+        required_cols = [
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+            'Score_Home_Score', 'Score_Away_Score',
+            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
+        ]
         
-        if merge_keys and available_cols:
-            df_master = df_master.drop(columns=[col for col in available_cols if col in df_master.columns], errors='ignore')
-            df_master = df_master.merge(df_scored[merge_keys + [col for col in available_cols if col not in merge_keys]], on=merge_keys, how='left')
+        merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in df_scored.columns and col in df_master.columns]
+        value_cols = [col for col in required_cols if col in df_scored.columns and col not in merge_keys]
+        
+        if merge_keys and value_cols:
+            df_master = df_master.drop(columns=value_cols, errors='ignore')
+            df_master = df_master.merge(
+                df_scored[merge_keys + value_cols],
+                on=merge_keys,
+                how='left'
+            )
         else:
-            st.warning(f"⚠️ No valid columns to merge from df_scored — skipping score update.")
-
+            st.warning("⚠️ No valid merge keys or value columns for backtest score update.")
+        
 
         if not df_master.empty:
             df_bt = fetch_scores_and_backtest(sport_key_api, df_master, api_key=API_KEY)
-
-
-
-
-
 
             if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
                 df_bt['SharpConfidenceTier'] = pd.cut(
