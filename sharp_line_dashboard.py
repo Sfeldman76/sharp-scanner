@@ -999,13 +999,22 @@ for sport_label, sport_key in {"NBA": SPORTS["NBA"], "MLB": SPORTS["MLB"]}.items
         # Drop old results before merge
         df_master = df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'], errors='ignore')
 
-        # Merge results only on matching rows
-        df_updated = df_master.merge(
-            df_scored[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']],
-            on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-            how='left',
-            suffixes=('', '_new')
-        )
+        required_cols = [
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+            'Score_Home_Score', 'Score_Away_Score',
+            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
+        ]
+        available_cols = [col for col in required_cols if col in df_scored.columns]
+        
+        if available_cols:
+            df_master = df_master.drop(columns=available_cols, errors='ignore')
+            df_master = df_master.merge(
+                df_scored[available_cols],
+                on=[col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in available_cols],
+                how='left'
+            )
+        else:
+            st.warning("⚠️ No available score columns in df_scored to merge.")
 
         for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
             if f'{col}_new' in df_updated.columns:
