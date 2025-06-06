@@ -1624,7 +1624,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
     with tab:
         # Sidebar rebuild button
         with st.sidebar:
-            if st.button("🔁 Rebuild Missing Sharp Moves from Line History"):
+           if st.button("🔁 Rebuild Missing Sharp Moves from Line History", key=f"rebuild_button_{sport_label}"):
                 with st.spinner("Rebuilding sharp_moves_master.csv from line_history_master.csv..."):
                     rows_added = rebuild_missing_games_in_sharp_master(drive)
                 st.success(f"✅ Added {rows_added} new rows to sharp_moves_master.csv.")
