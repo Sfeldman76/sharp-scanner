@@ -291,7 +291,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         st.warning("⚠️ No score columns found after merge.")
         return df_moves
 
-    def safe calc_cover(row):
+    def safe_calc_cover(row):
         try:
             return ("Win", 1) if row['Score_Home_Score'] > row['Score_Away_Score'] else ("Loss", 0)
         except:
