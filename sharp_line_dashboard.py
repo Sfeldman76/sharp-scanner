@@ -294,8 +294,12 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         on='Game_Key',
         how='left'
     )
-    st.write("✅ After merge — scored picks:", df['Score_Home_Score'].notna().sum())
-    st.write("🧪 Total picks:", len(df))
+    
+    # ✅ Safely handle case where no games matched (e.g., new system, waiting for completions)
+    if 'Score_Home_Score' not in df.columns or df['Score_Home_Score'].isna().all():
+        st.warning("⚠️ No matching completed games yet — waiting for sharp picks to settle.")
+        df['SHARP_HIT_BOOL'] = None  # allow it to continue with nulls
+        return df  # optionally or continue on
 
 
     if 'Score_Home_Score' not in df.columns:
@@ -1154,11 +1158,20 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
 
-        if not df_bt.empty:
+        if 'Score_Home_Score' in df_bt.columns and df_bt['Score_Home_Score'].notna().any():
             df_moves = df_bt
             st.success("✅ Backtest succeeded — df_moves updated.")
+        else:
+            st.info("ℹ️ No completed sharp picks yet — waiting for games to finish.")
+        
+        # ✅ Train model only if scoring is available
+        if 'SHARP_HIT_BOOL' in df_moves.columns and df_moves['SHARP_HIT_BOOL'].notna().sum() >= 5:
+            model = train_sharp_win_model(df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1])
+        else:
+            model = None
+            st.warning("⚠️ Not enough completed sharp picks to train a model.")
 
-      
+
 
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
