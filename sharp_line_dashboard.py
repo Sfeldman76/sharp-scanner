@@ -1413,13 +1413,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         # Load scores from the past N days via Odds API
         df_scored = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
         
-        # Only keep scores for games with results
-        df_scored = df_scored[df_scored['Score_Home_Score'].notna()]
-        st.write("🔍 df_master columns:", df_master.columns.tolist())
-        st.write("🔍 df_scored columns:", df_scored.columns.tolist())
-        st.write("🔍 Rows in df_master:", len(df_master))
-        st.write("🔍 Rows in df_scored:", len(df_scored))
-
+        
         # Merge back into master — only overwrite scores where Game_Key matches
         # ✅ Safe merge of updated score columns
         required_cols = [
@@ -1430,6 +1424,14 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         
         merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in df_scored.columns and col in df_master.columns]
         value_cols = [col for col in required_cols if col in df_scored.columns and col not in merge_keys]
+        # 🔍 Debug column presence and row counts before merge
+        st.write("🔍 df_master columns:", df_master.columns.tolist())
+        st.write("🔍 df_scored columns:", df_scored.columns.tolist())
+        st.write("🔍 Rows in df_master:", len(df_master))
+        st.write("🔍 Rows in df_scored:", len(df_scored))
+        st.write("🔍 merge_keys:", merge_keys)
+        st.write("🔍 value_cols:", value_cols)
+
         
         if merge_keys and value_cols:
             df_master = df_master.drop(columns=value_cols, errors='ignore')
