@@ -133,9 +133,11 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
         # Step 2: Clean up columns
-        cols_to_drop = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Game_ID']
+        # Don't drop Home_Team_Norm / Away_Team_Norm
+        cols_to_drop = ['Game_ID']
         df_existing.drop(columns=[c for c in cols_to_drop if c in df_existing.columns], inplace=True, errors='ignore')
         df_new.drop(columns=[c for c in cols_to_drop if c in df_new.columns], inplace=True, errors='ignore')
+
 
         # ✅ Step 3: Ensure Commence_Hour is built in df_new if missing
         if 'Commence_Hour' not in df_new.columns and 'Game_Start' in df_new.columns:
