@@ -1255,7 +1255,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                           pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p')
             )
         
-        summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
+      
         
         summary_df.drop(columns=[col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns], inplace=True)
         
@@ -1270,6 +1270,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             'SharpBetScore': 'Sharp\nBet\nScore',
             'Enhanced_Sharp_Confidence_Score': 'Enhanced\nConf.\nScore',
         }, inplace=True)
+        summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
         
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
