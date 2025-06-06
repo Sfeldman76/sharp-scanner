@@ -296,6 +296,8 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         utc=True, errors='coerce'
     )
     df_results['Game_Key'] = df_results['Home_Team_Norm'] + "_" + df_results['Away_Team_Norm'] + "_" + df_results['Commence_Hour'].astype(str)
+    st.write("🔍 Pre-merge df_moves shape:", df_moves.shape)
+    st.write("🔍 Pre-merge df_results shape:", df_results.shape)
 
     # === Merge on Game_Key
     if 'Game_Key' not in df_results.columns or 'Game_Key' not in df_moves.columns:
@@ -307,6 +309,8 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         on='Game_Key',
         how='left'
     )
+    st.write("🔍 Post-merge df shape:", df.shape)
+    st.write("🔍 Rows with non-null scores:", df[df['Score_Home_Score'].notna()].shape)
 
     # Warn if missing scores
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
