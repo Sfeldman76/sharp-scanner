@@ -285,23 +285,20 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         st.error(f"❌ df_results missing merge keys: {merge_keys}")
         return pd.DataFrame()
     
+    merge_keys = ['Game', 'Event_Date', 'Game_Hour']
     df = df_moves.merge(
         df_results.rename(columns={
             'Home_Score': 'Score_Home_Score',
             'Away_Score': 'Score_Away_Score'
         }),
         on=merge_keys,
-        how='left',
-        suffixes=('', '_score')
+        how='left'
     )
+
     
         
     # Overwrite these directly from df_results to avoid Game_Start issues
-    df['Event_Date'] = df['Event_Date'].fillna(df['Event_Date_score'])
-    df['Game_Hour'] = df['Game_Hour'].fillna(df['Game_Hour_score'])
     
-    # Drop the temporary merged columns
-    df.drop(columns=[col for col in df.columns if col.endswith('_score')], inplace=True)
 
 
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
