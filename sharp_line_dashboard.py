@@ -1422,8 +1422,25 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
             'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
         ]
         
-        merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in df_scored.columns and col in df_master.columns]
-        value_cols = [col for col in required_cols if col in df_scored.columns and col not in merge_keys]
+
+
+        merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+              if col in df_scored.columns and col in df_master.columns]
+        value_cols = [col for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']
+                      if col in df_scored.columns]
+        
+        # 🛡️ Ensure all merge keys exist
+        missing_keys = [col for col in merge_keys if col not in df_master.columns]
+        if missing_keys:
+            st.error(f"❌ Cannot merge — df_master is missing columns: {missing_keys}")
+        else:
+            df_master = df_master.drop(columns=value_cols, errors='ignore')
+            df_master = df_master.merge(
+                df_scored[merge_keys + value_cols],
+                on=merge_keys,
+                how='left'
+            )
+
         # 🔍 Debug column presence and row counts before merge
         st.write("🔍 df_master columns:", df_master.columns.tolist())
         st.write("🔍 df_scored columns:", df_scored.columns.tolist())
