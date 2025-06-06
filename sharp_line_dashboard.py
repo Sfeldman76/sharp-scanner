@@ -1295,9 +1295,11 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_odds_raw = pd.DataFrame(odds_rows)
         if not df_odds_raw.empty:
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Value']) else "",
+                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
+                else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
                 axis=1
             )
+
             df_odds_raw['Date + Time (EST)'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
                 lambda x: x.tz_localize('UTC').tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
                 if pd.notnull(x) else ""
