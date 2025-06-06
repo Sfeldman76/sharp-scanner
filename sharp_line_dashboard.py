@@ -285,19 +285,41 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         st.error(f"❌ df_results missing merge keys: {merge_keys}")
         return pd.DataFrame()
     
-    merge_keys = ['Game', 'Event_Date', 'Game_Hour']
-    df = df_moves.merge(
-        df_results.rename(columns={
-            'Home_Score': 'Score_Home_Score',
-            'Away_Score': 'Score_Away_Score'
-        }),
-        on=merge_keys,
-        how='left'
-    )
-
+   # Use only Game + Date as primary merge key (more lenient)
+    merge_keys = ['Game', 'Event_Date']
+    df_merge_base = df_moves.copy()
     
-        
-    # Overwrite these directly from df_results to avoid Game_Start issues
+    # Prep: ensure all merge keys exist
+    df_merge_base['Game'] = df_merge_base['Game'].str.strip().str.lower()
+    df_merge_base['Event_Date'] = df_merge_base['Game_Start'].dt.strftime('%Y-%m-%d')
+    df_merge_base['Game_Hour'] = df_merge_base['Game_Start'].dt.hour
+    
+    df_results['Game'] = df_results['Game'].str.strip().str.lower()
+    df_results['Event_Date'] = pd.to_datetime(df_results['Event_Date']).dt.strftime('%Y-%m-%d')
+    
+    # Temporary join without Game_Hour
+    merged = df_merge_base.merge(
+        df_results,
+        on=['Game', 'Event_Date'],
+        how='left',
+        suffixes=('', '_score')
+    )
+    
+    # Calculate hour difference
+    merged['Hour_Diff'] = abs(merged['Game_Hour'] - merged['Game_Hour_score'])
+    
+    # Sort by hour diff and keep closest match per Game/Market/Outcome
+    merged = merged.sort_values('Hour_Diff').drop_duplicates(subset=['Game_ID', 'Market', 'Outcome'])
+    
+    # Finalize scores
+    merged.rename(columns={
+        'Home_Score': 'Score_Home_Score',
+        'Away_Score': 'Score_Away_Score'
+    }, inplace=True)
+    
+    # Drop temp cols
+    merged.drop(columns=[col for col in merged.columns if col.endswith('_score') or col == 'Hour_Diff'], inplace=True)
+
     
 
 
