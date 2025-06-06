@@ -224,14 +224,13 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
 
     # Filter by date
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
-    cutoff = datetime.utcnow() - timedelta(days=days_back)
+    now_utc = datetime.now(pytz.utc)
+    cutoff = now_utc - timedelta(days=days_back)
     df_moves = df_moves[
-        (df_moves['Game_Start'] < datetime.utcnow()) &
+        (df_moves['Game_Start'] < now_utc) &
         (df_moves['Game_Start'] > cutoff)
     ].copy()
-    if df_moves.empty:
-        st.warning("⚠️ No sharp moves in the past few days.")
-        return pd.DataFrame()
+
 
     # Build Game_Key
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
