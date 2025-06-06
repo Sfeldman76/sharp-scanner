@@ -112,117 +112,6 @@ def fetch_live_odds(sport_key):
 
         return []
 
-def rebuild_missing_games_in_sharp_master(drive, folder_id=FOLDER_ID):
-    try:
-        from io import StringIO
-        from datetime import datetime
-
-        # === Load current sharp_moves_master
-        file_list_master = drive.ListFile({
-            'q': f"title='sharp_moves_master.csv' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        df_master = pd.DataFrame()
-        if file_list_master:
-            file_drive = file_list_master[0]
-            df_master = pd.read_csv(StringIO(file_drive.GetContentString()), low_memory=False)
-            df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
-
-        # === Load line history
-        file_list_history = drive.ListFile({
-            'q': f"title='line_history_master.csv' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        if not file_list_history:
-            print("⚠️ No line_history_master.csv found.")
-            return
-        file_drive_history = file_list_history[0]
-        df_history = pd.read_csv(StringIO(file_drive_history.GetContentString()), low_memory=False)
-        df_history['Game_Start'] = pd.to_datetime(df_history['Game_Start'], errors='coerce', utc=True)
-
-        # === Filter to supported books
-        df_history = df_history[df_history['Book'].isin(SHARP_BOOKS + REC_BOOKS)].copy()
-
-        # === Build game keys
-        df_history['Game_Key'] = df_history['Game'].str.lower().str.strip() + "_" + df_history['Game_Start'].dt.floor('H').astype(str)
-        if not df_master.empty:
-            df_master['Game_Key'] = df_master['Game'].str.lower().str.strip() + "_" + df_master['Game_Start'].dt.floor('H').astype(str)
-            known_keys = set(df_master['Game_Key'].unique())
-        else:
-            known_keys = set()
-
-        # === Find missing games
-        missing_games = df_history[~df_history['Game_Key'].isin(known_keys)]
-        if missing_games.empty:
-            print("✅ No missing games to rebuild.")
-            return
-
-        print(f"🔁 Rebuilding {missing_games['Game_Key'].nunique()} missing games...")
-
-        # === Rebuild detect_sharp_moves() snapshots for missing games
-        all_detected = []
-        grouped = missing_games.groupby('Game_Key')
-
-        for key, group in grouped:
-            snapshot_data = group.to_dict(orient='records')
-            fake_snapshot = {}
-            for row in snapshot_data:
-                gid = row.get('Game_ID', 'no_id_' + row['Game'])
-                fake_snapshot.setdefault(gid, {
-                    'id': gid,
-                    'home_team': row['Game'].split(' vs ')[0].strip(),
-                    'away_team': row['Game'].split(' vs ')[1].strip(),
-                    'commence_time': row['Game_Start'],
-                    'bookmakers': []
-                })
-                book_key = row['Book']
-                book_entry = next((b for b in fake_snapshot[gid]['bookmakers'] if b['key'] == book_key), None)
-                if not book_entry:
-                    book_entry = {'key': book_key, 'title': row['Bookmaker'], 'markets': []}
-                    fake_snapshot[gid]['bookmakers'].append(book_entry)
-
-                mtype = row['Market']
-                market_entry = next((m for m in book_entry['markets'] if m['key'] == mtype), None)
-                if not market_entry:
-                    market_entry = {'key': mtype, 'outcomes': []}
-                    book_entry['markets'].append(market_entry)
-
-                market_entry['outcomes'].append({
-                    'name': row['Outcome'],
-                    'price': row['Value'] if mtype == 'h2h' else None,
-                    'point': row['Value'] if mtype != 'h2h' else None,
-                    'bet_limit': row.get('Limit', 0)
-                })
-
-            # Run detection
-            df_detected, _, _ = detect_sharp_moves(
-                current=list(fake_snapshot.values()),
-                previous={},
-                sport_key='basketball_nba',  # You can customize per game if needed
-                SHARP_BOOKS=SHARP_BOOKS,
-                REC_BOOKS=REC_BOOKS,
-                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-                weights=market_component_win_rates
-            )
-
-            all_detected.append(df_detected)
-
-        # Combine and append only new games
-        df_new = pd.concat(all_detected, ignore_index=True)
-        df_final = pd.concat([df_master, df_new], ignore_index=True)
-        df_final.drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp'], keep='last', inplace=True)
-
-        # Save back to Drive
-        csv_buffer = StringIO()
-        df_final.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
-        new_file = drive.CreateFile({'title': 'sharp_moves_master.csv', "parents": [{"id": folder_id}]})
-        new_file.SetContentString(csv_buffer.getvalue())
-        new_file.Upload()
-
-        print(f"✅ Rebuilt and appended {len(df_new)} new rows — total now: {len(df_final)}")
-
-    except Exception as e:
-        print(f"❌ Failed to rebuild missing sharp games: {e}")
-
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     try:
@@ -1619,14 +1508,7 @@ df_mlb_bt = pd.DataFrame()
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master, drive):
     with tab:
-        # Sidebar rebuild button
-        with st.sidebar:
-           if st.button("🔁 Rebuild Missing Sharp Moves from Line History", key=f"rebuild_button_{sport_label}"):
-                with st.spinner("Rebuilding sharp_moves_master.csv from line_history_master.csv..."):
-                    rows_added = rebuild_missing_games_in_sharp_master(drive)
-                st.success(f"✅ Added {rows_added} new rows to sharp_moves_master.csv.")
-
-        # Now load master AFTER optional patch
+       # Now load master AFTER optional patch
         sport_key_lower = sport_key_api
         df_master = load_master_sharp_moves(drive)
 
