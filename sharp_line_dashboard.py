@@ -238,6 +238,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     days_back = min(days_back, 3)
     params = {'apiKey': api_key, 'daysFrom': days_back}
+    st.write("✅ Odds API scores pulled:", len(games))
 
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -277,15 +278,23 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         })
 
     df_scores = pd.DataFrame(score_rows)
+    st.write("✅ Parsed scores with final results:", df_scores.shape)
+    st.dataframe(df_scores.head())
+
     if df_scores.empty:
         st.warning("⚠️ No valid scores retrieved for matching.")
         return df_moves
+    st.write("✅ Sharp picks with Game Keys:", df_moves.shape)
+    st.dataframe(df_moves[['Game', 'Game_Key']].head())
 
     df = df_moves.merge(
         df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
         on='Game_Key',
         how='left'
     )
+    st.write("✅ After merge — scored picks:", df['Score_Home_Score'].notna().sum())
+    st.write("🧪 Total picks:", len(df))
+
 
     if 'Score_Home_Score' not in df.columns:
         st.warning("⚠️ No score columns found after merge.")
@@ -543,8 +552,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         game_name = f"{game['home_team']} vs {game['away_team']}"
         event_date = pd.to_datetime(game.get("commence_time")).strftime("%Y-%m-%d") if game.get("commence_time") else ""
         event_time = pd.to_datetime(game.get("commence_time"))
-        gid = game['id']
-        prev_game = previous_map.get(gid, {})
+       
+       
 
         for book in game.get('bookmakers', []):
             book_key = book['key']
@@ -562,7 +571,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         line_open_map[key] = (val, snapshot_time)
                     
                     entry = {
-                        'Game_ID': gid,  # ✅ Add this line
+                        
                         'Sport': sport_key,
                         'Time': snapshot_time,
                         'Game': game_name,
@@ -1166,7 +1175,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
-        df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
+        df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
 
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
 
@@ -1174,19 +1183,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             df_moves = df_bt
             st.success("✅ Backtest succeeded — df_moves updated.")
 
-        # Restore Game and Game_ID if dropped
-        if 'Game' not in df_moves.columns and 'Game_ID' in df_moves.columns:
-            df_moves = df_moves.merge(
-                df_moves_raw[['Game_ID', 'Game']].drop_duplicates(),
-                on='Game_ID',
-                how='left'
-            )
-        if 'Game_ID' not in df_moves.columns and 'Game' in df_moves.columns:
-            df_moves = df_moves.merge(
-                df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
-                on=['Game', 'Market', 'Outcome'],
-                how='left'
-            )
+      
 
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
