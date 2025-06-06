@@ -1170,7 +1170,8 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Sport'] = label
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
 
-        df_bt = fetch_scores_and_backtest(sport_key, drive)
+        df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+
         if not df_bt.empty:
             df_moves = df_bt
             st.success("✅ Backtest succeeded — df_moves updated.")
