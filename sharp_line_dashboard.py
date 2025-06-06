@@ -1417,23 +1417,16 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         df_scored = df_scored[df_scored['Score_Home_Score'].notna()]
         
         # Merge back into master — only overwrite scores where Game_Key matches
-        required_cols = [
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Score_Home_Score', 'Score_Away_Score',
-            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
-        ]
+        # ✅ Safe merge of updated score columns
+        required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']
+        merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in df_scored.columns]
         available_cols = [col for col in required_cols if col in df_scored.columns]
         
-        if available_cols:
-            df_master = df_master.drop(columns=available_cols, errors='ignore')
-            df_master = df_master.merge(
-                df_scored[available_cols],
-                on=[col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] if col in df_scored.columns],
-                how='left'
-            )
+        if merge_keys and available_cols:
+            df_master = df_master.drop(columns=[col for col in available_cols if col in df_master.columns], errors='ignore')
+            df_master = df_master.merge(df_scored[merge_keys + [col for col in available_cols if col not in merge_keys]], on=merge_keys, how='left')
         else:
-            st.warning("⚠️ No score columns found in df_scored for update.")
-        
+            st.warning(f"⚠️ No valid columns to merge from df_scored — skipping score update.")
 
 
         if not df_master.empty:
