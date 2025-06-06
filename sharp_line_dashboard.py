@@ -583,7 +583,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     label = str(outcome['name']).strip().lower()
                     price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
                     previous_odds_map[(g['home_team'], g['away_team'], mtype, label, book_key)] = price
-
+    
 
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
@@ -643,8 +643,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2) if prev_val is not None and val is not None else None
+                                                    if not prev:
+                                                        st.info("🟡 First run — running detection without prior snapshot.")
+                                                        prev = {}
+                                                    
 
-
+                
 
                     rows.append(entry)
 
@@ -1180,6 +1184,9 @@ def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOL
 
 
 def render_scanner_tab(label, sport_key, container, drive):
+    st.write(f"🚀 Starting sharp scan for: {label}")
+    st.write("✅ Returning df_moves with shape:", df_moves.shape)
+
     global market_component_win_rates
     df_master = load_master_sharp_moves(drive)
     
