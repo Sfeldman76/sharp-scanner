@@ -115,42 +115,41 @@ def fetch_live_odds(sport_key):
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     try:
-        # 🔐 Step 0: Guard against empty new data
         if df_new.empty:
             print(f"⚠️ Skipping append — {filename} input is empty.")
             return
 
-        # 🔍 Step 1: Find existing file on Drive
+        # Step 1: Try to load existing master
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
 
-        # 🧱 Step 2: Load existing file and append
+        df_existing = pd.DataFrame()
         if file_list:
             file_drive = file_list[0]
-            try:
-                existing_data = StringIO(file_drive.GetContentString())
-                df_existing = pd.read_csv(existing_data)
-                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-                print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
-            except Exception as read_error:
-                print(f"⚠️ Could not read {filename}, using only new data: {read_error}")
-                df_combined = df_new
+            existing_data = StringIO(file_drive.GetContentString())
+            df_existing = pd.read_csv(existing_data)
+            file_drive.Delete()  # Delete old file only after loading
+            print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
-            # ✅ Delete old version after merging
-            file_drive.Delete()
-            print(f"🗑️ Deleted old {filename} from Drive")
+        # Step 2: Merge old + new
+        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+
+        # Step 3: Drop duplicates (Game_Key + Market + Outcome most safely)
+        if 'Game_Key' in df_combined.columns:
+            df_combined.drop_duplicates(
+                subset=["Game_Key", "Market", "Outcome", "Bookmaker"],
+                keep='last',
+                inplace=True
+            )
         else:
-            df_combined = df_new
+            df_combined.drop_duplicates(
+                subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
+                keep='last',
+                inplace=True
+            )
 
-        # 🧼 Step 3: Drop duplicates safely
-        df_combined.drop_duplicates(
-            subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
-            keep='last',
-            inplace=True
-        )
-
-        # 💾 Step 4: Save and upload updated master file
+        # Step 4: Upload new master
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -158,11 +157,11 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
         new_file.SetContentString(csv_buffer.getvalue())
         new_file.Upload()
-
         print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
 
     except Exception as e:
         print(f"❌ Failed to append to {filename}: {e}")
+
 
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv"):
     try:
@@ -233,21 +232,23 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
     df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True).dt.floor('H')
-    df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
+    df_moves['Game_Key'] = (
+        df_moves['Home_Team_Norm'] + "_" +
+        df_moves['Away_Team_Norm'] + "_" +
+        df_moves['Commence_Hour'].astype(str)
+    )
 
+    # === Fetch scores from Odds API
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     days_back = min(days_back, 3)
     params = {'apiKey': api_key, 'daysFrom': days_back}
-    
 
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         games = response.json()
-        
-    except Exception as e:
-        st.error(f"❌ Failed to fetch scores: {e}")
-        return df_moves
+    except Exception:
+        return df_moves  # Skip scoring if API fails
 
     score_rows = []
     for game in games:
@@ -258,8 +259,12 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         away = game.get("away_team", "").strip().lower()
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
         game_hour = game_start.floor('H') if hasattr(game_start, 'floor') else game_start.replace(minute=0, second=0, microsecond=0)
+
         scores = game.get("scores", [])
-        score_dict = {s["name"].strip().lower(): s["score"] for s in scores if "name" in s and "score" in s}
+        score_dict = {
+            s["name"].strip().lower(): s["score"]
+            for s in scores if "name" in s and "score" in s
+        }
 
         home_score = score_dict.get(home)
         away_score = score_dict.get(away)
@@ -280,27 +285,19 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
 
     df_scores = pd.DataFrame(score_rows)
 
-    if df_scores.empty:
-        st.warning("⚠️ No valid scores retrieved for matching.")
-        return df_moves
-    
-
+    # === Merge with picks
     df = df_moves.merge(
         df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
         on='Game_Key',
         how='left'
     )
-    
-    # ✅ Safely handle case where no games matched (e.g., new system, waiting for completions)
+
+    # === If no scores matched, preserve structure and allow app to continue
     if 'Score_Home_Score' not in df.columns or df['Score_Home_Score'].isna().all():
-        st.warning("⚠️ No matching completed games yet — waiting for sharp picks to settle.")
-        df['SHARP_HIT_BOOL'] = None  # allow it to continue with nulls
-        return df  # optionally or continue on
-
-
-    if 'Score_Home_Score' not in df.columns:
-        st.warning("⚠️ No score columns found after merge.")
-        return df_moves
+        df['Score_Home_Score'] = None
+        df['Score_Away_Score'] = None
+        df['SHARP_HIT_BOOL'] = None
+        return df
 
     def safe_calc_cover(row):
         try:
@@ -310,7 +307,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
 
     df_valid = df[df['Score_Home_Score'].notna()].copy()
     if not df_valid.empty:
-        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(safe_calc_cover, axis=1, result_type="expand")
+        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(
+            safe_calc_cover, axis=1, result_type="expand"
+        )
         df.update(df_valid)
 
     return df
