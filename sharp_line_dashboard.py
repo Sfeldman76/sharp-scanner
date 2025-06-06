@@ -1153,9 +1153,6 @@ st.set_page_config(layout="wide")
 
 
 st.title("📊 Sharp Edge Scanner")
-auto_mode = st.sidebar.radio("🕹️ Refresh Mode", ["Auto Refresh", "Manual"], index=0)
-if auto_mode == "Auto Refresh":
-    st_autorefresh(interval=320000, key="autorefresh")
 
 def log_rec_snapshot(df_moves, sport_key, drive=None):
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
