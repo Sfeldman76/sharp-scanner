@@ -222,7 +222,6 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
     def normalize_team(t):
         return str(t).strip().lower()
 
-    # Filter by date
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
     cutoff = now_utc - timedelta(days=days_back)
@@ -231,16 +230,13 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         (df_moves['Game_Start'] > cutoff)
     ].copy()
 
-
-    # Build Game_Key
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
     df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True).dt.floor('H')
     df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
 
-    # Fetch scores from Odds API
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-    days_back = min(days_back, 3)  # prevent 422 errors
+    days_back = min(days_back, 3)
     params = {'apiKey': api_key, 'daysFrom': days_back}
 
     try:
@@ -259,6 +255,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
+        game_hour = game_start.floor('H') if hasattr(game_start, 'floor') else game_start.replace(minute=0, second=0, microsecond=0)
         scores = game.get("scores", [])
         score_dict = {s["name"].strip().lower(): s["score"] for s in scores if "name" in s and "score" in s}
 
@@ -275,8 +272,8 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
             'Score_Away_Score': away_score,
             'Home_Team_Norm': home,
             'Away_Team_Norm': away,
-            'Commence_Hour': game_start.floor('H'),
-            'Game_Key': f"{home}_{away}_{game_start.floor('H')}"
+            'Commence_Hour': game_hour,
+            'Game_Key': f"{home}_{away}_{game_hour}"
         })
 
     df_scores = pd.DataFrame(score_rows)
@@ -284,27 +281,29 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         st.warning("⚠️ No valid scores retrieved for matching.")
         return df_moves
 
-    # Merge scores into sharp move DataFrame
     df = df_moves.merge(
         df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
         on='Game_Key',
         how='left'
     )
 
-    # Safe scoring logic
-    def calc_cover(row):
+    if 'Score_Home_Score' not in df.columns:
+        st.warning("⚠️ No score columns found after merge.")
+        return df_moves
+
+    def safe calc_cover(row):
         try:
-            # Basic spread-style cover logic — replace with your own if needed
             return ("Win", 1) if row['Score_Home_Score'] > row['Score_Away_Score'] else ("Loss", 0)
         except:
             return (None, None)
 
     df_valid = df[df['Score_Home_Score'].notna()].copy()
     if not df_valid.empty:
-        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(calc_cover, axis=1, result_type="expand")
+        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(safe_calc_cover, axis=1, result_type="expand")
         df.update(df_valid)
 
     return df
+
 
 
     # === Refactored cover logic
