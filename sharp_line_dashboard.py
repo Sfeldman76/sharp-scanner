@@ -999,11 +999,50 @@ for sport_label, sport_key in {"NBA": SPORTS["NBA"], "MLB": SPORTS["MLB"]}.items
         # Drop old results before merge
         df_master = df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'], errors='ignore')
 
+        # === SAFELY BUILD MERGE KEYS
         required_cols = [
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Score_Home_Score', 'Score_Away_Score',
-            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
+            'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
         ]
+        
+        # Check what columns are in both
+        merge_keys = [col for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+                      if col in df_scored.columns and col in df_master.columns]
+        value_cols = [col for col in required_cols if col in df_scored.columns and col not in merge_keys]
+        
+        # 🔍 Log what's available
+        st.write("✅ df_master columns:", df_master.columns.tolist())
+        st.write("✅ df_scored columns:", df_scored.columns.tolist())
+        st.write("🧪 merge_keys:", merge_keys)
+        st.write("🧪 value_cols:", value_cols)
+        
+        # 🛠 If 'Game_Key' is missing, create it in df_master
+        if 'Game_Key' not in df_master.columns:
+            if all(col in df_master.columns for col in ['Game', 'Game_Start']):
+                df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+                df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+                df_master['Game_Key'] = (
+                    df_master['Home_Team_Norm'] + "_" +
+                    df_master['Away_Team_Norm'] + "_" +
+                    df_master['Commence_Hour'].astype(str)
+                )
+                st.success("✅ Rebuilt Game_Key in df_master")
+            else:
+                st.error("❌ Cannot create 'Game_Key' — missing 'Game' or 'Game_Start'")
+                st.stop()
+        
+        # ✅ Final safe merge
+        if merge_keys and value_cols:
+            df_master = df_master.drop(columns=value_cols, errors='ignore')
+            df_master = df_master.merge(
+                df_scored[merge_keys + value_cols],
+                on=merge_keys,
+                how='left'
+            )
+        else:
+            st.warning("⚠️ Skipping merge — no valid keys or values to merge.")
+
         available_cols = [col for col in required_cols if col in df_scored.columns]
         
         if available_cols:
