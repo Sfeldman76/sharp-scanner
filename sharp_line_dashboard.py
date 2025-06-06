@@ -209,7 +209,7 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
 
-def fetch_scores_and_backtest((sport_key, drive, days_back=5):
+def fetch_scores_and_backtest(sport_key, drive, days_back=5):
     # 1. Load historical sharp moves
     df_moves = load_master_sharp_moves(drive)
 
