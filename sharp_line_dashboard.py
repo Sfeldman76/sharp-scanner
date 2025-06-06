@@ -1300,8 +1300,9 @@ def render_scanner_tab(label, sport_key, container, drive):
                 axis=1
             )
 
-          
-            eastern = timezone('US/Eastern')
+         
+            
+            eastern = pytz_timezone('US/Eastern')
             
             df_odds_raw['Date + Time (EST)'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
                 lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
