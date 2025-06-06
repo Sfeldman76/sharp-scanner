@@ -276,7 +276,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
-    df_moves = df_moves[df_moves['Game_Start'] < datetime.now(dt_timezone.utc)
+    df_moves = df_moves[df_moves['Game_Start'] < datetime.now(dt_timezone.utc)]
 
 
     # ✅ Normalize team names and build Game_Key in both dfs
