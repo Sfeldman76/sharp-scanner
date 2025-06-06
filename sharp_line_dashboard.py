@@ -1159,7 +1159,29 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
 
         # === Backtest recent sharp moves
-        df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+       if not df_bt.empty:
+            merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+            confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
+            available = [col for col in confidence_cols if col in df_moves_raw.columns]
+        
+            df_bt_merged = df_bt.merge(
+                df_moves_raw[merge_cols + available].drop_duplicates(),
+                on=merge_cols,
+                how='left',
+                indicator=True
+            )
+        
+            st.write(f"🧪 {label} merge result:", df_bt_merged['_merge'].value_counts())
+        
+            # Fill confidence columns if merge failed on some rows
+            for col in available:
+                if col in df_bt_merged.columns and col in df_moves_raw.columns:
+                    df_bt_merged[col] = df_bt_merged[col].fillna(df_moves_raw[col])
+        
+            df_moves = df_bt_merged.drop(columns=['_merge'])
+        else:
+            st.info("ℹ️ No backtest results found — skipped.")
+
         if not df_bt.empty:
             merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
