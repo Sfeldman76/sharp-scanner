@@ -1556,7 +1556,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
             st.warning(f"⚠️ No historical sharp picks found for {sport_label}.")
 
 
-df_master = load_master_sharp_moves(drive)
+
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
