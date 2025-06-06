@@ -238,12 +238,14 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     days_back = min(days_back, 3)
     params = {'apiKey': api_key, 'daysFrom': days_back}
-    st.write("✅ Odds API scores pulled:", len(games))
+    
 
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         games = response.json()
+        st.write("✅ Odds API scores pulled:", len(games))  # ✅ now it's valid
+
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
         return df_moves
