@@ -112,38 +112,135 @@ def fetch_live_odds(sport_key):
 
         return []
 
+def recover_from_line_history_full(drive, folder_id=FOLDER_ID):
+    """
+    Restore missing rows into sharp_moves_master.csv using full line history,
+    using the same logic as detect_sharp_moves() — no SHARP_SIDE_TO_BET filter.
+    """
+    try:
+        # === Load current master ===
+        file_list_master = drive.ListFile({
+            'q': f"title='sharp_moves_master.csv' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+
+        df_master = pd.DataFrame()
+        if file_list_master:
+            file_drive_master = file_list_master[0]
+            df_master = pd.read_csv(StringIO(file_drive_master.GetContentString()), low_memory=False)
+            file_drive_master.Delete()  # Safe to overwrite after patching
+
+        # === Load line history ===
+        file_list_history = drive.ListFile({
+            'q': f"title='line_history_master.csv' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+
+        if not file_list_history:
+            print("⚠️ No line_history_master.csv found.")
+            return
+
+        file_drive_history = file_list_history[0]
+        df_history = pd.read_csv(StringIO(file_drive_history.GetContentString()), low_memory=False)
+
+        if df_history.empty:
+            print("⚠️ Line history is empty.")
+            return
+
+        # === Filter for entries that were scored — i.e., Value and SharpBetScore present
+        df_scored = df_history.copy()
+
+        df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], utc=True, errors='coerce')
+        df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], utc=True, errors='coerce')
+
+        # Fill columns if missing (Ref Sharp Value, confidence)
+        if 'Ref Sharp Value' not in df_scored.columns and 'Value' in df_scored.columns:
+            df_scored['Ref Sharp Value'] = df_scored['Value']
+        if 'SharpBetScore' not in df_scored.columns:
+            df_scored['SharpBetScore'] = None
+        if 'Enhanced_Sharp_Confidence_Score' not in df_scored.columns:
+            df_scored['Enhanced_Sharp_Confidence_Score'] = None
+        if 'SHARP_SIDE_TO_BET' not in df_scored.columns:
+            df_scored['SHARP_SIDE_TO_BET'] = 0
+
+        # Build merge key
+        key_cols = ['Game', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']
+        df_scored['merge_key'] = df_scored[key_cols].astype(str).agg('|'.join, axis=1)
+
+        if not df_master.empty:
+            df_master['Snapshot_Timestamp'] = pd.to_datetime(df_master['Snapshot_Timestamp'], utc=True, errors='coerce')
+            df_master['merge_key'] = df_master[key_cols].astype(str).agg('|'.join, axis=1)
+            known_keys = set(df_master['merge_key'])
+        else:
+            known_keys = set()
+
+        df_missing = df_scored[~df_scored['merge_key'].isin(known_keys)].copy()
+        if df_missing.empty:
+            print("✅ No new rows to add — sharp_moves_master is complete.")
+            return
+
+        # Prepare final columns
+        final_cols = [
+            'Game', 'Game_ID', 'Game_Start', 'Snapshot_Timestamp',
+            'Market', 'Outcome', 'Bookmaker', 'Book',
+            'Ref Sharp Value', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
+            'SHARP_SIDE_TO_BET'
+        ]
+
+        df_missing_final = df_missing[[col for col in final_cols if col in df_missing.columns]]
+        df_patched = pd.concat([df_master, df_missing_final], ignore_index=True).drop_duplicates()
+
+        # Upload updated master
+        csv_buffer = StringIO()
+        df_patched.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
+
+        file_drive_new = drive.CreateFile({'title': 'sharp_moves_master.csv', "parents": [{"id": folder_id}]})
+        file_drive_new.SetContentString(csv_buffer.getvalue())
+        file_drive_new.Upload()
+
+        print(f"✅ Recovered and added {len(df_missing_final)} new rows — total now: {len(df_patched)}")
+
+    except Exception as e:
+        print(f"❌ Failed to recover sharp moves: {e}")
 
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     try:
-        # 🔍 Step 1: Find all files with the same name
+        # 🔐 Step 0: Guard against empty new data
+        if df_new.empty:
+            print(f"⚠️ Skipping append — {filename} input is empty.")
+            return
+
+        # 🔍 Step 1: Find existing file on Drive
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
 
-        # 🔁 Step 2: Load and merge with existing file(s)
-        df_combined = df_new
+        # 🧱 Step 2: Load existing file and append
         if file_list:
-            print(f"📂 Found {len(file_list)} existing file(s) for {filename}. Merging contents.")
-            for file_drive in file_list:
-                try:
-                    existing_data = StringIO(file_drive.GetContentString())
-                    df_existing = pd.read_csv(existing_data)
-                    df_combined = pd.concat([df_existing, df_combined], ignore_index=True)
-                except Exception as read_error:
-                    print(f"⚠️ Could not read one file: {read_error}")
-                # Always delete old files to prevent duplicates
-                file_drive.Delete()
-                print(f"🗑️ Deleted old {filename} from Drive")
+            file_drive = file_list[0]
+            try:
+                existing_data = StringIO(file_drive.GetContentString())
+                df_existing = pd.read_csv(existing_data)
+                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
+            except Exception as read_error:
+                print(f"⚠️ Could not read {filename}, using only new data: {read_error}")
+                df_combined = df_new
 
-        # 🧼 Step 3: Remove duplicates
+            # ✅ Delete old version after merging
+            file_drive.Delete()
+            print(f"🗑️ Deleted old {filename} from Drive")
+        else:
+            df_combined = df_new
+
+        # 🧼 Step 3: Drop duplicates safely
         df_combined.drop_duplicates(
             subset=["Event_Date", "Game", "Market", "Outcome", "Bookmaker"],
             keep='last',
             inplace=True
         )
 
-        # 💾 Step 4: Save to buffer and upload to Drive
+        # 💾 Step 4: Save and upload updated master file
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -151,11 +248,11 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
         new_file.SetContentString(csv_buffer.getvalue())
         new_file.Upload()
-        print(f"✅ {filename} uploaded to Drive with {len(df_combined)} total rows.")
+
+        print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
 
     except Exception as e:
-        print(f"❌ Error appending to {filename}: {e}")
-
+        print(f"❌ Failed to append to {filename}: {e}")
 
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv"):
     try:
