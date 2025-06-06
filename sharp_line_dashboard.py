@@ -1533,13 +1533,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         sport_key_lower = sport_key_api  # e.g., "basketball_nba" or "baseball_mlb"
 
         if not df_master.empty:
-            df_bt = fetch_scores_and_backtest(
-                df_master[
-                    (df_master['Sport'] == sport_label) &
-                    (df_master['SHARP_SIDE_TO_BET'] == 1)
-                ],
-                sport_key=sport_key_api
-            )
+            df_bt = fetch_backtest_from_master(sport_key=sport_key_api, drive=drive)
+
 
             if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
                 df_bt['SharpConfidenceTier'] = pd.cut(
