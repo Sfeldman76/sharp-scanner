@@ -532,6 +532,7 @@ def detect_cross_market_sharp_support(df_moves):
 
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
+    import json  # for printing weights
 
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
@@ -545,14 +546,19 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     line_history_log = []
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
-    # Use learned weights if available, else fallback to default neutral confidence
-    # Normalize to consistent keys used in weights
+
+    # ✅ SAFELY BUILD previous_map even if previous is empty or None
+    if previous is None or not isinstance(previous, (dict, list)) or len(previous) == 0:
+        st.info("🟡 No previous snapshot — proceeding with empty previous_map.")
+        previous_map = {}
+    else:
+        previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous
+
+    # === Extract weights
     sport_scope_key = {
         'MLB': 'baseball_mlb',
         'NBA': 'basketball_nba'
     }.get(sport_key.upper(), sport_key.lower())  # fallback safe
-    # Normalize names + truncate time to the hour
 
     print("🔍 Weights structure preview:", json.dumps(weights, indent=2))
     print("🧠 Extracting weights for:", sport_scope_key)
@@ -567,9 +573,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         'Sharp_Prob_Shift',
         'Sharp_Limit_Total'
     ]
-    
-    # Incorrect: local_components = list(component_fields.keys())
-    local_components = component_fields  # ✅ Fix
+    local_components = component_fields  # ✅ corrected
 
 
     
@@ -643,12 +647,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2) if prev_val is not None and val is not None else None
-                                                    if not prev:
-                                                        st.info("🟡 First run — running detection without prior snapshot.")
-                                                        prev = {}
-                                                    
-
-                
+                                                   
 
                     rows.append(entry)
 
