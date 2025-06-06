@@ -1233,7 +1233,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
 
         if 'Blended_Sharp_Score' in df_moves.columns:
-            df_merge_scores = df[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']].drop_duplicates(subset=['Game', 'Market', 'Outcome'])
+            df_merge_scores = df_moves[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']].drop_duplicates()
             summary_df = summary_df.merge(
                 df_merge_scores,
                 on=['Game', 'Market', 'Outcome'],
