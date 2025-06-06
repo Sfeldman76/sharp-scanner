@@ -1533,7 +1533,11 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         sport_key_lower = sport_key_api  # e.g., "basketball_nba" or "baseball_mlb"
 
         if not df_master.empty:
-            df_bt = fetch_backtest_from_master(sport_key=sport_key_api, drive=drive)
+            recover_from_line_history_full(drive)  # optional safety
+            df_master = load_master_sharp_moves(drive)
+            df_bt = fetch_backtest_from_master(sport_key_api, drive)
+
+
 
 
             if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
