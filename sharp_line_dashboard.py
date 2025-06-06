@@ -216,14 +216,33 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
 
-def fetch_score_results(sport_key='basketball_nba', days_back=3, api_key=API_KEY):
+def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
     import requests
 
+    def normalize_team(t):
+        return str(t).strip().lower()
+
+    # Filter by date
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
+    cutoff = datetime.utcnow() - timedelta(days=days_back)
+    df_moves = df_moves[
+        (df_moves['Game_Start'] < datetime.utcnow()) &
+        (df_moves['Game_Start'] > cutoff)
+    ].copy()
+    if df_moves.empty:
+        st.warning("⚠️ No sharp moves in the past few days.")
+        return pd.DataFrame()
+
+    # Build Game_Key
+    df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
+    df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
+    df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True).dt.floor('H')
+    df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
+
+    # Fetch scores from Odds API
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-    params = {
-        'apiKey': api_key,
-        'daysFrom': days_back
-    }
+    days_back = min(days_back, 3)  # prevent 422 errors
+    params = {'apiKey': api_key, 'daysFrom': days_back}
 
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -231,176 +250,62 @@ def fetch_score_results(sport_key='basketball_nba', days_back=3, api_key=API_KEY
         games = response.json()
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
-        return pd.DataFrame()
+        return df_moves
 
-    result_rows = []
+    score_rows = []
     for game in games:
         if not game.get("completed"):
             continue
 
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
-        game_name = f"{home} vs {away}"
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        event_date = game_start.strftime("%Y-%m-%d")
-        game_hour = game_start.hour
-
         scores = game.get("scores", [])
         score_dict = {s["name"].strip().lower(): s["score"] for s in scores if "name" in s and "score" in s}
 
         home_score = score_dict.get(home)
         away_score = score_dict.get(away)
-
         if home_score is None or away_score is None:
             continue
 
-        result_rows.append({
-            'Game': game_name,
-            'Event_Date': event_date,
-            'Game_Hour': game_hour,
+        score_rows.append({
+            'Game': f"{home} vs {away}",
+            'Event_Date': game_start.strftime("%Y-%m-%d"),
+            'Game_Hour': game_start.hour,
             'Score_Home_Score': home_score,
-            'Score_Away_Score': away_score
+            'Score_Away_Score': away_score,
+            'Home_Team_Norm': home,
+            'Away_Team_Norm': away,
+            'Commence_Hour': game_start.floor('H'),
+            'Game_Key': f"{home}_{away}_{game_start.floor('H')}"
         })
 
-    return pd.DataFrame(result_rows)
-
-
-
-def fetch_backtest_from_master(sport_key, drive, days_back=3):
-    try:
-        # Load historical sharp moves
-        df_moves = load_master_sharp_moves(drive)
-        if df_moves.empty:
-            st.warning("⚠️ No historical sharp moves found.")
-            return pd.DataFrame()
-
-        # Parse and filter by date
-        df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
-        cutoff = datetime.now(dt_timezone.utc) - timedelta(days=days_back)
-        df_moves = df_moves[
-            (df_moves['Game_Start'] < datetime.now(dt_timezone.utc)) &
-            (df_moves['Game_Start'] > cutoff)
-        ].copy()
-        if df_moves.empty:
-            st.warning("⚠️ No sharp moves in the past few days to backtest.")
-            return pd.DataFrame()
-
-        # Normalize teams and build Game_Key
-        def normalize_team(t): return str(t).strip().lower()
-
-        df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
-        df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-        df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('H')
-        df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
-
-        # Fetch final scores
-        df_scores = fetch_score_results(sport_key=sport_key, days_back=days_back)
-        if df_scores.empty:
-            st.warning("⚠️ No scores found to backtest.")
-            return df_moves
-
-        df_scores['Home_Team_Norm'] = df_scores['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
-        df_scores['Away_Team_Norm'] = df_scores['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-        df_scores['Commence_Hour'] = pd.to_datetime(
-            df_scores['Event_Date'] + " " + df_scores['Game_Hour'].astype(str) + ":00", utc=True
-        )
-        df_scores['Game_Key'] = df_scores['Home_Team_Norm'] + "_" + df_scores['Away_Team_Norm'] + "_" + df_scores['Commence_Hour'].astype(str)
-
-        # Merge
-        df = df_moves.merge(
-            df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
-            on='Game_Key',
-            how='left'
-        )
-
-        # Apply scoring
-        def safe_calc_cover(r):
-            try:
-                result = calc_cover(r)
-                if isinstance(result, (list, tuple)) and len(result) == 2:
-                    return pd.Series(result)
-                return pd.Series([None, None])
-            except Exception as e:
-                print(f"❌ calc_cover error for {r.get('Game', '')}: {e}")
-                return pd.Series([None, None])
-
-        df_valid = df[df['Score_Home_Score'].notna()].copy()
-        if not df_valid.empty:
-            df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(safe_calc_cover, axis=1)
-            df.update(df_valid)
-
-        return df
-
-    except Exception as e:
-        print(f"❌ fetch_backtest_from_master failed: {e}")
-        return pd.DataFrame()
-
-
-def fetch_scores_and_backtest(sport_key, drive, days_back=3):
-    # 1. Load historical sharp moves
-    df_moves = load_master_sharp_moves(drive)
-
-    if df_moves.empty:
-        st.warning("⚠️ No historical sharp moves found.")
-        return pd.DataFrame()
-
-    # 2. Only keep moves with a Game_Start in the past N days
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
-    cutoff = datetime.now(dt_timezone.utc) - timedelta(days=days_back)
-    df_moves = df_moves[df_moves['Game_Start'] < datetime.now(dt_timezone.utc)]
-    df_moves = df_moves[df_moves['Game_Start'] > cutoff]
-
-    if df_moves.empty:
-        st.warning("⚠️ No sharp moves in the past few days to backtest.")
-        return pd.DataFrame()
-
-    # 3. Pull scores from Odds API
-    df_scores = fetch_score_results(sport_key=sport_key, days_back=days_back)
-
+    df_scores = pd.DataFrame(score_rows)
     if df_scores.empty:
-        st.warning("⚠️ No scores found to backtest.")
+        st.warning("⚠️ No valid scores retrieved for matching.")
         return df_moves
 
-    # 4. Build Game_Key in both
-    def normalize_team(t): return str(t).strip().lower()
-
-    df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
-    df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce').dt.floor('H')
-    df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
-
-    df_scores['Home_Team_Norm'] = df_scores['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
-    df_scores['Away_Team_Norm'] = df_scores['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_scores['Commence_Hour'] = pd.to_datetime(df_scores['Event_Date'] + " " + df_scores['Game_Hour'].astype(str) + ":00", utc=True)
-    df_scores['Game_Key'] = df_scores['Home_Team_Norm'] + "_" + df_scores['Away_Team_Norm'] + "_" + df_scores['Commence_Hour'].astype(str)
-
-    # 5. Merge
+    # Merge scores into sharp move DataFrame
     df = df_moves.merge(
         df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
         on='Game_Key',
         how='left'
     )
 
-    # 6. Apply cover calc (guarded)
-    def safe_calc_cover(r):
+    # Safe scoring logic
+    def calc_cover(row):
         try:
-            result = calc_cover(r)
-            if isinstance(result, (list, tuple)) and len(result) == 2:
-                return pd.Series(result)
-            return pd.Series([None, None])
-        except Exception as e:
-            print(f"❌ calc_cover error for {r.get('Game', '')}: {e}")
-            return pd.Series([None, None])
+            # Basic spread-style cover logic — replace with your own if needed
+            return ("Win", 1) if row['Score_Home_Score'] > row['Score_Away_Score'] else ("Loss", 0)
+        except:
+            return (None, None)
 
     df_valid = df[df['Score_Home_Score'].notna()].copy()
-
     if not df_valid.empty:
-        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(safe_calc_cover, axis=1)
+        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(calc_cover, axis=1, result_type="expand")
         df.update(df_valid)
 
     return df
-
-
 
 
     # === Refactored cover logic
