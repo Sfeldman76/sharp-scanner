@@ -279,16 +279,21 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df_moves['Game_Hour'] = df_moves['Game_Start'].dt.hour
 
     # Merge scores
+    # Overwrite to ensure consistent time anchor from Odds API
     df = df_moves.merge(
         df_results,
-        on=['Game', 'Event_Date', 'Game_Hour'],
-        how='left'
+        on='Game',  # Already lowercased & normalized
+        how='left',
+        suffixes=('', '_score')
     )
+    
+    # Overwrite these directly from df_results to avoid Game_Start issues
+    df['Event_Date'] = df['Event_Date'].fillna(df['Event_Date_score'])
+    df['Game_Hour'] = df['Game_Hour'].fillna(df['Game_Hour_score'])
+    
+    # Drop the temporary merged columns
+    df.drop(columns=[col for col in df.columns if col.endswith('_score')], inplace=True)
 
-    # Check for duplicates and remove if needed
-    if df.columns.duplicated().any():
-        st.warning(f"⚠️ Duplicate columns found after merge: {df.columns[df.columns.duplicated()].tolist()}")
-        df = df.loc[:, ~df.columns.duplicated()]
 
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Event_Date', 'Game_Hour', 'Score_Home_Score', 'Score_Away_Score']].head(10))
