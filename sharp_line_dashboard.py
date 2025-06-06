@@ -1345,7 +1345,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
         df_master = load_master_sharp_moves(drive)
 
         if not df_master.empty:
-            df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+            df_bt = fetch_scores_and_backtest(sport_key_api, df_master, api_key=API_KEY)
+
 
 
 
