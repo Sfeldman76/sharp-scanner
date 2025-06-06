@@ -222,18 +222,19 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
     result_rows = []
     completed_games = 0
-    
+
     for game in score_data:
         if not game.get("completed"):
             continue
-    
+
         completed_games += 1
         game_id = game.get("id")
-        home = game.get("home_team", "").strip().lower()
-        away = game.get("away_team", "").strip().lower()
+        home_team = game.get("home_team", "").strip()
+        away_team = game.get("away_team", "").strip()
+        commence_time = pd.to_datetime(game.get("commence_time"), utc=True)
+
         scores = game.get("scores", [])
         team_scores = {}
-    
         for s in scores:
             try:
                 name = s.get("name", "").strip().lower()
@@ -242,20 +243,24 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
                     team_scores[name] = score
             except Exception as e:
                 print(f"⚠️ Could not parse score from entry: {s} — {e}")
-    
+
+        home = home_team.lower()
+        away = away_team.lower()
+
         if home not in team_scores or away not in team_scores:
             st.warning(f"⚠️ Missing score for: {home=} {away=} vs {team_scores}")
             continue
-    
+
         result_rows.append({
-            'Game_ID': game_id,
-            'Home_Score': team_scores[home],
-            'Away_Score': team_scores[away]
+            'Game': f"{home_team} vs {away_team}".strip().lower(),
+            'Event_Date': commence_time.date().isoformat(),
+            'Game_Hour': commence_time.hour,
+            'Score_Home_Score': team_scores[home],
+            'Score_Away_Score': team_scores[away]
         })
-    
-    # ✅ This should go *after* the loop
-    st.write("📦 Parsed score entries:", pd.DataFrame(result_rows).head())
+
     df_results = pd.DataFrame(result_rows)
+    st.write("📦 Parsed score entries:", df_results.head())
     st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
 
     if df_results.empty:
@@ -263,42 +268,41 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
         return pd.DataFrame()
 
     # === Prepare df_moves ===
-    df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome']).copy()
+    df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome']).copy()
+    df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
 
-    # Time consistency
     df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
-    # Merge with df_results on Game_ID
-    df = df_moves.merge(df_results, on='Game_ID', how='left')
-    # 🔍 Inspect Game_IDs on both sides
-    st.write("🔎 First 5 Game_IDs in df_moves:", df_moves['Game_ID'].dropna().unique()[:5])
-    st.write("🔎 First 5 Game_IDs in df_results:", df_results['Game_ID'].dropna().unique()[:5])
 
-    # Remove duplicate columns if any
-    if df.columns.duplicated().any():
-        st.warning(f"⚠️ Duplicate columns found after merge: {df.columns[df.columns.duplicated()].tolist()}")
-        df = df.loc[:, ~df.columns.duplicated()]
+    df_moves['Event_Date'] = df_moves['Game_Start'].dt.date.astype(str)
+    df_moves['Game_Hour'] = df_moves['Game_Start'].dt.hour
 
-    # Rename score columns for clarity
-    df.rename(columns={
-        'Home_Score': 'Score_Home_Score',
-        'Away_Score': 'Score_Away_Score'
-    }, inplace=True)
+    # Merge using Game + Date + Hour
+    df = df_moves.merge(
+        df_results,
+        on=['Game', 'Event_Date', 'Game_Hour'],
+        how='left'
+    )
 
-    # Optional: Add Game label if missing for reporting
-    if 'Game' not in df.columns and 'Home_Team' in df_moves.columns and 'Away_Team' in df_moves.columns:
-        df['Game'] = df['Home_Team'].str.title() + ' vs ' + df['Away_Team'].str.title()
-
-    # Debug print
     st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
     st.write(df[['Game', 'Score_Home_Score', 'Score_Away_Score']].head(10))
 
+    # === Safe calc_cover
+    def safe_calc_cover(r):
+        try:
+            result = calc_cover(r)
+            if isinstance(result, (list, tuple)) and len(result) == 2:
+                return pd.Series(result)
+            return pd.Series([None, None])
+        except Exception as e:
+            print(f"❌ calc_cover() error for row: {r.get('Game', '')} – {e}")
+            return pd.Series([None, None])
 
-
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(calc_cover, axis=1)
+    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(safe_calc_cover, axis=1)
 
     return df
+
 
 
     # === Refactored cover logic
