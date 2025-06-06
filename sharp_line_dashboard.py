@@ -1131,9 +1131,10 @@ def render_scanner_tab(label, sport_key, container, drive):
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
-        # === Fetch current + prior snapshot
+        # === Fetch odds + previous snapshot
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
+
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
@@ -1143,7 +1144,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-        # === Detect sharp moves
+        # === Run sharp detection
         confidence_weights = market_component_win_rates.get(sport_key_lower, {})
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
@@ -1157,95 +1158,64 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
         df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
-        # === Backtest recent sharp moves
+
+        # === Load model if possible
+        model = load_model_from_drive(drive)
+
+        # === Early scoring BEFORE overwrite
+        if model is not None:
+            try:
+                df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
+            except Exception as e:
+                st.warning(f"⚠️ Could not apply model scoring early: {e}")
+
+        # === Backtest
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
-
-
-
-        # === Backtest recent sharp moves
         if not df_bt.empty:
             merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             available = [col for col in confidence_cols if col in df_moves_raw.columns]
-        
+
             df_bt_merged = df_bt.merge(
                 df_moves_raw[merge_cols + available].drop_duplicates(),
                 on=merge_cols,
                 how='left',
                 indicator=True
             )
-        
-            st.write(f"🧪 {label} merge result:", df_bt_merged['_merge'].value_counts())
-        
-            # Fill confidence columns if merge failed on some rows
+            st.write(f"🔍 {label} merge result:", df_bt_merged['_merge'].value_counts())
+
             for col in available:
                 if col in df_bt_merged.columns and col in df_moves_raw.columns:
                     df_bt_merged[col] = df_bt_merged[col].fillna(df_moves_raw[col])
-        
+
             df_moves = df_bt_merged.drop(columns=['_merge'])
         else:
             st.info("ℹ️ No backtest results found — skipped.")
 
-        if not df_bt.empty:
-            merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-            confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
-            available = [col for col in confidence_cols if col in df_moves_raw.columns]
-
-           # Merge confidence columns into score results
-            df_bt_scored = df_bt.merge(
-                df_moves_raw[merge_cols + available].drop_duplicates(),
-                on=merge_cols,
-                how='left'
-            )
-            
-            # Fill back any confidence values that were dropped
-            for col in available:
-                if col in df_bt_scored.columns and col in df_moves_raw.columns:
-                    df_bt_scored[col] = df_bt_scored[col].fillna(df_moves_raw[col])
-            
-            df_moves = df_bt_scored
-            # 🔁 Forward-fill any missing confidence values from the original df_moves_raw
-            for col in ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']:
-                if col in df_moves.columns and col in df_moves_raw.columns:
-                    df_moves[col] = df_moves[col].fillna(df_moves_raw[col])
-
-            if df_moves['Score_Home_Score'].notna().any():
-                st.success("✅ Backtest succeeded — score data added.")
-            else:
-                st.info("ℹ️ No completed sharp picks yet.")
-        else:
-            st.info("ℹ️ No backtest results found — skipped.")
-
-        # === Train or load sharp model
-        model = None
+        # === If enough sharp picks with scores, retrain model
         if 'SHARP_HIT_BOOL' in df_moves.columns and df_moves['SHARP_HIT_BOOL'].notna().sum() >= 5:
             model = train_sharp_win_model(df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1])
+            save_model_to_drive(model, drive)
+            save_model_timestamp(drive)
         else:
             st.warning("⚠️ Not enough completed sharp picks to train model.")
 
-        model = model or load_model_from_drive(drive)
-        if model is None or should_retrain_model(drive):
-            model_input = df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1].copy()
-            if not model_input.empty and 'SHARP_HIT_BOOL' in model_input.columns:
-                model = train_sharp_win_model(model_input)
-                save_model_to_drive(model, drive)
-                save_model_timestamp(drive)
-
-        # === Apply scoring
+        # === Final scoring pass after model refresh
         if model is not None:
             try:
                 df_moves = apply_blended_sharp_score(df_moves, model)
             except Exception as e:
-                st.warning(f"⚠️ Could not apply model scoring: {e}")
+                st.warning(f"⚠️ Final model scoring failed: {e}")
 
-        # === Fill in any _new fields, then clean
+        # === Fix any _new columns from Excel merge formats
         for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
             if f'{col}_new' in df_moves.columns:
                 df_moves[col] = df_moves[col].fillna(df_moves[f'{col}_new'])
                 df_moves.drop(columns=[f'{col}_new'], inplace=True)
 
-        # === Save to master (AFTER scoring)
-        append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+        # === Save to master
+        if not df_moves.empty:
+            append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
         # === Save audit log
         if not df_audit.empty:
@@ -1270,6 +1240,9 @@ def render_scanner_tab(label, sport_key, container, drive):
                 new_file.Upload()
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
+
+
+
 
     
 
