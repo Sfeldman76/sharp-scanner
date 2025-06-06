@@ -1184,8 +1184,7 @@ def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOL
 
 
 def render_scanner_tab(label, sport_key, container, drive):
-    st.write(f"🚀 Starting sharp scan for: {label}")
-    st.write("✅ Returning df_moves with shape:", df_moves.shape)
+    
 
     global market_component_win_rates
     df_master = load_master_sharp_moves(drive)
