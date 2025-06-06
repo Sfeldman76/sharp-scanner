@@ -244,8 +244,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         games = response.json()
-        st.write("✅ Odds API scores pulled:", len(games))  # ✅ now it's valid
-
+        
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
         return df_moves
@@ -280,14 +279,11 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         })
 
     df_scores = pd.DataFrame(score_rows)
-    st.write("✅ Parsed scores with final results:", df_scores.shape)
-    st.dataframe(df_scores.head())
 
     if df_scores.empty:
         st.warning("⚠️ No valid scores retrieved for matching.")
         return df_moves
-    st.write("✅ Sharp picks with Game Keys:", df_moves.shape)
-    st.dataframe(df_moves[['Game', 'Game_Key']].head())
+    
 
     df = df_moves.merge(
         df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
@@ -1340,6 +1336,31 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
        # Now load master AFTER optional patch
         sport_key_lower = sport_key_api
         df_master = load_master_sharp_moves(drive)
+        # Build Game_Key for df_master
+        if 'Game_Key' not in df_master.columns and all(col in df_master.columns for col in ['Game', 'Game_Start']):
+            df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+            df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+            df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+            df_master['Game_Key'] = (
+                df_master['Home_Team_Norm'] + "_" +
+                df_master['Away_Team_Norm'] + "_" +
+                df_master['Commence_Hour'].astype(str)
+            )
+        
+        # Load scores from the past N days via Odds API
+        df_scored = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
+        
+        # Only keep scores for games with results
+        df_scored = df_scored[df_scored['Score_Home_Score'].notna()]
+        
+        # Merge back into master — only overwrite scores where Game_Key matches
+        df_master = df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore')
+        df_master = df_master.merge(
+            df_scored[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
+            on='Game_Key',
+            how='left'
+        )
+
 
         if not df_master.empty:
             df_bt = fetch_scores_and_backtest(sport_key_api, df_master, api_key=API_KEY)
