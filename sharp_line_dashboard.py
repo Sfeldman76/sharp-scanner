@@ -1195,9 +1195,9 @@ def render_scanner_tab(label, sport_key, container, drive):
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
 
         if not prev:
-            st.info("🟡 First run detected — saving snapshot and skipping detection.")
-            upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
-            return pd.DataFrame()
+            st.info("🟡 First run — no snapshot found. Running detection anyway.")
+            prev = {}  # allow processing to continue with empty previous odds
+
 
         if not live or not isinstance(live, list) or len(live) == 0:
             st.warning(f"⚠️ No live odds returned for {label}.")
