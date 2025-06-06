@@ -326,6 +326,69 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
     except Exception as e:
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
+def fetch_backtest_from_master(sport_key, drive, days_back=5):
+    df_moves = load_master_sharp_moves(drive)
+
+    if df_moves.empty:
+        st.warning("⚠️ No historical sharp moves found.")
+        return pd.DataFrame()
+
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
+    cutoff = datetime.now(dt_timezone.utc) - timedelta(days=days_back)
+    df_moves = df_moves[
+        (df_moves['Game_Start'] < datetime.now(dt_timezone.utc)) &
+        (df_moves['Game_Start'] > cutoff)
+    ]
+
+    if df_moves.empty:
+        st.warning("⚠️ No sharp moves in the past few days to backtest.")
+        return pd.DataFrame()
+
+    df_scores = fetch_score_results(sport_key=sport_key, days_back=days_back)
+
+    if df_scores.empty:
+        st.warning("⚠️ No scores found to backtest.")
+        return df_moves
+
+    def normalize_team(t): return str(t).strip().lower()
+
+    # Build Game_Key in df_moves
+    df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
+    df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
+    df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('H')
+    df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
+
+    # Build Game_Key in df_scores
+    df_scores['Home_Team_Norm'] = df_scores['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
+    df_scores['Away_Team_Norm'] = df_scores['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
+    df_scores['Commence_Hour'] = pd.to_datetime(
+        df_scores['Event_Date'] + " " + df_scores['Game_Hour'].astype(str) + ":00",
+        utc=True
+    )
+    df_scores['Game_Key'] = df_scores['Home_Team_Norm'] + "_" + df_scores['Away_Team_Norm'] + "_" + df_scores['Commence_Hour'].astype(str)
+
+    df = df_moves.merge(
+        df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
+        on='Game_Key',
+        how='left'
+    )
+
+    def safe_calc_cover(r):
+        try:
+            result = calc_cover(r)
+            if isinstance(result, (list, tuple)) and len(result) == 2:
+                return pd.Series(result)
+            return pd.Series([None, None])
+        except Exception as e:
+            print(f"❌ calc_cover error for {r.get('Game', '')}: {e}")
+            return pd.Series([None, None])
+
+    df_valid = df[df['Score_Home_Score'].notna()].copy()
+    if not df_valid.empty:
+        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(safe_calc_cover, axis=1)
+        df.update(df_valid)
+
+    return df
 
 def fetch_scores_and_backtest(sport_key, drive, days_back=5):
     # 1. Load historical sharp moves
