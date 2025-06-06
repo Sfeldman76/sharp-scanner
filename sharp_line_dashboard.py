@@ -1012,7 +1012,7 @@ for sport_label, sport_key in {"NBA": SPORTS["NBA"], "MLB": SPORTS["MLB"]}.items
                 df_updated[col] = df_updated[col].fillna(df_updated[f'{col}_new'])
                 df_updated.drop(columns=[f'{col}_new'], inplace=True)
 
-         append_to_master_csv_on_drive(df_updated, "sharp_moves_master.csv", drive, FOLDER_ID)
+        append_to_master_csv_on_drive(df_updated, "sharp_moves_master.csv", drive, FOLDER_ID)
 
 # === Initialize Google Drive once ===
 
