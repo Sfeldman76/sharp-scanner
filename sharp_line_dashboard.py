@@ -978,6 +978,42 @@ def apply_blended_sharp_score(df, model):
 
 
 st.set_page_config(layout="wide")
+# === Auto-update sharp master results (NBA + MLB) ===
+for sport_label, sport_key in {"NBA": SPORTS["NBA"], "MLB": SPORTS["MLB"]}.items():
+    df_master = load_master_sharp_moves(drive)
+
+    if df_master.empty or 'Sport' not in df_master.columns:
+        continue
+
+    df_filtered = df_master[df_master['Sport'].str.lower() == sport_label.lower()]
+    if df_filtered.empty:
+        continue
+
+    df_scored = fetch_scores_and_backtest(sport_key, df_filtered, api_key=API_KEY)
+
+    if not df_scored.empty and 'Score_Home_Score' in df_scored.columns:
+        df_scored = df_scored[df_scored['Score_Home_Score'].notna()]
+        if df_scored.empty:
+            continue
+
+        # Drop old results before merge
+        df_master = df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'], errors='ignore')
+
+        # Merge results only on matching rows
+        df_updated = df_master.merge(
+            df_scored[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']],
+            on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+            how='left',
+            suffixes=('', '_new')
+        )
+
+        for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
+            if f'{col}_new' in df_updated.columns:
+                df_updated[col] = df_updated[col].fillna(df_updated[f'{col}_new'])
+                df_updated.drop(columns=[f'{col}_new'], inplace=True)
+
+        append_to_master_csv_on_drive(df_updated, "sharp_moves_master.csv", d
+
 # === Initialize Google Drive once ===
 
 
