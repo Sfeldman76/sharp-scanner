@@ -1157,6 +1157,10 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
         df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
+        # === Backtest recent sharp moves
+        df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+
+
 
         # === Backtest recent sharp moves
         if not df_bt.empty:
