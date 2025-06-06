@@ -1251,9 +1251,11 @@ def render_scanner_tab(label, sport_key, container, drive):
             summary_df = summary_df[summary_df['Game_Start'] > now_utc]
             eastern = pytz_timezone('US/Eastern')
             summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(
-                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if x.tzinfo else
-                          pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p')
+                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
+                else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
+                else ""
             )
+
         
       
         
