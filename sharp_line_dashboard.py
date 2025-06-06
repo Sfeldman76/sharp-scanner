@@ -506,12 +506,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ✅ SAFELY BUILD previous_map even if previous is empty or None
-    if previous is None or not isinstance(previous, (dict, list)) or len(previous) == 0:
-        st.info("🟡 No previous snapshot — proceeding with empty previous_map.")
-        previous_map = {}
-    else:
-        previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous
+    
 
     # === Extract weights
     sport_scope_key = {
@@ -594,20 +589,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     if val is None:
                         continue
 
-                    # Previous value lookup
-                    if prev_game:
-                        for prev_b in prev_game.get('bookmakers', []):
-                            if prev_b['key'] == book_key:
-                                for prev_m in prev_b.get('markets', []):
-                                    if prev_m['key'] == mtype:
-                                        for prev_o in prev_m.get('outcomes', []):
-                                            if normalize_label(prev_o['name']) == label:
-                                                prev_val = prev_o.get('point') if mtype != 'h2h' else prev_o.get('price')
-                                                if prev_val is not None:
-                                                    entry['Old Value'] = prev_val
-                                                    entry['Delta'] = round(val - prev_val, 2) if prev_val is not None and val is not None else None
-                                                   
-
+              
                     rows.append(entry)
 
                     # Track sharp data if limit is present
