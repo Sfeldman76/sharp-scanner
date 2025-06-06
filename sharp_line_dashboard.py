@@ -1183,88 +1183,63 @@ def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOL
 
 
 def render_scanner_tab(label, sport_key, container, drive):
-    
-
     global market_component_win_rates
-    df_master = load_master_sharp_moves(drive)
-    
+    timestamp = pd.Timestamp.utcnow()
+    sport_key_lower = sport_key.lower()
+
     with container:
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
 
-        if not prev:
-            st.info("🟡 First run — no snapshot found. Running detection anyway.")
-            prev = {}  # allow processing to continue with empty previous odds
-
-
         if not live or not isinstance(live, list) or len(live) == 0:
-            st.warning(f"⚠️ No live odds returned for {label}.")
+            st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
 
-        # Save live snapshot
+        if not prev:
+            st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
+            prev = {}
+
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-        sport_key_lower = sport_key.lower()
         confidence_weights = market_component_win_rates.get(sport_key_lower, {})
         if not confidence_weights:
             st.warning(f"⚠️ No learned weights found for {sport_key_lower} — fallback weights will apply.")
 
-        # Run detection
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
+
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
-            st.error("❌ detect_sharp_moves() did NOT return Enhanced_Sharp_Confidence_Score!")
-            st.stop()
-        else:
-            st.success("✅ detect_sharp_moves() includes Enhanced_Sharp_Confidence_Score")
-        # Add timestamp + label
-        timestamp = pd.Timestamp.utcnow()
+            st.error("❌ detect_sharp_moves() missing Enhanced_Sharp_Confidence_Score")
+            return pd.DataFrame()
+
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
-
-        # Deduplicate before model scoring
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome', 'Bookmaker'])
-        
-        
-        if df_moves.empty:
-            st.error("❌ df_moves is unexpectedly EMPTY before backtest — investigate filters.")
-            st.stop()
-        
-        # Run backtest (safely)
-        df_bt = fetch_scores_and_backtest(df_moves, sport_key)
+
+        df_bt = fetch_scores_and_backtest(sport_key, drive)
         if not df_bt.empty:
             df_moves = df_bt
             st.success("✅ Backtest succeeded — df_moves updated.")
-        else:
-            st.warning("⚠️ Backtest returned empty — keeping original df_moves.")
 
-        
-        # ✅ Restore 'Game' and 'Game_ID' safely BEFORE attempting merge
-        restore_keys = ['Game', 'Market', 'Outcome']
+        # Restore Game and Game_ID if dropped
         if 'Game' not in df_moves.columns and 'Game_ID' in df_moves.columns:
-            if all(k in df_moves_raw.columns for k in ['Game_ID', 'Game']):
-                df_moves = df_moves.merge(
-                    df_moves_raw[['Game_ID', 'Game']].drop_duplicates(),
-                    on='Game_ID',
-                    how='left'
-                )
-        
-        if 'Game_ID' not in df_moves.columns and all(k in df_moves.columns for k in restore_keys):
-            if all(k in df_moves_raw.columns for k in restore_keys + ['Game_ID']):
-                df_moves = df_moves.merge(
-                    df_moves_raw[restore_keys + ['Game_ID']].drop_duplicates(),
-                    on=restore_keys,
-                    how='left'
-                )
-        
-                    
-        # ✅ Save moves if available
+            df_moves = df_moves.merge(
+                df_moves_raw[['Game_ID', 'Game']].drop_duplicates(),
+                on='Game_ID',
+                how='left'
+            )
+        if 'Game_ID' not in df_moves.columns and 'Game' in df_moves.columns:
+            df_moves = df_moves.merge(
+                df_moves_raw[['Game', 'Market', 'Outcome', 'Game_ID']].drop_duplicates(),
+                on=['Game', 'Market', 'Outcome'],
+                how='left'
+            )
+
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
-        # Save audit
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             try:
@@ -1274,109 +1249,55 @@ def render_scanner_tab(label, sport_key, container, drive):
                 df_existing = pd.DataFrame()
                 if file_list:
                     file_drive = file_list[0]
-                    try:
-                        existing_data = StringIO(file_drive.GetContentString())
-                        df_existing = pd.read_csv(existing_data)
-                        file_drive.Delete()
-                    except Exception as e:
-                        print(f"⚠️ Could not read/delete previous line history file: {e}")
-
+                    existing_data = StringIO(file_drive.GetContentString())
+                    df_existing = pd.read_csv(existing_data)
+                    file_drive.Delete()
                 df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
-                csv_buffer = StringIO()
-                df_combined.to_csv(csv_buffer, index=False)
-                csv_buffer.seek(0)
-
+                buffer = StringIO()
+                df_combined.to_csv(buffer, index=False)
+                buffer.seek(0)
                 new_file = drive.CreateFile({'title': "line_history_master.csv", "parents": [{"id": FOLDER_ID}]})
-                new_file.SetContentString(csv_buffer.getvalue())
+                new_file.SetContentString(buffer.getvalue())
                 new_file.Upload()
-                print(f"✅ Uploaded line_history_master.csv with {len(df_combined)} rows.")
             except Exception as e:
-                st.error(f"❌ Failed to append to line history: {e}")
+                st.error(f"❌ Failed to update line history: {e}")
 
-        # Train or load model
         model = load_model_from_drive(drive)
         if model is None or should_retrain_model(drive):
-            print("🔁 Retraining sharp win model...")
-            if df_moves.empty or 'SHARP_SIDE_TO_BET' not in df_moves.columns:
-                st.warning("⚠️ No sharp picks detected to train on.")
-                return df_moves
+            if 'SHARP_SIDE_TO_BET' in df_moves.columns:
+                model_input = df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1].copy()
+                if 'SHARP_HIT_BOOL' in model_input.columns and not model_input.empty:
+                    model = train_sharp_win_model(model_input)
+                    save_model_to_drive(model, drive)
+                    save_model_timestamp(drive)
 
-            model_input = df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1].copy()
-            if model_input.empty or 'SHARP_HIT_BOOL' not in model_input.columns:
-                st.warning("⚠️ No backtest results available — skipping model training.")
-                return df_moves
-
-            model = train_sharp_win_model(model_input)
-            save_model_to_drive(model, drive)
-            save_model_timestamp(drive)
-        else:
-            print("✅ Using cached sharp win model.")
-        if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns:
+        if model is not None:
             try:
-                # Pick best merge keys
-                merge_cols = ['Game_ID', 'Market', 'Outcome'] if 'Game_ID' in df_moves.columns else ['Game', 'Market', 'Outcome']
-                if all(col in df_moves_raw.columns for col in merge_cols + ['Enhanced_Sharp_Confidence_Score']):
-                    df_moves = df_moves.merge(
-                        df_moves_raw[merge_cols + ['Enhanced_Sharp_Confidence_Score']].drop_duplicates(),
-                        on=merge_cols,
-                        how='left'
-                    )
+                df_moves = apply_blended_sharp_score(df_moves, model)
             except Exception as e:
-                st.warning(f"⚠️ Could not merge Enhanced_Sharp_Confidence_Score: {e}")
+                st.warning(f"⚠️ Could not apply model scoring: {e}")
 
-        # Final model scoring
-        df_moves = apply_blended_sharp_score(df_moves, model)
-
-        return df_moves
-
-
-
-      
-
-        # === Sharp Summary
-     
-        # === Sharp Summary
+        # === Sharp Summary Table
         st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
-        
-        # 🔁 Merge model predictions
         if 'Blended_Sharp_Score' in df_moves.columns:
             summary_df = summary_df.merge(
                 df_moves[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']],
-                on=['Game', 'Market', 'Outcome'],
-                how='left'
+                on=['Game', 'Market', 'Outcome'], how='left'
             )
-        
-        # 🔁 Merge Game_Start from df_moves to summary_df
         if 'Game_Start' in df_moves.columns:
             summary_df = summary_df.merge(
                 df_moves[['Game', 'Market', 'Outcome', 'Game_Start']].drop_duplicates(),
-                on=['Game', 'Market', 'Outcome'],
-                how='left'
+                on=['Game', 'Market', 'Outcome'], how='left'
             )
-        
-        if 'Game_Start' in summary_df.columns:
-            summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
-        
-            # ✅ Filter out games that have already started
             now_utc = datetime.now(pytz.utc)
+            summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
             summary_df = summary_df[summary_df['Game_Start'] > now_utc]
-        
-            # Convert Game_Start to EST for display
             eastern = pytz_timezone('US/Eastern')
-            summary_df['Game_Time_EST'] = summary_df['Game_Start'].apply(
-                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo else
-                          pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) else ""
+            summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(
+                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if x.tzinfo else
+                          pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p')
             )
-            summary_df['Date + Time (EST)'] = summary_df['Game_Time_EST']
-        else:
-            st.warning("⚠️ 'Game_Start' missing — no time filtering or EST display will apply.")
-            summary_df['Date + Time (EST)'] = None
-
-        
-        # 🧹 Drop outdated columns
         summary_df.drop(columns=[col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns], inplace=True)
-        
-        # 🏷️ Rename for wrapping
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
@@ -1387,112 +1308,64 @@ def render_scanner_tab(label, sport_key, container, drive):
             'Move_From_Open_Sharp': 'Sharp\nMove',
             'SharpBetScore': 'Sharp\nBet\nScore',
             'Enhanced_Sharp_Confidence_Score': 'Enhanced\nConf.\nScore',
-          
         }, inplace=True)
-        
-        # 🔽 Market filter (AFTER filtering out old games)
+
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
-        
-        # 📊 Column setup
-        frozen_cols = ['Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide']
-        scroll_cols = [
-            'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Sharp\nBet\nScore', 'Enhanced\nConf.\nScore']
-        final_cols = frozen_cols + scroll_cols
-        available_cols = [col for col in final_cols if col in filtered_df.columns]
-        sort_col = 'Date\n+ Time (EST)' if 'Date\n+ Time (EST)' in filtered_df.columns else available_cols[-1]
-        
-        # 📋 Display
-        st.dataframe(
-            filtered_df[available_cols].sort_values(by=sort_col, ascending=True, na_position='last'),
-            use_container_width=True
-        )
 
+        view_cols = ['Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
+                     'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
+                     'Sharp\nBet\nScore', 'Enhanced\nConf.\nScore']
+        st.dataframe(filtered_df[[col for col in view_cols if col in filtered_df.columns]].sort_values(
+            by='Date\n+ Time (EST)', na_position='last'), use_container_width=True)
 
-
-        # === Odds snapshot (pivoted, with limits, highlighted best lines)
-        #=== Odds snapshot (pivoted, with limits, highlighted best lines)
-        raw_odds_table = []
+        # === Live Odds Pivot Table
+        st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
+        odds_rows = []
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
-            commence = game.get("commence_time")
-            game_start = pd.to_datetime(commence) if commence else pd.NaT
-        
+            game_start = pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT
             for book in game.get("bookmakers", []):
-                book_title = book["title"]
                 for market in book.get("markets", []):
-                    mtype = market.get("key")
-                    for outcome in market.get("outcomes", []):
-                        price = outcome.get("point") if mtype != "h2h" else outcome.get("price")
-        
-                        raw_odds_table.append({
-                            'Event_Date': game_start.strftime("%Y-%m-%d") if pd.notnull(game_start) else "",
-                            'Game_Start': game_start,
+                    for o in market.get("outcomes", []):
+                        price = o.get('point') if market['key'] != 'h2h' else o.get('price')
+                        odds_rows.append({
                             "Game": game_name,
-                            "Market": mtype,
-                            "Outcome": outcome["name"],
-                            "Bookmaker": book_title,
+                            "Market": market['key'],
+                            "Outcome": o["name"],
+                            "Bookmaker": book["title"],
                             "Value": price,
-                            "Limit": outcome.get("bet_limit", 0)
+                            "Limit": o.get("bet_limit", 0),
+                            "Game_Start": game_start
                         })
-        
-        df_odds_raw = pd.DataFrame(raw_odds_table)
-        
-        # === Safe fallback if 'Game_Start' was entirely missing
-        if 'Game_Start' not in df_odds_raw.columns:
-            df_odds_raw['Game_Start'] = pd.NaT
-        
+
+        df_odds_raw = pd.DataFrame(odds_rows)
         if not df_odds_raw.empty:
-            st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
-        
-            import math
-            def safe_format_value_limit(row):
-                try:
-                    val = float(row['Value'])
-                    lim = int(row['Limit']) if pd.notnull(row['Limit']) and not math.isnan(row['Limit']) else 0
-                    return f"{round(val, 1)} ({lim})"
-                except:
-                    return ""
-        
-            df_odds_raw['Value_Limit'] = df_odds_raw.apply(safe_format_value_limit, axis=1)
-        
-            
-            eastern = pytz_timezone('US/Eastern')
-            
-            df_odds_raw['Game_Time_EST'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
-                lambda dt: dt.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(dt) and dt.tzinfo else
-                           pd.to_datetime(dt).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(dt) else ""
+            df_odds_raw['Value_Limit'] = df_odds_raw.apply(
+                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Value']) else "",
+                axis=1
             )
-            
-            df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Time_EST']
-        
-        
-            df_combined_display = df_odds_raw.pivot_table(
+            df_odds_raw['Date + Time (EST)'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
+                lambda x: x.tz_localize('UTC').tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
+                if pd.notnull(x) else ""
+            )
+            df_display = df_odds_raw.pivot_table(
                 index=["Date + Time (EST)", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
 
-
-
-            # List of sharp books to highlight
             sharp_books = ['Pinnacle', 'Bookmaker', 'BetOnline']
-
-            # Highlight sharp book columns with a light green background
-            # Highlight columns if their name is in sharp_books
-            def highlight_sharp_columns(df):
+            def highlight_sharp(df):
                 styles = pd.DataFrame('', index=df.index, columns=df.columns)
                 for col in df.columns:
                     if col in sharp_books:
                         styles[col] = 'background-color: #d0f0c0; color: black'
                 return styles
-            st.dataframe(
-                df_combined_display.style.apply(highlight_sharp_columns, axis=None),
-                use_container_width=True
-            )
+
+            st.dataframe(df_display.style.apply(highlight_sharp, axis=None), use_container_width=True)
 
         return df_moves
 
