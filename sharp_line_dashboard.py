@@ -266,7 +266,7 @@ def fetch_score_results(sport_key='basketball_nba', days_back=3, api_key=API_KEY
 
 
 
-def fetch_backtest_from_master(sport_key, drive, days_back=5):
+def fetch_backtest_from_master(sport_key, drive, days_back=3):
     try:
         # Load historical sharp moves
         df_moves = load_master_sharp_moves(drive)
