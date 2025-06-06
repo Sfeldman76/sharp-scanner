@@ -229,12 +229,15 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
 
         completed_games += 1
         game_id = game.get("id")
-        home_team = game.get("home_team", "").strip()
-        away_team = game.get("away_team", "").strip()
-        commence_time = pd.to_datetime(game.get("commence_time"), utc=True)
+        game_time = pd.to_datetime(game.get("commence_time"), utc=True)
+        game_hour = game_time.hour
+        event_date = game_time.strftime("%Y-%m-%d")
 
+        home = game.get("home_team", "").strip().lower()
+        away = game.get("away_team", "").strip().lower()
         scores = game.get("scores", [])
         team_scores = {}
+
         for s in scores:
             try:
                 name = s.get("name", "").strip().lower()
@@ -244,51 +247,53 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
             except Exception as e:
                 print(f"⚠️ Could not parse score from entry: {s} — {e}")
 
-        home = home_team.lower()
-        away = away_team.lower()
-
         if home not in team_scores or away not in team_scores:
             st.warning(f"⚠️ Missing score for: {home=} {away=} vs {team_scores}")
             continue
 
         result_rows.append({
-            'Game': f"{home_team} vs {away_team}".strip().lower(),
-            'Event_Date': commence_time.date().isoformat(),
-            'Game_Hour': commence_time.hour,
+            'Game': f"{home} vs {away}",
+            'Event_Date': event_date,
+            'Game_Hour': game_hour,
             'Score_Home_Score': team_scores[home],
             'Score_Away_Score': team_scores[away]
         })
 
     df_results = pd.DataFrame(result_rows)
-    st.write("📦 Parsed score entries:", df_results.head())
     st.write(f"✅ Completed games in API: {completed_games}, Parsed: {len(df_results)}")
+    st.write("📦 Parsed score entries:", df_results.head())
 
     if df_results.empty:
-        st.warning("⚠️ No parsed scores matched your games, even though API reported completed games.")
+        st.warning("⚠️ No parsed scores matched your games.")
         return pd.DataFrame()
 
-    # === Prepare df_moves ===
-    df_moves = df_moves.drop_duplicates(subset=['Game', 'Market', 'Outcome']).copy()
-    df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
-
-    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], errors='coerce', utc=True)
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], errors='coerce', utc=True)
+    # Prep df_moves
+    df_moves = df_moves.drop_duplicates(subset=['Game_ID', 'Market', 'Outcome']).copy()
+    df_moves['Snapshot_Timestamp'] = pd.to_datetime(df_moves['Snapshot_Timestamp'], utc=True, errors='coerce')
+    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
     df_moves = df_moves[df_moves['Snapshot_Timestamp'] < df_moves['Game_Start']]
 
-    df_moves['Event_Date'] = df_moves['Game_Start'].dt.date.astype(str)
+    # Normalize
+    df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
+    df_moves['Event_Date'] = df_moves['Game_Start'].dt.strftime("%Y-%m-%d")
     df_moves['Game_Hour'] = df_moves['Game_Start'].dt.hour
 
-    # Merge using Game + Date + Hour
+    # Merge scores
     df = df_moves.merge(
         df_results,
         on=['Game', 'Event_Date', 'Game_Hour'],
         how='left'
     )
 
-    st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
-    st.write(df[['Game', 'Score_Home_Score', 'Score_Away_Score']].head(10))
+    # Check for duplicates and remove if needed
+    if df.columns.duplicated().any():
+        st.warning(f"⚠️ Duplicate columns found after merge: {df.columns[df.columns.duplicated()].tolist()}")
+        df = df.loc[:, ~df.columns.duplicated()]
 
-    # === Safe calc_cover
+    st.write("🔍 After merge — % missing scores:", df['Score_Home_Score'].isna().mean())
+    st.write(df[['Game', 'Event_Date', 'Game_Hour', 'Score_Home_Score', 'Score_Away_Score']].head(10))
+
+    # Apply cover calc
     def safe_calc_cover(r):
         try:
             result = calc_cover(r)
@@ -302,6 +307,7 @@ def fetch_scores_and_backtest(df_moves, sport_key='baseball_mlb', days_back=3, a
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df.apply(safe_calc_cover, axis=1)
 
     return df
+
 
 
 
