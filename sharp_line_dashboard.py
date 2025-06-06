@@ -1399,16 +1399,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
        # Now load master AFTER optional patch
         sport_key_lower = sport_key_api
         df_master = load_master_sharp_moves(drive)
-        # Build Game_Key for df_master
-        if 'Game_Key' not in df_master.columns and all(col in df_master.columns for col in ['Game', 'Game_Start']):
-            df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-            df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-            df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
-            df_master['Game_Key'] = (
-                df_master['Home_Team_Norm'] + "_" +
-                df_master['Away_Team_Norm'] + "_" +
-                df_master['Commence_Hour'].astype(str)
-            )
+       
         
         # Load scores from the past N days via Odds API
         df_scored = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
@@ -1428,7 +1419,22 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, df_master,
               if col in df_scored.columns and col in df_master.columns]
         value_cols = [col for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']
                       if col in df_scored.columns]
-         # 🛡️ Defensive check for missing keys
+        # === 🛡️ FORCE 'Game_Key' CREATION IN df_master if missing
+        if 'Game_Key' not in df_master.columns:
+            if all(col in df_master.columns for col in ['Game', 'Game_Start']):
+                df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+                df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+                df_master['Game_Key'] = (
+                    df_master['Home_Team_Norm'] + "_" +
+                    df_master['Away_Team_Norm'] + "_" +
+                    df_master['Commence_Hour'].astype(str)
+                )
+            else:
+                st.error("❌ 'Game_Key' missing and cannot be created (requires 'Game' and 'Game_Start')")
+                return
+                
+        # 🛡️ Defensive check for missing keys
         missing_keys_master = [col for col in merge_keys if col not in df_master.columns]
         missing_keys_scored = [col for col in merge_keys if col not in df_scored.columns]
 
