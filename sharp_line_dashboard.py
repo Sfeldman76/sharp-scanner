@@ -508,14 +508,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         'NBA': 'basketball_nba'
     }.get(sport_key.upper(), sport_key.lower())  # fallback safe
     # Normalize names + truncate time to the hour
-    def normalize_team(t): return str(t).strip().lower()
-    
-    df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
-    df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce').dt.floor('H')
-    df_moves['Game_Key'] = df_moves['Home_Team_Norm'] + "_" + df_moves['Away_Team_Norm'] + "_" + df_moves['Commence_Hour'].astype(str)
 
-    
     print("🔍 Weights structure preview:", json.dumps(weights, indent=2))
     print("🧠 Extracting weights for:", sport_scope_key)
     confidence_weights = weights.get(sport_scope_key, {})
