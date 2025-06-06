@@ -1129,10 +1129,11 @@ def render_scanner_tab(label, sport_key, container, drive):
     sport_key_lower = sport_key.lower()
 
     with container:
-        # === Fetch odds + previous snapshot
+        st.subheader(f"📡 Scanning {label} Sharp Signals")
+
+        # === Fetch current + prior snapshot
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
-
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
@@ -1142,16 +1143,13 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-        # === Confidence weights
-        confidence_weights = market_component_win_rates.get(sport_key_lower, {})
-        if not confidence_weights:
-            st.warning(f"⚠️ No learned weights found for {sport_key_lower} — fallback weights will apply.")
-
         # === Detect sharp moves
+        confidence_weights = market_component_win_rates.get(sport_key_lower, {})
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
+
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
             st.error("❌ detect_sharp_moves() missing Enhanced_Sharp_Confidence_Score")
             return pd.DataFrame()
@@ -1160,42 +1158,37 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Sport'] = label
         df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
 
-        # === Backtest and re-merge confidence
+        # === Backtest recent sharp moves
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
         if not df_bt.empty:
             merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             available = [col for col in confidence_cols if col in df_moves_raw.columns]
+
             df_bt = df_bt.merge(df_moves_raw[merge_cols + available].drop_duplicates(), on=merge_cols, how='left')
             df_moves = df_bt
 
             if df_moves['Score_Home_Score'].notna().any():
-                st.success("✅ Backtest succeeded — df_moves updated.")
+                st.success("✅ Backtest succeeded — score data added.")
             else:
-                st.info("ℹ️ No completed sharp picks yet — waiting for games to finish.")
+                st.info("ℹ️ No completed sharp picks yet.")
         else:
             st.info("ℹ️ No backtest results found — skipped.")
 
-        # === Train or load model
+        # === Train or load sharp model
         model = None
         if 'SHARP_HIT_BOOL' in df_moves.columns and df_moves['SHARP_HIT_BOOL'].notna().sum() >= 5:
             model = train_sharp_win_model(df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1])
         else:
-            st.warning("⚠️ Not enough completed sharp picks to train a model.")
+            st.warning("⚠️ Not enough completed sharp picks to train model.")
 
         model = model or load_model_from_drive(drive)
         if model is None or should_retrain_model(drive):
-            if 'SHARP_SIDE_TO_BET' in df_moves.columns:
-                model_input = df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1].copy()
-                if 'SHARP_HIT_BOOL' in model_input.columns and not model_input.empty:
-                    model = train_sharp_win_model(model_input)
-                    save_model_to_drive(model, drive)
-                    save_model_timestamp(drive)
-        for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
-            if f'{col}_new' in df_master.columns:
-                df_master[col] = df_master[col].fillna(df_master[f'{col}_new'])
-                df_master.drop(columns=[f'{col}_new'], inplace=True)
-        append_to_master_csv_on_drive(df_master, "sharp_moves_master.csv", drive, FOLDER_ID)
+            model_input = df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1].copy()
+            if not model_input.empty and 'SHARP_HIT_BOOL' in model_input.columns:
+                model = train_sharp_win_model(model_input)
+                save_model_to_drive(model, drive)
+                save_model_timestamp(drive)
 
         # === Apply scoring
         if model is not None:
@@ -1204,9 +1197,14 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.warning(f"⚠️ Could not apply model scoring: {e}")
 
-        # === Save to master AFTER scoring is applied
-        if not df_moves.empty:
-            append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+        # === Fill in any _new fields, then clean
+        for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
+            if f'{col}_new' in df_moves.columns:
+                df_moves[col] = df_moves[col].fillna(df_moves[f'{col}_new'])
+                df_moves.drop(columns=[f'{col}_new'], inplace=True)
+
+        # === Save to master (AFTER scoring)
+        append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
         # === Save audit log
         if not df_audit.empty:
@@ -1221,6 +1219,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                     existing_data = StringIO(file_drive.GetContentString())
                     df_existing = pd.read_csv(existing_data)
                     file_drive.Delete()
+
                 df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
                 buffer = StringIO()
                 df_combined.to_csv(buffer, index=False)
@@ -1231,7 +1230,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
 
-      
+    
 
 
         # === Sharp Summary Table
