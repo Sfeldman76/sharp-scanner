@@ -498,70 +498,60 @@ def detect_cross_market_sharp_support(df_moves):
 
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
-    import json
     from collections import defaultdict
+    import json
 
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
     rows = []
-    line_open_map = {}  # {(game, market, label): (open_val, open_time)}
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
     sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
-    line_history_log = []
+    line_history_log = {}
+    line_open_map = {}
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
-    # === Weight extraction
-    sport_scope_key = {"MLB": "baseball_mlb", "NBA": "basketball_nba"}.get(sport_key.upper(), sport_key.lower())
-    print("🔍 Weights structure preview:", json.dumps(weights, indent=2))
-    print("🧠 Extracting weights for:", sport_scope_key)
+    sport_scope_key = {
+        'MLB': 'baseball_mlb',
+        'NBA': 'basketball_nba'
+    }.get(sport_key.upper(), sport_key.lower())
+
     confidence_weights = weights.get(sport_scope_key, {})
-    print(f"✅ Using weights for {sport_scope_key} — Available markets: {list(confidence_weights.keys())}")
 
-    # === Component fields
-    component_fields = [
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score',
-        'Sharp_Prob_Shift', 'Sharp_Limit_Total'
-    ]
-
-    # === Flatten previous snapshot odds
     previous_odds_map = {}
-    if isinstance(previous, list):
-        for g in previous:
-            for book in g.get('bookmakers', []):
-                book_key = book['key']
-                for market in book.get('markets', []):
-                    mtype = market.get('key')
-                    for outcome in market.get('outcomes', []):
-                        label = normalize_label(outcome.get('name'))
-                        price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
-                        key = (g['home_team'], g['away_team'], mtype, label, book_key)
-                        previous_odds_map[key] = price
+    for g in previous_map.values():
+        for book in g.get('bookmakers', []):
+            book_key = book['key']
+            for market in book.get('markets', []):
+                mtype = market.get('key')
+                for outcome in market.get('outcomes', []):
+                    label = normalize_label(outcome['name'])
+                    price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
+                    previous_odds_map[(g['home_team'], g['away_team'], mtype, label, book_key)] = price
 
-    # === Process current odds
     for game in current:
         game_name = f"{game['home_team']} vs {game['away_team']}"
         event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
         event_date = event_time.strftime("%Y-%m-%d") if pd.notnull(event_time) else ""
         game_hour = event_time.floor('H') if pd.notnull(event_time) else pd.NaT
         game_key = f"{game['home_team'].strip().lower()}_{game['away_team'].strip().lower()}_{game_hour}"
+        gid = game.get('id')
+        prev_game = previous_map.get(gid, {})
 
         for book in game.get('bookmakers', []):
             book_key = book['key']
+            book_title = book.get('title')
             for market in book.get('markets', []):
-                mtype = market['key']
+                mtype = market.get('key')
                 for o in market.get('outcomes', []):
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     limit = o.get('bet_limit') if 'bet_limit' in o and o.get('bet_limit') is not None else None
                     prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
-                    key = (game_name, mtype, label)
-
-                    if key not in line_open_map and val is not None:
-                        line_open_map[key] = (val, snapshot_time)
 
                     entry = {
                         'Sport': sport_key,
@@ -572,29 +562,43 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Event_Date': event_date,
                         'Market': mtype,
                         'Outcome': label,
-                        'Bookmaker': book['title'],
+                        'Bookmaker': book_title,
                         'Book': book_key,
                         'Value': val,
                         'Limit': limit,
                         'Old Value': old_val,
                         'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
-                        'Region': BOOKMAKER_REGIONS.get(book_key, 'unknown'),
                     }
 
-                    # Historical audit tracking
-                    line_history_log.append(entry.copy())
+                    # 🔁 Add previous value if available from previous snapshot
+                    if prev_game:
+                        for prev_b in prev_game.get('bookmakers', []):
+                            if prev_b['key'] == book_key:
+                                for prev_m in prev_b.get('markets', []):
+                                    if prev_m['key'] == mtype:
+                                        for prev_o in prev_m.get('outcomes', []):
+                                            if normalize_label(prev_o['name']) == label:
+                                                prev_val = prev_o.get('point') if mtype != 'h2h' else prev_o.get('price')
+                                                if prev_val is not None:
+                                                    entry['Old Value'] = prev_val
+                                                    entry['Delta'] = round(val - prev_val, 2) if val is not None else None
 
-                    if val is None:
-                        continue
-
+                    # Always log the line for downstream use
                     rows.append(entry)
+                    line_history_log.setdefault(gid, []).append(entry.copy())
 
-                    if limit is not None:
+                    # Track sharp logic only if value is valid
+                    if val is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, val, old_val))
-                        if book_key in SHARP_BOOKS_FOR_LIMITS:
-                            sharp_total_limit_map[(game_name, mtype, label)] += limit
+                        if book_key in SHARP_BOOKS:
+                            sharp_total_limit_map[(game_name, mtype, label)] += limit if limit is not None else 0
 
+                    if (game_name, mtype, label) not in line_open_map and val is not None:
+                        line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
+
+    # At this point, `rows` contains all lines (sharp or not)
+   
              
 
     # === Sharp scoring logic
