@@ -1368,14 +1368,26 @@ def render_scanner_tab(label, sport_key, container, drive):
                 how='left'
             )
         
-        # === Merge Game_Start from df_moves
-        if 'Game_Start' in df_moves.columns:
-            df_game_start = df_moves[['Game', 'Market', 'Outcome', 'Game_Start']].drop_duplicates()
-            summary_df = summary_df.merge(
-                df_game_start,
-                on=['Game', 'Market', 'Outcome'],
-                how='left'
-            )
+        # === Merge Game_Start from df_moves using safe MergeKey
+        df_moves['MergeKey'] = (
+            df_moves['Game'].str.strip().str.lower() + "_" +
+            df_moves['Market'].str.strip().str.lower() + "_" +
+            df_moves['Outcome'].str.strip().str.lower()
+        )
+        summary_df['MergeKey'] = (
+            summary_df['Game'].str.strip().str.lower() + "_" +
+            summary_df['Market'].str.strip().str.lower() + "_" +
+            summary_df['Outcome'].str.strip().str.lower()
+        )
+        
+        df_game_start = df_moves[['MergeKey', 'Game_Start']].dropna().drop_duplicates()
+        
+        summary_df = summary_df.merge(
+            df_game_start,
+            on='MergeKey',
+            how='left'
+        )
+
         
         # === Log games that failed to get Game_Start
         st.write("❗ Missing Game_Start rows:", summary_df[summary_df['Game_Start'].isna()][['Game', 'Market', 'Outcome']])
