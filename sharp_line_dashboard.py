@@ -1350,8 +1350,16 @@ def render_scanner_tab(label, sport_key, container, drive):
 
 
         # === Sharp Summary Table
+        # === Sharp Summary Table
         st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
-
+        
+        # === Normalize for clean merge
+        summary_df['Game'] = summary_df['Game'].str.strip().str.lower()
+        df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
+        df_moves['Outcome'] = df_moves['Outcome'].str.strip().str.lower()
+        summary_df['Outcome'] = summary_df['Outcome'].str.strip().str.lower()
+        
+        # === Merge Blended Score + Win Prob
         if 'Blended_Sharp_Score' in df_moves.columns:
             df_merge_scores = df_moves[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']].drop_duplicates()
             summary_df = summary_df.merge(
@@ -1360,40 +1368,39 @@ def render_scanner_tab(label, sport_key, container, drive):
                 how='left'
             )
         
+        # === Merge Game_Start from df_moves
         if 'Game_Start' in df_moves.columns:
+            df_game_start = df_moves[['Game', 'Market', 'Outcome', 'Game_Start']].drop_duplicates()
             summary_df = summary_df.merge(
-                df_moves[['Game', 'Market', 'Outcome', 'Game_Start']].drop_duplicates(),
+                df_game_start,
                 on=['Game', 'Market', 'Outcome'],
                 how='left'
             )
-            now_utc = datetime.now(pytz.utc)
-            summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
-            st.write(f"🕒 {label} Game_Start types:", summary_df['Game_Start'].apply(lambda x: str(x.tzinfo) if pd.notnull(x) else 'NaT').value_counts())
-
-            #summary_df = summary_df[summary_df['Game_Start'] > now_utc]
-
-            def safe_to_est(dt):
-                if pd.isna(dt):
-                    return ""
-                try:
-                    dt = pd.to_datetime(dt, errors='coerce')
-                    if dt.tzinfo is None:
-                        dt = dt.tz_localize('UTC')
-                    return dt.tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
-                except Exception as e:
-                    print(f"⚠️ Date conversion error: {e}")
-                    return ""
-            
-           
-
-            eastern = pytz_timezone('US/Eastern')
-            summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
-             
         
-      
+        # === Log games that failed to get Game_Start
+        st.write("❗ Missing Game_Start rows:", summary_df[summary_df['Game_Start'].isna()][['Game', 'Market', 'Outcome']])
         
+        # === Convert Game_Start to EST safely
+        def safe_to_est(dt):
+            if pd.isna(dt):
+                return ""
+            try:
+                dt = pd.to_datetime(dt, errors='coerce')
+                if dt.tzinfo is None:
+                    dt = dt.tz_localize('UTC')
+                return dt.tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
+            except Exception as e:
+                print(f"⚠️ Date conversion error: {e}")
+                return ""
+        
+        summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
+        summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
+        
+        # === Optional: filter out rows with no date for clarity
+        summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
+        
+        # === Rename and clean
         summary_df.drop(columns=[col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns], inplace=True)
-        
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
@@ -1405,18 +1412,24 @@ def render_scanner_tab(label, sport_key, container, drive):
             'SharpBetScore': 'Sharp\nBet\nScore',
             'Enhanced_Sharp_Confidence_Score': 'Enhanced\nConf.\nScore',
         }, inplace=True)
+        
         summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
         
+        # === Display filter
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
         
+        # === Final render
         view_cols = ['Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
                      'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
                      'Sharp\nBet\nScore', 'Enhanced\nConf.\nScore']
         
-        st.dataframe(filtered_df[[col for col in view_cols if col in filtered_df.columns]].sort_values(
-            by='Date\n+ Time (EST)', na_position='last'), use_container_width=True)
+        st.dataframe(
+            filtered_df[[col for col in view_cols if col in filtered_df.columns]]
+            .sort_values(by='Date\n+ Time (EST)', na_position='last'),
+            use_container_width=True
+        )
 
         # === Live Odds Pivot Table
         st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
