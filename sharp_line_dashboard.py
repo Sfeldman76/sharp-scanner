@@ -540,19 +540,38 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         game_key = f"{game['home_team'].strip().lower()}_{game['away_team'].strip().lower()}_{game_hour}"
         gid = game.get('id')
         prev_game = previous_map.get(gid, {})
-
+    
         for book in game.get('bookmakers', []):
-            book_key = book['key']
+            # ✅ Normalize book_key early
+            book_key_raw = book['key'].lower()
+            book_key = book_key_raw
+    
+            # Normalize rec books
+            for rec in REC_BOOKS:
+                if rec.replace(" ", "") in book_key_raw:
+                    book_key = rec.replace(" ", "")
+                    break
+            # Normalize sharp books
+            for sharp in SHARP_BOOKS:
+                if sharp in book_key_raw:
+                    book_key = sharp
+                    break
+    
+            # ✅ Skip unknown books
+            if book_key not in SHARP_BOOKS and book_key not in REC_BOOKS:
+                continue
+    
             book_title = book.get('title')
+    
             for market in book.get('markets', []):
                 mtype = market.get('key')
                 for o in market.get('outcomes', []):
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
-                    limit = o.get('bet_limit') if 'bet_limit' in o and o.get('bet_limit') is not None else None
+                    limit = o.get('bet_limit') if o.get('bet_limit') is not None else None
                     prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
-
+    
                     entry = {
                         'Sport': sport_key,
                         'Game_Key': game_key,
@@ -569,27 +588,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Old Value': old_val,
                         'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
                     }
-                    
-                    # ✅ Skip unknown bookmakers early
-                    book_key = book['key'].lower()
-
-                    # Normalize to rec book key
-                    for rec in REC_BOOKS:
-                        if rec.replace(" ", "") in book_key:
-                            book_key = rec.replace(" ", "")
-                            break
-                    for sharp in SHARP_BOOKS:
-                        if sharp in book_key:
-                            book_key = sharp
-                            break
-
-                    if book_key not in SHARP_BOOKS and book_key not in REC_BOOKS:
-                        continue
-                    
-                    # 🔁 Add previous value if available from previous snapshot
+    
+                    # ✅ Add previous value if available from prev snapshot
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
-                            if prev_b['key'] == book_key:
+                            if prev_b['key'].lower() == book_key_raw:
                                 for prev_m in prev_b.get('markets', []):
                                     if prev_m['key'] == mtype:
                                         for prev_o in prev_m.get('outcomes', []):
@@ -598,15 +601,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2) if val is not None else None
-                    
-                    # ✅ Add after filtering
+    
                     rows.append(entry)
                     line_history_log.setdefault(gid, []).append(entry.copy())
 
-                    # Always log the line for downstream use
-                    rows.append(entry)
-                    line_history_log.setdefault(gid, []).append(entry.copy())
-
+                 
                     # Track sharp logic only if value is valid
                     if val is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
