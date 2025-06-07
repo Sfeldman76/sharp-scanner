@@ -1385,7 +1385,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             summary_df['Outcome'].str.strip().str.lower()
         )
         
-        df_game_start = df_moves[['MergeKey', 'Game_Start']].dropna().drop_duplicates()
+        df_game_start = df_moves_raw[['Game', 'Market', 'Game_Start']].dropna().drop_duplicates()
+
         
         summary_df = summary_df.merge(
             df_game_start,
