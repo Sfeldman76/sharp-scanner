@@ -180,20 +180,22 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         csv_buffer = StringIO(file_drive.GetContentString())
         df_master = pd.read_csv(csv_buffer)
 
-        # === Patch: Recover missing Game_Start if possible
-        if 'Game_Start' not in df_master.columns or df_master['Game_Start'].isna().all():
-            print("🔄 Attempting to reconstruct 'Game_Start' from Event_Date and Commence_Hour...")
-
-            if 'Event_Date' in df_master.columns and 'Commence_Hour' in df_master.columns:
-                df_master['Game_Start'] = pd.to_datetime(
-                    df_master['Event_Date'].astype(str) + ' ' + df_master['Commence_Hour'].astype(str),
-                    errors='coerce',
-                    utc=True
+        # === Patch: Recover missing Game_Key if possible
+        if 'Game_Key' not in df_master.columns:
+            if 'Game' in df_master.columns and 'Game_Start' in df_master.columns:
+                print("🔄 Rebuilding Game_Key from Game and Game_Start...")
+                df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+                df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+                df_master['Game_Key'] = (
+                    df_master['Home_Team_Norm'] + "_" +
+                    df_master['Away_Team_Norm'] + "_" +
+                    df_master['Commence_Hour'].astype(str)
                 )
             else:
-                print("❌ Cannot reconstruct 'Game_Start' — missing 'Event_Date' or 'Commence_Hour'.")
+                raise KeyError("❌ 'Game_Key' missing and cannot be created (requires 'Game' and 'Game_Start')")
 
-        # ✅ Ensure Game_Start is parsed correctly
+        # ✅ Ensure Game_Start is datetime UTC
         df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
 
         return df_master
@@ -201,7 +203,8 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
     except Exception as e:
         print(f"❌ Failed to load master file: {e}")
         return pd.DataFrame()
-
+        
+        
 def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
     from io import StringIO
     import json
