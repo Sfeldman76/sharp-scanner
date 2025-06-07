@@ -1205,7 +1205,6 @@ def render_scanner_tab(label, sport_key, container, drive):
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
-        # === Fetch odds + previous snapshot
         live = fetch_live_odds(sport_key)
         prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
 
@@ -1218,7 +1217,6 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
-        # === Run sharp detection
         confidence_weights = market_component_win_rates.get(sport_key_lower, {})
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
@@ -1233,11 +1231,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Sport'] = label
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'])
 
-
-        # === Load model
         model = load_model_from_drive(drive)
-
-        # === Apply early model scoring on raw sharp moves
         if model is not None:
             try:
                 df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
@@ -1245,7 +1239,6 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.warning(f"⚠️ Could not apply model scoring early: {e}")
 
-        # === Recover confidence if missing
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns or df_moves['Enhanced_Sharp_Confidence_Score'].isna().all():
             st.warning("⚠️ Enhanced_Sharp_Confidence_Score missing — attempting to recover from df_moves_raw")
             try:
@@ -1258,7 +1251,6 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Recovery failed: {e}")
 
-        # === Backtest
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
         if not df_bt.empty:
             merge_cols = ['Game_Key', 'Market', 'Bookmaker']
@@ -1295,14 +1287,11 @@ def render_scanner_tab(label, sport_key, container, drive):
         else:
             st.warning("⚠️ Required columns missing for model training.")
 
-
-        # === Final scoring retry with safe recovery
         if model is not None:
             if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns or df_moves['Enhanced_Sharp_Confidence_Score'].isna().all():
-                st.warning("⚠️ Final scoring recovery: confidence missing again, retrying merge")
                 try:
                     df_moves = df_moves.drop(
-                        columns=[c for c in df_moves.columns if c in ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score']],
+                        columns=[c for c in ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score']],
                         errors='ignore'
                     )
                     df_moves = df_moves.merge(
@@ -1319,17 +1308,9 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.warning(f"⚠️ Final model scoring failed: {e}")
 
-        # === Fix any _new columns from Excel merge formats
-        for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']:
-            if f'{col}_new' in df_moves.columns:
-                df_moves[col] = df_moves[col].fillna(df_moves[f'{col}_new'])
-                df_moves.drop(columns=[f'{col}_new'], inplace=True)
-
-        # === Save to master
         if not df_moves.empty:
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
-        # === Save audit log
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             try:
@@ -1342,25 +1323,13 @@ def render_scanner_tab(label, sport_key, container, drive):
                     existing_data = StringIO(file_drive.GetContentString())
                     df_existing = pd.read_csv(existing_data)
                     file_drive.Delete()
-
                 df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
                 buffer = StringIO()
                 df_combined.to_csv(buffer, index=False)
                 buffer.seek(0)
-                new_file = drive.CreateFile({'title': "line_history_master.csv", "parents": [{"id": FOLDER_ID}]})
-                new_file.SetContentString(buffer.getvalue())
-                new_file.Upload()
+                drive.CreateFile({'title': "line_history_master.csv", 'parents': [{"id": FOLDER_ID}]}).SetContentString(buffer.getvalue()).Upload()
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
-
-
-
-
-
-
-
-    
-
 
         # === Sharp Summary Table
         # === Sharp Summary Table
@@ -1381,31 +1350,36 @@ def render_scanner_tab(label, sport_key, container, drive):
                 how='left'
             )
         
-        # === Merge Game_Start from df_moves using safe MergeKey
-        df_moves['MergeKey'] = (
-            df_moves['Game'].str.strip().str.lower() + "_" +
-            df_moves['Market'].str.strip().str.lower() + "_" +
-            df_moves['Outcome'].str.strip().str.lower()
-        )
-        summary_df['MergeKey'] = (
-            summary_df['Game'].str.strip().str.lower() + "_" +
-            summary_df['Market'].str.strip().str.lower() + "_" +
-            summary_df['Outcome'].str.strip().str.lower()
-        )
+     
         
         df_game_start = df_moves_raw[['Game', 'Market', 'Game_Start']].dropna().drop_duplicates()
-
-        
-        summary_df = summary_df.merge(
-            df_game_start,
-            on='MergeKey',
-            how='left'
-        )
 
         
         # === Log games that failed to get Game_Start
         st.write("❗ Missing Game_Start rows:", summary_df[summary_df['Game_Start'].isna()][['Game', 'Market', 'Outcome']])
         
+        
+        # ✅ Add Game_Start to summary_df using (Game + Market + Event_Date)
+        df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
+        
+        df_game_start['MergeKey'] = (
+            df_game_start['Game'].str.strip().str.lower() + "_" +
+            df_game_start['Market'].str.strip().str.lower() + "_" +
+            df_game_start['Event_Date'].astype(str)
+        )
+        
+        summary_df['MergeKey'] = (
+            summary_df['Game'].str.strip().str.lower() + "_" +
+            summary_df['Market'].str.strip().str.lower() + "_" +
+            summary_df['Event_Date'].astype(str)
+        )
+        
+        summary_df = summary_df.merge(
+            df_game_start[['MergeKey', 'Game_Start']],
+            on='MergeKey',
+            how='left'
+        )
+
         # === Convert Game_Start to EST safely
         def safe_to_est(dt):
             if pd.isna(dt):
