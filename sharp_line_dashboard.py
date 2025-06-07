@@ -224,22 +224,25 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     def normalize_team(t):
         return str(t).strip().lower()
 
+    # === Normalize and generate Game_Key
+    df_moves = df_moves.copy()
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
     cutoff = now_utc - pd.Timedelta(days=days_back)
     df_moves = df_moves[
         (df_moves['Game_Start'] < now_utc) & (df_moves['Game_Start'] > cutoff)
-    ].copy()
+    ]
 
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True).dt.floor('H')
+    df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('H')
     df_moves['Game_Key'] = (
         df_moves['Home_Team_Norm'] + "_" +
         df_moves['Away_Team_Norm'] + "_" +
         df_moves['Commence_Hour'].astype(str)
     )
 
+    # === Fetch scores from API
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
 
@@ -247,16 +250,18 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         games = response.json()
-    except Exception:
-        return df_moves  # Skip scoring if API fails
+    except Exception as e:
+        print(f"⚠️ Failed to fetch scores: {e}")
+        return df_moves
 
+    # === Parse scores into DataFrame
     score_rows = []
     for game in games:
         if not game.get("completed"):
             continue
 
-        home = game.get("home_team", "").strip().lower()
-        away = game.get("away_team", "").strip().lower()
+        home = normalize_team(game.get("home_team", ""))
+        away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
         game_hour = game_start.floor('H')
 
@@ -279,9 +284,71 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     df_scores = pd.DataFrame(score_rows)
 
-    # Merge scores back to original data
+    # === Merge scores with original moves
     df_merged = df_moves.merge(df_scores, on='Game_Key', how='left')
 
+    # === Cover result calculation
+    def calc_cover(row):
+        if pd.isna(row['Score_Home_Score']) or pd.isna(row['Score_Away_Score']):
+            return None, None
+
+        try:
+            hscore = float(row['Score_Home_Score'])
+            ascore = float(row['Score_Away_Score'])
+        except:
+            return None, None
+
+        market = str(row.get('Market', '')).strip().lower()
+        outcome = str(row.get('Outcome', '')).strip().lower()
+        ref_val = row.get('Ref Sharp Value', 0)
+
+        # H2H
+        if market == 'h2h':
+            if outcome in row['Home_Team_Norm']:
+                return ('Win', int(hscore > ascore))
+            elif outcome in row['Away_Team_Norm']:
+                return ('Win', int(ascore > hscore))
+            return None, None
+
+        # Spreads
+        elif market == 'spreads':
+            try:
+                spread = float(ref_val)
+                if outcome in row['Home_Team_Norm']:
+                    cover = (hscore - ascore) + spread > 0
+                elif outcome in row['Away_Team_Norm']:
+                    cover = (ascore - hscore) + spread > 0
+                else:
+                    return None, None
+                return ('Win' if cover else 'Loss', int(cover))
+            except:
+                return None, None
+
+        # Totals
+        elif market == 'totals':
+            try:
+                total = float(ref_val)
+                total_points = hscore + ascore
+                if 'over' in outcome:
+                    return ('Win', int(total_points > total))
+                elif 'under' in outcome:
+                    return ('Win', int(total_points < total))
+                else:
+                    return None, None
+            except:
+                return None, None
+
+        return None, None
+
+    # === Apply scoring
+    df_valid = df_merged[df_merged['Score_Home_Score'].notna()].copy()
+    if not df_valid.empty:
+        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(
+            calc_cover, axis=1, result_type="expand"
+        )
+        df_merged.update(df_valid)
+
+    return df_merged
     def calc_cover(row):
         if pd.isna(row['Score_Home_Score']) or pd.isna(row['Score_Away_Score']):
             return None, None
