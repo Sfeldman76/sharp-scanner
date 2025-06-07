@@ -148,7 +148,7 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
 
         # Step 4: Sort by time for clarity
         df_combined.sort_values(by='Snapshot_Timestamp', inplace=True)
-
+        df_new = build_game_key(df_new)
         # Step 5: Upload to Drive
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
@@ -587,45 +587,45 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     previous_odds_map[(g['home_team'], g['away_team'], mtype, label, book_key)] = price
 
     for game in current:
+        home_team = game['home_team'].strip().lower()
+        away_team = game['away_team'].strip().lower()
         game_name = f"{game['home_team']} vs {game['away_team']}"
         event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
         event_date = event_time.strftime("%Y-%m-%d") if pd.notnull(event_time) else ""
         game_hour = event_time.floor('H') if pd.notnull(event_time) else pd.NaT
-        game_key = f"{game['home_team'].strip().lower()}_{game['away_team'].strip().lower()}_{game_hour}"
         gid = game.get('id')
         prev_game = previous_map.get(gid, {})
-    
+
         for book in game.get('bookmakers', []):
-            # ✅ Normalize book_key early
             book_key_raw = book['key'].lower()
             book_key = book_key_raw
-    
-            # Normalize rec books
+
             for rec in REC_BOOKS:
                 if rec.replace(" ", "") in book_key_raw:
                     book_key = rec.replace(" ", "")
                     break
-            # Normalize sharp books
             for sharp in SHARP_BOOKS:
                 if sharp in book_key_raw:
                     book_key = sharp
                     break
-    
-            # ✅ Skip unknown books
+
             if book_key not in SHARP_BOOKS and book_key not in REC_BOOKS:
                 continue
-    
+
             book_title = book.get('title')
-    
+
             for market in book.get('markets', []):
-                mtype = market.get('key')
+                mtype = market.get('key').strip().lower()
                 for o in market.get('outcomes', []):
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
                     limit = o.get('bet_limit') if o.get('bet_limit') is not None else None
                     prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
-    
+
+                    # ✅ Build full Game_Key
+                    game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
+
                     entry = {
                         'Sport': sport_key,
                         'Game_Key': game_key,
@@ -641,9 +641,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Limit': limit,
                         'Old Value': old_val,
                         'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
+                        'Home_Team_Norm': home_team,
+                        'Away_Team_Norm': away_team,
+                        'Commence_Hour': game_hour
                     }
-    
-                    # ✅ Add previous value if available from prev snapshot
+
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
                             if prev_b['key'].lower() == book_key_raw:
@@ -655,12 +657,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2) if val is not None else None
-    
+
                     rows.append(entry)
                     line_history_log.setdefault(gid, []).append(entry.copy())
 
-                 
-                    # Track sharp logic only if value is valid
                     if val is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, val, old_val))
@@ -670,9 +670,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     if (game_name, mtype, label) not in line_open_map and val is not None:
                         line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
 
-    # At this point, `rows` contains all lines (sharp or not)
-   
-             
+
 
     # === Sharp scoring logic
     for (game_name, mtype), label_map in sharp_limit_map.items():
@@ -1294,7 +1292,9 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
-        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'])
+        # After df_moves_raw is created:
+        df_moves_raw = build_game_key(df_moves_raw)
+        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'])
 
         model = load_model_from_drive(drive)
         if model is not None:
@@ -1424,7 +1424,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_game_start = df_moves_raw[['Game', 'Market', 'Game_Start']].dropna().drop_duplicates()
         # ✅ Add Game_Start to summary_df using (Game + Market + Event_Date)
         df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
-        
+        df_master = build_game_key(df_master)
         df_game_start['MergeKey'] = (
             df_game_start['Game'].str.strip().str.lower() + "_" +
             df_game_start['Market'].str.strip().str.lower() + "_" +
@@ -1566,7 +1566,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
        # Now load master AFTER optional patch
         sport_key_lower = sport_key_api
         df_master = load_master_sharp_moves(drive)
-       
+        df_master = load_master_sharp_moves(drive)
+        df_master = build_game_key(df_master)
         
         # Load scores from the past N days via Odds API
         df_scored = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
