@@ -284,8 +284,11 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     df_scores = pd.DataFrame(score_rows)
 
-    # === Merge scores with original moves
+    # === Merge scores with original data
     df_merged = df_moves.merge(df_scores, on='Game_Key', how='left')
+
+    # === Optional tracking flag
+    df_merged['Scored'] = df_merged['Score_Home_Score'].notna()
 
     # === Cover result calculation
     def calc_cover(row):
@@ -330,9 +333,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
                 total = float(ref_val)
                 total_points = hscore + ascore
                 if 'over' in outcome:
-                    return ('Win', int(total_points > total))
+                    return ('Win' if total_points > total else 'Loss', int(total_points > total))
                 elif 'under' in outcome:
-                    return ('Win', int(total_points < total))
+                    return ('Win' if total_points < total else 'Loss', int(total_points < total))
                 else:
                     return None, None
             except:
@@ -340,13 +343,18 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
         return None, None
 
-    # === Apply scoring
-    df_valid = df_merged[df_merged['Score_Home_Score'].notna()].copy()
-    if not df_valid.empty:
-        df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(
-            calc_cover, axis=1, result_type="expand"
-        )
-        df_merged.update(df_valid)
+    # === Defensive scoring logic
+    if 'Score_Home_Score' in df_merged.columns and 'Score_Away_Score' in df_merged.columns:
+        if df_merged['Score_Home_Score'].notna().any():
+            df_valid = df_merged[df_merged['Score_Home_Score'].notna()].copy()
+            df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(
+                calc_cover, axis=1, result_type="expand"
+            )
+            df_merged.update(df_valid)
+        else:
+            print("🕒 No completed games found yet for scoring.")
+    else:
+        print("🕒 Score columns not present in merged DataFrame.")
 
     return df_merged
     def calc_cover(row):
