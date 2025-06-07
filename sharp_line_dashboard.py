@@ -1269,10 +1269,20 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.info("ℹ️ No backtest results found — skipped.")
 
         # === If enough sharp picks with results, retrain model
-        trainable = df_moves[
-            df_moves['SHARP_HIT_BOOL'].notna() &
-            df_moves['Enhanced_Sharp_Confidence_Score'].notna()
-        ]
+        if 'SHARP_HIT_BOOL' in df_moves.columns and 'Enhanced_Sharp_Confidence_Score' in df_moves.columns:
+            trainable = df_moves[
+                df_moves['SHARP_HIT_BOOL'].notna() &
+                df_moves['Enhanced_Sharp_Confidence_Score'].notna()
+            ]
+            if len(trainable) >= 5:
+                model = train_sharp_win_model(trainable)
+                save_model_to_drive(model, drive)
+                save_model_timestamp(drive)
+            else:
+                st.warning("⚠️ Not enough completed sharp picks to train model.")
+        else:
+            st.warning("⚠️ Required columns missing for model training.")
+
         
         if len(trainable) >= 5:
             model = train_sharp_win_model(trainable)
