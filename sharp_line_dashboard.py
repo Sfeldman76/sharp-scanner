@@ -357,47 +357,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         print("🕒 Score columns not present in merged DataFrame.")
 
     return df_merged
-    def calc_cover(row):
-        if pd.isna(row['Score_Home_Score']) or pd.isna(row['Score_Away_Score']):
-            return None, None
 
-        try:
-            hscore = float(row['Score_Home_Score'])
-            ascore = float(row['Score_Away_Score'])
-        except:
-            return None, None
-
-        margin = hscore - ascore
-        market = row.get('Market', '').lower()
-        outcome = row.get('Outcome', '').lower()
-
-        if market == 'h2h':
-            if outcome in row['Game'].lower().split(' vs ')[0]:
-                return ('Win', int(hscore > ascore))
-            elif outcome in row['Game'].lower().split(' vs ')[1]:
-                return ('Win', int(ascore > hscore))
-        elif market == 'spreads':
-            try:
-                ref_val = float(row.get('Ref Sharp Value', 0))
-                if outcome in row['Game'].lower().split(' vs ')[0]:
-                    cover = (hscore - ascore) + ref_val > 0
-                else:
-                    cover = (ascore - hscore) + ref_val > 0
-                return ('Win' if cover else 'Loss', int(cover))
-            except:
-                return None, None
-        elif market == 'totals':
-            try:
-                ref_val = float(row.get('Ref Sharp Value', 0))
-                total_points = hscore + ascore
-                if 'over' in outcome:
-                    return ('Win' if total_points > ref_val else 'Loss', int(total_points > ref_val))
-                elif 'under' in outcome:
-                    return ('Win' if total_points < ref_val else 'Loss', int(total_points < ref_val))
-            except:
-                return None, None
-
-        return None, None
 
     df_valid = df_merged[df_merged['Score_Home_Score'].notna()].copy()
     if not df_valid.empty:
