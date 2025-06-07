@@ -250,7 +250,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     # === Normalize and generate Game_Key
     df_moves = df_moves.copy()
     # 🛡️ Reconstruct Game_Start if missing
-    # 🛡️ Reconstruct Game_Start if missing — but skip future games if we can't rebuild
+    # 🛡️ Reconstruct Game_Start if missing — or safely skip scoring if not possible
     if 'Game_Start' not in df_moves.columns:
         if 'Event_Date' in df_moves.columns and 'Commence_Hour' in df_moves.columns:
             print("🔄 Rebuilding Game_Start from Event_Date + Commence_Hour...")
@@ -260,7 +260,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
                 utc=True
             )
         else:
-            print("⚠️ 'Game_Start' not found and cannot be rebuilt — skipping rows for scoring.")
+            print("⚠️ 'Game_Start' not found and cannot be rebuilt — skipping scoring.")
             df_moves['Scored'] = False
             df_moves['SHARP_COVER_RESULT'] = None
             df_moves['SHARP_HIT_BOOL'] = None
