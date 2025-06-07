@@ -1368,6 +1368,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             )
             now_utc = datetime.now(pytz.utc)
             summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce')
+            st.write(f"🕒 {label} Game_Start types:", summary_df['Game_Start'].apply(lambda x: str(x.tzinfo) if pd.notnull(x) else 'NaT').value_counts())
+
             #summary_df = summary_df[summary_df['Game_Start'] > now_utc]
             eastern = pytz_timezone('US/Eastern')
             summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(
