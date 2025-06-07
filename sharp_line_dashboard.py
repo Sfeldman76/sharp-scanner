@@ -1242,8 +1242,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.warning("⚠️ Enhanced_Sharp_Confidence_Score missing — attempting to recover from df_moves_raw")
             try:
                 df_moves = df_moves.merge(
-                    df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
-                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                    df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
+                    on=['Game_Key', 'Market', 'Bookmaker'],
                     how='left'
                 )
                 st.success("✅ Recovered confidence score from df_moves_raw")
@@ -1253,7 +1253,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         # === Backtest
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
         if not df_bt.empty:
-            merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+            merge_cols = ['Game_Key', 'Market', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             available = [col for col in confidence_cols if col in df_moves_raw.columns]
 
@@ -1298,8 +1298,8 @@ def render_scanner_tab(label, sport_key, container, drive):
                         errors='ignore'
                     )
                     df_moves = df_moves.merge(
-                        df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
-                        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                        df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
+                        on=['Game_Key', 'Market', 'Bookmaker'],
                         how='left'
                     )
                     st.success("✅ Final confidence recovery successful")
