@@ -1278,7 +1278,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
 
-        return df_moves
+
 
 
 
