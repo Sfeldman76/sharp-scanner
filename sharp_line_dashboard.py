@@ -658,17 +658,22 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
-    # === Append sharp-sided bets with enriched component scores
-    for (game_name, mtype, label), entry in sharp_lines.items():
-        metrics = sharp_metrics_map.get((game_name, mtype, label), {})
-        enriched = entry.copy()
-        enriched.update({
-            'Ref Sharp Value': entry['Value'],
-            'Ref Sharp Old Value': entry.get('Old Value'),
-            'Delta vs Sharp': 0.0,
-            'SHARP_SIDE_TO_BET': int(sharp_side_flags.get((game_name, mtype, label), 0)),
+    # === Assign sharp-side logic + metric scores to all rows
+    for row in rows:
+        game_name = row['Game']
+        mtype = row['Market']
+        label = row['Outcome']
     
-            # Always attach metrics — even if not sharp-side
+        metrics = sharp_metrics_map.get((game_name, mtype, label), {})
+        is_sharp_side = int(sharp_side_flags.get((game_name, mtype, label), 0))
+    
+        row.update({
+            'Ref Sharp Value': row['Value'],
+            'Ref Sharp Old Value': row.get('Old Value'),
+            'Delta vs Sharp': 0.0,
+            'SHARP_SIDE_TO_BET': is_sharp_side,
+    
+            # Always attach metrics
             'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
             'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
             'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
@@ -676,18 +681,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0)
         })
     
-        # Optional: basic score even if not best side
-        enriched['SharpBetScore'] = round(
-            2.0 * enriched['Sharp_Move_Signal'] +
-            2.0 * enriched['Sharp_Limit_Jump'] +
-            1.5 * enriched['Sharp_Time_Score'] +
-            1.0 * enriched['Sharp_Prob_Shift'] +
-            0.001 * enriched['Sharp_Limit_Total'], 2
+        # Base SharpBetScore even if not sharp-side
+        row['SharpBetScore'] = round(
+            2.0 * row['Sharp_Move_Signal'] +
+            2.0 * row['Sharp_Limit_Jump'] +
+            1.5 * row['Sharp_Time_Score'] +
+            1.0 * row['Sharp_Prob_Shift'] +
+            0.001 * row['Sharp_Limit_Total'], 2
         )
-    
-        rows.append(enriched)
 
-    
     # === Intelligence scoring
     def compute_weighted_signal(row, market_weights):
         market = str(row.get('Market', '')).lower()
