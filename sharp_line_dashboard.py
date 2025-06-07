@@ -94,6 +94,8 @@ def implied_prob(odds):
 
 
 @st.cache_data(ttl=60)
+
+
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -161,7 +163,41 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     except Exception as e:
         print(f"❌ Failed to append to {filename}: {e}")
 
+def build_game_key(df):
+    """
+    Builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
+    Adds Game_Key, Home_Team_Norm, Away_Team_Norm, Commence_Hour columns.
+    
+    Args:
+        df (pd.DataFrame): DataFrame containing columns: Game, Game_Start, Market, Outcome
 
+    Returns:
+        pd.DataFrame: The same DataFrame with a new 'Game_Key' column and supporting normalized fields.
+    """
+    import pandas as pd
+
+    if not all(col in df.columns for col in ['Game', 'Game_Start', 'Market', 'Outcome']):
+        raise ValueError("Missing one or more required columns: ['Game', 'Game_Start', 'Market', 'Outcome']")
+
+    df = df.copy()
+
+    # Normalize and extract components
+    df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+    df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+    df['Market_Norm'] = df['Market'].str.strip().str.lower()
+    df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
+
+    # Construct full Game_Key
+    df['Game_Key'] = (
+        df['Home_Team_Norm'] + "_" +
+        df['Away_Team_Norm'] + "_" +
+        df['Commence_Hour'].astype(str) + "_" +
+        df['Market_Norm'] + "_" +
+        df['Outcome_Norm']
+    )
+
+    return df
 
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=None):
     import pandas as pd
