@@ -259,7 +259,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
                 errors='coerce',
                 utc=True
             )
-        else:
+    	else:
             print("⚠️ 'Game_Start' not found and cannot be rebuilt — skipping scoring.")
             df_moves['Scored'] = False
             df_moves['SHARP_COVER_RESULT'] = None
