@@ -1026,7 +1026,7 @@ def log_rec_snapshot(df_moves, sport_key, drive=None):
     clean_old_snapshots()
 
     df_snapshot = df_moves[
-        ['Game', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Time']
+        ['Game', 'Market', 'Bookmaker', 'Value', 'Time']
     ].copy()
     df_snapshot.to_csv(path, index=False)
     print(f"📦 Rec snapshot saved to: {path}")
@@ -1339,7 +1339,13 @@ def render_scanner_tab(label, sport_key, container, drive):
                 buffer = StringIO()
                 df_combined.to_csv(buffer, index=False)
                 buffer.seek(0)
-                drive.CreateFile({'title': "line_history_master.csv", 'parents': [{"id": FOLDER_ID}]}).SetContentString(buffer.getvalue()).Upload()
+                new_file = drive.CreateFile({'title': "line_history_master.csv", 'parents': [{"id": FOLDER_ID}]})
+                if new_file is not None:
+                    new_file.SetContentString(buffer.getvalue())
+                    new_file.Upload()
+                else:
+                    st.error("❌ drive.CreateFile returned None for line_history_master.csv — skipping upload.")
+
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
 
