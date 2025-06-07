@@ -571,6 +571,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     }
                     
                     # ✅ Skip unknown bookmakers early
+                    book_key = book['key'].lower()
+
+                    # Normalize to rec book key
+                    for rec in REC_BOOKS:
+                        if rec.replace(" ", "") in book_key:
+                            book_key = rec.replace(" ", "")
+                            break
+                    for sharp in SHARP_BOOKS:
+                        if sharp in book_key:
+                            book_key = sharp
+                            break
+
                     if book_key not in SHARP_BOOKS and book_key not in REC_BOOKS:
                         continue
                     
