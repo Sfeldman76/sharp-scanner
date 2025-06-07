@@ -1128,6 +1128,61 @@ def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOL
         print(f"✅ Model timestamp updated: {timestamp_str}")
     except Exception as e:
         print(f"❌ Failed to save timestamp: {e}")
+def train_sharp_win_model(df):
+    st.subheader("🔍 Sharp Model Training Debug")
+    st.write(f"Total rows in df: {len(df)}")
+
+    # === Build final confidence score from available columns
+    if 'Enhanced_Sharp_Confidence_Score' not in df.columns and 'True_Sharp_Confidence_Score' not in df.columns:
+        st.error("❌ No confidence columns available for training.")
+        return None
+
+    df['Final_Confidence_Score'] = df.get('Enhanced_Sharp_Confidence_Score')
+    if 'True_Sharp_Confidence_Score' in df.columns:
+        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
+
+    # === Filter training set: only rows with score and result
+    df_filtered = df[
+        df['Final_Confidence_Score'].notna() &
+        df['SHARP_HIT_BOOL'].notna()
+    ].copy()
+
+    st.write("📊 Rows with SHARP_HIT_BOOL:", df_filtered['SHARP_HIT_BOOL'].notna().sum())
+    st.write("📊 Rows with confidence:", df_filtered['Final_Confidence_Score'].notna().sum())
+    st.write("📊 Rows passing both filters:", len(df_filtered))
+
+    if df_filtered.empty or len(df_filtered) < 5:
+        st.warning("⚠️ Not enough rows to train model.")
+        return None
+
+    # === Prepare features and labels
+    df_filtered['Final_Confidence_Score'] = df_filtered['Final_Confidence_Score'] / 100
+    df_filtered['Final_Confidence_Score'] = df_filtered['Final_Confidence_Score'].clip(0, 1)
+    df_filtered['target'] = df_filtered['SHARP_HIT_BOOL'].astype(int)
+
+    feature_cols = ['Final_Confidence_Score']
+    if 'CrossMarketSharpSupport' in df_filtered.columns:
+        feature_cols.append('CrossMarketSharpSupport')
+
+    df_filtered = df_filtered.dropna(subset=feature_cols)
+
+    X = df_filtered[feature_cols].astype(float)
+    y = df_filtered['target']
+
+    from xgboost import XGBClassifier
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import roc_auc_score
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
+
+    model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+    model.fit(X_train, y_train)
+
+    y_pred_proba = model.predict_proba(X_test)[:, 1]
+    auc = roc_auc_score(y_test, y_pred_proba)
+    st.success(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_filtered)} samples")
+
+    return model
 
 
 def render_scanner_tab(label, sport_key, container, drive):
@@ -1214,8 +1269,14 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.info("ℹ️ No backtest results found — skipped.")
 
         # === If enough sharp picks with results, retrain model
-        if 'SHARP_HIT_BOOL' in df_moves.columns and df_moves['SHARP_HIT_BOOL'].notna().sum() >= 5:
-            model = train_sharp_win_model(df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1])
+        trainable = df_moves[
+            df_moves['SHARP_HIT_BOOL'].notna() &
+            df_moves['Enhanced_Sharp_Confidence_Score'].notna()
+        ]
+        
+        if len(trainable) >= 5:
+            model = train_sharp_win_model(trainable)
+
             save_model_to_drive(model, drive)
             save_model_timestamp(drive)
         else:
