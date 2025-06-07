@@ -692,9 +692,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             0.001 * row['Sharp_Limit_Total'], 2
         )
     
-    # ✅ Only after loop is fully done
     df = pd.DataFrame(rows)
-    df_history = df.copy()
+    df_history = df.copy()  # needed for downstream sort on 'Time'
 
     # === Intelligence scoring
     def compute_weighted_signal(row, market_weights):
@@ -753,10 +752,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             print(f"⚠️ Confidence scoring error: {e}")
             return 50.0  # fallback neutral score
     
-  
-    # === Create base DataFrame
-    df = pd.DataFrame(rows)
-    df_history = pd.DataFrame(line_history_log)
+ 
     
     # === Sort by timestamp and extract open lines
     df_history_sorted = df_history.sort_values('Time')
