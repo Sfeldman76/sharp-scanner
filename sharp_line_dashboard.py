@@ -1349,16 +1349,8 @@ def render_scanner_tab(label, sport_key, container, drive):
                 on=['Game', 'Market', 'Outcome'],
                 how='left'
             )
-        
-     
-        
+          
         df_game_start = df_moves_raw[['Game', 'Market', 'Game_Start']].dropna().drop_duplicates()
-
-        
-        # === Log games that failed to get Game_Start
-        st.write("❗ Missing Game_Start rows:", summary_df[summary_df['Game_Start'].isna()][['Game', 'Market', 'Outcome']])
-        
-        
         # ✅ Add Game_Start to summary_df using (Game + Market + Event_Date)
         df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
         
