@@ -318,11 +318,19 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     df_scores = pd.DataFrame(score_rows)
 
+    if not score_rows:
+        print("🕒 No completed games returned by the Odds API.")
+        df_moves['Scored'] = False
+        df_moves['SHARP_COVER_RESULT'] = None
+        df_moves['SHARP_HIT_BOOL'] = None
+        return df_moves
+    
     # === Merge scores with original data
     df_merged = df_moves.merge(df_scores, on='Game_Key', how='left')
-
+    
     # === Optional tracking flag
     df_merged['Scored'] = df_merged['Score_Home_Score'].notna()
+    
 
     # === Unified cover result logic
     def calc_cover(row):
