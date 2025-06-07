@@ -943,38 +943,45 @@ def train_sharp_win_model(df):
 
 
 def apply_blended_sharp_score(df, model):
+    import numpy as np
     df = df.copy()
 
-    # Fallback confidence
+    # === Step 1: Clean up any _x / _y duplicates to avoid confusion
+    df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
+
+    # === Step 2: Confirm confidence column exists
     if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
         raise ValueError("❌ Missing Enhanced_Sharp_Confidence_Score in df")
 
+    # === Step 3: Build final confidence column
     df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
     if 'True_Sharp_Confidence_Score' in df.columns:
         df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
+    # Clamp or convert safely
+    df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce')
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
+    df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
 
-    # === Use only features the model expects
+    # === Step 4: Validate model features
     model_features = model.get_booster().feature_names
     feature_cols = [col for col in model_features if col in df.columns]
-
-    # Ensure all required features are present
     missing = set(model_features) - set(feature_cols)
     if missing:
         raise ValueError(f"❌ Missing model feature columns: {missing}")
 
+    # === Step 5: Predict
     X = df[feature_cols].astype(float)
-
-    # Predict
     df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
 
+    # === Step 6: Blend into final sharp score
     df['Blended_Sharp_Score'] = (
         0.5 * df['Model_Sharp_Win_Prob'] +
         0.5 * df['Final_Confidence_Score']
     )
 
     return df
+
 
 
 st.set_page_config(layout="wide")
