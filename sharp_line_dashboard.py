@@ -1371,13 +1371,24 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.write(f"🕒 {label} Game_Start types:", summary_df['Game_Start'].apply(lambda x: str(x.tzinfo) if pd.notnull(x) else 'NaT').value_counts())
 
             #summary_df = summary_df[summary_df['Game_Start'] > now_utc]
-            eastern = pytz_timezone('US/Eastern')
-            summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(
-                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
-                else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
-                else ""
-            )
 
+            def safe_to_est(dt):
+                if pd.isna(dt):
+                    return ""
+                try:
+                    dt = pd.to_datetime(dt, errors='coerce')
+                    if dt.tzinfo is None:
+                        dt = dt.tz_localize('UTC')
+                    return dt.tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
+                except Exception as e:
+                    print(f"⚠️ Date conversion error: {e}")
+                    return ""
+            
+           
+
+            eastern = pytz_timezone('US/Eastern')
+            summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
+             
         
       
         
