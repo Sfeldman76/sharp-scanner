@@ -569,7 +569,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Old Value': old_val,
                         'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
                     }
-
+                    
+                    # ✅ Skip unknown bookmakers early
+                    if book_key not in SHARP_BOOKS and book_key not in REC_BOOKS:
+                        continue
+                    
                     # 🔁 Add previous value if available from previous snapshot
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
@@ -582,6 +586,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
                                                     entry['Delta'] = round(val - prev_val, 2) if val is not None else None
+                    
+                    # ✅ Add after filtering
+                    rows.append(entry)
+                    line_history_log.setdefault(gid, []).append(entry.copy())
 
                     # Always log the line for downstream use
                     rows.append(entry)
