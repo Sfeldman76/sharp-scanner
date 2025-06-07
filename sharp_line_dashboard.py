@@ -163,18 +163,41 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
 
 
 
-def load_master_sharp_moves(drive, filename="sharp_moves_master.csv"):
+def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=None):
+    import pandas as pd
+    from io import StringIO
+
     try:
         file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{FOLDER_ID}' in parents and trashed=false"
+            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
+
         if not file_list:
             print("⚠️ No master file found.")
             return pd.DataFrame()
 
         file_drive = file_list[0]
         csv_buffer = StringIO(file_drive.GetContentString())
-        return pd.read_csv(csv_buffer)
+        df_master = pd.read_csv(csv_buffer)
+
+        # === Patch: Recover missing Game_Start if possible
+        if 'Game_Start' not in df_master.columns or df_master['Game_Start'].isna().all():
+            print("🔄 Attempting to reconstruct 'Game_Start' from Event_Date and Commence_Hour...")
+
+            if 'Event_Date' in df_master.columns and 'Commence_Hour' in df_master.columns:
+                df_master['Game_Start'] = pd.to_datetime(
+                    df_master['Event_Date'].astype(str) + ' ' + df_master['Commence_Hour'].astype(str),
+                    errors='coerce',
+                    utc=True
+                )
+            else:
+                print("❌ Cannot reconstruct 'Game_Start' — missing 'Event_Date' or 'Commence_Hour'.")
+
+        # ✅ Ensure Game_Start is parsed correctly
+        df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
+
+        return df_master
+
     except Exception as e:
         print(f"❌ Failed to load master file: {e}")
         return pd.DataFrame()
