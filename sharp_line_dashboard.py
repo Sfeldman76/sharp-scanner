@@ -217,20 +217,10 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         df_master = pd.read_csv(csv_buffer)
 
         # === Patch: Recover missing Game_Key if possible
-        if 'Game_Key' not in df_master.columns:
-            if 'Game' in df_master.columns and 'Game_Start' in df_master.columns:
-                print("🔄 Rebuilding Game_Key from Game and Game_Start...")
-                df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-                df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
-                df_master['Game_Key'] = (
-                    df_master['Home_Team_Norm'] + "_" +
-                    df_master['Away_Team_Norm'] + "_" +
-                    df_master['Commence_Hour'].astype(str)
-                )
-            else:
-                raise KeyError("❌ 'Game_Key' missing and cannot be created (requires 'Game' and 'Game_Start')")
-
+        try:
+            df_master = build_game_key(df_master)
+        except ValueError as e:
+            st.warning(f"⚠️ Could not build Game_Key: {e}")
         # ✅ Ensure Game_Start is datetime UTC
         df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
 
