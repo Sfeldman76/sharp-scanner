@@ -1159,10 +1159,10 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Sport'] = label
         df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
 
-        # === Load model if available
+        # === Load model
         model = load_model_from_drive(drive)
 
-        # === Early scoring on raw sharp moves
+        # === Apply early model scoring on raw sharp moves
         if model is not None:
             try:
                 df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
@@ -1170,7 +1170,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.warning(f"⚠️ Could not apply model scoring early: {e}")
 
-        # === Recover confidence into df_moves if missing
+        # === Recover confidence if missing
         if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns or df_moves['Enhanced_Sharp_Confidence_Score'].isna().all():
             st.warning("⚠️ Enhanced_Sharp_Confidence_Score missing — attempting to recover from df_moves_raw")
             try:
@@ -1206,7 +1206,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         else:
             st.info("ℹ️ No backtest results found — skipped.")
 
-        # === If enough scored sharp picks exist, retrain model
+        # === If enough sharp picks with results, retrain model
         if 'SHARP_HIT_BOOL' in df_moves.columns and df_moves['SHARP_HIT_BOOL'].notna().sum() >= 5:
             model = train_sharp_win_model(df_moves[df_moves['SHARP_SIDE_TO_BET'] == 1])
             save_model_to_drive(model, drive)
@@ -1214,11 +1214,15 @@ def render_scanner_tab(label, sport_key, container, drive):
         else:
             st.warning("⚠️ Not enough completed sharp picks to train model.")
 
-        # === Final scoring pass after model refresh
+        # === Final scoring retry with safe recovery
         if model is not None:
             if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns or df_moves['Enhanced_Sharp_Confidence_Score'].isna().all():
                 st.warning("⚠️ Final scoring recovery: confidence missing again, retrying merge")
                 try:
+                    df_moves = df_moves.drop(
+                        columns=[c for c in df_moves.columns if c in ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score']],
+                        errors='ignore'
+                    )
                     df_moves = df_moves.merge(
                         df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
                         on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
@@ -1267,7 +1271,8 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
 
-    
+        return df_moves
+
 
 
 
