@@ -249,6 +249,16 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     # === Normalize and generate Game_Key
     df_moves = df_moves.copy()
+    if 'Game_Start' not in df_moves.columns:
+    if 'Event_Date' in df_moves.columns and 'Commence_Hour' in df_moves.columns:
+        print("🔄 Rebuilding Game_Start from Event_Date + Commence_Hour...")
+        df_moves['Game_Start'] = pd.to_datetime(
+            df_moves['Event_Date'].astype(str) + ' ' + df_moves['Commence_Hour'].astype(str),
+            errors='coerce',
+            utc=True
+        )
+    else:
+        raise KeyError("❌ Cannot compute 'Game_Start' — missing both 'Game_Start' and fallback fields.")
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
     cutoff = now_utc - pd.Timedelta(days=days_back)
