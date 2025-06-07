@@ -663,6 +663,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
 
     # === Assign sharp-side logic + metric scores to all rows
+    # === Assign sharp-side logic + metric scores to all rows
     for row in rows:
         game_name = row['Game']
         mtype = row['Market']
@@ -676,8 +677,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'Ref Sharp Old Value': row.get('Old Value'),
             'Delta vs Sharp': 0.0,
             'SHARP_SIDE_TO_BET': is_sharp_side,
-    
-            # Always attach metrics
             'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
             'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
             'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
@@ -685,7 +684,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0)
         })
     
-        # Base SharpBetScore even if not sharp-side
         row['SharpBetScore'] = round(
             2.0 * row['Sharp_Move_Signal'] +
             2.0 * row['Sharp_Limit_Jump'] +
@@ -693,6 +691,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             1.0 * row['Sharp_Prob_Shift'] +
             0.001 * row['Sharp_Limit_Total'], 2
         )
+    
+    # ✅ Only after loop is fully done
+    df = pd.DataFrame(rows)
+    df_history = df.copy()
 
     # === Intelligence scoring
     def compute_weighted_signal(row, market_weights):
