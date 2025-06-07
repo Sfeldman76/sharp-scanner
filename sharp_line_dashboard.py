@@ -1223,7 +1223,8 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
-        df_moves = df_moves_raw.drop_duplicates(subset=['Market', 'Outcome', 'Bookmaker'])
+        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'])
+
 
         # === Load model
         model = load_model_from_drive(drive)
