@@ -114,6 +114,10 @@ def fetch_live_odds(sport_key):
 
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
+    from io import StringIO
+    from datetime import datetime
+    import pandas as pd
+
     try:
         if df_new.empty:
             print(f"⚠️ Skipping append — {filename} input is empty.")
@@ -132,28 +136,18 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             file_drive.Delete()
             print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
-        # Step 2: Clean up columns
-        # Don't drop Home_Team_Norm / Away_Team_Norm
-        cols_to_drop = ['Game_ID']
-        df_existing.drop(columns=[c for c in cols_to_drop if c in df_existing.columns], inplace=True, errors='ignore')
-        df_new.drop(columns=[c for c in cols_to_drop if c in df_new.columns], inplace=True, errors='ignore')
+        # Step 2: Add batch ID and timestamp to new data
+        snapshot_ts = pd.Timestamp.utcnow()
+        df_new['Snapshot_Timestamp'] = snapshot_ts
+        df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
 
-
-        # ✅ Step 3: Ensure Commence_Hour is built in df_new if missing
-        if 'Commence_Hour' not in df_new.columns and 'Game_Start' in df_new.columns:
-            df_new['Commence_Hour'] = pd.to_datetime(df_new['Game_Start'], errors='coerce', utc=True).dt.floor('H')
-
-        # Step 4: Combine
+        # Step 3: Combine all rows (no deduplication)
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
 
-        # ✅ Step 5: Deduplicate but keep Commence_Hour
-        df_combined.drop_duplicates(
-            subset=["Game_Key", "Market", "Outcome"],
-            keep='last',
-            inplace=True
-        )
+        # Step 4: Sort by time for clarity
+        df_combined.sort_values(by='Snapshot_Timestamp', inplace=True)
 
-        # Step 6: Upload
+        # Step 5: Upload to Drive
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -221,18 +215,20 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         print(f"❌ Failed to load snapshot from Drive: {e}")
         return {}
 
-def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
+def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE_WITH_KEY"):
     import requests
+    import pytz
+    import pandas as pd
+    from datetime import datetime
 
     def normalize_team(t):
         return str(t).strip().lower()
 
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
-    cutoff = now_utc - timedelta(days=days_back)
+    cutoff = now_utc - pd.Timedelta(days=days_back)
     df_moves = df_moves[
-        (df_moves['Game_Start'] < now_utc) &
-        (df_moves['Game_Start'] > cutoff)
+        (df_moves['Game_Start'] < now_utc) & (df_moves['Game_Start'] > cutoff)
     ].copy()
 
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
@@ -244,9 +240,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         df_moves['Commence_Hour'].astype(str)
     )
 
-    # === Fetch scores from Odds API
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-    days_back = min(days_back, 3)
     params = {'apiKey': api_key, 'daysFrom': days_back}
 
     try:
@@ -264,7 +258,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_hour = game_start.floor('H') if hasattr(game_start, 'floor') else game_start.replace(minute=0, second=0, microsecond=0)
+        game_hour = game_start.floor('H')
 
         scores = game.get("scores", [])
         score_dict = {
@@ -278,47 +272,66 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
             continue
 
         score_rows.append({
-            'Game': f"{home} vs {away}",
-            'Event_Date': game_start.strftime("%Y-%m-%d"),
-            'Game_Hour': game_start.hour,
+            'Game_Key': f"{home}_{away}_{game_hour}",
             'Score_Home_Score': home_score,
-            'Score_Away_Score': away_score,
-            'Home_Team_Norm': home,
-            'Away_Team_Norm': away,
-            'Commence_Hour': game_hour,
-            'Game_Key': f"{home}_{away}_{game_hour}"
+            'Score_Away_Score': away_score
         })
 
     df_scores = pd.DataFrame(score_rows)
 
-    # === Merge with picks
-    df = df_moves.merge(
-        df_scores[['Game_Key', 'Score_Home_Score', 'Score_Away_Score']],
-        on='Game_Key',
-        how='left'
-    )
+    # Merge scores back to original data
+    df_merged = df_moves.merge(df_scores, on='Game_Key', how='left')
 
-    # === If no scores matched, preserve structure and allow app to continue
-    if 'Score_Home_Score' not in df.columns or df['Score_Home_Score'].isna().all():
-        df['Score_Home_Score'] = None
-        df['Score_Away_Score'] = None
-        df['SHARP_HIT_BOOL'] = None
-        return df
+    def calc_cover(row):
+        if pd.isna(row['Score_Home_Score']) or pd.isna(row['Score_Away_Score']):
+            return None, None
 
-    def safe_calc_cover(row):
         try:
-            return ("Win", 1) if row['Score_Home_Score'] > row['Score_Away_Score'] else ("Loss", 0)
+            hscore = float(row['Score_Home_Score'])
+            ascore = float(row['Score_Away_Score'])
         except:
-            return (None, None)
+            return None, None
 
-    df_valid = df[df['Score_Home_Score'].notna()].copy()
+        margin = hscore - ascore
+        market = row.get('Market', '').lower()
+        outcome = row.get('Outcome', '').lower()
+
+        if market == 'h2h':
+            if outcome in row['Game'].lower().split(' vs ')[0]:
+                return ('Win', int(hscore > ascore))
+            elif outcome in row['Game'].lower().split(' vs ')[1]:
+                return ('Win', int(ascore > hscore))
+        elif market == 'spreads':
+            try:
+                ref_val = float(row.get('Ref Sharp Value', 0))
+                if outcome in row['Game'].lower().split(' vs ')[0]:
+                    cover = (hscore - ascore) + ref_val > 0
+                else:
+                    cover = (ascore - hscore) + ref_val > 0
+                return ('Win' if cover else 'Loss', int(cover))
+            except:
+                return None, None
+        elif market == 'totals':
+            try:
+                ref_val = float(row.get('Ref Sharp Value', 0))
+                total_points = hscore + ascore
+                if 'over' in outcome:
+                    return ('Win' if total_points > ref_val else 'Loss', int(total_points > ref_val))
+                elif 'under' in outcome:
+                    return ('Win' if total_points < ref_val else 'Loss', int(total_points < ref_val))
+            except:
+                return None, None
+
+        return None, None
+
+    df_valid = df_merged[df_merged['Score_Home_Score'].notna()].copy()
     if not df_valid.empty:
         df_valid[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_valid.apply(
-            safe_calc_cover, axis=1, result_type="expand"
+            calc_cover, axis=1, result_type="expand"
         )
-        df.update(df_valid)
+        df_merged.update(df_valid)
 
-    return df
+    return df_merged
 
 
 
