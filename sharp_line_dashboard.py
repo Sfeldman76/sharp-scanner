@@ -116,26 +116,26 @@ def fetch_live_odds(sport_key):
 
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
-    import pandas as pd
     from io import StringIO
-    from datetime import datetime
+    import pandas as pd
 
     try:
         if df_new.empty:
             print(f"⚠️ Skipping append — {filename} input is empty.")
             return
 
-        # === Normalize inputs ===
-        if all(col in df_new.columns for col in ['Game', 'Game_Start', 'Market', 'Outcome']):
+        # ✅ Build Game_Key if valid
+        if set(['Game', 'Game_Start', 'Market', 'Outcome']).issubset(df_new.columns):
             df_new = build_game_key(df_new)
         else:
-            print("⚠️ Skipping Game_Key creation due to missing columns.")
+            print("⚠️ Skipping Game_Key build — required columns missing")
 
-        if 'Sport' not in df_new.columns:
-            print("⚠️ 'Sport' column missing — assigning 'UNKNOWN'")
-            df_new['Sport'] = 'UNKNOWN'
+        # ✅ Add Snapshot Timestamp
+        snapshot_ts = pd.Timestamp.utcnow()
+        df_new['Snapshot_Timestamp'] = snapshot_ts
+        df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
 
-        # === Load existing master ===
+        # ✅ Load existing file (if any)
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
@@ -143,33 +143,37 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         df_existing = pd.DataFrame()
         if file_list:
             file_drive = file_list[0]
-            df_existing = pd.read_csv(StringIO(file_drive.GetContentString()))
+            existing_data = StringIO(file_drive.GetContentString())
+            df_existing = pd.read_csv(existing_data, low_memory=False)
             file_drive.Delete()
-            print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
+            print(f"📚 Existing master loaded — {len(df_existing)} rows")
 
-        # === Add timestamp metadata ===
-        snapshot_ts = pd.Timestamp.utcnow()
-        df_new['Snapshot_Timestamp'] = snapshot_ts
-        df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
-
-        # === Append and sort ===
+        # ✅ Combine
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+
+        # ✅ Sort
         df_combined.sort_values(by='Snapshot_Timestamp', inplace=True)
 
-        # === Upload updated file ===
-        buffer = StringIO()
-        df_combined.to_csv(buffer, index=False)
-        buffer.seek(0)
+        # ✅ Upload
+        csv_buffer = StringIO()
+        df_combined.to_csv(csv_buffer, index=False)
+        csv_buffer.seek(0)
 
         new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
-        new_file.SetContentString(buffer.getvalue())
+        new_file.SetContentString(csv_buffer.getvalue())
         new_file.Upload()
 
-        print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
+        print(f"✅ Uploaded updated master — now {len(df_combined)} rows")
+
+        # 🔍 Debug only: print sport counts
+        if 'Sport' in df_combined.columns:
+            print("📊 Final row counts by Sport:")
+            print(df_combined['Sport'].value_counts())
+        else:
+            print("⚠️ No Sport column found in combined master.")
 
     except Exception as e:
-        print(f"❌ Failed to append to {filename}: {e}")
-        def build_game_key(df):
+        print(f"❌ Failed to append to {filename}: {e}")def build_game_key(df):
     """
     Safely builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
     Returns df unmodified if required columns are missing.
@@ -1635,79 +1639,38 @@ df_mlb_bt = pd.DataFrame()
 
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
-
     with tab:
-       # Now load master AFTER optional patch
         sport_key_lower = sport_key_api
+
+        # ✅ Load master with Game_Key already handled
         df_master = load_master_sharp_moves(drive)
-    # Game_Key is built inside load_master_sharp_moves now
-        
-        # Load scores from the past N days via Odds API
+
+        if df_master.empty:
+            st.warning(f"⚠️ No data found in master file for {sport_label}")
+            return
+
+        # ✅ Fetch scored results
         df_scored = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
-        
-        
-        # Merge back into master — only overwrite scores where Game_Key matches
-        # ✅ Safe merge of updated score columns
-        required_cols = [
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Score_Home_Score', 'Score_Away_Score',
-            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT'
-        ]
-        
 
+        # ✅ Safe merge on valid keys
+        merge_keys = ['Game_Key', 'Market', 'Bookmaker']
+        value_cols = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']
+        valid_merge_keys = [col for col in merge_keys if col in df_scored.columns and col in df_master.columns]
+        valid_value_cols = [col for col in value_cols if col in df_scored.columns]
 
-        merge_keys = [col for col in ['Game_Key', 'Market', 'Bookmaker']
-              if col in df_scored.columns and col in df_master.columns]
-        value_cols = [col for col in ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']
-                      if col in df_scored.columns]
-        # === 🛡️ FORCE 'Game_Key' CREATION IN df_master if missing
-        if 'Game_Key' not in df_master.columns:
-            if all(col in df_master.columns for col in ['Game', 'Game_Start']):
-                df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-                df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('h')
-                df_master['Game_Key'] = (
-                    df_master['Home_Team_Norm'] + "_" +
-                    df_master['Away_Team_Norm'] + "_" +
-                    df_master['Commence_Hour'].astype(str)
-                )
-            else:
-                st.error("❌ 'Game_Key' missing and cannot be created (requires 'Game' and 'Game_Start')")
-                return
-                
-        # 🛡️ Defensive check for missing keys
-        missing_keys_master = [col for col in merge_keys if col not in df_master.columns]
-        missing_keys_scored = [col for col in merge_keys if col not in df_scored.columns]
-
-        # 🛡️ Ensure all merge keys exist
-        missing_keys = [col for col in merge_keys if col not in df_master.columns]
-        if missing_keys:
-            st.error(f"❌ Cannot merge — df_master is missing columns: {missing_keys}")
-        else:
-            df_master = df_master.drop(columns=value_cols, errors='ignore')
+        if valid_merge_keys and valid_value_cols:
+            df_master = df_master.drop(columns=valid_value_cols, errors='ignore')
             df_master = df_master.merge(
-                df_scored[merge_keys + value_cols],
-                on=merge_keys,
-                how='left'
-            )
-        # 🛡️ Defensive check for missing keys
-        missing_keys_master = [col for col in merge_keys if col not in df_master.columns]
-        missing_keys_scored = [col for col in merge_keys if col not in df_scored.columns]
-
-      
-
-        
-        if merge_keys and value_cols:
-            df_master = df_master.drop(columns=value_cols, errors='ignore')
-            df_master = df_master.merge(
-                df_scored[merge_keys + value_cols],
-                on=merge_keys,
+                df_scored[valid_merge_keys + valid_value_cols],
+                on=valid_merge_keys,
                 how='left'
             )
         else:
-            st.warning("⚠️ No valid merge keys or value columns for backtest score update.")
-        
+            st.warning("⚠️ No valid merge keys or values found for update.")
+            return
 
+    
+   
         if not df_master.empty:
             df_bt = fetch_scores_and_backtest(sport_key_api, df_master, api_key=API_KEY)
 
