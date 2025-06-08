@@ -1435,7 +1435,12 @@ def render_scanner_tab(label, sport_key, container, drive):
                 df_moves = apply_blended_sharp_score(df_moves, model)
             except Exception as e:
                 st.warning(f"⚠️ Final model scoring failed: {e}")
-
+        st.write(f"📦 [{label}] Appending {len(df_moves)} rows to master.")
+        if 'Sport' in df_moves.columns:
+            st.write("🏷️ Sports in batch:", df_moves['Sport'].unique())
+        else:
+            st.warning("⚠️ 'Sport' column missing before append.")
+        st.dataframe(df_moves[['Game', 'Market', 'Outcome', 'Game_Key']].head())
         # ✅ Ensure 'Sport' column exists before writing to master
         if not df_moves.empty:
             df_moves['Sport'] = label
