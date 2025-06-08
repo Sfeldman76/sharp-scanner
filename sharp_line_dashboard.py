@@ -350,6 +350,15 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     df_scores = pd.DataFrame(score_rows)
     df = df.merge(df_scores, on='Merge_Key_Short', how='left')
 
+    # === Only score rows with actual score data
+    if df_scores.empty:
+        df['SHARP_COVER_RESULT'] = None
+        df['SHARP_HIT_BOOL'] = None
+        df['Scored'] = False
+        return df
+
+    df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score']).copy()
+
     def calc_cover(row):
         try:
             h = float(row['Score_Home_Score'])
@@ -357,45 +366,42 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
             market = str(row.get('Market', '')).lower()
             outcome = str(row.get('Outcome', '')).lower()
             val = float(row.get('Ref Sharp Value', 0))
-    
+
             if market == 'totals':
                 total = h + a
                 if 'under' in outcome:
                     return ['Win', 1] if total < val else ['Loss', 0]
                 if 'over' in outcome:
                     return ['Win', 1] if total > val else ['Loss', 0]
-    
+
             margin = h - a if row['Home_Team_Norm'] in outcome else a - h
-    
+
             if market == 'spreads':
                 hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
                 return ['Win', 1] if hit else ['Loss', 0]
-    
+
             if market == 'h2h':
                 if row['Home_Team_Norm'] in outcome:
                     return ['Win', 1] if h > a else ['Loss', 0]
                 if row['Away_Team_Norm'] in outcome:
                     return ['Win', 1] if a > h else ['Loss', 0]
-    
-            # If none of the above conditions apply, fall through to catch block
-            raise ValueError("Could not resolve cover logic")
-    
-        except Exception as e:
-            st.write("❌ calc_cover error on row:", row.to_dict())
-            st.write("Error message:", str(e))
-            return ['Error', None]
-    
-    if df_scores.empty:
-        df['SHARP_COVER_RESULT'] = None
-        df['SHARP_HIT_BOOL'] = None
-        df['Scored'] = False
-        return df
+        except:
+            return [None, 0]
 
-    result = df.apply(calc_cover, axis=1)
-    st.write("🔍 Sample output from calc_cover():", result.head(10))
-    df['SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
-    df['SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
-    df['Scored'] = df['SHARP_COVER_RESULT'].notna()
+        return [None, 0]
+
+    # Apply scoring only to valid rows
+    result = df_valid.apply(calc_cover, axis=1, result_type='expand')
+    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
+
+    # Assign results back to the main df
+    df['SHARP_COVER_RESULT'] = None
+    df['SHARP_HIT_BOOL'] = 0
+    df['Scored'] = False
+
+    df.loc[df_valid.index, 'SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
+    df.loc[df_valid.index, 'SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
+    df.loc[df_valid.index, 'Scored'] = df.loc[df_valid.index, 'SHARP_COVER_RESULT'].notna()
 
     return df
         
