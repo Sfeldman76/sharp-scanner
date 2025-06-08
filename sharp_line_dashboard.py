@@ -124,44 +124,39 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             print(f"⚠️ Skipping append — {filename} input is empty.")
             return
 
-        # Ensure 'Sport' column exists
         if 'Sport' not in df_new.columns:
             df_new['Sport'] = 'Unknown'
 
-        # Build Game_Key if columns exist
         if set(['Game', 'Game_Start', 'Market', 'Outcome']).issubset(df_new.columns):
             df_new = build_game_key(df_new)
         else:
             print("⚠️ Skipping Game_Key creation — required columns missing.")
 
-        # Load existing master file
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
 
         df_existing = pd.DataFrame()
-        file_drive = None
         if file_list:
             file_drive = file_list[0]
             existing_data = StringIO(file_drive.GetContentString())
             df_existing = pd.read_csv(existing_data)
+            file_drive.Delete()
             print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
-        # Add timestamp fields
         snapshot_ts = pd.Timestamp.utcnow()
         df_new['Snapshot_Timestamp'] = snapshot_ts
         df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
 
-        # ✅ Align using full union of all columns (prevents column drop)
-        all_cols = sorted(set(df_existing.columns).union(set(df_new.columns)))
-        df_existing = df_existing.reindex(columns=all_cols)
-        df_new = df_new.reindex(columns=all_cols)
+        # ✅ Only reindex if df_existing has matching shape
+        if not df_existing.empty:
+            missing_in_new = [col for col in df_existing.columns if col not in df_new.columns]
+            for col in missing_in_new:
+                df_new[col] = None
+            df_new = df_new[df_existing.columns]  # exact order match
 
-        # ✅ Combine instead of overwrite
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        df_combined.sort_values(by='Snapshot_Timestamp', inplace=True)
 
-        # ✅ Upload WITHOUT deleting old file (Drive overwrites by title)
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -170,11 +165,10 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         new_file.SetContentString(csv_buffer.getvalue())
         new_file.Upload()
 
-        print(f"✅ Uploaded updated {filename} — now contains {len(df_combined)} rows")
+        print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
 
     except Exception as e:
         print(f"❌ Failed to append to {filename}: {e}")
-        
         def build_game_key(df):
     """
     Safely builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
