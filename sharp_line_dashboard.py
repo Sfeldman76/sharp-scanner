@@ -265,20 +265,18 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     # Rebuild Game_Start if needed
     if 'Game_Start' not in df_moves.columns:
         if 'Event_Date' in df_moves.columns and 'Commence_Hour' in df_moves.columns:
-            print("🔄 Rebuilding Game_Start from Event_Date + Commence_Hour...")
             df_moves['Game_Start'] = pd.to_datetime(
                 df_moves['Event_Date'].astype(str) + ' ' + df_moves['Commence_Hour'].astype(str),
                 errors='coerce',
                 utc=True
             )
         else:
-            print("⚠️ 'Game_Start' not found and cannot be rebuilt — skipping scoring.")
+            print("⚠️ 'Game_Start' missing and cannot be rebuilt — skipping scoring.")
             df_moves['Scored'] = False
             df_moves['SHARP_COVER_RESULT'] = None
             df_moves['SHARP_HIT_BOOL'] = None
             return df_moves
 
-    # Filter only recent games
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
     cutoff = now_utc - pd.Timedelta(days=days_back)
@@ -286,7 +284,6 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         (df_moves['Game_Start'] < now_utc) & (df_moves['Game_Start'] > cutoff)
     ]
 
-    # Normalize teams and create a short merge key for score matching
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
     df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('H')
@@ -296,7 +293,6 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df_moves['Commence_Hour'].astype(str)
     )
 
-    # Fetch scores
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
 
@@ -342,6 +338,84 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df_moves['SHARP_COVER_RESULT'] = None
         df_moves['SHARP_HIT_BOOL'] = None
         return df_moves
+
+    df_scored_subset = df_moves.merge(df_scores, on='Merge_Key_Short', how='inner')
+
+    def calc_cover(row):
+        from pandas import Series
+        try:
+            hscore = float(row['Score_Home_Score'])
+            ascore = float(row['Score_Away_Score'])
+        except:
+            return Series([None, None])
+
+        market = str(row.get('Market', '')).lower()
+        outcome = str(row.get('Outcome', '')).lower()
+        ref_val = row.get('Ref Sharp Value', 0)
+
+        if market == 'totals':
+            try:
+                total = float(ref_val)
+                total_points = hscore + ascore
+                if 'under' in outcome:
+                    return Series(['Win', 1]) if total_points < total else Series(['Loss', 0])
+                elif 'over' in outcome:
+                    return Series(['Win', 1]) if total_points > total else Series(['Loss', 0])
+            except:
+                return Series([None, None])
+
+        team = outcome
+        home = str(row.get('Home_Team', '')).lower()
+        away = str(row.get('Away_Team', '')).lower()
+
+        if team in home:
+            team_score, opp_score = hscore, ascore
+        elif team in away:
+            team_score, opp_score = ascore, hscore
+        else:
+            return Series([None, None])
+
+        margin = team_score - opp_score
+
+        if market == 'h2h':
+            return Series(['Win', 1]) if margin > 0 else Series(['Loss', 0])
+
+        if market == 'spreads':
+            try:
+                spread = float(ref_val)
+                hit = (margin > abs(spread)) if spread < 0 else (margin + spread > 0)
+                return Series(['Win', 1]) if hit else Series(['Loss', 0])
+            except:
+                return Series([None, None])
+
+        return Series([None, None])
+
+    if df_scored_subset.empty:
+        print("⚠️ No matchups eligible for scoring.")
+        df_moves['Scored'] = False
+        df_moves['SHARP_COVER_RESULT'] = None
+        df_moves['SHARP_HIT_BOOL'] = None
+        return df_moves
+
+    result = df_scored_subset.apply(calc_cover, axis=1, result_type="expand")
+    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
+    df_scored_subset = pd.concat([df_scored_subset, result], axis=1)
+    df_scored_subset['Scored'] = True
+
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    value_cols = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']
+
+    try:
+        df_moves = df_moves.drop(columns=value_cols, errors='ignore')
+        df_moves = df_moves.merge(
+            df_scored_subset[merge_keys + value_cols],
+            on=merge_keys,
+            how='left'
+        )
+    except Exception as e:
+        print(f"❌ Merge failed: {e}")
+
+    return df_moves
 
     # === Merge and calculate score
     df_scored_subset = df_moves.merge(df_scores, on='Merge_Key_Short', how='inner')
