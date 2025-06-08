@@ -1479,7 +1479,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_game_start = df_moves_raw[['Game', 'Market', 'Game_Start']].dropna().drop_duplicates()
         # ✅ Add Game_Start to summary_df using (Game + Market + Event_Date)
         df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
-        df_master = build_game_key(df_master)
+      
         df_game_start['MergeKey'] = (
             df_game_start['Game'].str.strip().str.lower() + "_" +
             df_game_start['Market'].str.strip().str.lower() + "_" +
