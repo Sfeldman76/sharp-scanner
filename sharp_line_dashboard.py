@@ -281,7 +281,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').round('h')
+    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').floor('h')
     df['Merge_Key_Short'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
@@ -328,7 +328,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_hour = game_start.round('h')
+        game_hour = pd.to_datetime(game.get("commence_time"), utc=True).floor('h')
 
         scores = game.get("scores", [])
         score_dict = {
@@ -348,6 +348,12 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         })
 
     df_scores = pd.DataFrame(score_rows)
+    st.subheader("🧪 Sample Merge Keys")
+    st.write("→ From Sharp Moves")
+    st.dataframe(df[['Merge_Key_Short', 'Game', 'Game_Start']].drop_duplicates().head())
+    
+    st.write("→ From Score API")
+    st.dataframe(df_scores.head())
     df = df.merge(df_scores, on='Merge_Key_Short', how='left')
 
     # === Only score rows with actual score data
