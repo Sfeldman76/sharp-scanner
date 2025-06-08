@@ -287,21 +287,41 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df['Away_Team_Norm'] + "_" +
         df['Commence_Hour'].astype(str)
     )
-
+    
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
-
+    
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         games = response.json()
+    
+        # === Diagnostic: Show some completed games for today's MLB results
+        completed_games_today = [
+            {
+                "home_team": g.get("home_team"),
+                "away_team": g.get("away_team"),
+                "commence_time": g.get("commence_time"),
+                "completed": g.get("completed"),
+                "scores": g.get("scores")
+            }
+            for g in games
+            if g.get("completed")
+        ][:5]  # limit to first 5 for readability
+    
+        if completed_games_today:
+            st.subheader("✅ Completed MLB Games (Pulled from Odds API)")
+            st.json(completed_games_today)
+        else:
+            st.warning("⚠️ No completed games returned by the Odds API for today.")
+    
     except Exception as e:
         print(f"⚠️ Failed to fetch scores: {e}")
         df['SHARP_COVER_RESULT'] = None
         df['SHARP_HIT_BOOL'] = None
         df['Scored'] = False
         return df
-
+        
     score_rows = []
     for game in games:
         if not game.get("completed"):
