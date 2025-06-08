@@ -174,7 +174,7 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     df = df.copy()
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
     df['Market_Norm'] = df['Market'].str.strip().str.lower()
     df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
     df['Game_Key'] = (
@@ -1476,7 +1476,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                 how='left'
             )
           
-        df_game_start = df_moves_raw[['Game', 'Market', 'Game_Start']].dropna().drop_duplicates()
+        
         # ✅ Add Game_Start to summary_df using (Game + Market + Event_Date)
         df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
       
@@ -1646,7 +1646,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
             if all(col in df_master.columns for col in ['Game', 'Game_Start']):
                 df_master['Home_Team_Norm'] = df_master['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
                 df_master['Away_Team_Norm'] = df_master['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('H')
+                df_master['Commence_Hour'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True).dt.floor('h')
                 df_master['Game_Key'] = (
                     df_master['Home_Team_Norm'] + "_" +
                     df_master['Away_Team_Norm'] + "_" +
