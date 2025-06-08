@@ -393,7 +393,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     
        
 
-        return [None, 0]
+
 
     # Apply scoring only to valid rows
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
