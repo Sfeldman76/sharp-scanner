@@ -281,22 +281,21 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df['Commence_Hour'] = df['Game_Start'].dt.floor('h')
+    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').round('h')
     df['Merge_Key_Short'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
         df['Commence_Hour'].astype(str)
     )
-    
+
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
-    
+
     try:
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         games = response.json()
-    
-        # === Diagnostic: Show some completed games for today's MLB results
+
         completed_games_today = [
             {
                 "home_team": g.get("home_team"),
@@ -305,23 +304,22 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
                 "completed": g.get("completed"),
                 "scores": g.get("scores")
             }
-            for g in games
-            if g.get("completed")
-        ][:5]  # limit to first 5 for readability
-    
+            for g in games if g.get("completed")
+        ][:5]
+
         if completed_games_today:
             st.subheader("✅ Completed MLB Games (Pulled from Odds API)")
             st.json(completed_games_today)
         else:
             st.warning("⚠️ No completed games returned by the Odds API for today.")
-    
+
     except Exception as e:
         print(f"⚠️ Failed to fetch scores: {e}")
         df['SHARP_COVER_RESULT'] = None
         df['SHARP_HIT_BOOL'] = None
         df['Scored'] = False
         return df
-        
+
     score_rows = []
     for game in games:
         if not game.get("completed"):
@@ -330,7 +328,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_hour = game_start.floor('h')
+        game_hour = game_start.round('h')
 
         scores = game.get("scores", [])
         score_dict = {
@@ -350,7 +348,6 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         })
 
     df_scores = pd.DataFrame(score_rows)
-
     df = df.merge(df_scores, on='Merge_Key_Short', how='left')
 
     def calc_cover(row):
@@ -368,7 +365,10 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
                 if 'over' in outcome:
                     return ['Win', 1] if total > val else ['Loss', 0]
 
-            margin = h - a if row['Home_Team_Norm'] in outcome else a - h
+            if market in ['spreads', 'h2h'] and row['Home_Team_Norm'] in outcome:
+                margin = h - a
+            else:
+                margin = a - h
 
             if market == 'spreads':
                 hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
@@ -385,7 +385,6 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
         return [None, 0]
 
-    # If no completed scores, apply fallback columns
     if df_scores.empty:
         df['SHARP_COVER_RESULT'] = None
         df['SHARP_HIT_BOOL'] = None
