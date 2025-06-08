@@ -273,37 +273,19 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     def normalize_team(t):
         return str(t).strip().lower()
 
-    df_moves = df_moves.copy()
-
-    # Rebuild Game_Start if needed
-    if 'Game_Start' not in df_moves.columns:
-        if 'Event_Date' in df_moves.columns and 'Commence_Hour' in df_moves.columns:
-            df_moves['Game_Start'] = pd.to_datetime(
-                df_moves['Event_Date'].astype(str) + ' ' + df_moves['Commence_Hour'].astype(str),
-                errors='coerce',
-                utc=True
-            )
-        else:
-            print("⚠️ 'Game_Start' missing and cannot be rebuilt — skipping scoring.")
-            df_moves['Scored'] = False
-            df_moves['SHARP_COVER_RESULT'] = None
-            df_moves['SHARP_HIT_BOOL'] = None
-            return df_moves
-
-    df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
+    df = df_moves.copy()
+    df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
     cutoff = now_utc - pd.Timedelta(days=days_back)
-    df_moves = df_moves[
-        (df_moves['Game_Start'] < now_utc) & (df_moves['Game_Start'] > cutoff)
-    ]
+    df = df[(df['Game_Start'] < now_utc) & (df['Game_Start'] > cutoff)]
 
-    df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
-    df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('h')
-    df_moves['Merge_Key_Short'] = (
-        df_moves['Home_Team_Norm'] + "_" +
-        df_moves['Away_Team_Norm'] + "_" +
-        df_moves['Commence_Hour'].astype(str)
+    df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
+    df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
+    df['Commence_Hour'] = df['Game_Start'].dt.floor('h')
+    df['Merge_Key_Short'] = (
+        df['Home_Team_Norm'] + "_" +
+        df['Away_Team_Norm'] + "_" +
+        df['Commence_Hour'].astype(str)
     )
 
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
@@ -315,7 +297,10 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         games = response.json()
     except Exception as e:
         print(f"⚠️ Failed to fetch scores: {e}")
-        return df_moves
+        df['SHARP_COVER_RESULT'] = None
+        df['SHARP_HIT_BOOL'] = None
+        df['Scored'] = False
+        return df
 
     score_rows = []
     for game in games:
@@ -345,172 +330,55 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         })
 
     df_scores = pd.DataFrame(score_rows)
+
+    df = df.merge(df_scores, on='Merge_Key_Short', how='left')
+
+    def calc_cover(row):
+        try:
+            h = float(row['Score_Home_Score'])
+            a = float(row['Score_Away_Score'])
+            market = str(row.get('Market', '')).lower()
+            outcome = str(row.get('Outcome', '')).lower()
+            val = float(row.get('Ref Sharp Value', 0))
+
+            if market == 'totals':
+                total = h + a
+                if 'under' in outcome:
+                    return ['Win', 1] if total < val else ['Loss', 0]
+                if 'over' in outcome:
+                    return ['Win', 1] if total > val else ['Loss', 0]
+
+            margin = h - a if row['Home_Team_Norm'] in outcome else a - h
+
+            if market == 'spreads':
+                hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
+                return ['Win', 1] if hit else ['Loss', 0]
+
+            if market == 'h2h':
+                if row['Home_Team_Norm'] in outcome:
+                    return ['Win', 1] if h > a else ['Loss', 0]
+                if row['Away_Team_Norm'] in outcome:
+                    return ['Win', 1] if a > h else ['Loss', 0]
+
+        except:
+            pass
+
+        return [None, 0]
+
+    # If no completed scores, apply fallback columns
     if df_scores.empty:
-        print("🕒 No completed games returned by the Odds API.")
-        df_moves['Scored'] = False
-        df_moves['SHARP_COVER_RESULT'] = None
-        df_moves['SHARP_HIT_BOOL'] = None
-        return df_moves
+        df['SHARP_COVER_RESULT'] = None
+        df['SHARP_HIT_BOOL'] = None
+        df['Scored'] = False
+        return df
 
-    df_scored_subset = df_moves.merge(df_scores, on='Merge_Key_Short', how='inner')
-
-    def calc_cover(row):
-        from pandas import Series
-        try:
-            hscore = float(row['Score_Home_Score'])
-            ascore = float(row['Score_Away_Score'])
-        except:
-            return Series([None, None])
-
-        market = str(row.get('Market', '')).lower()
-        outcome = str(row.get('Outcome', '')).lower()
-        ref_val = row.get('Ref Sharp Value', 0)
-
-        if market == 'totals':
-            try:
-                total = float(ref_val)
-                total_points = hscore + ascore
-                if 'under' in outcome:
-                    return Series(['Win', 1]) if total_points < total else Series(['Loss', 0])
-                elif 'over' in outcome:
-                    return Series(['Win', 1]) if total_points > total else Series(['Loss', 0])
-            except:
-                return Series([None, None])
-
-        team = outcome
-        home = str(row.get('Home_Team', '')).lower()
-        away = str(row.get('Away_Team', '')).lower()
-
-        if team in home:
-            team_score, opp_score = hscore, ascore
-        elif team in away:
-            team_score, opp_score = ascore, hscore
-        else:
-            return Series([None, None])
-
-        margin = team_score - opp_score
-
-        if market == 'h2h':
-            return Series(['Win', 1]) if margin > 0 else Series(['Loss', 0])
-
-        if market == 'spreads':
-            try:
-                spread = float(ref_val)
-                hit = (margin > abs(spread)) if spread < 0 else (margin + spread > 0)
-                return Series(['Win', 1]) if hit else Series(['Loss', 0])
-            except:
-                return Series([None, None])
-
-        return Series([None, None])
-
-    if df_scored_subset.empty:
-        print("⚠️ No matchups eligible for scoring.")
-        df_moves['Scored'] = False
-        df_moves['SHARP_COVER_RESULT'] = None
-        df_moves['SHARP_HIT_BOOL'] = None
-        return df_moves
-
-    result = df_scored_subset.apply(calc_cover, axis=1, result_type="expand")
+    result = df.apply(calc_cover, axis=1, result_type='expand')
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
-    df_scored_subset = pd.concat([df_scored_subset, result], axis=1)
-    df_scored_subset['Scored'] = True
+    df['SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
+    df['SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
+    df['Scored'] = df['SHARP_COVER_RESULT'].notna()
 
-    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-    value_cols = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']
-
-    try:
-        df_moves = df_moves.drop(columns=value_cols, errors='ignore')
-        df_moves = df_moves.merge(
-            df_scored_subset[merge_keys + value_cols],
-            on=merge_keys,
-            how='left'
-        )
-    except Exception as e:
-        print(f"❌ Merge failed: {e}")
-
-    return df_moves
-
-    # === Merge and calculate score
-    df_scored_subset = df_moves.merge(df_scores, on='Merge_Key_Short', how='inner')
-
-    def calc_cover(row):
-        from pandas import Series
-        try:
-            hscore = float(row['Score_Home_Score'])
-            ascore = float(row['Score_Away_Score'])
-        except:
-            return Series([None, None])
-
-        market = str(row.get('Market', '')).lower()
-        outcome = str(row.get('Outcome', '')).lower()
-        ref_val = row.get('Ref Sharp Value', 0)
-
-        if market == 'totals':
-            try:
-                total = float(ref_val)
-                total_points = hscore + ascore
-                if 'under' in outcome:
-                    return Series(['Win', 1]) if total_points < total else Series(['Loss', 0])
-                elif 'over' in outcome:
-                    return Series(['Win', 1]) if total_points > total else Series(['Loss', 0])
-            except:
-                return Series([None, None])
-
-        team = outcome
-        home = str(row.get('Home_Team', '')).lower()
-        away = str(row.get('Away_Team', '')).lower()
-
-        if team in home:
-            team_score, opp_score = hscore, ascore
-        elif team in away:
-            team_score, opp_score = ascore, hscore
-        else:
-            return Series([None, None])
-
-        margin = team_score - opp_score
-
-        if market == 'h2h':
-            return Series(['Win', 1]) if margin > 0 else Series(['Loss', 0])
-
-        if market == 'spreads':
-            try:
-                spread = float(ref_val)
-                hit = (margin > abs(spread)) if spread < 0 else (margin + spread > 0)
-                return Series(['Win', 1]) if hit else Series(['Loss', 0])
-            except:
-                return Series([None, None])
-
-        return Series([None, None])
-
-        # Apply safely and drop rows that fail
-    cover_results = df_scored_subset.apply(calc_cover, axis=1, result_type="expand")
-    cover_results.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
-    
-    # Fill NAs with defaults if needed
-    cover_results['SHARP_COVER_RESULT'] = cover_results['SHARP_COVER_RESULT'].fillna("Unknown")
-    cover_results['SHARP_HIT_BOOL'] = cover_results['SHARP_HIT_BOOL'].fillna(0).astype(int)
-    
-    # Assign back
-    df_scored_subset['SHARP_COVER_RESULT'] = cover_results['SHARP_COVER_RESULT']
-    df_scored_subset['SHARP_HIT_BOOL'] = cover_results['SHARP_HIT_BOOL']
-    df_scored_subset['Scored'] = True
-
-    # === Propagate scores back to full df_moves
-    df_moves = build_game_key(df_moves)
-    df_scored_subset = build_game_key(df_scored_subset)
-
-    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-    score_cols = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']
-
-    if all(col in df_scored_subset.columns for col in merge_keys):
-        df_moves.set_index(merge_keys, inplace=True)
-        df_scored_subset.set_index(merge_keys, inplace=True)
-        df_moves.update(df_scored_subset[score_cols])
-        df_moves.reset_index(inplace=True)
-    else:
-        print("⚠️ Skipping score update due to missing merge keys.")
-
-    return df_moves
+    return df
         
             
 def detect_market_leaders(df_history, sharp_books, rec_books):
