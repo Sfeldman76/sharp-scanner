@@ -415,7 +415,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     df.loc[df_valid.index, 'SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
     df.loc[df_valid.index, 'SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
     df.loc[df_valid.index, 'Scored'] = df.loc[df_valid.index, 'SHARP_COVER_RESULT'].notna()
-	if unmatched:
+    if unmatched:
         st.subheader("⚠️ Unmatched rows (could not score):")
         st.dataframe(pd.DataFrame(unmatched))
     return df
