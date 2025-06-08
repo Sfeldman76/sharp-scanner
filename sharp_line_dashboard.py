@@ -625,7 +625,8 @@ def detect_cross_market_sharp_support(df_moves):
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
     from collections import defaultdict
-    import json
+    import pandas as pd
+    from datetime import datetime
 
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
@@ -633,10 +634,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
-    sharp_lines, sharp_side_flags, sharp_metrics_map = {}, {}, {}
-    line_history_log = {}
-    line_open_map = {}
-
+    sharp_lines, line_history_log, line_open_map = {}, {}, {}
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
@@ -687,7 +685,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             book_title = book.get('title')
 
             for market in book.get('markets', []):
-                mtype = market.get('key').strip().lower()
+                mtype = market.get('key', '').strip().lower()
+                if mtype not in ['spreads', 'totals', 'h2h']:
+                    continue
+
                 for o in market.get('outcomes', []):
                     label = normalize_label(o['name'])
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
@@ -695,7 +696,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
 
-                    # ✅ Build full Game_Key
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
 
                     entry = {
@@ -737,13 +737,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, val, old_val))
                         if book_key in SHARP_BOOKS:
-                            sharp_total_limit_map[(game_name, mtype, label)] += limit if limit is not None else 0
+                            sharp_total_limit_map[(game_name, mtype, label)] += limit if limit else 0
+                        if (game_name, mtype, label) not in line_open_map:
+                            line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
 
-                    if (game_name, mtype, label) not in line_open_map and val is not None:
-                        line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
+    df_moves = pd.DataFrame(rows)
+    df_audit = pd.DataFrame([item for sublist in line_history_log.values() for item in sublist])
+    df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
-
-
+    
     # === Sharp scoring logic
     for (game_name, mtype), label_map in sharp_limit_map.items():
         scores = {}
