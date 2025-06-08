@@ -213,7 +213,12 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         csv_buffer = StringIO(file_drive.GetContentString())
         df_master = pd.read_csv(csv_buffer)
 
-        df_master = build_game_key(df_master)
+        # ✅ Try to build Game_Key
+        if set(['Game', 'Game_Start', 'Market', 'Outcome']).issubset(df_master.columns):
+            df_master = build_game_key(df_master)
+        else:
+            print("⚠️ Cannot build Game_Key in load_master_sharp_moves: required columns missing.")
+
         df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
 
         return df_master
@@ -221,7 +226,6 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
     except Exception as e:
         print(f"❌ Failed to load master file: {e}")
         return pd.DataFrame()
-
 
         
 def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
@@ -1636,7 +1640,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
        # Now load master AFTER optional patch
         sport_key_lower = sport_key_api
         df_master = load_master_sharp_moves(drive)
-        df_master = build_game_key(df_master)
+    # Game_Key is built inside load_master_sharp_moves now
         
         # Load scores from the past N days via Odds API
         df_scored = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
