@@ -1548,7 +1548,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
        # Now load master AFTER optional patch
         sport_key_lower = sport_key_api
         df_master = load_master_sharp_moves(drive)
-        df_master = load_master_sharp_moves(drive)
         df_master = build_game_key(df_master)
         
         # Load scores from the past N days via Odds API
