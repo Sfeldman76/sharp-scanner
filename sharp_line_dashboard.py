@@ -357,8 +357,8 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df['Scored'] = False
         return df
 
-    df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score']).copy()
-
+  
+	df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
     def calc_cover(row):
         try:
             h = float(row['Score_Home_Score'])
@@ -366,32 +366,42 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
             market = str(row.get('Market', '')).lower()
             outcome = str(row.get('Outcome', '')).lower()
             val = float(row.get('Ref Sharp Value', 0))
-
+    
             if market == 'totals':
                 total = h + a
                 if 'under' in outcome:
                     return ['Win', 1] if total < val else ['Loss', 0]
                 if 'over' in outcome:
                     return ['Win', 1] if total > val else ['Loss', 0]
-
+    
             margin = h - a if row['Home_Team_Norm'] in outcome else a - h
-
+    
             if market == 'spreads':
                 hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
                 return ['Win', 1] if hit else ['Loss', 0]
-
+    
             if market == 'h2h':
                 if row['Home_Team_Norm'] in outcome:
                     return ['Win', 1] if h > a else ['Loss', 0]
                 if row['Away_Team_Norm'] in outcome:
                     return ['Win', 1] if a > h else ['Loss', 0]
-        except:
+    
+            # If we get here, logic fell through
+            print("⚠️ Could not match outcome to any logic branch:")
+            print(row[['Market', 'Outcome', 'Home_Team_Norm', 'Away_Team_Norm', 'Score_Home_Score', 'Score_Away_Score']])
             return [None, 0]
+    
+       
 
         return [None, 0]
 
     # Apply scoring only to valid rows
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
+    if not df_valid.empty:
+        st.subheader("🔍 Sample rows being scored:")
+        st.dataframe(df_valid[['Game', 'Market', 'Outcome', 'Ref Sharp Value', 'Score_Home_Score', 'Score_Away_Score']].head(5))
+    else:
+        st.warning("⚠️ No valid rows available for scoring (missing scores or values).")
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
 
     # Assign results back to the main df
@@ -402,7 +412,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     df.loc[df_valid.index, 'SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
     df.loc[df_valid.index, 'SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
     df.loc[df_valid.index, 'Scored'] = df.loc[df_valid.index, 'SHARP_COVER_RESULT'].notna()
-
+	if unmatched:
+        st.subheader("⚠️ Unmatched rows (could not score):")
+        st.dataframe(pd.DataFrame(unmatched))
     return df
         
             
