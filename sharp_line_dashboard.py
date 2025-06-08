@@ -125,6 +125,13 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             print(f"⚠️ Skipping append — {filename} input is empty.")
             return
 
+        # ✅ Add Game_Key early
+        if set(['Game', 'Game_Start', 'Market', 'Outcome']).issubset(df_new.columns):
+            df_new = build_game_key(df_new)
+        else:
+            print("⚠️ Skipping Game_Key creation in append_to_master_csv_on_drive due to missing columns.")
+
+        # Step 1: Load existing master
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
@@ -137,17 +144,18 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             file_drive.Delete()
             print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
-        # Add snapshot metadata
+        # Step 2: Add batch ID and timestamp to new data
         snapshot_ts = pd.Timestamp.utcnow()
         df_new['Snapshot_Timestamp'] = snapshot_ts
         df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
 
-        # Combine and patch Game_Key
+        # Step 3: Combine all rows (no deduplication)
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-        df_combined = build_game_key(df_combined)
+
+        # Step 4: Sort by time for clarity
         df_combined.sort_values(by='Snapshot_Timestamp', inplace=True)
 
-        # Upload
+        # Step 5: Upload to Drive
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -155,11 +163,11 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
         new_file.SetContentString(csv_buffer.getvalue())
         new_file.Upload()
+
         print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
 
     except Exception as e:
         print(f"❌ Failed to append to {filename}: {e}")
-        
         def build_game_key(df):
     """
     Safely builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
