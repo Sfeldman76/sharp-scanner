@@ -116,22 +116,26 @@ def fetch_live_odds(sport_key):
 
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
+    import pandas as pd
     from io import StringIO
     from datetime import datetime
-    import pandas as pd
 
     try:
         if df_new.empty:
             print(f"⚠️ Skipping append — {filename} input is empty.")
             return
 
-        # ✅ Add Game_Key early
-        if set(['Game', 'Game_Start', 'Market', 'Outcome']).issubset(df_new.columns):
+        # === Normalize inputs ===
+        if all(col in df_new.columns for col in ['Game', 'Game_Start', 'Market', 'Outcome']):
             df_new = build_game_key(df_new)
         else:
-            print("⚠️ Skipping Game_Key creation in append_to_master_csv_on_drive due to missing columns.")
+            print("⚠️ Skipping Game_Key creation due to missing columns.")
 
-        # Step 1: Load existing master
+        if 'Sport' not in df_new.columns:
+            print("⚠️ 'Sport' column missing — assigning 'UNKNOWN'")
+            df_new['Sport'] = 'UNKNOWN'
+
+        # === Load existing master ===
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
@@ -139,29 +143,26 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         df_existing = pd.DataFrame()
         if file_list:
             file_drive = file_list[0]
-            existing_data = StringIO(file_drive.GetContentString())
-            df_existing = pd.read_csv(existing_data)
+            df_existing = pd.read_csv(StringIO(file_drive.GetContentString()))
             file_drive.Delete()
             print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
-        # Step 2: Add batch ID and timestamp to new data
+        # === Add timestamp metadata ===
         snapshot_ts = pd.Timestamp.utcnow()
         df_new['Snapshot_Timestamp'] = snapshot_ts
         df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
 
-        # Step 3: Combine all rows (no deduplication)
+        # === Append and sort ===
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-
-        # Step 4: Sort by time for clarity
         df_combined.sort_values(by='Snapshot_Timestamp', inplace=True)
 
-        # Step 5: Upload to Drive
-        csv_buffer = StringIO()
-        df_combined.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
+        # === Upload updated file ===
+        buffer = StringIO()
+        df_combined.to_csv(buffer, index=False)
+        buffer.seek(0)
 
         new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
-        new_file.SetContentString(csv_buffer.getvalue())
+        new_file.SetContentString(buffer.getvalue())
         new_file.Upload()
 
         print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
