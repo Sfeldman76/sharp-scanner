@@ -125,7 +125,6 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             print(f"⚠️ Skipping append — {filename} input is empty.")
             return
 
-        # Step 1: Load existing master
         file_list = drive.ListFile({
             'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
         }).GetList()
@@ -138,18 +137,17 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
             file_drive.Delete()
             print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
 
-        # Step 2: Add batch ID and timestamp to new data
+        # Add snapshot metadata
         snapshot_ts = pd.Timestamp.utcnow()
         df_new['Snapshot_Timestamp'] = snapshot_ts
         df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
 
-        # Step 3: Combine all rows (no deduplication)
+        # Combine and patch Game_Key
         df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-
-        # Step 4: Sort by time for clarity
+        df_combined = build_game_key(df_combined)
         df_combined.sort_values(by='Snapshot_Timestamp', inplace=True)
-        df_new = build_game_key(df_new)
-        # Step 5: Upload to Drive
+
+        # Upload
         csv_buffer = StringIO()
         df_combined.to_csv(csv_buffer, index=False)
         csv_buffer.seek(0)
@@ -157,38 +155,28 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
         new_file.SetContentString(csv_buffer.getvalue())
         new_file.Upload()
-
         print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
 
     except Exception as e:
         print(f"❌ Failed to append to {filename}: {e}")
-
-def build_game_key(df):
+        
+        def build_game_key(df):
     """
-    Builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
-    Adds Game_Key, Home_Team_Norm, Away_Team_Norm, Commence_Hour columns.
-    
-    Args:
-        df (pd.DataFrame): DataFrame containing columns: Game, Game_Start, Market, Outcome
-
-    Returns:
-        pd.DataFrame: The same DataFrame with a new 'Game_Key' column and supporting normalized fields.
+    Safely builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
+    Returns df unmodified if required columns are missing.
     """
-    import pandas as pd
-
-    if not all(col in df.columns for col in ['Game', 'Game_Start', 'Market', 'Outcome']):
-        raise ValueError("Missing one or more required columns: ['Game', 'Game_Start', 'Market', 'Outcome']")
+    required = ['Game', 'Game_Start', 'Market', 'Outcome']
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        print(f"⚠️ Skipping build_game_key — missing columns: {missing}")
+        return df
 
     df = df.copy()
-
-    # Normalize and extract components
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
     df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('H')
     df['Market_Norm'] = df['Market'].str.strip().str.lower()
     df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
-
-    # Construct full Game_Key
     df['Game_Key'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
@@ -196,9 +184,9 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         df['Market_Norm'] + "_" +
         df['Outcome_Norm']
     )
-
     return df
-
+        
+            
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=None):
     import pandas as pd
     from io import StringIO
@@ -216,12 +204,7 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         csv_buffer = StringIO(file_drive.GetContentString())
         df_master = pd.read_csv(csv_buffer)
 
-        # === Patch: Recover missing Game_Key if possible
-        try:
-            df_master = build_game_key(df_master)
-        except ValueError as e:
-            st.warning(f"⚠️ Could not build Game_Key: {e}")
-        # ✅ Ensure Game_Start is datetime UTC
+        df_master = build_game_key(df_master)
         df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
 
         return df_master
@@ -229,7 +212,8 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
     except Exception as e:
         print(f"❌ Failed to load master file: {e}")
         return pd.DataFrame()
-        
+
+
         
 def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
     from io import StringIO
@@ -294,6 +278,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
             df_moves['SHARP_HIT_BOOL'] = None
             return df_moves
 
+    # Filter only recent games
     df_moves['Game_Start'] = pd.to_datetime(df_moves['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
     cutoff = now_utc - pd.Timedelta(days=days_back)
@@ -301,17 +286,17 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         (df_moves['Game_Start'] < now_utc) & (df_moves['Game_Start'] > cutoff)
     ]
 
-    # Normalize and create Merge_Key_Short
+    # Normalize teams and create a short merge key for score matching
     df_moves['Home_Team_Norm'] = df_moves['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df_moves['Away_Team_Norm'] = df_moves['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df_moves['Commence_Hour'] = pd.to_datetime(df_moves['Game_Start'], utc=True).dt.floor('H')
+    df_moves['Commence_Hour'] = df_moves['Game_Start'].dt.floor('H')
     df_moves['Merge_Key_Short'] = (
         df_moves['Home_Team_Norm'] + "_" +
         df_moves['Away_Team_Norm'] + "_" +
         df_moves['Commence_Hour'].astype(str)
     )
 
-    # Fetch completed scores
+    # Fetch scores
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
 
@@ -358,10 +343,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df_moves['SHARP_HIT_BOOL'] = None
         return df_moves
 
-    # === Merge scores into subset
+    # === Merge and calculate score
     df_scored_subset = df_moves.merge(df_scores, on='Merge_Key_Short', how='inner')
 
-    # === Apply cover logic to scored rows
     def calc_cover(row):
         from pandas import Series
         try:
@@ -411,22 +395,29 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
         return Series([None, None])
 
-    # Apply scoring
     df_scored_subset[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_scored_subset.apply(
         calc_cover, axis=1, result_type="expand"
     )
-
-    # Mark those with scores
     df_scored_subset['Scored'] = True
 
-    # === Propagate scores back to full df_moves (with full Game_Key)
-    df_moves.update(
-        df_scored_subset.set_index(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])[
-            ['Score_Home_Score', 'Score_Away_Score', 'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']
-        ]
-    )
+    # === Propagate scores back to full df_moves
+    df_moves = build_game_key(df_moves)
+    df_scored_subset = build_game_key(df_scored_subset)
+
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    score_cols = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']
+
+    if all(col in df_scored_subset.columns for col in merge_keys):
+        df_moves.set_index(merge_keys, inplace=True)
+        df_scored_subset.set_index(merge_keys, inplace=True)
+        df_moves.update(df_scored_subset[score_cols])
+        df_moves.reset_index(inplace=True)
+    else:
+        print("⚠️ Skipping score update due to missing merge keys.")
 
     return df_moves
+        
+            
 def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
     df_history['Time'] = pd.to_datetime(df_history['Time'])
@@ -1277,7 +1268,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         # After df_moves_raw is created:
         df_moves_raw = build_game_key(df_moves_raw)
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'])
-
+        
         model = load_model_from_drive(drive)
         if model is not None:
             try:
