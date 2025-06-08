@@ -631,14 +631,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
-    rows = []
-    sharp_limit_map = defaultdict(lambda: defaultdict(list))
-    sharp_total_limit_map = defaultdict(int)
-    sharp_lines, line_history_log, line_open_map = {}, {}, {}
-    sharp_side_flags = {}
-    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows = []  # List of all line-level sharp move entries
+    sharp_limit_map = defaultdict(lambda: defaultdict(list))  # Stores all limits per (game, market, label)
+    sharp_total_limit_map = defaultdict(int)  # Total limit across sharp books
+    sharp_lines = {}  # Maps (game, market, label) → latest sharp line entry
+    line_history_log = {}  # Game-level ID → full history of entries
+    line_open_map = {}  # Tracks opening value per (game, market, label)
+    sharp_side_flags = {}  # Stores which (game, market, label) is the sharp side
+    sharp_metrics_map = {}  # Stores all calculated metrics for sharp side
+    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # For timestamping the snapshot
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
-
     sport_scope_key = {
         'MLB': 'baseball_mlb',
         'NBA': 'basketball_nba'
