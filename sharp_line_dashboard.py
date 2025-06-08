@@ -1355,10 +1355,9 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Sport'] = label
-        # After df_moves_raw is created:
         df_moves_raw = build_game_key(df_moves_raw)
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'])
-        
+
         model = load_model_from_drive(drive)
         if model is not None:
             try:
@@ -1436,7 +1435,9 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.warning(f"⚠️ Final model scoring failed: {e}")
 
+        # ✅ Ensure 'Sport' column exists before writing to master
         if not df_moves.empty:
+            df_moves['Sport'] = label
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
         if not df_audit.empty:
@@ -1461,10 +1462,10 @@ def render_scanner_tab(label, sport_key, container, drive):
                     new_file.Upload()
                 else:
                     st.error("❌ drive.CreateFile returned None for line_history_master.csv — skipping upload.")
-
             except Exception as e:
                 st.error(f"❌ Failed to update line history: {e}")
 
+      
         # === Sharp Summary Table
         # === Sharp Summary Table
         st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
