@@ -395,9 +395,17 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
         return Series([None, None])
 
-    df_scored_subset[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = df_scored_subset.apply(
-        calc_cover, axis=1, result_type="expand"
-    )
+        # Apply safely and drop rows that fail
+    cover_results = df_scored_subset.apply(calc_cover, axis=1, result_type="expand")
+    cover_results.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
+    
+    # Fill NAs with defaults if needed
+    cover_results['SHARP_COVER_RESULT'] = cover_results['SHARP_COVER_RESULT'].fillna("Unknown")
+    cover_results['SHARP_HIT_BOOL'] = cover_results['SHARP_HIT_BOOL'].fillna(0).astype(int)
+    
+    # Assign back
+    df_scored_subset['SHARP_COVER_RESULT'] = cover_results['SHARP_COVER_RESULT']
+    df_scored_subset['SHARP_HIT_BOOL'] = cover_results['SHARP_HIT_BOOL']
     df_scored_subset['Scored'] = True
 
     # === Propagate scores back to full df_moves
