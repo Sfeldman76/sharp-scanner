@@ -312,7 +312,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_hour = game_start.floor('H')
+        game_hour = game_start.floor('h')
 
         scores = game.get("scores", [])
         score_dict = {
@@ -647,7 +647,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         game_name = f"{game['home_team']} vs {game['away_team']}"
         event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
         event_date = event_time.strftime("%Y-%m-%d") if pd.notnull(event_time) else ""
-        game_hour = event_time.floor('H') if pd.notnull(event_time) else pd.NaT
+        game_hour = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
         gid = game.get('id')
         prev_game = previous_map.get(gid, {})
 
