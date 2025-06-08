@@ -357,42 +357,42 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
             market = str(row.get('Market', '')).lower()
             outcome = str(row.get('Outcome', '')).lower()
             val = float(row.get('Ref Sharp Value', 0))
-
+    
             if market == 'totals':
                 total = h + a
                 if 'under' in outcome:
                     return ['Win', 1] if total < val else ['Loss', 0]
                 if 'over' in outcome:
                     return ['Win', 1] if total > val else ['Loss', 0]
-
-            if market in ['spreads', 'h2h'] and row['Home_Team_Norm'] in outcome:
-                margin = h - a
-            else:
-                margin = a - h
-
+    
+            margin = h - a if row['Home_Team_Norm'] in outcome else a - h
+    
             if market == 'spreads':
                 hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
                 return ['Win', 1] if hit else ['Loss', 0]
-
+    
             if market == 'h2h':
                 if row['Home_Team_Norm'] in outcome:
                     return ['Win', 1] if h > a else ['Loss', 0]
                 if row['Away_Team_Norm'] in outcome:
                     return ['Win', 1] if a > h else ['Loss', 0]
-
-        except:
-            pass
-
-        return [None, 0]
-
+    
+            # If none of the above conditions apply, fall through to catch block
+            raise ValueError("Could not resolve cover logic")
+    
+        except Exception as e:
+            st.write("❌ calc_cover error on row:", row.to_dict())
+            st.write("Error message:", str(e))
+            return ['Error', None]
+    
     if df_scores.empty:
         df['SHARP_COVER_RESULT'] = None
         df['SHARP_HIT_BOOL'] = None
         df['Scored'] = False
         return df
 
-    result = df.apply(calc_cover, axis=1, result_type='expand')
-    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
+    result = df.apply(calc_cover, axis=1)
+    st.write("🔍 Sample output from calc_cover():", result.head(10))
     df['SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
     df['SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
     df['Scored'] = df['SHARP_COVER_RESULT'].notna()
