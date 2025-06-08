@@ -359,6 +359,8 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
   
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
+    unmatched = []
+
     def calc_cover(row):
         try:
             h = float(row['Score_Home_Score'])
@@ -386,13 +388,14 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
                 if row['Away_Team_Norm'] in outcome:
                     return ['Win', 1] if a > h else ['Loss', 0]
     
-            # If we get here, logic fell through
-            print("⚠️ Could not match outcome to any logic branch:")
-            print(row[['Market', 'Outcome', 'Home_Team_Norm', 'Away_Team_Norm', 'Score_Home_Score', 'Score_Away_Score']])
+            unmatched.append(row[['Game', 'Market', 'Outcome', 'Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']])
             return [None, 0]
     
-       
-
+        except Exception as e:
+            st.error(f"❌ calc_cover error: {e}")
+            unmatched.append(row[['Game', 'Market', 'Outcome', 'Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']])
+            return [None, 0]
+    
 
 
     # Apply scoring only to valid rows
