@@ -366,71 +366,80 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         })
 
     df_scores = pd.DataFrame(score_rows)
-
-               
+    
+    # === Debug: Show sample score rows and merge keys
     if not df_scores.empty:
         st.write("🔍 Sample Merge Keys from df_scores:")
         st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
+    
+        st.write("📄 Full df_scores sample:")
+        st.dataframe(df_scores.head())
     else:
         st.warning("⚠️ df_scores is empty — no valid completed games parsed.")
-
+    
+    # === Validate presence of merge key
     if df_scores.empty or 'Merge_Key_Short' not in df_scores.columns:
         st.warning("⚠️ No valid completed games matched for scoring.")
         df['SHARP_COVER_RESULT'] = None
         df['SHARP_HIT_BOOL'] = 0
         df['Scored'] = False
         return df
+    
+    # === Show Merge_Key_Short samples from sharp moves
     st.subheader("🧪 Sample Merge Keys")
     st.write("→ From Sharp Moves")
     st.dataframe(df[['Merge_Key_Short', 'Game', 'Game_Start']].drop_duplicates().head())
+    
     st.write("🔍 Merge_Key_Short in df columns:", 'Merge_Key_Short' in df.columns)
     st.write("🔍 df columns:", df.columns.tolist())
-    st.write("→ From Score API")
-    st.dataframe(df_scores.head())
-    # Merge in API scores, but don't overwrite existing ones
-    st.write("🔍 Columns in df:", df.columns.tolist())
+    
+    # === Check for presence of merge key before merge
     st.write("📌 MERGE DEBUG — checking both sides")
     st.write("🔑 'Merge_Key_Short' in df:", 'Merge_Key_Short' in df.columns)
     st.write("🔑 'Merge_Key_Short' in df_scores:", 'Merge_Key_Short' in df_scores.columns)
     st.write("📄 df_scores columns:", df_scores.columns.tolist())
-    st.write("📄 df_scores sample:", df_scores.head())
-    if 'Merge_Key_Short' not in df.columns:
-        st.error("❌ Merge_Key_Short missing — check merge key creation logic")
-    else:
-        st.dataframe(df[['Merge_Key_Short', 'Game', 'Game_Start']].drop_duplicates().head())
-
     
+    # === Merge
     if 'Merge_Key_Short' in df.columns and 'Merge_Key_Short' in df_scores.columns:
         df = df.merge(df_scores, on='Merge_Key_Short', how='left', suffixes=('', '_api'))
+        st.success("✅ Merge completed on 'Merge_Key_Short'")
     else:
         st.error("❌ Cannot merge — Merge_Key_Short missing from one or both DataFrames.")
         df['SHARP_COVER_RESULT'] = None
         df['SHARP_HIT_BOOL'] = 0
         df['Scored'] = False
         return df
-
     
-    # Only fill in missing scores
+    # === Post-merge score diagnostics
+    st.subheader("🔬 Post-Merge Score Check")
+    st.write("📊 Score_Home_Score_api non-null:", df['Score_Home_Score_api'].notna().sum() if 'Score_Home_Score_api' in df.columns else "Missing")
+    st.write("📊 Score_Away_Score_api non-null:", df['Score_Away_Score_api'].notna().sum() if 'Score_Away_Score_api' in df.columns else "Missing")
+    
+    st.dataframe(df[['Merge_Key_Short', 'Score_Home_Score', 'Score_Home_Score_api', 'Score_Away_Score', 'Score_Away_Score_api']].dropna(how='all').head(10))
+    
+    # === Fill scores only if api values exist
     for col in ['Score_Home_Score', 'Score_Away_Score']:
         api_col = f"{col}_api"
         if api_col in df.columns:
+            st.write(f"🔁 Filling missing {col} from {api_col}...")
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            df[api_col] = pd.to_numeric(df[api_col], errors='coerce')
             df[col] = df[col].combine_first(df[api_col])
             df.drop(columns=[api_col], inplace=True)
         else:
             st.warning(f"⚠️ {api_col} missing after merge — skipping fill for {col}")
-        # Now apply time filtering AFTER merge, to only score recent games
-        
-
-    # === Only score rows with actual score data
+    
+    # === Validate if scoring is possible
     if df_scores.empty:
         df['SHARP_COVER_RESULT'] = None
         df['SHARP_HIT_BOOL'] = None
         df['Scored'] = False
         return df
-
-  
+    
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
-    unmatched = []
+    st.write(f"✅ Valid rows available for scoring: {len(df_valid)}")
+    if df_valid.empty:
+        st.warning("⚠️ No valid rows to score after merging scores.")
 
     def calc_cover(row):
         try:
