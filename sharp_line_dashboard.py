@@ -351,6 +351,20 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
         for col in ['Score_Home_Score_api', 'Score_Away_Score_api']:
             count = df[col].notna().sum() if col in df.columns else "Missing"
             st.write(f"📊 {col} non-null:", count)
+        st.subheader("🕵️ Merge Key Preview")
+        st.write("✅ Sharp Moves Merge Keys:")
+        st.dataframe(df[['Merge_Key_Short']].drop_duplicates())
+        
+        st.write("✅ Score Rows Merge Keys:")
+        st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
+        
+        # Optional: show intersection
+        matching_keys = set(df['Merge_Key_Short']).intersection(set(df_scores['Merge_Key_Short']))
+        st.write(f"🔗 Matching keys count: {len(matching_keys)}")
+        if matching_keys:
+            st.write("🔗 Sample matching key(s):", list(matching_keys)[:3])
+        else:
+            st.warning("🚫 No matching Merge_Key_Short values between sharp moves and scores.")
 
         # Preview merged scores before filling
         view_cols = ['Merge_Key_Short', 'Score_Home_Score', 'Score_Home_Score_api', 'Score_Away_Score', 'Score_Away_Score_api']
