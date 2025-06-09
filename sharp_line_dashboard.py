@@ -281,7 +281,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').floor('h')
+    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').dt.floor('h')
     df['Merge_Key_Short'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
