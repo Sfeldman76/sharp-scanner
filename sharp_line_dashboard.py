@@ -279,15 +279,17 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     cutoff = now_utc - pd.Timedelta(days=days_back)
     df = df[(df['Game_Start'] < now_utc) & (df['Game_Start'] > cutoff)]
 
+    # Only parse and prep sharp move data — do not filter by time yet
+    df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+    df['Commence_Hour'] = df['Game_Start'].dt.floor('h')
     df['Merge_Key_Short'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
         df['Commence_Hour'].astype(str)
     )
-
+    
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
 
@@ -354,7 +356,16 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     
     st.write("→ From Score API")
     st.dataframe(df_scores.head())
-    df = df.merge(df_scores, on='Merge_Key_Short', how='left')
+    # Merge in API scores, but don't overwrite existing ones
+    df = df.merge(df_scores, on='Merge_Key_Short', how='left', suffixes=('', '_api'))
+    
+    # Only fill in missing scores
+    for col in ['Score_Home_Score', 'Score_Away_Score']:
+        api_col = f"{col}_api"
+        df[col] = df[col].combine_first(df[api_col])
+        df.drop(columns=[api_col], inplace=True)
+    # Now apply time filtering AFTER merge, to only score recent games
+    
 
     # === Only score rows with actual score data
     if df_scores.empty:
