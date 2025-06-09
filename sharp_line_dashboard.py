@@ -94,6 +94,15 @@ def implied_prob(odds):
 
 
 @st.cache_data(ttl=60)
+def patch_sport_column(df, expected_sport):
+    if 'Sport' in df.columns:
+        mismatches = df['Sport'] != expected_sport
+        if mismatches.any():
+            print(f"⚠️ Fixing {mismatches.sum()} mislabeled Sport entries.")
+            df.loc[mismatches, 'Sport'] = expected_sport
+    else:
+        df['Sport'] = expected_sport
+    return df
 
 
 def fetch_live_odds(sport_key):
@@ -1343,6 +1352,9 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Sport'] = label
+        df_moves_raw['Sport'] = label  # overwrite with correct label
+        df_moves_raw = patch_sport_column(df_moves_raw, label.upper())
+
         df_moves_raw = build_game_key(df_moves_raw)
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
 
@@ -1634,6 +1646,11 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
 
         # ✅ Load master with Game_Key already handled
         df_master = load_master_sharp_moves(drive, folder_id=FOLDER_ID)
+
+        # ✅ Fix mislabeled rows BEFORE filtering
+        df_master = patch_sport_column(df_master, sport_label.upper())
+
+        # ✅ Now filter to the current sport
         df_master = df_master[df_master['Sport'] == sport_label.upper()]
 
 
