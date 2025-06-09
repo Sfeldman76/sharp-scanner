@@ -376,8 +376,12 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
             'Score_Away_Score': away_score
         })
 
-    df_scores = pd.DataFrame(score_rows)
-    
+
+    df_scores = df_scores.rename(columns={
+        "Score_Home_Score": "Score_Home_Score_api",
+        "Score_Away_Score": "Score_Away_Score_api"
+    })
+
     # === Debug: Show sample score rows and merge keys
     if not df_scores.empty:
         st.write("🔍 Sample Merge Keys from df_scores:")
@@ -435,7 +439,23 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     st.write("📊 Score_Home_Score_api non-null:", df['Score_Home_Score_api'].notna().sum() if 'Score_Home_Score_api' in df.columns else "Missing")
     st.write("📊 Score_Away_Score_api non-null:", df['Score_Away_Score_api'].notna().sum() if 'Score_Away_Score_api' in df.columns else "Missing")
     
-    st.dataframe(df[['Merge_Key_Short', 'Score_Home_Score', 'Score_Home_Score_api', 'Score_Away_Score', 'Score_Away_Score_api']].dropna(how='all').head(10))
+    # ✅ Defensive debug block to prevent KeyError
+    expected_cols = ['Merge_Key_Short', 'Score_Home_Score', 'Score_Home_Score_api', 'Score_Away_Score', 'Score_Away_Score_api']
+    available_cols = [col for col in expected_cols if col in df.columns]
+    
+    st.subheader("🔬 Post-Merge Score Check")
+    
+    for col in ['Score_Home_Score_api', 'Score_Away_Score_api']:
+        if col in df.columns:
+            st.write(f"✅ {col} non-null:", df[col].notna().sum())
+        else:
+            st.write(f"❌ {col} not found in df.columns")
+    
+    if available_cols:
+        st.dataframe(df[available_cols].dropna(how='all').head(10))
+    else:
+        st.warning("⚠️ No score-related columns present after merge.")
+
     
     # === Fill scores only if api values exist
     for col in ['Score_Home_Score', 'Score_Away_Score']:
