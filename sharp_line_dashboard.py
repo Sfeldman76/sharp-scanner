@@ -274,10 +274,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         return str(t).strip().lower()
 
     df = df_moves.copy()
-    df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     now_utc = datetime.now(pytz.utc)
-    cutoff = now_utc - pd.Timedelta(days=days_back)
-    df = df[(df['Game_Start'] < now_utc) & (df['Game_Start'] > cutoff)]
+    #cutoff = now_utc - pd.Timedelta(days=days_back)
+    #df = df[(df['Game_Start'] < now_utc) & (df['Game_Start'] > cutoff)]
 
     # Only parse and prep sharp move data — do not filter by time yet
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
@@ -363,6 +362,11 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     st.write("→ From Score API")
     st.dataframe(df_scores.head())
     # Merge in API scores, but don't overwrite existing ones
+    st.write("🔍 Columns in df:", df.columns.tolist())
+    if 'Merge_Key_Short' not in df.columns:
+        st.error("❌ Merge_Key_Short missing — check merge key creation logic")
+    else:
+        st.dataframe(df[['Merge_Key_Short', 'Game', 'Game_Start']].drop_duplicates().head())
     df = df.merge(df_scores, on='Merge_Key_Short', how='left', suffixes=('', '_api'))
     
     # Only fill in missing scores
