@@ -468,17 +468,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
 
     return df
 
-def patch_sport_column(df, expected_sport):
-    if 'Sport' in df.columns:
-        mismatches = df['Sport'] != expected_sport
-        if mismatches.any():
-            print(f"⚠️ Fixing {mismatches.sum()} mislabeled Sport entries.")
-            df.loc[mismatches, 'Sport'] = expected_sport
-    else:
-        df['Sport'] = expected_sport
-    return df
-
-        
+       
             
 def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
@@ -1450,7 +1440,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         # ✅ Ensure 'Sport' column exists before writing to master
         if not df_moves.empty:
             df_moves['Sport'] = label
-            df_moves = patch_sport_column(df_moves, label.upper())
+           
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
 
 
