@@ -424,21 +424,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     st.write("🔑 'Merge_Key_Short' in df_scores:", 'Merge_Key_Short' in df_scores.columns)
     st.write("📄 df_scores columns:", df_scores.columns.tolist())
     
-    # === Merge
-    if not df_scores.empty and 'Merge_Key_Short' in df_scores.columns and 'Merge_Key_Short' in df.columns:
-        df_scores = df_scores.rename(columns={
-            "Score_Home_Score": "Score_Home_Score_api",
-            "Score_Away_Score": "Score_Away_Score_api"
-        })
-        
-        df = df.merge(df_scores, on='Merge_Key_Short', how='left')
-        st.success("✅ Merge completed on 'Merge_Key_Short'")
-    else:
-        st.error("❌ Cannot merge — df_scores is empty or missing Merge_Key_Short.")
-        df['SHARP_COVER_RESULT'] = None
-        df['SHARP_HIT_BOOL'] = 0
-        df['Scored'] = False
-        return df
+   
 
 
  
