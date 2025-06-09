@@ -270,7 +270,6 @@ def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
         return {}
 
 def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659fe861d68dfa2866c211294684"):
-
     import requests
     import pytz
     import pandas as pd
@@ -280,8 +279,11 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
     def normalize_team(t):
         return str(t).strip().lower()
 
-    df = df_moves.copy()
+    df = df_moves.copy()  # ✅ Define df first
+    df = build_game_key(df)  # ✅ Now safe to build keys
+
     now_utc = datetime.now(pytz.utc)
+
 
     # Normalize and filter past games
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
