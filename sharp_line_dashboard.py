@@ -291,6 +291,12 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df['Commence_Hour']
     )
 
+    # ✅ Only keep rows from sharp_moves that have already started (i.e., in the past)
+    
+    df = df[
+        (df['Game_Start'] < pd.Timestamp.utcnow()) &
+        (df['SHARP_HIT_BOOL'].isna())
+    ]
 
     
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
@@ -334,7 +340,10 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
         game_hour = game_start.floor('h').strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 🔁 Make merge key always match df (Sharp Moves): home → away → hour
         merge_key = f"{home}_{away}_{game_hour}"
+
 
         st.write("🔍 Sample Merge Keys from df:")
         st.dataframe(df[['Merge_Key_Short']].drop_duplicates())
@@ -409,7 +418,10 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df['SHARP_HIT_BOOL'] = 0
         df['Scored'] = False
         return df
-    
+    # Only keep rows where Game_Start < now (i.e., completed games)
+    now = pd.Timestamp.utcnow()
+    df = df[df['Game_Start'] < now]
+
     # === Post-merge score diagnostics
     st.subheader("🔬 Post-Merge Score Check")
     st.write("📊 Score_Home_Score_api non-null:", df['Score_Home_Score_api'].notna().sum() if 'Score_Home_Score_api' in df.columns else "Missing")
