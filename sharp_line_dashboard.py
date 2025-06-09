@@ -289,7 +289,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         df['Away_Team_Norm'] + "_" +
         df['Commence_Hour'].astype(str)
     )
-    df = df_moves.copy()
+
     
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
@@ -358,7 +358,8 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     st.subheader("🧪 Sample Merge Keys")
     st.write("→ From Sharp Moves")
     st.dataframe(df[['Merge_Key_Short', 'Game', 'Game_Start']].drop_duplicates().head())
-    
+    st.write("🔍 Merge_Key_Short in df columns:", 'Merge_Key_Short' in df.columns)
+    st.write("🔍 df columns:", df.columns.tolist())
     st.write("→ From Score API")
     st.dataframe(df_scores.head())
     # Merge in API scores, but don't overwrite existing ones
