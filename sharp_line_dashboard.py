@@ -360,10 +360,15 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
         for col in ['Score_Home_Score', 'Score_Away_Score']:
             api_col = f"{col}_api"
             if api_col in df.columns:
+                if col not in df.columns:
+                    df[col] = pd.NA  # 👈 safe initialize
                 df[col] = pd.to_numeric(df[col], errors='coerce')
                 df[api_col] = pd.to_numeric(df[api_col], errors='coerce')
                 df[col] = df[col].combine_first(df[api_col])
                 df.drop(columns=[api_col], inplace=True)
+            else:
+                st.warning(f"⚠️ {api_col} missing after merge — skipping fill for {col}")
+
     else:
         st.warning("ℹ️ No completed games to merge scores for.")
         df['SHARP_COVER_RESULT'] = None
