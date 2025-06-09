@@ -1654,6 +1654,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
 
         # ✅ Load master with Game_Key already handled
         df_master = load_master_sharp_moves(drive, folder_id=FOLDER_ID)
+        df_master = df_master[df_master['Sport'] == label.upper()]
 
 
         if df_master.empty:
