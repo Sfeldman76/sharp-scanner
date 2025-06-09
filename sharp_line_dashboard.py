@@ -1266,7 +1266,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        d
+        
 
         df_moves_raw['Sport'] = label.upper()  # Already present, good
 
