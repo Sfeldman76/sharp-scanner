@@ -338,13 +338,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
         st.write("🔍 Sample Merge Keys from df:")
         st.dataframe(df[['Merge_Key_Short']].drop_duplicates())
-                
-        if not df_scores.empty:
-            st.write("🔍 Sample Merge Keys from df_scores:")
-            st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
-        else:
-            st.warning("⚠️ df_scores is empty — no valid completed games parsed.")
-
+     
 
         st.write("✅ Completed game parsed:", game.get("home_team"), "vs", game.get("away_team"))
         if not home or not away or pd.isna(game_hour):
@@ -372,6 +366,13 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         })
 
     df_scores = pd.DataFrame(score_rows)
+
+               
+    if not df_scores.empty:
+        st.write("🔍 Sample Merge Keys from df_scores:")
+        st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
+    else:
+        st.warning("⚠️ df_scores is empty — no valid completed games parsed.")
 
     if df_scores.empty or 'Merge_Key_Short' not in df_scores.columns:
         st.warning("⚠️ No valid completed games matched for scoring.")
