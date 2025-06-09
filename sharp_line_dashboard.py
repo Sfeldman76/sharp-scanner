@@ -377,10 +377,19 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         })
 
 
+    if 'df_scores' in locals() and not df_scores.empty and 'Merge_Key_Short' in df.columns and 'Merge_Key_Short' in df_scores.columns:
+        df_scores = df_scores.rename(columns={
+            "Score_Home_Score": "Score_Home_Score_api",
+            "Score_Away_Score": "Score_Away_Score_api"
+        })
+        df = df.merge(df_scores, on='Merge_Key_Short', how='left')
+        st.success("✅ Merge completed on 'Merge_Key_Short'")
+    else:
+        st.warning("⚠️ Score merging skipped — df_scores is undefined or empty.")
     df_scores = df_scores.rename(columns={
-        "Score_Home_Score": "Score_Home_Score_api",
-        "Score_Away_Score": "Score_Away_Score_api"
-    })
+            "Score_Home_Score": "Score_Home_Score_api",
+            "Score_Away_Score": "Score_Away_Score_api"
+        })
 
     # === Debug: Show sample score rows and merge keys
     if not df_scores.empty:
