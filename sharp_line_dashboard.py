@@ -313,11 +313,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
         response.raise_for_status()
         games = response.json()
         completed_games = [g for g in games if g.get("completed")]
-        if completed_games:
-            st.subheader("✅ Completed Games from Odds API")
-            st.json(completed_games[:5])
-        else:
-            st.warning("⚠️ No completed games returned by the Odds API.")
+        
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
         df['SHARP_COVER_RESULT'] = None
@@ -357,18 +353,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
         df = df.merge(df_scores, on='Merge_Key_Short', how='left')
         st.success("✅ Scores merged for completed games")
 
-        # 🔍 Score merge diagnostics
-        st.subheader("🔬 Post-Merge Score Check")
-        for col in ['Score_Home_Score_api', 'Score_Away_Score_api']:
-            count = df[col].notna().sum() if col in df.columns else "Missing"
-            st.write(f"📊 {col} non-null:", count)
-        st.subheader("🕵️ Merge Key Preview")
-        st.write("✅ Sharp Moves Merge Keys:")
-        st.dataframe(df[['Merge_Key_Short']].drop_duplicates())
-        
-        st.write("✅ Score Rows Merge Keys:")
-        st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
-        
+    
         # Optional: show intersection
         matching_keys = set(df['Merge_Key_Short']).intersection(set(df_scores['Merge_Key_Short']))
         st.write(f"🔗 Matching keys count: {len(matching_keys)}")
@@ -382,11 +367,14 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
         st.dataframe(df[[c for c in view_cols if c in df.columns]].dropna(how='all').head(10))
 
         # Fill only if missing
+        # Always ensure target columns exist
+        for col in ['Score_Home_Score', 'Score_Away_Score']:
+            if col not in df.columns:
+                df[col] = pd.NA
+        
         for col in ['Score_Home_Score', 'Score_Away_Score']:
             api_col = f"{col}_api"
             if api_col in df.columns:
-                if col not in df.columns:
-                    df[col] = pd.NA  # 👈 safe initialize
                 df[col] = pd.to_numeric(df[col], errors='coerce')
                 df[api_col] = pd.to_numeric(df[api_col], errors='coerce')
                 df[col] = df[col].combine_first(df[api_col])
