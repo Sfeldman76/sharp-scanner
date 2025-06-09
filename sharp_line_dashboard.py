@@ -338,9 +338,13 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
         st.write("🔍 Sample Merge Keys from df:")
         st.dataframe(df[['Merge_Key_Short']].drop_duplicates())
-        
-        st.write("🔍 Sample Merge Keys from df_scores:")
-        st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
+                
+        if not df_scores.empty:
+            st.write("🔍 Sample Merge Keys from df_scores:")
+            st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
+        else:
+            st.warning("⚠️ df_scores is empty — no valid completed games parsed.")
+
 
         st.write("✅ Completed game parsed:", game.get("home_team"), "vs", game.get("away_team"))
         if not home or not away or pd.isna(game_hour):
@@ -393,7 +397,17 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         st.error("❌ Merge_Key_Short missing — check merge key creation logic")
     else:
         st.dataframe(df[['Merge_Key_Short', 'Game', 'Game_Start']].drop_duplicates().head())
-    df = df.merge(df_scores, on='Merge_Key_Short', how='left', suffixes=('', '_api'))
+
+    
+    if 'Merge_Key_Short' in df.columns and 'Merge_Key_Short' in df_scores.columns:
+        df = df.merge(df_scores, on='Merge_Key_Short', how='left', suffixes=('', '_api'))
+    else:
+        st.error("❌ Cannot merge — Merge_Key_Short missing from one or both DataFrames.")
+        df['SHARP_COVER_RESULT'] = None
+        df['SHARP_HIT_BOOL'] = 0
+        df['Scored'] = False
+        return df
+
     
     # Only fill in missing scores
     for col in ['Score_Home_Score', 'Score_Away_Score']:
