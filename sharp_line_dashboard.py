@@ -102,7 +102,8 @@ def patch_sport_column(df, expected_sport):
             df.loc[mismatches, 'Sport'] = expected_sport
     else:
         df['Sport'] = expected_sport
-    return df
+    return df  # ✅ Do NOT write to file here
+
 
 
 def fetch_live_odds(sport_key):
@@ -1656,8 +1657,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
         # ✅ Load master with Game_Key already handled
         df_master = load_master_sharp_moves(drive, folder_id=FOLDER_ID)
 
-        # ✅ Fix mislabeled rows BEFORE filtering
-        df_master = patch_sport_column(df_master, sport_label.upper())
+      
 
         # ✅ Now filter to the current sport
         df_master = df_master[df_master['Sport'] == sport_label.upper()]
