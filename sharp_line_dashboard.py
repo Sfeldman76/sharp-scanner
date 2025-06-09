@@ -406,24 +406,30 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     # Apply scoring only to valid rows
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
-    if not df_valid.empty:
+    # If no valid rows, set defaults and return
+    if df_valid.empty:
+        st.warning("⚠️ No valid rows available for scoring (missing scores or values).")
+        df['SHARP_COVER_RESULT'] = None
+        df['SHARP_HIT_BOOL'] = 0
+        df['Scored'] = False
+        return df
+
+    
+    else:
         st.subheader("🔍 Sample rows being scored:")
         st.dataframe(df_valid[['Game', 'Market', 'Outcome', 'Ref Sharp Value', 'Score_Home_Score', 'Score_Away_Score']].head(5))
-    else:
-        st.warning("⚠️ No valid rows available for scoring (missing scores or values).")
-    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
-
-    # Assign results back to the main df
-    df['SHARP_COVER_RESULT'] = None
-    df['SHARP_HIT_BOOL'] = 0
-    df['Scored'] = False
-
-    df.loc[df_valid.index, 'SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
-    df.loc[df_valid.index, 'SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
-    df.loc[df_valid.index, 'Scored'] = df.loc[df_valid.index, 'SHARP_COVER_RESULT'].notna()
-    if unmatched:
-        st.subheader("⚠️ Unmatched rows (could not score):")
-        st.dataframe(pd.DataFrame(unmatched))
+    
+        result = df_valid.apply(calc_cover, axis=1, result_type='expand')
+        result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
+    
+        df['SHARP_COVER_RESULT'] = None
+        df['SHARP_HIT_BOOL'] = 0
+        df['Scored'] = False
+    
+        df.loc[df_valid.index, 'SHARP_COVER_RESULT'] = result['SHARP_COVER_RESULT']
+        df.loc[df_valid.index, 'SHARP_HIT_BOOL'] = result['SHARP_HIT_BOOL'].astype(int)
+        df.loc[df_valid.index, 'Scored'] = df.loc[df_valid.index, 'SHARP_COVER_RESULT'].notna()
+    
     return df
         
             
