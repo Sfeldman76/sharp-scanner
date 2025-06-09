@@ -1317,7 +1317,16 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Sport'] = label
         df_moves_raw = build_game_key(df_moves_raw)
-        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'])
+        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
+
+        # ✅ Force restore Game_Start just in case it's been dropped
+        if 'Game_Start' not in df_moves.columns or df_moves['Game_Start'].isna().all():
+            df_moves = df_moves.merge(
+                df_moves_raw[['Game_Key', 'Bookmaker', 'Game_Start']].drop_duplicates(),
+                on=['Game_Key', 'Bookmaker'],
+                how='left'
+            )
+
 
         model = load_model_from_drive(drive)
         if model is not None:
