@@ -169,7 +169,8 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
 
     except Exception as e:
         print(f"❌ Failed to append to {filename}: {e}")
-        def build_game_key(df):
+        
+def build_game_key(df):
     """
     Safely builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
     Returns df unmodified if required columns are missing.
@@ -282,12 +283,14 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
-    df['Commence_Hour'] = df['Game_Start'].dt.floor('h')
+ 
+    df['Commence_Hour'] = df['Game_Start'].dt.floor('h').dt.strftime("%Y-%m-%d %H:%M:%S")
     df['Merge_Key_Short'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
-        df['Commence_Hour'].astype(str)
+        df['Commence_Hour']
     )
+
 
     
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
@@ -330,7 +333,15 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_hour = game_start.floor('h')
+        game_hour = game_start.floor('h').strftime("%Y-%m-%d %H:%M:%S")
+        merge_key = f"{home}_{away}_{game_hour}"
+
+        st.write("🔍 Sample Merge Keys from df:")
+        st.dataframe(df[['Merge_Key_Short']].drop_duplicates())
+        
+        st.write("🔍 Sample Merge Keys from df_scores:")
+        st.dataframe(df_scores[['Merge_Key_Short']].drop_duplicates())
+
         st.write("✅ Completed game parsed:", game.get("home_team"), "vs", game.get("away_team"))
         if not home or not away or pd.isna(game_hour):
             continue  # skip invalid rows
