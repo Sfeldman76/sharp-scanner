@@ -666,7 +666,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
 
                     entry = {
-                        'Sport': sport_key,
+                        'Sport': sport_key.upper(),  # ✅ Ensure consistent and correct league label
                         'Game_Key': game_key,
                         'Time': snapshot_time,
                         'Game': game_name,
