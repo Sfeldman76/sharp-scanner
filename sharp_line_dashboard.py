@@ -326,29 +326,33 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     for game in games:
         if not game.get("completed"):
             continue
-
+    
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_hour = pd.to_datetime(game.get("commence_time"), utc=True).floor('h')
-
+        game_hour = game_start.floor('h')
+    
+        if not home or not away or pd.isna(game_hour):
+            continue  # skip invalid rows
+    
+        merge_key = f"{home}_{away}_{game_hour}"
+    
         scores = game.get("scores", [])
         score_dict = {
             s["name"].strip().lower(): s["score"]
             for s in scores if "name" in s and "score" in s
         }
-
+    
         home_score = score_dict.get(home)
         away_score = score_dict.get(away)
         if home_score is None or away_score is None:
             continue
-
+    
         score_rows.append({
-            'Merge_Key_Short': f"{home}_{away}_{game_hour}",
+            'Merge_Key_Short': merge_key,
             'Score_Home_Score': home_score,
             'Score_Away_Score': away_score
         })
-
     df_scores = pd.DataFrame(score_rows)
     st.subheader("🧪 Sample Merge Keys")
     st.write("→ From Sharp Moves")
