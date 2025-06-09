@@ -289,6 +289,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
 
     # === Load sharp move master directly (this is your goal)
     df = load_master_sharp_moves(drive)
+ 
+    df = df[df['Sport'] == sport_key.upper()]  # ✅ Important!
+
     df = build_game_key(df)
     
     now_utc = datetime.now(pytz.utc)
@@ -1331,11 +1334,16 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        df_moves_raw['Sport'] = label  # overwrite with correct label
-     
+    
+        df_moves_raw['Sport'] = label.upper()  # Already present, good
+
+        # ✅ FILTER to only current sport
+        df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == label.upper()]
+
 
         df_moves_raw = build_game_key(df_moves_raw)
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
+
 
         # ✅ Force restore Game_Start just in case it's been dropped
         if 'Game_Start' not in df_moves.columns or df_moves['Game_Start'].isna().all():
