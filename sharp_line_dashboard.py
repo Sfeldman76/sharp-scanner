@@ -216,17 +216,23 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
 
         file_drive = file_list[0]
         csv_buffer = StringIO(file_drive.GetContentString())
-        df_master = pd.read_csv(csv_buffer)
-
-        # ✅ Try to build Game_Key
-        if set(['Game', 'Game_Start', 'Market', 'Outcome']).issubset(df_master.columns):
-            df_master = build_game_key(df_master)
-        else:
-            print("⚠️ Cannot build Game_Key in load_master_sharp_moves: required columns missing.")
+        df_master = pd.read_csv(csv_buffer, low_memory=False)
 
         df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
 
+        required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
+        if not set(required_cols).issubset(df_master.columns):
+            print("⚠️ Cannot build Game_Key — missing columns:", set(required_cols) - set(df_master.columns))
+        else:
+            df_master = build_game_key(df_master)
+            print("✅ Game_Key and Merge_Key_Short built successfully.")
+
         return df_master
+
+    except Exception as e:
+        print(f"❌ Failed to load master file: {e}")
+        return pd.DataFrame()
+
 
     except Exception as e:
         print(f"❌ Failed to load master file: {e}")
