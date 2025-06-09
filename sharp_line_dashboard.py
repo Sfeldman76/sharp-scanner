@@ -227,6 +227,7 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         df_master = pd.read_csv(csv_buffer, low_memory=False)
 
         df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
+        df_master['Sport'] = df_master.get('Sport', 'Unknown').astype(str).str.upper()
 
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
         if not set(required_cols).issubset(df_master.columns):
@@ -1351,7 +1352,6 @@ def render_scanner_tab(label, sport_key, container, drive):
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        df_moves_raw['Sport'] = label
         df_moves_raw['Sport'] = label  # overwrite with correct label
         df_moves_raw = patch_sport_column(df_moves_raw, label.upper())
 
@@ -1452,8 +1452,17 @@ def render_scanner_tab(label, sport_key, container, drive):
         # ✅ Ensure 'Sport' column exists before writing to master
         if not df_moves.empty:
             df_moves['Sport'] = label
-           
+            
+            # ✅ 1. Explicitly set Sport to the correct label
+            df_moves['Sport'] = label.upper()
+            
+            # ✅ 2. Fix any mismatches (this patches existing rows just in case)
+            df_moves = patch_sport_column(df_moves, label.upper())
+            
+            # ✅ 3. Now it's safe to append
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
+
+ 
 
 
         if not df_audit.empty:
