@@ -279,9 +279,10 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="3879659
     def normalize_team(t):
         return str(t).strip().lower()
 
-    df = df_moves.copy()  # ✅ Define df first
-    df = build_game_key(df)  # ✅ Now safe to build keys
-
+    # === Load sharp move master directly (this is your goal)
+    df = load_master_sharp_moves(drive)
+    df = build_game_key(df)
+    
     now_utc = datetime.now(pytz.utc)
 
 
