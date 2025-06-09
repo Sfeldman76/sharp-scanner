@@ -1108,8 +1108,7 @@ st.set_page_config(layout="wide")
 
 
 st.title("📊 Sharp Edge Scanner")
-if st.button("🔁 Upload Local sharp_moves_master.csv to Google Drive (One Time Only)"):
-    upload_sharp_master_once()
+
 
 def log_rec_snapshot(df_moves, sport_key, drive=None):
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
