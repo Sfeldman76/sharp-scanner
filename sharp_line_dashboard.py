@@ -201,7 +201,7 @@ def build_game_key(df):
 
     return df
 
-def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=None):
+def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=FOLDER_ID):
     import pandas as pd
     from io import StringIO
 
@@ -1604,7 +1604,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
         sport_key_lower = sport_key_api
 
         # ✅ Load master with Game_Key already handled
-        df_master = load_master_sharp_moves(drive)
+        df_master = load_master_sharp_moves(drive, folder_id=FOLDER_ID)
+
 
         if df_master.empty:
             st.warning(f"⚠️ No data found in master file for {sport_label}")
