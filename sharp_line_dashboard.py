@@ -293,11 +293,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
 
     # ✅ Only keep rows from sharp_moves that have already started (i.e., in the past)
     
-    df = df[
-        (df['Game_Start'] < pd.Timestamp.utcnow()) &
-        (df['SHARP_HIT_BOOL'].isna())
-    ]
-
+    df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
+    if 'SHARP_HIT_BOOL' in df.columns:
+        df = df[df['SHARP_HIT_BOOL'].isna()]
     
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
     params = {'apiKey': api_key, 'daysFrom': days_back}
