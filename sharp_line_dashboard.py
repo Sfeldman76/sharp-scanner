@@ -1299,6 +1299,25 @@ def train_sharp_win_model(df):
     st.success(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_filtered)} samples")
 
     return model
+st.subheader("📤 Re-Upload Sharp Moves Master File")
+
+uploaded = st.file_uploader("Upload `sharp_moves_master.csv` to Google Drive", type="csv")
+
+if uploaded is not None:
+    try:
+        from io import StringIO
+
+        # Read the uploaded content
+        content = StringIO(uploaded.getvalue().decode("utf-8"))
+
+        # Create Drive file and upload
+        file_drive = drive.CreateFile({'title': 'sharp_moves_master.csv', 'parents': [{"id": FOLDER_ID}]})
+        file_drive.SetContentString(content.getvalue())
+        file_drive.Upload()
+
+        st.success("✅ Uploaded successfully to Google Drive as `sharp_moves_master.csv`!")
+    except Exception as e:
+        st.error(f"❌ Failed to upload: {e}")
 
 
 def render_scanner_tab(label, sport_key, container, drive):
