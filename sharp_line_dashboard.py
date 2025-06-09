@@ -94,16 +94,6 @@ def implied_prob(odds):
 
 
 @st.cache_data(ttl=60)
-def patch_sport_column(df, expected_sport):
-    if 'Sport' in df.columns:
-        mismatches = df['Sport'] != expected_sport
-        if mismatches.any():
-            print(f"⚠️ Fixing {mismatches.sum()} mislabeled Sport entries.")
-            df.loc[mismatches, 'Sport'] = expected_sport
-    else:
-        df['Sport'] = expected_sport
-    return df  # ✅ Do NOT write to file here
-
 
 
 def fetch_live_odds(sport_key):
@@ -1354,7 +1344,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Sport'] = label  # overwrite with correct label
-        df_moves_raw = patch_sport_column(df_moves_raw, label.upper())
+     
 
         df_moves_raw = build_game_key(df_moves_raw)
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
@@ -1456,9 +1446,6 @@ def render_scanner_tab(label, sport_key, container, drive):
             
             # ✅ 1. Explicitly set Sport to the correct label
             df_moves['Sport'] = label.upper()
-            
-            # ✅ 2. Fix any mismatches (this patches existing rows just in case)
-            df_moves = patch_sport_column(df_moves, label.upper())
             
             # ✅ 3. Now it's safe to append
             append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
