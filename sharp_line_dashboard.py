@@ -412,7 +412,13 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     
     # === Merge
     if 'Merge_Key_Short' in df.columns and 'Merge_Key_Short' in df_scores.columns:
-        df = df.merge(df_scores, on='Merge_Key_Short', how='left', suffixes=('', '_api'))
+        df_scores_renamed = df_scores.rename(columns={
+            "Score_Home_Score": "Score_Home_Score_api",
+            "Score_Away_Score": "Score_Away_Score_api"
+        })
+        
+        df = df.merge(df_scores_renamed, on='Merge_Key_Short', how='left')
+
         st.success("✅ Merge completed on 'Merge_Key_Short'")
     else:
         st.error("❌ Cannot merge — Merge_Key_Short missing from one or both DataFrames.")
