@@ -171,10 +171,6 @@ def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
         print(f"❌ Failed to append to {filename}: {e}")
         
 def build_game_key(df):
-    """
-    Safely builds a fully unique Game_Key from Game, Game_Start, Market, and Outcome.
-    Returns df unmodified if required columns are missing.
-    """
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
     missing = [col for col in required if col not in df.columns]
     if missing:
@@ -187,6 +183,7 @@ def build_game_key(df):
     df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
     df['Market_Norm'] = df['Market'].str.strip().str.lower()
     df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
+    
     df['Game_Key'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
@@ -194,9 +191,16 @@ def build_game_key(df):
         df['Market_Norm'] + "_" +
         df['Outcome_Norm']
     )
+
+    # 🔁 ADD THIS: Create Merge_Key_Short for scoring merge
+    df['Merge_Key_Short'] = (
+        df['Home_Team_Norm'] + "_" +
+        df['Away_Team_Norm'] + "_" +
+        df['Commence_Hour'].astype(str)
+    )
+
     return df
-        
-            
+
 def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=None):
     import pandas as pd
     from io import StringIO
