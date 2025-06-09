@@ -218,7 +218,11 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         df_master = pd.read_csv(csv_buffer, low_memory=False)
 
         df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
-        df_master['Sport'] = df_master.get('Sport', 'Unknown').astype(str).str.upper()
+
+        # ✅ Ensure Sport column exists
+        if 'Sport' not in df_master.columns:
+            df_master['Sport'] = 'UNKNOWN'
+        df_master['Sport'] = df_master['Sport'].astype(str).str.upper()
 
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
         if not set(required_cols).issubset(df_master.columns):
@@ -234,11 +238,6 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         return pd.DataFrame()
 
 
-    except Exception as e:
-        print(f"❌ Failed to load master file: {e}")
-        return pd.DataFrame()
-
-        
 def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
     from io import StringIO
     import json
@@ -293,7 +292,12 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
 
     # Load and filter master data
     df = load_master_sharp_moves(drive)
+
+    if 'Sport' not in df.columns:
+        df['Sport'] = sport_label  # fallback if column is missing
+    
     df = df[df['Sport'] == sport_label]
+
     df = build_game_key(df)
 
     # Normalize past game keys
