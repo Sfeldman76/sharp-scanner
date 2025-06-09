@@ -113,32 +113,6 @@ def fetch_live_odds(sport_key):
         st.error(f"❌ Odds API Error: {e}")
 
         return []
-def upload_sharp_master_once():
-    from pydrive2.drive import GoogleDrive
-    import os
-
-    local_path = "C:/Users/sfeldman/OneDrive/Desktop/sharp_moves_master.csv"
-    filename = "sharp_moves_master.csv"
-
-    if not os.path.exists(local_path):
-        st.error(f"❌ File not found: {local_path}")
-        return
-
-    try:
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{FOLDER_ID}' in parents and trashed=false"
-        }).GetList()
-        for f in file_list:
-            f.Delete()
-            print(f"🗑️ Deleted old {filename} from Drive.")
-
-        new_file = drive.CreateFile({'title': filename, "parents": [{"id": FOLDER_ID}]})
-        new_file.SetContentFile(local_path)
-        new_file.Upload()
-        st.success(f"✅ Uploaded fresh {filename} to Google Drive.")
-    except Exception as e:
-        st.error(f"❌ Upload failed: {e}")
-
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     from io import StringIO
@@ -282,35 +256,6 @@ def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
         print(f"❌ Failed to upload snapshot: {e}")
 
 
-def clean_master_sport_labels(drive, expected_sport_label, filename="sharp_moves_master.csv", folder_id=FOLDER_ID):
-    df = load_master_sharp_moves(drive, filename=filename, folder_id=folder_id)
-
-    if df.empty:
-        st.warning(f"⚠️ Master file is empty — nothing to fix.")
-        return
-
-    # Fix mislabels
-    df = patch_sport_column(df, expected_sport_label)
-
-    # Save back to Drive (overwrite)
-    from io import StringIO
-    buffer = StringIO()
-    df.to_csv(buffer, index=False)
-    buffer.seek(0)
-
-    try:
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        for f in file_list:
-            f.Delete()
-
-        fixed_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
-        fixed_file.SetContentString(buffer.getvalue())
-        fixed_file.Upload()
-        st.success(f"✅ Overwrote {filename} with cleaned Sport labels.")
-    except Exception as e:
-        st.error(f"❌ Failed to overwrite cleaned master file: {e}")
 
 
         
@@ -1827,8 +1772,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
 with tab_nba:
-    # ✅ Clean before loading anything from master
-    clean_master_sport_labels(drive, "NBA")
+
 
     with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
         df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
@@ -1839,7 +1783,7 @@ with tab_nba:
 
 
 with tab_mlb:
-    clean_master_sport_labels(drive, "MLB")
+   
 
     with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
         df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
