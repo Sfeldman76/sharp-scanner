@@ -113,6 +113,31 @@ def fetch_live_odds(sport_key):
         st.error(f"❌ Odds API Error: {e}")
 
         return []
+def upload_sharp_master_once():
+    from pydrive2.drive import GoogleDrive
+    import os
+
+    local_path = "C:/Users/sfeldman/OneDrive/Desktop/sharp_moves_master.csv"
+    filename = "sharp_moves_master.csv"
+
+    if not os.path.exists(local_path):
+        st.error(f"❌ File not found: {local_path}")
+        return
+
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{FOLDER_ID}' in parents and trashed=false"
+        }).GetList()
+        for f in file_list:
+            f.Delete()
+            print(f"🗑️ Deleted old {filename} from Drive.")
+
+        new_file = drive.CreateFile({'title': filename, "parents": [{"id": FOLDER_ID}]})
+        new_file.SetContentFile(local_path)
+        new_file.Upload()
+        st.success(f"✅ Uploaded fresh {filename} to Google Drive.")
+    except Exception as e:
+        st.error(f"❌ Upload failed: {e}")
 
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
@@ -1138,6 +1163,8 @@ st.set_page_config(layout="wide")
 
 
 st.title("📊 Sharp Edge Scanner")
+if st.button("🔁 Upload Local sharp_moves_master.csv to Google Drive (One Time Only)"):
+    upload_sharp_master_once()
 
 def log_rec_snapshot(df_moves, sport_key, drive=None):
     now = datetime.now().strftime("%Y%m%d_%H%M%S")
