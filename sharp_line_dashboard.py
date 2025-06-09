@@ -363,6 +363,11 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
     st.dataframe(df_scores.head())
     # Merge in API scores, but don't overwrite existing ones
     st.write("🔍 Columns in df:", df.columns.tolist())
+    st.write("📌 MERGE DEBUG — checking both sides")
+    st.write("🔑 'Merge_Key_Short' in df:", 'Merge_Key_Short' in df.columns)
+    st.write("🔑 'Merge_Key_Short' in df_scores:", 'Merge_Key_Short' in df_scores.columns)
+    st.write("📄 df_scores columns:", df_scores.columns.tolist())
+    st.write("📄 df_scores sample:", df_scores.head())
     if 'Merge_Key_Short' not in df.columns:
         st.error("❌ Merge_Key_Short missing — check merge key creation logic")
     else:
