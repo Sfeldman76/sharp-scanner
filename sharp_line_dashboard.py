@@ -331,7 +331,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
         game_hour = game_start.floor('h')
-    
+        st.write("✅ Completed game parsed:", game.get("home_team"), "vs", game.get("away_team"))
         if not home or not away or pd.isna(game_hour):
             continue  # skip invalid rows
     
@@ -342,9 +342,11 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
             s["name"].strip().lower(): s["score"]
             for s in scores if "name" in s and "score" in s
         }
-    
+        
         home_score = score_dict.get(home)
         away_score = score_dict.get(away)
+        st.write("🏀 score_dict:", score_dict)
+        st.write("🔍 home:", home, "→", home_score, "| away:", away, "→", away_score)
         if home_score is None or away_score is None:
             continue
     
@@ -353,7 +355,15 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key="REPLACE
             'Score_Home_Score': home_score,
             'Score_Away_Score': away_score
         })
+
     df_scores = pd.DataFrame(score_rows)
+
+    if df_scores.empty or 'Merge_Key_Short' not in df_scores.columns:
+        st.warning("⚠️ No valid completed games matched for scoring.")
+        df['SHARP_COVER_RESULT'] = None
+        df['SHARP_HIT_BOOL'] = 0
+        df['Scored'] = False
+        return df
     st.subheader("🧪 Sample Merge Keys")
     st.write("→ From Sharp Moves")
     st.dataframe(df[['Merge_Key_Short', 'Game', 'Game_Start']].drop_duplicates().head())
