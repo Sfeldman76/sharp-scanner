@@ -257,6 +257,37 @@ def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
         print(f"❌ Failed to upload snapshot: {e}")
 
 
+def clean_master_sport_labels(drive, expected_sport_label, filename="sharp_moves_master.csv", folder_id=FOLDER_ID):
+    df = load_master_sharp_moves(drive, filename=filename, folder_id=folder_id)
+
+    if df.empty:
+        st.warning(f"⚠️ Master file is empty — nothing to fix.")
+        return
+
+    # Fix mislabels
+    df = patch_sport_column(df, expected_sport_label)
+
+    # Save back to Drive (overwrite)
+    from io import StringIO
+    buffer = StringIO()
+    df.to_csv(buffer, index=False)
+    buffer.seek(0)
+
+    try:
+        file_list = drive.ListFile({
+            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
+        }).GetList()
+        for f in file_list:
+            f.Delete()
+
+        fixed_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
+        fixed_file.SetContentString(buffer.getvalue())
+        fixed_file.Upload()
+        st.success(f"✅ Overwrote {filename} with cleaned Sport labels.")
+    except Exception as e:
+        st.error(f"❌ Failed to overwrite cleaned master file: {e}")
+
+
         
 def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
     try:
@@ -1768,15 +1799,22 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
 with tab_nba:
+    # ✅ Clean before loading anything from master
+    clean_master_sport_labels(drive, "NBA")
+
     with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
         df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
+
     with st.expander("📈 Backtest Performance", expanded=False):
         render_sharp_signal_analysis_tab(tab_nba, "NBA", SPORTS["NBA"], drive)
 
+
+
 with tab_mlb:
+    clean_master_sport_labels(drive, "MLB")
+
     with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
         df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
+
     with st.expander("📈 Backtest Performance", expanded=False):
         render_sharp_signal_analysis_tab(tab_mlb, "MLB", SPORTS["MLB"], drive)
-
-
