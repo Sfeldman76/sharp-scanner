@@ -1,5 +1,9 @@
 import streamlit as st
 
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+
+
 st.set_page_config(layout="wide")  # <-- top of file
 st.title("📊 Sharp Edge Scanner")
 import pandas as pd
@@ -21,6 +25,8 @@ from pytz import timezone as pytz_timezone
 from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
@@ -51,10 +57,6 @@ MARKETS = ['spreads', 'totals', 'h2h']
 
 
 
-import streamlit as st
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-import os
 
 # === Constants ===
 REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
@@ -127,6 +129,7 @@ def get_snapshot(data):
     except Exception as e:
         st.error(f"❌ Failed to build snapshot: {e}")
         return {}
+@st.cache_resource
 
 def init_gdrive():
     try:
