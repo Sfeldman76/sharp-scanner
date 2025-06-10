@@ -54,36 +54,29 @@ import os
 
 REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
 
-# === Step 1: Init Flow ===
-flow = Flow.from_client_secrets_file(
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
+# === Load client secrets as dict ===
+with open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"], "r") as f:
+    client_secrets = json.load(f)
+
+flow = Flow.from_client_config(
+    client_secrets,
     scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"],
     redirect_uri=REDIRECT_URI
 )
 
-# === Step 2: Handle OAuth Callback ===
+# === Handle OAuth callback ===
 code = st.query_params.get("code")
 if code and "credentials" not in st.session_state:
     try:
-        st.info("🔁 Attempting to fetch token using code...")
-        st.write(f"Received code: `{code}`")
-
-        # Fetch token
         flow.fetch_token(code=code[0])
-
-        # Save credentials
         st.session_state.credentials = flow.credentials
-        st.success("✅ Token successfully fetched! Rerunning app...")
         st.rerun()
     except Exception as e:
-        import traceback
-        st.error("❌ Failed to fetch token.")
-        st.code(traceback.format_exc())
+        st.error(f"❌ Failed to fetch token:\n\n{e}")
 
-# === Step 3: Prompt login if not authenticated ===
+# === Prompt login if not authenticated ===
 if "credentials" not in st.session_state:
     auth_url, _ = flow.authorization_url(prompt='consent')
-
     st.warning("🔐 Please connect your Google Drive account.")
     st.markdown(
         f'<a href="{auth_url}" target="_self"><button>🔓 Log in with Google Drive</button></a>',
@@ -91,24 +84,11 @@ if "credentials" not in st.session_state:
     )
     st.stop()
 
-# === Step 4: Drive API after login ===
+# === Authenticated: Access Google Drive ===
 creds = st.session_state.credentials
 drive_service = build("drive", "v3", credentials=creds)
 
 st.success("✅ Connected to Google Drive!")
-
-try:
-    results = drive_service.files().list(pageSize=5).execute()
-    files = results.get("files", [])
-    if files:
-        st.subheader("📂 Your Google Drive Files:")
-        for f in files:
-            st.write(f"{f['name']} (ID: {f['id']})")
-    else:
-        st.info("No files found.")
-except Exception as e:
-    st.error(f"❌ Failed to load files from Google Drive: {e}")
-
 
 
 # 🔁 Shared list of components used for scoring, learning, and tiering
