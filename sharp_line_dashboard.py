@@ -50,10 +50,11 @@ MARKETS = ['spreads', 'totals', 'h2h']
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # OK for Cloud Run HTTPS
 
 flow = Flow.from_client_secrets_file(
-    'credentials.json',
-    scopes=['https://www.googleapis.com/auth/drive.metadata.readonly'],
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
+    scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"],
     redirect_uri=REDIRECT_URI
 )
+
 
 # === Streamlit UI ===
 st.set_page_config(page_title="Sharp Scanner", layout="wide")
@@ -132,6 +133,8 @@ def get_snapshot(data):
 def init_gdrive():
     try:
         creds_path = os.environ["GDRIVE_CREDS_PATH"]
+      credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
+
 
         scope = ['https://www.googleapis.com/auth/drive']
         credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
