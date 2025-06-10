@@ -52,31 +52,47 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import os
 
+Rimport streamlit as st
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+import os
+import json
+
 REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
 
-# === Load client secrets as dict ===
+# === Load client secrets ===
 with open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"], "r") as f:
     client_secrets = json.load(f)
 
-flow = Flow.from_client_config(
-    client_secrets,
-    scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"],
-    redirect_uri=REDIRECT_URI
-)
+# === Step 1: Build Flow with state support ===
+def make_flow(state=None):
+    flow = Flow.from_client_config(
+        client_secrets,
+        scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"],
+        redirect_uri=REDIRECT_URI
+    )
+    if state:
+        flow.fetch_token._state = state
+    return flow
 
-# === Handle OAuth callback ===
+# === Step 2: Handle callback with state ===
 code = st.query_params.get("code")
-if code and "credentials" not in st.session_state:
+state = st.query_params.get("state")
+
+if code and state and "credentials" not in st.session_state:
     try:
+        flow = make_flow(state=state[0])
         flow.fetch_token(code=code[0])
         st.session_state.credentials = flow.credentials
         st.rerun()
     except Exception as e:
         st.error(f"❌ Failed to fetch token:\n\n{e}")
 
-# === Prompt login if not authenticated ===
+# === Step 3: Initiate login ===
 if "credentials" not in st.session_state:
-    auth_url, _ = flow.authorization_url(prompt='consent')
+    flow = make_flow()
+    auth_url, state = flow.authorization_url(prompt='consent')
+    st.session_state.auth_state = state
     st.warning("🔐 Please connect your Google Drive account.")
     st.markdown(
         f'<a href="{auth_url}" target="_self"><button>🔓 Log in with Google Drive</button></a>',
@@ -84,11 +100,11 @@ if "credentials" not in st.session_state:
     )
     st.stop()
 
-# === Authenticated: Access Google Drive ===
+# === Step 4: Use credentials ===
 creds = st.session_state.credentials
 drive_service = build("drive", "v3", credentials=creds)
-
 st.success("✅ Connected to Google Drive!")
+
 
 
 # 🔁 Shared list of components used for scoring, learning, and tiering
