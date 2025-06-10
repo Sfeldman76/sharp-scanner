@@ -5,7 +5,9 @@ from googleapiclient.discovery import build
 
 
 st.set_page_config(layout="wide")  # <-- top of file
-st.title("📊 Sharp Edge Scanner")
+st.title("Scott's Sharp Edge Scanner")
+
+st.set_option('server.maxUploadSize', 200)
 import pandas as pd
 import requests
 import os
@@ -184,12 +186,12 @@ def fetch_live_odds(sport_key):
 drive = init_gdrive()
 
 # 🔍 Debug the mounted secret
-st.write("GDRIVE_CREDS_PATH:", os.environ.get("GDRIVE_CREDS_PATH"))
+#st.write("GDRIVE_CREDS_PATH:", os.environ.get("GDRIVE_CREDS_PATH"))
 
-try:
-    st.write("Files in /secrets/drive/:", os.listdir("/secrets/drive"))
-except Exception as e:
-    st.error(f"❌ Could not list /secrets/drive/: {e}")
+#try:
+    #st.write("Files in /secrets/drive/:", os.listdir("/secrets/drive"))
+#except Exception as e:
+    #st.error(f"❌ Could not list /secrets/drive/: {e}")
 
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     from io import StringIO
@@ -331,6 +333,7 @@ def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
         print(f"✅ Snapshot uploaded to Google Drive: {filename}")
     except Exception as e:
         print(f"❌ Failed to upload snapshot: {e}")
+
 
 
 
