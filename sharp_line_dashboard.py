@@ -69,8 +69,10 @@ if code and "credentials" not in st.session_state:
 if "credentials" not in st.session_state:
     auth_url, _ = flow.authorization_url(prompt='consent')
     st.warning("🔐 Please connect your Google Drive account.")
-    st.markdown(f"[Click here to log in with Google Drive]({auth_url})")
+    st.markdown(f'<a href="{auth_url}">Click here to log in with Google Drive</a>', unsafe_allow_html=True)
     st.stop()
+
+
 
 # === Authenticated: Access Google Drive ===
 creds = st.session_state.credentials
