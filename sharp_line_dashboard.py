@@ -1,42 +1,38 @@
 import streamlit as st
-
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
 from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(layout="wide")  # <-- top of file
+# === Page Config ===
+st.set_page_config(layout="wide")
 st.title("Scott's Sharp Edge Scanner")
 
-
-# Refresh every 180 seconds
+# === Auto-refresh every 180 seconds ===
 st_autorefresh(interval=180 * 1000, key="data_refresh")
 
-
-import pandas as pd
-import requests
+# === Standard Imports ===
 import os
 import json
 import pickle
-from datetime import datetime, timedelta
-from io import StringIO
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-from io import BytesIO
 import pytz
+import time
+import requests
+import pandas as pd
+from io import StringIO, BytesIO
+from datetime import datetime, timedelta
 from collections import defaultdict, OrderedDict
 from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from pytz import timezone as pytz_timezone
+
+# === Google Drive Integration via Service Account ===
 from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
+
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
-REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
+REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"  # no longer used for login, just metadata
 
 SPORTS = {
     "NBA": "basketball_nba",
@@ -61,95 +57,8 @@ BOOKMAKER_REGIONS = {
 
 MARKETS = ['spreads', 'totals', 'h2h']
 
-
-
-
-# === Constants ===
-REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
-
-# === OAuth login flow (for user consent + Drive access)
-flow = Flow.from_client_secrets_file(
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"],  # must be the "web" client JSON
-    scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"],
-    redirect_uri=REDIRECT_URI
-)
-
-code = st.query_params.get("code")
-
-# ✅ ONLY fetch token if credentials not already stored
-if code and "credentials" not in st.session_state:
-    try:
-        if isinstance(code, list):
-            code = code[0]
-        flow.fetch_token(code=code)
-        st.session_state.credentials = flow.credentials
-        st.rerun()
-    except Exception as e:
-        if "invalid_grant" in str(e).lower() or "bad request" in str(e).lower():
-            st.warning("⚠️ Auth token expired or reused. Redirecting to login...")
-            auth_url, _ = flow.authorization_url(
-                prompt='consent',
-                access_type='offline',
-                include_granted_scopes='true'
-            )
-            st.markdown(f"""
-                <meta http-equiv="refresh" content="0; url={auth_url}">
-                <p>🔁 Redirecting to Google login...</p>
-            """, unsafe_allow_html=True)
-            st.stop()
-        else:
-            st.error("❌ Unexpected auth error. Click to retry.")
-            st.write("Details:", str(e))
-            code = None
-
-# ✅ If not authenticated, prompt login
-if "credentials" not in st.session_state:
-    auth_url, _ = flow.authorization_url(
-        prompt='consent',
-        access_type='offline',
-        include_granted_scopes='true'
-    )
-    st.markdown(
-        f'<a href="{auth_url}" target="_self"><button>🔐 Log in with Google Drive</button></a>',
-        unsafe_allow_html=True
-    )
-    st.stop()
-
-
-
-# === Authenticated: Access user's Google Drive
-creds = st.session_state.credentials
-drive_service = build("drive", "v3", credentials=creds)
-
-st.success("✅ Connected to Google Drive!")
-
-
-
-
-# 🔁 Shared list of components used for scoring, learning, and tiering
-component_fields = OrderedDict({
-    'Sharp_Move_Signal': 'Win Rate by Move Signal',
-    'Sharp_Time_Score': 'Win Rate by Time Score',
-    'Sharp_Limit_Jump': 'Win Rate by Limit Jump',
-    'Sharp_Prob_Shift': 'Win Rate by Prob Shift',
-    'Is_Reinforced_MultiMarket': 'Win Rate by Cross-Market Reinforcement',
-    'Market_Leader': 'Win Rate by Market Leader',
-    'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
-})
-
-market_component_win_rates = {}
-
-def get_snapshot(data):
-    """
-    Converts a list of game objects into a dictionary snapshot keyed by game ID.
-    """
-    try:
-        return {g['id']: g for g in data if 'id' in g}
-    except Exception as e:
-        st.error(f"❌ Failed to build snapshot: {e}")
-        return {}
+# === Initialize Google Drive via Service Account ===
 @st.cache_resource
-
 def init_gdrive():
     try:
         creds_path = os.environ["GDRIVE_CREDS_PATH"]
@@ -166,6 +75,26 @@ def init_gdrive():
         st.error(f"❌ Google Drive service auth failed: {e}")
         return None
 
+# ✅ Connect to Drive at app start
+drive = init_gdrive()
+if drive:
+    st.success("✅ Connected to Google Drive via Service Account!")
+else:
+    st.stop()  # Exit if Drive connection fails
+
+# === Component fields used in sharp scoring ===
+component_fields = OrderedDict({
+    'Sharp_Move_Signal': 'Win Rate by Move Signal',
+    'Sharp_Time_Score': 'Win Rate by Time Score',
+    'Sharp_Limit_Jump': 'Win Rate by Limit Jump',
+    'Sharp_Prob_Shift': 'Win Rate by Prob Shift',
+    'Is_Reinforced_MultiMarket': 'Win Rate by Cross-Market Reinforcement',
+    'Market_Leader': 'Win Rate by Market Leader',
+    'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
+})
+
+# === Placeholder for learned component weights
+market_component_win_rates = {}
 
 
 def implied_prob(odds):
@@ -1413,79 +1342,55 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.error(f"❌ Recovery failed: {e}")
 
+     
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+
         if not df_bt.empty:
+            # 🧼 Clean duplicates
+            df_bt = df_bt.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
+        
+            # 🧠 Merge confidence columns from df_moves_raw
             merge_cols = ['Game_Key', 'Market', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             available = [col for col in confidence_cols if col in df_moves_raw.columns]
-
-            df_bt_merged = df_bt.merge(
+        
+            df_bt = df_bt.merge(
                 df_moves_raw[merge_cols + available].drop_duplicates(),
                 on=merge_cols,
-                how='left',
-                indicator=True
+                how='left'
             )
-            st.write(f"🔍 {label} merge result:", df_bt_merged['_merge'].value_counts())
-
-            for col in available:
-                if col in df_bt_merged.columns and col in df_moves_raw.columns:
-                    df_bt_merged[col] = df_bt_merged[col].fillna(df_moves_raw[col])
-
-            df_moves = df_bt_merged.drop(columns=['_merge'])
-        else:
-            st.info("ℹ️ No backtest results found — skipped.")
-
-        if 'SHARP_HIT_BOOL' in df_moves.columns and 'Enhanced_Sharp_Confidence_Score' in df_moves.columns:
-            trainable = df_moves[
-                df_moves['SHARP_HIT_BOOL'].notna() &
-                df_moves['Enhanced_Sharp_Confidence_Score'].notna()
+        
+            # 🎯 Score with model if available
+            if model is not None:
+                try:
+                    df_bt = apply_blended_sharp_score(df_bt, model)
+                except Exception as e:
+                    st.warning(f"⚠️ Could not apply model scoring: {e}")
+        
+            # 🧠 Train if enough completed sharp picks
+            trainable = df_bt[
+                df_bt['SHARP_HIT_BOOL'].notna() &
+                df_bt['Enhanced_Sharp_Confidence_Score'].notna()
             ]
             if len(trainable) >= 5:
                 model = train_sharp_win_model(trainable)
                 save_model_to_drive(model, drive)
                 save_model_timestamp(drive)
             else:
-                st.warning("⚠️ Not enough completed sharp picks to train model.")
+                st.info("ℹ️ Not enough completed sharp picks to retrain model.")
+        
+            # 📤 Save updated sharp picks to Drive
+            df_bt['Sport'] = label.upper()
+            append_to_master_csv_on_drive(df_bt, "sharp_moves_master.csv", drive, FOLDER_ID)
+        
+            # ✅ Carry over into df_moves for downstream use
+            df_moves = df_bt.copy()
+            st.success(f"✅ Uploaded updated sharp picks with scores to Drive — {len(df_bt)} rows")
+        
         else:
-            st.warning("⚠️ Required columns missing for model training.")
-
-        if model is not None:
-            if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns or df_moves['Enhanced_Sharp_Confidence_Score'].isna().all():
-                try:
-                    df_moves = df_moves.drop(
-                        columns=[c for c in ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score']],
-                        errors='ignore'
-                    )
-                    df_moves = df_moves.merge(
-                        df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
-                        on=['Game_Key', 'Market', 'Bookmaker'],
-                        how='left'
-                    )
-                    st.success("✅ Final confidence recovery successful")
-                except Exception as e:
-                    st.error(f"❌ Final recovery failed: {e}")
-
-            try:
-                df_moves = apply_blended_sharp_score(df_moves, model)
-            except Exception as e:
-                st.warning(f"⚠️ Final model scoring failed: {e}")
-        st.write(f"📦 [{label}] Appending {len(df_moves)} rows to master.")
-        if 'Sport' in df_moves.columns:
-            st.write("🏷️ Sports in batch:", df_moves['Sport'].unique())
-        else:
-            st.warning("⚠️ 'Sport' column missing before append.")
-        st.dataframe(df_moves[['Game', 'Market', 'Outcome', 'Game_Key']].head())
-        # ✅ Ensure 'Sport' column exists before writing to master
-        if not df_moves.empty:
-            df_moves['Sport'] = label
-            
-            # ✅ 1. Explicitly set Sport to the correct label
-            df_moves['Sport'] = label.upper()
-            
-            # ✅ 3. Now it's safe to append
-            append_to_master_csv_on_drive(df_moves, "sharp_moves_master.csv", drive, FOLDER_ID)
-
- 
+            st.info("ℹ️ No backtest results to score.")
+        
+         
 
 
         if not df_audit.empty:
