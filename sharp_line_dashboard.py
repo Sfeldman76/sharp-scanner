@@ -15,7 +15,9 @@ from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from pytz import timezone as pytz_timezone
-
+from oauth2client.service_account import ServiceAccountCredentials
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
@@ -126,11 +128,10 @@ market_component_win_rates = {}
 def get_snapshot(data):
     return {g['id']: g for g in data}
 
+
 def init_gdrive():
     try:
-        creds_path = "/tmp/service_creds.json"
-        with open(creds_path, "w") as f:
-            json.dump(dict(st.secrets["gdrive"]), f)
+        creds_path = os.environ["GDRIVE_CREDS_PATH"]
 
         scope = ['https://www.googleapis.com/auth/drive']
         credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
@@ -143,6 +144,8 @@ def init_gdrive():
     except Exception as e:
         st.error(f"❌ Google Drive auth failed: {e}")
         return None
+
+
 drive = init_gdrive()
 def implied_prob(odds):
     try:
