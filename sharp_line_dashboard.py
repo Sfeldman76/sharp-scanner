@@ -2,10 +2,14 @@ import streamlit as st
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(layout="wide")  # <-- top of file
 st.title("Scott's Sharp Edge Scanner")
+
+
+# Refresh every 180 seconds
+st_autorefresh(interval=180 * 1000, key="data_refresh")
 
 st.set_option('server.maxUploadSize', 200)
 import pandas as pd
@@ -14,7 +18,7 @@ import os
 import json
 import pickle
 from datetime import datetime, timedelta
-from streamlit_autorefresh import st_autorefresh
+
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from io import BytesIO
