@@ -53,48 +53,53 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import os
 
-redirect_uri = "https://sharp-scanner-723770381669.us-east4.run.app/"
+# === Constants ===
+REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
 
-# === Initialize OAuth Flow ===
+# === OAuth login flow (for user consent + Drive access)
 flow = Flow.from_client_secrets_file(
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"],
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"],  # must be the "web" client JSON
     scopes=["https://www.googleapis.com/auth/drive.metadata.readonly"],
     redirect_uri=REDIRECT_URI
 )
 
-# === Handle OAuth Callback ===
+# === Handle Google redirect callback
 code = st.query_params.get("code")
 if code and "credentials" not in st.session_state:
     try:
-        flow.fetch_token(code=code)
+        flow.fetch_token(code=code)  # ✅ Pass full code
         st.session_state.credentials = flow.credentials
         st.rerun()
     except Exception as e:
         st.error(f"❌ Failed to fetch token:\n\n{e}")
         st.stop()
 
-# === Prompt login if not authenticated ===
+# === Prompt user login if not authenticated
 if "credentials" not in st.session_state:
-    auth_url, _ = flow.authorization_url(prompt='consent')
+    auth_url, _ = flow.authorization_url(
+        prompt='consent',
+        access_type='offline',
+        include_granted_scopes='true'
+    )
     st.markdown(
         f'<a href="{auth_url}" target="_self"><button>🔐 Log in with Google Drive</button></a>',
         unsafe_allow_html=True
     )
     st.stop()
 
-# === Authenticated: Access Google Drive ===
+# === Authenticated: Access user's Google Drive
 creds = st.session_state.credentials
 drive_service = build("drive", "v3", credentials=creds)
 
 st.success("✅ Connected to Google Drive!")
 
-# (Optional) Display 5 recent files
 try:
     files = drive_service.files().list(pageSize=5).execute().get("files", [])
     for f in files:
         st.write(f"{f['name']} (ID: {f['id']})")
 except Exception as e:
     st.error(f"❌ Failed to list Drive files: {e}")
+
 
 
 # 🔁 Shared list of components used for scoring, learning, and tiering
