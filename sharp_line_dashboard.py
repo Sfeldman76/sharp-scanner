@@ -128,11 +128,6 @@ def get_snapshot(data):
         st.error(f"❌ Failed to build snapshot: {e}")
         return {}
 
-
-
-return {g['id']: g for g in data}
-
-
 def init_gdrive():
     try:
         creds_path = os.environ["GDRIVE_CREDS_PATH"]
@@ -182,7 +177,7 @@ def fetch_live_odds(sport_key):
         st.error(f"❌ Odds API Error: {e}")
 
         return []
-
+drive = init_gdrive()
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     from io import StringIO
     import pandas as pd
@@ -1307,9 +1302,9 @@ if uploaded is not None:
         st.error(f"❌ Failed to upload: {e}")
 
 
-drive = init_gdrive()
 
-def render_scanner_tab(label, sport_key, container, drive):
+
+def render_scanner_tab(label, sport_key, container, ):
     global market_component_win_rates
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
@@ -1318,7 +1313,7 @@ def render_scanner_tab(label, sport_key, container, drive):
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
         live = fetch_live_odds(sport_key)
-        prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
+        prev = load_latest_snapshot_from_(sport_key, , FOLDER_ID)
 
         if not live:
             st.warning("⚠️ No live odds returned.")
@@ -1327,7 +1322,7 @@ def render_scanner_tab(label, sport_key, container, drive):
             st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
             prev = {}
 
-        upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
+        upload_snapshot_to_(sport_key, get_snapshot(live), drive, FOLDER_ID)
 
         confidence_weights = market_component_win_rates.get(sport_key_lower, {})
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
