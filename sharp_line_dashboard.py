@@ -18,7 +18,7 @@ import os
 import json
 import pickle
 from datetime import datetime, timedelta
-
+from io import StringIO
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from io import BytesIO
@@ -123,12 +123,6 @@ drive_service = build("drive", "v3", credentials=creds)
 
 st.success("✅ Connected to Google Drive!")
 
-try:
-    files = drive_service.files().list(pageSize=5).execute().get("files", [])
-    for f in files:
-        st.write(f"{f['name']} (ID: {f['id']})")
-except Exception as e:
-    st.error(f"❌ Failed to list Drive files: {e}")
 
 
 
