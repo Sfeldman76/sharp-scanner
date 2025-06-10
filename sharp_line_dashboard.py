@@ -133,9 +133,6 @@ def get_snapshot(data):
 def init_gdrive():
     try:
         creds_path = os.environ["GDRIVE_CREDS_PATH"]
-      credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
-
-
         scope = ['https://www.googleapis.com/auth/drive']
         credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
 
