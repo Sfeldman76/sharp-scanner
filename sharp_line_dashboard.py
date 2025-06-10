@@ -6,44 +6,33 @@ import json
 import pickle
 from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
-from oauth2client.service_account import ServiceAccountCredentials
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
-from io import StringIO
-from collections import defaultdict
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from io import BytesIO
 import pytz
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
-from io import BytesIO  # ✅ Use BytesIO for binary models
-import pickle
-from datetime import datetime, timedelta, timezone as dt_timezone
 from pytz import timezone as pytz_timezone
-from google_auth_oauthlib.flow import Flow
-import os
 
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # if testing over HTTP (dev only)
-
-flow = Flow.from_client_secrets_file(
-    'credentials.json',
-    scopes=['https://www.googleapis.com/auth/drive.metadata.readonly'],
-    redirect_uri='https://sharp-scanner-723770381669.us-east4.run.app/'
-)
-
-
+# === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
+FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
 
-SPORTS = {"NBA": "basketball_nba", "MLB": "baseball_mlb"}
+SPORTS = {
+    "NBA": "basketball_nba",
+    "MLB": "baseball_mlb"
+}
 
-SHARP_BOOKS_FOR_LIMITS = ['pinnacle', 'bookmaker', 'betonlineag']  # limit-based signals
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu', 'smarkets', 'matchbook']  # price-based sharp list
+SHARP_BOOKS_FOR_LIMITS = ['pinnacle', 'bookmaker', 'betonlineag']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu', 'smarkets', 'matchbook']
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
     'fanatics', 'espnbet', 'hard rock bet'
 ]
-
 
 BOOKMAKER_REGIONS = {
     'pinnacle': 'us', 'bookmaker': 'us', 'betonlineag': 'us',
@@ -55,8 +44,48 @@ BOOKMAKER_REGIONS = {
 
 MARKETS = ['spreads', 'totals', 'h2h']
 
+# === Google Drive OAuth ===
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # OK for Cloud Run HTTPS
 
-FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+flow = Flow.from_client_secrets_file(
+    'credentials.json',
+    scopes=['https://www.googleapis.com/auth/drive.metadata.readonly'],
+    redirect_uri=REDIRECT_URI
+)
+
+# === Streamlit UI ===
+st.set_page_config(page_title="Sharp Scanner", layout="wide")
+st.title("📊 Sharp Line Dashboard")
+
+# === Handle OAuth Callback ===
+code = st.experimental_get_query_params().get("code")
+if code and "credentials" not in st.session_state:
+    flow.fetch_token(code=code[0])
+    st.session_state.credentials = flow.credentials
+    st.experimental_rerun()
+
+# === Prompt login if not authenticated ===
+if "credentials" not in st.session_state:
+    auth_url, _ = flow.authorization_url(prompt='consent')
+    st.warning("🔐 Please log in with your Google account to access Drive.")
+    st.markdown(f"[Click here to log in with Google Drive]({auth_url})")
+    st.stop()
+
+# === If Authenticated: Access Google Drive ===
+creds = st.session_state.credentials
+drive_service = build("drive", "v3", credentials=creds)
+
+st.success("✅ Connected to Google Drive!")
+
+# Example: List first 5 files
+results = drive_service.files().list(pageSize=5).execute()
+files = results.get("files", [])
+if files:
+    st.write("📂 Your recent Google Drive files:")
+    for f in files:
+        st.write(f"- {f['name']} (ID: {f['id']})")
+else:
+    st.info("No files found.")
 
 # 🔁 Shared list of components used for scoring, learning, and tiering
 component_fields = OrderedDict({
