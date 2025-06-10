@@ -70,6 +70,29 @@ if "credentials" not in st.session_state:
     st.warning("🔐 Please log in with your Google account to access Drive.")
     st.markdown(f"[Click here to log in with Google Drive]({auth_url})")
     st.stop()
+# Handle Google OAuth callback
+code = st.experimental_get_query_params().get("code")
+if code and "credentials" not in st.session_state:
+    flow.fetch_token(code=code[0])
+    st.session_state.credentials = flow.credentials
+    st.experimental_rerun()
+
+# If not authenticated, show login button
+if "credentials" not in st.session_state:
+    auth_url, _ = flow.authorization_url(prompt='consent')
+    st.warning("🔐 Please connect your Google Drive account.")
+    st.markdown(f"[Click here to log in with Google Drive]({auth_url})")
+    st.stop()
+# Access Google Drive files
+creds = st.session_state.credentials
+drive_service = build("drive", "v3", credentials=creds)
+
+results = drive_service.files().list(pageSize=5).execute()
+files = results.get("files", [])
+
+st.subheader("📂 Your Google Drive Files:")
+for f in files:
+    st.write(f"{f['name']} (ID: {f['id']})")
 
 # === If Authenticated: Access Google Drive ===
 creds = st.session_state.credentials
