@@ -20,6 +20,16 @@ from io import BytesIO  # ✅ Use BytesIO for binary models
 import pickle
 from datetime import datetime, timedelta, timezone as dt_timezone
 from pytz import timezone as pytz_timezone
+from google_auth_oauthlib.flow import Flow
+import os
+
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'  # if testing over HTTP (dev only)
+
+flow = Flow.from_client_secrets_file(
+    'credentials.json',
+    scopes=['https://www.googleapis.com/auth/drive.metadata.readonly'],
+    redirect_uri='https://sharp-scanner-723770381669.us-east4.run.app/'
+)
 
 
 API_KEY = "3879659fe861d68dfa2866c211294684"
