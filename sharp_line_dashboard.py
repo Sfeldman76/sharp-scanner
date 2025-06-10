@@ -129,10 +129,12 @@ def init_gdrive():
         gauth.auth_method = 'service'
         gauth.credentials = credentials
 
-        return GoogleDrive(gauth)
+        drive = GoogleDrive(gauth)
+        return drive
     except Exception as e:
-        st.error(f"❌ Google Drive auth failed: {e}")
+        st.error(f"❌ Google Drive service auth failed: {e}")
         return None
+
 
 
 drive = init_gdrive()
