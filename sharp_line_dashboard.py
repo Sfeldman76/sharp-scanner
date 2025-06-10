@@ -11,7 +11,7 @@ st.title("Scott's Sharp Edge Scanner")
 # Refresh every 180 seconds
 st_autorefresh(interval=180 * 1000, key="data_refresh")
 
-st.set_option('server.maxUploadSize', 200)
+
 import pandas as pd
 import requests
 import os
