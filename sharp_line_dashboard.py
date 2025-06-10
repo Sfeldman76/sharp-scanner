@@ -1353,7 +1353,21 @@ def render_scanner_tab(label, sport_key, container, drive):
                 st.error(f"❌ Recovery failed: {e}")
 
      
+   
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+        
+        # 🧠 Re-attach confidence columns from df_moves_raw
+        if 'Enhanced_Sharp_Confidence_Score' not in df_bt.columns:
+            st.warning("⚠️ Enhanced_Sharp_Confidence_Score missing — attempting to recover from df_moves_raw")
+            try:
+                df_bt = df_bt.merge(
+                    df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
+                    on=['Game_Key', 'Market', 'Bookmaker'],
+                    how='left'
+                )
+                st.success("✅ Recovered Enhanced_Sharp_Confidence_Score")
+            except Exception as e:
+                st.error(f"❌ Failed to merge confidence scores: {e}")
 
         if not df_bt.empty:
             # 🧼 Clean duplicates
