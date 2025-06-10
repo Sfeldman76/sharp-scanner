@@ -70,18 +70,35 @@ flow = Flow.from_client_secrets_file(
     redirect_uri=REDIRECT_URI
 )
 
-# === Handle Google redirect callback
 code = st.query_params.get("code")
+
+# ✅ ONLY fetch token if credentials not already stored
 if code and "credentials" not in st.session_state:
     try:
-        flow.fetch_token(code=code)  # ✅ Pass full code
+        if isinstance(code, list):
+            code = code[0]
+        flow.fetch_token(code=code)
         st.session_state.credentials = flow.credentials
         st.rerun()
     except Exception as e:
-        st.error(f"❌ Failed to fetch token:\n\n{e}")
-        st.stop()
+        if "invalid_grant" in str(e).lower() or "bad request" in str(e).lower():
+            st.warning("⚠️ Auth token expired or reused. Redirecting to login...")
+            auth_url, _ = flow.authorization_url(
+                prompt='consent',
+                access_type='offline',
+                include_granted_scopes='true'
+            )
+            st.markdown(f"""
+                <meta http-equiv="refresh" content="0; url={auth_url}">
+                <p>🔁 Redirecting to Google login...</p>
+            """, unsafe_allow_html=True)
+            st.stop()
+        else:
+            st.error("❌ Unexpected auth error. Click to retry.")
+            st.write("Details:", str(e))
+            code = None
 
-# === Prompt user login if not authenticated
+# ✅ If not authenticated, prompt login
 if "credentials" not in st.session_state:
     auth_url, _ = flow.authorization_url(
         prompt='consent',
@@ -93,6 +110,8 @@ if "credentials" not in st.session_state:
         unsafe_allow_html=True
     )
     st.stop()
+
+
 
 # === Authenticated: Access user's Google Drive
 creds = st.session_state.credentials
