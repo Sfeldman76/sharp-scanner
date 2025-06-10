@@ -1304,25 +1304,28 @@ if uploaded is not None:
 
 
 
-def render_scanner_tab(label, sport_key, container, ):
+def render_scanner_tab(label, sport_key, container, drive):
+
     global market_component_win_rates
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
 
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
-
+    
         live = fetch_live_odds(sport_key)
-        prev = load_latest_snapshot_from_(sport_key, , FOLDER_ID)
-
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
+    
+        # ✅ Only upload if there's live data
+        upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
+    
+        prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
         if not prev:
             st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
             prev = {}
-
-        upload_snapshot_to_(sport_key, get_snapshot(live), drive, FOLDER_ID)
+      
 
         confidence_weights = market_component_win_rates.get(sport_key_lower, {})
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
