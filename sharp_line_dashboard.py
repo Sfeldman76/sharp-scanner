@@ -56,62 +56,40 @@ flow = Flow.from_client_secrets_file(
 )
 
 
-# === Streamlit UI ===
-st.set_page_config(page_title="Sharp Scanner", layout="wide")
-st.title("📊 Sharp Line Dashboard")
 
-# === Handle OAuth Callback ===
-code = st.experimental_get_query_params().get("code")
+# === Handle Google OAuth Callback ===
+code = st.query_params.get("code")  # modern alias for st.experimental_get_query_params()
 if code and "credentials" not in st.session_state:
     flow.fetch_token(code=code[0])
     st.session_state.credentials = flow.credentials
-    st.experimental_rerun()
+    st.rerun()
 
 # === Prompt login if not authenticated ===
-if "credentials" not in st.session_state:
-    auth_url, _ = flow.authorization_url(prompt='consent')
-    st.warning("🔐 Please log in with your Google account to access Drive.")
-    st.markdown(f"[Click here to log in with Google Drive]({auth_url})")
-    st.stop()
-# Handle Google OAuth callback
-code = st.experimental_get_query_params().get("code")
-if code and "credentials" not in st.session_state:
-    flow.fetch_token(code=code[0])
-    st.session_state.credentials = flow.credentials
-    st.experimental_rerun()
-
-# If not authenticated, show login button
 if "credentials" not in st.session_state:
     auth_url, _ = flow.authorization_url(prompt='consent')
     st.warning("🔐 Please connect your Google Drive account.")
     st.markdown(f"[Click here to log in with Google Drive]({auth_url})")
     st.stop()
-# Access Google Drive files
+
+# === Authenticated: Access Google Drive ===
 creds = st.session_state.credentials
 drive_service = build("drive", "v3", credentials=creds)
 
-results = drive_service.files().list(pageSize=5).execute()
-files = results.get("files", [])
-
-st.subheader("📂 Your Google Drive Files:")
-for f in files:
-    st.write(f"{f['name']} (ID: {f['id']})")
-
-# === If Authenticated: Access Google Drive ===
-creds = st.session_state.credentials
-drive_service = build("drive", "v3", credentials=creds)
-
+# === Display recent files
 st.success("✅ Connected to Google Drive!")
 
-# Example: List first 5 files
-results = drive_service.files().list(pageSize=5).execute()
-files = results.get("files", [])
-if files:
-    st.write("📂 Your recent Google Drive files:")
-    for f in files:
-        st.write(f"- {f['name']} (ID: {f['id']})")
-else:
-    st.info("No files found.")
+try:
+    results = drive_service.files().list(pageSize=5).execute()
+    files = results.get("files", [])
+    if files:
+        st.subheader("📂 Your Google Drive Files:")
+        for f in files:
+            st.write(f"{f['name']} (ID: {f['id']})")
+    else:
+        st.info("No files found.")
+except Exception as e:
+    st.error(f"❌ Failed to load files from Google Drive: {e}")
+
 
 # 🔁 Shared list of components used for scoring, learning, and tiering
 component_fields = OrderedDict({
