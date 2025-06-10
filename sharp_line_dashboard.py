@@ -1,4 +1,7 @@
 import streamlit as st
+
+st.set_page_config(layout="wide")  # <-- top of file
+st.title("📊 Sharp Edge Scanner")
 import pandas as pd
 import requests
 import os
@@ -116,7 +119,18 @@ component_fields = OrderedDict({
 market_component_win_rates = {}
 
 def get_snapshot(data):
-    return {g['id']: g for g in data}
+    """
+    Converts a list of game objects into a dictionary snapshot keyed by game ID.
+    """
+    try:
+        return {g['id']: g for g in data if 'id' in g}
+    except Exception as e:
+        st.error(f"❌ Failed to build snapshot: {e}")
+        return {}
+
+
+
+return {g['id']: g for g in data}
 
 
 def init_gdrive():
@@ -137,7 +151,6 @@ def init_gdrive():
 
 
 
-drive = init_gdrive()
 def implied_prob(odds):
     try:
         if odds < 0:
@@ -1073,7 +1086,7 @@ def apply_blended_sharp_score(df, model):
 
 
 
-st.set_page_config(layout="wide")
+
 
 
 # === Initialize Google Drive once ===
@@ -1081,7 +1094,7 @@ st.set_page_config(layout="wide")
 
 
 
-st.title("📊 Sharp Edge Scanner")
+
 
 
 def log_rec_snapshot(df_moves, sport_key, drive=None):
@@ -1293,6 +1306,8 @@ if uploaded is not None:
     except Exception as e:
         st.error(f"❌ Failed to upload: {e}")
 
+
+drive = init_gdrive()
 
 def render_scanner_tab(label, sport_key, container, drive):
     global market_component_win_rates
