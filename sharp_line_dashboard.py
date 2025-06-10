@@ -262,6 +262,24 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         print(f"❌ Failed to load master file: {e}")
         return pd.DataFrame()
 
+with st.expander("📤 Re-Upload Sharp Moves Master File (only if needed)", expanded=False):
+    uploaded = st.file_uploader("Upload `sharp_moves_master.csv` to Google Drive", type="csv")
+
+    if uploaded is not None:
+        try:
+            from io import StringIO
+
+            # Read the uploaded content
+            content = StringIO(uploaded.getvalue().decode("utf-8"))
+
+            # Create Drive file and upload
+            file_drive = drive.CreateFile({'title': 'sharp_moves_master.csv', 'parents': [{"id": FOLDER_ID}]})
+            file_drive.SetContentString(content.getvalue())
+            file_drive.Upload()
+
+            st.success("✅ Uploaded successfully to Google Drive as `sharp_moves_master.csv`!")
+        except Exception as e:
+            st.error(f"❌ Failed to upload: {e}")
 
 def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
     from io import StringIO
@@ -941,6 +959,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     ]].fillna(0)
     
     summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
+
+
+    required_sharp_cols = [
+        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
+        'Sharp_Confidence_Tier', 'True_Sharp_Confidence_Score'
+    ]
+    for col in required_sharp_cols:
+        if col not in df.columns:
+            df[col] = None
     
     return df, df_history, summary_df
 
@@ -1392,17 +1419,20 @@ def render_scanner_tab(label, sport_key, container, drive):
                     st.warning(f"⚠️ Could not apply model scoring: {e}")
         
             # 🧠 Train if enough completed sharp picks
-            trainable = df_bt[
-                df_bt['SHARP_HIT_BOOL'].notna() &
-                df_bt['Enhanced_Sharp_Confidence_Score'].notna()
-            ]
-            if len(trainable) >= 5:
-                model = train_sharp_win_model(trainable)
-                save_model_to_drive(model, drive)
-                save_model_timestamp(drive)
+            if 'Enhanced_Sharp_Confidence_Score' in df_bt.columns:
+                trainable = df_bt[
+                    df_bt['SHARP_HIT_BOOL'].notna() &
+                    df_bt['Enhanced_Sharp_Confidence_Score'].notna()
+                ]
+                if len(trainable) >= 5:
+                    model = train_sharp_win_model(trainable)
+                    save_model_to_drive(model, drive)
+                    save_model_timestamp(drive)
+                else:
+                    st.info("ℹ️ Not enough completed sharp picks to retrain model.")
             else:
-                st.info("ℹ️ Not enough completed sharp picks to retrain model.")
-        
+                st.warning("⚠️ Still missing Enhanced_Sharp_Confidence_Score — skipping model training.")
+
             # 📤 Save updated sharp picks to Drive
             df_bt['Sport'] = label.upper()
             append_to_master_csv_on_drive(df_bt, "sharp_moves_master.csv", drive, FOLDER_ID)
