@@ -263,7 +263,12 @@ def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=
         return pd.DataFrame()
 
 with st.expander("📤 Re-Upload Sharp Moves Master File (only if needed)", expanded=False):
-    uploaded = st.file_uploader("Upload `sharp_moves_master.csv` to Google Drive", type="csv")
+    uploaded = st.file_uploader(
+        "Upload `sharp_moves_master.csv` to Google Drive",
+        type="csv",
+        key="sharp_master_uploader"
+    )
+
 
     if uploaded is not None:
         try:
