@@ -8,3 +8,7 @@ PyDrive2
 oauth2client
 xgboost
 scikit-learn
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
