@@ -48,7 +48,7 @@ MARKETS = ['spreads', 'totals', 'h2h']
 
 
 
-Rimport streamlit as st
+import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import os
