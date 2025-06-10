@@ -55,14 +55,15 @@ flow = Flow.from_client_secrets_file(
     redirect_uri=REDIRECT_URI
 )
 
-
-
 # === Handle Google OAuth Callback ===
-code = st.query_params.get("code")  # modern alias for st.experimental_get_query_params()
+code = st.query_params.get("code")
 if code and "credentials" not in st.session_state:
-    flow.fetch_token(code=code[0])
-    st.session_state.credentials = flow.credentials
-    st.rerun()
+    try:
+        flow.fetch_token(code=code[0])
+        st.session_state.credentials = flow.credentials
+        st.rerun()
+    except Exception as e:
+        st.error(f"❌ Failed to fetch token: {e}")
 
 # === Prompt login if not authenticated ===
 if "credentials" not in st.session_state:
