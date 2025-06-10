@@ -53,7 +53,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import os
 
-REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"
+redirect_uri = "https://sharp-scanner-723770381669.us-east4.run.app/"
 
 # === Initialize OAuth Flow ===
 flow = Flow.from_client_secrets_file(
@@ -66,7 +66,7 @@ flow = Flow.from_client_secrets_file(
 code = st.query_params.get("code")
 if code and "credentials" not in st.session_state:
     try:
-        flow.fetch_token(code=code[0])
+        flow.fetch_token(code=code)
         st.session_state.credentials = flow.credentials
         st.rerun()
     except Exception as e:
