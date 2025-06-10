@@ -1263,6 +1263,16 @@ if uploaded is not None:
     except Exception as e:
         st.error(f"❌ Failed to upload: {e}")
 
+def get_snapshot(data):
+    """
+    Converts a list of game objects into a dictionary snapshot keyed by game ID.
+    """
+    try:
+        return {g['id']: g for g in data if 'id' in g}
+    except Exception as e:
+        st.error(f"❌ Failed to build snapshot: {e}")
+        return {}
+
 
 
 
