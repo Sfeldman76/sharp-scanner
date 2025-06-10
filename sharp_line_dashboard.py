@@ -160,7 +160,7 @@ def implied_prob(odds):
 
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=180)
 
 
 def fetch_live_odds(sport_key):
@@ -180,7 +180,17 @@ def fetch_live_odds(sport_key):
         st.error(f"❌ Odds API Error: {e}")
 
         return []
+
 drive = init_gdrive()
+
+# 🔍 Debug the mounted secret
+st.write("GDRIVE_CREDS_PATH:", os.environ.get("GDRIVE_CREDS_PATH"))
+
+try:
+    st.write("Files in /secrets/drive/:", os.listdir("/secrets/drive"))
+except Exception as e:
+    st.error(f"❌ Could not list /secrets/drive/: {e}")
+
 def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
     from io import StringIO
     import pandas as pd
