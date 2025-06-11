@@ -187,26 +187,50 @@ def write_snapshot_to_bigquery(snapshot_list):
 import streamlit as st
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
+    import pandas_gbq
+    from google.cloud import bigquery
+
     if df.empty:
-        st.warning(f"⚠️ DataFrame is empty — nothing to write to {table}.")
+        st.warning(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
         return
 
     df = df.copy()
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
+    # 🧼 Convert 'Time' column if present
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
 
+    # 🧼 Remove merge artifacts
+    df = df.rename(columns=lambda x: x.rstrip('_x'))
+    df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+
+    # 🧼 Ensure scoring columns exist
+    for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
+        if col not in df.columns:
+            df[col] = None
+
     st.info(f"📤 Writing {len(df)} rows to BigQuery table: {table}")
+    print(df.dtypes.to_dict())
+    print(df.head(2))
+
     try:
-        if force_replace:
-            to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace')
-            st.success(f"✅ Table replaced and uploaded {len(df)} rows to {table}")
-        else:
-            to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-            st.success(f"✅ Appended {len(df)} rows to {table}")
+        # Try appending normally
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+        st.success(f"✅ Appended {len(df)} rows to {table}")
     except Exception as e:
-        st.error(f"❌ Failed to upload to {table}: {e}")
+        st.warning(f"⚠️ Append failed — checking if schema mismatch: {e}")
+
+        if "Cannot add fields" in str(e):
+            # 💥 Replace the table schema once if append fails due to schema mismatch
+            try:
+                st.warning("⚠️ Schema mismatch detected — replacing table schema...")
+                to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace')
+                st.success(f"✅ Replaced table and uploaded {len(df)} rows to {table}")
+            except Exception as e2:
+                st.error(f"❌ Final BigQuery write failed (even after replace): {e2}")
+        else:
+            st.error(f"❌ BigQuery write failed: {e}")
 
         
 def build_game_key(df):
@@ -1222,29 +1246,32 @@ def render_scanner_tab(label, sport_key, container):
                 on=['Game_Key', 'Bookmaker'],
                 how='left'
             )
-        
+
+        # === Model scoring
         model = load_model_from_gcs(bucket_name=GCS_BUCKET)
-        
         if model is not None:
             try:
                 df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
                 st.success("✅ Applied model scoring to raw sharp data")
             except Exception as e:
                 st.warning(f"⚠️ Could not apply model scoring early: {e}")
-        
-        # ✅ Always upload today's sharp picks (raw) — even if not yet scored
-        if not df_moves_raw.empty:
-            df_moves_raw['Sport'] = label.upper()
-            write_to_bigquery(df_moves_raw, force_replace=True)
 
+        # === CLEANUP before upload ===
+        df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
+        df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore')
+        for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
+            if col not in df_moves_raw.columns:
+                df_moves_raw[col] = None
+
+        # ✅ Always upload unscored sharp picks (raw)
+        if not df_moves_raw.empty:
+            write_to_bigquery(df_moves_raw, force_replace=True)  # Safe schema reset on first upload
             st.info(f"✅ Uploaded {len(df_moves_raw)} unscored sharp picks to BigQuery.")
-        
+
         # === 5. Score Historical Games
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
 
-
         if not df_bt.empty:
-            # Ensure merge-safe columns exist
             merge_cols = ['Game_Key', 'Market', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             df_bt = ensure_columns(df_bt, merge_cols)
@@ -1279,35 +1306,35 @@ def render_scanner_tab(label, sport_key, container):
             df_bt['Sport'] = label.upper()
             write_to_bigquery(df_bt)
             df_moves = df_bt.copy()
-            
-            # ✅ Confirm score upload
+
+            # ✅ Confirm scored picks
             count_scored = len(df_bt[df_bt['SHARP_HIT_BOOL'].notna()])
             st.success(f"✅ Confirmed {count_scored} scored sharp picks uploaded to BigQuery.")
+
+            # ✅ Show Preview of Scored Picks
             def preview_sharp_master(label, limit=25):
-                client = bq_client
                 query = f"""
                     SELECT Game, Market, Outcome, SHARP_HIT_BOOL, SHARP_COVER_RESULT, Snapshot_Timestamp
                     FROM `{BQ_FULL_TABLE}`
                     WHERE Sport = '{label.upper()}'
-                      AND SHARP_HIT_BOOL IS NULL
+                      AND SHARP_HIT_BOOL IS NOT NULL
                     ORDER BY Snapshot_Timestamp DESC
                     LIMIT {limit}
                 """
-                df_preview = client.query(query).to_dataframe()
-                return df_preview
-            
-            # Display table preview in the app
+                return bq_client.query(query).to_dataframe()
+
             st.subheader(f"📋 Latest Scored Picks in Sharp Master – {label}")
             df_preview = preview_sharp_master(label)
             st.dataframe(df_preview)
-            st.success(f"✅ Uploaded {len(df_bt)} scored picks to BigQuery")
         else:
             st.info("ℹ️ No backtest results to score.")
 
+        # === Upload line history audit
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             write_line_history_to_bigquery(df_audit)
             print("🧪 line history audit shape:", df_audit.shape)
+
 
         # === 6. Summary Table ===
         if summary_df.empty:
