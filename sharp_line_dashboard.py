@@ -410,7 +410,7 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
         else:
             print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
 
-def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
+def fetch_scores_and_backtest(sport_key, df_moves, days_back=1, api_key=API_KEY):
     import requests
     import pandas as pd
     from datetime import datetime
