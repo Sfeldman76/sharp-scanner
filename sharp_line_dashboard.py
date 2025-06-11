@@ -1371,7 +1371,7 @@ df_mlb_bt = pd.DataFrame()
 
 
 
-dedef render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
+def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Backtest Performance – {sport_label}")
         sport_key_lower = sport_key_api
