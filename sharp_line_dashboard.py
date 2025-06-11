@@ -5,8 +5,8 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(layout="wide")
 st.title("Scott's Sharp Edge Scanner")
 
-# === Auto-refresh every 500 seconds ===
-st_autorefresh(interval=500 * 1000, key="data_refresh")
+# === Auto-refresh every 180 seconds ===
+st_autorefresh(interval=180 * 1000, key="data_refresh")
 
 # === Standard Imports ===
 import os
@@ -184,18 +184,27 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE):
         print(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
         return
 
-    df = df.copy()  # avoid mutation issues
+    df = df.copy()  # avoid mutating the original
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    print(f"🟢 Writing {len(df)} rows to {table}")
+    print(f"🟢 Attempting to write to BigQuery table: {table}")
+    print("🧪 DataFrame shape:", df.shape)
     print("🧪 Columns:", df.columns.tolist())
     print("🧪 Dtypes:\n", df.dtypes)
 
     try:
-        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-        print(f"✅ Appended {len(df)} rows to BigQuery table: {table}")
+        # First, try to CREATE the table if it doesn't exist
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='fail')
+        print(f"✅ Created new table and wrote {len(df)} rows to {table}")
     except Exception as e:
-        print(f"❌ Failed to write to BigQuery: {e}")
+        print(f"🔁 Table exists or failed to create: {e}")
+        try:
+            # Then fall back to append
+            to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+            print(f"✅ Appended {len(df)} rows to existing BigQuery table: {table}")
+        except Exception as e2:
+            print(f"❌ Final BigQuery write failed: {e2}")
+
 
 
 
