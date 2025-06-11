@@ -80,8 +80,28 @@ component_fields = OrderedDict({
     'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
 })
 
-# === Placeholder for learned component weights
 
+# 🔁 Force one test row into sharp_moves_master
+test_df = pd.DataFrame([{
+    'Game': 'test_game',
+    'Market': 'spread',
+    'Outcome': 'team_a',
+    'Bookmaker': 'testbook',
+    'Value': -3.5,
+    'Limit': 2500,
+    'SHARP_HIT_BOOL': 1,
+    'SHARP_COVER_RESULT': 'Win',
+    'Snapshot_Timestamp': pd.Timestamp.utcnow(),
+    'Sport': 'NBA'
+}])
+
+to_gbq(
+    test_df,
+    destination_table="sharp_data.sharp_moves_master",
+    project_id="sharplogger",
+    if_exists="append"
+)
+print("✅ Test row written to BigQuery.")
 
 
 
