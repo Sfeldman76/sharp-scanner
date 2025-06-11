@@ -332,13 +332,13 @@ def write_line_history_to_bigquery(df):
 
     df = df.copy()
 
-    # 🧼 Ensure Time is datetime
+    # ✅ Force conversion of 'Time' to datetime
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
 
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    # 🧼 Clean up any merge artifacts
+    # ✅ Clean merge artifacts
     df = df.rename(columns=lambda x: x.rstrip('_x'))
     df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
 
@@ -350,6 +350,54 @@ def write_line_history_to_bigquery(df):
     else:
         print(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
 
+def initialize_all_tables(df_snap, df_audit, market_weights_dict):
+    from google.cloud import bigquery
+
+    def table_needs_replacement(table_name):
+        try:
+            query = f"SELECT * FROM `{table_name}` LIMIT 1"
+            _ = bq_client.query(query).to_dataframe()
+            return False  # Table exists and has schema
+        except Exception as e:
+            print(f"⚠️ Table {table_name} likely missing or misconfigured: {e}")
+            return True
+
+    # === 1. Initialize line_history_master
+    if table_needs_replacement(LINE_HISTORY_TABLE):
+        df = df_audit.copy()
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+        if 'Time' in df.columns:
+            df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+        df = df.rename(columns=lambda x: x.rstrip('_x'))
+        df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+        to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+        print(f"✅ Initialized {LINE_HISTORY_TABLE} with {len(df)} rows")
+
+    # === 2. Initialize odds_snapshot_log
+    if table_needs_replacement(SNAPSHOTS_TABLE):
+        df = df_snap.copy()
+        df = df.rename(columns=lambda x: x.rstrip('_x'))
+        df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+        if 'Time' in df.columns:
+            df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+        to_gbq(df, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+        print(f"✅ Initialized {SNAPSHOTS_TABLE} with {len(df)} rows")
+
+    # === 3. Initialize market_weights
+    if table_needs_replacement(MARKET_WEIGHTS_TABLE):
+        rows = []
+        for market, components in market_weights_dict.items():
+            for component, values in components.items():
+                for val_key, win_rate in values.items():
+                    rows.append({
+                        'Market': market,
+                        'Component': component,
+                        'Value': val_key,
+                        'Win_Rate': float(win_rate)
+                    })
+        df = pd.DataFrame(rows)
+        to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+        print(f"✅ Initialized {MARKET_WEIGHTS_TABLE} with {len(df)} rows")
 
 
 
@@ -1211,7 +1259,9 @@ def render_scanner_tab(label, sport_key, container):
     market_component_win_rates = read_market_weights_from_bigquery()
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
+    # Only run schema initializer if needed
 
+    
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
@@ -1234,6 +1284,8 @@ def render_scanner_tab(label, sport_key, container):
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
+        # ✅ Safe one-time BigQuery table initializer
+        initialize_all_tables(df_snap=pd.DataFrame(live), df_audit=df_audit, market_weights_dict=market_component_win_rates)
 
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
             st.warning("⚠️ No sharp signals detected.")
