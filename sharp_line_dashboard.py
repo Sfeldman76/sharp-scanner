@@ -266,6 +266,17 @@ def write_market_weights_to_bigquery(weights_dict):
         print(f"❌ Failed to write market weights to BigQuery: {e}")
 
 
+def write_line_history_to_bigquery(df):
+    if df is None or df.empty:
+        print("⚠️ No line history data to upload.")
+        return
+    try:
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+        to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
+        print(f"✅ Uploaded {len(df)} line history rows to BigQuery.")
+    except Exception as e:
+        print(f"❌ Failed to upload line history: {e}")
+
 def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
     import requests
     import pandas as pd
