@@ -101,28 +101,6 @@ component_fields = OrderedDict({
 })
 
 
-# 🔁 Force one test row into sharp_moves_master
-test_df = pd.DataFrame([{
-    'Game': 'test_game',
-    'Market': 'spread',
-    'Outcome': 'team_a',
-    'Bookmaker': 'testbook',
-    'Value': -3.5,
-    'Limit': 2500,
-    'SHARP_HIT_BOOL': 1,
-    'SHARP_COVER_RESULT': 'Win',
-    'Snapshot_Timestamp': pd.Timestamp.utcnow(),
-    'Sport': 'NBA'
-}])
-
-to_gbq(
-    test_df,
-    destination_table="sharp_data.sharp_moves_master",
-    project_id="sharplogger",
-    if_exists="append"
-)
-print("✅ Test row written to BigQuery.")
-
 
 
 def implied_prob(odds):
@@ -201,39 +179,31 @@ def write_snapshot_to_bigquery(snapshot_list):
         print(f"❌ Failed to upload odds snapshot: {e}")
 
 
+import streamlit as st
 
-def write_to_bigquery(df, table=BQ_FULL_TABLE):
-    import pandas_gbq
-
+def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
     if df.empty:
-        print(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
+        st.warning(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
         return
 
     df = df.copy()
-    if 'Snapshot_Timestamp' not in df.columns:
-        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    print(f"\n🟢 Attempting to write {len(df)} rows to BigQuery table: {table}")
-    print("🧪 DataFrame shape:", df.shape)
-    print("🧪 Columns:", df.columns.tolist())
-    print("🧪 Dtypes:\n", df.dtypes.to_dict())
-    print(df.head(3))
+    if 'Time' in df.columns:
+        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+
+    st.info(f"📤 Uploading {len(df)} rows to BigQuery: `{table}`")
+    st.write(df.head(3))
 
     try:
-        # First, try to create the table (fails if it already exists)
-        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='fail')
-        print(f"✅ Created and wrote {len(df)} rows to new table: {table}")
-    except Exception as e:
-        print(f"🔁 Table already exists or failed to create: {e}")
-        try:
-            # Fall back to appending
+        if force_replace:
+            to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace')
+            st.success(f"✅ Replaced table and wrote {len(df)} rows to {table}")
+        else:
             to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-            print(f"✅ Appended {len(df)} rows to existing table: {table}")
-        except Exception as e2:
-            print(f"❌ Final BigQuery write failed for {table}: {e2}")
-
-
-
+            st.success(f"✅ Appended {len(df)} rows to {table}")
+    except Exception as e:
+        st.error(f"❌ BigQuery write failed: {e}")
 
         
 def build_game_key(df):
