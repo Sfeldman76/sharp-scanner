@@ -1652,8 +1652,9 @@ def render_scanner_tab(label, sport_key, container):
                 )
                 change_mask = pd.DataFrame(False, index=df_compare.index, columns=df_display.columns)
                 for col in df_display.columns:
-                    if col in df_prev_display.columns:
-                        change_mask[col] = df_compare[col] != df_compare[f"{col}_old"]
+                    old_col = f"{col}_old"
+                    if old_col in df_compare.columns:
+                        change_mask[col] = df_compare[col] != df_compare[old_col]
             else:
                 df_compare = df_display.copy()
                 change_mask = pd.DataFrame(False, index=df_display.index, columns=df_display.columns)
