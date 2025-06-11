@@ -29,6 +29,16 @@ from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
+from google.cloud import bigquery
+from pandas_gbq import to_gbq
+import pandas as pd
+
+GCP_PROJECT_ID = "your-project-id"  # ← replace with your GCP project ID
+BQ_DATASET = "sharp_data"
+BQ_TABLE = "sharp_moves_master"
+BQ_FULL_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+
+
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
 FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
