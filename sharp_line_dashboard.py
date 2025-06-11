@@ -1266,41 +1266,43 @@ def train_sharp_win_model(df):
 ###MODEL PAGE Interface======
 
 
-# === Run Detection for Multiple Sports ===
 for sport_label in ["NBA", "MLB"]:
-    sport_key = SPORTS.get(sport_label)
-    if not sport_key:
-        st.warning(f"⚠️ Invalid sport label: {sport_label}")
-        continue
+    sport_key = SPORTS[sport_label]  # "basketball_nba" or "baseball_mlb"
 
     with st.spinner(f"⚙️ Running sharp detection for {sport_label}..."):
-        try:
-            current_odds = fetch_live_odds(sport_key)
-            previous_odds = read_latest_snapshot_from_bigquery()
-            market_weights = read_market_weights_from_bigquery()
+        current_odds = fetch_live_odds(sport_key)
 
-            if not current_odds or not isinstance(current_odds, pd.DataFrame):
-                st.warning(f"⚠️ No valid odds data for {sport_label}")
-                continue
+        if not current_odds or not isinstance(current_odds, list):
+            st.warning(f"⚠️ No valid odds data for {sport_label} — skipping.")
+            continue
 
-            df_moves, df_snap, df_audit = detect_sharp_moves(
-                current=current_odds,
-                previous=previous_odds,
-                sport_key=sport_key,
-                SHARP_BOOKS=SHARP_BOOKS,
-                REC_BOOKS=REC_BOOKS,
-                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-                weights=market_weights
-            )
+        has_data = any("bookmakers" in g and g["bookmakers"] for g in current_odds)
+        if not has_data:
+            st.warning(f"⚠️ No bookmakers found in odds for {sport_label} — skipping.")
+            continue
 
-            write_to_bigquery(df_moves)
-            write_snapshot_to_bigquery(current_odds)
-            write_line_history_to_bigquery(df_audit)
+        previous_odds = read_latest_snapshot_from_bigquery()
+        market_weights = read_market_weights_from_bigquery()
 
-            st.success(f"✅ Sharp detection complete for {sport_label}")
-        except Exception as e:
-            st.error(f"❌ Error during sharp detection for {sport_label}: {e}")
+        df_moves, df_snap, df_audit = detect_sharp_moves(
+            current=current_odds,
+            previous=previous_odds,
+            sport_key=sport_key,
+            SHARP_BOOKS=SHARP_BOOKS,
+            REC_BOOKS=REC_BOOKS,
+            BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
+            weights=market_weights
+        )
 
+        if df_moves.empty:
+            st.warning(f"⚠️ No sharp moves detected for {sport_label}.")
+            continue
+
+        write_to_bigquery(df_moves)
+        write_snapshot_to_bigquery(current_odds)
+        write_line_history_to_bigquery(df_audit)
+
+    st.success(f"✅ Sharp detection complete for {sport_label}")
 
 
 
@@ -1308,19 +1310,18 @@ def render_scanner_tab(label, sport_key, container):
     market_component_win_rates = read_market_weights_from_bigquery()
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
-    # Only run schema initializer if needed
 
-    
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
+        df_moves_raw = pd.DataFrame()  # ✅ correctly inside container
 
         # === 1. Fetch Live Odds
         live = fetch_live_odds(sport_key)
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
-        
-        # Create snapshot frame
+
+        # === Create snapshot frame
         df_snap = pd.DataFrame([
             {
                 'Game_ID': game.get('id'),
@@ -1335,22 +1336,20 @@ def render_scanner_tab(label, sport_key, container):
             for book in game.get('bookmakers', [])
             for market in book.get('markets', [])
             for outcome in market.get('outcomes', [])
-        ])  # 🟢 Used only for initializing odds_snapshot_log
-        
+        ])
         write_snapshot_to_bigquery(live)
-        
+
         # === 2. Load Previous Snapshot
         prev = read_latest_snapshot_from_bigquery(hours=2)
         if not prev:
             st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
             prev = {}
-        # Convert previous snapshot into comparable pivot format
+
+        # ✅ Don't access df_moves_raw before detect_sharp_moves!
         prev_odds_rows = []
         for game in prev.values():
             game_name = f"{game.get('home_team')} vs {game.get('away_team')}"
             game_start = pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT
-            now = pd.Timestamp.utcnow()
-            not_started_mask = df_moves_raw['Game_Start'] > now
             for book in game.get("bookmakers", []):
                 for market in book.get("markets", []):
                     for o in market.get("outcomes", []):
