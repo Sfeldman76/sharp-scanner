@@ -34,7 +34,7 @@ from google.cloud import storage
 from google.cloud import bigquery
 from pandas_gbq import to_gbq
 import pandas as pd
-
+import google.api_core.exceptions
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -138,6 +138,24 @@ def fetch_live_odds(sport_key):
 
         return []
 
+def safe_to_gbq(df, table, replace=False):
+    mode = 'replace' if replace else 'append'
+    for attempt in range(3):
+        try:
+            to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists=mode)
+            return True
+        except google.api_core.exceptions.BadRequest as e:
+            print(f"❌ BadRequest during BigQuery write: {e}")
+            if "Cannot add fields" in str(e):
+                print("⚠️ Retrying with schema replace...")
+                to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace')
+                return True
+            else:
+                return False
+        except Exception as e:
+            print(f"❌ Retry {attempt + 1}/3 failed: {e}")
+    return False
+
 def write_snapshot_to_bigquery(snapshot_list):
     rows = []
     snapshot_time = pd.Timestamp.utcnow()
@@ -167,29 +185,20 @@ def write_snapshot_to_bigquery(snapshot_list):
         print("⚠️ No snapshot data to upload.")
         return
 
-    # ✅ Fix: use df_snap, not df
     if 'Time' in df_snap.columns:
         df_snap['Time'] = pd.to_datetime(df_snap['Time'], errors='coerce', utc=True)
 
     print("🧪 Snapshot dtypes:\n", df_snap.dtypes)
 
-    try:
-        to_gbq(df_snap, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
-        print(f"✅ Uploaded {len(df_snap)} odds snapshot rows to BigQuery.")
-        print("🚀 Snapshot live data length:", len(snapshot_list))
-        print("🚀 Snapshot rows:", len(df_snap))
-        print(df_snap.head(3))
-    except Exception as e:
-        print(f"❌ Failed to upload odds snapshot: {e}")
+    if not safe_to_gbq(df_snap, SNAPSHOTS_TABLE):
+        print(f"❌ Failed to upload odds snapshot to {SNAPSHOTS_TABLE}")
+
 
 
 
 import streamlit as st
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
-    import pandas_gbq
-    from google.cloud import bigquery
-
     if df.empty:
         st.warning(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
         return
@@ -197,15 +206,12 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
     df = df.copy()
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    # 🧼 Convert 'Time' column if present
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
 
-    # 🧼 Remove merge artifacts
     df = df.rename(columns=lambda x: x.rstrip('_x'))
     df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
 
-    # 🧼 Ensure scoring columns exist
     for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
         if col not in df.columns:
             df[col] = None
@@ -214,23 +220,8 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
     print(df.dtypes.to_dict())
     print(df.head(2))
 
-    try:
-        # Try appending normally
-        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-        st.success(f"✅ Appended {len(df)} rows to {table}")
-    except Exception as e:
-        st.warning(f"⚠️ Append failed — checking if schema mismatch: {e}")
-
-        if "Cannot add fields" in str(e):
-            # 💥 Replace the table schema once if append fails due to schema mismatch
-            try:
-                st.warning("⚠️ Schema mismatch detected — replacing table schema...")
-                to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace')
-                st.success(f"✅ Replaced table and uploaded {len(df)} rows to {table}")
-            except Exception as e2:
-                st.error(f"❌ Final BigQuery write failed (even after replace): {e2}")
-        else:
-            st.error(f"❌ BigQuery write failed: {e}")
+    if not safe_to_gbq(df, table, replace=force_replace):
+        st.error(f"❌ BigQuery upload failed for {table}")
 
         
 def build_game_key(df):
@@ -312,38 +303,55 @@ def read_latest_snapshot_from_bigquery(hours=2):
     except Exception as e:
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
-
-
 def write_market_weights_to_bigquery(weights_dict):
-    try:
-        rows = []
-        for market, components in weights_dict.items():
-            for component, values in components.items():
-                for val_key, win_rate in values.items():
-                    rows.append({
-                        'Market': market,
-                        'Component': component,
-                        'Value': val_key,
-                        'Win_Rate': float(win_rate)
-                    })
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
-            print(f"✅ Overwrote {len(df)} rows in market_weights BigQuery table.")
-    except Exception as e:
-        print(f"❌ Failed to write market weights to BigQuery: {e}")
+    rows = []
+    for market, components in weights_dict.items():
+        for component, values in components.items():
+            for val_key, win_rate in values.items():
+                rows.append({
+                    'Market': market,
+                    'Component': component,
+                    'Value': val_key,
+                    'Win_Rate': float(win_rate)
+                })
+
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        print("⚠️ No market weights to upload.")
+        return
+
+    if not safe_to_gbq(df, MARKET_WEIGHTS_TABLE):
+        print(f"❌ Failed to upload market weights.")
 
 
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
         print("⚠️ No line history data to upload.")
         return
-    try:
-        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-        to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
-        print(f"✅ Uploaded {len(df)} line history rows to BigQuery.")
-    except Exception as e:
-        print(f"❌ Failed to upload line history: {e}")
+
+    df = df.copy()
+
+    # 🧼 Ensure Time is datetime
+    if 'Time' in df.columns:
+        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
+    # 🧼 Clean up any merge artifacts
+    df = df.rename(columns=lambda x: x.rstrip('_x'))
+    df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+
+    print("🧪 Line history dtypes:\n", df.dtypes.to_dict())
+    print(df.head(2))
+
+    if not safe_to_gbq(df, LINE_HISTORY_TABLE):
+        print(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
+    else:
+        print(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
+
+
+
 
 def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
     import requests
