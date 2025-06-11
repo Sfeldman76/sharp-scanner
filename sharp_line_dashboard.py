@@ -33,15 +33,16 @@ from google.cloud import bigquery
 from pandas_gbq import to_gbq
 import pandas as pd
 
-GCP_PROJECT_ID = "your-project-id"  # ← replace with your GCP project ID
-BQ_DATASET = "sharp_data"
-BQ_TABLE = "sharp_moves_master"
+GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
+BQ_DATASET = "sharp_data"       # ✅ your dataset name
+BQ_TABLE = "sharp_moves_master" # ✅ your table name
 BQ_FULL_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
+
 
 
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
-FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
+#FOLDER_ID = "1v6WB0jRX_yJT2JSdXRvQOLQNfOZ97iGA"
 REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"  # no longer used for login, just metadata
 
 SPORTS = {
@@ -67,30 +68,7 @@ BOOKMAKER_REGIONS = {
 
 MARKETS = ['spreads', 'totals', 'h2h']
 
-# === Initialize Google Drive via Service Account ===
-@st.cache_resource
-def init_gdrive():
-    try:
-        creds_path = os.environ["GDRIVE_CREDS_PATH"]
-        scope = ['https://www.googleapis.com/auth/drive']
-        credentials = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
 
-        gauth = GoogleAuth()
-        gauth.auth_method = 'service'
-        gauth.credentials = credentials
-
-        drive = GoogleDrive(gauth)
-        return drive
-    except Exception as e:
-        st.error(f"❌ Google Drive service auth failed: {e}")
-        return None
-
-# ✅ Connect to Drive at app start
-drive = init_gdrive()
-if drive:
-    st.success("✅ Connected to Google Drive via Service Account!")
-else:
-    st.stop()  # Exit if Drive connection fails
 
 # === Component fields used in sharp scoring ===
 component_fields = OrderedDict({
@@ -139,15 +117,6 @@ def fetch_live_odds(sport_key):
 
         return []
 
-drive = init_gdrive()
-
-# 🔍 Debug the mounted secret
-#st.write("GDRIVE_CREDS_PATH:", os.environ.get("GDRIVE_CREDS_PATH"))
-
-#try:
-    #st.write("Files in /secrets/drive/:", os.listdir("/secrets/drive"))
-#except Exception as e:
-    #st.error(f"❌ Could not list /secrets/drive/: {e}")
 
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE):
