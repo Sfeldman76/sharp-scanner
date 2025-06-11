@@ -1560,7 +1560,14 @@ def render_scanner_tab(label, sport_key, container):
         # === PAGINATED TABLE 1: Filtered Custom Table ===
         total_rows_1 = len(filtered_df)
         total_pages_1 = (total_rows_1 - 1) // page_size + 1
-        page_1 = st.number_input("Page (Filtered Table)", key="table1_page", min_value=1, max_value=total_pages_1, value=1, step=1)
+        page_1 = st.number_input(
+            "Page (Filtered Table)",
+            key=f"{label}_table1_page",
+            min_value=1,
+            max_value=total_pages_1,
+            value=1,
+            step=1
+        )
         
         start_row_1 = (page_1 - 1) * page_size
         end_row_1 = start_row_1 + page_size
@@ -1662,8 +1669,14 @@ def render_scanner_tab(label, sport_key, container):
             # === Pagination for Live Odds Table ===
             total_rows_2 = len(df_display)
             total_pages_2 = (total_rows_2 - 1) // page_size + 1
-            page_2 = st.number_input("Page (Live Odds Table)", key="table2_page", min_value=1, max_value=total_pages_2, value=1, step=1)
-            
+            page_2 = st.number_input(
+                "Page (Live Odds Table)",  # ✅ Updated label
+                key=f"{label}_table2_page",  # ✅ Unique key per label/sport
+                min_value=1,
+                max_value=total_pages_2,
+                value=1,
+                step=1
+            )
             start_row_2 = (page_2 - 1) * page_size
             end_row_2 = start_row_2 + page_size
             paginated_df_2 = df_display.iloc[start_row_2:end_row_2].copy()
