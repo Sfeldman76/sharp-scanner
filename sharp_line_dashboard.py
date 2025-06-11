@@ -44,6 +44,11 @@ MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
+import os, json
+if os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
+    with open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]) as f:
+        info = json.load(f)
+        st.write("🔍 Credential file type:", info.get("type"))
 
 
 
