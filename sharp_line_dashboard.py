@@ -194,36 +194,43 @@ def write_snapshot_to_bigquery(snapshot_list):
     try:
         to_gbq(df_snap, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
         print(f"✅ Uploaded {len(df_snap)} odds snapshot rows to BigQuery.")
+        print("🚀 Snapshot live data length:", len(snapshot_list))
+        print("🚀 Snapshot rows:", len(df_snap))
+        print(df_snap.head(3))
     except Exception as e:
         print(f"❌ Failed to upload odds snapshot: {e}")
 
 
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE):
+    import pandas_gbq
+
     if df.empty:
         print(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
         return
 
-    df = df.copy()  # avoid mutating the original
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    df = df.copy()
+    if 'Snapshot_Timestamp' not in df.columns:
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    print(f"🟢 Attempting to write to BigQuery table: {table}")
+    print(f"\n🟢 Attempting to write {len(df)} rows to BigQuery table: {table}")
     print("🧪 DataFrame shape:", df.shape)
     print("🧪 Columns:", df.columns.tolist())
-    print("🧪 Dtypes:\n", df.dtypes)
+    print("🧪 Dtypes:\n", df.dtypes.to_dict())
+    print(df.head(3))
 
     try:
-        # First, try to CREATE the table if it doesn't exist
+        # First, try to create the table (fails if it already exists)
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='fail')
-        print(f"✅ Created new table and wrote {len(df)} rows to {table}")
+        print(f"✅ Created and wrote {len(df)} rows to new table: {table}")
     except Exception as e:
-        print(f"🔁 Table exists or failed to create: {e}")
+        print(f"🔁 Table already exists or failed to create: {e}")
         try:
-            # Then fall back to append
+            # Fall back to appending
             to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-            print(f"✅ Appended {len(df)} rows to existing BigQuery table: {table}")
+            print(f"✅ Appended {len(df)} rows to existing table: {table}")
         except Exception as e2:
-            print(f"❌ Final BigQuery write failed: {e2}")
+            print(f"❌ Final BigQuery write failed for {table}: {e2}")
 
 
 
@@ -1326,6 +1333,7 @@ def render_scanner_tab(label, sport_key, container):
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             write_line_history_to_bigquery(df_audit)
+            print("🧪 line history audit shape:", df_audit.shape)
 
         # === 6. Summary Table ===
         if summary_df.empty:
