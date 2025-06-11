@@ -9,34 +9,7 @@ st.title("Sharp Edge Scanner")
 # === Auto-refresh every 380 seconds ===
 st_autorefresh(interval=380 * 1000, key="data_refresh")
 
-# === Optional CSS cleanup ===
-st.markdown("""
-<style>
-.stStatusWidget {display: none;}
-#MainMenu, footer {visibility: hidden;}
-</style>
-""", unsafe_allow_html=True)
 
-# === Visual Loading Indicator ===
-with st.spinner("⚙️ Running sharp detection..."):
-    current_odds = fetch_live_odds(sport_key)
-    previous_odds = read_latest_snapshot_from_bigquery()
-    market_weights = read_market_weights_from_bigquery()
-    df_moves, df_snap, df_audit = detect_sharp_moves(
-        current=current_odds,
-        previous=previous_odds,
-        sport_key=sport_key,
-        SHARP_BOOKS=SHARP_BOOKS,
-        REC_BOOKS=REC_BOOKS,
-        BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-        weights=market_weights
-    )
-    write_to_bigquery(df_moves)
-    write_snapshot_to_bigquery(current_odds)
-    write_line_history_to_bigquery(df_audit)
-
-st.success("✅ Sharp detection complete.")
-aceholder.success("✅ Sharp detection complete.")
 
 
 # === Standard Imports ===
@@ -1283,6 +1256,33 @@ def train_sharp_win_model(df):
     st.success(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_filtered)} samples")
 
     return model
+# === Optional CSS cleanup ===
+st.markdown("""
+<style>
+.stStatusWidget {display: none;}
+#MainMenu, footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# === Visual Loading Indicator ===
+with st.spinner("⚙️ Running sharp detection..."):
+    current_odds = fetch_live_odds(sport_key)
+    previous_odds = read_latest_snapshot_from_bigquery()
+    market_weights = read_market_weights_from_bigquery()
+    df_moves, df_snap, df_audit = detect_sharp_moves(
+        current=current_odds,
+        previous=previous_odds,
+        sport_key=sport_key,
+        SHARP_BOOKS=SHARP_BOOKS,
+        REC_BOOKS=REC_BOOKS,
+        BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
+        weights=market_weights
+    )
+    write_to_bigquery(df_moves)
+    write_snapshot_to_bigquery(current_odds)
+    write_line_history_to_bigquery(df_audit)
+
+st.success("✅ Sharp detection complete.")
 
 
 def render_scanner_tab(label, sport_key, container):
