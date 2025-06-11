@@ -1330,6 +1330,8 @@ def render_scanner_tab(label, sport_key, container):
         for game in prev.values():
             game_name = f"{game.get('home_team')} vs {game.get('away_team')}"
             game_start = pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT
+            now = pd.Timestamp.utcnow()
+            not_started_mask = df_moves_raw['Game_Start'] > now
             for book in game.get("bookmakers", []):
                 for market in book.get("markets", []):
                     for o in market.get("outcomes", []):
@@ -1396,8 +1398,29 @@ def render_scanner_tab(label, sport_key, container):
             )
 
 
-        # === Model scoring
         model = load_model_from_gcs(bucket_name=GCS_BUCKET)
+        
+        if model is not None:
+            now = pd.Timestamp.utcnow()
+            df_moves_raw['Frozen'] = df_moves_raw['Game_Start'] <= now
+            not_started_mask = ~df_moves_raw['Frozen']
+
+            try:
+                # Only apply scoring to not-started rows
+                df_to_score = df_moves_raw[not_started_mask].copy()
+                scored_df = apply_blended_sharp_score(df_to_score, model)
+        
+                for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob',
+                            'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+                            'Sharp_Confidence_Tier']:
+                    df_moves_raw.loc[not_started_mask, col] = scored_df[col].values
+        
+                st.success("✅ Applied model scoring to unstarted games only")
+            except Exception as e:
+                st.warning(f"⚠️ Could not apply model scoring: {e}")
+          
+
+
         if model is not None:
             try:
                 df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
