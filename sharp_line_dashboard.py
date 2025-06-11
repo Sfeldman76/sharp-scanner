@@ -1325,7 +1325,45 @@ def render_scanner_tab(label, sport_key, container):
         if not prev:
             st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
             prev = {}
+        # Convert previous snapshot into comparable pivot format
+        prev_odds_rows = []
+        for game in prev.values():
+            game_name = f"{game.get('home_team')} vs {game.get('away_team')}"
+            game_start = pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT
+            for book in game.get("bookmakers", []):
+                for market in book.get("markets", []):
+                    for o in market.get("outcomes", []):
+                        price = o.get('point') if market['key'] != 'h2h' else o.get('price')
+                        prev_odds_rows.append({
+                            "Game": game_name,
+                            "Market": market['key'],
+                            "Outcome": o["name"],
+                            "Bookmaker": book["title"],
+                            "Value": price,
+                            "Limit": o.get("bet_limit", 0),
+                            "Game_Start": game_start
+                        })
         
+        df_prev_raw = pd.DataFrame(prev_odds_rows)
+        if not df_prev_raw.empty:
+            df_prev_raw['Value_Limit'] = df_prev_raw.apply(
+                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
+                else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
+                axis=1
+            )
+            df_prev_raw['Date + Time (EST)'] = pd.to_datetime(df_prev_raw['Game_Start'], errors='coerce').apply(
+                lambda x: x.tz_localize('UTC').tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) else ""
+            )
+        
+            df_prev_display = df_prev_raw.pivot_table(
+                index=["Date + Time (EST)", "Game", "Market", "Outcome"],
+                columns="Bookmaker",
+                values="Value_Limit",
+                aggfunc="first"
+            ).reset_index()
+        else:
+            df_prev_display = pd.DataFrame()
+
         # === 3. Run Sharp Detection
         # === 3. Run Sharp Detection
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
@@ -1602,40 +1640,78 @@ def render_scanner_tab(label, sport_key, container):
                 else ""
             )
         
+            # === Pivot Current Snapshot ===
             df_display = df_odds_raw.pivot_table(
                 index=["Date + Time (EST)", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
-        
+            
+            # === Compare to Previous Snapshot to Highlight Changes ===
+            if not df_prev_display.empty:
+                df_compare = df_display.merge(
+                    df_prev_display,
+                    on=["Date + Time (EST)", "Game", "Market", "Outcome"],
+                    suffixes=("", "_old"),
+                    how="left"
+                )
+                change_mask = pd.DataFrame(False, index=df_compare.index, columns=df_display.columns)
+                for col in df_display.columns:
+                    if col in df_prev_display.columns:
+                        change_mask[col] = df_compare[col] != df_compare[f"{col}_old"]
+            else:
+                df_compare = df_display.copy()
+                change_mask = pd.DataFrame(False, index=df_display.index, columns=df_display.columns)
+            
             # === Pagination for Live Odds Table ===
             total_rows_2 = len(df_display)
             total_pages_2 = (total_rows_2 - 1) // page_size + 1
             page_2 = st.number_input("Page (Live Odds Table)", key="table2_page", min_value=1, max_value=total_pages_2, value=1, step=1)
-        
+            
             start_row_2 = (page_2 - 1) * page_size
             end_row_2 = start_row_2 + page_size
             paginated_df_2 = df_display.iloc[start_row_2:end_row_2].copy()
-        
-            # === Highlight Sharp Books in HTML Table ===
-            def render_custom_html_table(df, highlight_cols):
-                def style_cell(val, col):
+            compare_slice = df_compare.iloc[start_row_2:end_row_2]
+            mask_slice = change_mask.iloc[start_row_2:end_row_2]
+            
+            # === Render Custom HTML Table with Change Highlighting ===
+            def render_custom_html_table(df, highlight_cols, change_mask=None, df_compare=None):
+                def style_cell(val, col, row_idx):
+                    base = ""
+                    arrow = ""
+                    # Highlight sharp books
                     if col in highlight_cols and val != "":
-                        return f'background-color:#d0f0c0; color:black; font-weight:600'
-                    return ""
-        
+                        base += "background-color:#d0f0c0; color:black; font-weight:600;"
+                    # Highlight changed values
+                    if change_mask is not None and col in change_mask.columns and change_mask.loc[row_idx, col]:
+                        old_val = df_compare.iloc[row_idx].get(f"{col}_old", "")
+                        new_val = df_compare.iloc[row_idx].get(col, "")
+                        try:
+                            val_float = float(str(new_val).split(" ")[0])
+                            old_float = float(str(old_val).split(" ")[0])
+                            if val_float > old_float:
+                                arrow = " 🔺"
+                                base += "background-color:#e6ffe6;"  # subtle green
+                            elif val_float < old_float:
+                                arrow = " 🔻"
+                                base += "background-color:#ffe6e6;"  # subtle red
+                        except:
+                            pass
+                    return base, arrow
+            
                 header_html = ''.join(f'<th>{col}</th>' for col in df.columns)
                 rows_html = ''
-                for _, row in df.iterrows():
+                for i, row in df.iterrows():
                     row_html = '<tr>'
                     for col in df.columns:
                         val = row[col]
-                        style = style_cell(val, col)
-                        row_html += f'<td style="{style}">{val if pd.notnull(val) else ""}</td>'
+                        style, arrow = style_cell(val, col, i)
+                        display_val = f"{val}{arrow}" if pd.notnull(val) else ""
+                        row_html += f'<td style="{style}">{display_val}</td>'
                     row_html += '</tr>'
                     rows_html += row_html
-        
+            
                 html = f"""
                 <table class="custom-table">
                     <thead><tr>{header_html}</tr></thead>
@@ -1643,10 +1719,17 @@ def render_scanner_tab(label, sport_key, container):
                 </table>
                 """
                 return html
-        
-            html_table_2 = render_custom_html_table(paginated_df_2, highlight_cols=['Pinnacle', 'Bookmaker', 'BetOnline'])
+            
+            html_table_2 = render_custom_html_table(
+                paginated_df_2,
+                highlight_cols=['Pinnacle', 'Bookmaker', 'BetOnline'],
+                change_mask=mask_slice,
+                df_compare=compare_slice
+            )
+            
             st.markdown(html_table_2, unsafe_allow_html=True)
             st.caption(f"Showing {start_row_2 + 1}-{min(end_row_2, total_rows_2)} of {total_rows_2} rows")
+
 
         return df_moves
 
