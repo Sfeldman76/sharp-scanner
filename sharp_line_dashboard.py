@@ -23,7 +23,7 @@ from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from pytz import timezone as pytz_timezone
-
+from google.oauth2 import service_account
 
 
 from google.cloud import bigquery
@@ -38,6 +38,19 @@ MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
+
+
+# === Load service account from mounted secret path ===
+SERVICE_ACCOUNT_PATH = "/mnt/secrets/google-cred/credentials.json"
+
+credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH)
+
+# Set as global context for pandas_gbq
+pandas_gbq.context.credentials = credentials
+pandas_gbq.context.project = GCP_PROJECT_ID
+
+
+bq_client = bigquery.Client(credentials=credentials, project=GCP_PROJECT_ID)
 
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
@@ -242,7 +255,7 @@ def build_game_key(df):
 
 def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
     try:
-        client = bigquery.Client(project=GCP_PROJECT_ID)
+        client = bq_client
         query = f"""
             SELECT * FROM `{table}`
             WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
@@ -258,7 +271,7 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
        
 def read_latest_snapshot_from_bigquery(hours=2):
     try:
-        client = bigquery.Client(project=GCP_PROJECT_ID)
+        client = bq_client
         query = f"""
             SELECT * FROM `{SNAPSHOTS_TABLE}`
             WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
@@ -512,7 +525,7 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
 
 def read_market_weights_from_bigquery():
     try:
-        client = bigquery.Client(project=GCP_PROJECT_ID)
+        client = bq_client
         query = f"SELECT * FROM `{MARKET_WEIGHTS_TABLE}`"
         df = client.query(query).to_dataframe()
         weights = defaultdict(lambda: defaultdict(dict))
@@ -1283,7 +1296,7 @@ def render_scanner_tab(label, sport_key, container):
             count_scored = len(df_bt[df_bt['SHARP_HIT_BOOL'].notna()])
             st.success(f"✅ Confirmed {count_scored} scored sharp picks uploaded to BigQuery.")
             def preview_sharp_master(label, limit=25):
-                client = bigquery.Client(project=GCP_PROJECT_ID)
+                client = bq_client
                 query = f"""
                     SELECT Game, Market, Outcome, SHARP_HIT_BOOL, SHARP_COVER_RESULT, Snapshot_Timestamp
                     FROM `{BQ_FULL_TABLE}`
