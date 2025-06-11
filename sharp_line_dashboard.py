@@ -206,7 +206,12 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
 
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-
+	# Optional: Drop columns BQ may reject if not needed
+    drop_cols = ['Final_Confidence_Score']  # not used in dashboard
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    
+    # Coerce types
+    df = df.astype({k: 'float' for k in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob'] if k in df.columns})
     df = df.rename(columns=lambda x: x.rstrip('_x'))
     df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
 
@@ -1380,45 +1385,41 @@ def render_scanner_tab(label, sport_key, container):
         # ✅ NOW create df_moves before using it below
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
         
-        # === 4. Restore Game_Start if missing
-        if 'Game_Start' not in df_moves.columns or df_moves['Game_Start'].isna().all():
-            df_moves = df_moves.merge(
-                df_moves_raw[['Game_Key', 'Bookmaker', 'Game_Start']].drop_duplicates(),
-                on=['Game_Key', 'Bookmaker'],
-                how='left'
-            )
-
-
+        # === 4. Load Model and Apply Scoring
         model = load_model_from_gcs(bucket_name=GCS_BUCKET)
         
         if model is not None:
             now = pd.Timestamp.utcnow()
             df_moves_raw['Frozen'] = df_moves_raw['Game_Start'] <= now
             not_started_mask = ~df_moves_raw['Frozen']
-
+        
             try:
-                # Only apply scoring to not-started rows
-                df_to_score = df_moves_raw[not_started_mask].copy()
-                scored_df = apply_blended_sharp_score(df_to_score, model)
+                # Score unstarted games only
+                df_unstarted = df_moves_raw[not_started_mask].copy()
+                if not df_unstarted.empty:
+                    df_scored = apply_blended_sharp_score(df_unstarted, model)
         
-                for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob',
-                            'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-                            'Sharp_Confidence_Tier']:
-                    df_moves_raw.loc[not_started_mask, col] = scored_df[col].values
+                    for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob',
+                                'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+                                'Sharp_Confidence_Tier']:
+                        if col in df_scored.columns:
+                            df_moves_raw.loc[not_started_mask, col] = df_scored[col].values
         
-                st.success("✅ Applied model scoring to unstarted games only")
+                    st.success(f"✅ Applied model scoring to {len(df_scored)} unstarted games")
+                else:
+                    st.info("ℹ️ No unstarted games to score.")
             except Exception as e:
-                st.warning(f"⚠️ Could not apply model scoring: {e}")
-          
-
-
-        if model is not None:
+                st.warning(f"⚠️ Error scoring unstarted games: {e}")
+        
+            # Optional full-frame scoring fallback
             try:
                 df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
-                st.success("✅ Applied model scoring to raw sharp data")
+                st.success("✅ Applied model scoring to all sharp picks (full frame)")
             except Exception as e:
-                st.warning(f"⚠️ Could not apply model scoring early: {e}")
-
+                st.warning(f"⚠️ Full-frame model scoring failed: {e}")
+        else:
+            st.warning("⚠️ Model not available — skipping scoring.")
+        
         # === CLEANUP before upload ===
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
         df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore')
