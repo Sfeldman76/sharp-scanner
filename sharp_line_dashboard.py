@@ -167,6 +167,10 @@ def write_snapshot_to_bigquery(snapshot_list):
         print("⚠️ No snapshot data to upload.")
         return
 
+    # ✅ Fix: use df_snap, not df
+    if 'Time' in df_snap.columns:
+        df_snap['Time'] = pd.to_datetime(df_snap['Time'], errors='coerce', utc=True)
+
     print("🧪 Snapshot dtypes:\n", df_snap.dtypes)
 
     try:
@@ -179,11 +183,12 @@ def write_snapshot_to_bigquery(snapshot_list):
         print(f"❌ Failed to upload odds snapshot: {e}")
 
 
+
 import streamlit as st
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
     if df.empty:
-        st.warning(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
+        st.warning(f"⚠️ DataFrame is empty — nothing to write to {table}.")
         return
 
     df = df.copy()
@@ -192,18 +197,16 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
 
-    st.info(f"📤 Uploading {len(df)} rows to BigQuery: `{table}`")
-    st.write(df.head(3))
-
+    st.info(f"📤 Writing {len(df)} rows to BigQuery table: {table}")
     try:
         if force_replace:
             to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace')
-            st.success(f"✅ Replaced table and wrote {len(df)} rows to {table}")
+            st.success(f"✅ Table replaced and uploaded {len(df)} rows to {table}")
         else:
             to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
             st.success(f"✅ Appended {len(df)} rows to {table}")
     except Exception as e:
-        st.error(f"❌ BigQuery write failed: {e}")
+        st.error(f"❌ Failed to upload to {table}: {e}")
 
         
 def build_game_key(df):
@@ -1232,7 +1235,8 @@ def render_scanner_tab(label, sport_key, container):
         # ✅ Always upload today's sharp picks (raw) — even if not yet scored
         if not df_moves_raw.empty:
             df_moves_raw['Sport'] = label.upper()
-            write_to_bigquery(df_moves_raw)
+            write_to_bigquery(df_moves_raw, force_replace=True)
+
             st.info(f"✅ Uploaded {len(df_moves_raw)} unscored sharp picks to BigQuery.")
         
         # === 5. Score Historical Games
