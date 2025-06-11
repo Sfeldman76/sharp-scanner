@@ -40,17 +40,13 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
 
 
-# === Load service account from mounted secret path ===
-SERVICE_ACCOUNT_PATH = "/mnt/secrets/google-cred/credentials.json"
 
-credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH)
+pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
-# Set as global context for pandas_gbq
-pandas_gbq.context.credentials = credentials
-pandas_gbq.context.project = GCP_PROJECT_ID
+bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
 
+st.success(f"✅ Using GCP Project: {bq_client.project}")
 
-bq_client = bigquery.Client(credentials=credentials, project=GCP_PROJECT_ID)
 
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
