@@ -102,7 +102,6 @@ component_fields = OrderedDict({
 
 
 
-
 def implied_prob(odds):
     try:
         if odds < 0:
@@ -364,24 +363,31 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
 
     # === 1. Initialize line_history_master
     if table_needs_replacement(LINE_HISTORY_TABLE):
-        df = df_audit.copy()
-        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-        if 'Time' in df.columns:
-            df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-        df = df.rename(columns=lambda x: x.rstrip('_x'))
-        df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
-        to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
-        print(f"✅ Initialized {LINE_HISTORY_TABLE} with {len(df)} rows")
+        if df_audit is not None and not df_audit.empty:
+            df = df_audit.copy()
+            df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+            if 'Time' in df.columns:
+                df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+            df = df.rename(columns=lambda x: x.rstrip('_x'))
+            df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+            to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+            print(f"✅ Initialized {LINE_HISTORY_TABLE} with {len(df)} rows")
+        else:
+            print(f"⚠️ Skipping {LINE_HISTORY_TABLE} initialization — df_audit is empty")
 
     # === 2. Initialize odds_snapshot_log
     if table_needs_replacement(SNAPSHOTS_TABLE):
-        df = df_snap.copy()
-        df = df.rename(columns=lambda x: x.rstrip('_x'))
-        df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
-        if 'Time' in df.columns:
-            df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-        to_gbq(df, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
-        print(f"✅ Initialized {SNAPSHOTS_TABLE} with {len(df)} rows")
+        if df_snap is not None and not df_snap.empty:
+            df = df_snap.copy()
+            df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+            if 'Time' in df.columns:
+                df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+            df = df.rename(columns=lambda x: x.rstrip('_x'))
+            df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+            to_gbq(df, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+            print(f"✅ Initialized {SNAPSHOTS_TABLE} with {len(df)} rows")
+        else:
+            print(f"⚠️ Skipping {SNAPSHOTS_TABLE} initialization — df_snap is empty")
 
     # === 3. Initialize market_weights
     if table_needs_replacement(MARKET_WEIGHTS_TABLE):
@@ -396,10 +402,11 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
                         'Win_Rate': float(win_rate)
                     })
         df = pd.DataFrame(rows)
-        to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
-        print(f"✅ Initialized {MARKET_WEIGHTS_TABLE} with {len(df)} rows")
-
-
+        if not df.empty:
+            to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+            print(f"✅ Initialized {MARKET_WEIGHTS_TABLE} with {len(df)} rows")
+        else:
+            print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
 
 def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
     import requests
@@ -1265,40 +1272,60 @@ def render_scanner_tab(label, sport_key, container):
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
-        # === 1. Fetch Live Odds ===
+        # === 1. Fetch Live Odds
         live = fetch_live_odds(sport_key)
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
-
+        
+        # Create snapshot frame
+        df_snap = pd.DataFrame([
+            {
+                'Game_ID': game.get('id'),
+                'Bookmaker': book.get('key'),
+                'Market': market.get('key'),
+                'Outcome': outcome.get('name'),
+                'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
+                'Limit': outcome.get('bet_limit'),
+                'Snapshot_Timestamp': pd.Timestamp.utcnow()
+            }
+            for game in live
+            for book in game.get('bookmakers', [])
+            for market in book.get('markets', [])
+            for outcome in market.get('outcomes', [])
+        ])  # 🟢 Used only for initializing odds_snapshot_log
+        
         write_snapshot_to_bigquery(live)
-
-        # === 2. Load Previous Snapshot from BigQuery ===
+        
+        # === 2. Load Previous Snapshot
         prev = read_latest_snapshot_from_bigquery(hours=2)
         if not prev:
             st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
             prev = {}
-
-        # === 3. Run Sharp Detection ===
+        
+        # === 3. Run Sharp Detection
+        # === 3. Run Sharp Detection
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
-        # ✅ Safe one-time BigQuery table initializer
-        initialize_all_tables(df_snap=pd.DataFrame(live), df_audit=df_audit, market_weights_dict=market_component_win_rates)
-
+        
+        # ✅ INIT TABLES (Safe placement — all required data is now available)
+        initialize_all_tables(df_snap=df_snap, df_audit=df_audit, market_weights_dict=market_component_win_rates)
+        
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
             st.warning("⚠️ No sharp signals detected.")
             return pd.DataFrame()
-
+        
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == label.upper()]
         df_moves_raw = build_game_key(df_moves_raw)
-
+        
+        # ✅ NOW create df_moves before using it below
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
-
+        
         # === 4. Restore Game_Start if missing
         if 'Game_Start' not in df_moves.columns or df_moves['Game_Start'].isna().all():
             df_moves = df_moves.merge(
@@ -1306,6 +1333,7 @@ def render_scanner_tab(label, sport_key, container):
                 on=['Game_Key', 'Bookmaker'],
                 how='left'
             )
+
 
         # === Model scoring
         model = load_model_from_gcs(bucket_name=GCS_BUCKET)
