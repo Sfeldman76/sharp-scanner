@@ -164,6 +164,8 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE):
         print(f"❌ Failed to write to BigQuery: {e}")
 
 
+
+
         
 def build_game_key(df):
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
@@ -1234,6 +1236,27 @@ def render_scanner_tab(label, sport_key, container):
             df_bt['Sport'] = label.upper()
             write_to_bigquery(df_bt)
             df_moves = df_bt.copy()
+            
+            # ✅ Confirm score upload
+            count_scored = len(df_bt[df_bt['SHARP_HIT_BOOL'].notna()])
+            st.success(f"✅ Confirmed {count_scored} scored sharp picks uploaded to BigQuery.")
+            def preview_sharp_master(label, limit=25):
+                client = bigquery.Client(project=GCP_PROJECT_ID)
+                query = f"""
+                    SELECT Game, Market, Outcome, SHARP_HIT_BOOL, SHARP_COVER_RESULT, Snapshot_Timestamp
+                    FROM `{BQ_FULL_TABLE}`
+                    WHERE Sport = '{label.upper()}'
+                      AND SHARP_HIT_BOOL IS NULL
+                    ORDER BY Snapshot_Timestamp DESC
+                    LIMIT {limit}
+                """
+                df_preview = client.query(query).to_dataframe()
+                return df_preview
+            
+            # Display table preview in the app
+            st.subheader(f"📋 Latest Scored Picks in Sharp Master – {label}")
+            df_preview = preview_sharp_master(label)
+            st.dataframe(df_preview)
             st.success(f"✅ Uploaded {len(df_bt)} scored picks to BigQuery")
         else:
             st.info("ℹ️ No backtest results to score.")
