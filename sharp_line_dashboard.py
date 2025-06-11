@@ -24,11 +24,17 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from pytz import timezone as pytz_timezone
 from google.oauth2 import service_account
+import pandas_gbq
+import pandas as pd
+import pandas_gbq  # ✅ Required for setting .context.project / .context.credentials
+from google.cloud import bigquery
+from google.cloud import storage
 
 
 from google.cloud import bigquery
 from pandas_gbq import to_gbq
 import pandas as pd
+
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -44,7 +50,7 @@ GCS_BUCKET = "sharp-models"
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
-
+gcs_client = storage.Client(project=GCP_PROJECT_ID)
 st.success(f"✅ Using GCP Project: {bq_client.project}")
 
 
