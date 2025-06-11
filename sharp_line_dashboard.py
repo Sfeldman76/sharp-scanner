@@ -24,10 +24,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from pytz import timezone as pytz_timezone
 
-# === Google Drive Integration via Service Account ===
-from oauth2client.service_account import ServiceAccountCredentials
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
 
 
 from google.cloud import bigquery
@@ -98,11 +94,14 @@ def implied_prob(odds):
     except:
         return None
 
+def ensure_columns(df, required_cols, fill_value=None):
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = fill_value
+    return df
 
 
 @st.cache_data(ttl=180)
-
-
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -212,28 +211,7 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
         return pd.DataFrame()
 
 
-def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
-    from io import StringIO
-    import json
-
-    filename = f"{sport_key}_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    buffer = StringIO()
-    json.dump(snapshot, buffer)
-    buffer.seek(0)
-
-    try:
-        file_drive = drive.CreateFile({'title': filename, 'parents': [{'id': folder_id}]})
-        file_drive.SetContentString(buffer.getvalue())
-        file_drive.Upload()
-        print(f"✅ Snapshot uploaded to Google Drive: {filename}")
-    except Exception as e:
-        print(f"❌ Failed to upload snapshot: {e}")
-
-
-
-
-
-        
+       
 def read_latest_snapshot_from_bigquery(hours=2):
     try:
         client = bigquery.Client(project=GCP_PROJECT_ID)
@@ -288,10 +266,8 @@ def write_market_weights_to_bigquery(weights_dict):
         print(f"❌ Failed to write market weights to BigQuery: {e}")
 
 
-
 def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
     import requests
-    import pytz
     import pandas as pd
     from datetime import datetime
     import streamlit as st
@@ -301,19 +277,34 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
 
     # Determine label from SPORTS dict
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
-    sport_label = expected_label[0].upper() if expected_label else "NBA"  # Fallback
+    sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    # Load and filter master data
-    df = load_master_sharp_moves(drive)
+    # ✅ Load master sharp picks
+    df = read_recent_sharp_moves(hours=72)
+    if df.empty or 'Game' not in df.columns:
+        st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
+        df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
+        return df_moves
 
     if 'Sport' not in df.columns:
-        df['Sport'] = sport_label  # fallback if column is missing
-    
+        df['Sport'] = sport_label
     df = df[df['Sport'] == sport_label]
+
+    if df.empty:
+        st.warning(f"⚠️ No historical picks found for {sport_label}.")
+        df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
+        return df_moves
 
     df = build_game_key(df)
 
-    # Normalize past game keys
+    # Ensure necessary columns exist
+    required = ['Game', 'Game_Start']
+    for col in required:
+        if col not in df.columns:
+            st.warning(f"⚠️ Missing required column in historical data: {col}")
+            df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
+            return df_moves
+
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].apply(normalize_team)
@@ -323,7 +314,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
 
-    # Pull completed games from API
+    # ✅ Fetch completed games with scores
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': days_back}, timeout=10)
@@ -331,9 +322,9 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         games = response.json()
         completed_games = [g for g in games if g.get("completed")]
     except Exception as e:
-        st.error(f"❌ Failed to fetch scores: {e}")
-        df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
-        return df
+        st.error(f"❌ Failed to fetch scores from Odds API: {e}")
+        df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
+        return df_moves
 
     # Build score rows
     score_rows = []
@@ -341,6 +332,8 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
+        if pd.isna(game_start):
+            continue
         merge_key = f"{home}_{away}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
@@ -351,12 +344,17 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
             })
 
     df_scores = pd.DataFrame(score_rows)
-    if df_scores.empty or 'Merge_Key_Short' not in df.columns:
-        st.warning("ℹ️ No matching completed games to merge scores for.")
-        df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
-        return df
+    if df_scores.empty:
+        st.warning("ℹ️ No valid score rows found from completed games.")
+        df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
+        return df_moves
 
-    # Merge and preview
+    if 'Merge_Key_Short' not in df.columns:
+        st.warning("⚠️ Missing merge keys in sharp picks.")
+        df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
+        return df_moves
+
+    # ✅ Merge scores
     df_scores.rename(columns={
         "Score_Home_Score": "Score_Home_Score_api",
         "Score_Away_Score": "Score_Away_Score_api"
@@ -370,12 +368,17 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
         df[col] = df[col].combine_first(df[api_col])
         df.drop(columns=[api_col], inplace=True, errors='ignore')
 
-    # Show preview
+    # ✅ Prepare to score
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
+    if df_valid.empty:
+        st.warning("ℹ️ No valid sharp picks with both scores and line values to score.")
+        df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
+        return df_moves
+
     st.success(f"✅ Scores merged. {len(df_valid)} valid rows ready for scoring.")
     st.dataframe(df_valid[['Game', 'Market', 'Outcome', 'Ref Sharp Value', 'Score_Home_Score', 'Score_Away_Score']].head())
 
-    # Score function
+    # ✅ Score logic
     def calc_cover(row):
         try:
             h, a = float(row['Score_Home_Score']), float(row['Score_Away_Score'])
@@ -390,36 +393,26 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
             if market == 'spreads':
                 hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
                 return ['Win', 1] if hit else ['Loss', 0]
+
             if market == 'h2h':
                 return ['Win', 1] if ((row['Home_Team_Norm'] in outcome and h > a) or
                                       (row['Away_Team_Norm'] in outcome and a > h)) else ['Loss', 0]
+
             return [None, 0]
         except:
             return [None, 0]
 
-    # Apply scoring
+    # ✅ Apply scoring
     df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = None
     df['Scored'] = False
-    if not df_valid.empty:
-        result = df_valid.apply(calc_cover, axis=1, result_type='expand')
-        result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
-        df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
-        df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
+    result = df_valid.apply(calc_cover, axis=1, result_type='expand')
+    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
+    df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
+    df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
 
     return df
 
 
-  def write_line_history_to_bigquery(df):
-    if df.empty:
-        print("⚠️ No line history data to upload.")
-        return
-    try:
-        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-        to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
-        print(f"✅ Uploaded {len(df)} line history rows to BigQuery.")
-    except Exception as e:
-        print(f"❌ Failed to upload line history: {e}")
-     
             
 def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
@@ -502,9 +495,6 @@ def detect_cross_market_sharp_support(df_moves):
     return df
 
 
-
-
-
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
     from collections import defaultdict
     import pandas as pd
@@ -513,38 +503,48 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
-    rows = []  # List of all line-level sharp move entries
-    sharp_limit_map = defaultdict(lambda: defaultdict(list))  # Stores all limits per (game, market, label)
-    sharp_total_limit_map = defaultdict(int)  # Total limit across sharp books
-    sharp_lines = {}  # Maps (game, market, label) → latest sharp line entry
-    line_history_log = {}  # Game-level ID → full history of entries
-    line_open_map = {}  # Tracks opening value per (game, market, label)
-    sharp_side_flags = {}  # Stores which (game, market, label) is the sharp side
-    sharp_metrics_map = {}  # Stores all calculated metrics for sharp side
-    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # For timestamping the snapshot
+    if not current:
+        print("⚠️ No current odds data provided.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
+
+    rows = []
+    sharp_limit_map = defaultdict(lambda: defaultdict(list))
+    sharp_total_limit_map = defaultdict(int)
+    sharp_lines = {}
+    line_history_log = {}
+    line_open_map = {}
+    sharp_side_flags = {}
+    sharp_metrics_map = {}
+
     sport_scope_key = {
         'MLB': 'baseball_mlb',
         'NBA': 'basketball_nba'
     }.get(sport_key.upper(), sport_key.lower())
-
     confidence_weights = weights.get(sport_scope_key, {})
 
+    # === Safely flatten previous odds
     previous_odds_map = {}
     for g in previous_map.values():
         for book in g.get('bookmakers', []):
-            book_key = book['key']
+            book_key = book.get('key')
             for market in book.get('markets', []):
                 mtype = market.get('key')
                 for outcome in market.get('outcomes', []):
-                    label = normalize_label(outcome['name'])
+                    label = normalize_label(outcome.get('name', ''))
                     price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
-                    previous_odds_map[(g['home_team'], g['away_team'], mtype, label, book_key)] = price
+                    previous_odds_map[(g.get('home_team'), g.get('away_team'), mtype, label, book_key)] = price
 
+    # === Parse current odds
     for game in current:
-        home_team = game['home_team'].strip().lower()
-        away_team = game['away_team'].strip().lower()
-        game_name = f"{game['home_team']} vs {game['away_team']}"
+        home_team = game.get('home_team', '').strip().lower()
+        away_team = game.get('away_team', '').strip().lower()
+        if not home_team or not away_team:
+            continue
+
+        game_name = f"{home_team.title()} vs {away_team.title()}"
         event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
         event_date = event_time.strftime("%Y-%m-%d") if pd.notnull(event_time) else ""
         game_hour = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
@@ -552,7 +552,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         prev_game = previous_map.get(gid, {})
 
         for book in game.get('bookmakers', []):
-            book_key_raw = book['key'].lower()
+            book_key_raw = book.get('key', '').lower()
             book_key = book_key_raw
 
             for rec in REC_BOOKS:
@@ -563,11 +563,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 if sharp in book_key_raw:
                     book_key = sharp
                     break
-
             if book_key not in SHARP_BOOKS and book_key not in REC_BOOKS:
                 continue
 
-            book_title = book.get('title')
+            book_title = book.get('title', book_key)
 
             for market in book.get('markets', []):
                 mtype = market.get('key', '').strip().lower()
@@ -575,16 +574,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     continue
 
                 for o in market.get('outcomes', []):
-                    label = normalize_label(o['name'])
+                    label = normalize_label(o.get('name', ''))
                     val = o.get('point') if mtype != 'h2h' else o.get('price')
-                    limit = o.get('bet_limit') if o.get('bet_limit') is not None else None
-                    prev_key = (game['home_team'], game['away_team'], mtype, label, book_key)
+                    limit = o.get('bet_limit')
+                    prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
 
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
 
                     entry = {
-                        'Sport': sport_key.upper(),  # ✅ Ensure consistent and correct league label
+                        'Sport': sport_key.upper(),
                         'Game_Key': game_key,
                         'Time': snapshot_time,
                         'Game': game_name,
@@ -603,13 +602,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Commence_Hour': game_hour
                     }
 
+                    # Fallback to previous game override if available
                     if prev_game:
                         for prev_b in prev_game.get('bookmakers', []):
-                            if prev_b['key'].lower() == book_key_raw:
+                            if prev_b.get('key', '').lower() == book_key_raw:
                                 for prev_m in prev_b.get('markets', []):
-                                    if prev_m['key'] == mtype:
+                                    if prev_m.get('key') == mtype:
                                         for prev_o in prev_m.get('outcomes', []):
-                                            if normalize_label(prev_o['name']) == label:
+                                            if normalize_label(prev_o.get('name')) == label:
                                                 prev_val = prev_o.get('point') if mtype != 'h2h' else prev_o.get('price')
                                                 if prev_val is not None:
                                                     entry['Old Value'] = prev_val
@@ -622,7 +622,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, val, old_val))
                         if book_key in SHARP_BOOKS:
-                            sharp_total_limit_map[(game_name, mtype, label)] += limit if limit else 0
+                            sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
                         if (game_name, mtype, label) not in line_open_map:
                             line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
 
@@ -630,48 +630,58 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_audit = pd.DataFrame([item for sublist in line_history_log.values() for item in sublist])
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
+
+
+
     
     # === Sharp scoring logic
+    # === Sharp scoring logic (safe version)
     for (game_name, mtype), label_map in sharp_limit_map.items():
         scores = {}
         label_signals = {}
         for label, entries in label_map.items():
             move_signal = limit_jump = prob_shift = time_score = 0
-            move_magnitude_score = 0
+            move_magnitude_score = 0.0
     
             for limit, curr, _ in entries:
                 open_val, _ = line_open_map.get((game_name, mtype, label), (None, None))
                 if open_val is not None and curr is not None:
-                    sharp_move_delta = abs(curr - open_val)
-                    if sharp_move_delta >= 0.01:
-                        move_signal += 1
-                        move_magnitude_score += sharp_move_delta
+                    try:
+                        sharp_move_delta = abs(curr - open_val)
+                        if sharp_move_delta >= 0.01:
+                            move_signal += 1
+                            move_magnitude_score += sharp_move_delta
     
-                    if mtype == 'totals':
-                        if 'under' in label and curr < open_val: move_signal += 1
-                        elif 'over' in label and curr > open_val: move_signal += 1
-                    elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
-                    elif mtype == 'h2h':
-                        imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
-                        if imp_now and imp_open and imp_now > imp_open: prob_shift += 1
+                        if mtype == 'totals':
+                            if 'under' in label and curr < open_val: move_signal += 1
+                            elif 'over' in label and curr > open_val: move_signal += 1
+                        elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
+                        elif mtype == 'h2h':
+                            imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
+                            if imp_now and imp_open and imp_now > imp_open:
+                                prob_shift += 1
+                    except:
+                        continue
     
-                if limit and limit >= 100:
+                if limit is not None and limit >= 100:
                     limit_jump += 1
     
-                hour = datetime.now().hour
-                time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
+                try:
+                    hour = datetime.now().hour
+                    time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
+                except:
+                    time_score += 0.5  # fallback
     
-            # Optional: cap magnitude boost
             move_magnitude_score = min(move_magnitude_score, 5.0)
-    
             total_limit = sharp_total_limit_map.get((game_name, mtype, label), 0)
+    
             scores[label] = (
                 2 * move_signal +
                 2 * limit_jump +
                 1.5 * time_score +
                 1.0 * prob_shift +
                 0.001 * total_limit +
-                3.0 * move_magnitude_score  # ← weighted boost
+                3.0 * move_magnitude_score
             )
     
             label_signals[label] = {
@@ -680,30 +690,25 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 'Sharp_Time_Score': time_score,
                 'Sharp_Prob_Shift': prob_shift,
                 'Sharp_Limit_Total': total_limit,
-                'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2)  # ← optional tracking
+                'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2)
             }
-
-     
-
+    
         if scores:
             best_label = max(scores, key=scores.get)
             sharp_side_flags[(game_name, mtype, best_label)] = 1
-            
-
-            sharp_metrics_map[(game_name, mtype, best_label)] = label_signals[best_label]
+            sharp_metrics_map[(game_name, mtype, best_label)] = label_signals.get(best_label, {})
 
     # === Assign sharp-side logic + metric scores to all rows
-    # === Assign sharp-side logic + metric scores to all rows
+    # === Assign sharp-side logic + metric scores
     for row in rows:
-        game_name = row['Game']
-        mtype = row['Market']
-        label = row['Outcome']
-    
+        game_name = row.get('Game', '')
+        mtype = row.get('Market', '')
+        label = row.get('Outcome', '')
         metrics = sharp_metrics_map.get((game_name, mtype, label), {})
         is_sharp_side = int(sharp_side_flags.get((game_name, mtype, label), 0))
     
         row.update({
-            'Ref Sharp Value': row['Value'],
+            'Ref Sharp Value': row.get('Value'),
             'Ref Sharp Old Value': row.get('Old Value'),
             'Delta vs Sharp': 0.0,
             'SHARP_SIDE_TO_BET': is_sharp_side,
@@ -714,13 +719,17 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0)
         })
     
-        row['SharpBetScore'] = round(
-            2.0 * row['Sharp_Move_Signal'] +
-            2.0 * row['Sharp_Limit_Jump'] +
-            1.5 * row['Sharp_Time_Score'] +
-            1.0 * row['Sharp_Prob_Shift'] +
-            0.001 * row['Sharp_Limit_Total'], 2
-        )
+        try:
+            row['SharpBetScore'] = round(
+                2.0 * row['Sharp_Move_Signal'] +
+                2.0 * row['Sharp_Limit_Jump'] +
+                1.5 * row['Sharp_Time_Score'] +
+                1.0 * row['Sharp_Prob_Shift'] +
+                0.001 * row['Sharp_Limit_Total'], 2
+            )
+        except:
+            row['SharpBetScore'] = 0.0
+
     
     df = pd.DataFrame(rows)
     df_history = df.copy()  # needed for downstream sort on 'Time'
@@ -1025,14 +1034,6 @@ def apply_blended_sharp_score(df, model):
 
     return df
 
-
-
-
-
-
-# === Initialize Google Drive once ===
-
-
 from google.cloud import storage
 
 def save_model_to_gcs(model, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
@@ -1118,91 +1119,49 @@ def train_sharp_win_model(df):
     st.success(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_filtered)} samples")
 
     return model
-st.subheader("📤 Re-Upload Sharp Moves Master File")
-
-uploaded = st.file_uploader("Upload `sharp_moves_master.csv` to Google Drive", type="csv")
-
-if uploaded is not None:
-    try:
-        from io import StringIO
-
-        # Read the uploaded content
-        content = StringIO(uploaded.getvalue().decode("utf-8"))
-
-        # Create Drive file and upload
-        file_drive = drive.CreateFile({'title': 'sharp_moves_master.csv', 'parents': [{"id": FOLDER_ID}]})
-        file_drive.SetContentString(content.getvalue())
-        file_drive.Upload()
-
-        st.success("✅ Uploaded successfully to Google Drive as `sharp_moves_master.csv`!")
-    except Exception as e:
-        st.error(f"❌ Failed to upload: {e}")
-
-def get_snapshot(data):
-    """
-    Converts a list of game objects into a dictionary snapshot keyed by game ID.
-    """
-    try:
-        return {g['id']: g for g in data if 'id' in g}
-    except Exception as e:
-        st.error(f"❌ Failed to build snapshot: {e}")
-        return {}
 
 
-
-
-def render_scanner_tab(label, sport_key, container, drive):
-
+def render_scanner_tab(label, sport_key, container):
     market_component_win_rates = read_market_weights_from_bigquery()
-
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
 
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
-    
+
+        # === 1. Fetch Live Odds ===
         live = fetch_live_odds(sport_key)
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
-    
-        # ✅ Only upload if there's live data
-        # ✅ Save snapshot to BigQuery
-            write_snapshot_to_bigquery(live)
-            
-            # ✅ Load latest snapshot from BigQuery instead of Drive
-            prev = read_latest_snapshot_from_bigquery(hours=2)
-            if not prev:
-                st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
-                prev = {}
 
-      
+        write_snapshot_to_bigquery(live)
 
-        confidence_weights = market_component_win_rates.get(sport_key_lower, {})
+        # === 2. Load Previous Snapshot from BigQuery ===
+        prev = read_latest_snapshot_from_bigquery(hours=2)
+        if not prev:
+            st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
+            prev = {}
+
+        # === 3. Run Sharp Detection ===
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS,
             weights=market_component_win_rates
         )
 
-        if 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
-            st.error("❌ detect_sharp_moves() missing Enhanced_Sharp_Confidence_Score")
+        if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
+            st.warning("⚠️ No sharp signals detected.")
             return pd.DataFrame()
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        
-
-        df_moves_raw['Sport'] = label.upper()  # Already present, good
-
-        # ✅ FILTER to only current sport
-
+        df_moves_raw['Sport'] = label.upper()
         df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == label.upper()]
-
         df_moves_raw = build_game_key(df_moves_raw)
+
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
 
-
-        # ✅ Force restore Game_Start just in case it's been dropped
+        # === 4. Restore Game_Start if missing
         if 'Game_Start' not in df_moves.columns or df_moves['Game_Start'].isna().all():
             df_moves = df_moves.merge(
                 df_moves_raw[['Game_Key', 'Bookmaker', 'Game_Start']].drop_duplicates(),
@@ -1210,10 +1169,7 @@ def render_scanner_tab(label, sport_key, container, drive):
                 how='left'
             )
 
-
-        load_model_from_gcs(bucket_name=GCS_BUCKET)
-
-
+        model = load_model_from_gcs(bucket_name=GCS_BUCKET)
 
         if model is not None:
             try:
@@ -1222,58 +1178,29 @@ def render_scanner_tab(label, sport_key, container, drive):
             except Exception as e:
                 st.warning(f"⚠️ Could not apply model scoring early: {e}")
 
-        if 'Enhanced_Sharp_Confidence_Score' not in df_moves.columns or df_moves['Enhanced_Sharp_Confidence_Score'].isna().all():
-            st.warning("⚠️ Enhanced_Sharp_Confidence_Score missing — attempting to recover from df_moves_raw")
-            try:
-                df_moves = df_moves.merge(
-                    df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
-                    on=['Game_Key', 'Market', 'Bookmaker'],
-                    how='left'
-                )
-                st.success("✅ Recovered confidence score from df_moves_raw")
-            except Exception as e:
-                st.error(f"❌ Recovery failed: {e}")
-
-     
-   
+        # === 5. Score Historical Games
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
-        
-        # 🧠 Re-attach confidence columns from df_moves_raw
-        if 'Enhanced_Sharp_Confidence_Score' not in df_bt.columns:
-            st.warning("⚠️ Enhanced_Sharp_Confidence_Score missing — attempting to recover from df_moves_raw")
-            try:
-                df_bt = df_bt.merge(
-                    df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Enhanced_Sharp_Confidence_Score']],
-                    on=['Game_Key', 'Market', 'Bookmaker'],
-                    how='left'
-                )
-                st.success("✅ Recovered Enhanced_Sharp_Confidence_Score")
-            except Exception as e:
-                st.error(f"❌ Failed to merge confidence scores: {e}")
 
         if not df_bt.empty:
-            # 🧼 Clean duplicates
-            df_bt = df_bt.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
-        
-            # 🧠 Merge confidence columns from df_moves_raw
+            # Ensure merge-safe columns exist
             merge_cols = ['Game_Key', 'Market', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
+            df_bt = ensure_columns(df_bt, merge_cols)
+            df_moves_raw = ensure_columns(df_moves_raw, merge_cols + confidence_cols)
+
             available = [col for col in confidence_cols if col in df_moves_raw.columns]
-        
             df_bt = df_bt.merge(
                 df_moves_raw[merge_cols + available].drop_duplicates(),
                 on=merge_cols,
                 how='left'
             )
-        
-            # 🎯 Score with model if available
+
             if model is not None:
                 try:
                     df_bt = apply_blended_sharp_score(df_bt, model)
                 except Exception as e:
-                    st.warning(f"⚠️ Could not apply model scoring: {e}")
-        
-            # 🧠 Train if enough completed sharp picks
+                    st.warning(f"⚠️ Could not apply model scoring to backtested data: {e}")
+
             if 'Enhanced_Sharp_Confidence_Score' in df_bt.columns:
                 trainable = df_bt[
                     df_bt['SHARP_HIT_BOOL'].notna() &
@@ -1282,56 +1209,32 @@ def render_scanner_tab(label, sport_key, container, drive):
                 if len(trainable) >= 5:
                     model = train_sharp_win_model(trainable)
                     save_model_to_gcs(model, bucket_name=GCS_BUCKET)
-
                 else:
                     st.info("ℹ️ Not enough completed sharp picks to retrain model.")
             else:
-                st.warning("⚠️ Still missing Enhanced_Sharp_Confidence_Score — skipping model training.")
+                st.warning("⚠️ Skipping training — confidence score column missing.")
 
-            # 📤 Save updated sharp picks to Drive
             df_bt['Sport'] = label.upper()
             write_to_bigquery(df_bt)
-        
-            # ✅ Carry over into df_moves for downstream use
             df_moves = df_bt.copy()
-            st.success(f"✅ Uploaded updated sharp picks with scores to Drive — {len(df_bt)} rows")
-        
+            st.success(f"✅ Uploaded {len(df_bt)} scored picks to BigQuery")
         else:
             st.info("ℹ️ No backtest results to score.")
-        
-         
-
 
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
-            try:
-                file_list = drive.ListFile({
-                    'q': f"title='line_history_master.csv' and '{FOLDER_ID}' in parents and trashed=false"
-                }).GetList()
-                df_existing = pd.DataFrame()
-                if file_list:
-                    file_drive = file_list[0]
-                    existing_data = StringIO(file_drive.GetContentString())
-                    df_existing = pd.read_csv(existing_data)
-                    file_drive.Delete()
-                df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
-                buffer = StringIO()
-                if not df_audit.empty:
-                    df_audit['Snapshot_Timestamp'] = timestamp
-                    write_line_history_to_bigquery(df_audit)
+            write_line_history_to_bigquery(df_audit)
 
-      
-        # === Sharp Summary Table
-        # === Sharp Summary Table
+        # === 6. Summary Table ===
+        if summary_df.empty:
+            st.info("ℹ️ No summary data available.")
+            return df_moves
+
         st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
-        
-        # === Normalize for clean merge
-        summary_df['Game'] = summary_df['Game'].str.strip().str.lower()
-        df_moves['Game'] = df_moves['Game'].str.strip().str.lower()
-        df_moves['Outcome'] = df_moves['Outcome'].str.strip().str.lower()
-        summary_df['Outcome'] = summary_df['Outcome'].str.strip().str.lower()
-        
-        # === Merge Blended Score + Win Prob
+        for col in ['Game', 'Outcome']:
+            summary_df[col] = summary_df[col].str.strip().str.lower()
+            df_moves[col] = df_moves[col].str.strip().str.lower()
+
         if 'Blended_Sharp_Score' in df_moves.columns:
             df_merge_scores = df_moves[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']].drop_duplicates()
             summary_df = summary_df.merge(
@@ -1339,30 +1242,26 @@ def render_scanner_tab(label, sport_key, container, drive):
                 on=['Game', 'Market', 'Outcome'],
                 how='left'
             )
-          
-        
-        # ✅ Add Game_Start to summary_df using (Game + Market + Event_Date)
-        df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
-      
-        df_game_start['MergeKey'] = (
-            df_game_start['Game'].str.strip().str.lower() + "_" +
-            df_game_start['Market'].str.strip().str.lower() + "_" +
-            df_game_start['Event_Date'].astype(str)
-        )
-        
-        summary_df['MergeKey'] = (
-            summary_df['Game'].str.strip().str.lower() + "_" +
-            summary_df['Market'].str.strip().str.lower() + "_" +
-            summary_df['Event_Date'].astype(str)
-        )
-        
-        summary_df = summary_df.merge(
-            df_game_start[['MergeKey', 'Game_Start']],
-            on='MergeKey',
-            how='left'
-        )
 
-        # === Convert Game_Start to EST safely
+        if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
+            df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
+            df_game_start['MergeKey'] = (
+                df_game_start['Game'].str.strip().str.lower() + "_" +
+                df_game_start['Market'].str.strip().str.lower() + "_" +
+                df_game_start['Event_Date'].astype(str)
+            )
+            summary_df['MergeKey'] = (
+                summary_df['Game'].str.strip().str.lower() + "_" +
+                summary_df['Market'].str.strip().str.lower() + "_" +
+                summary_df['Event_Date'].astype(str)
+            )
+            if 'MergeKey' in df_game_start.columns:
+                summary_df = summary_df.merge(
+                    df_game_start[['MergeKey', 'Game_Start']],
+                    on='MergeKey',
+                    how='left'
+                )
+
         def safe_to_est(dt):
             if pd.isna(dt):
                 return ""
@@ -1371,18 +1270,13 @@ def render_scanner_tab(label, sport_key, container, drive):
                 if dt.tzinfo is None:
                     dt = dt.tz_localize('UTC')
                 return dt.tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
-            except Exception as e:
-                print(f"⚠️ Date conversion error: {e}")
+            except:
                 return ""
-        
+
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
-        
-        # === Optional: filter out rows with no date for clarity
         summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
-        
-        # === Rename and clean
-        summary_df.drop(columns=[col for col in ['Date', 'Time\n(EST)'] if col in summary_df.columns], inplace=True)
+
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
@@ -1394,19 +1288,17 @@ def render_scanner_tab(label, sport_key, container, drive):
             'SharpBetScore': 'Sharp\nBet\nScore',
             'Enhanced_Sharp_Confidence_Score': 'Enhanced\nConf.\nScore',
         }, inplace=True)
-        
+
         summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
-        
-        # === Display filter
+
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
-        
-        # === Final render
+
         view_cols = ['Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
                      'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
                      'Sharp\nBet\nScore', 'Enhanced\nConf.\nScore']
-        
+
         st.dataframe(
             filtered_df[[col for col in view_cols if col in filtered_df.columns]]
             .sort_values(by='Date\n+ Time (EST)', na_position='last'),
@@ -1479,160 +1371,151 @@ df_mlb_bt = pd.DataFrame()
 
 
 
-def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
+dedef render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
+        st.subheader(f"📈 Backtest Performance – {sport_label}")
         sport_key_lower = sport_key_api
 
-        # ✅ Load master with Game_Key already handled
+        # ✅ 1. Load recent sharp picks from BigQuery
         df_master = read_recent_sharp_moves(hours=168)
-
-
-      
-
-        # ✅ Now filter to the current sport
-        df_master = df_master[df_master['Sport'] == sport_label.upper()]
-
-
-
         if df_master.empty:
-            st.warning(f"⚠️ No data found in master file for {sport_label}")
+            st.warning(f"⚠️ No sharp picks found in BigQuery.")
             return
 
-        # ✅ Fetch scored results
-        df_scored = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
-
-        # ✅ Safe merge on valid keys
-        merge_keys = ['Game_Key', 'Market', 'Bookmaker']
-        value_cols = ['Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT']
-        valid_merge_keys = [col for col in merge_keys if col in df_scored.columns and col in df_master.columns]
-        valid_value_cols = [col for col in value_cols if col in df_scored.columns]
-
-        if valid_merge_keys and valid_value_cols:
-            df_master = df_master.drop(columns=valid_value_cols, errors='ignore')
-            df_master = df_master.merge(
-                df_scored[valid_merge_keys + valid_value_cols],
-                on=valid_merge_keys,
-                how='left'
-            )
-        else:
-            st.warning("⚠️ No valid merge keys or values found for update.")
+        # ✅ 2. Filter for the current sport
+        if 'Sport' not in df_master.columns:
+            st.warning("⚠️ Missing 'Sport' column in sharp picks. Skipping.")
             return
 
-    
-   
-        if not df_master.empty:
-            df_bt = fetch_scores_and_backtest(sport_key_api, df_master, api_key=API_KEY)
+        df_master = df_master[df_master['Sport'] == sport_label.upper()]
+        if df_master.empty:
+            st.warning(f"⚠️ No data for {sport_label}.")
+            return
 
-            if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
-                df_bt['SharpConfidenceTier'] = pd.cut(
-                    df_bt['SharpBetScore'],
-                    bins=[0, 15, 25, 40, 100],
-                    labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
-                )
+        # ✅ 3. Fetch updated scores (avoids stale SHARP_HIT_BOOLs)
+        df_bt = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
+        if df_bt.empty:
+            st.warning("⚠️ No backtest data to evaluate.")
+            return
 
-                scored = df_bt[df_bt['SHARP_HIT_BOOL'].notna()]
-                st.subheader(f"🏆 Top Sharp Signal Performers by Market ({sport_label})")
+        if 'SHARP_HIT_BOOL' not in df_bt.columns:
+            st.warning("⚠️ Missing SHARP_HIT_BOOL. Skipping backtest summary.")
+            return
 
-                leaderboard_rows = []
-                for comp in component_fields:
-                    if comp in scored.columns:
-                        group = (
-                            scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                            .agg(['count', 'mean'])
-                            .reset_index()
-                            .rename(columns={
-                                'count': 'Signal_Count',
-                                'mean': 'Win_Rate',
-                                comp: 'Component_Value'
-                            })
-                        )
-                        group['Component'] = comp
-                        leaderboard_rows.append(group)
+        # === 4. Attach derived confidence tiers
+        df_bt['SharpConfidenceTier'] = pd.cut(
+            df_bt['SharpBetScore'],
+            bins=[0, 15, 25, 40, 100],
+            labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+        )
 
-                leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
-                leaderboard_df = leaderboard_df[[
-                    'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
-                ]].sort_values(by='Win_Rate', ascending=False)
+        # ✅ 5. Filter to only completed (scored) picks
+        scored = df_bt[df_bt['SHARP_HIT_BOOL'].notna()]
+        if scored.empty:
+            st.warning("ℹ️ No completed sharp picks available for analysis.")
+            return
 
-                st.dataframe(leaderboard_df.head(50))
-           
-
-                st.subheader(f"📊 {sport_label} Sharp Signal Performance by Market + Confidence Tier")
-                df_market_tier_summary = (
-                    scored
-                    .groupby(['Market', 'SharpConfidenceTier'])
-                    .agg(
-                        Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                        Hits=('SHARP_HIT_BOOL', 'sum'),
-                        Win_Rate=('SHARP_HIT_BOOL', 'mean')
-                    )
+        # === 6. Signal Leaderboard
+        st.subheader(f"🏆 Top Sharp Signal Performers by Market ({sport_label})")
+        leaderboard_rows = []
+        for comp in component_fields:
+            if comp in scored.columns:
+                group = (
+                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                    .agg(['count', 'mean'])
                     .reset_index()
-                    .round(3)
+                    .rename(columns={
+                        'count': 'Signal_Count',
+                        'mean': 'Win_Rate',
+                        comp: 'Component_Value'
+                    })
                 )
-                st.dataframe(df_market_tier_summary)
+                group['Component'] = comp
+                leaderboard_rows.append(group)
 
-                # === Component Learning & Weight Storage ===
-                st.subheader("🧠 Sharp Component Learning by Market")
-                market_component_win_rates_sport = {}
+        if leaderboard_rows:
+            leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
+            leaderboard_df = leaderboard_df[[
+                'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
+            ]].sort_values(by='Win_Rate', ascending=False)
 
-                for comp in component_fields:
-                    if comp in scored.columns:
-                        result = (
-                            scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                            .mean()
-                            .reset_index()
-                            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
-                            .sort_values(by=['Market', comp])
-                        )
-
-                        st.markdown(f"**📊 {comp} by Market**")
-                        st.dataframe(result)
-
-                        for _, row in result.iterrows():
-                            market = str(row['Market']).lower()
-                            val = row[comp]
-                            win_rate = max(0.5, row['Win_Rate'])  # ✅ clamp at 0.5
-
-                            # ✅ normalize value keys
-                            if pd.isna(val):
-                                continue  # skip NaNs
-                            elif isinstance(val, bool):
-                                val_key = str(val).lower()  # 'true'/'false'
-                            elif isinstance(val, float) and val.is_integer():
-                                val_key = str(int(val))  # 2.0 → '2'
-                            else:
-                                val_key = str(val).lower()
-
-                            market_component_win_rates_sport \
-                                .setdefault(market, {}) \
-                                .setdefault(comp, {})[val_key] = win_rate
-
-                # 🔁 Update and save to global + Drive
-                market_component_win_rates = globals().get("market_component_win_rates", {})
-                market_component_win_rates[sport_key_lower] = market_component_win_rates_sport
-                globals()["market_component_win_rates"] = market_component_win_rates
-
-                try:
-                    write_market_weights_to_bigquery(market_component_win_rates)
-
-                    print(f"✅ Saved weights for {sport_key_lower} to Google Drive.")
-                except Exception as e:
-                    print(f"❌ Failed to save weights for {sport_key_lower}: {e}")
-
-                # 🔍 Debug View
-                st.subheader(f"📥 Learned Weights for {sport_label}")
-                st.json(market_component_win_rates.get(sport_key_lower, {}))
-
-                st.subheader(f"🧪 Sample {sport_label} Confidence Inputs")
-                st.dataframe(df_bt[[
-                    'Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score'
-                ]].head())
-            else:
-                st.warning(f"⚠️ {sport_label} backtest missing 'SHARP_HIT_BOOL'. No results to summarize.")
+            st.dataframe(leaderboard_df.head(50))
         else:
-            st.warning(f"⚠️ No historical sharp picks found for {sport_label}.")
+            st.info("ℹ️ No signal components available to summarize.")
 
+        # === 7. Confidence Tier Summary
+        st.subheader(f"📊 Confidence Tier Performance by Market")
+        df_market_tier_summary = (
+            scored
+            .groupby(['Market', 'SharpConfidenceTier'])
+            .agg(
+                Total_Picks=('SHARP_HIT_BOOL', 'count'),
+                Hits=('SHARP_HIT_BOOL', 'sum'),
+                Win_Rate=('SHARP_HIT_BOOL', 'mean')
+            )
+            .reset_index()
+            .round(3)
+        )
+        if not df_market_tier_summary.empty:
+            st.dataframe(df_market_tier_summary)
+        else:
+            st.info("ℹ️ No market-tier breakdown available.")
 
+        # === 8. Learn Market Weights (to be saved to BigQuery)
+        st.subheader("🧠 Sharp Component Learning by Market")
+        market_component_win_rates_sport = {}
+        for comp in component_fields:
+            if comp in scored.columns:
+                result = (
+                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                    .mean()
+                    .reset_index()
+                    .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
+                    .sort_values(by=['Market', comp])
+                )
+                st.markdown(f"**📊 {comp} by Market**")
+                st.dataframe(result)
+
+                for _, row in result.iterrows():
+                    market = str(row['Market']).lower()
+                    val = row[comp]
+                    win_rate = max(0.5, row['Win_Rate'])  # clamp floor
+
+                    # Normalize key
+                    if pd.isna(val):
+                        continue
+                    elif isinstance(val, bool):
+                        val_key = str(val).lower()
+                    elif isinstance(val, float) and val.is_integer():
+                        val_key = str(int(val))
+                    else:
+                        val_key = str(val).lower()
+
+                    market_component_win_rates_sport \
+                        .setdefault(market, {}) \
+                        .setdefault(comp, {})[val_key] = win_rate
+
+        # === 9. Save learned weights
+        if market_component_win_rates_sport:
+            try:
+                all_weights = globals().get("market_component_win_rates", {})
+                all_weights[sport_key_lower] = market_component_win_rates_sport
+                globals()["market_component_win_rates"] = all_weights
+
+                write_market_weights_to_bigquery(all_weights)
+                st.success(f"✅ Saved learned weights for {sport_label} to BigQuery")
+            except Exception as e:
+                st.error(f"❌ Failed to save weights: {e}")
+        else:
+            st.info("ℹ️ No weight data generated.")
+
+        # === 10. Debug View
+        st.subheader(f"📥 Current Learned Weights ({sport_label})")
+        st.json(globals().get("market_component_win_rates", {}).get(sport_key_lower, {}))
+
+        st.subheader(f"🧪 Sample {sport_label} Confidence Inputs")
+        sample_cols = ['Market', 'Sharp_Move_Signal', 'Sharp_Time_Score', 'True_Sharp_Confidence_Score']
+        st.dataframe(scored[sample_cols].head(10) if all(c in scored.columns for c in sample_cols) else scored.head(10))
 
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
@@ -1641,18 +1524,10 @@ with tab_nba:
 
 
     with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
-        df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba, drive)
-
-    with st.expander("📈 Backtest Performance", expanded=False):
-        render_sharp_signal_analysis_tab(tab_nba, "NBA", SPORTS["NBA"], drive)
-
+        df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
 
 
 with tab_mlb:
    
-
     with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
-        df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb, drive)
-
-    with st.expander("📈 Backtest Performance", expanded=False):
-        render_sharp_signal_analysis_tab(tab_mlb, "MLB", SPORTS["MLB"], drive)
+        df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb)
