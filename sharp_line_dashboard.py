@@ -5,13 +5,7 @@ from streamlit_autorefresh import st_autorefresh
 # === Page Config ===
 st.set_page_config(layout="wide")
 st.title("Sharp Edge Scanner")
-# === Optional CSS cleanup ===
-st.markdown("""
-<style>
-.stStatusWidget {display: none;}
-#MainMenu, footer {visibility: hidden;}
-</style>
-""", unsafe_allow_html=True)
+
 
 # === Auto-refresh every 380 seconds ===
 st_autorefresh(interval=380 * 1000, key="data_refresh")
@@ -1263,47 +1257,6 @@ def train_sharp_win_model(df):
     st.success(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_filtered)} samples")
 
     return model
-###MODEL PAGE Interface======
-
-
-for sport_label in ["NBA", "MLB"]:
-    sport_key = SPORTS[sport_label]  # "basketball_nba" or "baseball_mlb"
-
-    with st.spinner(f"⚙️ Running sharp detection for {sport_label}..."):
-        current_odds = fetch_live_odds(sport_key)
-
-        if not current_odds or not isinstance(current_odds, list):
-            st.warning(f"⚠️ No valid odds data for {sport_label} — skipping.")
-            continue
-
-        has_data = any("bookmakers" in g and g["bookmakers"] for g in current_odds)
-        if not has_data:
-            st.warning(f"⚠️ No bookmakers found in odds for {sport_label} — skipping.")
-            continue
-
-        previous_odds = read_latest_snapshot_from_bigquery()
-        market_weights = read_market_weights_from_bigquery()
-
-        df_moves, df_snap, df_audit = detect_sharp_moves(
-            current=current_odds,
-            previous=previous_odds,
-            sport_key=sport_key,
-            SHARP_BOOKS=SHARP_BOOKS,
-            REC_BOOKS=REC_BOOKS,
-            BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-            weights=market_weights
-        )
-
-        if df_moves.empty:
-            st.warning(f"⚠️ No sharp moves detected for {sport_label}.")
-            continue
-
-        write_to_bigquery(df_moves)
-        write_snapshot_to_bigquery(current_odds)
-        write_line_history_to_bigquery(df_audit)
-
-    st.success(f"✅ Sharp detection complete for {sport_label}")
-
 
 
 def render_scanner_tab(label, sport_key, container):
@@ -1358,7 +1311,7 @@ def render_scanner_tab(label, sport_key, container):
                             "Game": game_name,
                             "Market": market['key'],
                             "Outcome": o["name"],
-                            "Bookmaker": book["title"],
+                            "Bookmaker": book.get("title", book.get("key", "Unknown Book")),
                             "Value": price,
                             "Limit": o.get("bet_limit", 0),
                             "Game_Start": game_start
