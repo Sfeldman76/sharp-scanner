@@ -6,7 +6,7 @@ st.set_page_config(layout="wide")
 st.title("Scott's Sharp Edge Scanner")
 
 # === Auto-refresh every 180 seconds ===
-st_autorefresh(interval=180 * 1000, key="data_refresh")
+st_autorefresh(interval=500 * 1000, key="data_refresh")
 
 # === Standard Imports ===
 import os
@@ -37,7 +37,9 @@ GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
 BQ_TABLE = "sharp_moves_master" # ✅ your table name
 BQ_FULL_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
-
+MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
+LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
+SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 
 
 # === Constants and Config ===
@@ -82,7 +84,8 @@ component_fields = OrderedDict({
 })
 
 # === Placeholder for learned component weights
-market_component_win_rates = {}
+
+
 
 
 def implied_prob(odds):
@@ -117,6 +120,36 @@ def fetch_live_odds(sport_key):
 
         return []
 
+def write_snapshot_to_bigquery(snapshot_list):
+    rows = []
+    snapshot_time = pd.Timestamp.utcnow()
+    for game in snapshot_list:
+        gid = game.get('id')
+        if not gid:
+            continue
+        for book in game.get('bookmakers', []):
+            book_key = book['key']
+            for market in book.get('markets', []):
+                market_key = market.get('key')
+                for outcome in market.get('outcomes', []):
+                    rows.append({
+                        'Game_ID': gid,
+                        'Bookmaker': book_key,
+                        'Market': market_key,
+                        'Outcome': outcome.get('name'),
+                        'Value': outcome.get('point') if market_key != 'h2h' else outcome.get('price'),
+                        'Limit': outcome.get('bet_limit'),
+                        'Snapshot_Timestamp': snapshot_time
+                    })
+    df_snap = pd.DataFrame(rows)
+    if df_snap.empty:
+        print("⚠️ No snapshot data to upload.")
+        return
+    try:
+        to_gbq(df_snap, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
+        print(f"✅ Uploaded {len(df_snap)} odds snapshot rows to BigQuery.")
+    except Exception as e:
+        print(f"❌ Failed to upload odds snapshot: {e}")
 
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE):
@@ -200,22 +233,39 @@ def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
 
 
         
-def load_latest_snapshot_from_drive(sport_key, drive, folder_id):
+def read_latest_snapshot_from_bigquery(hours=2):
     try:
-        file_list = drive.ListFile({
-            'q': f"title contains '{sport_key}_snapshot_' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-
-        if not file_list:
-            print(f"⚠️ No previous snapshot found for {sport_key}")
-            return {}
-
-        latest_file = sorted(file_list, key=lambda f: f['title'], reverse=True)[0]
-        content = latest_file.GetContentString()
-        return json.loads(content)
+        client = bigquery.Client(project=GCP_PROJECT_ID)
+        query = f"""
+            SELECT * FROM `{SNAPSHOTS_TABLE}`
+            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+        """
+        df = client.query(query).to_dataframe()
+        # Group back into the same format as before if needed
+        grouped = defaultdict(lambda: {"bookmakers": []})
+        for _, row in df.iterrows():
+            gid = row["Game_ID"]
+            entry = grouped[gid]
+            found_book = next((b for b in entry["bookmakers"] if b["key"] == row["Bookmaker"]), None)
+            if not found_book:
+                found_book = {"key": row["Bookmaker"], "markets": []}
+                entry["bookmakers"].append(found_book)
+            found_market = next((m for m in found_book["markets"] if m["key"] == row["Market"]), None)
+            if not found_market:
+                found_market = {"key": row["Market"], "outcomes": []}
+                found_book["markets"].append(found_market)
+            found_market["outcomes"].append({
+                "name": row["Outcome"],
+                "point": row["Value"],
+                "price": row["Value"] if row["Market"] == "h2h" else None,
+                "bet_limit": row["Limit"]
+            })
+        print(f"✅ Reconstructed {len(grouped)} snapshot games from BigQuery")
+        return dict(grouped)
     except Exception as e:
-        print(f"❌ Failed to load snapshot from Drive: {e}")
+        print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
+
 
 def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
     import requests
@@ -337,7 +387,17 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY)
     return df
 
 
-       
+  def write_line_history_to_bigquery(df):
+    if df.empty:
+        print("⚠️ No line history data to upload.")
+        return
+    try:
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+        to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
+        print(f"✅ Uploaded {len(df)} line history rows to BigQuery.")
+    except Exception as e:
+        print(f"❌ Failed to upload line history: {e}")
+     
             
 def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
@@ -378,47 +438,25 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
 
     return first_moves
 
-def save_weights_to_drive(weights, drive, folder_id=FOLDER_ID):
+
+
+def read_market_weights_from_bigquery():
     try:
-        # Delete old file
-        file_list = drive.ListFile({
-            'q': f"title='market_weights.json' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        for file in file_list:
-            file.Delete()
-
-        buffer = StringIO()
-        json.dump(weights, buffer, indent=2)
-        buffer.seek(0)
-
-        new_file = drive.CreateFile({'title': "market_weights.json", "parents": [{"id": folder_id}]})
-        new_file.SetContentString(buffer.getvalue())
-        new_file.Upload()
-        print("✅ Saved market weights to Google Drive.")
+        client = bigquery.Client(project=GCP_PROJECT_ID)
+        query = f"SELECT * FROM `{MARKET_WEIGHTS_TABLE}`"
+        df = client.query(query).to_dataframe()
+        weights = defaultdict(lambda: defaultdict(dict))
+        for _, row in df.iterrows():
+            market = row['Market']
+            component = row['Component']
+            value = str(row['Value']).lower()
+            win_rate = float(row['Win_Rate'])
+            weights[market][component][value] = win_rate
+        print(f"✅ Loaded {len(df)} market weight rows from BigQuery.")
+        return dict(weights)
     except Exception as e:
-        print(f"❌ Failed to save market weights to Drive: {e}")
-
-
-def load_weights_from_drive(drive, folder_id=FOLDER_ID):
-    try:
-        file_list = drive.ListFile({
-            'q': f"title='market_weights.json' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-
-        if not file_list:
-            print("⚠️ No saved market weights found on Google Drive.")
-            return {}
-
-        file_drive = file_list[0]
-        content = file_drive.GetContentString()
-        print("✅ Loaded market weights from Google Drive.")
-        return json.loads(content)
-
-    except Exception as e:
-        print(f"❌ Failed to load weights from Drive: {e}")
+        print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
-
-market_component_win_rates = load_weights_from_drive(drive)
 
 
 
@@ -1202,7 +1240,8 @@ def get_snapshot(data):
 
 def render_scanner_tab(label, sport_key, container, drive):
 
-    global market_component_win_rates
+    market_component_win_rates = read_market_weights_from_bigquery()
+
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
 
@@ -1215,12 +1254,15 @@ def render_scanner_tab(label, sport_key, container, drive):
             return pd.DataFrame()
     
         # ✅ Only upload if there's live data
-        upload_snapshot_to_drive(sport_key, get_snapshot(live), drive, FOLDER_ID)
-    
-        prev = load_latest_snapshot_from_drive(sport_key, drive, FOLDER_ID)
-        if not prev:
-            st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
-            prev = {}
+        # ✅ Save snapshot to BigQuery
+            write_snapshot_to_bigquery(live)
+            
+            # ✅ Load latest snapshot from BigQuery instead of Drive
+            prev = read_latest_snapshot_from_bigquery(hours=2)
+            if not prev:
+                st.info("🟡 First run — no previous snapshot. Continuing with empty prev.")
+                prev = {}
+
       
 
         confidence_weights = market_component_win_rates.get(sport_key_lower, {})
@@ -1358,16 +1400,9 @@ def render_scanner_tab(label, sport_key, container, drive):
                     file_drive.Delete()
                 df_combined = pd.concat([df_existing, df_audit], ignore_index=True)
                 buffer = StringIO()
-                df_combined.to_csv(buffer, index=False)
-                buffer.seek(0)
-                new_file = drive.CreateFile({'title': "line_history_master.csv", 'parents': [{"id": FOLDER_ID}]})
-                if new_file is not None:
-                    new_file.SetContentString(buffer.getvalue())
-                    new_file.Upload()
-                else:
-                    st.error("❌ drive.CreateFile returned None for line_history_master.csv — skipping upload.")
-            except Exception as e:
-                st.error(f"❌ Failed to update line history: {e}")
+                if not df_audit.empty:
+                    df_audit['Snapshot_Timestamp'] = timestamp
+                    write_line_history_to_bigquery(df_audit)
 
       
         # === Sharp Summary Table
@@ -1662,7 +1697,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
                 globals()["market_component_win_rates"] = market_component_win_rates
 
                 try:
-                    save_weights_to_drive(market_component_win_rates, drive)
+                    write_market_weights_to_bigquery(market_component_win_rates)
+
                     print(f"✅ Saved weights for {sport_key_lower} to Google Drive.")
                 except Exception as e:
                     print(f"❌ Failed to save weights for {sport_key_lower}: {e}")
