@@ -5,7 +5,7 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(layout="wide")
 st.title("Scott's Sharp Edge Scanner")
 
-# === Auto-refresh every 180 seconds ===
+# === Auto-refresh every 500 seconds ===
 st_autorefresh(interval=500 * 1000, key="data_refresh")
 
 # === Standard Imports ===
@@ -29,6 +29,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
+
 from google.cloud import bigquery
 from pandas_gbq import to_gbq
 import pandas as pd
@@ -40,7 +41,7 @@ BQ_FULL_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
 MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
-
+GCS_BUCKET = "sharp-models"
 
 # === Constants and Config ===
 API_KEY = "3879659fe861d68dfa2866c211294684"
@@ -265,6 +266,27 @@ def read_latest_snapshot_from_bigquery(hours=2):
     except Exception as e:
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
+
+
+def write_market_weights_to_bigquery(weights_dict):
+    try:
+        rows = []
+        for market, components in weights_dict.items():
+            for component, values in components.items():
+                for val_key, win_rate in values.items():
+                    rows.append({
+                        'Market': market,
+                        'Component': component,
+                        'Value': val_key,
+                        'Win_Rate': float(win_rate)
+                    })
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+            print(f"✅ Overwrote {len(df)} rows in market_weights BigQuery table.")
+    except Exception as e:
+        print(f"❌ Failed to write market weights to BigQuery: {e}")
+
 
 
 def fetch_scores_and_backtest(sport_key, df_moves, days_back=3, api_key=API_KEY):
@@ -1011,145 +1033,36 @@ def apply_blended_sharp_score(df, model):
 # === Initialize Google Drive once ===
 
 
+from google.cloud import storage
 
-
-
-
-
-def log_rec_snapshot(df_moves, sport_key, drive=None):
-    now = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_name = f"{sport_key}_snapshot_{now}.csv"
-    path = f"/tmp/rec_snapshots/{file_name}"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    clean_old_snapshots()
-
-    df_snapshot = df_moves[
-        ['Game', 'Market', 'Bookmaker', 'Value', 'Time']
-    ].copy()
-    df_snapshot.to_csv(path, index=False)
-    print(f"📦 Rec snapshot saved to: {path}")
-
-    # Upload to Google Drive if available
-    if drive:
-        try:
-            file_drive = drive.CreateFile({'title': file_name, "parents": [{"id": FOLDER_ID}]})
-            file_drive.SetContentFile(path)
-            file_drive.Upload()
-            print(f"☁️ Rec snapshot uploaded to Google Drive as: {file_name}")
-        except Exception as e:
-            print(f"❌ Failed to upload rec snapshot to Drive: {e}")
-import time
-
-def clean_old_snapshots(snapshot_dir="/tmp/rec_snapshots", max_age_hours=120):
-    now = time.time()
-    cutoff = now - (max_age_hours * 3600)
-
-    deleted = 0
-    for fname in os.listdir(snapshot_dir):
-        path = os.path.join(snapshot_dir, fname)
-        if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
-            try:
-                os.remove(path)
-                deleted += 1
-            except Exception as e:
-                print(f"⚠️ Failed to delete {path}: {e}")
-    print(f"🧹 Pruned {deleted} old snapshots.")
-
-
-def track_rec_drift(game_key, outcome_key, snapshot_dir="/tmp/rec_snapshots", minutes=30):
-    import glob
-    from datetime import timedelta
-
-    files = sorted(glob.glob(os.path.join(snapshot_dir, "*.csv")))
-    drift_rows = []
-
-    for f in files:
-        df = pd.read_csv(f)
-        df = df[df['Game'] == game_key]
-        df = df[df['Outcome'].str.lower() == outcome_key.lower()]
-
-        if df.empty:
-            continue
-
-        for _, row in df.iterrows():
-            drift_rows.append({
-                'Snapshot_Time': f.split('_')[-1].replace('.csv', ''),
-                'Value': row['Value'],
-                'Bookmaker': row['Bookmaker'],
-                'Market': row['Market']
-            })
-
-    return pd.DataFrame(drift_rows).sort_values(by='Snapshot_Time')
-
-def save_model_to_drive(model, drive, filename='sharp_win_model.pkl', folder_id=FOLDER_ID):
-    buffer = BytesIO()
-    pickle.dump(model, buffer)
-    buffer.seek(0)
-    
+def save_model_to_gcs(model, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
     try:
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        for file in file_list:
-            file.Delete()  # delete old model
-
-        file_drive = drive.CreateFile({'title': filename, 'parents': [{"id": folder_id}]})
-        file_drive.SetContentString(buffer.read().decode('latin1'))  # Save as encoded string
-        file_drive.Upload()
-        print(f"✅ Model saved to Google Drive as {filename}")
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        buffer = BytesIO()
+        pickle.dump(model, buffer)
+        blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
+        print(f"✅ Model saved to GCS: gs://{bucket_name}/{filename}")
     except Exception as e:
-        print(f"❌ Failed to save model to Google Drive: {e}")
+        print(f"❌ Failed to save model to GCS: {e}")
 
-def load_model_from_drive(drive, filename='sharp_win_model.pkl', folder_id=FOLDER_ID):
+
+def load_model_from_gcs(bucket_name="sharp-models", filename="sharp_win_model.pkl"):
     try:
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        if not file_list:
-            return None
-
-        content = file_list[0].GetContentString()
-        buffer = BytesIO(content.encode('latin1'))
-        model = pickle.load(buffer)
-        print(f"✅ Loaded model from Google Drive: {filename}")
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        content = blob.download_as_bytes()
+        model = pickle.loads(content)
+        print(f"✅ Loaded model from GCS: gs://{bucket_name}/{filename}")
         return model
     except Exception as e:
-        print(f"❌ Failed to load model: {e}")
+        print(f"❌ Failed to load model from GCS: {e}")
         return None
 
-def should_retrain_model(drive, filename='model_last_updated.txt', folder_id=FOLDER_ID):
-    try:
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        
-        if not file_list:
-            return True  # No record yet = retrain
 
-        file = file_list[0]
-        last_updated_str = file.GetContentString().strip()
-        last_updated = datetime.strptime(last_updated_str, "%Y-%m-%d")
-        return (datetime.utcnow() - last_updated) > timedelta(days=14)
 
-    except Exception as e:
-        print(f"⚠️ Failed to check model timestamp: {e}")
-        return True
-
-def save_model_timestamp(drive, filename='model_last_updated.txt', folder_id=FOLDER_ID):
-    timestamp_str = datetime.utcnow().strftime("%Y-%m-%d")
-    try:
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-        for file in file_list:
-            file.Delete()
-
-        file_drive = drive.CreateFile({'title': filename, 'parents': [{"id": folder_id}]})
-        file_drive.SetContentString(timestamp_str)
-        file_drive.Upload()
-        print(f"✅ Model timestamp updated: {timestamp_str}")
-    except Exception as e:
-        print(f"❌ Failed to save timestamp: {e}")
 def train_sharp_win_model(df):
     st.subheader("🔍 Sharp Model Training Debug")
     st.write(f"Total rows in df: {len(df)}")
@@ -1298,7 +1211,10 @@ def render_scanner_tab(label, sport_key, container, drive):
             )
 
 
-        model = load_model_from_drive(drive)
+        load_model_from_gcs(bucket_name=GCS_BUCKET)
+
+
+
         if model is not None:
             try:
                 df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
@@ -1365,8 +1281,8 @@ def render_scanner_tab(label, sport_key, container, drive):
                 ]
                 if len(trainable) >= 5:
                     model = train_sharp_win_model(trainable)
-                    save_model_to_drive(model, drive)
-                    save_model_timestamp(drive)
+                    save_model_to_gcs(model, bucket_name=GCS_BUCKET)
+
                 else:
                     st.info("ℹ️ Not enough completed sharp picks to retrain model.")
             else:
