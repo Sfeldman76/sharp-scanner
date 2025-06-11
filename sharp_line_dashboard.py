@@ -1425,7 +1425,7 @@ def render_scanner_tab(label, sport_key, container):
                     model = train_sharp_win_model(trainable)
                     save_model_to_gcs(model, bucket_name=GCS_BUCKET)
                 else:
-                    #st.info("ℹ️ Not enough completed sharp picks to retrain model.")
+                    pass #st.info("ℹ️ Not enough completed sharp picks to retrain model.")
             else:
                 st.warning("⚠️ Skipping training — confidence score column missing.")
 
@@ -1453,7 +1453,7 @@ def render_scanner_tab(label, sport_key, container):
             df_preview = preview_sharp_master(label)
             st.dataframe(df_preview)
         else:
-            #st.info("ℹ️ No backtest results to score.")
+            pass #st.info("ℹ️ No backtest results to score.")
 
         # === Upload line history audit
         if not df_audit.empty:
@@ -1467,7 +1467,7 @@ def render_scanner_tab(label, sport_key, container):
             st.info("ℹ️ No summary data available.")
             return df_moves
 
-        st.subheader(f"📊 Sharp vs Rec Book Consensus Summary – {label}")
+        st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
         for col in ['Game', 'Outcome']:
             summary_df[col] = summary_df[col].str.strip().str.lower()
             df_moves[col] = df_moves[col].str.strip().str.lower()
@@ -1536,14 +1536,42 @@ def render_scanner_tab(label, sport_key, container):
                      'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
                      'Sharp\nBet\nScore', 'Enhanced\nConf.\nScore']
 
-        st.dataframe(
-            filtered_df[[col for col in view_cols if col in filtered_df.columns]]
-            .sort_values(by='Date\n+ Time (EST)', na_position='last'),
-            use_container_width=True
-        )
+    
+        # === CSS Styling for HTML Table ===
+        st.markdown("""
+        <style>
+        .custom-table {
+            border-collapse: collapse;
+            width: 100%;
+            font-size: 14px;
+        }
+        .custom-table th, .custom-table td {
+            border: 1px solid #444;
+            padding: 8px;
+            text-align: center;
+        }
+        .custom-table th {
+            background-color: #1f2937;  /* dark header */
+            color: white;
+        }
+        .custom-table tr:nth-child(even) {
+            background-color: #2d3748;
+        }
+        .custom-table tr:hover {
+            background-color: #4b5563;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # === HTML Table Output ===
+        table_df = filtered_df[[col for col in view_cols if col in filtered_df.columns]].copy()
+        table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]  # Flatten column headers for HTML
+        table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
+        st.markdown(table_html, unsafe_allow_html=True)
+
 
         # === Live Odds Pivot Table
-        st.subheader(f"📋 Live Odds Snapshot – {label} (Odds + Limit)")
+        st.subheader(f" Live Odds Snapshot – {label} (Odds + Limit)")
         odds_rows = []
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
