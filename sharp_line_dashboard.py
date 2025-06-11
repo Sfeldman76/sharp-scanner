@@ -1268,28 +1268,39 @@ def train_sharp_win_model(df):
 
 # === Run Detection for Multiple Sports ===
 for sport_label in ["NBA", "MLB"]:
-    sport_key = SPORTS[sport_label]  # "basketball_nba" or "baseball_mlb"
+    sport_key = SPORTS.get(sport_label)
+    if not sport_key:
+        st.warning(f"⚠️ Invalid sport label: {sport_label}")
+        continue
 
     with st.spinner(f"⚙️ Running sharp detection for {sport_label}..."):
-        current_odds = fetch_live_odds(sport_key)
-        previous_odds = read_latest_snapshot_from_bigquery()
-        market_weights = read_market_weights_from_bigquery()
+        try:
+            current_odds = fetch_live_odds(sport_key)
+            previous_odds = read_latest_snapshot_from_bigquery()
+            market_weights = read_market_weights_from_bigquery()
 
-        df_moves, df_snap, df_audit = detect_sharp_moves(
-            current=current_odds,
-            previous=previous_odds,
-            sport_key=sport_key,
-            SHARP_BOOKS=SHARP_BOOKS,
-            REC_BOOKS=REC_BOOKS,
-            BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-            weights=market_weights
-        )
+            if not current_odds or not isinstance(current_odds, pd.DataFrame):
+                st.warning(f"⚠️ No valid odds data for {sport_label}")
+                continue
 
-        write_to_bigquery(df_moves)
-        write_snapshot_to_bigquery(current_odds)
-        write_line_history_to_bigquery(df_audit)
+            df_moves, df_snap, df_audit = detect_sharp_moves(
+                current=current_odds,
+                previous=previous_odds,
+                sport_key=sport_key,
+                SHARP_BOOKS=SHARP_BOOKS,
+                REC_BOOKS=REC_BOOKS,
+                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
+                weights=market_weights
+            )
 
-    st.success(f"✅ Sharp detection complete for {sport_label}")
+            write_to_bigquery(df_moves)
+            write_snapshot_to_bigquery(current_odds)
+            write_line_history_to_bigquery(df_audit)
+
+            st.success(f"✅ Sharp detection complete for {sport_label}")
+        except Exception as e:
+            st.error(f"❌ Error during sharp detection for {sport_label}: {e}")
+
 
 
 
