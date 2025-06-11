@@ -1,12 +1,58 @@
 import streamlit as st
+import time
 from streamlit_autorefresh import st_autorefresh
 
 # === Page Config ===
 st.set_page_config(layout="wide")
-st.title("Scott's Sharp Edge Scanner")
+st.title("Sharp Edge Scanner")
+
+# === CSS: Hide Streamlit's native status bar and add custom overlay ===
+st.markdown("""
+    <style>
+    .stStatusWidget {display: none;}
+    #MainMenu, footer {visibility: hidden;}
+
+    .overlay {
+        position: fixed;
+        top: 0; left: 0; width: 100vw; height: 100vh;
+        background: rgba(255,255,255,0.6);
+        z-index: 9999;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+
+    .loader {
+        border: 6px solid #f3f3f3;
+        border-top: 6px solid #3B82F6;
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# === Placeholder to manage overlay ===
+overlay_placeholder = st.empty()
+
+# === Simulate detection run ===
+if st.button("Run Detection"):
+    overlay_placeholder.markdown("<div class='overlay'><div class='loader'></div></div>", unsafe_allow_html=True)
+    st.markdown("⚙️ Running detection...")
+    time.sleep(3)  # ⏱️ Replace this with your real backend call
+
+    overlay_placeholder.empty()  # ⛔ Remove overlay
+    st.success("✅ Detection complete.")
 
 # === Auto-refresh every 180 seconds ===
 st_autorefresh(interval=180 * 1000, key="data_refresh")
+
 
 # === Standard Imports ===
 import os
