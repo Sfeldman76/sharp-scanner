@@ -45,18 +45,12 @@ LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
 import os, json
-if os.path.exists(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]):
-    with open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"]) as f:
-        info = json.load(f)
-        st.write("🔍 Credential file type:", info.get("type"))
-
-
 
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
 gcs_client = storage.Client(project=GCP_PROJECT_ID)
-st.success(f"✅ Using GCP Project: {bq_client.project}")
+
 
 
 # === Constants and Config ===
@@ -215,12 +209,10 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
         if col not in df.columns:
             df[col] = None
 
-    st.info(f"📤 Writing {len(df)} rows to BigQuery table: {table}")
-    print(df.dtypes.to_dict())
-    print(df.head(2))
-
+    # Only show error if failed
     if not safe_to_gbq(df, table, replace=force_replace):
         st.error(f"❌ BigQuery upload failed for {table}")
+    
 
         
 def build_game_key(df):
@@ -1354,7 +1346,7 @@ def render_scanner_tab(label, sport_key, container):
         # ✅ Always upload unscored sharp picks (raw)
         if not df_moves_raw.empty:
             write_to_bigquery(df_moves_raw, force_replace=True)  # Safe schema reset on first upload
-            st.info(f"✅ Uploaded {len(df_moves_raw)} unscored sharp picks to BigQuery.")
+            #st.info(f"✅ Uploaded {len(df_moves_raw)} unscored sharp picks to BigQuery.")
 
         # === 5. Score Historical Games
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
@@ -1387,7 +1379,7 @@ def render_scanner_tab(label, sport_key, container):
                     model = train_sharp_win_model(trainable)
                     save_model_to_gcs(model, bucket_name=GCS_BUCKET)
                 else:
-                    st.info("ℹ️ Not enough completed sharp picks to retrain model.")
+                    #st.info("ℹ️ Not enough completed sharp picks to retrain model.")
             else:
                 st.warning("⚠️ Skipping training — confidence score column missing.")
 
@@ -1397,7 +1389,7 @@ def render_scanner_tab(label, sport_key, container):
 
             # ✅ Confirm scored picks
             count_scored = len(df_bt[df_bt['SHARP_HIT_BOOL'].notna()])
-            st.success(f"✅ Confirmed {count_scored} scored sharp picks uploaded to BigQuery.")
+            #st.success(f"✅ Confirmed {count_scored} scored sharp picks uploaded to BigQuery.")
 
             # ✅ Show Preview of Scored Picks
             def preview_sharp_master(label, limit=25):
@@ -1415,7 +1407,7 @@ def render_scanner_tab(label, sport_key, container):
             df_preview = preview_sharp_master(label)
             st.dataframe(df_preview)
         else:
-            st.info("ℹ️ No backtest results to score.")
+            #st.info("ℹ️ No backtest results to score.")
 
         # === Upload line history audit
         if not df_audit.empty:
