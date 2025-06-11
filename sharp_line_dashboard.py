@@ -561,11 +561,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         game_hour = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
         gid = game.get('id')
         prev_game = previous_map.get(gid, {})
-
+        
         for book in game.get('bookmakers', []):
             book_key_raw = book.get('key', '').lower()
-            book_key = book_key_raw
-
+            book_key = book_key_raw  # default
+        
+            # 🔄 Normalize to known sharp/rec books
             for rec in REC_BOOKS:
                 if rec.replace(" ", "") in book_key_raw:
                     book_key = rec.replace(" ", "")
@@ -574,11 +575,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 if sharp in book_key_raw:
                     book_key = sharp
                     break
-            if book_key not in SHARP_BOOKS and book_key not in REC_BOOKS:
-                continue
-
+        
             book_title = book.get('title', book_key)
-
+        
             for market in book.get('markets', []):
                 mtype = market.get('key', '').strip().lower()
                 if mtype not in ['spreads', 'totals', 'h2h']:
