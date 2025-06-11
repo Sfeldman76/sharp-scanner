@@ -143,12 +143,13 @@ def fetch_live_odds(sport_key):
 def write_snapshot_to_bigquery(snapshot_list):
     rows = []
     snapshot_time = pd.Timestamp.utcnow()
+
     for game in snapshot_list:
         gid = game.get('id')
         if not gid:
             continue
         for book in game.get('bookmakers', []):
-            book_key = book['key']
+            book_key = book.get('key')
             for market in book.get('markets', []):
                 market_key = market.get('key')
                 for outcome in market.get('outcomes', []):
@@ -161,10 +162,15 @@ def write_snapshot_to_bigquery(snapshot_list):
                         'Limit': outcome.get('bet_limit'),
                         'Snapshot_Timestamp': snapshot_time
                     })
+
     df_snap = pd.DataFrame(rows)
+
     if df_snap.empty:
         print("⚠️ No snapshot data to upload.")
         return
+
+    print("🧪 Snapshot dtypes:\n", df_snap.dtypes)
+
     try:
         to_gbq(df_snap, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists="append")
         print(f"✅ Uploaded {len(df_snap)} odds snapshot rows to BigQuery.")
@@ -172,17 +178,24 @@ def write_snapshot_to_bigquery(snapshot_list):
         print(f"❌ Failed to upload odds snapshot: {e}")
 
 
+
 def write_to_bigquery(df, table=BQ_FULL_TABLE):
     if df.empty:
-        print("⚠️ Skipping BigQuery write — DataFrame is empty.")
+        print(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
         return
+
+    df = df.copy()  # avoid mutation issues
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
+    print(f"🟢 Writing {len(df)} rows to {table}")
+    print("🧪 Columns:", df.columns.tolist())
+    print("🧪 Dtypes:\n", df.dtypes)
+
     try:
-        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
         print(f"✅ Appended {len(df)} rows to BigQuery table: {table}")
     except Exception as e:
         print(f"❌ Failed to write to BigQuery: {e}")
-
 
 
 
