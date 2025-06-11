@@ -149,60 +149,19 @@ drive = init_gdrive()
 #except Exception as e:
     #st.error(f"❌ Could not list /secrets/drive/: {e}")
 
-def append_to_master_csv_on_drive(df_new, filename, drive, folder_id):
-    from io import StringIO
-    import pandas as pd
 
+def write_to_bigquery(df, table=BQ_FULL_TABLE):
+    if df.empty:
+        print("⚠️ Skipping BigQuery write — DataFrame is empty.")
+        return
     try:
-        if df_new.empty:
-            print(f"⚠️ Skipping append — {filename} input is empty.")
-            return
-
-        if 'Sport' not in df_new.columns:
-            df_new['Sport'] = 'Unknown'
-
-        if set(['Game', 'Game_Start', 'Market', 'Outcome']).issubset(df_new.columns):
-            df_new = build_game_key(df_new)
-        else:
-            print("⚠️ Skipping Game_Key creation — required columns missing.")
-
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-
-        df_existing = pd.DataFrame()
-        if file_list:
-            file_drive = file_list[0]
-            existing_data = StringIO(file_drive.GetContentString())
-            df_existing = pd.read_csv(existing_data)
-            file_drive.Delete()
-            print(f"📚 Loaded existing {filename} with {len(df_existing)} rows")
-
-        snapshot_ts = pd.Timestamp.utcnow()
-        df_new['Snapshot_Timestamp'] = snapshot_ts
-        df_new['Snapshot_ID'] = f"{filename}_{snapshot_ts.strftime('%Y%m%d_%H%M%S')}"
-
-        # ✅ Only reindex if df_existing has matching shape
-        if not df_existing.empty:
-            missing_in_new = [col for col in df_existing.columns if col not in df_new.columns]
-            for col in missing_in_new:
-                df_new[col] = None
-            df_new = df_new[df_existing.columns]  # exact order match
-
-        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-
-        csv_buffer = StringIO()
-        df_combined.to_csv(csv_buffer, index=False)
-        csv_buffer.seek(0)
-
-        new_file = drive.CreateFile({'title': filename, "parents": [{"id": folder_id}]})
-        new_file.SetContentString(csv_buffer.getvalue())
-        new_file.Upload()
-
-        print(f"✅ Uploaded updated {filename} to Drive — total rows: {len(df_combined)}")
-
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+        print(f"✅ Appended {len(df)} rows to BigQuery table: {table}")
     except Exception as e:
-        print(f"❌ Failed to append to {filename}: {e}")
+        print(f"❌ Failed to write to BigQuery: {e}")
+
+
         
 def build_game_key(df):
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
@@ -235,66 +194,20 @@ def build_game_key(df):
 
     return df
 
-def load_master_sharp_moves(drive, filename="sharp_moves_master.csv", folder_id=FOLDER_ID):
-    import pandas as pd
-    from io import StringIO
-
+def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
     try:
-        file_list = drive.ListFile({
-            'q': f"title='{filename}' and '{folder_id}' in parents and trashed=false"
-        }).GetList()
-
-        if not file_list:
-            print("⚠️ No master file found.")
-            return pd.DataFrame()
-
-        file_drive = file_list[0]
-        csv_buffer = StringIO(file_drive.GetContentString())
-        df_master = pd.read_csv(csv_buffer, low_memory=False)
-
-        df_master['Game_Start'] = pd.to_datetime(df_master['Game_Start'], errors='coerce', utc=True)
-
-        # ✅ Ensure Sport column exists
-        if 'Sport' not in df_master.columns:
-            df_master['Sport'] = 'UNKNOWN'
-        df_master['Sport'] = df_master['Sport'].astype(str).str.upper()
-
-        required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
-        if not set(required_cols).issubset(df_master.columns):
-            print("⚠️ Cannot build Game_Key — missing columns:", set(required_cols) - set(df_master.columns))
-        else:
-            df_master = build_game_key(df_master)
-            print("✅ Game_Key and Merge_Key_Short built successfully.")
-
-        return df_master
-
+        client = bigquery.Client(project=GCP_PROJECT_ID)
+        query = f"""
+            SELECT * FROM `{table}`
+            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+        """
+        df = client.query(query).to_dataframe()
+        print(f"✅ Loaded {len(df)} rows from BigQuery (last {hours}h)")
+        return df
     except Exception as e:
-        print(f"❌ Failed to load master file: {e}")
+        print(f"❌ Failed to read from BigQuery: {e}")
         return pd.DataFrame()
 
-with st.expander("📤 Re-Upload Sharp Moves Master File (only if needed)", expanded=False):
-    uploaded = st.file_uploader(
-        "Upload `sharp_moves_master.csv` to Google Drive",
-        type="csv",
-        key="sharp_master_uploader"
-    )
-
-
-    if uploaded is not None:
-        try:
-            from io import StringIO
-
-            # Read the uploaded content
-            content = StringIO(uploaded.getvalue().decode("utf-8"))
-
-            # Create Drive file and upload
-            file_drive = drive.CreateFile({'title': 'sharp_moves_master.csv', 'parents': [{"id": FOLDER_ID}]})
-            file_drive.SetContentString(content.getvalue())
-            file_drive.Upload()
-
-            st.success("✅ Uploaded successfully to Google Drive as `sharp_moves_master.csv`!")
-        except Exception as e:
-            st.error(f"❌ Failed to upload: {e}")
 
 def upload_snapshot_to_drive(sport_key, snapshot, drive, folder_id):
     from io import StringIO
@@ -1450,7 +1363,7 @@ def render_scanner_tab(label, sport_key, container, drive):
 
             # 📤 Save updated sharp picks to Drive
             df_bt['Sport'] = label.upper()
-            append_to_master_csv_on_drive(df_bt, "sharp_moves_master.csv", drive, FOLDER_ID)
+            write_to_bigquery(df_bt)
         
             # ✅ Carry over into df_moves for downstream use
             df_moves = df_bt.copy()
@@ -1651,7 +1564,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, drive):
         sport_key_lower = sport_key_api
 
         # ✅ Load master with Game_Key already handled
-        df_master = load_master_sharp_moves(drive, folder_id=FOLDER_ID)
+        df_master = read_recent_sharp_moves(hours=168)
+
 
       
 
