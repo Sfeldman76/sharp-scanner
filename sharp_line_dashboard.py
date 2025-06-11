@@ -1179,18 +1179,25 @@ def render_scanner_tab(label, sport_key, container):
                 on=['Game_Key', 'Bookmaker'],
                 how='left'
             )
-
+        
         model = load_model_from_gcs(bucket_name=GCS_BUCKET)
-
+        
         if model is not None:
             try:
                 df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
                 st.success("✅ Applied model scoring to raw sharp data")
             except Exception as e:
                 st.warning(f"⚠️ Could not apply model scoring early: {e}")
-
+        
+        # ✅ Always upload today's sharp picks (raw) — even if not yet scored
+        if not df_moves_raw.empty:
+            df_moves_raw['Sport'] = label.upper()
+            write_to_bigquery(df_moves_raw)
+            st.info(f"✅ Uploaded {len(df_moves_raw)} unscored sharp picks to BigQuery.")
+        
         # === 5. Score Historical Games
         df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+
 
         if not df_bt.empty:
             # Ensure merge-safe columns exist
