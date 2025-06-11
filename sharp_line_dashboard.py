@@ -6,52 +6,37 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(layout="wide")
 st.title("Sharp Edge Scanner")
 
-# === CSS: Hide Streamlit's native status bar and add custom overlay ===
+# === Auto-refresh every 380 seconds ===
+st_autorefresh(interval=380 * 1000, key="data_refresh")
+
+# === Optional CSS cleanup ===
 st.markdown("""
-    <style>
-    .stStatusWidget {display: none;}
-    #MainMenu, footer {visibility: hidden;}
-
-    .overlay {
-        position: fixed;
-        top: 0; left: 0; width: 100vw; height: 100vh;
-        background: rgba(255,255,255,0.6);
-        z-index: 9999;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-    }
-
-    .loader {
-        border: 6px solid #f3f3f3;
-        border-top: 6px solid #3B82F6;
-        border-radius: 50%;
-        width: 50px;
-        height: 50px;
-        animation: spin 1s linear infinite;
-    }
-
-    @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-    }
-    </style>
+<style>
+.stStatusWidget {display: none;}
+#MainMenu, footer {visibility: hidden;}
+</style>
 """, unsafe_allow_html=True)
 
-# === Placeholder to manage overlay ===
-overlay_placeholder = st.empty()
+# === Visual Loading Indicator ===
+with st.spinner("⚙️ Running sharp detection..."):
+    current_odds = fetch_live_odds(sport_key)
+    previous_odds = read_latest_snapshot_from_bigquery()
+    market_weights = read_market_weights_from_bigquery()
+    df_moves, df_snap, df_audit = detect_sharp_moves(
+        current=current_odds,
+        previous=previous_odds,
+        sport_key=sport_key,
+        SHARP_BOOKS=SHARP_BOOKS,
+        REC_BOOKS=REC_BOOKS,
+        BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
+        weights=market_weights
+    )
+    write_to_bigquery(df_moves)
+    write_snapshot_to_bigquery(current_odds)
+    write_line_history_to_bigquery(df_audit)
 
-# === Simulate detection run ===
-if st.button("Run Detection"):
-    overlay_placeholder.markdown("<div class='overlay'><div class='loader'></div></div>", unsafe_allow_html=True)
-    st.markdown("⚙️ Running detection...")
-    time.sleep(3)  # ⏱️ Replace this with your real backend call
-
-    overlay_placeholder.empty()  # ⛔ Remove overlay
-    st.success("✅ Detection complete.")
-
-# === Auto-refresh every 180 seconds ===
-st_autorefresh(interval=180 * 1000, key="data_refresh")
+st.success("✅ Sharp detection complete.")
+aceholder.success("✅ Sharp detection complete.")
 
 
 # === Standard Imports ===
@@ -1537,7 +1522,19 @@ def render_scanner_tab(label, sport_key, container):
                      'Sharp\nBet\nScore', 'Enhanced\nConf.\nScore']
 
     
-        # === CSS Styling for HTML Table ===
+        # === Set Page Size for All Tables ===
+        page_size = 10
+        
+        # === PAGINATED TABLE 1: Filtered Custom Table ===
+        total_rows_1 = len(filtered_df)
+        total_pages_1 = (total_rows_1 - 1) // page_size + 1
+        page_1 = st.number_input("Page (Filtered Table)", key="table1_page", min_value=1, max_value=total_pages_1, value=1, step=1)
+        
+        start_row_1 = (page_1 - 1) * page_size
+        end_row_1 = start_row_1 + page_size
+        paginated_df_1 = filtered_df.iloc[start_row_1:end_row_1]
+        
+        # === CSS Styling for All Tables ===
         st.markdown("""
         <style>
         .custom-table {
@@ -1551,7 +1548,7 @@ def render_scanner_tab(label, sport_key, container):
             text-align: center;
         }
         .custom-table th {
-            background-color: #1f2937;  /* dark header */
+            background-color: #1f2937;
             color: white;
         }
         .custom-table tr:nth-child(even) {
@@ -1563,14 +1560,14 @@ def render_scanner_tab(label, sport_key, container):
         </style>
         """, unsafe_allow_html=True)
         
-        # === HTML Table Output ===
-        table_df = filtered_df[[col for col in view_cols if col in filtered_df.columns]].copy()
-        table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]  # Flatten column headers for HTML
-        table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
-        st.markdown(table_html, unsafe_allow_html=True)
-
-
-        # === Live Odds Pivot Table
+        # === HTML Table Output for Table 1 ===
+        table_df_1 = paginated_df_1[[col for col in view_cols if col in paginated_df_1.columns]].copy()
+        table_df_1.columns = [col.replace('\n', ' ') for col in table_df_1.columns]
+        table_html_1 = table_df_1.to_html(classes="custom-table", index=False, escape=False)
+        st.markdown(table_html_1, unsafe_allow_html=True)
+        st.caption(f"Showing {start_row_1 + 1}-{min(end_row_1, total_rows_1)} of {total_rows_1} rows")
+        
+        # === Live Odds Snapshot Table ===
         st.subheader(f" Live Odds Snapshot – {label} (Odds + Limit)")
         odds_rows = []
         for game in live:
@@ -1589,7 +1586,7 @@ def render_scanner_tab(label, sport_key, container):
                             "Limit": o.get("bet_limit", 0),
                             "Game_Start": game_start
                         })
-
+        
         df_odds_raw = pd.DataFrame(odds_rows)
         if not df_odds_raw.empty:
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(
@@ -1597,33 +1594,59 @@ def render_scanner_tab(label, sport_key, container):
                 else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
                 axis=1
             )
-
-         
-            
+        
             eastern = pytz_timezone('US/Eastern')
-            
             df_odds_raw['Date + Time (EST)'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
                 lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
                 else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
                 else ""
             )
-
+        
             df_display = df_odds_raw.pivot_table(
                 index=["Date + Time (EST)", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
-
-            sharp_books = ['Pinnacle', 'Bookmaker', 'BetOnline']
-            def highlight_sharp(df):
-                styles = pd.DataFrame('', index=df.index, columns=df.columns)
-                for col in df.columns:
-                    if col in sharp_books:
-                        styles[col] = 'background-color: #d0f0c0; color: black'
-                return styles
-
-            st.dataframe(df_display.style.apply(highlight_sharp, axis=None), use_container_width=True)
+        
+            # === Pagination for Live Odds Table ===
+            total_rows_2 = len(df_display)
+            total_pages_2 = (total_rows_2 - 1) // page_size + 1
+            page_2 = st.number_input("Page (Live Odds Table)", key="table2_page", min_value=1, max_value=total_pages_2, value=1, step=1)
+        
+            start_row_2 = (page_2 - 1) * page_size
+            end_row_2 = start_row_2 + page_size
+            paginated_df_2 = df_display.iloc[start_row_2:end_row_2].copy()
+        
+            # === Highlight Sharp Books in HTML Table ===
+            def render_custom_html_table(df, highlight_cols):
+                def style_cell(val, col):
+                    if col in highlight_cols and val != "":
+                        return f'background-color:#d0f0c0; color:black; font-weight:600'
+                    return ""
+        
+                header_html = ''.join(f'<th>{col}</th>' for col in df.columns)
+                rows_html = ''
+                for _, row in df.iterrows():
+                    row_html = '<tr>'
+                    for col in df.columns:
+                        val = row[col]
+                        style = style_cell(val, col)
+                        row_html += f'<td style="{style}">{val if pd.notnull(val) else ""}</td>'
+                    row_html += '</tr>'
+                    rows_html += row_html
+        
+                html = f"""
+                <table class="custom-table">
+                    <thead><tr>{header_html}</tr></thead>
+                    <tbody>{rows_html}</tbody>
+                </table>
+                """
+                return html
+        
+            html_table_2 = render_custom_html_table(paginated_df_2, highlight_cols=['Pinnacle', 'Bookmaker', 'BetOnline'])
+            st.markdown(html_table_2, unsafe_allow_html=True)
+            st.caption(f"Showing {start_row_2 + 1}-{min(end_row_2, total_rows_2)} of {total_rows_2} rows")
 
         return df_moves
 
