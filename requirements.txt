@@ -12,3 +12,5 @@ google-auth-httplib2
 google-api-python-client
 oauth2client
 pydrive2
+google-cloud-bigquery
+pandas-gbq
