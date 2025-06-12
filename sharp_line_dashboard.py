@@ -1236,12 +1236,12 @@ def render_scanner_tab(label, sport_key, container):
         
         if model is not None:
             now = pd.Timestamp.utcnow()
-            df_moves_raw['Frozen'] = df_moves_raw['Game_Start'] <= now
-            not_started_mask = ~df_moves_raw['Frozen']
+            #df_moves_raw['Frozen'] = df_moves_raw['Game_Start'] <= now
+            #not_started_mask = ~df_moves_raw['Frozen']
         
             try:
                 # Score unstarted games only
-                df_unstarted = df_moves_raw[not_started_mask].copy()
+                pass #df_unstarted = df_moves_raw[not_started_mask].copy()
                 if not df_unstarted.empty:
                     df_scored = apply_blended_sharp_score(df_unstarted, model)
         
