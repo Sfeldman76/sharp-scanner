@@ -1682,6 +1682,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
             })
 
     df_scores = pd.DataFrame(score_rows)
+    
+    # === DEBUG BLOCK: Show match between sharp picks and scores
+    st.subheader("🔍 Debug: Sharp Picks vs Completed Scores")
+    st.write("Sample Sharp Picks (from df):")
+    st.dataframe(df[['Game', 'Game_Start', 'Merge_Key_Short', 'Ref Sharp Value']].head(10))
+
+    st.write("Sample Completed Scores (from df_scores):")
+    st.dataframe(df_scores.head(10))
+
+    st.write("✅ Merge Keys from Sharp Picks:", df['Merge_Key_Short'].dropna().unique()[:5])
+    st.write("✅ Merge Keys from Scores:", df_scores['Merge_Key_Short'].dropna().unique()[:5])
+
+    matches = df.merge(df_scores, on='Merge_Key_Short', how='inner')
+    st.write(f"✅ Matches found between sharp picks and completed scores: {len(matches)}")
+    st.dataframe(matches[['Game', 'Merge_Key_Short', 'Market', 'Outcome',
+                          'Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']].head(5))
     if df_scores.empty:
         st.warning("ℹ️ No valid score rows from completed games.")
         df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
