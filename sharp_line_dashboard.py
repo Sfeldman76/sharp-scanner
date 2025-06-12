@@ -1248,7 +1248,7 @@ def render_scanner_tab(label, sport_key, container):
 
 
         # === 6. Backtest Scores
-        df_bt = fetch_scores_and_backtest(sport_key, api_key=API_KEY, model=model)
+        df_bt = fetch_scores_and_backtest(sport_key, df_moves=df_moves_raw, api_key=API_KEY, model=model)
         if not df_bt.empty:
             df_bt = build_game_key(df_bt)
             merge_cols = ['Game_Key', 'Market', 'Bookmaker']
