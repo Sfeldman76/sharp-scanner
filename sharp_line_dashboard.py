@@ -1224,12 +1224,28 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ Model not available — skipping scoring.")
 
         # === 5. Upload raw picks
+        # Build game keys BEFORE writing
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
         df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore')
+        df_moves_raw = build_game_key(df_moves_raw)
+        
+        # Fill merge key and reference values (must exist to score later)
+        if 'Ref Sharp Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
+            df_moves_raw['Ref Sharp Value'] = df_moves_raw['Value']
+        
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
+        required_cols = ['Game_Key', 'Merge_Key_Short', 'Ref Sharp Value', 'Game_Start']
+        missing_cols = [col for col in required_cols if col not in df_moves_raw.columns or df_moves_raw[col].isna().all()]
+        if missing_cols:
+            st.warning(f"⚠️ Missing columns before upload: {missing_cols}")
+        else:
+            st.success("✅ All required columns present — ready to upload to BigQuery.")
+
+        # Write final to BigQuery after keys and values are valid
         write_to_bigquery(df_moves_raw, force_replace=True)
+
 
         # === 6. Backtest Scores
         df_bt = fetch_scores_and_backtest(sport_key, api_key=API_KEY, model=model)
@@ -1582,6 +1598,11 @@ def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=Non
         return pd.DataFrame()
 
     df = build_game_key(df)
+
+    # Defensive fix: ensure Ref Sharp Value exists for scoring
+    if 'Ref Sharp Value' not in df.columns and 'Value' in df.columns:
+        df['Ref Sharp Value'] = df['Value']
+    
     df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
     df['Merge_Key_Short'] = (
         df['Home_Team_Norm'] + "_" +
