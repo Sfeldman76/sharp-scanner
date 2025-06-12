@@ -1267,7 +1267,7 @@ def render_scanner_tab(label, sport_key, container):
             #st.info(f"✅ Uploaded {len(df_moves_raw)} unscored sharp picks to BigQuery.")
 
         # === 5. Score Historical Games
-        df_bt = fetch_scores_and_backtest(sport_key, api_key=API_KEY, model=model)
+        df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
 
         if not df_bt.empty:
             merge_cols = ['Game_Key', 'Market', 'Bookmaker']
@@ -1596,7 +1596,9 @@ def render_scanner_tab(label, sport_key, container):
 
         return df_moves
 
-def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=None):
+def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
+    if df_moves is None:
+        df_moves = pd.DataFrame()
     
     import requests
     import pandas as pd
