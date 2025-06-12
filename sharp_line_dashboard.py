@@ -1244,7 +1244,7 @@ def render_scanner_tab(label, sport_key, container):
             st.success("✅ All required columns present — ready to upload to BigQuery.")
 
         # Write final to BigQuery after keys and values are valid
-        write_to_bigquery(df_moves_raw, force_replace=True)
+        write_to_bigquery(df_moves_raw, force_replace=False)
 
 
         # === 6. Backtest Scores
