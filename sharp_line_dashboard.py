@@ -410,7 +410,7 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
         else:
             print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
 
-def fetch_scores_and_backtest(sport_key, df_moves, days_back=1, api_key=API_KEY, model=None):
+def fetch_scores_and_backtest(sport_key, df_master=None, days_back=1, api_key=API_KEY, model=None):
     import requests
     import pandas as pd
     from datetime import datetime
@@ -423,7 +423,7 @@ def fetch_scores_and_backtest(sport_key, df_moves, days_back=1, api_key=API_KEY,
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
     # === 1. Load sharp picks
-    df = read_recent_sharp_moves(hours=72)
+    df = df_master if df_master is not None else read_recent_sharp_moves(hours=72)
     if df.empty or 'Game' not in df.columns:
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
@@ -1403,7 +1403,7 @@ def render_scanner_tab(label, sport_key, container):
             #st.info(f"✅ Uploaded {len(df_moves_raw)} unscored sharp picks to BigQuery.")
 
         # === 5. Score Historical Games
-        df_bt = fetch_scores_and_backtest(sport_key, df_moves, api_key=API_KEY)
+        df_bt = fetch_scores_and_backtest(sport_key, df_master=None, api_key=API_KEY, model=model)
 
         if not df_bt.empty:
             merge_cols = ['Game_Key', 'Market', 'Bookmaker']
