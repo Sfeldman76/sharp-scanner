@@ -1571,7 +1571,7 @@ def render_scanner_tab(label, sport_key, container):
 
         return df_moves
 
-def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=None):
+def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
     import requests
     import pandas as pd
     from datetime import datetime
@@ -1583,14 +1583,19 @@ def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=Non
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    # === 1. Load sharp picks from BigQuery ===
-    df = read_recent_sharp_moves(hours=72)
+    # === 1. Use passed-in df_moves or fallback to BigQuery
+    if df_moves is not None and not df_moves.empty:
+        df = df_moves.copy()
+        st.info("📥 Using in-memory sharp picks (df_moves)")
+    else:
+        df = read_recent_sharp_moves(hours=72)
+        st.info("📡 Loaded sharp picks from BigQuery")
+
     if df.empty or 'Game' not in df.columns:
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         return pd.DataFrame()
 
-    # === 2. Filter + Build Keys ===
-    df = df.copy()
+    # === 2. Filter + Build Keys
     df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
     df = df[df['Sport'] == sport_label]
     if df.empty:
@@ -1598,20 +1603,10 @@ def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=Non
         return pd.DataFrame()
 
     df = build_game_key(df)
-
-    # Defensive fix: ensure Ref Sharp Value exists for scoring
-    if 'Ref Sharp Value' not in df.columns and 'Value' in df.columns:
-        df['Ref Sharp Value'] = df['Value']
-    
-    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
-    df['Merge_Key_Short'] = (
-        df['Home_Team_Norm'] + "_" +
-        df['Away_Team_Norm'] + "_" +
-        df['Commence_Hour'].dt.strftime("%Y-%m-%d %H:%M:%S")
-    )
-
-
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
+    df['Home_Team_Norm'] = df['Home_Team_Norm'].fillna('')
+    df['Away_Team_Norm'] = df['Away_Team_Norm'].fillna('')
+    df['Commence_Hour'] = df['Commence_Hour'].astype(str)
     df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
