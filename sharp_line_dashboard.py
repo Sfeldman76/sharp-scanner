@@ -1597,13 +1597,13 @@ def render_scanner_tab(label, sport_key, container):
         return df_moves
 
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
-    if df_moves is None:
-        df_moves = pd.DataFrame()
-    
     import requests
     import pandas as pd
     from datetime import datetime
     import streamlit as st
+
+    if df_moves is None:
+        df_moves = pd.DataFrame()
 
     def normalize_team(t):
         return str(t).strip().lower()
@@ -1611,8 +1611,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    # === 1. Load sharp picks
-    df = df_master if df_master is not None else read_recent_sharp_moves(hours=72)
+    # ✅ Use passed-in df_moves or fallback
+    df = df_moves if not df_moves.empty else read_recent_sharp_moves(hours=72)
+
     if df.empty or 'Game' not in df.columns:
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
@@ -1733,10 +1734,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
 
-    st.warning("⚠️ No sharp picks available to score for {sport_label}.")
-    df[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
-    return df
-
+    # ✅ Final return
+    return df.copy()
 
 
 
