@@ -206,6 +206,7 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
 
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
 	# Optional: Drop columns BQ may reject if not needed
     drop_cols = ['Final_Confidence_Score']  # not used in dashboard
     df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
@@ -304,8 +305,16 @@ def read_latest_snapshot_from_bigquery(hours=2):
     except Exception as e:
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
+
 def write_market_weights_to_bigquery(weights_dict):
     rows = []
+
+    # Example fallback — remove or keep for testing purposes only
+    weights_dict = {
+        'spreads': {'Sharp_Move_Signal': {'1': 0.55, '2': 0.6}},
+        'totals': {'Sharp_Limit_Jump': {'1': 0.57}}
+	}
+
     for market, components in weights_dict.items():
         for component, values in components.items():
             for val_key, win_rate in values.items():
@@ -322,8 +331,11 @@ def write_market_weights_to_bigquery(weights_dict):
         print("⚠️ No market weights to upload.")
         return
 
-    if not safe_to_gbq(df, MARKET_WEIGHTS_TABLE):
-        print(f"❌ Failed to upload market weights.")
+    # ✅ Upload to BigQuery
+    if not safe_to_gbq(df, MARKET_WEIGHTS_TABLE, replace=True):
+        print(f"❌ Failed to upload market weights to {MARKET_WEIGHTS_TABLE}")
+    else:
+        print(f"✅ Uploaded {len(df)} market weight rows to {MARKET_WEIGHTS_TABLE}")
 
 
 def write_line_history_to_bigquery(df):
@@ -1612,7 +1624,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
     # ✅ Use passed-in df_moves or fallback
-    df = df_moves if not df_moves.empty else read_recent_sharp_moves(hours=72)
+    df_master = read_recent_sharp_moves(hours=72)
+    df = df_master.copy()
 
     if df.empty or 'Game' not in df.columns:
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
