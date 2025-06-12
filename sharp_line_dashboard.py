@@ -1582,12 +1582,13 @@ def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=Non
         return pd.DataFrame()
 
     df = build_game_key(df)
-	df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
+    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
     df['Merge_Key_Short'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
         df['Commence_Hour'].dt.strftime("%Y-%m-%d %H:%M:%S")
     )
+
 
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
