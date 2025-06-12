@@ -265,6 +265,8 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
             WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
         """
         df = client.query(query).to_dataframe()
+        df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
+
         print(f"✅ Loaded {len(df)} rows from BigQuery (last {hours}h)")
         return df
     except Exception as e:
@@ -1288,7 +1290,7 @@ def render_scanner_tab(label, sport_key, container):
             write_line_history_to_bigquery(df_audit)
             print("🧪 line history audit shape:", df_audit.shape)
 
-        return df_moves
+
 
 
         # === 6. Summary Table ===
@@ -1580,6 +1582,13 @@ def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=Non
         return pd.DataFrame()
 
     df = build_game_key(df)
+	df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
+    df['Merge_Key_Short'] = (
+        df['Home_Team_Norm'] + "_" +
+        df['Away_Team_Norm'] + "_" +
+        df['Commence_Hour'].dt.strftime("%Y-%m-%d %H:%M:%S")
+    )
+
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
     if 'SHARP_HIT_BOOL' in df.columns:
