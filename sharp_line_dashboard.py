@@ -1636,9 +1636,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         df['Sport'] = sport_label
     df = df[df['Sport'] == sport_label]
     if df.empty:
-        st.warning(f"⚠️ No historical picks found for {sport_label}.")
-        df_moves[['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL', 'Scored']] = None
-        return df_moves
+	st.warning(f"⚠️ No historical picks found for {sport_label}.")
+        return pd.DataFrame()
+
+    # ✅ Fix: Build Game Keys and Merge_Key_Short
+    df = build_game_key(df)
+
 
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].apply(normalize_team)
