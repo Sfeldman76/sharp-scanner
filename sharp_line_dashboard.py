@@ -1646,17 +1646,25 @@ def fetch_scores_and_backtest(sport_key, days_back=1, api_key=API_KEY, model=Non
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
 
+    
     # === 3. Fetch completed games from API ===
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-        response = requests.get(url, params={'apiKey': api_key, 'daysFrom': days_back}, timeout=10)
+        params = {
+            'apiKey': api_key,
+            'daysFrom': int(days_back)  # ✅ explicitly ensure it's an int
+        }
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
+    
         games = response.json()
         completed_games = [g for g in games if g.get("completed")]
         st.info(f"✅ Completed games found: {len(completed_games)}")
+    
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
+
 
     # === 4. Build score key DataFrame ===
     score_rows = []
