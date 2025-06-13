@@ -25,7 +25,7 @@ div[data-testid="stDataFrame"] > div {
 
 
 # === Auto-refresh every 380 seconds ===
-st_autorefresh(interval=580 * 1000, key="data_refresh")
+st_autorefresh(interval=1580 * 1000, key="data_refresh")
 
 
 st.markdown("""
