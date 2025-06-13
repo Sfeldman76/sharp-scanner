@@ -1128,6 +1128,65 @@ def train_sharp_win_model(df):
     st.success(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_filtered)} samples")
 
     return model
+def train_and_upload_initial_model(df_master, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
+    from xgboost import XGBClassifier
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import roc_auc_score
+    from io import BytesIO
+
+    # === Step 1: Filter labeled data
+    df = df_master.copy()
+    if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
+        st.error("❌ Missing Enhanced_Sharp_Confidence_Score.")
+        return None
+
+    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
+    if 'True_Sharp_Confidence_Score' in df.columns:
+        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
+
+    df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()]
+    if df.empty or len(df) < 5:
+        st.warning("⚠️ Not enough labeled data to train a model.")
+        return None
+
+    df['target'] = df['SHARP_HIT_BOOL'].astype(int)
+    df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
+    df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
+
+    feature_cols = ['Final_Confidence_Score']
+    if 'CrossMarketSharpSupport' in df.columns:
+        feature_cols.append('CrossMarketSharpSupport')
+
+    df = df.dropna(subset=feature_cols)
+    X = df[feature_cols].astype(float)
+    y = df['target'].astype(int)
+
+    if len(df) < 5:
+        st.warning("⚠️ Not enough samples to train a model.")
+        return None
+
+    # === Step 2: Train model
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
+    model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+    model.fit(X_train, y_train)
+
+    auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+    st.success(f"✅ Trained model AUC: {auc:.3f} on {len(df)} samples")
+
+    # === Step 3: Upload to GCS
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        buffer = BytesIO()
+        pickle.dump(model, buffer)
+        blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
+        st.success(f"📦 Uploaded model to gs://{bucket_name}/{filename}")
+    except Exception as e:
+        st.error(f"❌ Failed to upload model to GCS: {e}")
+        return None
+
+    return model
 
 
 def render_scanner_tab(label, sport_key, container):
@@ -1301,19 +1360,24 @@ def render_scanner_tab(label, sport_key, container):
                 st.warning(f"⚠️ Scoring backtest failed: {e}")
 
             # === Optional Retraining
+            # === Optional Retraining
             if 'Enhanced_Sharp_Confidence_Score' in df_bt.columns:
                 trainable = df_bt[
                     df_bt['SHARP_HIT_BOOL'].notna() & df_bt['Enhanced_Sharp_Confidence_Score'].notna()
                 ]
                 if len(trainable) >= 5:
-                    model = train_sharp_win_model(trainable)
-                    save_model_to_gcs(model, bucket_name=GCS_BUCKET)
+                    model = train_and_upload_initial_model(trainable)
+                    if model is not None:
+                        st.success("✅ Model retrained and uploaded to GCS.")
+                    else:
+                        st.warning("⚠️ Model training failed or skipped.")
                 else:
                     st.info("ℹ️ Not enough data to retrain model.")
-
+            
             df_bt['Sport'] = label.upper()
             write_to_bigquery(df_bt)
             df_moves = df_bt.copy()
+            
 
             # ✅ Preview
             def preview_sharp_master(label, limit=25):
@@ -1610,7 +1674,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    # === 1. Load sharp picks
+    # === 1. Load sharp picks (in-memory or from BigQuery)
     if df_moves is not None and not df_moves.empty:
         df = df_moves.copy()
         st.info("📥 Using in-memory sharp picks (df_moves)")
@@ -1622,27 +1686,23 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         return pd.DataFrame()
 
-    # === 2. Filter + Ensure Required Columns
+    # === 2. Coerce and rebuild required keys
     df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
     df = df[df['Sport'] == sport_label]
-
-    # Ensure required columns exist
-    required_cols = ['Game', 'Market', 'Outcome', 'Game_Start', 'Value']
-    df = ensure_columns(df, required_cols)
-
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
+    df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
     df = build_game_key(df)
 
-    # Only include unscored picks before current time
-    df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
+    # === 3. Filter for unscored picks before game time
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
+    df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
 
     if df.empty:
         st.warning(f"⚠️ No unscored picks remaining for {sport_label}.")
         return pd.DataFrame()
 
-    # === 3. Fetch scores from Odds API
+    # === 4. Fetch completed games from Odds API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1654,16 +1714,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
 
-    # === 4. Build score rows
+    # === 5. Build score merge keys
     score_rows = []
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-
         if pd.isna(game_start):
             continue
-
         merge_key = f"{home}_{away}_{game_start.floor('h').tz_localize(None).strftime('%Y-%m-%d %H:%M:%S')}"
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
@@ -1678,7 +1736,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.warning("ℹ️ No valid score rows from completed games.")
         return df
 
-    # === 5. Merge Debug
+    # === 6. Merge Debug
     st.subheader("🔍 Sharp Pick vs Score Merge Debug")
     st.dataframe(df[['Game', 'Game_Start', 'Merge_Key_Short', 'Ref Sharp Value']].head(10))
     st.dataframe(df_scores.head(10))
@@ -1686,7 +1744,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     st.write("✅ Merge Keys (Scores):", df_scores['Merge_Key_Short'].dropna().unique()[:5])
     st.write(f"✅ Matches Found: {len(df.merge(df_scores, on='Merge_Key_Short', how='inner'))}")
 
-    # === 6. Merge scores into picks
+    # === 7. Merge Scores
     df = df.merge(df_scores.rename(columns={
         "Score_Home_Score": "Score_Home_Score_api",
         "Score_Away_Score": "Score_Away_Score_api"
@@ -1699,10 +1757,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         df[col] = df[col].combine_first(df[api_col])
         df.drop(columns=[api_col], inplace=True, errors='ignore')
 
-    if 'Ref Sharp Value' in df.columns and 'Value' in df.columns:
-        df['Ref Sharp Value'] = df['Ref Sharp Value'].combine_first(df['Value'])
-
-    # === 7. Score Picks
+    # === 8. Score Picks
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
     if df_valid.empty:
         st.warning("ℹ️ No valid sharp picks with both scores and line values to score.")
@@ -1736,7 +1791,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
 
-    # === 8. Optional: Re-score with model
+    # === 9. Optional: Re-score with model
     if model is not None:
         try:
             df = apply_blended_sharp_score(df, model)
@@ -1745,6 +1800,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
             st.warning(f"⚠️ Model scoring failed: {e}")
 
     return df
+
 
 
 
