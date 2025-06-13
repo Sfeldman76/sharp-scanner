@@ -1725,46 +1725,30 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         return pd.DataFrame()
 
-    # === 2. Normalize + build keys
+    # === 2. Normalize and filter
     df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
     df = df[df['Sport'] == sport_label]
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
     df = build_game_key(df)
     df = df[df['SHARP_HIT_BOOL'].isna()]
-
     st.info(f"✅ Eligible sharp picks to score: {len(df)}")
-    
-    df = build_game_key(df)  # ✅ always needed
-    df = df[df['SHARP_HIT_BOOL'].isna()]  # ✅ always needed
-    
-    # === 4. Fetch completed games from API
+
+    # === 3. Fetch completed games from API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
         response.raise_for_status()
         games = response.json()
-    
-        st.subheader("🧪 Raw Scores API Check")
-        st.write(f"⚙️ Total games returned: {len(games)}")
-        if not games:
-            st.error("❌ The Odds API returned 0 games. This will block all scoring.")
-            return df
-    
-        st.text("🔎 Sample game JSON:")
-        st.json(games[0])
-    
         completed_games = [g for g in games if g.get("completed") is True]
         st.write(f"✅ Completed games: {len(completed_games)}")
-    
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
-    
-    # === 5. Build merge keys from scores
+
+    # === 4. Build score rows and merge keys
     score_rows = []
     completed_keys = set()
-    
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
@@ -1780,90 +1764,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Score_Home_Score': scores[home],
                 'Score_Away_Score': scores[away]
             })
-    
-    # === 6. Filter sharp picks to only completed games
-    df = df[df['Merge_Key_Short'].isin(completed_keys)]
-    st.info(f"✅ Sharp picks matching completed games: {len(df)}")
-    
-    # === 7. Debug API keys
-    api_debug = pd.DataFrame(score_rows)
-    st.subheader("🧪 Merge Keys from API Scores")
-    st.dataframe(api_debug.head(10))
-    
-    sharp_keys = df['Merge_Key_Short'].dropna().unique().tolist()
-    score_keys = api_debug['Merge_Key_Short'].dropna().unique().tolist()
-    overlap = set(sharp_keys) & set(score_keys)
-    st.write(f"🔍 Matching Merge Keys: {len(overlap)}")
-    st.write(list(overlap)[:5])
-    
-    df_scores = pd.DataFrame(score_rows)
 
-
-   # === 4. Fetch completed games from API
-    try:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-        response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
-        response.raise_for_status()
-        games = response.json()
-    
-        st.subheader("🧪 Raw Scores API Check")
-        st.write(f"⚙️ Total games returned: {len(games)}")
-        if not games:
-            st.error("❌ The Odds API returned 0 games. This will block all scoring.")
-            return df
-    
-        st.text("🔎 Sample game JSON:")
-        st.json(games[0])
-    
-        completed_games = [g for g in games if g.get("completed") is True]
-        st.write(f"✅ Completed games: {len(completed_games)}")
-    
-    except Exception as e:
-        st.error(f"❌ Failed to fetch scores: {e}")
-        return df
-    
-    # === 5. Build merge keys and score rows
-    score_rows = []
-    completed_keys = set()
-    
-    for game in completed_games:
-        home = normalize_team(game.get("home_team", ""))
-        away = normalize_team(game.get("away_team", ""))
-        game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        if pd.isna(game_start):
-            continue
-        merge_key = build_merge_key(home, away, game_start)
-        scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
-        if home in scores and away in scores:
-            completed_keys.add(merge_key)
-            score_rows.append({
-                'Merge_Key_Short': merge_key,
-                'Score_Home_Score': scores[home],
-                'Score_Away_Score': scores[away]
-            })
-    
-    # ✅ Define df_scores BEFORE using it
     df_scores = pd.DataFrame(score_rows)
-    
-    # === 6. Filter sharp picks to only completed games
     df = df[df['Merge_Key_Short'].isin(completed_keys)]
-    st.info(f"✅ Sharp picks matching completed games: {len(df)}")
-    
-    # === Check if we have any score rows
-    if df_scores.empty:
-        st.warning("ℹ️ No valid score rows from completed games.")
+    if df.empty:
+        st.warning("ℹ️ No sharp picks match completed games.")
         return df
 
-
-    # === 6. Merge preview
-    st.subheader("🔗 Merge Preview: Sharp Picks vs Scores")
-    st.dataframe(df[['Game', 'Game_Start', 'Merge_Key_Short', 'Ref Sharp Value']].head())
-    st.dataframe(df_scores.head())
-    st.write("🔑 Sample Merge Keys (Sharp Picks):", df['Merge_Key_Short'].dropna().unique()[:3])
-    st.write("🔑 Sample Merge Keys (Scores):", df_scores['Merge_Key_Short'].dropna().unique()[:3])
-    st.write(f"🔍 Merge matches: {len(df.merge(df_scores, on='Merge_Key_Short', how='inner'))}")
-
-    # === 7. Merge
+    # === 5. Merge and score
     df = df.merge(df_scores.rename(columns={
         "Score_Home_Score": "Score_Home_Score_api",
         "Score_Away_Score": "Score_Away_Score_api"
@@ -1874,14 +1782,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df[col] = pd.to_numeric(df.get(col), errors='coerce')
         df[api_col] = pd.to_numeric(df.get(api_col), errors='coerce')
         df[col] = df[col].combine_first(df[api_col])
-        df.drop(columns=[api_col], inplace=True, errors='ignore')
+        df.drop(columns=[api_col], inplace=True)
 
-    # === 8. Scoring logic
+    # === 6. Apply result logic
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
-    st.write(f"🧾 Valid picks to be scored: {len(df_valid)}")
-
     if df_valid.empty:
-        st.warning("ℹ️ No valid sharp picks with both scores and line values to score.")
+        st.warning("ℹ️ No valid rows with score and line to evaluate.")
         return df
 
     def calc_cover(row):
@@ -1890,7 +1796,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             val = float(row['Ref Sharp Value'])
             market = str(row.get('Market', '')).lower()
             outcome = str(row.get('Outcome', '')).lower()
-
             if market == 'totals':
                 return ['Win', 1] if ('under' in outcome and h + a < val) or ('over' in outcome and h + a > val) else ['Loss', 0]
             if market == 'spreads':
@@ -1911,10 +1816,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Scored'] = False
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
-
     st.success(f"✅ Scoring complete. Hits: {df['SHARP_HIT_BOOL'].sum()}, Total Scored: {df['Scored'].sum()}")
 
-    # === 9. Optional: Re-score with model
     if model is not None:
         try:
             df = apply_blended_sharp_score(df, model)
@@ -1923,7 +1826,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             st.warning(f"⚠️ Model scoring failed: {e}")
 
     return df
-
 
 
 
