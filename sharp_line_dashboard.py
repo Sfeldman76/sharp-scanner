@@ -257,7 +257,7 @@ def build_game_key(df):
 
     return df
 
-def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves(hours=500, table=BQ_FULL_TABLE):
     try:
         client = bq_client
         query = f"""
