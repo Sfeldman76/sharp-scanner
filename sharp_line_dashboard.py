@@ -1316,28 +1316,9 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
         )
-
-        df_moves_raw, df_audit, summary_df = detect_sharp_moves(
-            live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
-        )
         
-     
-            if not df_moves_raw.empty:
-                if 'Sharp_Move_Signal' in df_moves_raw.columns:
-                    st.write("🔍 Sharp Move Signal Breakdown:")
-                    summary = df_moves_raw.groupby(['Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']).size().reset_index(name="Count")
-                    st.dataframe(summary)
+    
         
-                if 'Enhanced_Sharp_Confidence_Score' in df_moves_raw.columns:
-                    conf_df = df_moves_raw[df_moves_raw['Enhanced_Sharp_Confidence_Score'].notna()]
-
-                    st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker',
-                                          'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
-                                          'Sharp_Confidence_Tier']].sort_values(
-                        'Enhanced_Sharp_Confidence_Score', ascending=False).head(10))
-            else:
-                st.warning("⚠️ No rows returned from detect_sharp_moves()")
-
         #initialize_all_tables(df_snap=df_snap, df_audit=df_audit, market_weights_dict=market_component_win_rates)
 
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
