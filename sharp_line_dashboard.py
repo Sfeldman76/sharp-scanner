@@ -1735,12 +1735,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     import streamlit as st
 
     def normalize_team(t):
-        return str(t).strip().lower()
+        return str(t).strip().lower().replace('.', '').replace('&', 'and')
 
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
     st.subheader(f"🔍 Backtest Scoring – {sport_label}")
+    force_backtest = st.sidebar.checkbox("🛠 Force Backtest All Picks", value=False)
 
     # === 1. Load sharp picks
     if df_moves is not None and not df_moves.empty:
@@ -1761,17 +1762,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
     df = build_game_key(df)
 
-    # === 3. Filter unscored + before game time
+    # === 3. Filter unscored picks
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
-    df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
 
-    st.write(f"🧮 Sharp picks to be scored: {len(df)}")
+    if not force_backtest:
+        df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
+    else:
+        st.warning("⚠️ Forcing backtest on all picks regardless of Game_Start time.")
+
+    st.write(f"🧮 Picks eligible for backtest scoring: {len(df)}")
+
     if df.empty:
         st.warning(f"⚠️ No unscored picks remaining for {sport_label}.")
         return pd.DataFrame()
 
-    # === 4. Fetch completed games from Odds API
+    # === 4. Fetch completed scores from API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1783,7 +1789,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
 
-    # === 5. Build score merge keys
+    # === 5. Build merge keys from scores
     score_rows = []
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
@@ -1801,21 +1807,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
             })
 
     df_scores = pd.DataFrame(score_rows)
-    st.write(f"📊 Score rows available: {len(df_scores)}")
+    st.write(f"📊 Valid score rows found: {len(df_scores)}")
 
     if df_scores.empty:
         st.warning("ℹ️ No valid score rows from completed games.")
         return df
 
-    # === 6. Merge Debug
-    st.subheader("🧪 Sharp Picks vs Scores – Merge Preview")
-    st.dataframe(df[['Game', 'Game_Start', 'Merge_Key_Short', 'Ref Sharp Value']].head(10))
-    st.dataframe(df_scores.head(10))
-    st.write("🔑 Merge Keys (Sharp Picks):", df['Merge_Key_Short'].dropna().unique()[:5])
-    st.write("🔑 Merge Keys (Scores):", df_scores['Merge_Key_Short'].dropna().unique()[:5])
-    st.write(f"🔗 Merge Matches: {len(df.merge(df_scores, on='Merge_Key_Short', how='inner'))}")
+    # === 6. Merge preview
+    st.subheader("🔗 Merge Preview: Sharp Picks vs Scores")
+    st.dataframe(df[['Game', 'Game_Start', 'Merge_Key_Short', 'Ref Sharp Value']].head())
+    st.dataframe(df_scores.head())
+    st.write("🔑 Sample Merge Keys (Sharp Picks):", df['Merge_Key_Short'].dropna().unique()[:3])
+    st.write("🔑 Sample Merge Keys (Scores):", df_scores['Merge_Key_Short'].dropna().unique()[:3])
+    st.write(f"🔍 Merge matches: {len(df.merge(df_scores, on='Merge_Key_Short', how='inner'))}")
 
-    # === 7. Merge Scores
+    # === 7. Merge
     df = df.merge(df_scores.rename(columns={
         "Score_Home_Score": "Score_Home_Score_api",
         "Score_Away_Score": "Score_Away_Score_api"
@@ -1828,9 +1834,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         df[col] = df[col].combine_first(df[api_col])
         df.drop(columns=[api_col], inplace=True, errors='ignore')
 
-    # === 8. Score Picks
+    # === 8. Scoring logic
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
-    st.write(f"🧾 Valid rows for scoring: {len(df_valid)}")
+    st.write(f"🧾 Valid picks to be scored: {len(df_valid)}")
 
     if df_valid.empty:
         st.warning("ℹ️ No valid sharp picks with both scores and line values to score.")
@@ -1875,8 +1881,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
             st.warning(f"⚠️ Model scoring failed: {e}")
 
     return df
-
-
 
 
 
