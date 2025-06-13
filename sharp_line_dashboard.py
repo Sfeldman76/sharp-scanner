@@ -1248,10 +1248,22 @@ def render_scanner_tab(label, sport_key, container):
         df_existing = read_recent_sharp_moves(hours=168)
         df_existing = df_existing[df_existing['Sport'] == label.upper()]
         df_existing = build_game_key(df_existing)
-        
+        # === Add Pre_Game and Post_Game flags to historical picks
+    	df_existing['Game_Start'] = pd.to_datetime(df_existing['Game_Start'], errors='coerce', utc=True)
+    	
+    	df_existing['Pre_Game'] = df_existing['Game_Start'] > now
+    	df_existing['Post_Game'] = ~df_existing['Pre_Game']
+    	
+    	# === Clean boolean types for BigQuery compatibility
+    	df_existing['Pre_Game'] = df_existing['Pre_Game'].fillna(False).astype(bool)
+    	df_existing['Post_Game'] = df_existing['Post_Game'].fillna(False).astype(bool)
+
         df_combined = pd.concat([df_existing, df_moves_raw], ignore_index=True)
         df_combined = df_combined.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='last')
-        
+        # === Final cleanup for BigQuery (ensure no bool dtype issues)
+    	df_combined['Pre_Game'] = df_combined['Pre_Game'].fillna(False).astype(bool)
+    	df_combined['Post_Game'] = df_combined['Post_Game'].fillna(False).astype(bool)
+
         write_to_bigquery(df_combined, force_replace=False)
 
 
