@@ -1377,18 +1377,18 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ Model not available — skipping scoring.")
 
         # === 5. Upload raw picks
-        # Build game keys BEFORE writing
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
         df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore')
         df_moves_raw = build_game_key(df_moves_raw)
         
-        # Fill merge key and reference values (must exist to score later)
+        # Fill required fields
         if 'Ref Sharp Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref Sharp Value'] = df_moves_raw['Value']
         
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
+        
         required_cols = ['Game_Key', 'Merge_Key_Short', 'Ref Sharp Value', 'Game_Start']
         missing_cols = [col for col in required_cols if col not in df_moves_raw.columns or df_moves_raw[col].isna().all()]
         if missing_cols:
@@ -1396,61 +1396,39 @@ def render_scanner_tab(label, sport_key, container):
         else:
             st.success("✅ All required columns present — ready to upload to BigQuery.")
         
-        # === Preserve past picks by merging with BigQuery history
-        df_existing = read_recent_sharp_moves(hours=168)
-        df_existing = df_existing[df_existing['Sport'] == label.upper()]
-        df_existing = build_game_key(df_existing)
-
-        # === Add Pre_Game and Post_Game flags to historical picks
-        df_existing['Game_Start'] = pd.to_datetime(df_existing['Game_Start'], errors='coerce', utc=True)
-        df_existing['Pre_Game'] = df_existing['Game_Start'] > now
-        df_existing['Post_Game'] = ~df_existing['Pre_Game']
-
-        # === Clean boolean types for BigQuery compatibility
-        df_existing['Pre_Game'] = df_existing['Pre_Game'].fillna(False).astype(bool)
-        df_existing['Post_Game'] = df_existing['Post_Game'].fillna(False).astype(bool)
-
-        df_combined = pd.concat([df_existing, df_moves_raw], ignore_index=True)
-        df_combined = df_combined.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='last')
-
-        # === Final cleanup for BigQuery (ensure no bool dtype issues)
-        df_combined['Pre_Game'] = df_combined['Pre_Game'].fillna(False).astype(bool)
-        df_combined['Post_Game'] = df_combined['Post_Game'].fillna(False).astype(bool)
-
-        write_to_bigquery(df_combined, force_replace=False)
-      
-
-        # === 6. Backtest Scores
+        # Pre/Post game flags
+        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], utc=True, errors='coerce')
+        now = pd.Timestamp.utcnow()
+        df_moves_raw['Pre_Game'] = df_moves_raw['Game_Start'] > now
+        df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
+        
+        # Upload initial picks (including pre-game)
+        write_to_bigquery(df_moves_raw, force_replace=False)
+        
+        # === 6. Backtest completed picks
         df_bt = fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
-
         
-
-        
-        # === Mark uploaded sharp picks as Pre/Post-game
-        df_combined['Pre_Game'] = df_combined['Game_Start'] > pd.Timestamp.utcnow()
-        df_combined['Post_Game'] = ~df_combined['Pre_Game']
-
-        if not df_bt.empty:
+        # === 7. If scoring returned valid results, update master
+        if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
             df_bt = build_game_key(df_bt)
+        
+            # Attach confidence scores from raw
             merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             df_bt = ensure_columns(df_bt, merge_cols)
             df_moves_raw = ensure_columns(df_moves_raw, merge_cols + confidence_cols)
-
             available = [col for col in confidence_cols if col in df_moves_raw.columns]
+        
             df_bt = df_bt.merge(
                 df_moves_raw[merge_cols + available].drop_duplicates(),
-                on=merge_cols,
-                how='left'
+                on=merge_cols, how='left'
             )
-
-
+        
             try:
                 df_bt = apply_blended_sharp_score(df_bt, model)
             except Exception as e:
                 st.warning(f"⚠️ Scoring backtest failed: {e}")
-
-            # === Optional Retraining
+        
             # === Optional Retraining
             if 'Enhanced_Sharp_Confidence_Score' in df_bt.columns:
                 trainable = df_bt[
@@ -1464,36 +1442,37 @@ def render_scanner_tab(label, sport_key, container):
                         st.warning("⚠️ Model training failed or skipped.")
                 else:
                     st.info("ℹ️ Not enough data to retrain model.")
-            
-            df_bt['Sport'] = label.upper()
-            write_to_bigquery(df_bt)
-            df_moves = df_bt.copy()
-            
-
-            # ✅ Preview
-            def preview_sharp_master(label, limit=25):
-                query = f"""
-                    SELECT Game, Market, Outcome, SHARP_HIT_BOOL, SHARP_COVER_RESULT, Snapshot_Timestamp
-                    FROM `{BQ_FULL_TABLE}`
-                    WHERE Sport = '{label.upper()}'
-                      AND SHARP_HIT_BOOL IS NOT NULL
-                    ORDER BY Snapshot_Timestamp DESC
-                    LIMIT {limit}
-                """
-                return bq_client.query(query).to_dataframe()
-
+        
+            # === Merge into master
+            df_master = read_recent_sharp_moves(hours=168)
+            df_master = df_master[df_master['Sport'] == label.upper()]
+            df_master = build_game_key(df_master)
+        
+            df_bt = df_bt[df_bt['SHARP_HIT_BOOL'].notna()]  # scored only
+            df_master.set_index(['Game_Key', 'Bookmaker'], inplace=True)
+            df_bt.set_index(['Game_Key', 'Bookmaker'], inplace=True)
+        
+            df_master.update(df_bt[['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']])
+            df_master.reset_index(inplace=True)
+        
+            write_to_bigquery(df_master, force_replace=False)
+            df_moves = df_master.copy()
+        
             st.subheader(f"📋 Latest Scored Picks in Sharp Master – {label}")
-            st.dataframe(preview_sharp_master(label))
+            st.dataframe(
+                df_master[df_master['SHARP_HIT_BOOL'].notna()]
+                .sort_values("Snapshot_Timestamp", ascending=False)
+                [['Game', 'Market', 'Outcome', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Snapshot_Timestamp']]
+                .head(25)
+            )
         else:
             st.info("ℹ️ No backtest results available.")
-
+        
         # === Upload line history
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
             write_line_history_to_bigquery(df_audit)
             print("🧪 line history audit shape:", df_audit.shape)
-
-
 
 
         # === 6. Summary Table ===
