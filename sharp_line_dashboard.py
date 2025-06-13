@@ -1827,10 +1827,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         if pd.isna(game_start):
             continue
         merge_key = build_merge_key(home, away, game_start)
-        api_debug = pd.DataFrame(score_rows)
-        st.subheader("🧪 Merge Keys from API Scores")
-        st.dataframe(api_debug.head(10))
-
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
             score_rows.append({
@@ -1838,9 +1834,19 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
                 'Score_Home_Score': scores[home],
                 'Score_Away_Score': scores[away]
             })
-
-    df_scores = pd.DataFrame(score_rows)
-    st.write(f"📊 Valid score rows found: {len(df_scores)}")
+    
+    # === ✅ Debug API merge keys after all rows collected
+    api_debug = pd.DataFrame(score_rows)
+    st.subheader("🧪 Merge Keys from API Scores")
+    st.dataframe(api_debug.head(10))
+    
+    # Compare to sharp picks
+    sharp_keys = df['Merge_Key_Short'].dropna().unique().tolist()
+    score_keys = api_debug['Merge_Key_Short'].dropna().unique().tolist()
+    
+    overlap = set(sharp_keys) & set(score_keys)
+    st.write(f"🔍 Matching Merge Keys: {len(overlap)}")
+    st.write(list(overlap)[:5])
 
     if df_scores.empty:
         st.warning("ℹ️ No valid score rows from completed games.")
