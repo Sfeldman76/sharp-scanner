@@ -1604,14 +1604,13 @@ def render_scanner_tab(label, sport_key, container):
         return df_moves
 
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
-
     def normalize_team(t):
         return str(t).strip().lower()
 
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    # === 1. Use passed-in df_moves or fallback to BigQuery
+    # === 1. Load sharp picks
     if df_moves is not None and not df_moves.empty:
         df = df_moves.copy()
         st.info("📥 Using in-memory sharp picks (df_moves)")
@@ -1623,21 +1622,27 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         return pd.DataFrame()
 
-    # === 2. Filter + Build Keys
+    # === 2. Filter + Ensure Required Columns
     df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
     df = df[df['Sport'] == sport_label]
-    if df.empty:
-        st.warning(f"⚠️ No historical picks found for {sport_label}.")
-        return pd.DataFrame()
+
+    # Ensure required columns exist
+    required_cols = ['Game', 'Market', 'Outcome', 'Game_Start', 'Value']
+    df = ensure_columns(df, required_cols)
 
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
-    df = build_game_key(df)  # uses .dt.tz_localize(None) now ✅
+    df = build_game_key(df)
 
+    # Only include unscored picks before current time
     df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
 
-    # === 3. Fetch completed games from Odds API
+    if df.empty:
+        st.warning(f"⚠️ No unscored picks remaining for {sport_label}.")
+        return pd.DataFrame()
+
+    # === 3. Fetch scores from Odds API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1649,18 +1654,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
 
-    # === 4. Build score merge keys
+    # === 4. Build score rows
     score_rows = []
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
+
         if pd.isna(game_start):
             continue
 
-        # ❗Match the same tz-naive format used in build_game_key()
         merge_key = f"{home}_{away}_{game_start.floor('h').tz_localize(None).strftime('%Y-%m-%d %H:%M:%S')}"
-
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
             score_rows.append({
@@ -1674,7 +1678,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.warning("ℹ️ No valid score rows from completed games.")
         return df
 
-    # === 5. DEBUG Merge Key Check
+    # === 5. Merge Debug
     st.subheader("🔍 Sharp Pick vs Score Merge Debug")
     st.dataframe(df[['Game', 'Game_Start', 'Merge_Key_Short', 'Ref Sharp Value']].head(10))
     st.dataframe(df_scores.head(10))
@@ -1682,7 +1686,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     st.write("✅ Merge Keys (Scores):", df_scores['Merge_Key_Short'].dropna().unique()[:5])
     st.write(f"✅ Matches Found: {len(df.merge(df_scores, on='Merge_Key_Short', how='inner'))}")
 
-    # === 6. Merge Scores
+    # === 6. Merge scores into picks
     df = df.merge(df_scores.rename(columns={
         "Score_Home_Score": "Score_Home_Score_api",
         "Score_Away_Score": "Score_Away_Score_api"
@@ -1741,6 +1745,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
             st.warning(f"⚠️ Model scoring failed: {e}")
 
     return df
+
 
 
 
