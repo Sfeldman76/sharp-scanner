@@ -1396,17 +1396,7 @@ def render_scanner_tab(label, sport_key, container):
         df_combined['Post_Game'] = df_combined['Post_Game'].fillna(False).astype(bool)
 
         write_to_bigquery(df_combined, force_replace=False)
-
-
-        # Write final to BigQuery after keys and values are valid
-        # === 🧪 Debug: Preview merge keys from df_moves_raw before scoring
-        st.subheader("🧪 Merge Key Debug")
-        st.write("Sample Merge_Key_Short from df_moves_raw:")
-        st.dataframe(
-            df_moves_raw[['Home_Team_Norm', 'Away_Team_Norm', 'Game_Start', 'Merge_Key_Short']]
-            .drop_duplicates()
-            .head()
-        )
+      
 
         # === 6. Backtest Scores
         df_bt = fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
