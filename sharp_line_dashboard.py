@@ -1198,18 +1198,18 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
         )
-        initialize_all_tables(df_snap=df_snap, df_audit=df_audit, market_weights_dict=market_component_win_rates)
+        #initialize_all_tables(df_snap=df_snap, df_audit=df_audit, market_weights_dict=market_component_win_rates)
 
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
             st.warning("⚠️ No sharp signals detected.")
             return pd.DataFrame()
         # === Add Pre-Game / Post-Game flags for clarity
+        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
+        df_moves_raw['Snapshot_Timestamp'] = timestamp
         now = pd.Timestamp.utcnow()
         df_moves_raw['Pre_Game'] = df_moves_raw['Game_Start'] > now
         df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
 
-        df_moves_raw['Snapshot_Timestamp'] = timestamp
-        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
@@ -1261,8 +1261,10 @@ def render_scanner_tab(label, sport_key, container):
 
         # === 6. Backtest Scores
         df_bt = fetch_scores_and_backtest(sport_key, df_moves=df_moves_raw, api_key=API_KEY, model=model)
-        df['Pre_Game'] = df['Game_Start'] > pd.Timestamp.utcnow()
-        df['Post_Game'] = ~df['Pre_Game']
+        
+        # === Mark uploaded sharp picks as Pre/Post-game
+        df_combined['Pre_Game'] = df_combined['Game_Start'] > pd.Timestamp.utcnow()
+        df_combined['Post_Game'] = ~df_combined['Pre_Game']
 
         if not df_bt.empty:
             df_bt = build_game_key(df_bt)
