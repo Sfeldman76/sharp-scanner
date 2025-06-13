@@ -1242,9 +1242,19 @@ def render_scanner_tab(label, sport_key, container):
             st.warning(f"⚠️ Missing columns before upload: {missing_cols}")
         else:
             st.success("✅ All required columns present — ready to upload to BigQuery.")
+        # === Preserve past picks by merging with BigQuery history
+        df_existing = read_recent_sharp_moves(hours=168)
+        df_existing = df_existing[df_existing['Sport'] == label.upper()]
+        df_existing = build_game_key(df_existing)
+        
+        df_combined = pd.concat([df_existing, df_moves_raw], ignore_index=True)
+        df_combined = df_combined.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='last')
+        
+        write_to_bigquery(df_combined, force_replace=False)
+
 
         # Write final to BigQuery after keys and values are valid
-        write_to_bigquery(df_moves_raw, force_replace=False)
+      
 
 
         # === 6. Backtest Scores
