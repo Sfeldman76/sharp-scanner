@@ -7,10 +7,57 @@ from streamlit_autorefresh import st_autorefresh
 # === Page Config ===
 st.set_page_config(layout="wide")
 st.title("Sharp Edge Scanner")
+st.markdown("""
+<style>
+.scrollable-dataframe-container {
+    max-height: 600px;
+    overflow-y: auto;
+    overflow-x: auto;
+    border: 1px solid #444;
+    padding: 0.5rem;
+    margin-bottom: 1rem;
+}
+div[data-testid="stDataFrame"] > div {
+    width: 100% !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # === Auto-refresh every 380 seconds ===
 st_autorefresh(interval=380 * 1000, key="data_refresh")
+
+
+st.markdown("""
+<style>
+.scrollable-table-container {
+    max-height: 600px;
+    overflow-y: auto;
+    border: 1px solid #444;
+    margin-bottom: 1rem;
+}
+.custom-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 14px;
+}
+.custom-table th, .custom-table td {
+    border: 1px solid #444;
+    padding: 8px;
+    text-align: center;
+}
+.custom-table th {
+    background-color: #1f2937;
+    color: white;
+}
+.custom-table tr:nth-child(even) {
+    background-color: #2d3748;
+}
+.custom-table tr:hover {
+    background-color: #4b5563;
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 
@@ -117,7 +164,7 @@ def ensure_columns(df, required_cols, fill_value=None):
     return df
 
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=380)
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -525,10 +572,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
-    st.write(f"🟡 Detecting sharp moves for {sport_key.upper()} at {snapshot_time}")
-    st.write(f"📊 Current odds entries: {len(current)}")
-    st.write(f"📦 Previous odds loaded: {len(previous_map)}")
-
+    
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
@@ -648,15 +692,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                             line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
 
     df_moves = pd.DataFrame(rows)
-    st.write(f"✅ Flattened odds to {len(df_moves)} rows in df_moves")
-    st.write("🔍 Sample df_moves rows with sharp candidates:")
-    st.dataframe(df_moves[df_moves['Delta'].notna()].head())
-    
-    # Assign df immediately to avoid undefined access
-    df = df_moves.copy()
-    st.write(f"📊 Created base df: {df.shape}")
-
-
     df_audit = pd.DataFrame([item for sublist in line_history_log.values() for item in sublist])
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
@@ -823,10 +858,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
  
     sharp_count = df[df['SHARP_SIDE_TO_BET'] == 1].shape[0]
-    st.write(f"🎯 Sharp sides detected: {sharp_count}")
-    if sharp_count == 0:
-        st.write("⚠️ No sharp sides were flagged. Check limits, delta threshold, or missing sharp books.")
-
+   
     # === Sort by timestamp and extract open lines
     df_history_sorted = df_history.sort_values('Time')
     
@@ -970,17 +1002,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df[col] = None
 
     conf_df = df[df['Enhanced_Sharp_Confidence_Score'].notna()]
-    st.write(f"🧠 Scored entries with confidence: {len(conf_df)}")
-    st.write("⭐ Confidence tier breakdown:")
-    st.write(conf_df['Sharp_Confidence_Tier'].value_counts(dropna=False))
-    st.write("🧪 Sharp signals summary:")
-    st.write(df[['Game', 'Market', 'Outcome', 'Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']].groupby(['Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']).size())
-
-    if 'st' in globals():
-        st.write("🧪 Final Sharp Picks Preview:")
-        st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']].sort_values('Enhanced_Sharp_Confidence_Score', ascending=False).head(10))
-
-
+   
     return df, df_history, summary_df
 
 def train_sharp_win_model(df):
@@ -1598,7 +1620,8 @@ def render_scanner_tab(label, sport_key, container):
         table_df_1 = paginated_df_1[[col for col in view_cols if col in paginated_df_1.columns]].copy()
         table_df_1.columns = [col.replace('\n', ' ') for col in table_df_1.columns]
         table_html_1 = table_df_1.to_html(classes="custom-table", index=False, escape=False)
-        st.markdown(table_html_1, unsafe_allow_html=True)
+        st.markdown(f"<div class='scrollable-table-container'>{table_html_1}</div>", unsafe_allow_html=True)
+
         st.caption(f"Showing {start_row_1 + 1}-{min(end_row_1, total_rows_1)} of {total_rows_1} rows")
         
         # === Live Odds Snapshot Table ===
@@ -1730,7 +1753,8 @@ def render_scanner_tab(label, sport_key, container):
                 df_compare=compare_slice
             )
             
-            st.markdown(html_table_2, unsafe_allow_html=True)
+            st.markdown(f"<div class='scrollable-table-container'>{html_table_2}</div>", unsafe_allow_html=True)
+
             st.caption(f"Showing {start_row_2 + 1}-{min(end_row_2, total_rows_2)} of {total_rows_2} rows")
 
 
