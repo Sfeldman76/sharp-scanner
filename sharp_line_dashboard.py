@@ -1434,15 +1434,7 @@ def render_scanner_tab(label, sport_key, container):
             write_to_bigquery(df_master, force_replace=False)
             df_moves = df_master.copy()
         
-            st.subheader(f"📋 Latest Scored Picks in Sharp Master – {label}")
-            st.dataframe(
-                df_master[df_master['SHARP_HIT_BOOL'].notna()]
-                .sort_values("Snapshot_Timestamp", ascending=False)
-                [['Game', 'Market', 'Outcome', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Snapshot_Timestamp']]
-                .head(25)
-            )
-        else:
-            st.info("ℹ️ No backtest results available.")
+            
         
         # === Upload line history
         if not df_audit.empty:
