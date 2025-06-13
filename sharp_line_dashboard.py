@@ -25,7 +25,7 @@ div[data-testid="stDataFrame"] > div {
 
 
 # === Auto-refresh every 380 seconds ===
-st_autorefresh(interval=380 * 1000, key="data_refresh")
+st_autorefresh(interval=580 * 1000, key="data_refresh")
 
 
 st.markdown("""
@@ -164,7 +164,7 @@ def ensure_columns(df, required_cols, fill_value=None):
     return df
 
 
-@st.cache_data(ttl=380)
+@st.cache_data(ttl=550)
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
