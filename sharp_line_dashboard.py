@@ -1780,13 +1780,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
 
-    if not force_backtest:
-        df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
-    else:
-        st.warning("⚠️ Forcing backtest on all picks regardless of Game_Start time.")
-
-    st.write(f"🧮 Picks eligible for backtest scoring: {len(df)}")
-
+   
     if df.empty:
         st.warning(f"⚠️ No unscored picks remaining for {sport_label}.")
         return pd.DataFrame()
