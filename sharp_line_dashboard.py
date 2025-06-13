@@ -519,6 +519,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
+    st.write(f"🟡 Detecting sharp moves for {sport_key.upper()} at {snapshot_time}")
+    st.write(f"📊 Current odds entries: {len(current)}")
+    st.write(f"📦 Previous odds loaded: {len(previous_map)}")
 
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
@@ -625,6 +628,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                                     entry['Delta'] = round(val - prev_val, 2) if val is not None else None
 
                     rows.append(entry)
+                    if len(rows) % 100 == 0:
+                        print(f"📥 Processed {len(rows)} odds entries so far...")
+
                     line_history_log.setdefault(gid, []).append(entry.copy())
 
                     if val is not None:
@@ -636,6 +642,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                             line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
 
     df_moves = pd.DataFrame(rows)
+    st.write(f"✅ Flattened odds to {len(df_moves)} rows in df_moves")
+    st.write("🔍 Sample df_moves rows with sharp candidates:")
+    st.write(df_moves[df_moves['Delta'].notna()].head())
+    st.write(f"📊 Created base df: {df.shape}")
+    st.write("🧪 Sharp signals summary:")
+    st.write(df[['Game', 'Market', 'Outcome', 'Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']].groupby(['Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']).size())
+
     df_audit = pd.DataFrame([item for sublist in line_history_log.values() for item in sublist])
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
@@ -801,7 +814,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             return 50.0  # fallback neutral score
     
  
-    
+    sharp_count = df[df['SHARP_SIDE_TO_BET'] == 1].shape[0]
+    st.write(f"🎯 Sharp sides detected: {sharp_count}")
+    if sharp_count == 0:
+        st.write("⚠️ No sharp sides were flagged. Check limits, delta threshold, or missing sharp books.")
+
     # === Sort by timestamp and extract open lines
     df_history_sorted = df_history.sort_values('Time')
     
@@ -943,7 +960,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     for col in required_sharp_cols:
         if col not in df.columns:
             df[col] = None
-    
+
+    conf_df = df[df['Enhanced_Sharp_Confidence_Score'].notna()]
+    st.write(f"🧠 Scored entries with confidence: {len(conf_df)}")
+    st.write("⭐ Confidence tier breakdown:")
+    st.write(conf_df['Sharp_Confidence_Tier'].value_counts(dropna=False))
+    if 'st' in globals():
+    st.write("🧪 Final Sharp Picks Preview:")
+    st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']].sort_values('Enhanced_Sharp_Confidence_Score', ascending=False).head(10))
+
+
     return df, df_history, summary_df
 
 def train_sharp_win_model(df):
@@ -1257,6 +1283,39 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
         )
+        # === 3. Detect Sharp Moves
+        with st.expander("🧪 Sharp Detection Debug Log", expanded=False):
+            st.write(f"🟡 Detecting sharp moves for `{label.upper()}` at `{timestamp.strftime('%Y-%m-%d %H:%M:%S')}`")
+            st.write(f"📊 Current odds entries: {len(live)}")
+            st.write(f"📦 Previous odds loaded: {len(prev) if isinstance(prev, dict) else 'Unavailable'}")
+        
+        df_moves_raw, df_audit, summary_df = detect_sharp_moves(
+            live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
+        )
+        
+        # === Post-detection debugging
+        with st.expander("🧪 Post-Detection Summary", expanded=False):
+            st.write(f"✅ Rows returned from detect_sharp_moves(): `{len(df_moves_raw)}`")
+            
+            if not df_moves_raw.empty:
+                if 'Sharp_Move_Signal' in df_moves_raw.columns:
+                    st.write("🔍 Sharp Move Signal Breakdown:")
+                    summary = df_moves_raw.groupby(['Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']).size().reset_index(name="Count")
+                    st.dataframe(summary)
+        
+                if 'Enhanced_Sharp_Confidence_Score' in df_moves_raw.columns:
+                    conf_df = df_moves_raw[df_moves_raw['Enhanced_Sharp_Confidence_Score'].notna()]
+                    st.write(f"🧠 Scored entries with confidence: {len(conf_df)}")
+                    st.write("⭐ Confidence tier breakdown:")
+                    st.dataframe(conf_df['Sharp_Confidence_Tier'].value_counts(dropna=False).reset_index(name="Count"))
+                    st.write("🎯 Top 10 Sharp Picks by Confidence Score:")
+                    st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker',
+                                          'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
+                                          'Sharp_Confidence_Tier']].sort_values(
+                        'Enhanced_Sharp_Confidence_Score', ascending=False).head(10))
+            else:
+                st.warning("⚠️ No rows returned from detect_sharp_moves()")
+
         #initialize_all_tables(df_snap=df_snap, df_audit=df_audit, market_weights_dict=market_component_win_rates)
 
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
@@ -1668,13 +1727,17 @@ def render_scanner_tab(label, sport_key, container):
         return df_moves
 
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
+    import streamlit as st
+
     def normalize_team(t):
         return str(t).strip().lower()
 
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    # === 1. Load sharp picks (in-memory or from BigQuery)
+    st.subheader(f"🔍 Backtest Scoring – {sport_label}")
+
+    # === 1. Load sharp picks
     if df_moves is not None and not df_moves.empty:
         df = df_moves.copy()
         st.info("📥 Using in-memory sharp picks (df_moves)")
@@ -1686,18 +1749,19 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         return pd.DataFrame()
 
-    # === 2. Coerce and rebuild required keys
+    # === 2. Normalize + build keys
     df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
     df = df[df['Sport'] == sport_label]
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
     df = build_game_key(df)
 
-    # === 3. Filter for unscored picks before game time
+    # === 3. Filter unscored + before game time
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
     df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
 
+    st.write(f"🧮 Sharp picks to be scored: {len(df)}")
     if df.empty:
         st.warning(f"⚠️ No unscored picks remaining for {sport_label}.")
         return pd.DataFrame()
@@ -1732,17 +1796,19 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
             })
 
     df_scores = pd.DataFrame(score_rows)
+    st.write(f"📊 Score rows available: {len(df_scores)}")
+
     if df_scores.empty:
         st.warning("ℹ️ No valid score rows from completed games.")
         return df
 
     # === 6. Merge Debug
-    st.subheader("🔍 Sharp Pick vs Score Merge Debug")
+    st.subheader("🧪 Sharp Picks vs Scores – Merge Preview")
     st.dataframe(df[['Game', 'Game_Start', 'Merge_Key_Short', 'Ref Sharp Value']].head(10))
     st.dataframe(df_scores.head(10))
-    st.write("✅ Merge Keys (Sharp Picks):", df['Merge_Key_Short'].dropna().unique()[:5])
-    st.write("✅ Merge Keys (Scores):", df_scores['Merge_Key_Short'].dropna().unique()[:5])
-    st.write(f"✅ Matches Found: {len(df.merge(df_scores, on='Merge_Key_Short', how='inner'))}")
+    st.write("🔑 Merge Keys (Sharp Picks):", df['Merge_Key_Short'].dropna().unique()[:5])
+    st.write("🔑 Merge Keys (Scores):", df_scores['Merge_Key_Short'].dropna().unique()[:5])
+    st.write(f"🔗 Merge Matches: {len(df.merge(df_scores, on='Merge_Key_Short', how='inner'))}")
 
     # === 7. Merge Scores
     df = df.merge(df_scores.rename(columns={
@@ -1759,13 +1825,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
 
     # === 8. Score Picks
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
+    st.write(f"🧾 Valid rows for scoring: {len(df_valid)}")
+
     if df_valid.empty:
         st.warning("ℹ️ No valid sharp picks with both scores and line values to score.")
         return df
 
     def calc_cover(row):
         try:
-            h, a = float(row['Score_Home_Score'])
+            h, a = float(row['Score_Home_Score']), float(row['Score_Away_Score'])
             val = float(row['Ref Sharp Value'])
             market = str(row.get('Market', '')).lower()
             outcome = str(row.get('Outcome', '')).lower()
@@ -1790,6 +1858,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     df['Scored'] = False
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
+
+    st.success(f"✅ Scoring complete. Hits: {df['SHARP_HIT_BOOL'].sum()}, Total Scored: {df['Scored'].sum()}")
 
     # === 9. Optional: Re-score with model
     if model is not None:
