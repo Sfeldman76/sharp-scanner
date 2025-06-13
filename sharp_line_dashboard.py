@@ -1745,7 +1745,7 @@ def render_scanner_tab(label, sport_key, container):
 
         return df_moves
 
-def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
+def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, model=None):
     import streamlit as st
 
   
@@ -1797,26 +1797,25 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
         response.raise_for_status()
         games = response.json()
-        st.subheader("🧪 Raw Scores from Odds API")
-        st.write(f"Total games fetched: {len(games)}")
+    
+        st.subheader("🧪 Raw Scores API Check")
+        st.write(f"⚙️ Total games returned: {len(games)}")
+    
+        if not games:
+            st.error("❌ The Odds API returned 0 games. This will block all scoring.")
+            return df
+    
+        # Display one raw sample
+        st.text("🔎 Sample game JSON:")
+        st.json(games[0] if games else {})
+    
+        completed_games = [g for g in games if g.get("completed") is True]
+        st.write(f"✅ Completed games: {len(completed_games)}")
         
-        # Show a few sample games with keys and timestamps
-        sample_scores = []
-        for game in games[:10]:
-            sample_scores.append({
-                'Home': game.get("home_team"),
-                'Away': game.get("away_team"),
-                'Start': game.get("commence_time"),
-                'Completed': game.get("completed"),
-                'Scores': game.get("scores")
-            })
-        st.dataframe(pd.DataFrame(sample_scores))
-
-        completed_games = [g for g in games if g.get("completed")]
-        st.info(f"✅ Completed games found: {len(completed_games)}")
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
+
 
     # === 5. Build merge keys from scores
     score_rows = []
