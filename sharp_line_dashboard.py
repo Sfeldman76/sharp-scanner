@@ -237,7 +237,7 @@ def build_game_key(df):
     df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
     df['Market_Norm'] = df['Market'].str.strip().str.lower()
     df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
-    
+
     df['Game_Key'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
@@ -246,14 +246,20 @@ def build_game_key(df):
         df['Outcome_Norm']
     )
 
-    # 🔁 ADD THIS: Create Merge_Key_Short for scoring merge
-    df['Merge_Key_Short'] = (
-        df['Home_Team_Norm'] + "_" +
-        df['Away_Team_Norm'] + "_" +
-        df['Commence_Hour'].astype(str)
+    df['Merge_Key_Short'] = df.apply(
+        lambda row: build_merge_key(row['Home_Team_Norm'], row['Away_Team_Norm'], row['Commence_Hour']),
+        axis=1
     )
 
     return df
+    
+def normalize_team(t):
+    return str(t).strip().lower().replace('.', '').replace('&', 'and')
+
+def build_merge_key(home, away, game_start):
+    return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
+
+
 
 def read_recent_sharp_moves(hours=500, table=BQ_FULL_TABLE):
     try:
@@ -1741,8 +1747,7 @@ def render_scanner_tab(label, sport_key, container):
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
     import streamlit as st
 
-    def normalize_team(t):
-        return str(t).strip().lower().replace('.', '').replace('&', 'and')
+  
 
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
@@ -1805,7 +1810,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
         if pd.isna(game_start):
             continue
-        merge_key = f"{home}_{away}_{game_start.floor('h').tz_localize(None).strftime('%Y-%m-%d %H:%M:%S')}"
+        merge_key = build_merge_key(home, away, game_start)
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
             score_rows.append({
