@@ -1261,7 +1261,7 @@ def render_scanner_tab(label, sport_key, container):
         df_bt = fetch_scores_and_backtest(sport_key, df_moves=df_moves_raw, api_key=API_KEY, model=model)
         if not df_bt.empty:
             df_bt = build_game_key(df_bt)
-            merge_cols = ['Game_Key', 'Market', 'Bookmaker']
+            merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
             confidence_cols = ['Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']
             df_bt = ensure_columns(df_bt, merge_cols)
             df_moves_raw = ensure_columns(df_moves_raw, merge_cols + confidence_cols)
@@ -1272,6 +1272,7 @@ def render_scanner_tab(label, sport_key, container):
                 on=merge_cols,
                 how='left'
             )
+
 
             try:
                 df_bt = apply_blended_sharp_score(df_bt, model)
