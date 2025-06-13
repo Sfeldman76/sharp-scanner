@@ -644,8 +644,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_moves = pd.DataFrame(rows)
     st.write(f"✅ Flattened odds to {len(df_moves)} rows in df_moves")
     st.write("🔍 Sample df_moves rows with sharp candidates:")
-    st.write(df_moves[df_moves['Delta'].notna()].head())
+    st.dataframe(df_moves[df_moves['Delta'].notna()].head())
+    
+    # Assign df immediately to avoid undefined access
+    df = df_moves.copy()
     st.write(f"📊 Created base df: {df.shape}")
+
     st.write("🧪 Sharp signals summary:")
     st.write(df[['Game', 'Market', 'Outcome', 'Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']].groupby(['Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']).size())
 
