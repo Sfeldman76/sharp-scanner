@@ -36,8 +36,6 @@ import pandas as pd
 import pandas_gbq  # ✅ Required for setting .context.project / .context.credentials
 from google.cloud import bigquery
 from google.cloud import storage
-
-
 from google.cloud import bigquery
 from pandas_gbq import to_gbq
 import pandas as pd
@@ -236,7 +234,7 @@ def build_game_key(df):
     df = df.copy()
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-     df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
+    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
     df['Market_Norm'] = df['Market'].str.strip().str.lower()
     df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
     
@@ -1590,10 +1588,6 @@ def render_scanner_tab(label, sport_key, container):
         return df_moves
 
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API_KEY, model=None):
-    import requests
-    import pandas as pd
-    from datetime import datetime
-    import streamlit as st
 
     def normalize_team(t):
         return str(t).strip().lower()
@@ -1620,16 +1614,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.warning(f"⚠️ No historical picks found for {sport_label}.")
         return pd.DataFrame()
 
-    df = build_game_key(df)
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
-    df['Home_Team_Norm'] = df['Home_Team_Norm'].fillna('')
-    df['Away_Team_Norm'] = df['Away_Team_Norm'].fillna('')
-    df['Commence_Hour'] = df['Commence_Hour'].astype(str)
+    df = build_game_key(df)  # uses .dt.tz_localize(None) now ✅
+
     df = df[df['Game_Start'] < pd.Timestamp.utcnow()]
     if 'SHARP_HIT_BOOL' in df.columns:
         df = df[df['SHARP_HIT_BOOL'].isna()]
 
-    # === 3. Fetch completed games from API ===
+    # === 3. Fetch completed games from Odds API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1641,7 +1633,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
 
-    # === 4. Build score rows
+    # === 4. Build score merge keys
     score_rows = []
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
@@ -1649,7 +1641,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
         game_start = pd.to_datetime(game.get("commence_time"), utc=True)
         if pd.isna(game_start):
             continue
-        merge_key = f"{home}_{away}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
+
+        # ❗Match the same tz-naive format used in build_game_key()
+        merge_key = f"{home}_{away}_{game_start.floor('h').tz_localize(None).strftime('%Y-%m-%d %H:%M:%S')}"
+
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
             score_rows.append({
@@ -1730,6 +1725,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
             st.warning(f"⚠️ Model scoring failed: {e}")
 
     return df
+
 
 
 
