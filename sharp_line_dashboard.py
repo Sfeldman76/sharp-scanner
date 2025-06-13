@@ -1375,9 +1375,15 @@ def render_scanner_tab(label, sport_key, container):
         # Upload initial picks (including pre-game)
         write_to_bigquery(df_moves_raw, force_replace=False)
         
-        # === 6. Backtest completed picks
-        df_bt = fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
-        
+        # === 6. Backtest completed picks only once per session
+        backtest_key = f"scored_{sport_key.lower()}"
+        if not st.session_state.get(backtest_key, False):
+            df_bt = fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
+            st.session_state[backtest_key] = True
+            st.success("✅ Backtesting and scoring completed.")
+        else:
+            st.info(f"⏭ Skipping re-scoring — already completed for {label.upper()} this session.")
+            df_bt = pd.DataFrame()  # fallback if needed
         # === 7. If scoring returned valid results, update master
         if not df_bt.empty and 'SHARP_HIT_BOOL' in df_bt.columns:
             df_bt = build_game_key(df_bt)
