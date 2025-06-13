@@ -1402,11 +1402,12 @@ def render_scanner_tab(label, sport_key, container):
         # === 🧪 Debug: Preview merge keys from df_moves_raw before scoring
         st.subheader("🧪 Merge Key Debug")
         st.write("Sample Merge_Key_Short from df_moves_raw:")
-        st.dataframe(df_moves_raw[['Game', 'Market', 'Outcome', 'Game_Start']].assign(
-            Merge_Key_Short=lambda df: df['Game'].str.lower().str.strip() + "_" +
-                                        df['Game_Start'].dt.floor('h').dt.strftime('%Y-%m-%d %H:%M:%S')
-        ).drop_duplicates().head())
-        
+        st.dataframe(
+            df_moves_raw[['Home_Team_Norm', 'Away_Team_Norm', 'Game_Start', 'Merge_Key_Short']]
+            .drop_duplicates()
+            .head()
+        )
+
         # === 6. Backtest Scores
         df_bt = fetch_scores_and_backtest(sport_key, df_moves=df_moves_raw, api_key=API_KEY, model=model)
         
