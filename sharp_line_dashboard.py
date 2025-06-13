@@ -1409,7 +1409,8 @@ def render_scanner_tab(label, sport_key, container):
         )
 
         # === 6. Backtest Scores
-        df_bt = fetch_scores_and_backtest(sport_key, df_moves=df_moves_raw, api_key=API_KEY, model=model)
+        df_bt = fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
+
         
 
         
@@ -1746,15 +1747,9 @@ def render_scanner_tab(label, sport_key, container):
         return df_moves
 
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, model=None):
-    import streamlit as st
-
-  
-
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-
-    # === 1. Load sharp picks
     # === 1. Load sharp picks
     if df_moves is not None and not df_moves.empty:
         df = df_moves.copy()
@@ -1762,20 +1757,23 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     else:
         df = read_recent_sharp_moves(hours=72)
         st.info("📡 Loaded sharp picks from BigQuery")
-    
+
     if df.empty or 'Game' not in df.columns:
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         return pd.DataFrame()
-    
+
     # === 2. Normalize + build keys
     df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
     df = df[df['Sport'] == sport_label]
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
     df = build_game_key(df)
-    
-    # === 3. Filter unscored sharp picks
     df = df[df['SHARP_HIT_BOOL'].isna()]
+
+    st.info(f"✅ Eligible sharp picks to score: {len(df)}")
+    
+    df = build_game_key(df)  # ✅ always needed
+    df = df[df['SHARP_HIT_BOOL'].isna()]  # ✅ always needed
     
     # === 4. Fetch completed games from API
     try:
