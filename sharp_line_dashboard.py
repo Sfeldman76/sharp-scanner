@@ -650,8 +650,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df = df_moves.copy()
     st.write(f"📊 Created base df: {df.shape}")
 
-    st.write("🧪 Sharp signals summary:")
-    st.write(df[['Game', 'Market', 'Outcome', 'Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']].groupby(['Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']).size())
 
     df_audit = pd.DataFrame([item for sublist in line_history_log.values() for item in sublist])
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
@@ -969,6 +967,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     st.write(f"🧠 Scored entries with confidence: {len(conf_df)}")
     st.write("⭐ Confidence tier breakdown:")
     st.write(conf_df['Sharp_Confidence_Tier'].value_counts(dropna=False))
+    st.write("🧪 Sharp signals summary:")
+    st.write(df[['Game', 'Market', 'Outcome', 'Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']].groupby(['Sharp_Move_Signal', 'SHARP_SIDE_TO_BET']).size())
+
     if 'st' in globals():
         st.write("🧪 Final Sharp Picks Preview:")
         st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']].sort_values('Enhanced_Sharp_Confidence_Score', ascending=False).head(10))
