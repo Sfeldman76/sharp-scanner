@@ -1102,7 +1102,7 @@ def apply_blended_sharp_score(df, model):
 
     return df
 
-from google.cloud import storage
+
 
 def save_model_to_gcs(model, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
     try:
@@ -1316,20 +1316,12 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
         )
-        # === 3. Detect Sharp Moves
-        with st.expander("🧪 Sharp Detection Debug Log", expanded=False):
-            st.write(f"🟡 Detecting sharp moves for `{label.upper()}` at `{timestamp.strftime('%Y-%m-%d %H:%M:%S')}`")
-            st.write(f"📊 Current odds entries: {len(live)}")
-            st.write(f"📦 Previous odds loaded: {len(prev) if isinstance(prev, dict) else 'Unavailable'}")
-        
+
         df_moves_raw, df_audit, summary_df = detect_sharp_moves(
             live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
         )
         
-        # === Post-detection debugging
-        with st.expander("🧪 Post-Detection Summary", expanded=False):
-            st.write(f"✅ Rows returned from detect_sharp_moves(): `{len(df_moves_raw)}`")
-            
+     
             if not df_moves_raw.empty:
                 if 'Sharp_Move_Signal' in df_moves_raw.columns:
                     st.write("🔍 Sharp Move Signal Breakdown:")
@@ -1338,10 +1330,7 @@ def render_scanner_tab(label, sport_key, container):
         
                 if 'Enhanced_Sharp_Confidence_Score' in df_moves_raw.columns:
                     conf_df = df_moves_raw[df_moves_raw['Enhanced_Sharp_Confidence_Score'].notna()]
-                    st.write(f"🧠 Scored entries with confidence: {len(conf_df)}")
-                    st.write("⭐ Confidence tier breakdown:")
-                    st.dataframe(conf_df['Sharp_Confidence_Tier'].value_counts(dropna=False).reset_index(name="Count"))
-                    st.write("🎯 Top 10 Sharp Picks by Confidence Score:")
+
                     st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker',
                                           'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
                                           'Sharp_Confidence_Tier']].sort_values(
