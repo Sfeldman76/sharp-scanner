@@ -1753,10 +1753,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    st.subheader(f"🔍 Backtest Scoring – {sport_label}")
-    force_backtest = st.sidebar.checkbox("🛠 Force Backtest All Picks", value=False, key=f"force_backtest_{sport_key}")
 
-
+    # === 1. Load sharp picks
     # === 1. Load sharp picks
     if df_moves is not None and not df_moves.empty:
         df = df_moves.copy()
@@ -1764,28 +1762,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     else:
         df = read_recent_sharp_moves(hours=72)
         st.info("📡 Loaded sharp picks from BigQuery")
-
+    
     if df.empty or 'Game' not in df.columns:
         st.warning(f"⚠️ No sharp picks available to score for {sport_label}.")
         return pd.DataFrame()
-
+    
     # === 2. Normalize + build keys
     df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
     df = df[df['Sport'] == sport_label]
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
     df = build_game_key(df)
-
-    # === 3. Filter unscored picks
-    if 'SHARP_HIT_BOOL' in df.columns:
-        df = df[df['SHARP_HIT_BOOL'].isna()]
-
-   
-    if df.empty:
-        st.warning(f"⚠️ No unscored picks remaining for {sport_label}.")
-        return pd.DataFrame()
-
-    # === 4. Fetch completed scores from API
+    
+    # === 3. Filter unscored sharp picks
+    df = df[df['SHARP_HIT_BOOL'].isna()]
+    
+    # === 4. Fetch completed games from API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1794,25 +1786,24 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
         st.subheader("🧪 Raw Scores API Check")
         st.write(f"⚙️ Total games returned: {len(games)}")
-    
         if not games:
             st.error("❌ The Odds API returned 0 games. This will block all scoring.")
             return df
     
-        # Display one raw sample
         st.text("🔎 Sample game JSON:")
-        st.json(games[0] if games else {})
+        st.json(games[0])
     
         completed_games = [g for g in games if g.get("completed") is True]
         st.write(f"✅ Completed games: {len(completed_games)}")
-        
+    
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
         return df
-
-
+    
     # === 5. Build merge keys from scores
     score_rows = []
+    completed_keys = set()
+    
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
@@ -1822,28 +1813,86 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         merge_key = build_merge_key(home, away, game_start)
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
+            completed_keys.add(merge_key)
             score_rows.append({
                 'Merge_Key_Short': merge_key,
                 'Score_Home_Score': scores[home],
                 'Score_Away_Score': scores[away]
             })
     
-    # === ✅ Debug API merge keys after all rows collected
+    # === 6. Filter sharp picks to only completed games
+    df = df[df['Merge_Key_Short'].isin(completed_keys)]
+    st.info(f"✅ Sharp picks matching completed games: {len(df)}")
+    
+    # === 7. Debug API keys
     api_debug = pd.DataFrame(score_rows)
     st.subheader("🧪 Merge Keys from API Scores")
     st.dataframe(api_debug.head(10))
     
-    # Compare to sharp picks
     sharp_keys = df['Merge_Key_Short'].dropna().unique().tolist()
     score_keys = api_debug['Merge_Key_Short'].dropna().unique().tolist()
-    
     overlap = set(sharp_keys) & set(score_keys)
     st.write(f"🔍 Matching Merge Keys: {len(overlap)}")
     st.write(list(overlap)[:5])
+    
+    df_scores = pd.DataFrame(score_rows)
 
+
+   # === 4. Fetch completed games from API
+    try:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
+        response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
+        response.raise_for_status()
+        games = response.json()
+    
+        st.subheader("🧪 Raw Scores API Check")
+        st.write(f"⚙️ Total games returned: {len(games)}")
+        if not games:
+            st.error("❌ The Odds API returned 0 games. This will block all scoring.")
+            return df
+    
+        st.text("🔎 Sample game JSON:")
+        st.json(games[0])
+    
+        completed_games = [g for g in games if g.get("completed") is True]
+        st.write(f"✅ Completed games: {len(completed_games)}")
+    
+    except Exception as e:
+        st.error(f"❌ Failed to fetch scores: {e}")
+        return df
+    
+    # === 5. Build merge keys and score rows
+    score_rows = []
+    completed_keys = set()
+    
+    for game in completed_games:
+        home = normalize_team(game.get("home_team", ""))
+        away = normalize_team(game.get("away_team", ""))
+        game_start = pd.to_datetime(game.get("commence_time"), utc=True)
+        if pd.isna(game_start):
+            continue
+        merge_key = build_merge_key(home, away, game_start)
+        scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
+        if home in scores and away in scores:
+            completed_keys.add(merge_key)
+            score_rows.append({
+                'Merge_Key_Short': merge_key,
+                'Score_Home_Score': scores[home],
+                'Score_Away_Score': scores[away]
+            })
+    
+    # ✅ Define df_scores BEFORE using it
+    df_scores = pd.DataFrame(score_rows)
+    
+    # === 6. Filter sharp picks to only completed games
+    df = df[df['Merge_Key_Short'].isin(completed_keys)]
+    st.info(f"✅ Sharp picks matching completed games: {len(df)}")
+    
+    # === Check if we have any score rows
     if df_scores.empty:
         st.warning("ℹ️ No valid score rows from completed games.")
         return df
+
 
     # === 6. Merge preview
     st.subheader("🔗 Merge Preview: Sharp Picks vs Scores")
