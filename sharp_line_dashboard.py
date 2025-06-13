@@ -164,7 +164,7 @@ def ensure_columns(df, required_cols, fill_value=None):
     return df
 
 
-@st.cache_data(ttl=550)
+@st.cache_data(ttl=180)
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -557,7 +557,7 @@ def detect_cross_market_sharp_support(df_moves):
 
     return df
 
-
+@st.cache_data(ttl=400)
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
     from collections import defaultdict
     import pandas as pd
