@@ -2116,11 +2116,24 @@ tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 with tab_nba:
 
 
-    with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
-        df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
+    with tab_nba:
+        st.subheader("🏀 NBA Sharp Scanner")
+        run_nba = st.checkbox("Run NBA Scanner", value=True, key="run_nba_scanner")
+        if run_nba:
+            with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
+                df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
+        else:
+            st.info("🔄 NBA scanner is paused to reduce load.")
 
 
 with tab_mlb:
    
-    with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
-        df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb)
+    with tab_mlb:
+        st.subheader("⚾ MLB Sharp Scanner")
+        run_mlb = st.checkbox("Run MLB Scanner", value=False, key="run_mlb_scanner")
+        if run_mlb:
+            with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
+                df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb)
+        else:
+            st.info("🔄 MLB scanner is paused to reduce load.")
+    
