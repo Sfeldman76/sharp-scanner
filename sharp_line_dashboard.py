@@ -205,7 +205,7 @@ def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
     df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
-	# Optional: Drop columns BQ may reject if not needed
+    # Optional: Drop columns BQ may reject if not needed
     drop_cols = ['Final_Confidence_Score']  # not used in dashboard
     df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
     
@@ -313,7 +313,7 @@ def write_market_weights_to_bigquery(weights_dict):
     weights_dict = {
         'spreads': {'Sharp_Move_Signal': {'1': 0.55, '2': 0.6}},
         'totals': {'Sharp_Limit_Jump': {'1': 0.57}}
-	}
+    }
 
     for market, components in weights_dict.items():
         for component, values in components.items():
