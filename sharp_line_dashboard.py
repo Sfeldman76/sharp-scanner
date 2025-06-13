@@ -966,8 +966,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     st.write("⭐ Confidence tier breakdown:")
     st.write(conf_df['Sharp_Confidence_Tier'].value_counts(dropna=False))
     if 'st' in globals():
-    st.write("🧪 Final Sharp Picks Preview:")
-    st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']].sort_values('Enhanced_Sharp_Confidence_Score', ascending=False).head(10))
+        st.write("🧪 Final Sharp Picks Preview:")
+        st.dataframe(conf_df[['Game', 'Market', 'Outcome', 'Bookmaker', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier']].sort_values('Enhanced_Sharp_Confidence_Score', ascending=False).head(10))
 
 
     return df, df_history, summary_df
