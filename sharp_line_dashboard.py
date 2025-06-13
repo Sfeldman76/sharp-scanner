@@ -236,7 +236,7 @@ def build_game_key(df):
     df = df.copy()
     df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
     df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
+     df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
     df['Market_Norm'] = df['Market'].str.strip().str.lower()
     df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
     
@@ -1205,6 +1205,10 @@ def render_scanner_tab(label, sport_key, container):
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
             st.warning("⚠️ No sharp signals detected.")
             return pd.DataFrame()
+        # === Add Pre-Game / Post-Game flags for clarity
+        now = pd.Timestamp.utcnow()
+        df_moves_raw['Pre_Game'] = df_moves_raw['Game_Start'] > now
+        df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
 
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
@@ -1259,6 +1263,9 @@ def render_scanner_tab(label, sport_key, container):
 
         # === 6. Backtest Scores
         df_bt = fetch_scores_and_backtest(sport_key, df_moves=df_moves_raw, api_key=API_KEY, model=model)
+        df['Pre_Game'] = df['Game_Start'] > pd.Timestamp.utcnow()
+        df['Post_Game'] = ~df['Pre_Game']
+
         if not df_bt.empty:
             df_bt = build_game_key(df_bt)
             merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
