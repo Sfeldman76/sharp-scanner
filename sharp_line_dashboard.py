@@ -1748,7 +1748,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=1, api_key=API
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
     st.subheader(f"🔍 Backtest Scoring – {sport_label}")
-    force_backtest = st.sidebar.checkbox("🛠 Force Backtest All Picks", value=False)
+    force_backtest = st.sidebar.checkbox("🛠 Force Backtest All Picks", value=False, key=f"force_backtest_{sport_key}")
+
 
     # === 1. Load sharp picks
     if df_moves is not None and not df_moves.empty:
