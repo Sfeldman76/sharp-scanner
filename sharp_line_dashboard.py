@@ -2,6 +2,8 @@ import streamlit as st
 import time
 from streamlit_autorefresh import st_autorefresh
 
+
+
 # === Page Config ===
 st.set_page_config(layout="wide")
 st.title("Sharp Edge Scanner")
@@ -193,8 +195,6 @@ def write_snapshot_to_bigquery(snapshot_list):
 
 
 
-
-import streamlit as st
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
     if df.empty:
