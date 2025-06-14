@@ -1326,7 +1326,7 @@ def render_scanner_tab(label, sport_key, container):
 
         backtest_key = f"scored_{sport_key.lower()}"
         if not st.session_state.get(backtest_key, False):
-            df_bt = fetch_scores_and_backtest(sport_key, df_moves=df_moves_raw, api_key=API_KEY, model=model)
+            df_bt = fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
             st.session_state[backtest_key] = True
             st.success("✅ Backtesting and scoring completed.")
         else:
