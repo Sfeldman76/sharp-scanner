@@ -1695,7 +1695,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
         on='Merge_Key_Short', how='inner'
     )
-    
+    df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
     # ✅ Filter out future games
     now = pd.Timestamp.utcnow()
     df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < now]
