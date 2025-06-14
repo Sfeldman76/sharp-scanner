@@ -1682,35 +1682,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    if df_moves is not None and not df_moves.empty:
-        df = df_moves.copy()
-        st.info("📥 Using in-memory sharp picks")
-    else:
-        @st.cache_data(ttl=300)
-        def read_scored_sharp_picks(hours=72):
-            query = f"""
-                SELECT * FROM `sharp_data.sharp_moves_master`
-                WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
-            """
-            return bq_client.query(query).to_dataframe()
-        df = read_scored_sharp_picks(hours=72)
-
-    if df.empty or 'Game' not in df.columns:
-        st.warning(f"⚠️ No sharp picks to score for {sport_label}")
-        return pd.DataFrame()
-
-    df['Sport'] = df.get('Sport', sport_label).fillna(sport_label)
-    df = df[df['Sport'] == sport_label]
-    df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
-    df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
-    if df['Ref Sharp Value'].isna().all():
-        st.warning("⚠️ No Ref Sharp Value found in sharp picks — cannot score.")
-        return df
-    df = build_game_key(df)
-    df = df[df['SHARP_HIT_BOOL'].isna()]
-    st.info(f"✅ Eligible sharp picks to score: {len(df)}")
-
-    # === 2. Fetch game scores from API
+    # === 1. Fetch completed games from Odds API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1718,11 +1690,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         games = response.json()
     except Exception as e:
         st.error(f"❌ Failed to fetch scores: {e}")
-        return df
+        return pd.DataFrame()
 
     completed_games = [g for g in games if g.get("completed")]
     st.info(f"✅ Completed games: {len(completed_games)}")
 
+    # === 2. Extract score rows
     score_rows = []
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
@@ -1742,101 +1715,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Inserted_Timestamp': pd.Timestamp.utcnow()
             })
 
-    if not score_rows:
-        st.warning("⚠️ No valid score rows from completed games.")
-        return df
-
-    # === Always Save Scores to BigQuery ===
+    # === 3. Save to BigQuery immediately
     try:
         df_game_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
         df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
-    
-        if not df_game_scores.empty:
-            to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-            print(f"✅ Saved {len(df_game_scores)} final game scores to BigQuery.")
-        else:
-            print("ℹ️ No valid scores to upload.")
-    except Exception as e:
-        print(f"❌ Failed to upload game scores: {e}")
-    try:
-        pass#existing = bq_client.query("SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`").to_dataframe()
-        pass#existing_keys = set(existing['Merge_Key_Short'].dropna().unique())
-        pass#df_game_scores = df_game_scores[~df_game_scores['Merge_Key_Short'].isin(existing_keys)]
 
         if not df_game_scores.empty:
             to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-            print(f"✅ Saved {len(df_game_scores)} new final game scores to BigQuery.")
+            st.success(f"✅ Uploaded {len(df_game_scores)} final game scores to BigQuery.")
         else:
-            print("ℹ️ No new completed games to upload.")
+            st.info("ℹ️ No valid game scores to upload.")
     except Exception as e:
-        print(f"❌ Failed to upload game scores: {e}")
+        st.error(f"❌ Failed to upload game scores: {e}")
 
-    # === 4. Merge into sharp picks
-    df_scores = df_game_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
-    df = df[df['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
-    if df.empty:
-        st.warning("⚠️ No sharp picks match completed games after filtering.")
-        return df
-    
-
-
-    df = df.merge(
-        df_scores.rename(columns={
-            "Score_Home_Score": "Score_Home_Score_api",
-            "Score_Away_Score": "Score_Away_Score_api"
-        }),
-        on='Merge_Key_Short', how='left'
-    )
-
-    for col in ['Score_Home_Score', 'Score_Away_Score']:
-        api_col = f"{col}_api"
-        df[col] = pd.to_numeric(df.get(col), errors='coerce')
-        df[api_col] = pd.to_numeric(df.get(api_col), errors='coerce')
-        df[col] = df[col].combine_first(df[api_col])
-        df.drop(columns=[api_col], inplace=True, errors='ignore')
-
-    df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
-    if df_valid.empty:
-        st.warning("ℹ️ No valid picks to score")
-        return df
-
-    def calc_cover(row):
-        try:
-            h, a = float(row['Score_Home_Score']), float(row['Score_Away_Score'])
-            val = float(row['Ref Sharp Value'])
-            market = str(row.get('Market', '')).lower()
-            outcome = str(row.get('Outcome', '')).lower()
-            if market == 'totals':
-                return ['Win', 1] if ('under' in outcome and h + a < val) or ('over' in outcome and h + a > val) else ['Loss', 0]
-            if market == 'spreads':
-                margin = h - a if row['Home_Team_Norm'] in outcome else a - h
-                hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
-                return ['Win', 1] if hit else ['Loss', 0]
-            if market == 'h2h':
-                return ['Win', 1] if ((row['Home_Team_Norm'] in outcome and h > a) or
-                                      (row['Away_Team_Norm'] in outcome and a > h)) else ['Loss', 0]
-            return [None, 0]
-        except:
-            return [None, 0]
-
-    result = df_valid.apply(calc_cover, axis=1, result_type='expand')
-    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
-    df['SHARP_COVER_RESULT'] = None
-    df['SHARP_HIT_BOOL'] = None
-    df['Scored'] = False
-    df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
-    df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
-
-    st.success(f"✅ Scoring complete. Hits: {df['SHARP_HIT_BOOL'].sum()}, Scored: {df['Scored'].sum()}")
-
-    if model is not None:
-        try:
-            df = apply_blended_sharp_score(df, model)
-            st.success("✅ Applied model scoring to backtested data")
-        except Exception as e:
-            st.warning(f"⚠️ Model scoring failed: {e}")
-
-    return df
+    # === Return raw DataFrame for chaining if needed
+    return pd.DataFrame(score_rows)
     
     
 # Safe predefinition
