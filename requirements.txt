@@ -16,3 +16,4 @@ google-cloud-bigquery
 pandas-gbq
 google-cloud-storage
 pyarrow
+google-cloud-bigquery-storage
