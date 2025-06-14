@@ -249,51 +249,36 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         print(f"❌ Failed to upload snapshot to GCS: {e}")
 
-def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
-    """
-    Smart dispatcher that handles writes to BigQuery for both master and scores tables.
-    Cleans columns, aligns schema, and applies safe writes.
-    """
+def write_to_bigquery(df, table='sharp_data.sharp_scores_full'):
     from pandas_gbq import to_gbq
 
     if df.empty:
-        st.info(f"ℹ️ No data to write to BigQuery ({table})")
+        st.info("ℹ️ No data to write to BigQuery.")
         return
 
     df = df.copy()
     df.columns = [col.replace(" ", "_") for col in df.columns]
 
-    # Always timestamp
-    df["Snapshot_Timestamp"] = pd.Timestamp.utcnow()
-
-    # Normalize field naming
-    if 'Ref_Sharp_Value' not in df.columns and 'Ref Sharp Value' in df.columns:
-        df.rename(columns={'Ref Sharp Value': 'Ref_Sharp_Value'}, inplace=True)
-
-    df = df.rename(columns=lambda x: x.rstrip('_x'))
-    df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
-
-    # Fill scoring flags if missing
-    for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
-        if col not in df.columns:
-            df[col] = None
-
-    # Type enforcement for score fields
-    for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Drop unapproved fields (BigQuery strict schema match)
+    allowed_cols = {
+        'sharp_data.sharp_scores_full': [
+            'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+            'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+            'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+            'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp'
+        ],
+        'sharp_data.sharp_moves_master': None  # Add allowed list here if needed
+    }
+    if table in allowed_cols and allowed_cols[table] is not None:
+        df = df[[col for col in df.columns if col in allowed_cols[table]]]
 
     try:
-        to_gbq(
-            df,
-            destination_table=table,
-            project_id=GCP_PROJECT_ID,
-            if_exists='replace' if force_replace else 'append'
-        )
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
         st.success(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         st.error(f"❌ Failed to upload to {table}: {e}")
-        
         
 def build_game_key(df):
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
@@ -1691,7 +1676,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
-    # === 1. Load sharp picks
     if df_moves is not None and not df_moves.empty:
         df = df_moves.copy()
         st.info("📥 Using in-memory sharp picks")
@@ -1703,7 +1687,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
             """
             return bq_client.query(query).to_dataframe()
-
         df = read_scored_sharp_picks(hours=72)
 
     if df.empty or 'Game' not in df.columns:
@@ -1718,7 +1701,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df = df[df['SHARP_HIT_BOOL'].isna()]
     st.info(f"✅ Eligible sharp picks to score: {len(df)}")
 
-    # === 2. Fetch game scores from Odds API
+    # === 2. Fetch game scores from API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1754,24 +1737,47 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.warning("⚠️ No valid score rows from completed games.")
         return df
 
-    df_game_scores = pd.DataFrame(score_rows)
+    # === 3. Save scores to BigQuery (de-dupe on Merge_Key_Short)
+    df_game_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
     df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
 
     try:
-        to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-        st.success(f"✅ Saved {len(df_game_scores)} game scores to BigQuery.")
-    except Exception as e:
-        st.warning(f"❌ Failed to upload game scores: {e}")
+        existing = bq_client.query("SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`").to_dataframe()
+        existing_keys = set(existing['Merge_Key_Short'].dropna().unique())
+        df_game_scores = df_game_scores[~df_game_scores['Merge_Key_Short'].isin(existing_keys)]
 
-    completed_keys = set(df_game_scores['Merge_Key_Short'].unique())
-    df = df[df['Merge_Key_Short'].isin(completed_keys)]
+        if not df_game_scores.empty:
+            to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+            print(f"✅ Saved {len(df_game_scores)} new final game scores to BigQuery.")
+        else:
+            print("ℹ️ No new completed games to upload.")
+    except Exception as e:
+        print(f"❌ Failed to upload game scores: {e}")
+
+    # === 4. Merge into sharp picks
+    df_scores = df_game_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
+    df = df[df['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
+
     st.info(f"✅ Sharp picks matching completed games: {len(df)}")
 
-    # === 3. Join Scores
-    df_scores = df_game_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
-    df = df.merge(df_scores, on='Merge_Key_Short', how='left')
+    if df.empty:
+        return df
 
-    # === 4. Score sharp picks
+    df = df.merge(
+        df_scores.rename(columns={
+            "Score_Home_Score": "Score_Home_Score_api",
+            "Score_Away_Score": "Score_Away_Score_api"
+        }),
+        on='Merge_Key_Short', how='left'
+    )
+
+    for col in ['Score_Home_Score', 'Score_Away_Score']:
+        api_col = f"{col}_api"
+        df[col] = pd.to_numeric(df.get(col), errors='coerce')
+        df[api_col] = pd.to_numeric(df.get(api_col), errors='coerce')
+        df[col] = df[col].combine_first(df[api_col])
+        df.drop(columns=[api_col], inplace=True, errors='ignore')
+
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
     if df_valid.empty:
         st.warning("ℹ️ No valid picks to score")
@@ -1806,7 +1812,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     st.success(f"✅ Scoring complete. Hits: {df['SHARP_HIT_BOOL'].sum()}, Scored: {df['Scored'].sum()}")
 
-    # === 5. Optional: model scoring
     if model is not None:
         try:
             df = apply_blended_sharp_score(df, model)
@@ -1815,7 +1820,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             st.warning(f"⚠️ Model scoring failed: {e}")
 
     return df
-
+    
+    
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
