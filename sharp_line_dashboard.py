@@ -1399,7 +1399,11 @@ def render_scanner_tab(label, sport_key, container):
                 df_scores_full['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
             
                 # ✅ Write to BigQuery
-                to_gbq(df_scores_full, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
+                try:
+                    to_gbq(df_scores_full, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
+                    st.success(f"✅ Logged {len(df_scores_full)} completed sharp scores.")
+                except Exception as e:
+                    st.error(f"❌ Failed to write sharp_scores_full: {e}")
                 st.success(f"✅ Logged {len(df_scores_full)} completed sharp scores.")
             else:
                 st.info("ℹ️ No completed games to log.")
@@ -1967,27 +1971,35 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
-# === Toggle to select one sport at a time
-selected_sport = st.selectbox("Select Sport to Analyze", ["NBA", "MLB"])
+# --- NBA Tab Block
+with tab_nba:
+    st.subheader("🏀 NBA Sharp Scanner")
+    run_nba = st.checkbox("Run NBA Scanner", value=True, key="run_nba_scanner")
 
-if selected_sport == "NBA":
-    scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
-    with scan_tab:
-        st.subheader("🏀 NBA Sharp Scanner")
-        run_nba = st.checkbox("Run NBA Scanner", value=True, key="run_nba_scanner")
-        if run_nba:
-            df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], scan_tab)
+    if run_nba:
+        if st.session_state.get("run_mlb_scanner"):
+            st.warning("⚠️ Please disable MLB scanner to run NBA.")
+        else:
+            scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
+            with scan_tab:
+                df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], scan_tab)
+            with analysis_tab:
+                render_sharp_signal_analysis_tab(analysis_tab, "NBA", SPORTS["NBA"])
 
-    with analysis_tab:
-        render_sharp_signal_analysis_tab(analysis_tab, "NBA", SPORTS["NBA"])
+# --- MLB Tab Block
+with tab_mlb:
+    st.subheader("⚾ MLB Sharp Scanner")
+    run_mlb = st.checkbox("Run MLB Scanner", value=False, key="run_mlb_scanner")
 
-elif selected_sport == "MLB":
-    scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
-    with scan_tab:
-        st.subheader("⚾ MLB Sharp Scanner")
-        run_mlb = st.checkbox("Run MLB Scanner", value=False, key="run_mlb_scanner")
-        if run_mlb:
-            df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], scan_tab)
+    if run_mlb:
+        if st.session_state.get("run_nba_scanner"):
+            st.warning("⚠️ Please disable NBA scanner to run MLB.")
+        else:
+            scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
+            with scan_tab:
+                df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], scan_tab)
+            with analysis_tab:
+                render_sharp_signal_analysis_tab(analysis_tab, "MLB", SPORTS["MLB"])
 
-    with analysis_tab:
-        render_sharp_signal_analysis_tab(analysis_tab, "MLB", SPORTS["MLB"])
+
+        
