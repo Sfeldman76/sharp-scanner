@@ -1692,9 +1692,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
         on='Merge_Key_Short', how='left'
     )
-
-    df['Ref_Sharp_Value'] = df.get('Ref_Sharp_Value').combine_first(df.get('Value'))
-
+    if 'Ref_Sharp_Value' not in df.columns:
+        df['Ref_Sharp_Value'] = df.get('Value')
+    else:
+        df['Ref_Sharp_Value'] = df['Ref_Sharp_Value'].combine_first(df.get('Value'))
+    
     # === 5. Scoring logic
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
     if df_valid.empty:
