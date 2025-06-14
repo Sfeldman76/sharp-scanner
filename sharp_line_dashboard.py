@@ -250,34 +250,6 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
         print(f"❌ Failed to upload snapshot to GCS: {e}")
 
 
-def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
-    if df.empty:
-        st.warning(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
-        return
-
-    df = df.copy()
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-
-    if 'Time' in df.columns:
-        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
-    # Optional: Drop columns BQ may reject if not needed
-    drop_cols = ['Final_Confidence_Score']  # not used in dashboard
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
-    
-    # Coerce types
-    df = df.astype({k: 'float' for k in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob'] if k in df.columns})
-    df = df.rename(columns=lambda x: x.rstrip('_x'))
-    df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
-
-    for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
-        if col not in df.columns:
-            df[col] = None
-
-    # Only show error if failed
-    if not safe_to_gbq(df, table, replace=force_replace):
-        st.error(f"❌ BigQuery upload failed for {table}")
-    
 
         
 def build_game_key(df):
@@ -371,12 +343,6 @@ def read_latest_snapshot_from_bigquery(hours=2):
 def write_market_weights_to_bigquery(weights_dict):
     rows = []
 
-    # Example fallback — remove or keep for testing purposes only
-    weights_dict = {
-        'spreads': {'Sharp_Move_Signal': {'1': 0.55, '2': 0.6}},
-        'totals': {'Sharp_Limit_Jump': {'1': 0.57}}
-    }
-
     for market, components in weights_dict.items():
         for component, values in components.items():
             for val_key, win_rate in values.items():
@@ -398,8 +364,9 @@ def write_market_weights_to_bigquery(weights_dict):
         print(f"❌ Failed to upload market weights to {MARKET_WEIGHTS_TABLE}")
     else:
         print(f"✅ Uploaded {len(df)} market weight rows to {MARKET_WEIGHTS_TABLE}")
-
-
+        
+        
+        
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
         print("⚠️ No line history data to upload.")
@@ -1138,82 +1105,44 @@ def load_model_from_gcs(bucket_name="sharp-models", filename="sharp_win_model.pk
     except Exception as e:
         print(f"❌ Failed to load model from GCS: {e}")
         return None
-
-
-
-def train_sharp_win_model(df):
-    st.subheader("🔍 Sharp Model Training Debug")
-    st.write(f"Total rows in df: {len(df)}")
-
-    # === Build final confidence score from available columns
-    if 'Enhanced_Sharp_Confidence_Score' not in df.columns and 'True_Sharp_Confidence_Score' not in df.columns:
-        st.error("❌ No confidence columns available for training.")
-        return None
-
-    df['Final_Confidence_Score'] = df.get('Enhanced_Sharp_Confidence_Score')
-    if 'True_Sharp_Confidence_Score' in df.columns:
-        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
-
-    # === Filter training set: only rows with score and result
-    df_filtered = df[
-        df['Final_Confidence_Score'].notna() &
-        df['SHARP_HIT_BOOL'].notna()
-    ].copy()
-
-    st.write("📊 Rows with SHARP_HIT_BOOL:", df_filtered['SHARP_HIT_BOOL'].notna().sum())
-    st.write("📊 Rows with confidence:", df_filtered['Final_Confidence_Score'].notna().sum())
-    st.write("📊 Rows passing both filters:", len(df_filtered))
-
-    if df_filtered.empty or len(df_filtered) < 5:
-        st.warning("⚠️ Not enough rows to train model.")
-        return None
-
-    # === Prepare features and labels
-    df_filtered['Final_Confidence_Score'] = df_filtered['Final_Confidence_Score'] / 100
-    df_filtered['Final_Confidence_Score'] = df_filtered['Final_Confidence_Score'].clip(0, 1)
-    df_filtered['target'] = df_filtered['SHARP_HIT_BOOL'].astype(int)
-
-    feature_cols = ['Final_Confidence_Score']
-    if 'CrossMarketSharpSupport' in df_filtered.columns:
-        feature_cols.append('CrossMarketSharpSupport')
-
-    df_filtered = df_filtered.dropna(subset=feature_cols)
-
-    X = df_filtered[feature_cols].astype(float)
-    y = df_filtered['target']
-
-    from xgboost import XGBClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import roc_auc_score
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
-
-    model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
-    model.fit(X_train, y_train)
-
-    y_pred_proba = model.predict_proba(X_test)[:, 1]
-    auc = roc_auc_score(y_test, y_pred_proba)
-    st.success(f"✅ Trained Sharp Win Model — AUC: {auc:.3f} on {len(df_filtered)} samples")
-
-    return model
-def train_and_upload_initial_model(df_master, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
+@st.cache_data(ttl=300)
+def fetch_scored_picks_from_bigquery(limit=5000):
+    query = f"""
+        SELECT *
+        FROM `sharp_data.sharp_scores_full`
+        WHERE SHARP_HIT_BOOL IS NOT NULL
+        ORDER BY Snapshot_Timestamp DESC
+        LIMIT {limit}
+    """
+    try:
+        df = bq_client.query(query).to_dataframe()
+        df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"❌ Failed to fetch scored picks: {e}")
+        return pd.DataFrame()
+        
+def train_and_upload_initial_model(df=None, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
     from xgboost import XGBClassifier
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import roc_auc_score
     from io import BytesIO
 
-    # === Step 1: Filter labeled data
-    df = df_master.copy()
-    if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
-        st.error("❌ Missing Enhanced_Sharp_Confidence_Score.")
+    # === Step 1: Load if not passed
+    if df is None or df.empty:
+        df = fetch_scored_picks_from_bigquery()
+
+    if df.empty:
+        st.warning("⚠️ No data found for model training.")
         return None
 
-    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
+    # === Step 2: Build features
+    df['Final_Confidence_Score'] = df.get('Enhanced_Sharp_Confidence_Score')
     if 'True_Sharp_Confidence_Score' in df.columns:
         df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
-    df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()]
-    if df.empty or len(df) < 5:
+    df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()].copy()
+    if len(df) < 5:
         st.warning("⚠️ Not enough labeled data to train a model.")
         return None
 
@@ -1227,13 +1156,9 @@ def train_and_upload_initial_model(df_master, bucket_name="sharp-models", filena
 
     df = df.dropna(subset=feature_cols)
     X = df[feature_cols].astype(float)
-    y = df['target'].astype(int)
+    y = df['target']
 
-    if len(df) < 5:
-        st.warning("⚠️ Not enough samples to train a model.")
-        return None
-
-    # === Step 2: Train model
+    # === Step 3: Train model
     X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     model.fit(X_train, y_train)
@@ -1241,7 +1166,7 @@ def train_and_upload_initial_model(df_master, bucket_name="sharp-models", filena
     auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
     st.success(f"✅ Trained model AUC: {auc:.3f} on {len(df)} samples")
 
-    # === Step 3: Upload to GCS
+    # === Step 4: Upload model
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
@@ -1255,6 +1180,7 @@ def train_and_upload_initial_model(df_master, bucket_name="sharp-models", filena
         return None
 
     return model
+
 
 
 def render_scanner_tab(label, sport_key, container):
@@ -1430,7 +1356,27 @@ def render_scanner_tab(label, sport_key, container):
                 df_bt = apply_blended_sharp_score(df_bt, model)
             except Exception as e:
                 st.warning(f"⚠️ Scoring backtest failed: {e}")
-        
+            # ✅ Filter to only completed, scored picks
+            scored_rows = df_bt[df_bt['SHARP_HIT_BOOL'].notna()].copy()
+            
+            if not scored_rows.empty:
+                scoring_fields = [
+                    'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref Sharp Value',
+                    'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+                    'Sharp_Time_Score', 'Sharp_Limit_Total',
+                    'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
+                    'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+                    'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
+                ]
+                scored_rows = ensure_columns(scored_rows, scoring_fields)
+                df_scores_full = scored_rows[scoring_fields].copy()
+                df_scores_full['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+            
+                # ✅ Write to BigQuery
+                to_gbq(df_scores_full, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
+                st.success(f"✅ Logged {len(df_scores_full)} completed sharp scores.")
+            else:
+                st.info("ℹ️ No completed games to log.")
             # === Optional Retraining
             if 'Enhanced_Sharp_Confidence_Score' in df_bt.columns:
                 trainable = df_bt[
@@ -1742,9 +1688,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df = df_moves.copy()
         print("📥 Using in-memory sharp picks")
     else:
-        df = read_recent_sharp_moves(hours=72)
-        print("📡 Loaded sharp picks from BigQuery")
-
+        @st.cache_data(ttl=300)
+        def read_scored_sharp_picks(hours=72):
+            query = f"""
+                SELECT * FROM `sharp_data.sharp_scores_full`
+                WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+            """
+            return bq_client.query(query).to_dataframe()
+        
+df = read_scored_sharp_picks(hours=72)
     if df.empty or 'Game' not in df.columns:
         print(f"⚠️ No sharp picks to score for {sport_label}")
         return pd.DataFrame()
@@ -1916,125 +1868,74 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.warning("ℹ️ No completed sharp picks available for analysis.")
             return
 
-        # === 6. Signal Leaderboard
-        st.subheader(f"🏆 Top Sharp Signal Performers by Market ({sport_label})")
-        leaderboard_rows = []
-        for comp in component_fields:
-            if comp in scored.columns:
-                group = (
-                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                    .agg(['count', 'mean'])
-                    .reset_index()
-                    .rename(columns={
-                        'count': 'Signal_Count',
-                        'mean': 'Win_Rate',
-                        comp: 'Component_Value'
-                    })
-                )
-                group['Component'] = comp
-                leaderboard_rows.append(group)
-
-        if leaderboard_rows:
-            leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
-            leaderboard_df = leaderboard_df[[
-                'Market', 'Component', 'Component_Value', 'Signal_Count', 'Win_Rate'
-            ]].sort_values(by='Win_Rate', ascending=False)
-
-            st.dataframe(leaderboard_df.head(50))
-        else:
-            st.info("ℹ️ No signal components available to summarize.")
-
-        # === 7. Confidence Tier Summary
-        st.subheader(f"📊 Confidence Tier Performance by Market")
-        df_market_tier_summary = (
-            scored
-            .groupby(['Market', 'SharpConfidenceTier'])
-            .agg(
-                Total_Picks=('SHARP_HIT_BOOL', 'count'),
-                Hits=('SHARP_HIT_BOOL', 'sum'),
-                Win_Rate=('SHARP_HIT_BOOL', 'mean')
-            )
-            .reset_index()
-            .round(3)
-        )
-        if not df_market_tier_summary.empty:
-            st.dataframe(df_market_tier_summary)
-        else:
-            st.info("ℹ️ No market-tier breakdown available.")
-
-        # === 8. Learn Market Weights (to be saved to BigQuery)
-        st.subheader("🧠 Sharp Component Learning by Market")
-        market_component_win_rates_sport = {}
-        for comp in component_fields:
-            if comp in scored.columns:
-                result = (
-                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                    .mean()
-                    .reset_index()
-                    .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
-                    .sort_values(by=['Market', comp])
-                )
-                st.markdown(f"**📊 {comp} by Market**")
-                st.dataframe(result)
-
-                for _, row in result.iterrows():
-                    market = str(row['Market']).lower()
-                    val = row[comp]
-                    win_rate = max(0.5, row['Win_Rate'])  # clamp floor
-
-                    # Normalize key
-                    if pd.isna(val):
-                        continue
-                    elif isinstance(val, bool):
-                        val_key = str(val).lower()
-                    elif isinstance(val, float) and val.is_integer():
-                        val_key = str(int(val))
-                    else:
-                        val_key = str(val).lower()
-
-                    market_component_win_rates_sport \
-                        .setdefault(market, {}) \
-                        .setdefault(comp, {})[val_key] = win_rate
-
-        # === 9. Save learned weights
-        if market_component_win_rates_sport:
-            try:
-                all_weights = globals().get("market_component_win_rates", {})
-                all_weights[sport_key_lower] = market_component_win_rates_sport
-                globals()["market_component_win_rates"] = all_weights
-
-                write_market_weights_to_bigquery(all_weights)
-                st.success(f"✅ Saved learned weights for {sport_label} to BigQuery")
-            except Exception as e:
-                st.error(f"❌ Failed to save weights: {e}")
-        else:
-            st.info("ℹ️ No weight data generated.")
-
+        # === 6. Simple Summary: Bet Score vs Win Rate
+        st.subheader(f"📈 Bet Score vs Win Rate – {sport_label}")
         
+        if 'Enhanced_Sharp_Confidence_Score' in scored.columns:
+            # Round to nearest 5 for bucketing
+            scored['Score_Bin'] = (
+                scored['Enhanced_Sharp_Confidence_Score']
+                .apply(lambda x: round(x / 5) * 5)
+                .clip(lower=0, upper=100)
+            )
+        
+            score_summary = (
+                scored.groupby('Score_Bin')['SHARP_HIT_BOOL']
+                .agg(['count', 'sum', 'mean'])
+                .reset_index()
+                .rename(columns={
+                    'Score_Bin': 'Enhanced_Score_Bin',
+                    'count': 'Picks',
+                    'sum': 'Wins',
+                    'mean': 'Win_Rate'
+                })
+                .round({'Win_Rate': 3})
+            )
+        
+            st.dataframe(score_summary)
+        else:
+            st.info("ℹ️ No Enhanced_Sharp_Confidence_Score available.")
+        
+        # === 9. Upload button to write learned weights
+        if market_component_win_rates_sport:
+            all_weights = globals().get("market_component_win_rates", {})
+            all_weights[sport_key_lower] = market_component_win_rates_sport
+            globals()["market_component_win_rates"] = all_weights
+        
+            if st.button("📤 Upload Learned Market Weights"):
+                try:
+                    write_market_weights_to_bigquery(all_weights)
+                    st.success(f"✅ Uploaded weights for {sport_label} to BigQuery")
+                except Exception as e:
+                    st.error(f"❌ Upload failed: {e}")
+        else:
+            st.info("ℹ️ No learned market weights to upload.")
+        
+        
+
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
+# --- NBA Tabs
 with tab_nba:
-
-
-    with tab_nba:
+    scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
+    with scan_tab:
         st.subheader("🏀 NBA Sharp Scanner")
         run_nba = st.checkbox("Run NBA Scanner", value=True, key="run_nba_scanner")
         if run_nba:
-            with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
-                df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], tab_nba)
-        else:
-            st.info("🔄 NBA scanner is paused to reduce load.")
+            df_nba_live = render_scanner_tab("NBA", SPORTS["NBA"], scan_tab)
 
+    with analysis_tab:
+        render_sharp_signal_analysis_tab(analysis_tab, "NBA", SPORTS["NBA"])
 
+# --- MLB Tabs
 with tab_mlb:
-   
-    with tab_mlb:
+    scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
+    with scan_tab:
         st.subheader("⚾ MLB Sharp Scanner")
         run_mlb = st.checkbox("Run MLB Scanner", value=False, key="run_mlb_scanner")
         if run_mlb:
-            with st.expander("📊 Real-Time Sharp Scanner", expanded=True):
-                df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], tab_mlb)
-        else:
-            st.info("🔄 MLB scanner is paused to reduce load.")
-    
+            df_mlb_live = render_scanner_tab("MLB", SPORTS["MLB"], scan_tab)
+
+    with analysis_tab:
+        render_sharp_signal_analysis_tab(analysis_tab, "MLB", SPORTS["MLB"])
