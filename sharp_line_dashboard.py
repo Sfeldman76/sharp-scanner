@@ -1696,7 +1696,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             """
             return bq_client.query(query).to_dataframe()
         
-df = read_scored_sharp_picks(hours=72)
+        df = read_scored_sharp_picks(hours=72)
     if df.empty or 'Game' not in df.columns:
         print(f"⚠️ No sharp picks to score for {sport_label}")
         return pd.DataFrame()
@@ -1895,7 +1895,32 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.dataframe(score_summary)
         else:
             st.info("ℹ️ No Enhanced_Sharp_Confidence_Score available.")
-        
+        # Add this block to compute the learned market weights
+        market_component_win_rates_sport = {}
+        for comp in component_fields:
+            if comp in scored.columns:
+                result = (
+                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
+                    .mean()
+                    .reset_index()
+                    .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
+                    .sort_values(by=['Market', comp])
+                )
+                for _, row in result.iterrows():
+                    market = str(row['Market']).lower()
+                    val = row[comp]
+                    win_rate = max(0.5, row['Win_Rate'])  # clamp floor
+                    if pd.isna(val):
+                        continue
+                    elif isinstance(val, bool):
+                        val_key = str(val).lower()
+                    elif isinstance(val, float) and val.is_integer():
+                        val_key = str(int(val))
+                    else:
+                        val_key = str(val).lower()
+                    market_component_win_rates_sport \
+                        .setdefault(market, {}) \
+                        .setdefault(comp, {})[val_key] = win_rate
         # === 9. Upload button to write learned weights
         if market_component_win_rates_sport:
             all_weights = globals().get("market_component_win_rates", {})
