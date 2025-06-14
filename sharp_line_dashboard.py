@@ -1808,7 +1808,35 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             st.success(f"📤 Uploaded {len(scored_rows)} scored picks to sharp_scores_full.")
         except Exception as e:
             st.error(f"❌ Failed to upload scored picks: {e}")
-
+    # ✅ Write updated scored picks to sharp_scores_full and update sharp_moves_master
+    try:
+        scored_subset = df[df['Scored'] == True].copy()
+        if not scored_subset.empty:
+            score_cols = [
+                'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+                'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+                'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+                'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+                'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+                'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
+            ]
+            scored_subset = scored_subset[score_cols + ['Snapshot_Timestamp']] \
+                if 'Snapshot_Timestamp' in df.columns else scored_subset[score_cols]
+            write_to_bigquery(scored_subset, table='sharp_data.sharp_scores_full')
+    
+            # Also update master table rows
+            df_master = read_recent_sharp_moves(hours=168)
+            df_master = build_game_key(df_master)
+            scored_subset = build_game_key(scored_subset)
+    
+            df_master.set_index(['Game_Key', 'Bookmaker'], inplace=True)
+            scored_subset.set_index(['Game_Key', 'Bookmaker'], inplace=True)
+            df_master.update(scored_subset[['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']])
+            df_master.reset_index(inplace=True)
+            write_to_bigquery(df_master, table='sharp_data.sharp_moves_master')
+            st.success(f"✅ Backtest results pushed to BigQuery for {len(scored_subset)} rows")
+    except Exception as e:
+        st.error(f"❌ Failed to write scored picks to BigQuery: {e}")
     return df
     
 # Safe predefinition
