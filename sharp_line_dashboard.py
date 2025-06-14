@@ -376,8 +376,12 @@ def write_market_weights_to_bigquery(weights_dict):
         for component, values in components.items():
             for val_key, win_rate in values.items():
                 try:
+                    # NEW: Unwrap nested dicts
+                    if isinstance(win_rate, dict) and 'value' in win_rate:
+                        win_rate = win_rate['value']
                     if isinstance(win_rate, dict):
-                        raise ValueError("Nested dict found instead of float.")
+                        raise ValueError("Nested dict still present")
+
                     rows.append({
                         'Market': market,
                         'Component': component,
@@ -393,13 +397,13 @@ def write_market_weights_to_bigquery(weights_dict):
 
     df = pd.DataFrame(rows)
     print(f"✅ Prepared {len(df)} rows for upload to market_weights.")
-
-    # Write to BigQuery
+    
     try:
         to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
         print(f"✅ Uploaded to {MARKET_WEIGHTS_TABLE}")
     except Exception as e:
         print(f"❌ Upload failed: {e}")
+        
         
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
@@ -1751,13 +1755,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
 
-    if model is not None:
-        try:
-            df = apply_blended_sharp_score(df, model)
-            st.success("✅ Applied model scoring")
-        except Exception as e:
-            st.warning(f"⚠️ Model scoring failed: {e}")
-    
     # === 7. Final upload to sharp_scores_full
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
@@ -1767,31 +1764,56 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
     ]
     
-    # === Clean score fields (if present)
+    # ✅ Sanitize & deduplicate raw score rows
+    df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
+    df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
+    
+    # ✅ Convert score fields to numeric (safe for upload)
+    df_scores['Score_Home_Score'] = pd.to_numeric(df_scores['Score_Home_Score'], errors='coerce')
+    df_scores['Score_Away_Score'] = pd.to_numeric(df_scores['Score_Away_Score'], errors='coerce')
+    
+    # ✅ Also ensure the merged `df` (with picks) has valid types
     df['Score_Home_Score'] = pd.to_numeric(df.get('Score_Home_Score'), errors='coerce')
     df['Score_Away_Score'] = pd.to_numeric(df.get('Score_Away_Score'), errors='coerce')
     df = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
     
-    # === Build output
+    # ✅ Build final output for upload
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     
-    # === Validate Parquet schema
+    # ✅ Validate Parquet schema before upload
     import pyarrow as pa
     try:
-        pa.Table.from_pandas(df_scores_out)  # ✅ validate correct DF
+        pa.Table.from_pandas(df_scores_out)
     except Exception as e:
         st.error(f"❌ Parquet conversion failed: {e}")
         st.code(df_scores_out.dtypes.to_string())
         st.stop()
     
-    # === Upload to BigQuery
+    # ✅ Remove unchanged rows (deduplicate before write)
+    key_cols = [
+        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score',
+        'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket', 'Market_Leader',
+        'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score'
+    ]
+    df_scores_out = df_scores_out.sort_values('Snapshot_Timestamp')
+    df_scores_out = df_scores_out.drop_duplicates(subset=key_cols, keep='last')
+    
+    if df_scores_out.empty:
+        st.info("ℹ️ No changed sharp scores to upload.")
+        return pd.DataFrame()
+    
+    # ✅ Upload to BigQuery
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
         st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
     except Exception as e:
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
-    return df_scores_out
+
+  
+      return df_scores_out
     
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
