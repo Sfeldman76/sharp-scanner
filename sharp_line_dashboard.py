@@ -1743,6 +1743,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
 
+    if model is not None:
+        try:
+            df = apply_blended_sharp_score(df, model)
+            st.success("✅ Applied model scoring")
+        except Exception as e:
+            st.warning(f"⚠️ Model scoring failed: {e}")
+    
     # === 7. Final upload to sharp_scores_full
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
@@ -1751,15 +1758,31 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'LimitUp_NoMove_Flag', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
     ]
+    
+    # === Clean score fields (if present)
+    df['Score_Home_Score'] = pd.to_numeric(df.get('Score_Home_Score'), errors='coerce')
+    df['Score_Away_Score'] = pd.to_numeric(df.get('Score_Away_Score'), errors='coerce')
+    df = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
+    
+    # === Build output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-
+    
+    # === Validate Parquet schema
+    import pyarrow as pa
+    try:
+        pa.Table.from_pandas(df_scores_out)  # ✅ validate correct DF
+    except Exception as e:
+        st.error(f"❌ Parquet conversion failed: {e}")
+        st.code(df_scores_out.dtypes.to_string())
+        st.stop()
+    
+    # === Upload to BigQuery
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
         st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
     except Exception as e:
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
-
     return df_scores_out
     
 # Safe predefinition
