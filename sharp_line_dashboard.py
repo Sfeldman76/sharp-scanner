@@ -1688,10 +1688,19 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     valid_keys = set(df_scores['Merge_Key_Short'].dropna().unique())
     df_master = df_master[df_master['Merge_Key_Short'].isin(valid_keys)]
 
+  
+    
+    df_master = ensure_columns(df_master, ['Game_Start'])
     df = df_master.merge(
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
-        on='Merge_Key_Short', how='left'
+        on='Merge_Key_Short', how='inner'
     )
+    
+    # ✅ Filter out future games
+    now = pd.Timestamp.utcnow()
+    df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < now]
+    
+    
     if 'Ref_Sharp_Value' not in df.columns:
         df['Ref_Sharp_Value'] = df.get('Value')
     else:
