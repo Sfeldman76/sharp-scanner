@@ -1715,9 +1715,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Inserted_Timestamp': pd.Timestamp.utcnow()
             })
 
-if not score_rows:
-    st.warning("⚠️ No valid score rows from completed games.")
-    return df
+    if not score_rows:
+        st.warning("⚠️ No valid score rows from completed games.")
+        return df
 
     # === 3. Construct DataFrame and validate
     df_game_scores = pd.DataFrame(score_rows)
