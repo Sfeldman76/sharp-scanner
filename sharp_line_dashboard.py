@@ -1654,7 +1654,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
     df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
-
+	# === Debug Print of Raw Scores ===
+    st.subheader(f"🧪 Raw Scores Debug – {sport_label}")
+    st.write(df_scores.head(10))
+    st.code(df_scores.dtypes.to_string())
+    
+    # Check for mixed types or object fields
+    for col in df_scores.columns:
+        unique_types = df_scores[col].dropna().map(type).unique()
+        st.write(f"🔍 {col}: {unique_types}")
     # === 3. Upload to game_scores_final (deduping)
     try:
         existing_keys = bq_client.query("""
