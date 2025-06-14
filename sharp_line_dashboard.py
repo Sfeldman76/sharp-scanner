@@ -88,6 +88,9 @@ from pandas_gbq import to_gbq
 import pandas as pd
 import google.api_core.exceptions
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
 BQ_TABLE = "sharp_moves_master" # ✅ your table name
@@ -201,7 +204,12 @@ def safe_to_gbq(df, table, replace=False):
             print(f"❌ Retry {attempt + 1}/3 failed: {e}")
     return False
 
-def write_snapshot_to_bigquery(snapshot_list):
+
+from google.cloud import storage
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
     rows = []
     snapshot_time = pd.Timestamp.utcnow()
 
@@ -230,15 +238,19 @@ def write_snapshot_to_bigquery(snapshot_list):
         print("⚠️ No snapshot data to upload.")
         return
 
-    if 'Time' in df_snap.columns:
-        df_snap['Time'] = pd.to_datetime(df_snap['Time'], errors='coerce', utc=True)
+    filename = f"{folder}{snapshot_time.strftime('%Y%m%d_%H%M%S')}_snapshot.parquet"
+    table = pa.Table.from_pandas(df_snap)
+    buffer = BytesIO()
+    pq.write_table(table, buffer, compression='snappy')
 
-    print("🧪 Snapshot dtypes:\n", df_snap.dtypes)
-
-    if not safe_to_gbq(df_snap, SNAPSHOTS_TABLE):
-        print(f"❌ Failed to upload odds snapshot to {SNAPSHOTS_TABLE}")
-
-
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
+        print(f"✅ Snapshot uploaded to GCS as Parquet: gs://{bucket_name}/{filename}")
+    except Exception as e:
+        print(f"❌ Failed to upload snapshot to GCS: {e}")
 
 
 def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
@@ -1278,7 +1290,7 @@ def render_scanner_tab(label, sport_key, container):
             for market in book.get('markets', [])
             for outcome in market.get('outcomes', [])
         ])
-        write_snapshot_to_bigquery(live)
+        write_snapshot_to_gcs_parquet(live)
 
         prev = read_latest_snapshot_from_bigquery(hours=2) or {}
         prev_odds_rows = []
@@ -1313,11 +1325,21 @@ def render_scanner_tab(label, sport_key, container):
             df_prev_display = pd.DataFrame()
 
         # === 3. Detect Sharp Moves
-        df_moves_raw, df_audit, summary_df = detect_sharp_moves(
-            live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
-        )
-        
-    
+        #df_moves_raw, df_audit, summary_df = detect_sharp_moves(
+          #  live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
+        #)
+        detection_key = f"sharp_moves_{sport_key.lower()}"
+
+        if detection_key in st.session_state:
+            df_moves_raw, df_audit, summary_df = st.session_state[detection_key]
+            st.info(f"✅ Using cached sharp detection results for {label}")
+        else:
+            df_moves_raw, df_audit, summary_df = detect_sharp_moves(
+                live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
+            )
+            st.session_state[detection_key] = (df_moves_raw, df_audit, summary_df)
+            st.success("🧠 Sharp detection run completed and cached.")
+            
         
         #initialize_all_tables(df_snap=df_snap, df_audit=df_audit, market_weights_dict=market_component_win_rates)
 
@@ -1339,8 +1361,15 @@ def render_scanner_tab(label, sport_key, container):
         model = load_model_from_gcs(bucket_name=GCS_BUCKET)
         if model is not None:
             try:
-                df_moves_raw = apply_blended_sharp_score(df_moves_raw, model)
-                st.success("✅ Model scoring applied to sharp picks")
+                df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
+                if not df_pre_game.empty:
+                    df_scored = apply_blended_sharp_score(df_pre_game, model)
+                    for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']:
+                        if col in df_scored.columns:
+                            df_moves_raw.loc[df_scored.index, col] = df_scored[col].values
+                    st.success(f"✅ Model scoring applied to {len(df_scored)} pre-game rows")
+                else:
+                    st.info("ℹ️ No pre-game rows to score")
             except Exception as e:
                 st.warning(f"⚠️ Failed to apply model scoring: {e}")
         else:
