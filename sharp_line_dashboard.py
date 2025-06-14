@@ -1715,23 +1715,55 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Inserted_Timestamp': pd.Timestamp.utcnow()
             })
 
-    # === 3. Save to BigQuery (de-duped, cleaned)
+if not score_rows:
+    st.warning("⚠️ No valid score rows from completed games.")
+    return df
+
+    # === 3. Construct DataFrame and validate
+    df_game_scores = pd.DataFrame(score_rows)
+    st.write("📊 Raw df_game_scores (before dropna):", df_game_scores.head(3))
+    st.write("🧪 dtypes:", df_game_scores.dtypes)
+    
+    # Drop rows with missing required values
+    required_cols = ['Merge_Key_Short', 'Game_Start', 'Score_Home_Score', 'Score_Away_Score']
+    df_game_scores = df_game_scores.dropna(subset=required_cols)
+    st.write("✅ Rows after dropna for required fields:", len(df_game_scores))
+    
+    # Drop duplicates on Merge_Key_Short
+    df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
+    
+    # === 4. Test if Parquet conversion will work
+    import pyarrow as pa
     try:
-        df_game_scores = pd.DataFrame(score_rows)
+        _ = pa.Table.from_pandas(df_game_scores)
+        st.success("🧪 Parquet conversion test passed (schema is valid)")
+    except Exception as e:
+        st.error(f"❌ Parquet conversion failed: {e}")
+        st.stop()
     
-        # Clean bad rows
-        df_game_scores = df_game_scores.dropna(subset=['Merge_Key_Short', 'Game_Start'])
-        df_game_scores = df_game_scores[pd.to_datetime(df_game_scores['Game_Start'], errors='coerce').notna()]
-        df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
+    # === 5. Check existing keys in BigQuery to dedupe
+    try:
+        existing = bq_client.query("SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`").to_dataframe()
+        existing_keys = set(existing['Merge_Key_Short'].dropna().unique())
+        df_game_scores = df_game_scores[~df_game_scores['Merge_Key_Short'].isin(existing_keys)]
+        st.write(f"🧹 After deduplication, {len(df_game_scores)} new rows remain")
+    except Exception as e:
+        st.error(f"❌ Failed to check existing keys: {e}")
+        st.stop()
     
+    # === 6. Upload to BigQuery
+    try:
         if not df_game_scores.empty:
             to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-            st.success(f"✅ Uploaded {len(df_game_scores)} final game scores to BigQuery.")
+            st.success(f"✅ Uploaded {len(df_game_scores)} new final game scores to BigQuery.")
         else:
-            st.info("ℹ️ No valid game scores to upload.")
+            st.info("ℹ️ No new completed games to upload.")
     except Exception as e:
-        st.error(f"❌ Failed to upload game scores: {e}")
-    # === Return raw DataFrame for chaining if needed
+        import traceback
+        st.error(f"❌ Failed to upload game scores: {type(e).__name__} — {str(e)}")
+        st.code(traceback.format_exc())    
+    
+    
     return pd.DataFrame(score_rows)
     
     
