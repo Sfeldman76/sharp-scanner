@@ -1334,10 +1334,7 @@ def render_scanner_tab(label, sport_key, container):
 
       
       
-            
-            # ✅ Write updated master and scored picks to BigQuery
-            if 'df_scores_full' in locals() and not df_scores_full.empty:
-                write_to_bigquery(df_master, table='sharp_data.sharp_moves_master')
+          
                 
             
             df_moves = df_master.copy()
