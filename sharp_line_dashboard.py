@@ -1658,23 +1658,25 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
     df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
 
+    # === 3. Upload to game_scores_final (deduping)
     try:
         existing_keys = bq_client.query("""
             SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`
         """).to_dataframe()
         existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
-        df_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)]
+        new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)]
     except Exception as e:
         st.warning(f"⚠️ Failed to check existing score rows: {e}")
+        new_scores = df_scores
 
-    if not df_scores.empty:
+    if not new_scores.empty:
         try:
-            to_gbq(df_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-            st.success(f"✅ Uploaded {len(df_scores)} new game scores")
+            to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+            st.success(f"✅ Uploaded {len(new_scores)} new game scores")
         except Exception as e:
             st.error(f"❌ Failed to upload game scores: {e}")
 
-    # === 3. Load sharp picks ===
+    # === 4. Load sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
     df_master = build_game_key(df_master)
 
@@ -1682,13 +1684,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.warning("⚠️ No sharp picks to backtest")
         return pd.DataFrame()
 
+    # ✅ Filter to sharp picks with scores only
+    valid_keys = set(df_scores['Merge_Key_Short'].dropna().unique())
+    df_master = df_master[df_master['Merge_Key_Short'].isin(valid_keys)]
+
     df = df_master.merge(
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
-        on='Merge_Key_Short', how='inner'
+        on='Merge_Key_Short', how='left'
     )
 
     df['Ref_Sharp_Value'] = df.get('Ref_Sharp_Value').combine_first(df.get('Value'))
 
+    # === 5. Scoring logic
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
     if df_valid.empty:
         st.warning("ℹ️ No valid sharp picks with scores to evaluate")
@@ -1720,7 +1727,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
 
-    # === Optional: model scoring ===
+    # === 6. Optional: model scoring
     if model is not None:
         try:
             df = apply_blended_sharp_score(df, model)
@@ -1728,13 +1735,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
 
-    # === FINAL: Write sharp_scores_full to BigQuery ===
+    # === 7. Final upload to sharp_scores_full
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total',
-        'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
-        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score',
+        'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket', 'Market_Leader',
+        'LimitUp_NoMove_Flag', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
     ]
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
@@ -1746,7 +1753,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
 
     return df_scores_out
-    
     
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
