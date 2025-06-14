@@ -1746,14 +1746,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.warning("⚠️ No valid score rows from completed games.")
         return df
 
-    # === 3. Save scores to BigQuery (de-dupe on Merge_Key_Short)
-    df_game_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
-    df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
-
+    # === Always Save Scores to BigQuery ===
     try:
-        existing = bq_client.query("SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`").to_dataframe()
-        existing_keys = set(existing['Merge_Key_Short'].dropna().unique())
-        df_game_scores = df_game_scores[~df_game_scores['Merge_Key_Short'].isin(existing_keys)]
+        df_game_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
+        df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
+    
+        if not df_game_scores.empty:
+            to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+            print(f"✅ Saved {len(df_game_scores)} final game scores to BigQuery.")
+        else:
+            print("ℹ️ No valid scores to upload.")
+    except Exception as e:
+        print(f"❌ Failed to upload game scores: {e}")
+    try:
+        pass#existing = bq_client.query("SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`").to_dataframe()
+        pass#existing_keys = set(existing['Merge_Key_Short'].dropna().unique())
+        pass#df_game_scores = df_game_scores[~df_game_scores['Merge_Key_Short'].isin(existing_keys)]
 
         if not df_game_scores.empty:
             to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
