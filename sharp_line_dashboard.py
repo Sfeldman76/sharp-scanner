@@ -276,6 +276,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full'):
 
     try:
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+        print(f"🧪 Uploading to {table} with columns: {df.columns.tolist()}")
         st.success(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         st.error(f"❌ Failed to upload to {table}: {e}")
@@ -1295,7 +1296,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = build_game_key(df_moves_raw)
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first').copy()
 
-        model = load_model_from_gcs(bucket_name=GCS_BUCKET)
+        model = st.session_state.get('sharp_model') or load_model_from_gcs(bucket_name=GCS_BUCKET)
         if model is not None:
             try:
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
@@ -1377,7 +1378,7 @@ def render_scanner_tab(label, sport_key, container):
                 if len(trainable) >= 5:
                     model = train_and_upload_initial_model(trainable)
                     if model is not None:
-                        st.success("✅ Model retrained and uploaded to GCS.")
+                        st.session_state['sharp_model'] = model
                     else:
                         st.warning("⚠️ Model training failed or skipped.")
                 else:
@@ -1389,14 +1390,19 @@ def render_scanner_tab(label, sport_key, container):
             df_bt = df_bt[df_bt['SHARP_HIT_BOOL'].notna()].copy()
             df_bt = df_bt.drop_duplicates(subset=['Game_Key', 'Bookmaker'])
             df_master = df_master.drop_duplicates(subset=['Game_Key', 'Bookmaker'])
+            for col in ['Game_Key', 'Bookmaker']:
+                if col not in df_master.columns or col not in df_bt.columns:
+                    st.warning(f"⚠️ Missing {col} in master or backtest data — cannot update.")
+                    return df_moves
             df_master.set_index(['Game_Key', 'Bookmaker'], inplace=True)
             df_bt.set_index(['Game_Key', 'Bookmaker'], inplace=True)
             df_master.update(df_bt[['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']])
             df_master.reset_index(inplace=True)
             
             # ✅ Write updated master and scored picks to BigQuery
-            write_to_bigquery(df_master, table='sharp_data.sharp_moves_master')
-            write_to_bigquery(df_scores_full, table='sharp_data.sharp_scores_full')
+            if 'df_scores_full' in locals() and not df_scores_full.empty:
+                write_to_bigquery(df_master, table='sharp_data.sharp_moves_master')
+                write_to_bigquery(df_scores_full, table='sharp_data.sharp_scores_full')
             
             df_moves = df_master.copy()
         
@@ -1697,6 +1703,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df = df[df['Sport'] == sport_label]
     df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
     df['Ref Sharp Value'] = df.get('Ref Sharp Value').combine_first(df.get('Value'))
+    if df['Ref Sharp Value'].isna().all():
+        st.warning("⚠️ No Ref Sharp Value found in sharp picks — cannot score.")
+        return df
     df = build_game_key(df)
     df = df[df['SHARP_HIT_BOOL'].isna()]
     st.info(f"✅ Eligible sharp picks to score: {len(df)}")
@@ -1757,11 +1766,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 4. Merge into sharp picks
     df_scores = df_game_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
     df = df[df['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
-
-    st.info(f"✅ Sharp picks matching completed games: {len(df)}")
-
     if df.empty:
+        st.warning("⚠️ No sharp picks match completed games after filtering.")
         return df
+    
+
 
     df = df.merge(
         df_scores.rename(columns={
