@@ -249,7 +249,33 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         print(f"❌ Failed to upload snapshot to GCS: {e}")
 
+def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
+    if df.empty:
+        st.warning(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
+        return
 
+    df = df.copy()
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
+    if 'Time' in df.columns:
+        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
+
+    # Optional: Drop temporary/extra columns
+    drop_cols = ['Final_Confidence_Score']
+    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+
+    # Force schema types
+    df = df.astype({k: 'float' for k in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob'] if k in df.columns})
+    df = df.rename(columns=lambda x: x.rstrip('_x'))
+    df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+
+    for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
+        if col not in df.columns:
+            df[col] = None
+
+    if not safe_to_gbq(df, table, replace=force_replace):
+        st.error(f"❌ BigQuery upload failed for {table}")
 
         
 def build_game_key(df):
@@ -1941,8 +1967,10 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
-# --- NBA Tabs
-with tab_nba:
+# === Toggle to select one sport at a time
+selected_sport = st.selectbox("Select Sport to Analyze", ["NBA", "MLB"])
+
+if selected_sport == "NBA":
     scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
     with scan_tab:
         st.subheader("🏀 NBA Sharp Scanner")
@@ -1953,8 +1981,7 @@ with tab_nba:
     with analysis_tab:
         render_sharp_signal_analysis_tab(analysis_tab, "NBA", SPORTS["NBA"])
 
-# --- MLB Tabs
-with tab_mlb:
+elif selected_sport == "MLB":
     scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
     with scan_tab:
         st.subheader("⚾ MLB Sharp Scanner")
