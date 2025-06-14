@@ -1715,11 +1715,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Inserted_Timestamp': pd.Timestamp.utcnow()
             })
 
-    # === 3. Save to BigQuery immediately
+    # === 3. Save to BigQuery (de-duped, cleaned)
     try:
-        df_game_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
+        df_game_scores = pd.DataFrame(score_rows)
+    
+        # Clean bad rows
+        df_game_scores = df_game_scores.dropna(subset=['Merge_Key_Short', 'Game_Start'])
+        df_game_scores = df_game_scores[pd.to_datetime(df_game_scores['Game_Start'], errors='coerce').notna()]
         df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
-
+    
         if not df_game_scores.empty:
             to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
             st.success(f"✅ Uploaded {len(df_game_scores)} final game scores to BigQuery.")
@@ -1727,7 +1731,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             st.info("ℹ️ No valid game scores to upload.")
     except Exception as e:
         st.error(f"❌ Failed to upload game scores: {e}")
-
     # === Return raw DataFrame for chaining if needed
     return pd.DataFrame(score_rows)
     
