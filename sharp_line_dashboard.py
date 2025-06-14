@@ -1675,7 +1675,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             st.error(f"❌ Failed to upload game scores: {e}")
 
     # === 3. Load sharp picks ===
-    df_master = read_recent_sharp_moves(hours=days_back * 24)
+    df_master = read_recent_sharp_moves(hours=days_back * 72)
     df_master = build_game_key(df_master)
 
     if df_master.empty:
