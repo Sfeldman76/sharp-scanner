@@ -1718,6 +1718,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df = df[df['SHARP_HIT_BOOL'].isna()]
     st.info(f"✅ Eligible sharp picks to score: {len(df)}")
 
+    # === 2. Fetch game scores from Odds API
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
@@ -1731,7 +1732,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     st.info(f"✅ Completed games: {len(completed_games)}")
 
     score_rows = []
-    completed_keys = set()
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
         away = normalize_team(game.get("away_team", ""))
@@ -1739,33 +1739,39 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         merge_key = build_merge_key(home, away, game_start)
         scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
-            completed_keys.add(merge_key)
             score_rows.append({
                 'Merge_Key_Short': merge_key,
+                'Home_Team': home,
+                'Away_Team': away,
+                'Game_Start': game_start,
                 'Score_Home_Score': scores[home],
-                'Score_Away_Score': scores[away]
+                'Score_Away_Score': scores[away],
+                'Source': 'oddsapi',
+                'Inserted_Timestamp': pd.Timestamp.utcnow()
             })
 
     if not score_rows:
         st.warning("⚠️ No valid score rows from completed games.")
         return df
 
-    df_scores = pd.DataFrame(score_rows)
+    df_game_scores = pd.DataFrame(score_rows)
+    df_game_scores = df_game_scores.drop_duplicates(subset=['Merge_Key_Short'])
+
+    try:
+        to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+        st.success(f"✅ Saved {len(df_game_scores)} game scores to BigQuery.")
+    except Exception as e:
+        st.warning(f"❌ Failed to upload game scores: {e}")
+
+    completed_keys = set(df_game_scores['Merge_Key_Short'].unique())
     df = df[df['Merge_Key_Short'].isin(completed_keys)]
     st.info(f"✅ Sharp picks matching completed games: {len(df)}")
 
-    df = df.merge(df_scores.rename(columns={
-        "Score_Home_Score": "Score_Home_Score_api",
-        "Score_Away_Score": "Score_Away_Score_api"
-    }), on='Merge_Key_Short', how='left')
+    # === 3. Join Scores
+    df_scores = df_game_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
+    df = df.merge(df_scores, on='Merge_Key_Short', how='left')
 
-    for col in ['Score_Home_Score', 'Score_Away_Score']:
-        api_col = f"{col}_api"
-        df[col] = pd.to_numeric(df.get(col), errors='coerce')
-        df[api_col] = pd.to_numeric(df.get(api_col), errors='coerce')
-        df[col] = df[col].combine_first(df[api_col])
-        df.drop(columns=[api_col], inplace=True, errors='ignore')
-
+    # === 4. Score sharp picks
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref Sharp Value']).copy()
     if df_valid.empty:
         st.warning("ℹ️ No valid picks to score")
@@ -1800,7 +1806,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     st.success(f"✅ Scoring complete. Hits: {df['SHARP_HIT_BOOL'].sum()}, Scored: {df['Scored'].sum()}")
 
-    # Optional model scoring
+    # === 5. Optional: model scoring
     if model is not None:
         try:
             df = apply_blended_sharp_score(df, model)
