@@ -249,34 +249,51 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         print(f"❌ Failed to upload snapshot to GCS: {e}")
 
-def write_to_bigquery(df, table=BQ_FULL_TABLE, force_replace=False):
+def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
+    """
+    Smart dispatcher that handles writes to BigQuery for both master and scores tables.
+    Cleans columns, aligns schema, and applies safe writes.
+    """
+    from pandas_gbq import to_gbq
+
     if df.empty:
-        st.warning(f"⚠️ Skipping BigQuery write to {table} — DataFrame is empty.")
+        st.info(f"ℹ️ No data to write to BigQuery ({table})")
         return
 
     df = df.copy()
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    df.columns = [col.replace(" ", "_") for col in df.columns]
 
-    if 'Time' in df.columns:
-        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
+    # Always timestamp
+    df["Snapshot_Timestamp"] = pd.Timestamp.utcnow()
 
-    # Optional: Drop temporary/extra columns
-    drop_cols = ['Final_Confidence_Score']
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+    # Normalize field naming
+    if 'Ref_Sharp_Value' not in df.columns and 'Ref Sharp Value' in df.columns:
+        df.rename(columns={'Ref Sharp Value': 'Ref_Sharp_Value'}, inplace=True)
 
-    # Force schema types
-    df = df.astype({k: 'float' for k in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob'] if k in df.columns})
     df = df.rename(columns=lambda x: x.rstrip('_x'))
     df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
 
+    # Fill scoring flags if missing
     for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
         if col not in df.columns:
             df[col] = None
 
-    if not safe_to_gbq(df, table, replace=force_replace):
-        st.error(f"❌ BigQuery upload failed for {table}")
+    # Type enforcement for score fields
+    for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
+    try:
+        to_gbq(
+            df,
+            destination_table=table,
+            project_id=GCP_PROJECT_ID,
+            if_exists='replace' if force_replace else 'append'
+        )
+        st.success(f"✅ Uploaded {len(df)} rows to {table}")
+    except Exception as e:
+        st.error(f"❌ Failed to upload to {table}: {e}")
+        
         
 def build_game_key(df):
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
@@ -1153,33 +1170,31 @@ def fetch_scored_picks_from_bigquery(limit=5000):
         st.error(f"❌ Failed to fetch scored picks: {e}")
         return pd.DataFrame()
         
-def train_and_upload_initial_model(df=None, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
+def train_and_upload_initial_model(df_master, bucket_name="sharp-models", filename="sharp_win_model.pkl"):
     from xgboost import XGBClassifier
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import roc_auc_score
     from io import BytesIO
+    import pickle
+    import pandas as pd
+    from google.cloud import storage
 
-    # === Step 1: Load if not passed
-    if df is None or df.empty:
-        df = fetch_scored_picks_from_bigquery()
-
-    if df.empty:
-        st.warning("⚠️ No data found for model training.")
+    df = df_master.copy()
+    if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
+        st.error("❌ Missing Enhanced_Sharp_Confidence_Score.")
         return None
 
-    # === Step 2: Build features
-    df['Final_Confidence_Score'] = df.get('Enhanced_Sharp_Confidence_Score')
+    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
     if 'True_Sharp_Confidence_Score' in df.columns:
         df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
-    df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()].copy()
+    df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()]
     if len(df) < 5:
-        st.warning("⚠️ Not enough labeled data to train a model.")
+        st.warning("⚠️ Not enough labeled data to train model.")
         return None
 
     df['target'] = df['SHARP_HIT_BOOL'].astype(int)
-    df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
-    df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
+    df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 100) / 100
 
     feature_cols = ['Final_Confidence_Score']
     if 'CrossMarketSharpSupport' in df.columns:
@@ -1187,9 +1202,8 @@ def train_and_upload_initial_model(df=None, bucket_name="sharp-models", filename
 
     df = df.dropna(subset=feature_cols)
     X = df[feature_cols].astype(float)
-    y = df['target']
+    y = df['target'].astype(int)
 
-    # === Step 3: Train model
     X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     model.fit(X_train, y_train)
@@ -1197,7 +1211,6 @@ def train_and_upload_initial_model(df=None, bucket_name="sharp-models", filename
     auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
     st.success(f"✅ Trained model AUC: {auc:.3f} on {len(df)} samples")
 
-    # === Step 4: Upload model
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
@@ -1206,6 +1219,7 @@ def train_and_upload_initial_model(df=None, bucket_name="sharp-models", filename
         pickle.dump(model, buffer)
         blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
         st.success(f"📦 Uploaded model to gs://{bucket_name}/{filename}")
+        return model
     except Exception as e:
         st.error(f"❌ Failed to upload model to GCS: {e}")
         return None
@@ -1394,10 +1408,13 @@ def render_scanner_tab(label, sport_key, container):
             df_bt.set_index(['Game_Key', 'Bookmaker'], inplace=True)
             df_master.update(df_bt[['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']])
             df_master.reset_index(inplace=True)
-            write_to_bigquery(df_master, force_replace=False)
+            
+            # ✅ Write updated master and scored picks to BigQuery
+            write_to_bigquery(df_master, table='sharp_data.sharp_moves_master')
+            write_to_bigquery(df_scores_full, table='sharp_data.sharp_scores_full')
+            
             df_moves = df_master.copy()
-
-        return df_moves
+        
         
         # === Upload line history
         if not df_audit.empty:
