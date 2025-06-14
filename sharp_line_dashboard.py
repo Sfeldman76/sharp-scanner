@@ -1322,7 +1322,7 @@ def render_scanner_tab(label, sport_key, container):
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
 
-        write_to_bigquery(df_moves_raw, force_replace=False)
+        #write_to_bigquery(df_moves_raw, force_replace=False)
 
         backtest_key = f"scored_{sport_key.lower()}"
         if not st.session_state.get(backtest_key, False):
