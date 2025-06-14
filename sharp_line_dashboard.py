@@ -87,7 +87,7 @@ from google.cloud import bigquery
 from pandas_gbq import to_gbq
 import pandas as pd
 import google.api_core.exceptions
-
+from google.cloud import bigquery_storage_v1
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -372,26 +372,31 @@ def write_market_weights_to_bigquery(weights_dict):
     for market, components in weights_dict.items():
         for component, values in components.items():
             for val_key, win_rate in values.items():
-                rows.append({
-                    'Market': market,
-                    'Component': component,
-                    'Value': val_key,
-                    'Win_Rate': float(win_rate)
-                })
+                try:
+                    if isinstance(win_rate, dict):
+                        raise ValueError("Nested dict found instead of float.")
+                    rows.append({
+                        'Market': market,
+                        'Component': component,
+                        'Value': val_key,
+                        'Win_Rate': float(win_rate)
+                    })
+                except Exception as e:
+                    print(f"⚠️ Skipped invalid win_rate for {market}/{component}/{val_key}: {e}")
 
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        print("⚠️ No market weights to upload.")
+    if not rows:
+        print("⚠️ No valid market weights to upload.")
         return
 
-    # ✅ Upload to BigQuery
-    if not safe_to_gbq(df, MARKET_WEIGHTS_TABLE, replace=True):
-        print(f"❌ Failed to upload market weights to {MARKET_WEIGHTS_TABLE}")
-    else:
-        print(f"✅ Uploaded {len(df)} market weight rows to {MARKET_WEIGHTS_TABLE}")
-        
-        
+    df = pd.DataFrame(rows)
+    print(f"✅ Prepared {len(df)} rows for upload to market_weights.")
+
+    # Write to BigQuery
+    try:
+        to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
+        print(f"✅ Uploaded to {MARKET_WEIGHTS_TABLE}")
+    except Exception as e:
+        print(f"❌ Upload failed: {e}")
         
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
