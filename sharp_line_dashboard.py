@@ -205,9 +205,6 @@ def safe_to_gbq(df, table, replace=False):
     return False
 
 
-from google.cloud import storage
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
     rows = []
@@ -319,7 +316,7 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-
+@st.cache_data(ttl=600)
 def read_recent_sharp_moves(hours=500, table=BQ_FULL_TABLE):
     try:
         client = bq_client
