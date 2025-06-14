@@ -1754,6 +1754,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 6. Upload to BigQuery
     try:
         if not df_game_scores.empty:
+            # Ensure float conversion before upload
+            numeric_cols = ['Score_Home_Score', 'Score_Away_Score']
+            for col in numeric_cols:
+                df_game_scores[col] = pd.to_numeric(df_game_scores[col], errors='coerce')
             to_gbq(df_game_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
             st.success(f"✅ Uploaded {len(df_game_scores)} new final game scores to BigQuery.")
         else:
