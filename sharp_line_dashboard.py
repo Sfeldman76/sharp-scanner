@@ -1337,7 +1337,7 @@ def render_scanner_tab(label, sport_key, container):
           
                 
             
-            df_moves = df_master.copy()
+            df_moves = df_moves_raw.copy()
         
         
         # === Upload line history
