@@ -249,7 +249,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         print(f"❌ Failed to upload snapshot to GCS: {e}")
 
-def write_to_bigquery(df, table='sharp_data.sharp_scores_full'):
+def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
     from pandas_gbq import to_gbq
 
     if df.empty:
@@ -275,7 +275,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full'):
         df = df[[col for col in df.columns if col in allowed_cols[table]]]
 
     try:
-        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace' if force_replace else 'append')
         print(f"🧪 Uploading to {table} with columns: {df.columns.tolist()}")
         st.success(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
