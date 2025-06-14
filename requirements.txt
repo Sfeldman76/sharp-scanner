@@ -15,3 +15,4 @@ pydrive2
 google-cloud-bigquery
 pandas-gbq
 google-cloud-storage
+pyarrow
