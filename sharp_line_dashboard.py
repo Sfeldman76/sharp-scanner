@@ -1742,21 +1742,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score',
         'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket', 'Market_Leader',
         'LimitUp_NoMove_Flag', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
-        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
     ]
     
     # ✅ Build final DataFrame
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    
-    # ✅ Fix datatypes for upload
-    
-   
-    
-    # ✅ Coerce types to match BigQuery schema
-    
-    
-    ## === Coerce datatypes BEFORE schema validation
+    # === Coerce datatypes BEFORE schema validation
     df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce').astype(float)
     df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
     df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
@@ -1764,7 +1756,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
     df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
     df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
-    
+    df_scores_out['Sport'] = sport_label.upper()
     # Optional mixed object checker
     for col in df_scores_out.select_dtypes(include='object'):
         if df_scores_out[col].map(type).nunique() > 1:
