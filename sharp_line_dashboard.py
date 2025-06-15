@@ -1876,34 +1876,35 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.warning("ℹ️ No completed picks with model predictions.")
             return
 
-        # ✅ 3. Bin model probabilities
-        df_bt['Prob_Bin'] = (
-            df_bt['Model_Sharp_Win_Prob']
-            .apply(lambda x: round(x * 10) / 10)  # bins: 0.0, 0.1, ..., 1.0
-        )
-
-        prob_summary = (
-            df_bt.groupby('Prob_Bin')['SHARP_HIT_BOOL']
-            .agg(['count', 'sum', 'mean'])
-            .reset_index()
-            .rename(columns={
-                'count': 'Picks',
-                'sum': 'Wins',
-                'mean': 'Win_Rate'
+        # === 3. Compute win rate + confidence intervals
+        z = 1.96  # 95% confidence level
+        
+        def compute_ci(n, p):
+            if n == 0:
+                return 0.0, 0.0
+            margin = z * np.sqrt((p * (1 - p)) / n)
+            return max(p - margin, 0), min(p + margin, 1)
+        
+        summary_rows = []
+        for bin_val, group in df_bt.groupby('Prob_Bin'):
+            n = group['SHARP_HIT_BOOL'].count()
+            wins = group['SHARP_HIT_BOOL'].sum()
+            p = wins / n if n > 0 else 0
+            lower, upper = compute_ci(n, p)
+            summary_rows.append({
+                'Prob_Bin': bin_val,
+                'Picks': n,
+                'Wins': wins,
+                'Win_Rate': round(p, 3),
+                'CI_Lower': round(lower, 3),
+                'CI_Upper': round(upper, 3)
             })
-            .round({'Win_Rate': 3})
-        )
-
+        
+        prob_summary = pd.DataFrame(summary_rows).sort_values('Prob_Bin')
+        
         # ✅ 4. Display table
-        st.dataframe(prob_summary)
-
-        # ✅ 5. Optional: Chart
-        st.line_chart(
-            prob_summary.set_index('Prob_Bin')[['Win_Rate']],
-            use_container_width=True
-        )
-
-        st.caption("Win Rate = actual % of hits within each model-predicted probability bucket.")
+        st.dataframe(prob_summary
+  
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
