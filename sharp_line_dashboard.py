@@ -1045,12 +1045,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
    
     return df, df_history, summary_df
 
-def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs: bool = True):
-    from google.cloud import bigquery
-    from xgboost import XGBClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import roc_auc_score
+# === Constants: Define all expected features explicitly
+EXPECTED_FEATURES = [
+    'Final_Confidence_Score',
+    'Market_h2h', 'Market_spreads', 'Market_totals',
+    'CrossMarketSharpSupport', 'Unique_Sharp_Books',
+    'LimitUp_NoMove_Flag', 'Market_Leader'
+]
 
+# === Training Function Fix ===
+def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs: bool = True):
     client = bigquery.Client()
     sport = sport.upper()
 
@@ -1068,15 +1072,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
             bigquery.ScalarQueryParameter("hours", "INT64", hours)
         ]
     )
-    try:
-        df = client.query(query, job_config=job_config).to_dataframe()
-    except Exception as e:
-        st.error("❌ Failed to run query for model training")
-        st.code(query)
-        st.exception(e)
-        return None
-    
 
+    df = client.query(query, job_config=job_config).to_dataframe()
     if df.empty:
         st.warning(f"⚠️ No data found for {sport}")
         return None
@@ -1085,33 +1082,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
     df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()]
     df['target'] = df['SHARP_HIT_BOOL'].astype(int)
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 100) / 100
-    
-    # === Add Market dummies BEFORE defining feature_cols
+
     df['Market'] = df['Market'].astype(str).str.lower()
     market_dummies = pd.get_dummies(df['Market'], prefix='Market')
     df = pd.concat([df, market_dummies], axis=1)
-    
-    # === Now define feature columns correctly
-    feature_cols = ['Final_Confidence_Score'] + list(market_dummies.columns)
-    
-    if 'CrossMarketSharpSupport' in df.columns:
-        feature_cols.append('CrossMarketSharpSupport')
-    if 'Unique_Sharp_Books' in df.columns:
-        feature_cols.append('Unique_Sharp_Books')
-    if 'LimitUp_NoMove_Flag' in df.columns:
-        feature_cols.append('LimitUp_NoMove_Flag')
-    if 'Market_Leader' in df.columns:
-        feature_cols.append('Market_Leader')
-    
-    df = df.dropna(subset=feature_cols)
+
+    for col in EXPECTED_FEATURES:
+        if col not in df.columns:
+            df[col] = 0 if col.startswith('Market_') or col in ['LimitUp_NoMove_Flag', 'Market_Leader'] else np.nan
+
+    df = df.dropna(subset=EXPECTED_FEATURES)
     if len(df) < 5:
         st.warning(f"⚠️ Not enough labeled samples for {sport} model.")
         return None
-    
-    X = df[feature_cols].astype(float)
-    y = df['target'].astype(int)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
+    X = df[EXPECTED_FEATURES].astype(float)
+    y = df['target']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
     model.fit(X_train, y_train)
 
@@ -1119,13 +1107,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
     st.success(f"✅ Trained {sport} model – AUC: {auc:.3f} on {len(df)} samples")
 
     if save_to_gcs:
-        filename = f"sharp_win_model_{sport.lower()}.pkl"
         save_model_to_gcs(model, sport=sport)
 
     return model
 
 
-
+# === Scoring Function Fix ===
 def apply_blended_sharp_score(df, model):
     import numpy as np
     import pandas as pd
@@ -1134,79 +1121,75 @@ def apply_blended_sharp_score(df, model):
     df = df.copy()
 
     try:
-        # === Step 1: Drop _x/_y columns
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
         st.info(f"✅ Columns after _x/_y cleanup: {df.columns.tolist()}")
     except Exception as e:
-        st.error(f"❌ Step 1 failed: {e}")
+        st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
     try:
+        # === Final Confidence Score
         if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
             raise ValueError("Missing Enhanced_Sharp_Confidence_Score")
         df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
         if 'True_Sharp_Confidence_Score' in df.columns:
             df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
-        df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce')
-        df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
+        df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce') / 100
         df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
     except Exception as e:
-        st.error(f"❌ Step 2 failed (confidence prep): {e}")
+        st.error(f"❌ Confidence score prep failed: {e}")
         return pd.DataFrame()
 
     try:
+        # === Market dummies
         df['Market'] = df['Market'].astype(str).str.lower()
         market_dummies = pd.get_dummies(df['Market'], prefix='Market')
-        st.info(f"✅ Market dummy columns: {market_dummies.columns.tolist()}")
-    except Exception as e:
-        st.error(f"❌ Step 3 failed (market dummies): {e}")
-        return pd.DataFrame()
-
-    try:
         model_features = model.get_booster().feature_names
 
-        # Add missing dummy columns expected by model
+        # Add any missing dummies expected by model
         for col in model_features:
             if col.startswith("Market_") and col not in market_dummies.columns:
                 market_dummies[col] = 0
-
-        # 🧼 Remove duplicate columns (pre-existing dummies)
-        market_dummies = market_dummies[[col for col in market_dummies.columns if col not in df.columns]]
-
         df = pd.concat([df, market_dummies], axis=1)
     except Exception as e:
-        st.error(f"❌ Step 4 failed (align market features): {e}")
+        st.error(f"❌ Market dummies failed: {e}")
         return pd.DataFrame()
 
     try:
-        feature_cols = [col for col in model_features if col in df.columns]
-        missing = set(model_features) - set(feature_cols)
+        # === Ensure all non-market features are present and coerced
+        if 'CrossMarketSharpSupport' not in df.columns:
+            df['CrossMarketSharpSupport'] = 0
+        if 'Unique_Sharp_Books' not in df.columns:
+            df['Unique_Sharp_Books'] = 0
+        if 'LimitUp_NoMove_Flag' not in df.columns:
+            df['LimitUp_NoMove_Flag'] = False
+        if 'Market_Leader' not in df.columns:
+            df['Market_Leader'] = False
+
+        df['CrossMarketSharpSupport'] = pd.to_numeric(df['CrossMarketSharpSupport'], errors='coerce').fillna(0)
+        df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0)
+        df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].astype(int)
+        df['Market_Leader'] = df['Market_Leader'].astype(int)
+    except Exception as e:
+        st.error(f"❌ Feature coercion failed: {e}")
+        return pd.DataFrame()
+
+    try:
+        # === Final feature alignment
+        feature_cols = [col for col in model.get_booster().feature_names if col in df.columns]
+        missing = set(model.get_booster().feature_names) - set(feature_cols)
         if missing:
-            raise ValueError(f"❌ Missing model feature columns: {missing}")
+            raise ValueError(f"Missing model feature columns: {missing}")
         st.info(f"✅ Model features used: {feature_cols}")
     except Exception as e:
-        st.error(f"❌ Step 5 failed (feature column selection): {e}")
+        st.error(f"❌ Feature alignment failed: {e}")
         return pd.DataFrame()
+
     try:
-        # === Fix: coerce 'True'/'False' strings to 1/0
-        for col in feature_cols:
-            if df[col].dtype == object and df[col].isin(['True', 'False']).any():
-                df[col] = df[col].map({'True': 1, 'False': 0})
-    
         X = df[feature_cols].astype(float)
-    except Exception as e:
-        st.error(f"❌ Step 6 failed (feature to float): {e}")
-        st.dataframe(df[feature_cols].head())
-        return pd.DataFrame()
-
-    try:
-        st.info("🔍 Step 7: Running model.predict_proba()")
-        st.info(f"✅ X shape: {X.shape}, columns: {X.columns.tolist()}")
-
         df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
         df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce').fillna(0).clip(0, 1)
-
         df['Model_Confidence_Tier'] = pd.cut(
             df['Model_Confidence'],
             bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
@@ -1214,11 +1197,12 @@ def apply_blended_sharp_score(df, model):
         )
         st.success("✅ Model scoring complete")
     except Exception as e:
-        st.error(f"❌ Step 7 failed (prediction or binning): {e}")
-        st.dataframe(df.head(5))
+        st.error(f"❌ Prediction failed: {e}")
         return pd.DataFrame()
 
     return df
+        
+        
 def save_model_to_gcs(model, sport, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}.pkl"
     try:
