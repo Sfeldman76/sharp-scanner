@@ -1551,7 +1551,7 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Live Odds Snapshot Table ===
         st.subheader(f" Live Odds Snapshot – {label} (Odds + Limit)")
-        oodds_rows = []
+        odds_rows = []
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
             game_start = pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT
