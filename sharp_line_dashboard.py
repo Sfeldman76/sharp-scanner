@@ -1754,7 +1754,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             st.success("✅ Applied model scoring")
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
-
     # === 7. Final upload to sharp_scores_full
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
@@ -1764,42 +1763,36 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
     ]
     
-    # ✅ Sanitize & deduplicate raw score rows
+    # ✅ Construct and sanitize score DataFrame
     df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
     df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
     
-    # ✅ Convert score fields to numeric (safe for upload)
+    # ✅ Ensure correct numeric types for scores
     df_scores['Score_Home_Score'] = pd.to_numeric(df_scores['Score_Home_Score'], errors='coerce')
     df_scores['Score_Away_Score'] = pd.to_numeric(df_scores['Score_Away_Score'], errors='coerce')
     
-    # ✅ Also ensure the merged `df` (with picks) has valid types
+    # ✅ Also clean the merged df used for final scoring
     df['Score_Home_Score'] = pd.to_numeric(df.get('Score_Home_Score'), errors='coerce')
     df['Score_Away_Score'] = pd.to_numeric(df.get('Score_Away_Score'), errors='coerce')
     df = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
     
-    # ✅ Build final output for upload
+    # ✅ Build final output for BigQuery
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     
-    # ✅ Validate Parquet schema before upload
+    # ✅ Validate PyArrow schema before upload
     import pyarrow as pa
     try:
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
-        st.error(f"❌ Parquet conversion failed: {e}")
+        st.error(f"❌ Parquet validation failed: {e}")
         st.code(df_scores_out.dtypes.to_string())
         st.stop()
     
-    # ✅ Remove unchanged rows (deduplicate before write)
-    key_cols = [
-        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score',
-        'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket', 'Market_Leader',
-        'LimitUp_NoMove_Flag', 'SharpBetScore',
-        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score'
-    ]
+    # ✅ Remove unchanged rows (only timestamp changed)
+    dedup_cols = [col for col in score_cols if col != 'Scored']  # Optional: keep 'Scored' changes
     df_scores_out = df_scores_out.sort_values('Snapshot_Timestamp')
-    df_scores_out = df_scores_out.drop_duplicates(subset=key_cols, keep='last')
+    df_scores_out = df_scores_out.drop_duplicates(subset=dedup_cols, keep='last')
     
     if df_scores_out.empty:
         st.info("ℹ️ No changed sharp scores to upload.")
@@ -1811,10 +1804,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
     except Exception as e:
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
-
-  
-    return df_scores_out
     
+    return df_scores_out
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
