@@ -1491,33 +1491,27 @@ def render_scanner_tab(label, sport_key, container):
         filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
         
         # === Columns to show
+        # === Columns to show
+         # === Columns to show
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model_Sharp_Win_Prob', 'Confidence\nTier'  # ✅ Now included
+            'Model_Sharp_Win_Prob', 'Confidence\nTier'
         ]
-        # === Set Page Size for All Tables ===
-        page_size = 40
         
-        # === PAGINATED TABLE 1: Filtered Custom Table ===
-        total_rows_1 = len(filtered_df)
-        total_pages_1 = (total_rows_1 - 1) // page_size + 1
-        page_1 = st.number_input(
-            "Page (Filtered Table)",
-            key=f"{label}_table1_page",
-            min_value=1,
-            max_value=total_pages_1,
-            value=1,
-            step=1
-        )
+        # === Filtered subset
+        table_df = filtered_df[view_cols].copy()
+        table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]
         
-        start_row_1 = (page_1 - 1) * page_size
-        end_row_1 = start_row_1 + page_size
-        paginated_df_1 = filtered_df.iloc[start_row_1:end_row_1]
-        
-        # === CSS Styling for All Tables ===
+        # === CSS Styling for All Tables (keep this once)
         st.markdown("""
         <style>
+        .scrollable-table-container {
+            max-height: 600px;
+            overflow-y: auto;
+            border: 1px solid #444;
+            margin-bottom: 1rem;
+        }
         .custom-table {
             border-collapse: collapse;
             width: 100%;
@@ -1541,14 +1535,12 @@ def render_scanner_tab(label, sport_key, container):
         </style>
         """, unsafe_allow_html=True)
         
-        # === HTML Table Output for Table 1 ===
-        table_df_1 = paginated_df_1[[col for col in view_cols if col in paginated_df_1.columns]].copy()
-        table_df_1.columns = [col.replace('\n', ' ') for col in table_df_1.columns]
-        table_html_1 = table_df_1.to_html(classes="custom-table", index=False, escape=False)
-        st.markdown(f"<div class='scrollable-table-container'>{table_html_1}</div>", unsafe_allow_html=True)
-
-        st.caption(f"Showing {start_row_1 + 1}-{min(end_row_1, total_rows_1)} of {total_rows_1} rows")
+        # === Render HTML Table
+        table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
+        st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
         
+        # === Optional footer
+        st.caption(f"Showing {len(table_df)} rows")
         # === Live Odds Snapshot Table ===
         st.subheader(f" Live Odds Snapshot – {label} (Odds + Limit)")
         odds_rows = []
@@ -1612,24 +1604,10 @@ def render_scanner_tab(label, sport_key, container):
             else:
                 df_compare = df_display.copy()
                 change_mask = pd.DataFrame(False, index=df_display.index, columns=df_display.columns)
-            
-            # === Pagination for Live Odds Table ===
-            total_rows_2 = len(df_display)
-            total_pages_2 = (total_rows_2 - 1) // page_size + 1
-            page_2 = st.number_input(
-                "Page (Live Odds Table)",  # ✅ Updated label
-                key=f"{label}_table2_page",  # ✅ Unique key per label/sport
-                min_value=1,
-                max_value=total_pages_2,
-                value=1,
-                step=1
-            )
-            start_row_2 = (page_2 - 1) * page_size
-            end_row_2 = start_row_2 + page_size
-            paginated_df_2 = df_display.iloc[start_row_2:end_row_2].copy()
-            compare_slice = df_compare.iloc[start_row_2:end_row_2]
-            mask_slice = change_mask.iloc[start_row_2:end_row_2]
-            
+            # === Live Odds Table: Skip pagination and use full scrollable display ===
+            paginated_df_2 = df_display.copy()
+            compare_slice = df_compare.copy()
+            mask_slice = change_mask.copy()
             # === Render Custom HTML Table with Change Highlighting ===
             def render_custom_html_table(df, highlight_cols, change_mask=None, df_compare=None):
                 def style_cell(val, col, row_idx):
@@ -1684,7 +1662,7 @@ def render_scanner_tab(label, sport_key, container):
             
             st.markdown(f"<div class='scrollable-table-container'>{html_table_2}</div>", unsafe_allow_html=True)
 
-            st.caption(f"Showing {start_row_2 + 1}-{min(end_row_2, total_rows_2)} of {total_rows_2} rows")
+            st.caption(f"Showing {len(paginated_df_2)} rows")
 
 
         return df_moves
