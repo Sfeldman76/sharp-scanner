@@ -1771,25 +1771,29 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # ✅ Coerce types to match BigQuery schema
     
     
-    # Coerce nullable bools and strings
+    ## === Coerce datatypes BEFORE schema validation
+    df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce').astype(float)
     df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
-    df_scores_out['Scored'] = df_scores_out['Scored'].astype(str)
-    df_scores_out['SHARP_HIT_BOOL'] = df_scores_out['SHARP_HIT_BOOL'].astype(str)
-    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna('').astype(str)
+    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
+    df_scores_out['LimitUp_NoMove_Flag'] = pd.to_numeric(df_scores_out['LimitUp_NoMove_Flag'], errors='coerce').astype(bool)
+    df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
+    df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
     df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
     
-    # Optional: ensure no weird objects
+    # Optional mixed object checker
     for col in df_scores_out.select_dtypes(include='object'):
         if df_scores_out[col].map(type).nunique() > 1:
             st.warning(f"⚠️ Column {col} has mixed types!")
-    # ✅ Deduplicate: remove rows where only timestamp changed
+    
+    # === Deduplicate (before schema validation)
     dedup_cols = [col for col in score_cols if col != 'Scored']
     df_scores_out = df_scores_out.sort_values('Snapshot_Timestamp')
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_cols, keep='last')
+    
+    # === Parquet schema validation
     import pyarrow as pa
-
     try:
-        table = pa.Table.from_pandas(df_scores_out)
+        pa.Table.from_pandas(df_scores_out)
         st.success("✅ Parquet schema validation passed")
     except Exception as e:
         st.error("❌ Parquet conversion failed")
@@ -1797,11 +1801,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.code(df_scores_out.dtypes.to_string())
         st.write(df_scores_out.head(3))
         st.stop()
+    
+    # === Final upload
     if df_scores_out.empty:
         st.info("ℹ️ No changed sharp scores to upload.")
-        return df  # Return full evaluated frame for downstream use
+        return df, pd.DataFrame()
     
-    # ✅ Upload to BigQuery
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
         st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
@@ -1809,7 +1814,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
         st.code(df_scores_out.dtypes.to_string())
     
-    return df, df_scores_out  # ✅ Return full evaluated + uploaded sharp picks
+    return df, df_scores_outted + uploaded sharp picks
     
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
