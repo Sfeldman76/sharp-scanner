@@ -1441,7 +1441,7 @@ def render_scanner_tab(label, sport_key, container):
         ]
     
         # === Set Page Size for All Tables ===
-        page_size = 10
+        page_size = 40
         
         # === PAGINATED TABLE 1: Filtered Custom Table ===
         total_rows_1 = len(filtered_df)
@@ -1495,11 +1495,15 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Live Odds Snapshot Table ===
         st.subheader(f" Live Odds Snapshot – {label} (Odds + Limit)")
-        odds_rows = []
+        oodds_rows = []
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
             game_start = pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT
+        
             for book in game.get("bookmakers", []):
+                if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
+                    continue  # ✅ skip non-sharp/rec books
+        
                 for market in book.get("markets", []):
                     for o in market.get("outcomes", []):
                         price = o.get('point') if market['key'] != 'h2h' else o.get('price')
@@ -1512,7 +1516,7 @@ def render_scanner_tab(label, sport_key, container):
                             "Limit": o.get("bet_limit", 0),
                             "Game_Start": game_start
                         })
-        
+                
         df_odds_raw = pd.DataFrame(odds_rows)
         if not df_odds_raw.empty:
             df_odds_raw['Value_Limit'] = df_odds_raw.apply(
@@ -1847,18 +1851,13 @@ df_mlb_bt = pd.DataFrame()
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
-        st.subheader(f"📈 Backtest Performance – {sport_label}")
+        st.subheader(f"📈 Model Calibration – {sport_label}")
         sport_key_lower = sport_key_api
 
-        # ✅ 1. Load recent sharp picks from BigQuery
+        # ✅ 1. Load recent sharp picks
         df_master = read_recent_sharp_moves(hours=168)
         if df_master.empty:
-            st.warning(f"⚠️ No sharp picks found in BigQuery.")
-            return
-
-        # ✅ 2. Filter for the current sport
-        if 'Sport' not in df_master.columns:
-            st.warning("⚠️ Missing 'Sport' column in sharp picks. Skipping.")
+            st.warning(f"⚠️ No sharp picks found.")
             return
 
         df_master = df_master[df_master['Sport'] == sport_label.upper()]
@@ -1866,101 +1865,45 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.warning(f"⚠️ No data for {sport_label}.")
             return
 
-        # ✅ 3. Fetch updated scores (avoids stale SHARP_HIT_BOOLs)
+        # ✅ 2. Fetch latest scores + model scores
         df_bt, _ = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
+        if df_bt.empty or 'Model_Sharp_Win_Prob' not in df_bt.columns:
+            st.warning("⚠️ Missing model predictions or backtest data.")
+            return
+
+        df_bt = df_bt[df_bt['SHARP_HIT_BOOL'].notna() & df_bt['Model_Sharp_Win_Prob'].notna()].copy()
         if df_bt.empty:
-            st.warning("⚠️ No backtest data to evaluate.")
+            st.warning("ℹ️ No completed picks with model predictions.")
             return
 
-        if 'SHARP_HIT_BOOL' not in df_bt.columns:
-            st.warning("⚠️ Missing SHARP_HIT_BOOL. Skipping backtest summary.")
-            return
-
-        # === 4. Attach derived confidence tiers
-        df_bt['SharpConfidenceTier'] = pd.cut(
-            df_bt['SharpBetScore'],
-            bins=[0, 15, 25, 40, 100],
-            labels=["⚠️ Low", "✅ Moderate", "⭐ High", "🔥 Steam"]
+        # ✅ 3. Bin model probabilities
+        df_bt['Prob_Bin'] = (
+            df_bt['Model_Sharp_Win_Prob']
+            .apply(lambda x: round(x * 10) / 10)  # bins: 0.0, 0.1, ..., 1.0
         )
 
-        # ✅ 5. Filter to only completed (scored) picks
-        scored = scored.copy()
-        scored['Score_Bin'] = (
-            scored['Enhanced_Sharp_Confidence_Score']
-            .apply(lambda x: round(x / 5) * 5)
-            .clip(lower=0, upper=100)
+        prob_summary = (
+            df_bt.groupby('Prob_Bin')['SHARP_HIT_BOOL']
+            .agg(['count', 'sum', 'mean'])
+            .reset_index()
+            .rename(columns={
+                'count': 'Picks',
+                'sum': 'Wins',
+                'mean': 'Win_Rate'
+            })
+            .round({'Win_Rate': 3})
         )
 
-        # === 6. Simple Summary: Bet Score vs Win Rate
-        st.subheader(f"📈 Bet Score vs Win Rate – {sport_label}")
-        
-        if 'Enhanced_Sharp_Confidence_Score' in scored.columns:
-            # Round to nearest 5 for bucketing
-            scored['Score_Bin'] = (
-                scored['Enhanced_Sharp_Confidence_Score']
-                .apply(lambda x: round(x / 5) * 5)
-                .clip(lower=0, upper=100)
-            )
-        
-            score_summary = (
-                scored.groupby('Score_Bin')['SHARP_HIT_BOOL']
-                .agg(['count', 'sum', 'mean'])
-                .reset_index()
-                .rename(columns={
-                    'Score_Bin': 'Enhanced_Score_Bin',
-                    'count': 'Picks',
-                    'sum': 'Wins',
-                    'mean': 'Win_Rate'
-                })
-                .round({'Win_Rate': 3})
-            )
-        
-            st.dataframe(score_summary)
-        else:
-            st.info("ℹ️ No Enhanced_Sharp_Confidence_Score available.")
-        # Add this block to compute the learned market weights
-        market_component_win_rates_sport = {}
-        for comp in component_fields:
-            if comp in scored.columns:
-                result = (
-                    scored.groupby(['Market', comp])['SHARP_HIT_BOOL']
-                    .mean()
-                    .reset_index()
-                    .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
-                    .sort_values(by=['Market', comp])
-                )
-                for _, row in result.iterrows():
-                    market = str(row['Market']).lower()
-                    val = row[comp]
-                    win_rate = max(0.5, row['Win_Rate'])  # clamp floor
-                    if pd.isna(val):
-                        continue
-                    elif isinstance(val, bool):
-                        val_key = str(val).lower()
-                    elif isinstance(val, float) and val.is_integer():
-                        val_key = str(int(val))
-                    else:
-                        val_key = str(val).lower()
-                    market_component_win_rates_sport \
-                        .setdefault(market, {}) \
-                        .setdefault(comp, {})[val_key] = win_rate
-        # === 9. Upload button to write learned weights
-        if market_component_win_rates_sport:
-            all_weights = globals().get("market_component_win_rates", {})
-            all_weights[sport_key_lower] = market_component_win_rates_sport
-            globals()["market_component_win_rates"] = all_weights
-        
-            if st.button("📤 Upload Learned Market Weights"):
-                try:
-                    write_market_weights_to_bigquery(all_weights)
-                    st.success(f"✅ Uploaded weights for {sport_label} to BigQuery")
-                except Exception as e:
-                    st.error(f"❌ Upload failed: {e}")
-        else:
-            st.info("ℹ️ No learned market weights to upload.")
-        
-        
+        # ✅ 4. Display table
+        st.dataframe(prob_summary)
 
+        # ✅ 5. Optional: Chart
+        st.line_chart(
+            prob_summary.set_index('Prob_Bin')[['Win_Rate']],
+            use_container_width=True
+        )
+
+        st.caption("Win Rate = actual % of hits within each model-predicted probability bucket.")
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
