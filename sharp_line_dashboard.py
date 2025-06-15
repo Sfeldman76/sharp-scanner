@@ -1353,14 +1353,16 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
                 if not df_pre_game.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game, model)
-                    for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
-                        if col in df_scored.columns:
+        
+                    if not df_scored.empty and all(col in df_scored.columns for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']):
+                        for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
                             df_moves_raw.loc[df_scored.index, col] = df_scored[col].values
-                    
+                    else:
+                        st.warning("⚠️ Model returned empty or incomplete DataFrame during live scoring.")
                 else:
                     st.info("ℹ️ No pre-game rows to score")
             except Exception as e:
-                st.warning(f"⚠️ Failed to apply model scoring: {e}")
+                st.warning(f"⚠️ Failed to apply model scoring: {e}")        
         else:
             st.warning("⚠️ Model not available — skipping scoring.")
         
