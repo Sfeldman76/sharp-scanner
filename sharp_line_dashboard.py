@@ -1164,9 +1164,15 @@ def apply_blended_sharp_score(df, model):
 
     try:
         model_features = model.get_booster().feature_names
+
+        # Add missing dummy columns expected by model
         for col in model_features:
             if col.startswith("Market_") and col not in market_dummies.columns:
-                market_dummies[col] = 0  # Fill missing dummies
+                market_dummies[col] = 0
+
+        # 🧼 Remove duplicate columns (pre-existing dummies)
+        market_dummies = market_dummies[[col for col in market_dummies.columns if col not in df.columns]]
+
         df = pd.concat([df, market_dummies], axis=1)
     except Exception as e:
         st.error(f"❌ Step 4 failed (align market features): {e}")
@@ -1188,15 +1194,15 @@ def apply_blended_sharp_score(df, model):
         st.error(f"❌ Step 6 failed (feature to float): {e}")
         st.dataframe(df[feature_cols].head())
         return pd.DataFrame()
+
     try:
         st.info("🔍 Step 7: Running model.predict_proba()")
-        X = df[feature_cols].astype(float)  # confirm this step worked earlier
         st.info(f"✅ X shape: {X.shape}, columns: {X.columns.tolist()}")
-        
+
         df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
         df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce').fillna(0).clip(0, 1)
-        
+
         df['Model_Confidence_Tier'] = pd.cut(
             df['Model_Confidence'],
             bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
@@ -1205,11 +1211,10 @@ def apply_blended_sharp_score(df, model):
         st.success("✅ Model scoring complete")
     except Exception as e:
         st.error(f"❌ Step 7 failed (prediction or binning): {e}")
-        st.write(df.head())
+        st.dataframe(df.head(5))
         return pd.DataFrame()
 
     return df
-
 def save_model_to_gcs(model, sport, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}.pkl"
     try:
