@@ -1764,7 +1764,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
     
-    # === 8. Final output DataFrame
+   # === 8. Final output DataFrame ===
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
@@ -1773,38 +1773,49 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
     ]
+    
+    # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     df_scores_out['Sport'] = sport_label.upper()
     
-    # ✅ Deduplicate against existing BigQuery rows using Option 1 key set
-    dedup_key_cols = ['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Sport', 'SHARP_HIT_BOOL']
+    # ✅ Define full deduplication fingerprint (ignore timestamp)
+    dedup_fingerprint_cols = score_cols.copy()  # includes all except timestamp
+    
+    # ✅ Remove local exact duplicates before querying BigQuery
+    df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
+    
+    # ✅ Query BigQuery for existing fingerprints (same line state, any time)
     existing = bq_client.query(f"""
-        SELECT DISTINCT {', '.join(dedup_key_cols)}
+        SELECT DISTINCT {', '.join(dedup_fingerprint_cols)}
         FROM `sharp_data.sharp_scores_full`
         WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
     """).to_dataframe()
     
+    # ✅ Remove already-existing line states (not new even if timestamp is different)
     df_scores_out = df_scores_out.merge(
         existing,
-        on=dedup_key_cols,
+        on=dedup_fingerprint_cols,
         how='left',
         indicator=True
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
     
+    # ✅ Final upload
     if df_scores_out.empty:
-        st.info("ℹ️ No new scored picks to upload.")
+        st.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
     
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
-        st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
+        st.success(f"✅ Wrote {len(df_scores_out)} new distinct scored picks")
     except Exception as e:
-        st.error(f"❌ Failed to upload to BigQuery: {e}")
+        st.error(f"❌ Upload failed: {e}")
+        st.code(df_scores_out.dtypes.to_string())
     
-    return df, df_scores_out # Make sure you return both outputs
-
+    return df, df_scores_out
+    
+    
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
