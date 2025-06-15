@@ -1319,7 +1319,7 @@ def render_scanner_tab(label, sport_key, container):
                     for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']:
                         if col in df_scored.columns:
                             df_moves_raw.loc[df_scored.index, col] = df_scored[col].values
-                    st.success(f"✅ Model scoring applied to {len(df_scored)} pre-game rows")
+                    
                 else:
                     st.info("ℹ️ No pre-game rows to score")
             except Exception as e:
@@ -1761,7 +1761,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if model is not None:
         try:
             df = apply_blended_sharp_score(df, model)
-            st.success("✅ Applied model scoring")
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
     
@@ -1777,6 +1776,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # ✅ Build final DataFrame
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    
     # === Coerce datatypes BEFORE schema validation
     df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce').astype(float)
     df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
@@ -1786,47 +1786,50 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
     df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
     df_scores_out['Sport'] = sport_label.upper()
-    # Optional mixed object checker
+    
+    # Optional: mixed object checker
     for col in df_scores_out.select_dtypes(include='object'):
         if df_scores_out[col].map(type).nunique() > 1:
             st.warning(f"⚠️ Column {col} has mixed types!")
     
-    # === Deduplicate (before schema validation)
+    # === Deduplicate locally first (remove timestamp-only diffs)
     dedup_cols = [col for col in score_cols if col != 'Scored']
     df_scores_out = df_scores_out.sort_values('Snapshot_Timestamp')
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_cols, keep='last')
     
-    # === Parquet schema validation
-    import pyarrow as pa
-    try:
-        pa.Table.from_pandas(df_scores_out)
-        st.success("✅ Parquet schema validation passed")
-    except Exception as e:
-        st.error("❌ Parquet conversion failed")
-        st.code(str(e))
-        st.code(df_scores_out.dtypes.to_string())
-        st.write(df_scores_out.head(3))
-        st.stop()
+    # === De-duplicate against existing BigQuery entries
+    existing_keys = bq_client.query("""
+        SELECT DISTINCT Game_Key, Bookmaker, Snapshot_Timestamp
+        FROM `sharp_data.sharp_scores_full`
+        WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+    """).to_dataframe()
     
-    # === Final upload
+    df_scores_out = df_scores_out.merge(
+        existing_keys,
+        on=['Game_Key', 'Bookmaker', 'Snapshot_Timestamp'],
+        how='left',
+        indicator=True
+    )
+    df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
+    
+    # ✅ Final check before upload
     if df_scores_out.empty:
-        st.info("ℹ️ No changed sharp scores to upload.")
+        st.info("ℹ️ No new scored picks to upload.")
         return df, pd.DataFrame()
     
+    # === Upload to BigQuery
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
-        st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
+        st.success(f"✅ Wrote {len(df_scores_out)} new scored picks to sharp_scores_full")
     except Exception as e:
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
         st.code(df_scores_out.dtypes.to_string())
     
-    return df, 
-    
+    return df, df_scores_out  # 🟩 Make sure you return both outputs
+
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
-
-
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
@@ -1850,7 +1853,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             return
 
         # ✅ 3. Fetch updated scores (avoids stale SHARP_HIT_BOOLs)
-        df_bt = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
+        df_bt, _ = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
         if df_bt.empty:
             st.warning("⚠️ No backtest data to evaluate.")
             return
@@ -1867,10 +1870,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         )
 
         # ✅ 5. Filter to only completed (scored) picks
-        scored = df_bt[df_bt['SHARP_HIT_BOOL'].notna()]
-        if scored.empty:
-            st.warning("ℹ️ No completed sharp picks available for analysis.")
-            return
+        scored = scored.copy()
+        scored['Score_Bin'] = (
+            scored['Enhanced_Sharp_Confidence_Score']
+            .apply(lambda x: round(x / 5) * 5)
+            .clip(lower=0, upper=100)
+        )
 
         # === 6. Simple Summary: Bet Score vs Win Rate
         st.subheader(f"📈 Bet Score vs Win Rate – {sport_label}")
