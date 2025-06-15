@@ -1665,7 +1665,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         """).to_dataframe()
         existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
         new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
-
+       
         import pyarrow as pa
         pa.Table.from_pandas(new_scores)
 
@@ -1766,9 +1766,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # ✅ Fix datatypes for upload
     df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].astype(bool)
-    df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
-    df_scores_out['Scored'] = df_scores_out['Scored'].astype(bool)
+   
     
+    # ✅ Coerce types to match BigQuery schema
+    df_scores_out['SHARP_HIT_BOOL'] = df_scores_out['SHARP_HIT_BOOL'].astype(str)
+    df_scores_out['Scored'] = df_scores_out['Scored'].astype(str)
+    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna('').astype(str)
     # ✅ Deduplicate: remove rows where only timestamp changed
     dedup_cols = [col for col in score_cols if col != 'Scored']
     df_scores_out = df_scores_out.sort_values('Snapshot_Timestamp')
