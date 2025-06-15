@@ -1156,7 +1156,13 @@ def apply_blended_sharp_score(df, model):
     # === Step 5: Predict
     X = df[feature_cols].astype(float)
     df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
-
+    df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
+    
+    df['Model_Confidence_Tier'] = pd.cut(
+        df['Model_Confidence'],
+        bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
+        labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
+    )
     # === Step 6: Blend into final sharp score
     df['Blended_Sharp_Score'] = (
         0.5 * df['Model_Sharp_Win_Prob'] +
@@ -1384,7 +1390,7 @@ def render_scanner_tab(label, sport_key, container):
             )
 
         if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
-            df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
+            df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start', 'Model_Confidence_Tier']].dropna().drop_duplicates()
             df_game_start['MergeKey'] = (
                 df_game_start['Game'].str.strip().str.lower() + "_" +
                 df_game_start['Market'].str.strip().str.lower() + "_" +
