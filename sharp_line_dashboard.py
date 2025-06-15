@@ -1776,35 +1776,33 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     df_scores_out['Sport'] = sport_label.upper()
-
-    # Deduplicate against self
-    df_scores_out = df_scores_out.drop_duplicates()
-
-    # Deduplicate against BigQuery
-    existing = bq_client.query("""
-        SELECT DISTINCT Game_Key, Bookmaker, Market, Outcome, Snapshot_Timestamp
+    
+    # ✅ Deduplicate against existing BigQuery rows using Option 1 key set
+    dedup_key_cols = ['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Sport', 'SHARP_HIT_BOOL']
+    existing = bq_client.query(f"""
+        SELECT DISTINCT {', '.join(dedup_key_cols)}
         FROM `sharp_data.sharp_scores_full`
         WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
     """).to_dataframe()
-
+    
     df_scores_out = df_scores_out.merge(
         existing,
-        on=['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Snapshot_Timestamp'],
+        on=dedup_key_cols,
         how='left',
         indicator=True
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
-
+    
     if df_scores_out.empty:
         st.info("ℹ️ No new scored picks to upload.")
         return df, pd.DataFrame()
-
+    
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
         st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
     except Exception as e:
         st.error(f"❌ Failed to upload to BigQuery: {e}")
-
+    
     return df, df_scores_out # Make sure you return both outputs
 
 # Safe predefinition
