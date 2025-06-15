@@ -6,7 +6,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # === Page Config ===
 st.set_page_config(layout="wide")
-st.title("Sharp Edge Scanner")
+st.title("Betting Line Scanner")
 st.markdown("""
 <style>
 .scrollable-dataframe-container {
