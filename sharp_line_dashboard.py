@@ -1632,7 +1632,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     completed_games = [g for g in games if g.get("completed")]
     st.info(f"✅ Completed games: {len(completed_games)}")
 
-    # === 2. Build score table ===
+    # === 2. Build score table
     score_rows = []
     for game in completed_games:
         home = normalize_team(game.get("home_team", ""))
@@ -1651,40 +1651,38 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Source': 'oddsapi',
                 'Inserted_Timestamp': pd.Timestamp.utcnow()
             })
-
-    if not score_rows:
-        st.warning("⚠️ No valid score rows from completed games.")
-        return pd.DataFrame()
-
+    
     df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
     df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
-	# === Debug Print of Raw Scores ===
-    st.subheader(f"🧪 Raw Scores Debug – {sport_label}")
-    st.write(df_scores.head(10))
-    st.code(df_scores.dtypes.to_string())
     
-    # Check for mixed types or object fields
-    for col in df_scores.columns:
-        unique_types = df_scores[col].dropna().map(type).unique()
-        st.write(f"🔍 {col}: {unique_types}")
-    # === 3. Upload to game_scores_final (deduping)
+    # ✅ Force numeric conversion BEFORE upload
+    df_scores['Score_Home_Score'] = pd.to_numeric(df_scores['Score_Home_Score'], errors='coerce')
+    df_scores['Score_Away_Score'] = pd.to_numeric(df_scores['Score_Away_Score'], errors='coerce')
+    
+    # ✅ Drop bad rows
+    df_scores = df_scores.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
+    
+    # === 3. Upload to game_scores_final
     try:
         existing_keys = bq_client.query("""
             SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`
         """).to_dataframe()
         existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
-        new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)]
+        new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
+    
+        # ✅ Convert again on new_scores (in case of slicing)
+        new_scores['Score_Home_Score'] = pd.to_numeric(new_scores['Score_Home_Score'], errors='coerce')
+        new_scores['Score_Away_Score'] = pd.to_numeric(new_scores['Score_Away_Score'], errors='coerce')
+    
+        # ✅ Final PyArrow validation (optional)
+        import pyarrow as pa
+        pa.Table.from_pandas(new_scores)
+    
+        to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+        st.success(f"✅ Uploaded {len(new_scores)} new game scores")
     except Exception as e:
-        st.warning(f"⚠️ Failed to check existing score rows: {e}")
-        new_scores = df_scores
-
-    if not new_scores.empty:
-        try:
-            to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-            st.success(f"✅ Uploaded {len(new_scores)} new game scores")
-        except Exception as e:
-            st.error(f"❌ Failed to upload game scores: {e}")
-
+        st.error(f"❌ Failed to upload game scores: {e}")
+        st.code(new_scores.dtypes.to_string())
     # === 4. Load sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
     df_master = build_game_key(df_master)
