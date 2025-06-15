@@ -1176,7 +1176,7 @@ def apply_blended_sharp_score(df, model):
     )
 
   
-    return df
+    return df  # ✅ Good: returns just the DataFrame
 
 
 
