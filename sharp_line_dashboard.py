@@ -1160,10 +1160,18 @@ def apply_blended_sharp_score(df, model):
 
     try:
         # === Step 4: Ensure expected features are present and typed correctly
-        df['CrossMarketSharpSupport'] = pd.to_numeric(df.get('CrossMarketSharpSupport', 0), errors='coerce').fillna(0)
-        df['Unique_Sharp_Books'] = pd.to_numeric(df.get('Unique_Sharp_Books', 0), errors='coerce').fillna(0)
-        df['LimitUp_NoMove_Flag'] = df.get('LimitUp_NoMove_Flag', False).astype(int)
-        df['Market_Leader'] = df.get('Market_Leader', False).astype(int)
+        for col, default_val, dtype in [
+            ('CrossMarketSharpSupport', 0, 'float'),
+            ('Unique_Sharp_Books', 0, 'float'),
+            ('LimitUp_NoMove_Flag', 0, 'int'),
+            ('Market_Leader', 0, 'int')
+        ]:
+            if col not in df.columns:
+                df[col] = default_val
+            if dtype == 'float':
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+            elif dtype == 'int':
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
     except Exception as e:
         st.error(f"❌ Feature coercion failed: {e}")
         return pd.DataFrame()
