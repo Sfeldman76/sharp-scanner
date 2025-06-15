@@ -1121,14 +1121,15 @@ def apply_blended_sharp_score(df, model):
     df = df.copy()
 
     try:
+        # === Step 1: Clean trailing merge columns
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-        st.info(f"✅ Columns after _x/_y cleanup: {df.columns.tolist()}")
+        st.info(f"✅ Columns after cleanup: {df.columns.tolist()}")
     except Exception as e:
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
     try:
-        # === Final Confidence Score
+        # === Step 2: Final Confidence Score (0–1)
         if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
             raise ValueError("Missing Enhanced_Sharp_Confidence_Score")
         df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
@@ -1141,51 +1142,45 @@ def apply_blended_sharp_score(df, model):
         return pd.DataFrame()
 
     try:
-        # === Market dummies
+        # === Step 3: Market dummies
         df['Market'] = df['Market'].astype(str).str.lower()
         market_dummies = pd.get_dummies(df['Market'], prefix='Market')
-        model_features = model.get_booster().feature_names
 
-        # Add any missing dummies expected by model
+        # Add missing dummy columns expected by model
+        model_features = model.get_booster().feature_names
         for col in model_features:
             if col.startswith("Market_") and col not in market_dummies.columns:
                 market_dummies[col] = 0
+
         df = pd.concat([df, market_dummies], axis=1)
+        df = df.loc[:, ~df.columns.duplicated()]  # ✅ Fix for 'DataFrame has no dtype'
     except Exception as e:
-        st.error(f"❌ Market dummies failed: {e}")
+        st.error(f"❌ Market dummy prep failed: {e}")
         return pd.DataFrame()
 
     try:
-        # === Ensure all non-market features are present and coerced
-        if 'CrossMarketSharpSupport' not in df.columns:
-            df['CrossMarketSharpSupport'] = 0
-        if 'Unique_Sharp_Books' not in df.columns:
-            df['Unique_Sharp_Books'] = 0
-        if 'LimitUp_NoMove_Flag' not in df.columns:
-            df['LimitUp_NoMove_Flag'] = False
-        if 'Market_Leader' not in df.columns:
-            df['Market_Leader'] = False
-
-        df['CrossMarketSharpSupport'] = pd.to_numeric(df['CrossMarketSharpSupport'], errors='coerce').fillna(0)
-        df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0)
-        df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].astype(int)
-        df['Market_Leader'] = df['Market_Leader'].astype(int)
+        # === Step 4: Ensure expected features are present and typed correctly
+        df['CrossMarketSharpSupport'] = pd.to_numeric(df.get('CrossMarketSharpSupport', 0), errors='coerce').fillna(0)
+        df['Unique_Sharp_Books'] = pd.to_numeric(df.get('Unique_Sharp_Books', 0), errors='coerce').fillna(0)
+        df['LimitUp_NoMove_Flag'] = df.get('LimitUp_NoMove_Flag', False).astype(int)
+        df['Market_Leader'] = df.get('Market_Leader', False).astype(int)
     except Exception as e:
         st.error(f"❌ Feature coercion failed: {e}")
         return pd.DataFrame()
 
     try:
-        # === Final feature alignment
-        feature_cols = [col for col in model.get_booster().feature_names if col in df.columns]
-        missing = set(model.get_booster().feature_names) - set(feature_cols)
+        # === Step 5: Align to model features
+        feature_cols = [col for col in model_features if col in df.columns]
+        missing = set(model_features) - set(feature_cols)
         if missing:
             raise ValueError(f"Missing model feature columns: {missing}")
-        st.info(f"✅ Model features used: {feature_cols}")
+        st.info(f"✅ Using model features: {feature_cols}")
     except Exception as e:
         st.error(f"❌ Feature alignment failed: {e}")
         return pd.DataFrame()
 
     try:
+        # === Step 6: Predict
         X = df[feature_cols].astype(float)
         df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
         df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
