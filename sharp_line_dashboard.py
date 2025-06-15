@@ -1188,10 +1188,15 @@ def apply_blended_sharp_score(df, model):
         st.error(f"❌ Step 6 failed (feature to float): {e}")
         st.dataframe(df[feature_cols].head())
         return pd.DataFrame()
-
     try:
+        st.info("🔍 Step 7: Running model.predict_proba()")
+        X = df[feature_cols].astype(float)  # confirm this step worked earlier
+        st.info(f"✅ X shape: {X.shape}, columns: {X.columns.tolist()}")
+        
         df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
         df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
+        df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce').fillna(0).clip(0, 1)
+        
         df['Model_Confidence_Tier'] = pd.cut(
             df['Model_Confidence'],
             bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
@@ -1200,6 +1205,7 @@ def apply_blended_sharp_score(df, model):
         st.success("✅ Model scoring complete")
     except Exception as e:
         st.error(f"❌ Step 7 failed (prediction or binning): {e}")
+        st.write(df.head())
         return pd.DataFrame()
 
     return df
