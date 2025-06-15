@@ -1128,88 +1128,64 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
 
 def apply_blended_sharp_score(df, model):
     import numpy as np
-    import pandas as pd
-
-    st.info("🔍 Entered apply_blended_sharp_score()")
-
     df = df.copy()
 
-    try:
-        # === Step 1: Drop _x/_y columns
-        df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-        st.info(f"✅ Columns after _x/_y cleanup: {df.columns.tolist()}")
-    except Exception as e:
-        st.error(f"❌ Step 1 failed: {e}")
-        return df
+    print("🔍 Entered apply_blended_sharp_score()")
 
-    try:
-        if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
-            raise ValueError("Missing Enhanced_Sharp_Confidence_Score")
-        df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
-        if 'True_Sharp_Confidence_Score' in df.columns:
-            df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
-    except Exception as e:
-        st.error(f"❌ Step 2 failed: {e}")
-        return df
+    # === Step 1: Clean up any _x / _y duplicates to avoid confusion
+    df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
+    print("✅ Columns after _x/_y cleanup:", df.columns.tolist())
 
-    try:
-        df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce')
-        df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
-        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
-    except Exception as e:
-        st.error(f"❌ Step 3 failed converting Final_Confidence_Score: {e}")
-        st.dataframe(df[['Final_Confidence_Score']].head())
-        return df
+    # === Step 2: Confirm confidence column exists
+    if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
+        raise ValueError("❌ Missing Enhanced_Sharp_Confidence_Score in df")
 
-    try:
-        df['Market'] = df['Market'].astype(str).str.lower()
-        market_dummies = pd.get_dummies(df['Market'], prefix='Market')
-        st.info(f"✅ Market dummy columns: {market_dummies.columns.tolist()}")
-    except Exception as e:
-        st.error(f"❌ Step 4 failed during Market dummies: {e}")
-        return df
+    # === Step 3: Build final confidence column
+    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
+    if 'True_Sharp_Confidence_Score' in df.columns:
+        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
-    try:
-        model_features = model.get_booster().feature_names
-        for col in model_features:
-            if col.startswith("Market_") and col not in market_dummies.columns:
-                market_dummies[col] = 0
-        df = pd.concat([df, market_dummies], axis=1)
-    except Exception as e:
-        st.error(f"❌ Step 5 failed during model feature alignment: {e}")
-        return df
+    df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce')
+    df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
+    df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
 
-    try:
-        feature_cols = [col for col in model_features if col in df.columns]
-        missing = set(model_features) - set(feature_cols)
-        if missing:
-            raise ValueError(f"❌ Missing model feature columns: {missing}")
-        st.info(f"✅ Model features used: {feature_cols}")
-    except Exception as e:
-        st.error(f"❌ Step 6 failed: {e}")
-        return df
+    # === Step 4: Generate Market dummies to match training logic
+    df['Market'] = df['Market'].astype(str).str.lower()
+    market_dummies = pd.get_dummies(df['Market'], prefix='Market')
+    print("✅ Market dummy columns:", market_dummies.columns.tolist())
 
+    # Add missing dummy columns expected by model
+    model_features = model.get_booster().feature_names
+    for col in model_features:
+        if col.startswith('Market_') and col not in market_dummies.columns:
+            market_dummies[col] = 0
+
+    df = pd.concat([df, market_dummies], axis=1)
+
+    # === Step 5: Validate model features
+    feature_cols = [col for col in model_features if col in df.columns]
+    missing = set(model_features) - set(feature_cols)
+    if missing:
+        raise ValueError(f"❌ Missing model feature columns: {missing}")
+    print("✅ Model features used:", feature_cols)
+
+    # === Step 6: Predict model win probabilities
     try:
         X = df[feature_cols].astype(float)
-    except Exception as e:
-        st.error(f"❌ Step 7 failed converting features to float: {e}")
-        st.dataframe(df[feature_cols].head())
-        return df
-
-    try:
         df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
-        df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
-        df['Model_Confidence_Tier'] = pd.cut(
-            df['Model_Confidence'],
-            bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
-            labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
-        )
     except Exception as e:
-        st.error(f"❌ Step 8 failed during prediction or scoring: {e}")
-        return df
+        print(f"❌ Step 8 failed during prediction or scoring: {e}")
+        raise
+
+    # === Step 7: Add confidence metrics
+    df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
+    df['Model_Confidence_Tier'] = pd.cut(
+        df['Model_Confidence'],
+        bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
+        labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
+    )
 
     return df
-
 
 def save_model_to_gcs(model, sport, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}.pkl"
