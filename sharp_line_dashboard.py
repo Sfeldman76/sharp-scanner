@@ -1764,68 +1764,48 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
     
-    # === 8. Final upload to sharp_scores_full
+    # === 8. Final output DataFrame
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score',
-        'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket', 'Market_Leader',
-        'LimitUp_NoMove_Flag', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
-        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
     ]
-    
-    # ✅ Build final DataFrame
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    
-    # === Coerce datatypes BEFORE schema validation
-    df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce').astype(float)
-    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
-    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
-    df_scores_out['LimitUp_NoMove_Flag'] = pd.to_numeric(df_scores_out['LimitUp_NoMove_Flag'], errors='coerce').astype(bool)
-    df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
-    df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
-    df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
     df_scores_out['Sport'] = sport_label.upper()
-    
-    # Optional: mixed object checker
-    for col in df_scores_out.select_dtypes(include='object'):
-        if df_scores_out[col].map(type).nunique() > 1:
-            st.warning(f"⚠️ Column {col} has mixed types!")
-    
-    # === Deduplicate locally first (remove timestamp-only diffs)
-    dedup_cols = [col for col in score_cols if col != 'Scored']
-    df_scores_out = df_scores_out.sort_values('Snapshot_Timestamp')
-    df_scores_out = df_scores_out.drop_duplicates(subset=dedup_cols, keep='last')
-    
-    # === De-duplicate against existing BigQuery entries
-    existing_keys = bq_client.query("""
-        SELECT DISTINCT Game_Key, Bookmaker, Snapshot_Timestamp
+
+    # Deduplicate against self
+    df_scores_out = df_scores_out.drop_duplicates()
+
+    # Deduplicate against BigQuery
+    existing = bq_client.query("""
+        SELECT DISTINCT Game_Key, Bookmaker, Market, Outcome, Snapshot_Timestamp
         FROM `sharp_data.sharp_scores_full`
         WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
     """).to_dataframe()
-    
+
     df_scores_out = df_scores_out.merge(
-        existing_keys,
-        on=['Game_Key', 'Bookmaker', 'Snapshot_Timestamp'],
+        existing,
+        on=['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Snapshot_Timestamp'],
         how='left',
         indicator=True
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
-    
-    # ✅ Final check before upload
+
     if df_scores_out.empty:
         st.info("ℹ️ No new scored picks to upload.")
         return df, pd.DataFrame()
-    
-    # === Upload to BigQuery
+
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
-        st.success(f"✅ Wrote {len(df_scores_out)} new scored picks to sharp_scores_full")
+        st.success(f"✅ Wrote {len(df_scores_out)} scored picks to sharp_scores_full")
     except Exception as e:
-        st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
-        st.code(df_scores_out.dtypes.to_string())
-    
-    return df, df_scores_out  # 🟩 Make sure you return both outputs
+        st.error(f"❌ Failed to upload to BigQuery: {e}")
+
+    return df, df_scores_out # Make sure you return both outputs
 
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
