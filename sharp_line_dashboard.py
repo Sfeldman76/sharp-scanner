@@ -1814,7 +1814,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
         st.code(df_scores_out.dtypes.to_string())
     
-    return df, df_scores_outted + uploaded sharp picks
+    return df, df_scores_out
     
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
