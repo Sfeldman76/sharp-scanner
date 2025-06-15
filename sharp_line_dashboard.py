@@ -1187,8 +1187,12 @@ def apply_blended_sharp_score(df, model):
     except Exception as e:
         st.error(f"❌ Step 5 failed (feature column selection): {e}")
         return pd.DataFrame()
-
     try:
+        # === Fix: coerce 'True'/'False' strings to 1/0
+        for col in feature_cols:
+            if df[col].dtype == object and df[col].isin(['True', 'False']).any():
+                df[col] = df[col].map({'True': 1, 'False': 0})
+    
         X = df[feature_cols].astype(float)
     except Exception as e:
         st.error(f"❌ Step 6 failed (feature to float): {e}")
