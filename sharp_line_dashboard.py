@@ -1165,9 +1165,11 @@ def apply_blended_sharp_score(df, model):
     if missing:
         raise ValueError(f"❌ Missing model feature columns: {missing}")
 
-    # === Step 6: Predict
+    # === Step 6: Predict model win probabilities
     X = df[feature_cols].astype(float)
     df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
+
+    # === Step 7: Add confidence metrics
     df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
     df['Model_Confidence_Tier'] = pd.cut(
         df['Model_Confidence'],
@@ -1175,9 +1177,7 @@ def apply_blended_sharp_score(df, model):
         labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
     )
 
-  
-    return df  # ✅ Good: returns just the DataFrame
-
+    return df
 
 
 def save_model_to_gcs(model, sport, bucket_name="sharp-models"):
@@ -1855,7 +1855,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.error(f"❌ Upload failed: {e}")
         st.code(df_scores_out.dtypes.to_string())
     
-    return df, df_scores_out
+    return df
     
     
 # Safe predefinition
