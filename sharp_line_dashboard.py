@@ -1085,18 +1085,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
     df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()]
     df['target'] = df['SHARP_HIT_BOOL'].astype(int)
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 100) / 100
-
-    feature_cols = ['Final_Confidence_Score']
-
+    
+    # === Add Market dummies BEFORE defining feature_cols
+    df['Market'] = df['Market'].astype(str).str.lower()
+    market_dummies = pd.get_dummies(df['Market'], prefix='Market')
+    df = pd.concat([df, market_dummies], axis=1)
+    
+    # === Now define feature columns correctly
+    feature_cols = ['Final_Confidence_Score'] + list(market_dummies.columns)
+    
     if 'CrossMarketSharpSupport' in df.columns:
         feature_cols.append('CrossMarketSharpSupport')
-    
     if 'Unique_Sharp_Books' in df.columns:
         feature_cols.append('Unique_Sharp_Books')
-    
     if 'LimitUp_NoMove_Flag' in df.columns:
         feature_cols.append('LimitUp_NoMove_Flag')
-    
     if 'Market_Leader' in df.columns:
         feature_cols.append('Market_Leader')
     
@@ -1104,10 +1107,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
     if len(df) < 5:
         st.warning(f"⚠️ Not enough labeled samples for {sport} model.")
         return None
-
+    
     X = df[feature_cols].astype(float)
     y = df['target'].astype(int)
-
     X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
     model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
@@ -1141,34 +1143,39 @@ def apply_blended_sharp_score(df, model):
     if 'True_Sharp_Confidence_Score' in df.columns:
         df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
 
-    # Clamp or convert safely
     df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce')
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
 
-    # === Step 4: Validate model features
+    # === Step 4: Generate Market dummies to match training logic
+    df['Market'] = df['Market'].astype(str).str.lower()
+    market_dummies = pd.get_dummies(df['Market'], prefix='Market')
+
+    # Add missing dummy columns expected by model
     model_features = model.get_booster().feature_names
+    for col in model_features:
+        if col.startswith('Market_') and col not in market_dummies.columns:
+            market_dummies[col] = 0
+
+    df = pd.concat([df, market_dummies], axis=1)
+
+    # === Step 5: Validate model features
     feature_cols = [col for col in model_features if col in df.columns]
     missing = set(model_features) - set(feature_cols)
     if missing:
         raise ValueError(f"❌ Missing model feature columns: {missing}")
 
-    # === Step 5: Predict
+    # === Step 6: Predict
     X = df[feature_cols].astype(float)
     df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
     df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
-    
     df['Model_Confidence_Tier'] = pd.cut(
         df['Model_Confidence'],
         bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
         labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
     )
-    # === Step 6: Blend into final sharp score
-    df['Blended_Sharp_Score'] = (
-        0.5 * df['Model_Sharp_Win_Prob'] +
-        0.5 * df['Final_Confidence_Score']
-    )
 
+  
     return df
 
 
@@ -1909,7 +1916,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         prob_summary = pd.DataFrame(summary_rows).sort_values('Prob_Bin')
         
         # ✅ 4. Display table
-        st.dataframe(prob_summary
+        st.dataframe(prob_summary)
   
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
