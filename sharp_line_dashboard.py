@@ -1760,8 +1760,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score',
         'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket', 'Market_Leader',
         'LimitUp_NoMove_Flag', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
-        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored',
-        'Score_Home_Score', 'Score_Away_Score'  # ✅ required for schema
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
+         # ✅ required for schema
     ]
    
        # ✅ Build final output for BigQuery
