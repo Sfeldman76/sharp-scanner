@@ -1180,7 +1180,6 @@ def fetch_scored_picks_from_bigquery(limit=5000):
         return pd.DataFrame()
         
 
-
 def render_scanner_tab(label, sport_key, container):
     market_component_win_rates = read_market_weights_from_bigquery()
     timestamp = pd.Timestamp.utcnow()
@@ -1240,7 +1239,7 @@ def render_scanner_tab(label, sport_key, container):
                 aggfunc="first"
             ).reset_index()
 
-        detection_key = f"sharp_moves_{sport_key.lower()}"
+        detection_key = f"sharp_moves_{sport_key_lower}"
         if detection_key in st.session_state:
             df_moves_raw, df_audit, summary_df = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp detection results for {label}")
@@ -1251,9 +1250,12 @@ def render_scanner_tab(label, sport_key, container):
             st.session_state[detection_key] = (df_moves_raw, df_audit, summary_df)
             st.success("🧠 Sharp detection run completed and cached.")
 
-       if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
-    st.warning("⚠️ No sharp signals detected.")
-    return pd.DataFrame()
+        # ✅ FIXED INDENTATION HERE
+        if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
+            st.warning("⚠️ No sharp signals detected.")
+            return pd.DataFrame()
+
+   
 
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
