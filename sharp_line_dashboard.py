@@ -1775,7 +1775,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     ]
     
     # Build full output
-    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()   
+    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
+    df_scores_out['Sport'] = sport_label.upper()
+    df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
@@ -1792,7 +1794,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
     df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
     df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
-    df_scores_out['Snapshot_Timestamp'] = pd.to_datetime(df_scores_out['Snapshot_Timestamp'], utc=True, errors='coerce')
+ 
         # Debug: ensure schema matches
     try:
         import pyarrow as pa
