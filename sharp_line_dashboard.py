@@ -1775,10 +1775,33 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     ]
     
     # Build full output
-    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
-    df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    df_scores_out['Sport'] = sport_label.upper()
-    
+    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()   
+    # === Coerce and clean all fields BEFORE dedup and upload
+    df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
+    df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
+    df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').astype('Int64')
+    df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
+    df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce')
+    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
+    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
+    df_scores_out['LimitUp_NoMove_Flag'] = df_scores_out['LimitUp_NoMove_Flag'].fillna(False).astype(bool)
+    df_scores_out['SharpBetScore'] = pd.to_numeric(df_scores_out['SharpBetScore'], errors='coerce')
+    df_scores_out['Enhanced_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['Enhanced_Sharp_Confidence_Score'], errors='coerce')
+    df_scores_out['True_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['True_Sharp_Confidence_Score'], errors='coerce')
+    df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
+    df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
+    df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
+    df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
+    df_scores_out['Snapshot_Timestamp'] = pd.to_datetime(df_scores_out['Snapshot_Timestamp'], utc=True, errors='coerce')
+        # Debug: ensure schema matches
+    try:
+        import pyarrow as pa
+        pa.Table.from_pandas(df_scores_out)
+    except Exception as e:
+        st.error("❌ Parquet validation failed before upload")
+        st.code(str(e))
+        st.write(df_scores_out.dtypes)
+        st.stop()
     # ✅ Define full deduplication fingerprint (ignore timestamp)
     dedup_fingerprint_cols = score_cols.copy()  # includes all except timestamp
     
