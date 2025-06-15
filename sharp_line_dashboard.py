@@ -559,12 +559,13 @@ def read_market_weights_from_bigquery():
 
 
 
-def detect_cross_market_sharp_support(df_moves):
+def detect_cross_market_sharp_support(df_moves, score_threshold=25):
     df = df_moves.copy()
     df['SupportKey'] = df['Game'].astype(str) + " | " + df['Outcome'].astype(str)
 
-    df_sharp = df[df['SharpBetScore'] >= 25].copy()
+    df_sharp = df[df['SharpBetScore'] >= score_threshold].copy()
 
+    # Count unique markets
     market_counts = (
         df_sharp.groupby('SupportKey')['Market']
         .nunique()
@@ -572,12 +573,27 @@ def detect_cross_market_sharp_support(df_moves):
         .rename(columns={'Market': 'CrossMarketSharpSupport'})
     )
 
+    # Count unique sharp bookmakers
+    sharp_book_counts = (
+        df_sharp[df_sharp['Book'].isin(SHARP_BOOKS)]
+        .groupby('SupportKey')['Book']
+        .nunique()
+        .reset_index()
+        .rename(columns={'Book': 'Unique_Sharp_Books'})
+    )
+
     df = df.merge(market_counts, on='SupportKey', how='left')
+    df = df.merge(sharp_book_counts, on='SupportKey', how='left')
+
     df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
-    df['Is_Reinforced_MultiMarket'] = df['CrossMarketSharpSupport'] >= 2
+    df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
+    df['Is_Reinforced_MultiMarket'] = (
+        (df['CrossMarketSharpSupport'] >= 2) | (df['Unique_Sharp_Books'] >= 2)
+    )
 
     return df
-
+    
+    
 @st.cache_data(ttl=1000)
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
     from collections import defaultdict
@@ -947,7 +963,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     ).astype(int)
     
     df = detect_cross_market_sharp_support(df)
-    
+    df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
+    df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
+    df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
+    df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
     # ✅ Compute dynamic, market-calibrated confidence
     df['True_Sharp_Confidence_Score'] = df.apply(
         lambda r: compute_weighted_signal(r, confidence_weights), axis=1
@@ -1068,9 +1087,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
     df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 100) / 100
 
     feature_cols = ['Final_Confidence_Score']
+
     if 'CrossMarketSharpSupport' in df.columns:
         feature_cols.append('CrossMarketSharpSupport')
-
+    
+    if 'Unique_Sharp_Books' in df.columns:
+        feature_cols.append('Unique_Sharp_Books')
+    
+    if 'LimitUp_NoMove_Flag' in df.columns:
+        feature_cols.append('LimitUp_NoMove_Flag')
+    
+    if 'Market_Leader' in df.columns:
+        feature_cols.append('Market_Leader')
+    
     df = df.dropna(subset=feature_cols)
     if len(df) < 5:
         st.warning(f"⚠️ Not enough labeled samples for {sport} model.")
