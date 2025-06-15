@@ -1886,9 +1886,13 @@ df_mlb_bt = pd.DataFrame()
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
-        sport_key_lower = sport_key_api
 
-        # ✅ 1. Load recent sharp picks
+        model_key = f"sharp_model_{sport_label.lower()}"
+        model = st.session_state.get(model_key)
+        if model is None:
+            model = load_model_from_gcs(sport=sport_label)
+            st.session_state[model_key] = model
+
         df_master = read_recent_sharp_moves(hours=168)
         if df_master.empty:
             st.warning(f"⚠️ No sharp picks found.")
@@ -1899,46 +1903,9 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.warning(f"⚠️ No data for {sport_label}.")
             return
 
-        # ✅ 2. Fetch latest scores + model scores
-        df_bt, _ = fetch_scores_and_backtest(sport_key_api, df_master.copy(), api_key=API_KEY)
-        if df_bt.empty or 'Model_Sharp_Win_Prob' not in df_bt.columns:
-            st.warning("⚠️ Missing model predictions or backtest data.")
-            return
-
-        df_bt = df_bt[df_bt['SHARP_HIT_BOOL'].notna() & df_bt['Model_Sharp_Win_Prob'].notna()].copy()
-        if df_bt.empty:
-            st.warning("ℹ️ No completed picks with model predictions.")
-            return
-
-        # === 3. Compute win rate + confidence intervals
-        z = 1.96  # 95% confidence level
-        
-        def compute_ci(n, p):
-            if n == 0:
-                return 0.0, 0.0
-            margin = z * np.sqrt((p * (1 - p)) / n)
-            return max(p - margin, 0), min(p + margin, 1)
-        
-        summary_rows = []
-        for bin_val, group in df_bt.groupby('Prob_Bin'):
-            n = group['SHARP_HIT_BOOL'].count()
-            wins = group['SHARP_HIT_BOOL'].sum()
-            p = wins / n if n > 0 else 0
-            lower, upper = compute_ci(n, p)
-            summary_rows.append({
-                'Prob_Bin': bin_val,
-                'Picks': n,
-                'Wins': wins,
-                'Win_Rate': round(p, 3),
-                'CI_Lower': round(lower, 3),
-                'CI_Upper': round(upper, 3)
-            })
-        
-        prob_summary = pd.DataFrame(summary_rows).sort_values('Prob_Bin')
-        
-        # ✅ 4. Display table
-        st.dataframe(prob_summary)
-  
+        df_bt, _ = fetch_scores_and_backtest(
+            sport_key_api, df_master.copy(), api_key=API_KEY, model=model
+        )
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
