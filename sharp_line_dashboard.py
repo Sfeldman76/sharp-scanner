@@ -1128,62 +1128,79 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
 
 def apply_blended_sharp_score(df, model):
     import numpy as np
+    import pandas as pd
+
+    st.info("🔍 Entered apply_blended_sharp_score()")
     df = df.copy()
 
-    print("🔍 Entered apply_blended_sharp_score()")
+    try:
+        # === Step 1: Drop _x/_y columns
+        df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
+        st.info(f"✅ Columns after _x/_y cleanup: {df.columns.tolist()}")
+    except Exception as e:
+        st.error(f"❌ Step 1 failed: {e}")
+        return pd.DataFrame()
 
-    # === Step 1: Clean up any _x / _y duplicates to avoid confusion
-    df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-    print("✅ Columns after _x/_y cleanup:", df.columns.tolist())
+    try:
+        if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
+            raise ValueError("Missing Enhanced_Sharp_Confidence_Score")
+        df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
+        if 'True_Sharp_Confidence_Score' in df.columns:
+            df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
+        df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce')
+        df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
+        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
+    except Exception as e:
+        st.error(f"❌ Step 2 failed (confidence prep): {e}")
+        return pd.DataFrame()
 
-    # === Step 2: Confirm confidence column exists
-    if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
-        raise ValueError("❌ Missing Enhanced_Sharp_Confidence_Score in df")
+    try:
+        df['Market'] = df['Market'].astype(str).str.lower()
+        market_dummies = pd.get_dummies(df['Market'], prefix='Market')
+        st.info(f"✅ Market dummy columns: {market_dummies.columns.tolist()}")
+    except Exception as e:
+        st.error(f"❌ Step 3 failed (market dummies): {e}")
+        return pd.DataFrame()
 
-    # === Step 3: Build final confidence column
-    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
-    if 'True_Sharp_Confidence_Score' in df.columns:
-        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
+    try:
+        model_features = model.get_booster().feature_names
+        for col in model_features:
+            if col.startswith("Market_") and col not in market_dummies.columns:
+                market_dummies[col] = 0  # Fill missing dummies
+        df = pd.concat([df, market_dummies], axis=1)
+    except Exception as e:
+        st.error(f"❌ Step 4 failed (align market features): {e}")
+        return pd.DataFrame()
 
-    df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce')
-    df['Final_Confidence_Score'] = df['Final_Confidence_Score'] / 100
-    df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
+    try:
+        feature_cols = [col for col in model_features if col in df.columns]
+        missing = set(model_features) - set(feature_cols)
+        if missing:
+            raise ValueError(f"❌ Missing model feature columns: {missing}")
+        st.info(f"✅ Model features used: {feature_cols}")
+    except Exception as e:
+        st.error(f"❌ Step 5 failed (feature column selection): {e}")
+        return pd.DataFrame()
 
-    # === Step 4: Generate Market dummies to match training logic
-    df['Market'] = df['Market'].astype(str).str.lower()
-    market_dummies = pd.get_dummies(df['Market'], prefix='Market')
-    print("✅ Market dummy columns:", market_dummies.columns.tolist())
-
-    # Add missing dummy columns expected by model
-    model_features = model.get_booster().feature_names
-    for col in model_features:
-        if col.startswith('Market_') and col not in market_dummies.columns:
-            market_dummies[col] = 0
-
-    df = pd.concat([df, market_dummies], axis=1)
-
-    # === Step 5: Validate model features
-    feature_cols = [col for col in model_features if col in df.columns]
-    missing = set(model_features) - set(feature_cols)
-    if missing:
-        raise ValueError(f"❌ Missing model feature columns: {missing}")
-    print("✅ Model features used:", feature_cols)
-
-    # === Step 6: Predict model win probabilities
     try:
         X = df[feature_cols].astype(float)
-        df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
     except Exception as e:
-        print(f"❌ Step 8 failed during prediction or scoring: {e}")
-        raise
+        st.error(f"❌ Step 6 failed (feature to float): {e}")
+        st.dataframe(df[feature_cols].head())
+        return pd.DataFrame()
 
-    # === Step 7: Add confidence metrics
-    df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
-    df['Model_Confidence_Tier'] = pd.cut(
-        df['Model_Confidence'],
-        bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
-        labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
-    )
+    try:
+        df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
+        df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
+        df['Model_Confidence_Tier'] = pd.cut(
+            df['Model_Confidence'],
+            bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
+            labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
+        )
+        st.success("✅ Model scoring complete")
+    except Exception as e:
+        st.error(f"❌ Step 7 failed (prediction or binning): {e}")
+        return pd.DataFrame()
 
     return df
 
@@ -1336,7 +1353,7 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
                 if not df_pre_game.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game, model)
-                    for col in ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']:
+                    for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
                         if col in df_scored.columns:
                             df_moves_raw.loc[df_scored.index, col] = df_scored[col].values
                     
@@ -1357,7 +1374,7 @@ def render_scanner_tab(label, sport_key, container):
                 df_moves_raw[col] = None
         
         # === Prepare final deduped view with scores
-        model_cols = ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']
+        model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
         for col in model_cols:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
@@ -1389,20 +1406,24 @@ def render_scanner_tab(label, sport_key, container):
         if summary_df.empty:
             st.info("ℹ️ No summary data available.")
             return df_moves
-
+        
         st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
+        
+        # === Normalize keys
         for col in ['Game', 'Outcome']:
             summary_df[col] = summary_df[col].str.strip().str.lower()
             df_moves[col] = df_moves[col].str.strip().str.lower()
-
-        if 'Blended_Sharp_Score' in df_moves.columns:
-            df_merge_scores = df_moves[['Game', 'Market', 'Outcome', 'Blended_Sharp_Score', 'Model_Sharp_Win_Prob']].drop_duplicates()
-            summary_df = summary_df.merge(
-                df_merge_scores,
-                on=['Game', 'Market', 'Outcome'],
-                how='left'
-            )
-
+        
+        # === Merge model score + confidence tier
+        model_cols_to_merge = ['Game', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
+        df_merge_scores = df_moves[model_cols_to_merge].drop_duplicates()
+        summary_df = summary_df.merge(
+            df_merge_scores,
+            on=['Game', 'Market', 'Outcome'],
+            how='left'
+        )
+        
+        # === Merge Game_Start for EST display
         if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
             df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start', 'Model_Confidence_Tier']].dropna().drop_duplicates()
             df_game_start['MergeKey'] = (
@@ -1415,16 +1436,15 @@ def render_scanner_tab(label, sport_key, container):
                 summary_df['Market'].str.strip().str.lower() + "_" +
                 summary_df['Event_Date'].astype(str)
             )
-            if 'MergeKey' in df_game_start.columns:
-                summary_df = summary_df.merge(
-                    df_game_start[['MergeKey', 'Game_Start']],
-                    on='MergeKey',
-                    how='left'
-                )
-
+            summary_df = summary_df.merge(
+                df_game_start[['MergeKey', 'Game_Start']],
+                on='MergeKey',
+                how='left'
+            )
+        
+        # === Format to EST
         def safe_to_est(dt):
-            if pd.isna(dt):
-                return ""
+            if pd.isna(dt): return ""
             try:
                 dt = pd.to_datetime(dt, errors='coerce')
                 if dt.tzinfo is None:
@@ -1432,11 +1452,12 @@ def render_scanner_tab(label, sport_key, container):
                 return dt.tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
             except:
                 return ""
-
+        
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
         summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
-
+        
+        # === Rename columns for display
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
@@ -1445,21 +1466,23 @@ def render_scanner_tab(label, sport_key, container):
             'Sharp_Book_Consensus': 'Sharp\nConsensus',
             'Move_From_Open_Rec': 'Rec\nMove',
             'Move_From_Open_Sharp': 'Sharp\nMove',
-            
+            'Model_Confidence_Tier': 'Confidence\nTier'
         }, inplace=True)
-
+        
+        # === Drop duplicate rows
         summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
-
+        
+        # === Market filter
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
-
+        
+        # === Columns to show
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model_Sharp_Win_Prob'  # ✅ only keep this one
+            'Model_Sharp_Win_Prob', 'Confidence\nTier'  # ✅ Now included
         ]
-    
         # === Set Page Size for All Tables ===
         page_size = 40
         
