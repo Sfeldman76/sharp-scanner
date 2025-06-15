@@ -1704,24 +1704,37 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
 
+    # === 6. Calculate result
     def calc_cover(row):
         try:
-            h, a = float(row['Score_Home_Score'])
+            h = float(row['Score_Home_Score'])
+            a = float(row['Score_Away_Score'])
             val = float(row['Ref_Sharp_Value'])
             market = str(row.get('Market', '')).lower()
             outcome = str(row.get('Outcome', '')).lower()
+    
             if market == 'totals':
-                return ['Win', 1] if ('under' in outcome and h + a < val) or ('over' in outcome and h + a > val) else ['Loss', 0]
+                if 'under' in outcome and h + a < val:
+                    return ['Win', 1]
+                elif 'over' in outcome and h + a > val:
+                    return ['Win', 1]
+                else:
+                    return ['Loss', 0]
+    
             if market == 'spreads':
                 margin = h - a if row['Home_Team_Norm'] in outcome else a - h
                 hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
                 return ['Win', 1] if hit else ['Loss', 0]
+    
             if market == 'h2h':
-                return ['Win', 1] if ((row['Home_Team_Norm'] in outcome and h > a) or (row['Away_Team_Norm'] in outcome and a > h)) else ['Loss', 0]
+                home_win = row['Home_Team_Norm'] in outcome and h > a
+                away_win = row['Away_Team_Norm'] in outcome and a > h
+                return ['Win', 1] if home_win or away_win else ['Loss', 0]
+    
             return [None, 0]
-        except:
+        except Exception:
             return [None, 0]
-
+    
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
     df['SHARP_COVER_RESULT'] = None
@@ -1729,7 +1742,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Scored'] = False
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
-
+    
     # === 7. Apply model scoring if available
     if model is not None:
         try:
@@ -1737,8 +1750,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             st.success("✅ Applied model scoring")
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
-
-        # === 8. Final upload to sharp_scores_full
+    
+    # === 8. Final upload to sharp_scores_full
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift', 'Sharp_Time_Score',
@@ -1746,20 +1759,25 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'LimitUp_NoMove_Flag', 'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored'
     ]
-
+    
     # ✅ Build final DataFrame
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-
+    
+    # ✅ Fix datatypes for upload
+    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].astype(bool)
+    df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
+    df_scores_out['Scored'] = df_scores_out['Scored'].astype(bool)
+    
     # ✅ Deduplicate: remove rows where only timestamp changed
     dedup_cols = [col for col in score_cols if col != 'Scored']
     df_scores_out = df_scores_out.sort_values('Snapshot_Timestamp')
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_cols, keep='last')
-
+    
     if df_scores_out.empty:
         st.info("ℹ️ No changed sharp scores to upload.")
-        return df  # Return full frame with scores, but skip write
-
+        return df  # Return full evaluated frame for downstream use
+    
     # ✅ Upload to BigQuery
     try:
         to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
@@ -1767,11 +1785,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     except Exception as e:
         st.error(f"❌ Failed to upload to sharp_scores_full: {e}")
         st.code(df_scores_out.dtypes.to_string())
-
-    return df  # ✅ Return full evaluated + model-scored picks
-   
-
-
+    
+    return df, df_scores_out  # ✅ Return full evaluated + uploaded sharp picks
+    
 # Safe predefinition
 df_nba_bt = pd.DataFrame()
 df_mlb_bt = pd.DataFrame()
