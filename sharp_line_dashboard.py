@@ -1049,8 +1049,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
             bigquery.ScalarQueryParameter("hours", "INT64", hours)
         ]
     )
-
-    df = client.query(query, job_config=job_config).to_dataframe()
+    try:
+        df = client.query(query, job_config=job_config).to_dataframe()
+    except Exception as e:
+        st.error("❌ Failed to run query for model training")
+        st.code(query)
+        st.exception(e)
+        return None
+    
 
     if df.empty:
         st.warning(f"⚠️ No data found for {sport}")
@@ -1209,8 +1215,9 @@ def render_scanner_tab(label, sport_key, container):
             for outcome in market.get('outcomes', [])
         ])
         write_snapshot_to_gcs_parquet(live)
-
+        
         prev = read_latest_snapshot_from_bigquery(hours=2) or {}
+        # === Build df_prev_raw for audit
         df_prev_raw = pd.DataFrame([
             {
                 "Game": f"{game.get('home_team')} vs {game.get('away_team')}",
@@ -1226,11 +1233,12 @@ def render_scanner_tab(label, sport_key, container):
             for market in book.get("markets", [])
             for o in market.get("outcomes", [])
         ])
-
+        
         df_prev_display = pd.DataFrame()
         if not df_prev_raw.empty:
             df_prev_raw['Value_Limit'] = df_prev_raw.apply(
-                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value']) else "", axis=1)
+                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value']) else "", axis=1
+            )
             df_prev_raw['Date + Time (EST)'] = pd.to_datetime(df_prev_raw['Game_Start'], errors='coerce').dt.tz_localize('UTC').dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
             df_prev_display = df_prev_raw.pivot_table(
                 index=["Date + Time (EST)", "Game", "Market", "Outcome"],
@@ -1238,7 +1246,8 @@ def render_scanner_tab(label, sport_key, container):
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
-
+        
+        # === Fetch/calculate sharp signals
         detection_key = f"sharp_moves_{sport_key_lower}"
         if detection_key in st.session_state:
             df_moves_raw, df_audit, summary_df = st.session_state[detection_key]
@@ -1249,14 +1258,13 @@ def render_scanner_tab(label, sport_key, container):
             )
             st.session_state[detection_key] = (df_moves_raw, df_audit, summary_df)
             st.success("🧠 Sharp detection run completed and cached.")
-
-        # ✅ FIXED INDENTATION HERE
+        
+        # === Exit early if no data
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
             st.warning("⚠️ No sharp signals detected.")
             return pd.DataFrame()
-
-   
-
+        
+        # === Enrich raw frame
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         now = pd.Timestamp.utcnow()
@@ -1264,11 +1272,8 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
-        model_cols = ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']
-        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first')[['Game', 'Market', 'Outcome'] + model_cols]
         
-        
-        # === Load sport-specific model
+        # === Load model
         model_key = f'sharp_model_{label.lower()}'
         model = st.session_state.get(model_key)
         if model is None:
@@ -1276,7 +1281,7 @@ def render_scanner_tab(label, sport_key, container):
             if model:
                 st.session_state[model_key] = model
         
-        # === Apply model to pre-game rows
+        # === Apply model scoring
         if model is not None:
             try:
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
@@ -1292,29 +1297,34 @@ def render_scanner_tab(label, sport_key, container):
                 st.warning(f"⚠️ Failed to apply model scoring: {e}")
         else:
             st.warning("⚠️ Model not available — skipping scoring.")
+        
+        # === Clean up and fill required columns
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
         df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore')
-        df_moves_raw = build_game_key(df_moves_raw)
         if 'Ref Sharp Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
-
-        #write_to_bigquery(df_moves_raw, force_replace=False)
-
-        backtest_key = f"scored_{sport_key.lower()}"
+        
+        # === Prepare final deduped view with scores
+        model_cols = ['Blended_Sharp_Score', 'Model_Sharp_Win_Prob']
+        for col in model_cols:
+            if col not in df_moves_raw.columns:
+                df_moves_raw[col] = None
+        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first')[['Game', 'Market', 'Outcome'] + model_cols]
+        
+        # === Run backtest (if not already done this session)
+        backtest_key = f"scored_{sport_key_lower}"
         if not st.session_state.get(backtest_key, False):
             fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
             st.session_state[backtest_key] = True
             st.success("✅ Backtesting and scoring completed.")
         else:
             st.info(f"⏭ Skipping re-scoring — already completed for {label.upper()} this session.")
-
-      
-      
-          
-                
+              
+                  
+                        
             
             df_moves = df_moves_raw.copy()
         
