@@ -1897,6 +1897,47 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         df_bt, _ = fetch_scores_and_backtest(
             sport_key_api, df_master.copy(), api_key=API_KEY, trained_models=trained_models
         )
+        if df_bt.empty or 'Model_Sharp_Win_Prob' not in df_bt.columns:
+            st.info("ℹ️ No scored predictions available for calibration analysis.")
+            return
+
+        df_bt = df_bt[df_bt['Scored'] == True].copy()
+
+        # Clean & coerce
+        df_bt['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt['Model_Sharp_Win_Prob'], errors='coerce')
+        df_bt['Model_Confidence'] = pd.to_numeric(df_bt['Model_Confidence'], errors='coerce')
+
+        # Define bins
+        prob_bins = np.linspace(0, 1, 11)
+
+        # Bin probabilities
+        df_bt['Prob_Bin'] = pd.cut(df_bt['Model_Sharp_Win_Prob'], bins=prob_bins, labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
+        df_bt['Conf_Bin'] = pd.cut(df_bt['Model_Confidence'], bins=prob_bins, labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
+
+        # Group and summarize
+        prob_summary = (
+            df_bt.groupby('Prob_Bin')['SHARP_HIT_BOOL']
+            .agg(['count', 'mean'])
+            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
+            .reset_index()
+        )
+
+        conf_summary = (
+            df_bt.groupby('Conf_Bin')['SHARP_HIT_BOOL']
+            .agg(['count', 'mean'])
+            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
+            .reset_index()
+        )
+
+        # Display in 2 columns
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("#### 🔢 Model Probability Calibration")
+            st.dataframe(prob_summary.style.format({'Win_Rate': '{:.1%}'}))
+
+        with col2:
+            st.markdown("#### 🎯 Model Confidence Calibration")
+            st.dataframe(conf_summary.style.format({'Win_Rate': '{:.1%}'}))
 
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
