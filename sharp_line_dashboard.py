@@ -118,7 +118,9 @@ REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"  # no long
 
 SPORTS = {
     "NBA": "basketball_nba",
-    "MLB": "baseball_mlb"
+    "MLB": "baseball_mlb",
+    "CFL": "americanfootball_cfl",
+    "WNBA": "basketball_wnba",
 }
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle', 'bookmaker', 'betonlineag']
