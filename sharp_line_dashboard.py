@@ -124,7 +124,7 @@ SPORTS = {
 }
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu', 'smarkets', 'bovada','bookmaker', 'betonlineag', 'betus']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','betfair_ex_uk', 'smarkets','bookmaker', 'betonlineag', 'betus']
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
@@ -2074,7 +2074,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .style.format({'Win_Rate': '{:.1%}'})
             )
 
-ttab_nba, tab_mlb, tab_cfl, tab_wnba = st.tabs(["🏀 NBA", "⚾ MLB", "🏈 CFL", "🏀 WNBA"])
+tab_nba, tab_mlb, tab_cfl, tab_wnba = st.tabs(["🏀 NBA", "⚾ MLB", "🏈 CFL", "🏀 WNBA"])
 
 # --- NBA Tab Block
 with tab_nba:
