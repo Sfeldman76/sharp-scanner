@@ -1531,7 +1531,90 @@ def render_scanner_tab(label, sport_key, container):
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first')[['Game', 'Market', 'Outcome'] + model_cols]
+        # === Enhance df_moves_raw with Model Reasoning and Confidence Trend
+
+        # 1. First snapshot values per line
+        df_first = df_snap.sort_values('Snapshot_Timestamp') \
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
+            .rename(columns={
+                'Sharp_Win_Prob': 'First_Sharp_Prob',
+                'Sharp_Confidence_Tier': 'First_Tier',
+                'Value': 'First_Line_Value'
+            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Sharp_Prob', 'First_Tier', 'First_Line_Value']]
         
+        # 2. Merge into df_moves_raw
+        df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+        
+        # 3. Tier Change
+        tier_rank = {"⚠️ Weak": 1, "🟡 Moderate": 2, "🔥 Strong": 3}
+        df_moves_raw['Tier_Change'] = df_moves_raw.apply(lambda row: (
+            f"↑ {row['First_Tier']} → {row['Sharp_Confidence_Tier']}" if tier_rank.get(row['Sharp_Confidence_Tier'], 0) > tier_rank.get(row['First_Tier'], 0) else
+            f"↓ {row['First_Tier']} → {row['Sharp_Confidence_Tier']}" if tier_rank.get(row['Sharp_Confidence_Tier'], 0) < tier_rank.get(row['First_Tier'], 0) else
+            "↔ No Change"
+        ), axis=1)
+        
+        # 4. Direction
+        df_moves_raw['Prob_Delta'] = df_moves_raw['Sharp_Win_Prob'] - df_moves_raw['First_Sharp_Prob']
+        df_moves_raw['Line_Delta'] = df_moves_raw['Value'] - df_moves_raw['First_Line_Value']
+        df_moves_raw['Direction'] = df_moves_raw.apply(lambda row: (
+            "🟢 Model ↑ / Line ↓" if row['Prob_Delta'] > 0 and row['Line_Delta'] < 0 else
+            "🔴 Model ↓ / Line ↑" if row['Prob_Delta'] < 0 and row['Line_Delta'] > 0 else
+            "⚪ Mixed"
+        ), axis=1)
+        
+        # 5. Model Reasoning
+        def build_model_reason(row):
+            reasons = []
+            if row['Sharp_Win_Prob'] > 0.55:
+                reasons.append("Model ↑")
+            if row.get('Sharp_Prob_Shift', 0) > 0:
+                reasons.append("Confidence ↑")
+            if row.get('Sharp_Limit_Jump'):
+                reasons.append("Limit Jump")
+            if row.get('Market_Leader'):
+                reasons.append("Led Move")
+            if row.get('Is_Reinforced_MultiMarket'):
+                reasons.append("Cross-Market Support")
+            if row.get('LimitUp_NoMove_Flag'):
+                reasons.append("Limit ↑ w/o Price Move")
+            return " | ".join(reasons) if reasons else ""
+        
+        df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
+        
+        # 6. Confidence Evolution
+        def build_trend_explanation(row):
+            start = row.get('First_Sharp_Prob', None)
+            now = row.get('Sharp_Win_Prob', None)
+            if start is None or now is None:
+                return ""
+            delta = now - start
+            trend = "↔ Stable"
+            reason = []
+        
+            if delta >= 0.04:
+                trend = "📈 Trending Up"
+                if row.get('Sharp_Prob_Shift', 0) > 0:
+                    reason.append("confidence ↑")
+                if row.get('Sharp_Limit_Jump'):
+                    reason.append("limit ↑")
+                if row.get('Is_Reinforced_MultiMarket'):
+                    reason.append("multi-market support")
+            elif delta <= -0.04:
+                trend = "📉 Trending Down"
+                if row.get('Sharp_Prob_Shift', 0) < 0:
+                    reason.append("confidence ↓")
+                if not row.get('Sharp_Limit_Jump'):
+                    reason.append("no limit activity")
+                if not row.get('Market_Leader'):
+                    reason.append("market resistance")
+            else:
+                trend = "↔ Stable"
+                if abs(delta) > 0.01:
+                    reason.append("minor shift")
+        
+            return f"{trend}: {start:.2f} → {now:.2f}" + (f" due to {', '.join(reason)}" if reason else "")
+        
+        df_moves_raw['📊 Confidence Evolution'] = df_moves_raw.apply(build_trend_explanation, axis=1)
         # === Run backtest (if not already done this session)
 
 
@@ -1580,7 +1663,14 @@ def render_scanner_tab(label, sport_key, container):
             on=['Game', 'Market', 'Outcome'],
             how='left'
         )
-        
+        # === Merge in Model Reasoning + Confidence Evolution
+        extra_cols = ['Game', 'Market', 'Outcome', '📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']
+        df_extras = df_moves_raw[extra_cols].drop_duplicates()
+        summary_df = summary_df.merge(
+            df_extras,
+            on=['Game', 'Market', 'Outcome'],
+            how='left'
+        )
         # === Merge Game_Start for EST display
         if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
             df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start', 'Model_Confidence_Tier']].dropna().drop_duplicates()
@@ -1624,7 +1714,11 @@ def render_scanner_tab(label, sport_key, container):
             'Sharp_Book_Consensus': 'Sharp\nConsensus',
             'Move_From_Open_Rec': 'Rec\nMove',
             'Move_From_Open_Sharp': 'Sharp\nMove',
-            'Model_Confidence_Tier': 'Confidence\nTier'
+            'Model_Confidence_Tier': 'Confidence\nTier',
+            '📌 Model Reasoning': 'Why Model Prefers',
+            '📊 Confidence Evolution': 'Confidence Trend',
+            'Tier_Change': 'Tier Δ',
+            'Direction': 'Line/Model Direction'
         }, inplace=True)
         
         # === Drop duplicate rows
@@ -1638,10 +1732,12 @@ def render_scanner_tab(label, sport_key, container):
         # === Columns to show
         # === Columns to show
          # === Columns to show
-        view_cols = [
+        
+         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model_Sharp_Win_Prob', 'Confidence\nTier'
+            'Model_Sharp_Win_Prob', 'Confidence\nTier',
+            'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
         
         # === Filtered subset
