@@ -91,6 +91,9 @@ from google.cloud import bigquery_storage_v1
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import numpy as np
+
+
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
 BQ_TABLE = "sharp_moves_master" # ✅ your table name
