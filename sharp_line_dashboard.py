@@ -1565,24 +1565,64 @@ def render_scanner_tab(label, sport_key, container):
         <style>
         .scrollable-table-container {
             max-height: 600px;
-            overflow-y: auto;
+            overflow: auto;
             border: 1px solid #444;
             margin-bottom: 1rem;
+            position: relative;
         }
+        
         .custom-table {
             border-collapse: collapse;
-            width: 100%;
+            width: max-content;
+            table-layout: fixed;
             font-size: 14px;
         }
+        
         .custom-table th, .custom-table td {
             border: 1px solid #444;
             padding: 8px;
             text-align: center;
+            white-space: nowrap;
         }
+        
         .custom-table th {
             background-color: #1f2937;
             color: white;
+            position: sticky;
+            top: 0;
+            z-index: 2;
         }
+        
+        /* Freeze first 4 columns */
+        .custom-table th:nth-child(1),
+        .custom-table td:nth-child(1) {
+            position: sticky;
+            left: 0;
+            background-color: #2d3748;
+            z-index: 3;
+        }
+        .custom-table th:nth-child(2),
+        .custom-table td:nth-child(2) {
+            position: sticky;
+            left: 120px;
+            background-color: #2d3748;
+            z-index: 3;
+        }
+        .custom-table th:nth-child(3),
+        .custom-table td:nth-child(3) {
+            position: sticky;
+            left: 240px;
+            background-color: #2d3748;
+            z-index: 3;
+        }
+        .custom-table th:nth-child(4),
+        .custom-table td:nth-child(4) {
+            position: sticky;
+            left: 360px;
+            background-color: #2d3748;
+            z-index: 3;
+        }
+        
         .custom-table tr:nth-child(even) {
             background-color: #2d3748;
         }
@@ -2015,16 +2055,23 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         )
 
 
-        # Display in 2 columns
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("#### 🔢 Model Probability Calibration")
-            st.dataframe(prob_summary.style.format({'Win_Rate': '{:.1%}'}))
-
-        with col2:
-            st.markdown("#### 🎯 Model Confidence Calibration")
-            st.dataframe(conf_summary.style.format({'Win_Rate': '{:.1%}'}))
-
+        st.markdown("#### 🔢 Model Probability Calibration by Market")
+        for market in prob_summary['Market'].unique():
+            st.markdown(f"**📊 {market.upper()}**")
+            st.dataframe(
+                prob_summary[prob_summary['Market'] == market]
+                .drop(columns='Market')
+                .style.format({'Win_Rate': '{:.1%}'})
+            )
+        
+        st.markdown("#### 🎯 Model Confidence Calibration by Market")
+        for market in conf_summary['Market'].unique():
+            st.markdown(f"**📊 {market.upper()}**")
+            st.dataframe(
+                conf_summary[conf_summary['Market'] == market]
+                .drop(columns='Market')
+                .style.format({'Win_Rate': '{:.1%}'})
+            )
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
