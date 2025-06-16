@@ -1,6 +1,4 @@
-# detect_utils.py
-
-from config import SPORTS, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS  # Adjust if stored elsewhere
+from config import SPORTS, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS
 from utils import (
     fetch_live_odds,
     read_latest_snapshot_from_bigquery,
@@ -12,7 +10,7 @@ from utils import (
 )
 
 def detect_and_save_all_sports():
-    for sport_label in ["NBA", "MLB"]:  # Add "WNBA", "CFL" as needed
+    for sport_label in ["NBA", "MLB"]:  # Add "WNBA", "CFL" if needed
         print(f"🔍 Running sharp detection for {sport_label}...")
         sport_key = SPORTS[sport_label]
 
@@ -38,4 +36,4 @@ def detect_and_save_all_sports():
             print(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
 
         except Exception as e:
-            print(f"❌ Error processing {sport_label}: {e}")
+            print(f"❌ Error during detection for {sport_label}: {e}")
