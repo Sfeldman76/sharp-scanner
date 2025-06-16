@@ -1383,13 +1383,11 @@ def render_scanner_tab(label, sport_key, container):
         if trained_models:
             try:
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
-                st.write(f"🧪 Pre-game rows: {len(df_pre_game)}")
+             
         
                 if not df_pre_game.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
-                    st.write("🧪 Scored rows:", len(df_scored))
-                    st.write("🧪 Scored DataFrame columns:", df_scored.columns.tolist())
-                    st.write("🧪 Market distribution:", df_scored['Market'].value_counts())
+                   
         
                     if not df_scored.empty:
                         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
@@ -1416,12 +1414,7 @@ def render_scanner_tab(label, sport_key, container):
                                             df_moves_raw.drop(columns=[scored_col], inplace=True)
                                     else:
                                         st.warning(f"⚠️ Missing expected scored column: {scored_col}")
-                                merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-                                st.write("Unscored rows (missing in df_scored):")
-                                missing_rows = df_moves_raw[~df_moves_raw[merge_keys].apply(tuple, axis=1).isin(
-                                    set(df_scored[merge_keys].dropna().apply(tuple, axis=1))
-                                )]
-                                st.dataframe(missing_rows)
+                            
                             except Exception as merge_error:
                                 st.error(f"❌ Merge failed: {merge_error}")
                                 st.dataframe(df_scored[merge_keys + score_cols].head(5))
@@ -2008,18 +2001,19 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
         # Group and summarize
         prob_summary = (
-            df_bt.groupby('Prob_Bin')['SHARP_HIT_BOOL']
+            df_bt.groupby(['Market', 'Prob_Bin'])['SHARP_HIT_BOOL']
+            .agg(['count', 'mean'])
+            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
+            .reset_index()
+        )
+        
+        conf_summary = (
+            df_bt.groupby(['Market', 'Conf_Bin'])['SHARP_HIT_BOOL']
             .agg(['count', 'mean'])
             .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
             .reset_index()
         )
 
-        conf_summary = (
-            df_bt.groupby('Conf_Bin')['SHARP_HIT_BOOL']
-            .agg(['count', 'mean'])
-            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
-            .reset_index()
-        )
 
         # Display in 2 columns
         col1, col2 = st.columns(2)
