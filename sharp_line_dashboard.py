@@ -1135,8 +1135,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
         if save_to_gcs:
             save_model_to_gcs(model, calibrator=iso, sport=sport, market=market_type)
 
-            joblib.dump(iso, f"/tmp/iso_{sport}_{market_type}.pkl")
-            upload_to_gcs(f"/tmp/iso_{sport}_{market_type}.pkl", f"models/iso_{sport}_{market_type}.pkl")
+           
 
         # AUC
         auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
