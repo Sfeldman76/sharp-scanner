@@ -2075,7 +2075,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .style.format({'Win_Rate': '{:.1%}'})
             )
 
-tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
+ttab_nba, tab_mlb, tab_cfl, tab_wnba = st.tabs(["🏀 NBA", "⚾ MLB", "🏈 CFL", "🏀 WNBA"])
 
 # --- NBA Tab Block
 with tab_nba:
@@ -2085,8 +2085,8 @@ with tab_nba:
         train_sharp_model_from_bq(sport="NBA")
 
     if run_nba:
-        if st.session_state.get("run_mlb_scanner"):
-            st.warning("⚠️ Please disable MLB scanner to run NBA.")
+        if any(st.session_state.get(k) for k in ["run_mlb_scanner", "run_cfl_scanner", "run_wnba_scanner"]):
+            st.warning("⚠️ Please disable other scanners to run NBA.")
         else:
             scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
             with scan_tab:
@@ -2098,12 +2098,11 @@ with tab_nba:
 with tab_mlb:
     st.subheader("⚾ MLB Sharp Scanner")
     run_mlb = st.checkbox("Run MLB Scanner", value=False, key="run_mlb_scanner")
-
     if st.button("⚾ Train MLB Sharp Model"):
         train_sharp_model_from_bq(sport="MLB")
     if run_mlb:
-        if st.session_state.get("run_nba_scanner"):
-            st.warning("⚠️ Please disable NBA scanner to run MLB.")
+        if any(st.session_state.get(k) for k in ["run_nba_scanner", "run_cfl_scanner", "run_wnba_scanner"]):
+            st.warning("⚠️ Please disable other scanners to run MLB.")
         else:
             scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
             with scan_tab:
@@ -2111,5 +2110,35 @@ with tab_mlb:
             with analysis_tab:
                 render_sharp_signal_analysis_tab(analysis_tab, "MLB", SPORTS["MLB"])
 
+# --- CFL Tab Block
+with tab_cfl:
+    st.subheader("🏈 CFL Sharp Scanner")
+    run_cfl = st.checkbox("Run CFL Scanner", value=False, key="run_cfl_scanner")
+    if st.button("🏈 Train CFL Sharp Model"):
+        train_sharp_model_from_bq(sport="CFL")
+    if run_cfl:
+        if any(st.session_state.get(k) for k in ["run_nba_scanner", "run_mlb_scanner", "run_wnba_scanner"]):
+            st.warning("⚠️ Please disable other scanners to run CFL.")
+        else:
+            scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
+            with scan_tab:
+                df_cfl_live = render_scanner_tab("CFL", SPORTS["CFL"], scan_tab)
+            with analysis_tab:
+                render_sharp_signal_analysis_tab(analysis_tab, "CFL", SPORTS["CFL"])
 
-        
+# --- WNBA Tab Block
+with tab_wnba:
+    st.subheader("🏀 WNBA Sharp Scanner")
+    run_wnba = st.checkbox("Run WNBA Scanner", value=False, key="run_wnba_scanner")
+    if st.button("🏀 Train WNBA Sharp Model"):
+        train_sharp_model_from_bq(sport="WNBA")
+    if run_wnba:
+        if any(st.session_state.get(k) for k in ["run_nba_scanner", "run_mlb_scanner", "run_cfl_scanner"]):
+            st.warning("⚠️ Please disable other scanners to run WNBA.")
+        else:
+            scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
+            with scan_tab:
+                df_wnba_live = render_scanner_tab("WNBA", SPORTS["WNBA"], scan_tab)
+            with analysis_tab:
+                render_sharp_signal_analysis_tab(analysis_tab, "WNBA", SPORTS["WNBA"])
+
