@@ -25,7 +25,7 @@ div[data-testid="stDataFrame"] > div {
 
 
 # === Auto-refresh every 380 seconds ===
-st_autorefresh(interval=2080 * 1000, key="data_refresh")
+st_autorefresh(interval=380 * 1000, key="data_refresh")
 
 
 st.markdown("""
@@ -170,7 +170,7 @@ def ensure_columns(df, required_cols, fill_value=None):
     return df
 
 
-@st.cache_data(ttl=700)
+@st.cache_data(ttl=380)
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -320,7 +320,7 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=380)
 def read_recent_sharp_moves(hours=500, table=BQ_FULL_TABLE):
     try:
         client = bq_client
@@ -597,7 +597,7 @@ def detect_cross_market_sharp_support(df_moves, score_threshold=25):
     return df
     
     
-@st.cache_data(ttl=1000)
+@st.cache_data(ttl=380)
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
     from collections import defaultdict
     import pandas as pd
@@ -1571,9 +1571,12 @@ def render_scanner_tab(label, sport_key, container):
         
             for book in game.get("bookmakers", []):
                 if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
-                    continue  # ✅ skip non-sharp/rec books
+                    continue  # ✅ Skip non-sharp/rec books
         
                 for market in book.get("markets", []):
+                    if market.get('key') not in ['h2h', 'spreads', 'totals']:
+                        continue  # ✅ Skip non-target markets
+        
                     for o in market.get("outcomes", []):
                         price = o.get('point') if market['key'] != 'h2h' else o.get('price')
                         odds_rows.append({
@@ -1585,6 +1588,7 @@ def render_scanner_tab(label, sport_key, container):
                             "Limit": o.get("bet_limit", 0),
                             "Game_Start": game_start
                         })
+
                 
         df_odds_raw = pd.DataFrame(odds_rows)
         if not df_odds_raw.empty:
