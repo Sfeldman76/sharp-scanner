@@ -1048,22 +1048,33 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
    
     return df, df_history, summary_df
 
-# === Constants: Define all expected features explicitly
-EXPECTED_FEATURES = [
-    'Final_Confidence_Score',
-    'Market_h2h', 'Market_spreads', 'Market_totals',
-    'CrossMarketSharpSupport', 'Unique_Sharp_Books',
-    'LimitUp_NoMove_Flag', 'Market_Leader'
-]
 
-# === Training Function Fix ===
 def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs: bool = True):
+    from google.cloud import bigquery
+    import pandas as pd
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import roc_auc_score
+    from xgboost import XGBClassifier
+    import streamlit as st
+ EXPECTED_FEATURES = [
+        'Sharp_Move_Signal',
+        'Sharp_Limit_Jump',
+        'Sharp_Prob_Shift',
+        'Sharp_Time_Score',
+        'Sharp_Limit_Total',
+        'Is_Reinforced_MultiMarket',
+        'Market_Leader',
+        'LimitUp_NoMove_Flag',
+        'SharpBetScore',
+        'Unique_Sharp_Books'
+    ]
+
     client = bigquery.Client()
     sport = sport.upper()
 
-    query = f"""
+    query = """
         SELECT *
-        FROM `sharp_data.sharp_scores_full`
+        FROM `sharplogger.sharp_data.sharp_scores_full`
         WHERE SHARP_HIT_BOOL IS NOT NULL
           AND Scored = TRUE
           AND Sport = @sport
@@ -1076,145 +1087,110 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
         ]
     )
 
-    df = client.query(query, job_config=job_config).to_dataframe()
-    if df.empty:
+    df_all = client.query(query, job_config=job_config).to_dataframe()
+    if df_all.empty:
         st.warning(f"⚠️ No data found for {sport}")
-        return None
+        return {}
 
-    df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
-    df = df[df['Final_Confidence_Score'].notna() & df['SHARP_HIT_BOOL'].notna()]
-    df['target'] = df['SHARP_HIT_BOOL'].astype(int)
-    df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 100) / 100
+    df_all['target'] = df_all['SHARP_HIT_BOOL'].astype(int)
+    df_all['Market'] = df_all['Market'].astype(str).str.lower()
 
-    df['Market'] = df['Market'].astype(str).str.lower()
-    market_dummies = pd.get_dummies(df['Market'], prefix='Market')
-    df = pd.concat([df, market_dummies], axis=1)
+    trained_models = {}
 
-    for col in EXPECTED_FEATURES:
-        if col not in df.columns:
-            if col.startswith('Market_') or col in ['LimitUp_NoMove_Flag', 'Market_Leader']:
+    for market_type in ['spreads', 'totals', 'h2h']:
+        df = df_all[df_all['Market'] == market_type].copy()
+        if len(df) < 10:
+            st.info(f"ℹ️ Skipping {market_type} – not enough data.")
+            continue
+
+        for col in EXPECTED_FEATURES:
+            if col not in df.columns:
                 df[col] = 0
-            else:
-                df[col] = np.nan
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)  # fallback to 0 if still NaN
-        df = df.dropna(subset=EXPECTED_FEATURES)
-    
-    if len(df) < 5:
-        st.warning(f"⚠️ Not enough labeled samples for {sport} model.")
-        return None
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    X = df[EXPECTED_FEATURES].astype(float)
-    y = df['target']
+        X = df[EXPECTED_FEATURES].astype(float)
+        y = df['target']
+        X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
-    model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
-    model.fit(X_train, y_train)
+        model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+        model.fit(X_train, y_train)
 
-    auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
-    st.success(f"✅ Trained {sport} model – AUC: {auc:.3f} on {len(df)} samples")
+        auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+        st.success(f"✅ {sport} - {market_type.upper()} model trained – AUC: {auc:.3f} on {len(df)} samples")
 
-    if save_to_gcs:
-        save_model_to_gcs(model, sport=sport)
+        trained_models[market_type] = model
 
-    return model
+        if save_to_gcs:
+            save_model_to_gcs(model, sport=sport, market=market_type)
+
+    return trained_models
 
 
-# === Scoring Function Fix ===
-def apply_blended_sharp_score(df, model):
+def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
+    import streamlit as st
 
     st.info("🔍 Entered apply_blended_sharp_score()")
     df = df.copy()
 
     try:
-        # === Step 1: Clean trailing merge columns
+        # Clean merge suffixes
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-        st.info(f"✅ Columns after cleanup: {df.columns.tolist()}")
     except Exception as e:
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
     try:
-        # === Step 2: Final Confidence Score (0–1)
-        if 'Enhanced_Sharp_Confidence_Score' not in df.columns:
-            raise ValueError("Missing Enhanced_Sharp_Confidence_Score")
-        df['Final_Confidence_Score'] = df['Enhanced_Sharp_Confidence_Score']
-        if 'True_Sharp_Confidence_Score' in df.columns:
-            df['Final_Confidence_Score'] = df['Final_Confidence_Score'].fillna(df['True_Sharp_Confidence_Score'])
-        df['Final_Confidence_Score'] = pd.to_numeric(df['Final_Confidence_Score'], errors='coerce') / 100
-        df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
+        # Final confidence fallback (optional)
+        if 'Enhanced_Sharp_Confidence_Score' in df.columns:
+            df['Final_Confidence_Score'] = pd.to_numeric(df['Enhanced_Sharp_Confidence_Score'], errors='coerce') / 100
+            df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
     except Exception as e:
-        st.error(f"❌ Confidence score prep failed: {e}")
-        return pd.DataFrame()
+        st.warning(f"⚠️ Could not compute fallback confidence score: {e}")
 
-    try:
-        # === Step 3: Market dummies
-        df['Market'] = df['Market'].astype(str).str.lower()
-        market_dummies = pd.get_dummies(df['Market'], prefix='Market')
+    df['Market'] = df['Market'].astype(str).str.lower()
+    all_scored = []
 
-        # Add missing dummy columns expected by model
-        model_features = model.get_booster().feature_names
-        for col in model_features:
-            if col.startswith("Market_") and col not in market_dummies.columns:
-                market_dummies[col] = 0
+    for market_type, model in trained_models.items():
+        df_market = df[df['Market'] == market_type].copy()
+        if df_market.empty:
+            continue
 
-        df = pd.concat([df, market_dummies], axis=1)
-        df = df.loc[:, ~df.columns.duplicated()]  # ✅ Fix for 'DataFrame has no dtype'
-    except Exception as e:
-        st.error(f"❌ Market dummy prep failed: {e}")
-        return pd.DataFrame()
+        try:
+            model_features = model.get_booster().feature_names
 
-    try:
-        # === Step 4: Ensure expected features are present and typed correctly
-        for col, default_val, dtype in [
-            ('CrossMarketSharpSupport', 0, 'float'),
-            ('Unique_Sharp_Books', 0, 'float'),
-            ('LimitUp_NoMove_Flag', 0, 'int'),
-            ('Market_Leader', 0, 'int')
-        ]:
-            if col not in df.columns:
-                df[col] = default_val
-            if dtype == 'float':
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-            elif dtype == 'int':
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-    except Exception as e:
-        st.error(f"❌ Feature coercion failed: {e}")
-        return pd.DataFrame()
+            # Ensure all required features exist
+            for col in model_features:
+                if col not in df_market.columns:
+                    df_market[col] = 0
+            df_market = df_market[model_features].astype(float)
 
-    try:
-        # === Step 5: Align to model features
-        feature_cols = [col for col in model_features if col in df.columns]
-        missing = set(model_features) - set(feature_cols)
-        if missing:
-            raise ValueError(f"Missing model feature columns: {missing}")
-        st.info(f"✅ Using model features: {feature_cols}")
-    except Exception as e:
-        st.error(f"❌ Feature alignment failed: {e}")
-        return pd.DataFrame()
+            # Predict
+            df.loc[df['Market'] == market_type, 'Model_Sharp_Win_Prob'] = model.predict_proba(df_market)[:, 1]
 
-    try:
-        # === Step 6: Predict
-        X = df[feature_cols].astype(float)
-        df['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
-        df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
-        df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce').fillna(0).clip(0, 1)
-        df['Model_Confidence_Tier'] = pd.cut(
-            df['Model_Sharp_Win_Prob'],
-            bins=[0.0, 0.4, 0.5, 0.6, 1.0],
-            labels=["⚠️ Underdog", "✅ Coinflip", "⭐ Lean", "🔥 Favorite"]
-        )
-        st.success("✅ Model scoring complete")
-    except Exception as e:
-        st.error(f"❌ Prediction failed: {e}")
-        return pd.DataFrame()
+        except Exception as e:
+            st.error(f"❌ Failed to apply model for {market_type}: {e}")
 
+    # Confidence tiering (optional visual)
+    df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
+    df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
+    df['Model_Confidence_Tier'] = pd.cut(
+        df['Model_Sharp_Win_Prob'],
+        bins=[0.0, 0.4, 0.5, 0.6, 1.0],
+        labels=["⚠️ Underdog", "✅ Coinflip", "⭐ Lean", "🔥 Favorite"]
+    )
+
+    st.success("✅ Model scoring complete (per-market)")
     return df
         
         
-def save_model_to_gcs(model, sport, bucket_name="sharp-models"):
-    filename = f"sharp_win_model_{sport.lower()}.pkl"
+import pickle
+from io import BytesIO
+from google.cloud import storage
+
+def save_model_to_gcs(model, sport, market, bucket_name="sharp-models"):
+    filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
@@ -1227,8 +1203,8 @@ def save_model_to_gcs(model, sport, bucket_name="sharp-models"):
         print(f"❌ Failed to save model to GCS: {e}")
 
 
-def load_model_from_gcs(sport, bucket_name="sharp-models"):
-    filename = f"sharp_win_model_{sport.lower()}.pkl"
+def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
+    filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
@@ -1240,6 +1216,7 @@ def load_model_from_gcs(sport, bucket_name="sharp-models"):
     except Exception as e:
         print(f"❌ Failed to load model from GCS: {e}")
         return None
+
         
         
         
@@ -1349,19 +1326,25 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = build_game_key(df_moves_raw)
         
         # === Load model
-        model_key = f'sharp_model_{label.lower()}'
-        model = st.session_state.get(model_key)
-        if model is None:
-            model = load_model_from_gcs(sport=label)
-            if model:
-                st.session_state[model_key] = model
+       # === Load per-market models
+        model_key = f'sharp_models_{label.lower()}'
+        trained_models = st.session_state.get(model_key)
+        
+        if trained_models is None:
+            trained_models = {}
+            for market_type in ['spreads', 'totals', 'h2h']:
+                model = load_model_from_gcs(sport=label, market=market_type)
+                if model:
+                    trained_models[market_type] = model
+            st.session_state[model_key] = trained_models
+
         
         # === Apply model scoring
-        if model is not None:
+        if trained_models:
             try:
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
                 if not df_pre_game.empty:
-                    df_scored = apply_blended_sharp_score(df_pre_game, model)
+                    df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
         
                     if not df_scored.empty and all(col in df_scored.columns for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']):
                         for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
@@ -1371,9 +1354,10 @@ def render_scanner_tab(label, sport_key, container):
                 else:
                     st.info("ℹ️ No pre-game rows to score")
             except Exception as e:
-                st.warning(f"⚠️ Failed to apply model scoring: {e}")        
+                st.warning(f"⚠️ Failed to apply model scoring: {e}")
         else:
-            st.warning("⚠️ Model not available — skipping scoring.")
+            st.warning("⚠️ No per-market models available — skipping scoring.")
+
         
         # === Clean up and fill required columns
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
@@ -1665,7 +1649,8 @@ def render_scanner_tab(label, sport_key, container):
 
         return df_moves
 
-def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, model=None):
+def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
+
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
@@ -1796,7 +1781,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 7. Apply model scoring if available
     if model is not None:
         try:
-            df = apply_blended_sharp_score(df, model)
+            df = apply_blended_sharp_score(df, trained_models)
+
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
     
@@ -1806,9 +1792,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
         'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Unique_Sharp_Books',
         'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
     ]
+
     
     # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
@@ -1830,6 +1818,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
     df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
     df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
+    df_scores_out['Unique_Sharp_Books'] = pd.to_numeric(df_scores_out['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
+
+  
  
         # Debug: ensure schema matches
     try:
