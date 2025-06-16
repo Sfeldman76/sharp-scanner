@@ -1409,9 +1409,19 @@ def render_scanner_tab(label, sport_key, container):
                                     suffixes=('', '_scored')
                                 )
                                 for col in score_cols:
-                                    df_moves_raw[col] = df_moves_raw[f"{col}_scored"]
-                                    df_moves_raw.drop(columns=[f"{col}_scored"], inplace=True)
-                                st.success("✅ Model scoring merged successfully.")
+                                    scored_col = f"{col}_scored" if f"{col}_scored" in df_moves_raw.columns else col
+                                    if scored_col in df_moves_raw.columns:
+                                        df_moves_raw[col] = df_moves_raw[scored_col]
+                                        if scored_col != col:
+                                            df_moves_raw.drop(columns=[scored_col], inplace=True)
+                                    else:
+                                        st.warning(f"⚠️ Missing expected scored column: {scored_col}")
+                                merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+                                st.write("Unscored rows (missing in df_scored):")
+                                missing_rows = df_moves_raw[~df_moves_raw[merge_keys].apply(tuple, axis=1).isin(
+                                    set(df_scored[merge_keys].dropna().apply(tuple, axis=1))
+                                )]
+                                st.dataframe(missing_rows)
                             except Exception as merge_error:
                                 st.error(f"❌ Merge failed: {merge_error}")
                                 st.dataframe(df_scored[merge_keys + score_cols].head(5))
