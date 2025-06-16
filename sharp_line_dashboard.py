@@ -123,13 +123,12 @@ SPORTS = {
     "WNBA": "basketball_wnba",
 }
 
-SHARP_BOOKS_FOR_LIMITS = ['pinnacle', 'bookmaker', 'betonlineag']
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu', 'smarkets', 'matchbook']
+SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu', 'smarkets', 'bovada','bookmaker', 'betonlineag', 'betus']
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
-    'fanatics', 'espnbet', 'hard rock bet'
-]
+    'fanatics', 'espnbet', 'hard rock bet']
 
 BOOKMAKER_REGIONS = {
     'pinnacle': 'us', 'bookmaker': 'us', 'betonlineag': 'us',
