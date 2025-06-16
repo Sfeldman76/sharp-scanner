@@ -1092,9 +1092,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
 
     for col in EXPECTED_FEATURES:
         if col not in df.columns:
-            df[col] = 0 if col.startswith('Market_') or col in ['LimitUp_NoMove_Flag', 'Market_Leader'] else np.nan
-
-    df = df.dropna(subset=EXPECTED_FEATURES)
+            if col.startswith('Market_') or col in ['LimitUp_NoMove_Flag', 'Market_Leader']:
+                df[col] = 0
+            else:
+                df[col] = np.nan
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)  # fallback to 0 if still NaN
+        df = df.dropna(subset=EXPECTED_FEATURES)
+    
     if len(df) < 5:
         st.warning(f"⚠️ Not enough labeled samples for {sport} model.")
         return None
