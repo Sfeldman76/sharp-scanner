@@ -1426,14 +1426,20 @@ def render_scanner_tab(label, sport_key, container):
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first')[['Game', 'Market', 'Outcome'] + model_cols]
         
         # === Run backtest (if not already done this session)
-        backtest_key = f"scored_{sport_key_lower}"
-        if not st.session_state.get(backtest_key, False):
-            fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, trained_models=trained_models)
-            st.session_state[backtest_key] = True
-            st.success("✅ Backtesting and scoring completed.")
+
+
+        backtest_date_key = f"last_backtest_date_{sport_key_lower}"
+        today = datetime.utcnow().date()
+        
+        if st.session_state.get(backtest_date_key) != today:
+            fetch_scores_and_backtest(
+                sport_key, df_moves=None, api_key=API_KEY, trained_models=trained_models
+            )
+            st.session_state[backtest_date_key] = today
+            st.success("✅ Backtesting and scoring completed for today.")
         else:
-            st.info(f"⏭ Skipping re-scoring — already completed for {label.upper()} this session.")
-              
+            st.info(f"⏭ Backtest already run today for {label.upper()} — skipping.")
+
                   
                         
             
