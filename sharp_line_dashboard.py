@@ -1133,7 +1133,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
 
         # Save both if needed
         if save_to_gcs:
-            save_model_to_gcs(model, sport=f"{sport}_{market_type}")
+            save_model_to_gcs(model, calibrator=iso, sport=sport, market=market_type)
+
             joblib.dump(iso, f"/tmp/iso_{sport}_{market_type}.pkl")
             upload_to_gcs(f"/tmp/iso_{sport}_{market_type}.pkl", f"models/iso_{sport}_{market_type}.pkl")
 
