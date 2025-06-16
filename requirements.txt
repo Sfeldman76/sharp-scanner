@@ -17,3 +17,4 @@ pandas-gbq
 google-cloud-storage
 pyarrow
 google-cloud-bigquery-storage
+joblib               # for saving isotonic calibrators
