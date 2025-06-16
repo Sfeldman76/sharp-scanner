@@ -1161,10 +1161,21 @@ def apply_blended_sharp_score(df, trained_models):
             model_features = model.get_booster().feature_names
 
             # Ensure all required features exist
+            # === Ensure all required features exist and are numeric
             for col in model_features:
                 if col not in df_market.columns:
                     df_market[col] = 0
+            
+                df_market[col] = (
+                    df_market[col]
+                    .astype(str)
+                    .replace({'True': 1, 'False': 0, 'true': 1, 'false': 0})
+                )
+                df_market[col] = pd.to_numeric(df_market[col], errors='coerce').fillna(0)
+            
+            # Final conversion to float before prediction
             df_market = df_market[model_features].astype(float)
+
 
             # Predict
             df.loc[df['Market'] == market_type, 'Model_Sharp_Win_Prob'] = model.predict_proba(df_market)[:, 1]
