@@ -1877,11 +1877,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
 
-        model_key = f"sharp_model_{sport_label.lower()}"
-        model = st.session_state.get(model_key)
-        if model is None:
-            model = load_model_from_gcs(sport=sport_label)
-            st.session_state[model_key] = model
+        trained_models = {}
+        for market_type in ['spreads', 'totals', 'h2h']:
+            model = load_model_from_gcs(sport=sport_label, market=market_type)
+            if model:
+                trained_models[market_type] = model
+
 
         df_master = read_recent_sharp_moves(hours=168)
         if df_master.empty:
@@ -1894,8 +1895,9 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             return
 
         df_bt, _ = fetch_scores_and_backtest(
-            sport_key_api, df_master.copy(), api_key=API_KEY, model=model
+            sport_key_api, df_master.copy(), api_key=API_KEY, trained_models=trained_models
         )
+
 
 tab_nba, tab_mlb = st.tabs(["🏀 NBA", "⚾ MLB"])
 
