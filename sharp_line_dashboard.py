@@ -1387,17 +1387,24 @@ def render_scanner_tab(label, sport_key, container):
         
                     if not df_scored.empty:
                         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-                        df_moves_raw = df_moves_raw.merge(
-                            df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']],
-                            on=merge_keys,
-                            how='left',
-                            suffixes=('', '_scored')
-                        )
+                        score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
                     
-                        # Overwrite cleanly
-                        df_moves_raw['Model_Sharp_Win_Prob'] = df_moves_raw['Model_Sharp_Win_Prob_scored']
-                        df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier_scored']
-                        df_moves_raw.drop(columns=['Model_Sharp_Win_Prob_scored', 'Model_Confidence_Tier_scored'], inplace=True)
+                        # Check that all required columns exist in df_scored
+                        missing = [col for col in merge_keys + score_cols if col not in df_scored.columns]
+                        if missing:
+                            st.warning(f"⚠️ Cannot merge scores — missing columns: {missing}")
+                        else:
+                            df_moves_raw = df_moves_raw.merge(
+                                df_scored[merge_keys + score_cols],
+                                on=merge_keys,
+                                how='left',
+                                suffixes=('', '_scored')
+                            )
+                    
+                            for col in score_cols:
+                                df_moves_raw[col] = df_moves_raw[f"{col}_scored"]
+                                df_moves_raw.drop(columns=[f"{col}_scored"], inplace=True)
+
 
                     else:
                         st.warning("⚠️ Model returned empty or incomplete DataFrame during live scoring.")
