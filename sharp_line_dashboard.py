@@ -124,19 +124,48 @@ SPORTS = {
 }
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','betfair_ex_uk', 'smarkets','bookmaker', 'betonlineag', 'betus']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','betfair_ex_uk', 'smarkets','betonlineag', 'betus', 'lowvig']
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
-    'fanatics', 'espnbet', 'hard rock bet']
+    'fanatics', 'espnbet', 'hard rock bet','bovada']
 
 BOOKMAKER_REGIONS = {
-    'pinnacle': 'us', 'bookmaker': 'us', 'betonlineag': 'us',
-    'bovada': 'us', 'heritagesports': 'us', 'betus': 'us',
-    'betmgm': 'us', 'draftkings': 'us', 'fanduel': 'us', 'betrivers': 'us', 'pointsbetus': 'us2',
-    'bet365': 'uk', 'williamhill': 'uk', 'ladbrokes': 'uk', 'unibet': 'eu', 'bwin': 'eu',
-    'sportsbet': 'au', 'ladbrokesau': 'au', 'neds': 'au'
+    # 🔹 Sharp Books
+    'pinnacle': 'eu',
+    'betfair_ex_eu': 'eu',
+    'betfair_ex_uk': 'uk',
+    'smarkets': 'uk',
+    'matchbook': 'uk',
+    'betonlineag': 'us',
+    'lowvig': 'us',
+    'betanysports': 'us2',
+    'betus': 'us',
+
+    # 🔸 Rec Books
+    'betmgm': 'us',
+    'draftkings': 'us',
+    'fanduel': 'us',
+    'betrivers': 'us',
+    'espnbet': 'us2',
+    'hardrockbet': 'us2',
+    'fanatics': 'us',
+    'mybookieag': 'us',
+    'bovada': 'us',
+    'rebet': 'us2',
+    'windcreek': 'us2',
+
+    # Optional extras (if needed later)
+    'bet365': 'uk',
+    'williamhill': 'uk',
+    'ladbrokes': 'uk',
+    'unibet': 'eu',
+    'bwin': 'eu',
+    'sportsbet': 'au',
+    'ladbrokesau': 'au',
+    'neds': 'au'
 }
+
 
 MARKETS = ['spreads', 'totals', 'h2h']
 
