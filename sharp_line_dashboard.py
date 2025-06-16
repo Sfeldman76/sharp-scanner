@@ -1201,9 +1201,9 @@ def apply_blended_sharp_score(df, model):
         df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce').fillna(0).clip(0, 1)
         df['Model_Confidence_Tier'] = pd.cut(
-            df['Model_Confidence'],
-            bins=[-0.01, 0.25, 0.5, 0.75, 1.0],
-            labels=["⚠️ Uncertain", "✅ Moderate", "⭐ Confident", "🔥 Very Confident"]
+            df['Model_Sharp_Win_Prob'],
+            bins=[0.0, 0.4, 0.5, 0.6, 1.0],
+            labels=["⚠️ Underdog", "✅ Coinflip", "⭐ Lean", "🔥 Favorite"]
         )
         st.success("✅ Model scoring complete")
     except Exception as e:
