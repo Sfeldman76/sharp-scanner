@@ -1385,9 +1385,20 @@ def render_scanner_tab(label, sport_key, container):
                 if not df_pre_game.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
         
-                    if not df_scored.empty and all(col in df_scored.columns for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']):
-                        for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
-                            df_moves_raw.loc[df_scored.index, col] = df_scored[col].values
+                    if not df_scored.empty:
+                        merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+                        df_moves_raw = df_moves_raw.merge(
+                            df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']],
+                            on=merge_keys,
+                            how='left',
+                            suffixes=('', '_scored')
+                        )
+                    
+                        # Overwrite cleanly
+                        df_moves_raw['Model_Sharp_Win_Prob'] = df_moves_raw['Model_Sharp_Win_Prob_scored']
+                        df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier_scored']
+                        df_moves_raw.drop(columns=['Model_Sharp_Win_Prob_scored', 'Model_Confidence_Tier_scored'], inplace=True)
+
                     else:
                         st.warning("⚠️ Model returned empty or incomplete DataFrame during live scoring.")
                 else:
