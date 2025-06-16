@@ -1056,7 +1056,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
     from sklearn.metrics import roc_auc_score
     from xgboost import XGBClassifier
     import streamlit as st
- EXPECTED_FEATURES = [
+    EXPECTED_FEATURES = [
         'Sharp_Move_Signal',
         'Sharp_Limit_Jump',
         'Sharp_Prob_Shift',
@@ -1378,7 +1378,7 @@ def render_scanner_tab(label, sport_key, container):
         # === Run backtest (if not already done this session)
         backtest_key = f"scored_{sport_key_lower}"
         if not st.session_state.get(backtest_key, False):
-            fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, model=model)
+            fetch_scores_and_backtest(sport_key, df_moves=None, api_key=API_KEY, trained_models=trained_models)
             st.session_state[backtest_key] = True
             st.success("✅ Backtesting and scoring completed.")
         else:
@@ -1779,9 +1779,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
     
     # === 7. Apply model scoring if available
-    if model is not None:
+    if trained_models:
         try:
             df = apply_blended_sharp_score(df, trained_models)
+
 
         except Exception as e:
             st.warning(f"⚠️ Model scoring failed: {e}")
