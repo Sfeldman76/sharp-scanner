@@ -90,7 +90,7 @@ import google.api_core.exceptions
 from google.cloud import bigquery_storage_v1
 import pyarrow as pa
 import pyarrow.parquet as pq
-
+from detect_utils import detect_and_save_all_sports
 import numpy as np
 
 
@@ -239,6 +239,7 @@ def safe_to_gbq(df, table, replace=False):
 
 
 
+
 def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
     rows = []
     snapshot_time = pd.Timestamp.utcnow()
@@ -367,6 +368,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
     except Exception as e:
         st.error(f"❌ Failed to upload to {table}: {e}")
 
+    
 
         
 def build_game_key(df):
