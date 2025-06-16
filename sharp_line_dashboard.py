@@ -282,6 +282,59 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         print(f"❌ Failed to upload snapshot to GCS: {e}")
 
+
+def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
+    if df is None or df.empty:
+        print("⚠️ No sharp moves to write.")
+        return
+
+    df = df.copy()
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
+    # Clean up any merge artifacts
+    df.columns = [col.strip().replace(" ", "_") for col in df.columns]
+    df = df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], errors='ignore')
+
+    # Try to coerce object types to strings for BigQuery
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).replace("nan", None)
+
+    # Deduplicate before write (based on primary key logic)
+    dedup_keys = [
+        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
+        'Scored', 'Sport'
+    ]
+
+    try:
+        existing = bq_client.query(f"""
+            SELECT DISTINCT {', '.join(dedup_keys)}
+            FROM `{table}`
+            WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+        """).to_dataframe()
+
+        df = df.merge(existing, on=dedup_keys, how='left', indicator=True)
+        df = df[df['_merge'] == 'left_only'].drop(columns=['_merge'])
+
+    except Exception as e:
+        print(f"⚠️ Dedup check failed — proceeding with all rows: {e}")
+
+    if df.empty:
+        print("ℹ️ No new sharp move rows to write.")
+        return
+
+    try:
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+        print(f"✅ Wrote {len(df)} new rows to {table}")
+    except Exception as e:
+        print(f"❌ Failed to write sharp moves to BigQuery: {e}")
+        print(df.dtypes)
+
 def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
     from pandas_gbq import to_gbq
 
@@ -313,6 +366,8 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
         #st.success(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         st.error(f"❌ Failed to upload to {table}: {e}")
+
+
         
 def build_game_key(df):
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
@@ -1370,6 +1425,7 @@ def render_scanner_tab(label, sport_key, container):
         detection_key = f"sharp_moves_{sport_key_lower}"
         if detection_key in st.session_state:
             df_moves_raw, df_audit, summary_df = st.session_state[detection_key]
+          
             st.info(f"✅ Using cached sharp detection results for {label}")
         else:
             df_moves_raw, df_audit, summary_df = detect_sharp_moves(
@@ -1391,9 +1447,9 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
-        
+        write_sharp_moves_to_master(df_moves_raw)
         # === Load model
-       # === Load per-market models
+        # === Load per-market models
         model_key = f'sharp_models_{label.lower()}'
         trained_models = st.session_state.get(model_key)
         
