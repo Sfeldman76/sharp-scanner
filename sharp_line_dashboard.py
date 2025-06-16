@@ -1049,6 +1049,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     return df, df_history, summary_df
 
 
+from sklearn.isotonic import IsotonicRegression
+import joblib
+
 def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs: bool = True):
     from google.cloud import bigquery
     import pandas as pd
@@ -1056,6 +1059,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
     from sklearn.metrics import roc_auc_score
     from xgboost import XGBClassifier
     import streamlit as st
+
     EXPECTED_FEATURES = [
         'Sharp_Move_Signal',
         'Sharp_Limit_Jump',
@@ -1103,6 +1107,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
             st.info(f"ℹ️ Skipping {market_type} – not enough data.")
             continue
 
+        # Ensure all features are present and numeric
         for col in EXPECTED_FEATURES:
             if col not in df.columns:
                 df[col] = 0
@@ -1115,15 +1120,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
         model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
         model.fit(X_train, y_train)
 
-        auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
-        st.success(f"✅ {sport} - {market_type.upper()} model trained – AUC: {auc:.3f} on {len(df)} samples")
+        # === Isotonic Calibration
+        X_proba_train = model.predict_proba(X_train)[:, 1]
+        iso = IsotonicRegression(out_of_bounds='clip')
+        iso.fit(X_proba_train, y_train)
 
-        trained_models[market_type] = model
+        # Save model and iso per market
+        trained_models[market_type] = {
+            "model": model,
+            "calibrator": iso
+        }
 
+        # Save both if needed
         if save_to_gcs:
-            save_model_to_gcs(model, sport=sport, market=market_type)
+            save_model_to_gcs(model, sport=f"{sport}_{market_type}")
+            joblib.dump(iso, f"/tmp/iso_{sport}_{market_type}.pkl")
+            upload_to_gcs(f"/tmp/iso_{sport}_{market_type}.pkl", f"models/iso_{sport}_{market_type}.pkl")
+
+        # AUC
+        auc = roc_auc_score(y_test, model.predict_proba(X_test)[:, 1])
+        st.success(f"✅ Trained {sport} {market_type.upper()} – AUC: {auc:.3f} on {len(df)} samples")
 
     return trained_models
+
 
 
 def apply_blended_sharp_score(df, trained_models):
@@ -1135,14 +1154,12 @@ def apply_blended_sharp_score(df, trained_models):
     df = df.copy()
 
     try:
-        # Clean merge suffixes
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
     try:
-        # Final confidence fallback (optional)
         if 'Enhanced_Sharp_Confidence_Score' in df.columns:
             df['Final_Confidence_Score'] = pd.to_numeric(df['Enhanced_Sharp_Confidence_Score'], errors='coerce') / 100
             df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
@@ -1150,69 +1167,74 @@ def apply_blended_sharp_score(df, trained_models):
         st.warning(f"⚠️ Could not compute fallback confidence score: {e}")
 
     df['Market'] = df['Market'].astype(str).str.lower()
-    all_scored = []
 
-    for market_type, model in trained_models.items():
+    for market_type, bundle in trained_models.items():
+        model = bundle['model']
+        iso = bundle['calibrator']
         df_market = df[df['Market'] == market_type].copy()
+
         if df_market.empty:
             continue
 
         try:
             model_features = model.get_booster().feature_names
 
-            # Ensure all required features exist
-            # === Ensure all required features exist and are numeric
+            # Ensure all required features exist and are numeric
             for col in model_features:
                 if col not in df_market.columns:
                     df_market[col] = 0
-            
                 df_market[col] = (
                     df_market[col]
                     .astype(str)
                     .replace({'True': 1, 'False': 0, 'true': 1, 'false': 0})
                 )
                 df_market[col] = pd.to_numeric(df_market[col], errors='coerce').fillna(0)
-            
-            # Final conversion to float before prediction
+
             df_market = df_market[model_features].astype(float)
 
+            # Predict with calibration
+            raw_probs = model.predict_proba(df_market)[:, 1]
+            calibrated_probs = iso.predict(raw_probs)
 
-            # Predict
-            df.loc[df['Market'] == market_type, 'Model_Sharp_Win_Prob'] = model.predict_proba(df_market)[:, 1]
+            df.loc[df['Market'] == market_type, 'Model_Sharp_Win_Prob'] = raw_probs
+            df.loc[df['Market'] == market_type, 'Model_Confidence'] = calibrated_probs
 
         except Exception as e:
             st.error(f"❌ Failed to apply model for {market_type}: {e}")
 
-    # Confidence tiering (optional visual)
-    df['Model_Confidence'] = (df['Model_Sharp_Win_Prob'] - 0.5).abs() * 2
-    df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
-    df['Model_Confidence_Tier'] = pd.cut(
-        df['Model_Sharp_Win_Prob'],
-        bins=[0.0, 0.4, 0.5, 0.6, 1.0],
-        labels=["⚠️ Underdog", "✅ Coinflip", "⭐ Lean", "🔥 Favorite"]
-    )
+    # Apply tiering only if Model_Sharp_Win_Prob exists
+    if 'Model_Sharp_Win_Prob' in df.columns:
+        df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
+        df['Model_Confidence_Tier'] = pd.cut(
+            df['Model_Sharp_Win_Prob'],
+            bins=[0.0, 0.4, 0.5, 0.6, 1.0],
+            labels=["⚠️ Underdog", "✅ Coinflip", "⭐ Lean", "🔥 Favorite"]
+        )
 
     st.success("✅ Model scoring complete (per-market)")
     return df
+
         
         
-import pickle
 from io import BytesIO
+import pickle
 from google.cloud import storage
 
-def save_model_to_gcs(model, sport, market, bucket_name="sharp-models"):
+def save_model_to_gcs(model, calibrator, sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(filename)
+
+        # Save both model and calibrator together
         buffer = BytesIO()
-        pickle.dump(model, buffer)
+        pickle.dump({"model": model, "calibrator": calibrator}, buffer)
         blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
-        print(f"✅ Model saved to GCS: gs://{bucket_name}/{filename}")
+
+        print(f"✅ Model + calibrator saved to GCS: gs://{bucket_name}/{filename}")
     except Exception as e:
         print(f"❌ Failed to save model to GCS: {e}")
-
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
@@ -1221,9 +1243,13 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(filename)
         content = blob.download_as_bytes()
-        model = pickle.loads(content)
-        print(f"✅ Loaded model from GCS: gs://{bucket_name}/{filename}")
-        return model
+        data = pickle.loads(content)
+
+        print(f"✅ Loaded model + calibrator from GCS: gs://{bucket_name}/{filename}")
+        return {
+            "model": data["model"],
+            "calibrator": data["calibrator"]
+        }
     except Exception as e:
         print(f"❌ Failed to load model from GCS: {e}")
         return None
@@ -1232,7 +1258,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         
         
 @st.cache_data(ttl=300)
-def fetch_scored_picks_from_bigquery(limit=5000):
+def fetch_scored_picks_from_bigquery(limit=50000):
     query = f"""
         SELECT *
         FROM `sharp_data.sharp_scores_full`
@@ -1344,9 +1370,11 @@ def render_scanner_tab(label, sport_key, container):
         if trained_models is None:
             trained_models = {}
             for market_type in ['spreads', 'totals', 'h2h']:
-                model = load_model_from_gcs(sport=label, market=market_type)
-                if model:
-                    trained_models[market_type] = model
+                model_bundle = load_model_from_gcs(sport=label, market=market_type)
+                if model_bundle:
+                    trained_models[market_type] = model_bundle
+
+                    
             st.session_state[model_key] = trained_models
 
         
@@ -1894,9 +1922,11 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
         trained_models = {}
         for market_type in ['spreads', 'totals', 'h2h']:
-            model = load_model_from_gcs(sport=sport_label, market=market_type)
-            if model:
-                trained_models[market_type] = model
+            model_bundle = load_model_from_gcs(sport=sport_label, market=market_type)
+
+            if model_bundle:
+                trained_models[market_type] = model_bundle
+
 
 
         df_master = read_recent_sharp_moves(hours=168)
