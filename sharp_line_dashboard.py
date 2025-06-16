@@ -1777,7 +1777,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Scored'] = False
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
-    
+    # Ensure 'Unique_Sharp_Books' is present and numeric
+    if 'Unique_Sharp_Books' not in df.columns:
+        df['Unique_Sharp_Books'] = 0
+    df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
+
     # === 7. Apply model scoring if available
     if trained_models:
         try:
