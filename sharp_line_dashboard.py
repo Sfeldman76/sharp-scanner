@@ -309,8 +309,8 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
 
     try:
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace' if force_replace else 'append')
-        print(f"🧪 Uploading to {table} with columns: {df.columns.tolist()}")
-        st.success(f"✅ Uploaded {len(df)} rows to {table}")
+        
+        #st.success(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         st.error(f"❌ Failed to upload to {table}: {e}")
         
@@ -1241,7 +1241,7 @@ def apply_blended_sharp_score(df, trained_models):
             labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
         )
 
-    st.success("✅ Model scoring complete (per-market)")
+    #st.success("✅ Model scoring complete (per-market)")
     return df
 
         
@@ -1376,7 +1376,7 @@ def render_scanner_tab(label, sport_key, container):
                 live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
             )
             st.session_state[detection_key] = (df_moves_raw, df_audit, summary_df)
-            st.success("🧠 Sharp detection run completed and cached.")
+            #st.success("🧠 Sharp detection run completed and cached.")
         
         # === Exit early if no data
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
@@ -1854,7 +1854,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         pa.Table.from_pandas(new_scores)
 
         to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-        st.success(f"✅ Uploaded {len(new_scores)} new game scores")
+        #st.success(f"✅ Uploaded {len(new_scores)} new game scores")
     except Exception as e:
         st.error(f"❌ Failed to upload game scores: {e}")
         st.code(new_scores.dtypes.to_string())
