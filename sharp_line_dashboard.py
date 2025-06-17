@@ -264,7 +264,8 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                     })
 
     df_snap = pd.DataFrame(rows)
-
+    # Build Game_Key in df_snap using the same function as df_moves_raw
+    df_snap = build_game_key(df_snap)
     if df_snap.empty:
         print("⚠️ No snapshot data to upload.")
         return
