@@ -620,3 +620,126 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
    
     return df, df_history, summary_df
 
+def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
+    if df is None or df.empty:
+        print("⚠️ No sharp moves to write.")
+        return
+
+    df = df.copy()
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
+    # Clean up any merge artifacts
+    df.columns = [col.strip().replace(" ", "_") for col in df.columns]
+    df = df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], errors='ignore')
+
+    # Try to coerce object types to strings for BigQuery
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).replace("nan", None)
+
+    # Deduplicate before write (based on primary key logic)
+    dedup_keys = [
+        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
+        'Scored', 'Sport'
+    ]
+
+    try:
+        existing = bq_client.query(f"""
+            SELECT DISTINCT {', '.join(dedup_keys)}
+            FROM `{table}`
+            WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+        """).to_dataframe()
+
+        df = df.merge(existing, on=dedup_keys, how='left', indicator=True)
+        df = df[df['_merge'] == 'left_only'].drop(columns=['_merge'])
+
+    except Exception as e:
+        print(f"⚠️ Dedup check failed — proceeding with all rows: {e}")
+
+    if df.empty:
+        print("ℹ️ No new sharp move rows to write.")
+        return
+
+    try:
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+        print(f"✅ Wrote {len(df)} new rows to {table}")
+    except Exception as e:
+        print(f"❌ Failed to write sharp moves to BigQuery: {e}")
+        print(df.dtypes)
+
+
+def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
+    rows = []
+    snapshot_time = pd.Timestamp.utcnow()
+
+    for game in snapshot_list:
+        gid = game.get('id')
+        if not gid:
+            continue
+        for book in game.get('bookmakers', []):
+            book_key = book.get('key')
+            for market in book.get('markets', []):
+                market_key = market.get('key')
+                for outcome in market.get('outcomes', []):
+                    rows.append({
+                        'Game_ID': gid,
+                        'Bookmaker': book_key,
+                        'Market': market_key,
+                        'Outcome': outcome.get('name'),
+                        'Value': outcome.get('point') if market_key != 'h2h' else outcome.get('price'),
+                        'Limit': outcome.get('bet_limit'),
+                        'Snapshot_Timestamp': snapshot_time
+                    })
+
+    df_snap = pd.DataFrame(rows)
+    # Build Game_Key in df_snap using the same function as df_moves_raw
+    df_snap = build_game_key(df_snap)
+    if df_snap.empty:
+        print("⚠️ No snapshot data to upload.")
+        return
+
+    filename = f"{folder}{snapshot_time.strftime('%Y%m%d_%H%M%S')}_snapshot.parquet"
+    table = pa.Table.from_pandas(df_snap)
+    buffer = BytesIO()
+    pq.write_table(table, buffer, compression='snappy')
+
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
+        print(f"✅ Snapshot uploaded to GCS as Parquet: gs://{bucket_name}/{filename}")
+    except Exception as e:
+        print(f"❌ Failed to upload snapshot to GCS: {e}")
+
+def write_line_history_to_bigquery(df):
+    if df is None or df.empty:
+        print("⚠️ No line history data to upload.")
+        return
+
+    df = df.copy()
+
+    # ✅ Force conversion of 'Time' to datetime
+    if 'Time' in df.columns:
+        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
+    # ✅ Clean merge artifacts
+    df = df.rename(columns=lambda x: x.rstrip('_x'))
+    df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
+
+    print("🧪 Line history dtypes:\n", df.dtypes.to_dict())
+    print(df.head(2))
+
+    if not safe_to_gbq(df, LINE_HISTORY_TABLE):
+        print(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
+    else:
+        print(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
+
+
