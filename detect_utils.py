@@ -10,7 +10,7 @@ from utils import (
 )
 
 def detect_and_save_all_sports():
-    for sport_label in ["NBA", "MLB","WNBA","CFL"]: 
+    for sport_label in ["NBA", "MLB", "WNBA", "CFL"]: 
         print(f"🔍 Running sharp detection for {sport_label}...")
         sport_key = SPORTS[sport_label]
 
@@ -19,7 +19,8 @@ def detect_and_save_all_sports():
             previous = read_latest_snapshot_from_bigquery()
             market_weights = read_market_weights_from_bigquery()
 
-            df_moves, df_snap, df_audit = detect_sharp_moves(
+            # 🚨 FIX: This returns (df_moves_raw, df_audit, df_summary), not (df_moves, df_snap, df_audit)
+            df_moves_raw, df_audit, df_summary = detect_sharp_moves(
                 current=current,
                 previous=previous,
                 sport_key=sport_key,
@@ -29,11 +30,11 @@ def detect_and_save_all_sports():
                 weights=market_weights,
             )
 
-            write_sharp_moves_to_master(df_moves)
+            write_sharp_moves_to_master(df_moves_raw)
             write_line_history_to_bigquery(df_audit)
-            upload_snapshot_to_gcs(df_snap)
+            write_snapshot_to_gcs_parquet(current)  # ✅ needs `current`, not df_summary or df_moves_raw
 
-            print(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
+            print(f"✅ Completed: {sport_label} — Moves: {len(df_moves_raw)}")
 
         except Exception as e:
             print(f"❌ Error during detection for {sport_label}: {e}")
