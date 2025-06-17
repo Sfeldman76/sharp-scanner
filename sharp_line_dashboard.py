@@ -1657,7 +1657,6 @@ def render_scanner_tab(label, sport_key, container):
             write_line_history_to_bigquery(df_audit)
             print("🧪 line history audit shape:", df_audit.shape)
 
-
         # === 6. Summary Table ===
         if summary_df.empty:
             st.info("ℹ️ No summary data available.")
@@ -1667,25 +1666,31 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Normalize keys
         for col in ['Game', 'Outcome']:
-            summary_df[col] = summary_df[col].str.strip().str.lower()
-            df_moves[col] = df_moves[col].str.strip().str.lower()
+            if col in summary_df.columns:
+                summary_df[col] = summary_df[col].str.strip().str.lower()
+            if col in df_moves.columns:
+                df_moves[col] = df_moves[col].str.strip().str.lower()
+        
+        # === Ensure required model columns exist
+        model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
+        for col in model_cols:
+            if col not in df_moves.columns:
+                df_moves[col] = None
         
         # === Merge model score + confidence tier
-        model_cols_to_merge = ['Game', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
+        model_cols_to_merge = ['Game', 'Market', 'Outcome'] + model_cols
         df_merge_scores = df_moves[model_cols_to_merge].drop_duplicates()
-        summary_df = summary_df.merge(
-            df_merge_scores,
-            on=['Game', 'Market', 'Outcome'],
-            how='left'
-        )
-        # === Merge in Model Reasoning + Confidence Evolution
+        summary_df = summary_df.merge(df_merge_scores, on=['Game', 'Market', 'Outcome'], how='left')
+        
+        # === Ensure extra diagnostic columns exist before merging
+        for col in ['📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']:
+            if col not in df_moves_raw.columns:
+                df_moves_raw[col] = ""
+        
         extra_cols = ['Game', 'Market', 'Outcome', '📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']
         df_extras = df_moves_raw[extra_cols].drop_duplicates()
-        summary_df = summary_df.merge(
-            df_extras,
-            on=['Game', 'Market', 'Outcome'],
-            how='left'
-        )
+        summary_df = summary_df.merge(df_extras, on=['Game', 'Market', 'Outcome'], how='left')
+        
         # === Merge Game_Start for EST display
         if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
             df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start', 'Model_Confidence_Tier']].dropna().drop_duplicates()
@@ -1743,6 +1748,7 @@ def render_scanner_tab(label, sport_key, container):
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
+
         
         # === Columns to show
         # === Columns to show
