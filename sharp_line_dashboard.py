@@ -1733,7 +1733,7 @@ def render_scanner_tab(label, sport_key, container):
         # === Columns to show
          # === Columns to show
         
-         view_cols = [
+        view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
             'Model_Sharp_Win_Prob', 'Confidence\nTier',
