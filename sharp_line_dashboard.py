@@ -1382,7 +1382,7 @@ def render_scanner_tab(label, sport_key, container):
         ])
         df_snap = build_game_key(df_snap)
         
-        write_snapshot_to_gcs_parquet(live)
+        #write_snapshot_to_gcs_parquet(live)
         prev = read_latest_snapshot_from_bigquery(hours=2) or {}
         # === Build df_prev_raw for audit
         df_prev_raw = pd.DataFrame([
@@ -1449,7 +1449,7 @@ def render_scanner_tab(label, sport_key, container):
             st.info(f"🧪 Nulls in required Game_Key fields: {null_counts.to_dict()}")
 
 
-        write_sharp_moves_to_master(df_moves_raw)
+        #write_sharp_moves_to_master(df_moves_raw)
         # === Load model
         # === Load per-market models
         model_key = f'sharp_models_{label.lower()}'
@@ -1656,8 +1656,8 @@ def render_scanner_tab(label, sport_key, container):
         # === Upload line history
         if not df_audit.empty:
             df_audit['Snapshot_Timestamp'] = timestamp
-            write_line_history_to_bigquery(df_audit)
-            print("🧪 line history audit shape:", df_audit.shape)
+            pass#write_line_history_to_bigquery(df_audit)
+           
 
         # === 6. Summary Table ===
         if summary_df.empty:
@@ -2027,14 +2027,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
         new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
        
-        import pyarrow as pa
-        pa.Table.from_pandas(new_scores)
+ 
 
-        to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-        #st.success(f"✅ Uploaded {len(new_scores)} new game scores")
+        pass#to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+        pass#st.success(f"✅ Uploaded {len(new_scores)} new game scores")
     except Exception as e:
-        st.error(f"❌ Failed to upload game scores: {e}")
-        st.code(new_scores.dtypes.to_string())
+        pass#st.error(f"❌ Failed to upload game scores: {e}")
+        pass#st.code(new_scores.dtypes.to_string())
 
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
@@ -2189,12 +2188,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         st.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
     
-    try:
-        to_gbq(df_scores_out, 'sharp_data.sharp_scores_full', project_id=GCP_PROJECT_ID, if_exists='append')
-        st.success(f"✅ Wrote {len(df_scores_out)} new distinct scored picks")
-    except Exception as e:
-        st.error(f"❌ Upload failed: {e}")
-        st.code(df_scores_out.dtypes.to_string())
+ 
     
     return df
     
