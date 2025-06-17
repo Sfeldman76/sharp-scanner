@@ -1442,11 +1442,7 @@ def render_scanner_tab(label, sport_key, container):
         # === Diagnose Game_Key build failure
         required_fields = ['Game', 'Game_Start', 'Market', 'Outcome']
         missing_cols = [col for col in required_fields if col not in df_moves_raw.columns]
-        if missing_cols:
-            st.warning(f"❌ Missing columns before build_game_key: {missing_cols}")
-        else:
-            null_counts = df_moves_raw[required_fields].isnull().sum()
-            st.info(f"🧪 Nulls in required Game_Key fields: {null_counts.to_dict()}")
+        
 
 
         #write_sharp_moves_to_master(df_moves_raw)
