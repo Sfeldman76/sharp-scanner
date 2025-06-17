@@ -90,7 +90,7 @@ import google.api_core.exceptions
 from google.cloud import bigquery_storage_v1
 import pyarrow as pa
 import pyarrow.parquet as pq
-from detect_utils import detect_and_save_all_sports
+#from detect_utils import detect_and_save_all_sports
 import numpy as np
 
 
