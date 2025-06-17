@@ -206,7 +206,7 @@ def read_latest_snapshot_from_bigquery(hours=2):
         return {}
 
 
-def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
+def write_sharp_moves_to_master(df, table=BQ_FULL_TABLE):
     if df is None or df.empty:
         print("⚠️ No sharp moves to write.")
         return
