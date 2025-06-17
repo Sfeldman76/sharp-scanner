@@ -62,5 +62,6 @@ def detect_and_save_all_sports():
 
             logging.info(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
 
-        except Exception:
-            logging.exception(f"❌ Error during detection for {sport_label}")
+        except Exception as e:
+            logging.warning(f"⚠️ No model found for {sport}-{market}: {e}")
+            return None
