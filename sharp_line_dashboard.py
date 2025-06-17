@@ -1372,7 +1372,6 @@ def render_scanner_tab(label, sport_key, container):
         df_snap = build_game_key(df_snap)
         
         write_snapshot_to_gcs_parquet(live)
-        write_sharp_moves_to_master(df_moves_raw)  # ✅ CORRECTED HERE
         prev = read_latest_snapshot_from_bigquery(hours=2) or {}
         # === Build df_prev_raw for audit
         df_prev_raw = pd.DataFrame([
@@ -1416,8 +1415,7 @@ def render_scanner_tab(label, sport_key, container):
             )
             st.session_state[detection_key] = (df_moves_raw, df_audit, summary_df)
             #st.success("🧠 Sharp detection run completed and cached.")
-        
-        # === Exit early if no data
+       # === Exit early if no data
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
             st.warning("⚠️ No sharp signals detected.")
             return pd.DataFrame()
