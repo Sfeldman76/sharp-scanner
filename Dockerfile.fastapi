@@ -10,3 +10,4 @@ COPY . .
 ENV PORT=8080
 
 CMD ["uvicorn", "sharp_trigger_service:app", "--host", "0.0.0.0", "--port", "8080"]
+
