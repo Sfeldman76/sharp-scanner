@@ -826,7 +826,7 @@ def detect_cross_market_sharp_support(df_moves, score_threshold=25):
     return df
 
 
-   def apply_blended_sharp_score(df, trained_models):
+def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
 
