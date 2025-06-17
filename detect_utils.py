@@ -1,4 +1,4 @@
-from config import SPORTS, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS
+from config import SPORTS, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, API_KEY
 from utils import (
     fetch_live_odds,
     read_latest_snapshot_from_bigquery,
@@ -15,17 +15,15 @@ def detect_and_save_all_sports():
         sport_key = SPORTS[sport_label]
 
         try:
-            def detect_and_save_all_sports():
-    for sport_label in ["NBA", "MLB", "WNBA", "CFL"]:
-        print(f"🔍 Running sharp detection for {sport_label}...")
-        sport_key = SPORTS[sport_label]
+            # Fetch current odds
+            current = fetch_live_odds(sport_key, API_KEY)
 
-        try:
-            current = fetch_live_odds(sport_key, API_KEY)  # ✅ fixed
+            # Historical snapshot + weights
             previous = read_latest_snapshot_from_bigquery()
             market_weights = read_market_weights_from_bigquery()
 
-            df_moves, df_snap, df_audit = detect_sharp_moves(
+            # Detection logic
+            df_moves_raw, df_audit, _ = detect_sharp_moves(
                 current=current,
                 previous=previous,
                 sport_key=sport_key,
@@ -35,32 +33,10 @@ def detect_and_save_all_sports():
                 weights=market_weights,
             )
 
-            write_sharp_moves_to_master(df_moves)
-            write_line_history_to_bigquery(df_audit)
-            write_snapshot_to_gcs_parquet(df_snap)
-
-            print(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
-
-        except Exception as e:
-            print(f"❌ Error during detection for {sport_label}: {e}")
-
-            previous = read_latest_snapshot_from_bigquery()
-            market_weights = read_market_weights_from_bigquery()
-
-            # 🚨 FIX: This returns (df_moves_raw, df_audit, df_summary), not (df_moves, df_snap, df_audit)
-            df_moves_raw, df_audit, df_summary = detect_sharp_moves(
-                current=current,
-                previous=previous,
-                sport_key=sport_key,
-                SHARP_BOOKS=SHARP_BOOKS,
-                REC_BOOKS=REC_BOOKS,
-                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-                weights=market_weights,
-            )
-
+            # Save results
             write_sharp_moves_to_master(df_moves_raw)
             write_line_history_to_bigquery(df_audit)
-            write_snapshot_to_gcs_parquet(current)  # ✅ needs `current`, not df_summary or df_moves_raw
+            write_snapshot_to_gcs_parquet(current)
 
             print(f"✅ Completed: {sport_label} — Moves: {len(df_moves_raw)}")
 
