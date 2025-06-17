@@ -1524,38 +1524,47 @@ def render_scanner_tab(label, sport_key, container):
         # === Clean up and fill required columns
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
         df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore')
-        if 'Ref Sharp Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
+        
+        # Add fallback for Ref_Sharp_Value
+        if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
+        
+        # Ensure scoring result placeholders
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
         
-        # === Prepare final deduped view with scores
+        # Ensure model scoring outputs exist
         model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
         for col in model_cols:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
+        
+        # Prepare final deduplicated scoring view
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first')[['Game', 'Market', 'Outcome'] + model_cols]
+                
         # === Enhance df_moves_raw with Model Reasoning and Confidence Trend
         
-        # === 1. First snapshot values per line
+        # 1. First snapshot values per line
         df_first = df_snap.sort_values('Snapshot_Timestamp') \
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
             .rename(columns={
                 'Value': 'First_Line_Value'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']]
+
         
-        # === 2. Merge into df_moves_raw
-        df_moves_raw = df_moves_raw.merge(
-            df_first,
-            on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-            how='left'
-        )
+        # 2. Merge into df_moves_raw
+        df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
         
-        # === 3. Tier Change (optional if First_Tier exists — you can remove this safely if not used)
-        df_moves_raw['Tier_Change'] = "↔ Stable"
+        # 3. Tier Change
+        tier_rank = {"⚠️ Weak": 1, "🟡 Moderate": 2, "🔥 Strong": 3}
+        df_moves_raw['Tier_Change'] = df_moves_raw.apply(lambda row: (
+            f"↑ {row['First_Tier']} → {row['Sharp_Confidence_Tier']}" if tier_rank.get(row['Sharp_Confidence_Tier'], 0) > tier_rank.get(row['First_Tier'], 0) else
+            f"↓ {row['First_Tier']} → {row['Sharp_Confidence_Tier']}" if tier_rank.get(row['Sharp_Confidence_Tier'], 0) < tier_rank.get(row['First_Tier'], 0) else
+            "↔ No Change"
+        ), axis=1)
         
-        # === 4. Direction
+        # 4. Direction
         df_moves_raw['Prob_Delta'] = df_moves_raw['Sharp_Win_Prob'] - df_moves_raw['First_Sharp_Prob']
         df_moves_raw['Line_Delta'] = df_moves_raw['Value'] - df_moves_raw['First_Line_Value']
         df_moves_raw['Direction'] = df_moves_raw.apply(lambda row: (
@@ -1564,7 +1573,7 @@ def render_scanner_tab(label, sport_key, container):
             "⚪ Mixed"
         ), axis=1)
         
-        # === 5. Model Reasoning
+        # 5. Model Reasoning
         def build_model_reason(row):
             reasons = []
             if row['Sharp_Win_Prob'] > 0.55:
@@ -1583,7 +1592,7 @@ def render_scanner_tab(label, sport_key, container):
         
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
         
-        # === 6. Confidence Evolution
+        # 6. Confidence Evolution
         def build_trend_explanation(row):
             start = row.get('First_Sharp_Prob', None)
             now = row.get('Sharp_Win_Prob', None)
@@ -1617,6 +1626,8 @@ def render_scanner_tab(label, sport_key, container):
             return f"{trend}: {start:.2f} → {now:.2f}" + (f" due to {', '.join(reason)}" if reason else "")
         
         df_moves_raw['📊 Confidence Evolution'] = df_moves_raw.apply(build_trend_explanation, axis=1)
+
+
         # === Run backtest (if not already done this session)
 
 
