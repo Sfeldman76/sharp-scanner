@@ -44,18 +44,21 @@ def detect_and_save_all_sports():
             write_snapshot_to_gcs_parquet(current)
 
             # 🔍 Load models and apply scoring
+            # ✅ Load models for this sport
             trained_models = {
                 market: load_model_from_gcs(sport_label, market)
                 for market in ['spreads', 'totals', 'h2h']
             }
-            trained_models = {k: v for k, v in trained_models.items() if v}
-
+            trained_models = {k: v for k, v in trained_models.items() if v}  # filter out missing models
+            
+            # 🧠 Apply model scoring if available
             if trained_models:
                 df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
                 write_to_bigquery(df_scored)
                 logging.info(f"✅ Scored and saved {len(df_scored)} rows to sharp_scores_full.")
             else:
                 logging.warning("⚠️ No trained models found — skipping scoring.")
+
 
             logging.info(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
 
