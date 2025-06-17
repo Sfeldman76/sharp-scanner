@@ -160,4 +160,14 @@ def read_latest_snapshot_from_bigquery(hours=2):
     except Exception as e:
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
+def read_market_weights_from_bigquery():
+    try:
+        query = f"SELECT * FROM `{MARKET_WEIGHTS_TABLE}`"
+        df = bq_client.query(query).to_dataframe()
+        weights = {row["Feature"]: row["Weight"] for _, row in df.iterrows()}
+        print(f"✅ Loaded {len(weights)} market weights from BigQuery")
+        return weights
+    except Exception as e:
+        print(f"❌ Failed to load market weights from BigQuery: {e}")
+        return {}
 
