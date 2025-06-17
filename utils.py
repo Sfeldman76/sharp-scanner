@@ -740,13 +740,34 @@ def write_line_history_to_bigquery(df):
 
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    # Clean column names
+    # Clean merge artifacts
     df = df.rename(columns=lambda x: x.rstrip('_x'))
     df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
 
+    # Define the allowed schema columns
+    LINE_HISTORY_ALLOWED_COLS = [
+        "Sport", "Game_Key", "Time", "Game", "Game_Start", "Event_Date",
+        "Market", "Outcome", "Bookmaker", "Book", "Value", "Limit",
+        "Old Value", "Delta", "Home_Team_Norm", "Away_Team_Norm", "Commence_Hour",
+        "Ref Sharp Value", "Ref Sharp Old Value", "Delta vs Sharp",
+        "SHARP_SIDE_TO_BET", "Sharp_Move_Signal", "Sharp_Limit_Jump",
+        "Sharp_Time_Score", "Sharp_Prob_Shift", "Sharp_Limit_Total",
+        "SharpBetScore", "Snapshot_Timestamp"
+    ]
+
+    # ✅ Remove any unexpected columns before upload
+    allowed = set(LINE_HISTORY_ALLOWED_COLS)
+    actual = set(df.columns)
+    extra = actual - allowed
+    if extra:
+        logging.warning(f"⚠️ Dropping unexpected columns before upload: {extra}")
+    df = df[[col for col in LINE_HISTORY_ALLOWED_COLS if col in df.columns]]
+
+    # Log preview
     logging.debug("🧪 Line history dtypes:\n" + str(df.dtypes.to_dict()))
     logging.debug("Sample rows:\n" + df.head(2).to_string())
 
+    # Upload
     if not safe_to_gbq(df, LINE_HISTORY_TABLE):
         logging.error(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
     else:
