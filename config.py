@@ -3,26 +3,53 @@
 SPORTS = {
     "NBA": "basketball_nba",
     "MLB": "baseball_mlb",
+    "CFL": "americanfootball_cfl",
     "WNBA": "basketball_wnba",
-    "CFL": "americanfootball_cfl"
 }
 
-SHARP_BOOKS = [
-    "pinnacle", "bookmaker", "betonline", "heritage"
-]
+SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','betfair_ex_uk', 'smarkets','betonlineag','lowvig']
 
 REC_BOOKS = [
-    "draftkings", "fanduel", "pointsbet", "betrivers", "mgm"
-]
+    'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
+    'fanatics', 'espnbet', 'hardrockbet','bovada','betus' ]
 
 BOOKMAKER_REGIONS = {
-    "pinnacle": "offshore",
-    "bookmaker": "offshore",
-    "betonline": "offshore",
-    "heritage": "offshore",
-    "draftkings": "us",
-    "fanduel": "us",
-    "pointsbet": "us",
-    "betrivers": "us",
-    "mgm": "us"
+    # 🔹 Sharp Books
+    'pinnacle': 'eu',
+    'betfair_ex_eu': 'eu',
+    'betfair_ex_uk': 'uk',
+    'smarkets': 'uk',
+    'matchbook': 'uk',
+    'betonlineag': 'us',
+    'lowvig': 'us',
+    'betanysports': 'us2',
+    'betus': 'us',
+
+    # 🔸 Rec Books
+    'betmgm': 'us',
+    'draftkings': 'us',
+    'fanduel': 'us',
+    'betrivers': 'us',
+    'espnbet': 'us2',
+    'hardrockbet': 'us2',
+    'fanatics': 'us',
+    'mybookieag': 'us',
+    'bovada': 'us',
+    'rebet': 'us2',
+    'windcreek': 'us2',
+
+    # Optional extras (if needed later)
+    'bet365': 'uk',
+    'williamhill': 'uk',
+    'ladbrokes': 'uk',
+    'unibet': 'eu',
+    'bwin': 'eu',
+    'sportsbet': 'au',
+    'ladbrokesau': 'au',
+    'neds': 'au'
 }
+
+
+MARKETS = ['spreads', 'totals', 'h2h']
+
