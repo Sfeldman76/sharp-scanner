@@ -1391,6 +1391,7 @@ def render_scanner_tab(label, sport_key, container):
             for market in book.get('markets', [])
             for outcome in market.get('outcomes', [])
         ])
+        df_snap = build_game_key(df_snap)
         write_snapshot_to_gcs_parquet(live)
         
         prev = read_latest_snapshot_from_bigquery(hours=2) or {}
