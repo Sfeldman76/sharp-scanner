@@ -127,3 +127,37 @@ def write_parquet_to_gcs(df, filename, bucket_name=GCS_BUCKET, folder="snapshots
     blob = gcs_client.bucket(bucket_name).blob(blob_path)
     blob.upload_from_string(buffer.getvalue(), content_type="application/octet-stream")
     print(f"✅ Uploaded Parquet to gs://{bucket_name}/{blob_path}")
+
+def read_latest_snapshot_from_bigquery(hours=2):
+    try:
+        query = f"""
+            SELECT * FROM `{SNAPSHOTS_TABLE}`
+            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+        """
+        df = bq_client.query(query).to_dataframe()
+
+        # Restructure into grouped dict format expected by detect_sharp_moves
+        grouped = defaultdict(lambda: {"bookmakers": []})
+        for _, row in df.iterrows():
+            gid = row["Game_ID"]
+            entry = grouped[gid]
+            found_book = next((b for b in entry["bookmakers"] if b["key"] == row["Bookmaker"]), None)
+            if not found_book:
+                found_book = {"key": row["Bookmaker"], "markets": []}
+                entry["bookmakers"].append(found_book)
+            found_market = next((m for m in found_book["markets"] if m["key"] == row["Market"]), None)
+            if not found_market:
+                found_market = {"key": row["Market"], "outcomes": []}
+                found_book["markets"].append(found_market)
+            found_market["outcomes"].append({
+                "name": row["Outcome"],
+                "point": row["Value"],
+                "price": row["Value"] if row["Market"] == "h2h" else None,
+                "bet_limit": row["Limit"]
+            })
+
+        return dict(grouped)
+    except Exception as e:
+        print(f"❌ Failed to load snapshot from BigQuery: {e}")
+        return {}
+
