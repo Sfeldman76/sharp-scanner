@@ -1,9 +1,9 @@
 # === Web App & Frontend ===
 streamlit==1.35.0
-streamlit-autorefresh
-fastapi
-uvicorn[standard]
+streamlit-autorefresh==1.0.1
 altair
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
 # === Data Handling ===
 pandas
 requests
