@@ -1407,7 +1407,7 @@ def render_scanner_tab(label, sport_key, container):
         df_snap = build_game_key(df_snap)
         
         write_snapshot_to_gcs_parquet(live)
-        
+        write_sharp_moves_to_master(df_moves_raw)  # ✅ CORRECTED HERE
         prev = read_latest_snapshot_from_bigquery(hours=2) or {}
         # === Build df_prev_raw for audit
         df_prev_raw = pd.DataFrame([
