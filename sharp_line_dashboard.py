@@ -1545,8 +1545,8 @@ def render_scanner_tab(label, sport_key, container):
                 
         # === Enhance df_moves_raw with Model Reasoning and Confidence Trend
         
-       # 1. First snapshot values per line
-       df_first = df_moves_raw.sort_values('Snapshot_Timestamp') \
+        # 1. First snapshot values per line
+        df_first = df_moves_raw.sort_values('Snapshot_Timestamp') \
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
             .rename(columns={
                 'Value': 'First_Line_Value',
