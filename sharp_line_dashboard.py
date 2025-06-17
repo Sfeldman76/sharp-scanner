@@ -3,7 +3,6 @@ import time
 from streamlit_autorefresh import st_autorefresh
 
 
-
 # === Page Config ===
 st.set_page_config(layout="wide")
 st.title("Betting Line Scanner")
