@@ -750,6 +750,79 @@ def write_line_history_to_bigquery(df):
         logging.error(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
     else:
         logging.info(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
+        
+def detect_market_leaders(df_history, sharp_books, rec_books):
+    df_history = df_history.copy()
+    df_history['Time'] = pd.to_datetime(df_history['Time'])
+    df_history['Book'] = df_history['Book'].str.lower()
 
+    # Detect open value per Book
+    df_open = (
+        df_history
+        .sort_values('Time')
+        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
+        .first()
+        .reset_index()
+        .rename(columns={'Value': 'Open_Value'})
+    )
+
+    df_history = df_history.merge(df_open, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+    df_history['Has_Moved'] = (df_history['Value'] != df_history['Open_Value']) & df_history['Value'].notna()
+
+    first_moves = (
+        df_history[df_history['Has_Moved']]
+        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Time']
+        .min()
+        .reset_index()
+        .rename(columns={'Time': 'First_Move_Time'})
+    )
+
+    first_moves['Book_Type'] = first_moves['Book'].map(
+        lambda b: 'Sharp' if b in sharp_books else ('Rec' if b in rec_books else 'Other')
+    )
+    first_moves['Move_Rank'] = first_moves.groupby(
+        ['Game', 'Market', 'Outcome']
+    )['First_Move_Time'].rank(method='first')
+
+    first_moves['Market_Leader'] = (
+        (first_moves['Book_Type'] == 'Sharp') & (first_moves['Move_Rank'] == 1)
+    )
+
+    return first_moves
+
+def detect_cross_market_sharp_support(df_moves, score_threshold=25):
+    df = df_moves.copy()
+    df['SupportKey'] = df['Game'].astype(str) + " | " + df['Outcome'].astype(str)
+
+    df_sharp = df[df['SharpBetScore'] >= score_threshold].copy()
+
+    # Count unique markets
+    market_counts = (
+        df_sharp.groupby('SupportKey')['Market']
+        .nunique()
+        .reset_index()
+        .rename(columns={'Market': 'CrossMarketSharpSupport'})
+    )
+
+    # Count unique sharp bookmakers
+    sharp_book_counts = (
+        df_sharp[df_sharp['Book'].isin(SHARP_BOOKS)]
+        .groupby('SupportKey')['Book']
+        .nunique()
+        .reset_index()
+        .rename(columns={'Book': 'Unique_Sharp_Books'})
+    )
+
+    df = df.merge(market_counts, on='SupportKey', how='left')
+    df = df.merge(sharp_book_counts, on='SupportKey', how='left')
+
+    df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
+    df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
+    df['Is_Reinforced_MultiMarket'] = (
+        (df['CrossMarketSharpSupport'] >= 2) | (df['Unique_Sharp_Books'] >= 2)
+    )
+
+    return df
+    
 
 
