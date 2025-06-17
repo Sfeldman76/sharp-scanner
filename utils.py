@@ -204,6 +204,71 @@ def read_latest_snapshot_from_bigquery(hours=2):
     except Exception as e:
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
+
+
+def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
+    if df is None or df.empty:
+        print("⚠️ No sharp moves to write.")
+        return
+
+    df = df.copy()
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    print(f"🧪 Initial row count: {len(df)}")
+
+    # Clean column names and artifacts
+    df.columns = [col.strip().replace(" ", "_") for col in df.columns]
+    df = df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], errors='ignore')
+
+    # Convert object columns to strings
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).replace("nan", None)
+
+    dedup_keys = [
+        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
+        'Scored', 'Sport'
+    ]
+
+    try:
+        # Ensure all dedup keys exist in df
+        missing = [col for col in dedup_keys if col not in df.columns]
+        if missing:
+            print(f"⚠️ Missing dedup keys in df: {missing}")
+        else:
+            existing = bq_client.query(f"""
+                SELECT DISTINCT {', '.join(dedup_keys)}
+                FROM `{table}`
+                WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+            """).to_dataframe()
+
+            before = len(df)
+            df = df.merge(existing, on=dedup_keys, how='left', indicator=True)
+            df = df[df['_merge'] == 'left_only'].drop(columns=['_merge'])
+            print(f"🧪 Deduped: {before} → {len(df)}")
+
+    except Exception as e:
+        print(f"⚠️ Dedup check failed — skipping dedup: {e}")
+
+    if df.empty:
+        print("ℹ️ No new sharp move rows to write after dedup.")
+        return
+
+    try:
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
+        print(f"✅ Wrote {len(df)} new rows to {table}")
+    except Exception as e:
+        print(f"❌ Failed to write sharp moves to BigQuery: {e}")
+        print(df.dtypes)
+        print(df.head())
+
+
+
+
 def read_market_weights_from_bigquery():
     try:
         query = f"SELECT * FROM `{MARKET_WEIGHTS_TABLE}`"
@@ -663,68 +728,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     conf_df = df[df['Enhanced_Sharp_Confidence_Score'].notna()]
    
     return df, df_history, summary_df
-
-def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
-    if df is None or df.empty:
-        print("⚠️ No sharp moves to write.")
-        return
-
-    df = df.copy()
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    print(f"🧪 Initial row count: {len(df)}")
-
-    # Clean column names and artifacts
-    df.columns = [col.strip().replace(" ", "_") for col in df.columns]
-    df = df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], errors='ignore')
-
-    # Convert object columns to strings
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            df[col] = df[col].astype(str).replace("nan", None)
-
-    dedup_keys = [
-        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
-        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
-        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
-        'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
-        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
-        'Scored', 'Sport'
-    ]
-
-    try:
-        # Ensure all dedup keys exist in df
-        missing = [col for col in dedup_keys if col not in df.columns]
-        if missing:
-            print(f"⚠️ Missing dedup keys in df: {missing}")
-        else:
-            existing = bq_client.query(f"""
-                SELECT DISTINCT {', '.join(dedup_keys)}
-                FROM `{table}`
-                WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-            """).to_dataframe()
-
-            before = len(df)
-            df = df.merge(existing, on=dedup_keys, how='left', indicator=True)
-            df = df[df['_merge'] == 'left_only'].drop(columns=['_merge'])
-            print(f"🧪 Deduped: {before} → {len(df)}")
-
-    except Exception as e:
-        print(f"⚠️ Dedup check failed — skipping dedup: {e}")
-
-    if df.empty:
-        print("ℹ️ No new sharp move rows to write after dedup.")
-        return
-
-    try:
-        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-        print(f"✅ Wrote {len(df)} new rows to {table}")
-    except Exception as e:
-        print(f"❌ Failed to write sharp moves to BigQuery: {e}")
-        print(df.dtypes)
-        print(df.head())
-
-
 
 
 
