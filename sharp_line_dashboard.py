@@ -303,12 +303,14 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
             df[col] = df[col].astype(str).replace("nan", None)
 
     try:
+        st.info(f"📤 Uploading to `{table}`...")
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-        print(f"✅ Wrote {len(df)} new rows to {table}")
+        st.success(f"✅ Wrote {len(df)} new rows to `{table}`")
     except Exception as e:
-        print(f"❌ Failed to write sharp moves to BigQuery: {e}")
-        print(df.dtypes)
-        print(df.head())
+        st.error(f"❌ Upload to `{table}` failed: {e}")
+        st.code(df.dtypes.to_string(), language="python")
+        st.dataframe(df.head(5))
+
 
 
 
