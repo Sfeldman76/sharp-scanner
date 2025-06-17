@@ -1571,22 +1571,29 @@ def render_scanner_tab(label, sport_key, container):
             "⚪ Mixed"
         ), axis=1)
         
-        # 5. Model Reasoning
         def build_model_reason(row):
             reasons = []
-            if row['Model_Sharp_Win_Prob'] > 0.55:
-                reasons.append("Model ↑")
+        
+            try:
+                win_prob = row.get('Model_Sharp_Win_Prob')
+                if win_prob is not None and pd.notnull(win_prob) and win_prob > 0.55:
+                    reasons.append("Model ↑")
+            except:
+                pass
+        
             if row.get('Sharp_Prob_Shift', 0) > 0:
                 reasons.append("Confidence ↑")
-            if row.get('Sharp_Limit_Jump'):
+            if row.get('Sharp_Limit_Jump', 0):
                 reasons.append("Limit Jump")
-            if row.get('Market_Leader'):
+            if row.get('Market_Leader', 0):
                 reasons.append("Led Move")
-            if row.get('Is_Reinforced_MultiMarket'):
+            if row.get('Is_Reinforced_MultiMarket', 0):
                 reasons.append("Cross-Market Support")
-            if row.get('LimitUp_NoMove_Flag'):
+            if row.get('LimitUp_NoMove_Flag', 0):
                 reasons.append("Limit ↑ w/o Price Move")
-            return " | ".join(reasons) if reasons else ""
+        
+            return " | ".join(reasons)
+
         
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
         
