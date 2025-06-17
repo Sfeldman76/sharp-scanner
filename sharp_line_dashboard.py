@@ -286,21 +286,31 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
 
 def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if df is None or df.empty:
-        print("⚠️ No sharp moves to write.")
+        st.warning("⚠️ No sharp moves to write.")
         return
 
     df = df.copy()
+
+    # Safety: Ensure Game_Key exists
+    if 'Game_Key' not in df.columns or df['Game_Key'].isnull().all():
+        st.warning("❌ No valid Game_Key present — skipping upload.")
+        st.dataframe(df[['Game', 'Game_Start', 'Market', 'Outcome']].head())
+        return
+
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    print(f"🧪 Sharp moves ready to write: {len(df)}")
+    st.info(f"🧪 Sharp moves ready to write: {len(df)}")
 
     # Clean column names
     df.columns = [col.strip().replace(" ", "_") for col in df.columns]
     df = df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], errors='ignore')
 
-    # Convert object columns
+    if 'Time' in df.columns:
+        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+
+    # Convert object columns safely
     for col in df.columns:
         if df[col].dtype == 'object':
-            df[col] = df[col].astype(str).replace("nan", None)
+            df[col] = df[col].where(df[col].notna(), None)
 
     try:
         st.info(f"📤 Uploading to `{table}`...")
