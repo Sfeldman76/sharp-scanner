@@ -1559,7 +1559,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
         
         # 3. Tier Change
-        tier_rank = {"⚠️ Weak": 1, "🟡 Moderate": 2, "🔥 Strong": 3}
+        tier_rank = {"⚠️ Low": 1, "✅ Medium": 2, "⭐ High": 3, "🔥 Steam": 4}
         df_moves_raw['Tier_Change'] = df_moves_raw.apply(lambda row: (
             f"↑ {row['First_Tier']} → {row['Sharp_Confidence_Tier']}" if tier_rank.get(row['Sharp_Confidence_Tier'], 0) > tier_rank.get(row['First_Tier'], 0) else
             f"↓ {row['First_Tier']} → {row['Sharp_Confidence_Tier']}" if tier_rank.get(row['Sharp_Confidence_Tier'], 0) < tier_rank.get(row['First_Tier'], 0) else
@@ -1567,7 +1567,7 @@ def render_scanner_tab(label, sport_key, container):
         ), axis=1)
         
         # 4. Direction
-        df_moves_raw['Prob_Delta'] = df_moves_raw['Sharp_Win_Prob'] - df_moves_raw['First_Sharp_Prob']
+        df_moves_raw['Prob_Delta'] = df_moves_raw['Model_Sharp_Win_Prob'] - df_moves_raw['First_Sharp_Prob']
         df_moves_raw['Line_Delta'] = df_moves_raw['Value'] - df_moves_raw['First_Line_Value']
         df_moves_raw['Direction'] = df_moves_raw.apply(lambda row: (
             "🟢 Model ↑ / Line ↓" if row['Prob_Delta'] > 0 and row['Line_Delta'] < 0 else
@@ -1578,7 +1578,7 @@ def render_scanner_tab(label, sport_key, container):
         # 5. Model Reasoning
         def build_model_reason(row):
             reasons = []
-            if row['Sharp_Win_Prob'] > 0.55:
+            if row['Model_Sharp_Win_Prob'] > 0.55:
                 reasons.append("Model ↑")
             if row.get('Sharp_Prob_Shift', 0) > 0:
                 reasons.append("Confidence ↑")
@@ -1597,7 +1597,7 @@ def render_scanner_tab(label, sport_key, container):
         # 6. Confidence Evolution
         def build_trend_explanation(row):
             start = row.get('First_Sharp_Prob', None)
-            now = row.get('Sharp_Win_Prob', None)
+            now = row.get('Model_Sharp_Win_Prob', None)
             if start is None or now is None:
                 return ""
             delta = now - start
