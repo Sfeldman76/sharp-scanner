@@ -1662,12 +1662,15 @@ def render_scanner_tab(label, sport_key, container):
         
         st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
         
-        # === Normalize keys
-        for col in ['Game', 'Outcome']:
-            if col in summary_df.columns:
-                summary_df[col] = summary_df[col].str.strip().str.lower()
-            if col in df_moves.columns:
-                df_moves[col] = df_moves[col].str.strip().str.lower()
+        # === Normalize keys BEFORE any merges
+        for col in ['Game', 'Market', 'Outcome']:
+            for df_ in [summary_df, df_moves, df_moves_raw]:
+                if col in df_.columns:
+                    df_[col] = df_[col].astype(str).str.strip().str.lower()
+        
+        if 'Event_Date' in summary_df.columns and 'Event_Date' in df_moves_raw.columns:
+            summary_df['Event_Date'] = summary_df['Event_Date'].astype(str)
+            df_moves_raw['Event_Date'] = df_moves_raw['Event_Date'].astype(str)
         
         # === Ensure required model columns exist
         model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
@@ -1675,12 +1678,12 @@ def render_scanner_tab(label, sport_key, container):
             if col not in df_moves.columns:
                 df_moves[col] = None
         
-        # === Merge model score + confidence tier
+        # === Merge model scores
         model_cols_to_merge = ['Game', 'Market', 'Outcome'] + model_cols
         df_merge_scores = df_moves[model_cols_to_merge].drop_duplicates()
         summary_df = summary_df.merge(df_merge_scores, on=['Game', 'Market', 'Outcome'], how='left')
         
-        # === Ensure extra diagnostic columns exist before merging
+        # === Ensure diagnostic columns exist before merging
         for col in ['📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = ""
@@ -1689,18 +1692,14 @@ def render_scanner_tab(label, sport_key, container):
         df_extras = df_moves_raw[extra_cols].drop_duplicates()
         summary_df = summary_df.merge(df_extras, on=['Game', 'Market', 'Outcome'], how='left')
         
-        # === Merge Game_Start for EST display
+        # === Merge Game_Start for EST formatting
         if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
             df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start', 'Model_Confidence_Tier']].dropna().drop_duplicates()
             df_game_start['MergeKey'] = (
-                df_game_start['Game'].str.strip().str.lower() + "_" +
-                df_game_start['Market'].str.strip().str.lower() + "_" +
-                df_game_start['Event_Date'].astype(str)
+                df_game_start['Game'] + "_" + df_game_start['Market'] + "_" + df_game_start['Event_Date']
             )
             summary_df['MergeKey'] = (
-                summary_df['Game'].str.strip().str.lower() + "_" +
-                summary_df['Market'].str.strip().str.lower() + "_" +
-                summary_df['Event_Date'].astype(str)
+                summary_df['Game'] + "_" + summary_df['Market'] + "_" + summary_df['Event_Date']
             )
             summary_df = summary_df.merge(
                 df_game_start[['MergeKey', 'Game_Start']],
@@ -1708,7 +1707,7 @@ def render_scanner_tab(label, sport_key, container):
                 how='left'
             )
         
-        # === Format to EST
+        # === Format Game_Start into readable EST format
         def safe_to_est(dt):
             if pd.isna(dt): return ""
             try:
@@ -1742,16 +1741,12 @@ def render_scanner_tab(label, sport_key, container):
         # === Drop duplicate rows
         summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
         
-        # === Market filter
+        # === Filter by market
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
-
         
-        # === Columns to show
-        # === Columns to show
-         # === Columns to show
-        
+        # === Columns to show in final table
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
@@ -1759,10 +1754,8 @@ def render_scanner_tab(label, sport_key, container):
             'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
         
-        # === Filtered subset
         table_df = filtered_df[view_cols].copy()
         table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]
-        
         # === CSS Styling for All Tables (keep this once)
         st.markdown("""
         <style>
