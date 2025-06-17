@@ -8,6 +8,10 @@ import pyarrow.parquet as pq
 from io import BytesIO
 import requests
 import numpy as np
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 
 # === Config ===
 GCP_PROJECT_ID = "sharplogger"
@@ -129,10 +133,6 @@ def write_parquet_to_gcs(df, filename, bucket_name=GCS_BUCKET, folder="snapshots
     print(f"✅ Uploaded Parquet to gs://{bucket_name}/{blob_path}")
 
 
-import logging
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
 def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
     rows = []
     snapshot_time = pd.Timestamp.utcnow()
@@ -218,9 +218,6 @@ def read_latest_snapshot_from_bigquery(hours=2):
         return {}
 
 
-import logging
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if df is None or df.empty:
@@ -722,10 +719,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
 
 
-import logging
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
         logging.warning("⚠️ No line history data to upload.")
@@ -823,6 +816,124 @@ def detect_cross_market_sharp_support(df_moves, score_threshold=25):
     )
 
     return df
-    
 
+
+   def apply_blended_sharp_score(df, trained_models):
+    import numpy as np
+    import pandas as pd
+
+
+    logging.info("🔍 Entered apply_blended_sharp_score()")
+    df = df.copy()
+
+    try:
+        df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
+    except Exception as e:
+        st.error(f"❌ Cleanup failed: {e}")
+        return pd.DataFrame()
+
+    try:
+        if 'Enhanced_Sharp_Confidence_Score' in df.columns:
+            df['Final_Confidence_Score'] = pd.to_numeric(df['Enhanced_Sharp_Confidence_Score'], errors='coerce') / 100
+            df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
+    except Exception as e:
+        logging.warning(f"⚠️ Could not compute fallback confidence score: {e}")
+
+    df['Market'] = df['Market'].astype(str).str.lower()
+
+    for market_type, bundle in trained_models.items():
+        model = bundle['model']
+        iso = bundle['calibrator']
+        df_market = df[df['Market'] == market_type].copy()
+
+        if df_market.empty:
+            continue
+
+        try:
+            model_features = model.get_booster().feature_names
+
+            # Ensure all required features exist and are numeric
+            for col in model_features:
+                if col not in df_market.columns:
+                    df_market[col] = 0
+                df_market[col] = (
+                    df_market[col]
+                    .astype(str)
+                    .replace({'True': 1, 'False': 0, 'true': 1, 'false': 0})
+                )
+                df_market[col] = pd.to_numeric(df_market[col], errors='coerce').fillna(0)
+
+            df_market = df_market[model_features].astype(float)
+
+            # Predict with calibration
+            raw_probs = model.predict_proba(df_market)[:, 1]
+            calibrated_probs = iso.predict(raw_probs)
+
+            df.loc[df['Market'] == market_type, 'Model_Sharp_Win_Prob'] = raw_probs
+            df.loc[df['Market'] == market_type, 'Model_Confidence'] = calibrated_probs
+
+        except Exception as e:
+            logging.error(f"❌ Failed to apply model for {market_type}: {e}")
+
+    # Apply tiering only if Model_Sharp_Win_Prob exists
+    if 'Model_Sharp_Win_Prob' in df.columns:
+        df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
+        df['Model_Confidence_Tier'] = pd.cut(
+            df['Model_Sharp_Win_Prob'],
+            bins=[0.0, 0.4, 0.5, 0.6, 1.0],
+            labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
+        )
+
+    #st.success("✅ Model scoring complete (per-market)")
+    return df
+ 
+def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
+    filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        content = blob.download_as_bytes()
+        data = pickle.loads(content)
+
+        print(f"✅ Loaded model + calibrator from GCS: gs://{bucket_name}/{filename}")
+        return {
+            "model": data["model"],
+            "calibrator": data["calibrator"]
+        }
+    except Exception as e:
+        print(f"❌ Failed to load model from GCS: {e}")
+        return None
+        
+def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
+    from pandas_gbq import to_gbq
+
+    if df.empty:
+        logging.info("ℹ️ No data to write to BigQuery.")
+        return
+
+    df = df.copy()
+    df.columns = [col.replace(" ", "_") for col in df.columns]
+
+    # Drop unapproved fields (BigQuery strict schema match)
+    allowed_cols = {
+        'sharp_data.sharp_scores_full': [
+            'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+            'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+            'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+            'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp'
+        ],
+        'sharp_data.sharp_moves_master': None  # Add allowed list here if needed
+    }
+    if table in allowed_cols and allowed_cols[table] is not None:
+        df = df[[col for col in df.columns if col in allowed_cols[table]]]
+
+    try:
+        to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace' if force_replace else 'append')
+        logging.info(f"✅ Uploaded {len(df)} rows to {table}")
+    except Exception as e:
+        logging.exception(f"❌ Failed to upload to {table}")
+        
 
