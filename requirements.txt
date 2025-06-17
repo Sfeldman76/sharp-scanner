@@ -1,5 +1,5 @@
 # === Web App & Frontend ===
-streamlit
+streamlit==1.35.0
 streamlit-autorefresh
 fastapi
 uvicorn[standard]
