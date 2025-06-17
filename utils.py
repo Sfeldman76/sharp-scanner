@@ -156,10 +156,18 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                         'Snapshot_Timestamp': snapshot_time
                     })
 
-    df_snap = pd.DataFrame(rows)
+ 
 
     # Build Game_Key in df_snap using the same function as df_moves_raw
-    df_snap = build_game_key(df_snap)
+    df_snap = pd.DataFrame(rows)
+
+    # ✅ Only run build_game_key if required fields exist
+    required_fields = {'Game', 'Game_Start', 'Market', 'Outcome'}
+    if required_fields.issubset(df_snap.columns):
+        df_snap = build_game_key(df_snap)
+    else:
+        missing = required_fields - set(df_snap.columns)
+        logging.warning(f"⚠️ Skipping build_game_key — missing columns: {missing}")
 
     if df_snap.empty:
         logging.warning("⚠️ No snapshot data to upload to GCS.")
