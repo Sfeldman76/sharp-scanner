@@ -10,6 +10,7 @@ import requests
 import numpy as np
 import logging
 
+import pickle  # ✅ Add this at the top of your script
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
@@ -916,6 +917,8 @@ def apply_blended_sharp_score(df, trained_models):
     #st.success("✅ Model scoring complete (per-market)")
     return df
  
+
+
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
     try:
@@ -931,7 +934,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
             "calibrator": data["calibrator"]
         }
     except Exception as e:
-        print(f"❌ Failed to load model from GCS: {e}")
+        logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
         return None
         
 def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
