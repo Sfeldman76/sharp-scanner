@@ -717,49 +717,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         print(df.dtypes)
 
 
-def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
-    rows = []
-    snapshot_time = pd.Timestamp.utcnow()
 
-    for game in snapshot_list:
-        gid = game.get('id')
-        if not gid:
-            continue
-        for book in game.get('bookmakers', []):
-            book_key = book.get('key')
-            for market in book.get('markets', []):
-                market_key = market.get('key')
-                for outcome in market.get('outcomes', []):
-                    rows.append({
-                        'Game_ID': gid,
-                        'Bookmaker': book_key,
-                        'Market': market_key,
-                        'Outcome': outcome.get('name'),
-                        'Value': outcome.get('point') if market_key != 'h2h' else outcome.get('price'),
-                        'Limit': outcome.get('bet_limit'),
-                        'Snapshot_Timestamp': snapshot_time
-                    })
-
-    df_snap = pd.DataFrame(rows)
-    # Build Game_Key in df_snap using the same function as df_moves_raw
-    df_snap = build_game_key(df_snap)
-    if df_snap.empty:
-        print("⚠️ No snapshot data to upload.")
-        return
-
-    filename = f"{folder}{snapshot_time.strftime('%Y%m%d_%H%M%S')}_snapshot.parquet"
-    table = pa.Table.from_pandas(df_snap)
-    buffer = BytesIO()
-    pq.write_table(table, buffer, compression='snappy')
-
-    try:
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(filename)
-        blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
-        print(f"✅ Snapshot uploaded to GCS as Parquet: gs://{bucket_name}/{filename}")
-    except Exception as e:
-        print(f"❌ Failed to upload snapshot to GCS: {e}")
 
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
