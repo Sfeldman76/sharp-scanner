@@ -6,7 +6,7 @@ from utils import (
     detect_sharp_moves,
     write_sharp_moves_to_master,
     write_line_history_to_bigquery,
-    upload_snapshot_to_gcs,
+    write_snapshot_to_gcs_parquet,
 )
 
 def detect_and_save_all_sports():
