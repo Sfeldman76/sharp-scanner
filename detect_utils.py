@@ -7,6 +7,7 @@ from utils import (
     write_sharp_moves_to_master,
     write_line_history_to_bigquery,
     write_snapshot_to_gcs_parquet,
+    detect_market_leaders
 )
 
 def detect_and_save_all_sports():
