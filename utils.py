@@ -129,6 +129,10 @@ def write_parquet_to_gcs(df, filename, bucket_name=GCS_BUCKET, folder="snapshots
     print(f"✅ Uploaded Parquet to gs://{bucket_name}/{blob_path}")
 
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
     rows = []
     snapshot_time = pd.Timestamp.utcnow()
@@ -153,25 +157,33 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                     })
 
     df_snap = pd.DataFrame(rows)
+
     # Build Game_Key in df_snap using the same function as df_moves_raw
     df_snap = build_game_key(df_snap)
+
     if df_snap.empty:
-        print("⚠️ No snapshot data to upload.")
+        logging.warning("⚠️ No snapshot data to upload to GCS.")
         return
 
     filename = f"{folder}{snapshot_time.strftime('%Y%m%d_%H%M%S')}_snapshot.parquet"
-    table = pa.Table.from_pandas(df_snap)
     buffer = BytesIO()
-    pq.write_table(table, buffer, compression='snappy')
+
+    try:
+        table = pa.Table.from_pandas(df_snap)
+        pq.write_table(table, buffer, compression='snappy')
+    except Exception as e:
+        logging.exception("❌ Failed to write snapshot DataFrame to Parquet.")
+        return
 
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(filename)
         blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
-        print(f"✅ Snapshot uploaded to GCS as Parquet: gs://{bucket_name}/{filename}")
+        logging.info(f"✅ Snapshot uploaded to GCS: gs://{bucket_name}/{filename}")
     except Exception as e:
-        print(f"❌ Failed to upload snapshot to GCS: {e}")
+        logging.exception("❌ Failed to upload snapshot to GCS.")
+
 def read_latest_snapshot_from_bigquery(hours=2):
     try:
         query = f"""
@@ -206,33 +218,46 @@ def read_latest_snapshot_from_bigquery(hours=2):
         return {}
 
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if df is None or df.empty:
-        print("⚠️ No sharp moves to write.")
+        logging.warning("⚠️ No sharp moves to write.")
         return
 
     df = df.copy()
+
+    # Safety: Ensure Game_Key exists
+    if 'Game_Key' not in df.columns or df['Game_Key'].isnull().all():
+        logging.warning("❌ No valid Game_Key present — skipping upload.")
+        logging.debug(df[['Game', 'Game_Start', 'Market', 'Outcome']].head().to_string())
+        return
+
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    print(f"🧪 Sharp moves ready to write: {len(df)}")
+    logging.info(f"🧪 Sharp moves ready to write: {len(df)}")
 
     # Clean column names
     df.columns = [col.strip().replace(" ", "_") for col in df.columns]
     df = df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], errors='ignore')
 
-    # Convert object columns
+    if 'Time' in df.columns:
+        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+
+    # Convert object columns safely
     for col in df.columns:
         if df[col].dtype == 'object':
-            df[col] = df[col].astype(str).replace("nan", None)
+            df[col] = df[col].where(df[col].notna(), None)
 
     try:
+        logging.info(f"📤 Uploading to `{table}`...")
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
-        print(f"✅ Wrote {len(df)} new rows to {table}")
+        logging.info(f"✅ Wrote {len(df)} new rows to `{table}`")
     except Exception as e:
-        print(f"❌ Failed to write sharp moves to BigQuery: {e}")
-        print(df.dtypes)
-        print(df.head())
-
-
+        logging.exception(f"❌ Upload to `{table}` failed.")
+        logging.debug("Schema:\n" + df.dtypes.to_string())
+        logging.debug("Preview:\n" + df.head(5).to_string())
 
 
 def read_market_weights_from_bigquery():
@@ -697,29 +722,34 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
 
 
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
-        print("⚠️ No line history data to upload.")
+        logging.warning("⚠️ No line history data to upload.")
         return
 
     df = df.copy()
 
-    # ✅ Force conversion of 'Time' to datetime
+    # Convert Time to UTC datetime
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
 
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    # ✅ Clean merge artifacts
+    # Clean column names
     df = df.rename(columns=lambda x: x.rstrip('_x'))
     df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
 
-    print("🧪 Line history dtypes:\n", df.dtypes.to_dict())
-    print(df.head(2))
+    logging.debug("🧪 Line history dtypes:\n" + str(df.dtypes.to_dict()))
+    logging.debug("Sample rows:\n" + df.head(2).to_string())
 
     if not safe_to_gbq(df, LINE_HISTORY_TABLE):
-        print(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
+        logging.error(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
     else:
-        print(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
+        logging.info(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
+
 
 
