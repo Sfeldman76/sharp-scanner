@@ -579,6 +579,58 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # ✅ Final return (no field names changed)
     return df, df_history, summary_df
 
+# === Outside of detect_sharp_moves ===
+def assign_confidence_scores(df, market_weights):
+    df['True_Sharp_Confidence_Score'] = df.apply(
+        lambda r: compute_weighted_signal(r, market_weights), axis=1
+    )
+    df['Enhanced_Sharp_Confidence_Score'] = df.apply(
+        lambda r: compute_confidence(r, market_weights), axis=1
+    )
+    df['Sharp_Confidence_Tier'] = pd.cut(
+        df['Enhanced_Sharp_Confidence_Score'],
+        bins=[-1, 25, 50, 75, float('inf')],
+        labels=['⚠️ Low', '✅ Medium', '⭐ High', '🔥 Steam']
+    )
+    return df
+
+def summarize_consensus(df, SHARP_BOOKS, REC_BOOKS):
+    def summarize_group(g):
+        return pd.Series({
+            'Rec_Book_Consensus': g[g['Book'].isin(REC_BOOKS)]['Value'].mean(),
+            'Sharp_Book_Consensus': g[g['Book'].isin(SHARP_BOOKS)]['Value'].mean(),
+            'Rec_Open': g[g['Book'].isin(REC_BOOKS)]['Open_Value'].mean(),
+            'Sharp_Open': g[g['Book'].isin(SHARP_BOOKS)]['Open_Value'].mean()
+        })
+
+    summary_df = (
+        df.groupby(['Event_Date', 'Game', 'Market', 'Outcome'])
+        .apply(summarize_group)
+        .reset_index()
+    )
+
+    summary_df['Recommended_Outcome'] = summary_df['Outcome']
+    summary_df['Move_From_Open_Rec'] = (summary_df['Rec_Book_Consensus'] - summary_df['Rec_Open']).fillna(0)
+    summary_df['Move_From_Open_Sharp'] = (summary_df['Sharp_Book_Consensus'] - summary_df['Sharp_Open']).fillna(0)
+
+    sharp_scores = df[df['SharpBetScore'].notnull()][[
+        'Event_Date', 'Game', 'Market', 'Outcome',
+        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier'
+    ]].drop_duplicates()
+
+    summary_df = summary_df.merge(
+        sharp_scores,
+        on=['Event_Date', 'Game', 'Market', 'Outcome'],
+        how='left'
+    )
+
+    summary_df[['SharpBetScore', 'Enhanced_Sharp_Confidence_Score']] = summary_df[[
+        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score'
+    ]].fillna(0)
+    summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
+
+    return summary_df
+
 
 def write_line_history_to_bigquery(df):
     if df is None or df.empty:
