@@ -19,8 +19,8 @@ from utils import (
     read_recent_sharp_moves, 
     detect_cross_market_sharp_support, 
     assign_confidence_scores,
-    summarize_consensus
-    
+    summarize_consensus,
+    compute_weighted_signal
 )
 
 def detect_and_save_all_sports():
