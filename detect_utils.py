@@ -66,7 +66,7 @@ def detect_and_save_all_sports():
             # Save all output
             write_sharp_moves_to_master(df_moves)
             write_line_history_to_bigquery(df_audit)
-            write_snapshot_to_gcs_parquet(df_snap)
+            write_snapshot_to_gcs_parquet(current)  # where `current` is the JSON list from `fetch_live_odds()`
 
             # 🔍 Load models and apply scoring
             trained_models = {
