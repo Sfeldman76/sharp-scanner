@@ -1643,7 +1643,7 @@ def render_scanner_tab(label, sport_key, container):
         #else:
             #st.info(f"⏭ Backtest already run today for {label.upper()} — skipping.")
                            
-            df_moves = df_moves_raw.copy()
+        df_moves = df_moves_raw.copy()
         
         
         # === Upload line history
