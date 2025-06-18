@@ -643,7 +643,6 @@ def fetch_scored_picks_from_bigquery(limit=50000):
         st.error(f"❌ Failed to fetch scored picks: {e}")
         return pd.DataFrame()
         
-
 def render_scanner_tab(label, sport_key, container):
     market_component_win_rates = read_market_weights_from_bigquery()
     timestamp = pd.Timestamp.utcnow()
@@ -652,11 +651,13 @@ def render_scanner_tab(label, sport_key, container):
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
+        # === Fetch live odds for display table
         live = fetch_live_odds(sport_key)
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
 
+        # === Build current snapshot table (live odds view)
         df_snap = pd.DataFrame([
             {
                 'Game_ID': game.get('id'),
@@ -675,10 +676,9 @@ def render_scanner_tab(label, sport_key, container):
             for outcome in market.get('outcomes', [])
         ])
         df_snap = build_game_key(df_snap)
-        
-        #write_snapshot_to_gcs_parquet(live)
+
+        # === Previous snapshot for live odds comparison
         prev = read_latest_snapshot_from_bigquery(hours=2) or {}
-        # === Build df_prev_raw for audit
         df_prev_raw = pd.DataFrame([
             {
                 "Game": f"{game.get('home_team')} vs {game.get('away_team')}",
@@ -694,38 +694,36 @@ def render_scanner_tab(label, sport_key, container):
             for market in book.get("markets", [])
             for o in market.get("outcomes", [])
         ])
-        
         df_prev_display = pd.DataFrame()
         if not df_prev_raw.empty:
             df_prev_raw['Value_Limit'] = df_prev_raw.apply(
-                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value']) else "", axis=1
+                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})"
+                if pd.notnull(r['Limit']) and pd.notnull(r['Value']) else "", axis=1
             )
-            df_prev_raw['Date + Time (EST)'] = pd.to_datetime(df_prev_raw['Game_Start'], errors='coerce').dt.tz_localize('UTC').dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
+            df_prev_raw['Date + Time (EST)'] = pd.to_datetime(df_prev_raw['Game_Start'], errors='coerce')\
+                .dt.tz_localize('UTC').dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
             df_prev_display = df_prev_raw.pivot_table(
                 index=["Date + Time (EST)", "Game", "Market", "Outcome"],
                 columns="Bookmaker",
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
-        
-        # === Fetch/calculate sharp signals
+
+        # === Load sharp moves from BigQuery (from Cloud Scheduler)
         detection_key = f"sharp_moves_{sport_key_lower}"
         if detection_key in st.session_state:
-            df_moves_raw, df_audit, summary_df = st.session_state[detection_key]
-          
-            st.info(f"✅ Using cached sharp detection results for {label}")
+            df_moves_raw = st.session_state[detection_key]
+            st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            df_moves_raw, df_audit, summary_df = detect_sharp_moves(
-                live, prev, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights=market_component_win_rates
-            )
-            st.session_state[detection_key] = (df_moves_raw, df_audit, summary_df)
-            #st.success("🧠 Sharp detection run completed and cached.")
-       # === Exit early if no data
+            df_moves_raw = read_recent_sharp_moves(hours=2)
+            st.session_state[detection_key] = df_moves_raw
+            st.success(f"📥 Loaded sharp moves from BigQuery")
+
         if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
-            st.warning("⚠️ No sharp signals detected.")
+            st.warning("⚠️ No sharp moves detected.")
             return pd.DataFrame()
-        
-        # === Enrich raw frame
+
+        # === Enrich and score
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         now = pd.Timestamp.utcnow()
@@ -733,15 +731,8 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
-        # === Diagnose Game_Key build failure
-        required_fields = ['Game', 'Game_Start', 'Market', 'Outcome']
-        missing_cols = [col for col in required_fields if col not in df_moves_raw.columns]
-        
 
-
-        #write_sharp_moves_to_master(df_moves_raw)
-        # === Load model
-        # === Load per-market models
+        # === Load per-market models from GCS
         model_key = f'sharp_models_{label.lower()}'
         trained_models = st.session_state.get(model_key)
         
@@ -751,8 +742,6 @@ def render_scanner_tab(label, sport_key, container):
                 model_bundle = load_model_from_gcs(sport=label, market=market_type)
                 if model_bundle:
                     trained_models[market_type] = model_bundle
-
-                    
             st.session_state[model_key] = trained_models
 
         
