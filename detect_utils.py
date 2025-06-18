@@ -50,59 +50,72 @@ def detect_and_save_all_sports():
             )
             logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
 
-            # 🔍 Load models and apply scoring
-            trained_models = {
-                market: load_model_from_gcs(sport_label, market)
-                for market in ['spreads', 'totals', 'h2h']
-            }
-            trained_models = {k: v for k, v in trained_models.items() if v}
-
-            # ✅ Backtest sharp picks against final scores
-            fetch_scores_and_backtest(
-                sport_key=sport_key,
-                df_moves=df_moves,
-                days_back=3,
-                api_key=API_KEY,
-                trained_models=trained_models
-            )
-
-            # Rebuild df_snap manually for snapshot logging
-            df_snap = pd.DataFrame([
-                {
-                    'Game_ID': game.get('id'),
-                    'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
-                    'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
-                    'Bookmaker': book.get('key'),
-                    'Market': market.get('key'),
-                    'Outcome': outcome.get('name'),
-                    'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
-                    'Limit': outcome.get('bet_limit'),
-                    'Snapshot_Timestamp': timestamp
+            try:
+                # 🔍 Load models and apply scoring
+                trained_models = {
+                    market: load_model_from_gcs(sport_label, market)
+                    for market in ['spreads', 'totals', 'h2h']
                 }
-                for game in current
-                for book in game.get('bookmakers', [])
-                for market in book.get('markets', [])
-                for outcome in market.get('outcomes', [])
-            ])
-            df_snap = build_game_key(df_snap)
+                trained_models = {k: v for k, v in trained_models.items() if v}
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to load models for {sport_label}: {e}", exc_info=True)
+                trained_models = {}
 
-            # Save all output
-            write_sharp_moves_to_master(df_moves)
-            write_line_history_to_bigquery(df_audit)
-            write_snapshot_to_gcs_parquet(current)
+            try:
+                # ✅ Backtest sharp picks against final scores
+                fetch_scores_and_backtest(
+                    sport_key=sport_key,
+                    df_moves=df_moves,
+                    days_back=3,
+                    api_key=API_KEY,
+                    trained_models=trained_models
+                )
+            except Exception as e:
+                logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
-            # 🧠 Apply model scoring
-            if trained_models:
-                df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
-                if not df_scored.empty:
-                    #write_to_bigquery(df_scored)
-                    logging.info(f"✅ Scored {len(df_scored)} rows (not saved — backtest handles final write).")
+            try:
+                # Rebuild df_snap manually for snapshot logging
+                df_snap = pd.DataFrame([
+                    {
+                        'Game_ID': game.get('id'),
+                        'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
+                        'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
+                        'Bookmaker': book.get('key'),
+                        'Market': market.get('key'),
+                        'Outcome': outcome.get('name'),
+                        'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
+                        'Limit': outcome.get('bet_limit'),
+                        'Snapshot_Timestamp': timestamp
+                    }
+                    for game in current
+                    for book in game.get('bookmakers', [])
+                    for market in book.get('markets', [])
+                    for outcome in market.get('outcomes', [])
+                ])
+                df_snap = build_game_key(df_snap)
+
+                write_sharp_moves_to_master(df_moves)
+                write_line_history_to_bigquery(df_audit)
+                write_snapshot_to_gcs_parquet(current)
+
+            except Exception as e:
+                logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
+
+            # 🧠 Apply model scoring separately
+            try:
+                if trained_models:
+                    df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
+                    if not df_scored.empty:
+                        # write_to_bigquery(df_scored)
+                        logging.info(f"✅ Scored {len(df_scored)} rows (not saved — backtest handles final write).")
+                    else:
+                        logging.info("ℹ️ No scored rows — model returned empty.")
                 else:
-                    logging.info("ℹ️ No scored rows — model returned empty.")
-            else:
-                logging.info(f"ℹ️ No trained models found for {sport_label} — skipping scoring.")
+                    logging.info(f"ℹ️ No trained models found for {sport_label} — skipping scoring.")
+            except Exception as e:
+                logging.error(f"❌ Model scoring failed for {sport_label}: {e}", exc_info=True)
 
             logging.info(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
 
         except Exception as e:
-            logging.error(f"❌ Error during {sport_label} detection: {e}", exc_info=True)
+            logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
