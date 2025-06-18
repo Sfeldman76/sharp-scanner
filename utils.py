@@ -579,6 +579,51 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # ✅ Final return (no field names changed)
     return df, df_history, summary_df
 
+def compute_weighted_signal(row, market_weights):
+    market = str(row.get('Market', '')).lower()
+    total_score = 0
+    max_possible = 0
+
+    component_importance = {
+        'Sharp_Move_Signal': 2.0,
+        'Sharp_Limit_Jump': 2.0,
+        'Sharp_Time_Score': 1.5,
+        'Sharp_Prob_Shift': 1.0,
+        'Sharp_Limit_Total': 0.001
+    }
+
+    for comp, importance in component_importance.items():
+        val = row.get(comp)
+        if val is None:
+            continue
+
+        try:
+            val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val).lower()
+            weight = market_weights.get(market, {}).get(comp, {}).get(val_key, 0.5)
+        except:
+            weight = 0.5
+
+        total_score += weight * importance
+        max_possible += importance
+
+    return round((total_score / max_possible) * 100 if max_possible else 50, 2)
+
+def compute_confidence(row, market_weights):
+    base_score = min(row.get('SharpBetScore', 0) / 50, 1.0) * 50
+    weight_score = compute_weighted_signal(row, market_weights)
+
+    limit_position_bonus = 0
+    if row.get('LimitUp_NoMove_Flag') == 1:
+        limit_position_bonus = 15
+    elif row.get('Limit_Jump') == 1 and abs(row.get('Delta vs Sharp', 0)) > 0.25:
+        limit_position_bonus = 5
+
+    market_lead_bonus = 5 if row.get('Market_Leader') else 0
+
+    final_conf = base_score + weight_score + limit_position_bonus + market_lead_bonus
+    return round(min(final_conf, 100), 2)
+
+
 # === Outside of detect_sharp_moves ===
 def assign_confidence_scores(df, market_weights):
     df['True_Sharp_Confidence_Score'] = df.apply(
