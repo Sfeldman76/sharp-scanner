@@ -1490,7 +1490,7 @@ def render_scanner_tab(label, sport_key, container):
                                     on=merge_keys,
                                     how='left',
                                     suffixes=('', '_scored'),
-                                    validate='many_to_one'
+                                    
                                 )
                                 for col in score_cols:
                                     scored_col = f"{col}_scored" if f"{col}_scored" in df_moves_raw.columns else col
