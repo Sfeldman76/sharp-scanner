@@ -24,7 +24,7 @@ def detect_and_save_all_sports():
 
         try:
             timestamp = pd.Timestamp.utcnow()
-            live = fetch_live_odds(sport_key, API_KEY)
+            current = fetch_live_odds(sport_key, API_KEY
             logging.info(f"📥 Odds pulled: {len(live)} games")
 
             previous = read_latest_snapshot_from_bigquery()
