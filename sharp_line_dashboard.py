@@ -1538,7 +1538,6 @@ def render_scanner_tab(label, sport_key, container):
                 
         # === 1. Ensure timestamps are parsed and merge keys are clean
         df_moves_raw['Snapshot_Timestamp'] = pd.to_datetime(df_moves_raw['Snapshot_Timestamp'], utc=True)
-        
         for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
             df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip()
         
@@ -1571,10 +1570,57 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Tier_Change'] = df_moves_raw.apply(
             lambda row: compute_tier_change(row.get('First_Tier'), row.get('Sharp_Confidence_Tier')), axis=1
         )
+        
+        # === 5. Confidence Trend
+        def build_trend_explanation(row):
+            start = row.get('First_Sharp_Prob')
+            now = row.get('Model_Sharp_Win_Prob')
+            if start is None or now is None:
+                return "⚠️ Missing"
+            try:
+                start = float(start)
+                now = float(now)
+            except:
+                return "⚠️ Error"
+            delta = now - start
+            threshold = 0.04
+            if delta >= threshold:
+                trend = "📈 Trending Up"
+            elif delta <= -threshold:
+                trend = "📉 Trending Down"
+            else:
+                trend = "↔ Stable"
+            return f"{trend}: {start:.2%} → {now:.2%}"
+        
+        df_moves_raw['Confidence_Trend'] = df_moves_raw.apply(build_trend_explanation, axis=1)
+        
+        # === 6. Line/Model Direction
+        def determine_direction(row):
+            try:
+                start_prob = float(row.get('First_Sharp_Prob', 0))
+                model_prob = float(row.get('Model_Sharp_Win_Prob', 0))
+                prob_delta = model_prob - start_prob
+            except:
+                prob_delta = 0
+            try:
+                line_delta = float(row.get('Value', 0)) - float(row.get('First_Line_Value', 0))
+            except:
+                line_delta = 0
+            if prob_delta > 0.04 and line_delta < 0:
+                return "🟢 Model ↑ / Line ↓"
+            elif prob_delta < -0.04 and line_delta > 0:
+                return "🔴 Model ↓ / Line ↑"
+            elif prob_delta > 0.04 and line_delta > 0:
+                return "🟢 Aligned ↑"
+            elif prob_delta < -0.04 and line_delta < 0:
+                return "🔻 Aligned ↓"
+            return "⚪ Mixed"
+        
+        df_moves_raw['Line_Model_Direction'] = df_moves_raw.apply(determine_direction, axis=1)
+        
+        # === 7. Model Reason Explanation
         def build_model_reason(row):
             reasons = []
-    
-            # === 1. Model baseline confidence
             try:
                 prob = float(row.get('Model_Sharp_Win_Prob', 0))
                 if prob >= 0.58:
@@ -1590,13 +1636,11 @@ def render_scanner_tab(label, sport_key, container):
             except:
                 reasons.append("⚠️ No model confidence")
         
-            # === 2. Confidence shift
             if row.get('Sharp_Prob_Shift', 0) > 0:
                 reasons.append("Confidence ↑")
             elif row.get('Sharp_Prob_Shift', 0) < 0:
                 reasons.append("Confidence ↓")
         
-            # === 3. Market-based movement
             if row.get('Sharp_Limit_Jump', 0):
                 reasons.append("Limit Jump")
             if row.get('Market_Leader', 0):
@@ -1607,61 +1651,17 @@ def render_scanner_tab(label, sport_key, container):
                 reasons.append("Limit ↑ w/o Price Move")
         
             return " | ".join(reasons)
-
-        # === 5. Confidence Trend
-        def build_trend_explanation(row):
-            start = row.get('First_Sharp_Prob')
-            now = row.get('Model_Sharp_Win_Prob')
         
-            if start is None or now is None:
-                return "⚠️ Missing"
-            try:
-                start = float(start)
-                now = float(now)
-            except:
-                return "⚠️ Error"
-        
-            delta = now - start
-            threshold = 0.04  # 4% swing
-        
-            if delta >= threshold:
-                trend = "📈 Trending Up"
-            elif delta <= -threshold:
-                trend = "📉 Trending Down"
-            else:
-                trend = "↔ Stable"
-        
-            return f"{trend}: {start:.2%} → {now:.2%}"
-        
-        df_moves_raw['Confidence_Trend'] = df_moves_raw.apply(build_trend_explanation, axis=1)
-        
-        # === 6. Line/Model Direction
-        def determine_direction(row):
-            try:
-                start_prob = float(row.get('First_Sharp_Prob', 0))
-                model_prob = float(row.get('Model_Sharp_Win_Prob', 0))
-                prob_delta = model_prob - start_prob
-            except:
-                prob_delta = 0
-        
-            try:
-                line_delta = float(row.get('Value', 0)) - float(row.get('First_Line_Value', 0))
-            except:
-                line_delta = 0
-        
-            if prob_delta > 0.04 and line_delta < 0:
-                return "🟢 Model ↑ / Line ↓"
-            elif prob_delta < -0.04 and line_delta > 0:
-                return "🔴 Model ↓ / Line ↑"
-            elif prob_delta > 0.04 and line_delta > 0:
-                return "🟢 Aligned ↑"
-            elif prob_delta < -0.04 and line_delta < 0:
-                return "🔻 Aligned ↓"
-            return "⚪ Mixed"
-        
-        df_moves_raw['Line_Model_Direction'] = df_moves_raw.apply(determine_direction, axis=1)
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
-
+        
+        # === 8. Final Deduplicated View (keep latest)
+        df_moves = df_moves_raw.drop_duplicates(
+            subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last'
+        )[[
+            'Game', 'Market', 'Outcome', 'Sharp_Consensus', 'Rec_Move', 'Sharp_Move',
+            'Model_Sharp_Win_Prob', 'Sharp_Confidence_Tier', '📌 Model Reasoning',
+            'Confidence_Trend', 'Tier_Change', 'Line_Model_Direction'
+        ]]
 
         # === Run backtest (if not already done this session)
 
