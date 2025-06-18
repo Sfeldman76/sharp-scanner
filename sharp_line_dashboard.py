@@ -2253,12 +2253,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.warning(f"⚠️ No data for {sport_label}.")
             return
 
-        df_bt, _ = fetch_scores_and_backtest(
-            sport_key_api, df_master.copy(), api_key=API_KEY, trained_models=trained_models
-        )
-        if df_bt.empty or 'Model_Sharp_Win_Prob' not in df_bt.columns:
-            st.info("ℹ️ No scored predictions available for calibration analysis.")
-            return
+        df_bt = df_master.copy()
 
         df_bt = df_bt[df_bt['Scored'] == True].copy()
 
