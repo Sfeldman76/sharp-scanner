@@ -1173,7 +1173,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     return df
 
-def backfill_unscored_sharp_moves(sport_label: str, trained_models: dict, days_back: int = 3):
+def backfill_unscored_sharp_moves(sport_label: str, trained_models: dict, days_back: int = 8):
     """
     Scores and updates sharp_moves_master rows where model probability is missing.
     Only runs on unscored rows to avoid overwriting.
