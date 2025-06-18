@@ -13,6 +13,7 @@ import logging
 import pickle  # ✅ Add this at the top of your script
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+from google.cloud import bigquery, storage
 
 # === Config ===
 GCP_PROJECT_ID = "sharplogger"
@@ -967,5 +968,222 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
         logging.info(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         logging.exception(f"❌ Failed to upload to {table}")
-        
+  
+def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
+
+    expected_label = [k for k, v in SPORTS.items() if v == sport_key]
+    sport_label = expected_label[0].upper() if expected_label else "NBA"
+
+    # === 1. Fetch completed games ===
+    try:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
+        response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
+        response.raise_for_status()
+        games = response.json()
+    except Exception as e:
+        logging.error(f"❌ Failed to fetch scores: {e}")
+        return pd.DataFrame()
+
+    completed_games = [g for g in games if g.get("completed")]
+    logging.info(f"✅ Completed games: {len(completed_games)}")
+
+    # === 2. Extract valid score rows ===
+    score_rows = []
+    for game in completed_games:
+        home = normalize_team(game.get("home_team", ""))
+        away = normalize_team(game.get("away_team", ""))
+        game_start = pd.to_datetime(game.get("commence_time"), utc=True)
+        merge_key = build_merge_key(home, away, game_start)
+        scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
+        if home in scores and away in scores:
+            score_rows.append({
+                'Merge_Key_Short': merge_key,
+                'Home_Team': home,
+                'Away_Team': away,
+                'Game_Start': game_start,
+                'Score_Home_Score': scores[home],
+                'Score_Away_Score': scores[away],
+                'Source': 'oddsapi',
+                'Inserted_Timestamp': pd.Timestamp.utcnow()
+            })
+
+    df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
+    df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
+    df_scores['Score_Home_Score'] = pd.to_numeric(df_scores['Score_Home_Score'], errors='coerce')
+    df_scores['Score_Away_Score'] = pd.to_numeric(df_scores['Score_Away_Score'], errors='coerce')
+    df_scores = df_scores.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
+
+    # === 3. Upload scores to `game_scores_final` ===
+    try:
+        existing_keys = bq_client.query("""
+            SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`
+        """).to_dataframe()
+        existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
+        new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
+       
+ 
+
+        pass#to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+        pass#st.success(f"✅ Uploaded {len(new_scores)} new game scores")
+    except Exception as e:
+        pass#st.error(f"❌ Failed to upload game scores: {e}")
+        pass#st.code(new_scores.dtypes.to_string())
+
+    # === 4. Load recent sharp picks
+    df_master = read_recent_sharp_moves(hours=days_back * 72)
+    df_master = build_game_key(df_master)
+    df_master = ensure_columns(df_master, ['Game_Start'])
+    df_master = df_master[df_master['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
+
+    if df_master.empty:
+        logging.warning("⚠️ No sharp picks to backtest")
+        return pd.DataFrame()
+
+    # === 5. Merge scores and filter
+    df = df_master.merge(
+        df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
+        on='Merge_Key_Short', how='inner'
+    )
+    df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
+    df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
+
+    if 'Ref_Sharp_Value' not in df.columns:
+        df['Ref_Sharp_Value'] = df.get('Value')
+    else:
+        df['Ref_Sharp_Value'] = df['Ref_Sharp_Value'].combine_first(df.get('Value'))
+
+    # === 6. Calculate result
+    df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
+    if df_valid.empty:
+        st.warning("ℹ️ No valid sharp picks with scores to evaluate")
+        return pd.DataFrame()
+
+    # === 6. Calculate result
+    def calc_cover(row):
+        try:
+            h = float(row['Score_Home_Score'])
+            a = float(row['Score_Away_Score'])
+            val = float(row['Ref_Sharp_Value'])
+            market = str(row.get('Market', '')).lower()
+            outcome = str(row.get('Outcome', '')).lower()
+    
+            if market == 'totals':
+                if 'under' in outcome and h + a < val:
+                    return ['Win', 1]
+                elif 'over' in outcome and h + a > val:
+                    return ['Win', 1]
+                else:
+                    return ['Loss', 0]
+    
+            if market == 'spreads':
+                margin = h - a if row['Home_Team_Norm'] in outcome else a - h
+                hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
+                return ['Win', 1] if hit else ['Loss', 0]
+    
+            if market == 'h2h':
+                home_win = row['Home_Team_Norm'] in outcome and h > a
+                away_win = row['Away_Team_Norm'] in outcome and a > h
+                return ['Win', 1] if home_win or away_win else ['Loss', 0]
+    
+            return [None, 0]
+        except Exception:
+            return [None, 0]
+    
+    result = df_valid.apply(calc_cover, axis=1, result_type='expand')
+    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
+    df['SHARP_COVER_RESULT'] = None
+    df['SHARP_HIT_BOOL'] = None
+    df['Scored'] = False
+    df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
+    df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
+    # Ensure 'Unique_Sharp_Books' is present and numeric
+    if 'Unique_Sharp_Books' not in df.columns:
+        df['Unique_Sharp_Books'] = 0
+    df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
+
+    # === 7. Apply model scoring if available
+    if trained_models:
+        try:
+            df = apply_blended_sharp_score(df, trained_models)
+
+
+        except Exception as e:
+            st.warning(f"⚠️ Model scoring failed: {e}")
+    
+   # === 8. Final output DataFrame ===
+    score_cols = [
+        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Unique_Sharp_Books',
+        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
+    ]
+
+    
+    # Build full output
+    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
+    df_scores_out['Sport'] = sport_label.upper()
+    df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
+    # === Coerce and clean all fields BEFORE dedup and upload
+    df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
+    df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
+    df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').astype('Int64')
+    df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
+    df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce')
+    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
+    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
+    df_scores_out['LimitUp_NoMove_Flag'] = df_scores_out['LimitUp_NoMove_Flag'].fillna(False).astype(bool)
+    df_scores_out['SharpBetScore'] = pd.to_numeric(df_scores_out['SharpBetScore'], errors='coerce')
+    df_scores_out['Enhanced_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['Enhanced_Sharp_Confidence_Score'], errors='coerce')
+    df_scores_out['True_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['True_Sharp_Confidence_Score'], errors='coerce')
+    df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
+    df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
+    df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
+    df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
+    df_scores_out['Unique_Sharp_Books'] = pd.to_numeric(df_scores_out['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
+
+  
+ 
+        # Debug: ensure schema matches
+    try:
+        import pyarrow as pa
+        pa.Table.from_pandas(df_scores_out)
+    except Exception as e:
+        logging.error("❌ Parquet validation failed before upload")
+        logging.code(str(e))
+        logging.write(df_scores_out.dtypes)
+        logging.stop()
+    # ✅ Define full deduplication fingerprint (ignore timestamp)
+    dedup_fingerprint_cols = score_cols.copy()  # includes all except timestamp
+    
+    # ✅ Remove local exact duplicates before querying BigQuery
+    df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
+    
+    # ✅ Query BigQuery for existing fingerprints (same line state, any time)
+    existing = bq_client.query(f"""
+        SELECT DISTINCT {', '.join(dedup_fingerprint_cols)}
+        FROM `sharp_data.sharp_scores_full`
+        WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+    """).to_dataframe()
+    
+    # ✅ Remove already-existing line states (not new even if timestamp is different)
+    df_scores_out = df_scores_out.merge(
+        existing,
+        on=dedup_fingerprint_cols,
+        how='left',
+        indicator=True
+    )
+    df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
+    
+    # ✅ Final upload
+    if df_scores_out.empty:
+        logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
+        return df, pd.DataFrame()
+    
+ 
+    
+    return df
+          
 
