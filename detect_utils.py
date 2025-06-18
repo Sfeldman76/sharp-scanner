@@ -21,7 +21,8 @@ from utils import (
     assign_confidence_scores,
     summarize_consensus,
     compute_weighted_signal,
-    compute_confidence
+    compute_confidence,
+    backfill_unscored_sharp_moves
 )
 
 def detect_and_save_all_sports():
@@ -73,6 +74,10 @@ def detect_and_save_all_sports():
                     trained_models=trained_models
                 )
 
+                
+                backfill_unscored_sharp_moves(sport_label, trained_models, days_back=backtest_days)
+
+            
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
