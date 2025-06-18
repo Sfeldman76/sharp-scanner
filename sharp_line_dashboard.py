@@ -822,7 +822,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Rec_Book_Consensus'] = df_moves_raw['Rec_Book_Consensus'].round(2)
         df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Move_From_Open_Sharp'].round(2)
         df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Move_From_Open_Rec'].round(2)
-                if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
+        if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
         
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
