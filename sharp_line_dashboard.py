@@ -913,7 +913,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     
     df = pd.DataFrame(rows)
-    df_history = df.copy()  # needed for downstream sort on 'Time'
+    = df.copy()  # needed for downstream sort on 'Time'
 
     # === Intelligence scoring
     def compute_weighted_signal(row, market_weights):
@@ -976,11 +976,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     sharp_count = df[df['SHARP_SIDE_TO_BET'] == 1].shape[0]
    
     # === Sort by timestamp and extract open lines
-    df_history_sorted = df_history.sort_values('Time')
+   _sorted =.sort_values('Time')
     
     # Global open per market/outcome (first ever seen)
     line_open_df = (
-        df_history_sorted.dropna(subset=['Value'])
+       _sorted.dropna(subset=['Value'])
         .groupby(['Game', 'Market', 'Outcome'])['Value']
         .first()
         .reset_index()
@@ -989,7 +989,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     # Per-book open value (first seen per book)
     line_open_per_book = (
-        df_history_sorted.dropna(subset=['Value'])
+       _sorted.dropna(subset=['Value'])
         .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
         .first()
         .reset_index()
@@ -997,7 +997,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     )
     # === Extract opening limit for each (Game, Market, Outcome, Book)
     open_limit_df = (
-        df_history_sorted
+       _sorted
         .dropna(subset=['Limit'])
         .groupby(['Game', 'Market', 'Outcome', 'Book'])['Limit']
         .first()
@@ -1007,7 +1007,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     # === Early exit if empty
     if df.empty:
-        return df, df_history
+        return df,
     
     # === Merge opening lines into live odds
     df = df.merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
@@ -1122,7 +1122,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     conf_df = df[df['Enhanced_Sharp_Confidence_Score'].notna()]
    
-    return df, df_history, summary_df
+    return df,, summary_df
 
 
 from sklearn.isotonic import IsotonicRegression
@@ -1536,19 +1536,18 @@ def render_scanner_tab(label, sport_key, container):
         # Prepare final deduplicated scoring view
         df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first')[['Game', 'Market', 'Outcome'] + model_cols]
                 
-        # === 1. Ensure timestamps are parsed and merge keys are clean
-        df_moves_raw['Snapshot_Timestamp'] = pd.to_datetime(df_moves_raw['Snapshot_Timestamp'], utc=True)
-        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-            df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip()
+        df_history = read_recent_sharp_moves(hours=72)
+        df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
+        df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
         
-        # === 2. First snapshot values per line (baseline reference)
-        df_first = df_moves_raw.sort_values('Snapshot_Timestamp') \
+        df_first = df_history.sort_values('Snapshot_Timestamp') \
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
             .rename(columns={
                 'Value': 'First_Line_Value',
                 'Sharp_Confidence_Tier': 'First_Tier',
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
+
         
         # === 3. Merge into full dataset
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
@@ -1653,7 +1652,8 @@ def render_scanner_tab(label, sport_key, container):
             return " | ".join(reasons)
         
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
-        
+        logging.info(f"✅ Merged historical trend baseline for {len(df_first)} unique lines.")
+
      
 
         # === Run backtest (if not already done this session)
