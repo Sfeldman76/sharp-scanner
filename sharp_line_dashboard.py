@@ -1626,29 +1626,39 @@ def render_scanner_tab(label, sport_key, container):
         
             return f"{trend}: {start:.2f} → {now:.2f}" + (f" due to {', '.join(reason)}" if reason else "")
         def determine_direction(row):
-            prob_delta = row.get('Model_Sharp_Win_Prob', 0) - row.get('First_Sharp_Prob', 0) / 100
-            line_delta = row.get('Value', 0) - row.get('First_Line_Value', 0)
+            try:
+                start = float(row.get('First_Sharp_Prob', 0))
+                now = float(row.get('Model_Sharp_Win_Prob', 0)) * 100
+                prob_delta = now - start
+            except:
+                prob_delta = 0
         
-            if prob_delta > 0 and line_delta < 0:
+            try:
+                line_delta = row.get('Value', 0) - row.get('First_Line_Value', 0)
+            except:
+                line_delta = 0
+        
+            if prob_delta > 4 and line_delta < 0:
                 return "🟢 Model ↑ / Line ↓"
-            elif prob_delta < 0 and line_delta > 0:
+            elif prob_delta < -4 and line_delta > 0:
                 return "🔴 Model ↓ / Line ↑"
-            elif prob_delta > 0 and line_delta > 0:
+            elif prob_delta > 4 and line_delta > 0:
                 return "🟢 Aligned ↑"
-            elif prob_delta < 0 and line_delta < 0:
+            elif prob_delta < -4 and line_delta < 0:
                 return "🔻 Aligned ↓"
             return "⚪ Mixed"
-        
+    
         df_moves_raw['Direction'] = df_moves_raw.apply(determine_direction, axis=1)
+
 
         TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
         def compute_tier_change(first, current):
             if not first or not current:
                 return "⚠️ Missing"
-        
-            first_val = TIER_ORDER.get(first, 0)
-            current_val = TIER_ORDER.get(current, 0)
+            
+            first_val = TIER_ORDER.get(first.strip(), 0)
+            current_val = TIER_ORDER.get(current.strip(), 0)
         
             if current_val > first_val:
                 return f"↑ {first} → {current}"
@@ -1657,8 +1667,9 @@ def render_scanner_tab(label, sport_key, container):
             return "↔ No Change"
         
         df_moves_raw['Tier_Change'] = df_moves_raw.apply(
-            lambda row: compute_tier_change(row['First_Tier'], row['Sharp_Confidence_Tier']), axis=1
+            lambda row: compute_tier_change(row.get('First_Tier'), row.get('Sharp_Confidence_Tier')), axis=1
         )
+
   
         df_moves_raw['📊 Confidence Evolution'] = df_moves_raw.apply(build_trend_explanation, axis=1)
 
