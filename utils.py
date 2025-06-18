@@ -1172,7 +1172,43 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     return df
 
-    
+    def backfill_unscored_sharp_moves(sport_label: str, trained_models: dict, days_back: int = 3):
+    """
+    Scores and updates sharp_moves_master rows where model probability is missing.
+    Only runs on unscored rows to avoid overwriting.
+    """
+    from google.cloud import bigquery
+    bq_client = bigquery.Client()
+
+    sport_label = sport_label.upper()
+
+    query = f"""
+        SELECT *
+        FROM `sharp_data.sharp_moves_master`
+        WHERE Sport = '{sport_label}'
+          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
+          AND Model_Sharp_Win_Prob IS NULL
+    """
+
+    try:
+        df_unscored = bq_client.query(query).to_dataframe()
+    except Exception as e:
+        logging.error(f"❌ Failed to query unscored sharp moves for {sport_label}: {e}")
+        return
+
+    if df_unscored.empty:
+        logging.info(f"⏭ No unscored sharp moves found for {sport_label}. Skipping backfill.")
+        return
+
+    logging.info(f"🔁 Scoring {len(df_unscored)} unscored sharp moves for {sport_label}...")
+
+    try:
+        df_scored = apply_blended_sharp_score(df_unscored, trained_models)
+        write_sharp_moves_to_master(df_scored)
+        logging.info(f"✅ Backfilled {len(df_scored)} sharp moves for {sport_label}.")
+    except Exception as e:
+        logging.exception(f"❌ Failed to backfill sharp move scoring for {sport_label}: {e}")
+
  
     
 
