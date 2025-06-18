@@ -1631,17 +1631,17 @@ def render_scanner_tab(label, sport_key, container):
         # === Run backtest (if not already done this session)
 
 
-        backtest_date_key = f"last_backtest_date_{sport_key_lower}"
+        #backtest_date_key = f"last_backtest_date_{sport_key_lower}"
         today = datetime.utcnow().date()
         
-        if st.session_state.get(backtest_date_key) != today:
-            fetch_scores_and_backtest(
-                sport_key, df_moves=None, api_key=API_KEY, trained_models=trained_models
-            )
-            st.session_state[backtest_date_key] = today
-            st.success("✅ Backtesting and scoring completed for today.")
-        else:
-            st.info(f"⏭ Backtest already run today for {label.upper()} — skipping.")
+        #if st.session_state.get(backtest_date_key) != today:
+            #fetch_scores_and_backtest(
+                #sport_key, df_moves=None, api_key=API_KEY, trained_models=trained_models
+            #)
+            #st.session_state[backtest_date_key] = today
+            #st.success("✅ Backtesting and scoring completed for today.")
+        #else:
+            #st.info(f"⏭ Backtest already run today for {label.upper()} — skipping.")
 
                   
                         
@@ -1650,11 +1650,10 @@ def render_scanner_tab(label, sport_key, container):
         
         
         # === Upload line history
-        if not df_audit.empty:
-            df_audit['Snapshot_Timestamp'] = timestamp
-            pass#write_line_history_to_bigquery(df_audit)
+        #if not df_audit.empty:
+            #df_audit['Snapshot_Timestamp'] = timestamp
+            #write_line_history_to_bigquery(df_audit)
            
-
         # === 6. Summary Table ===
         if summary_df.empty:
             st.info("ℹ️ No summary data available.")
@@ -1662,7 +1661,7 @@ def render_scanner_tab(label, sport_key, container):
         
         st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
         
-        # === Normalize keys BEFORE any merges
+        # === Normalize keys before merges
         for col in ['Game', 'Market', 'Outcome']:
             for df_ in [summary_df, df_moves, df_moves_raw]:
                 if col in df_.columns:
@@ -1683,18 +1682,17 @@ def render_scanner_tab(label, sport_key, container):
         df_merge_scores = df_moves[model_cols_to_merge].drop_duplicates()
         summary_df = summary_df.merge(df_merge_scores, on=['Game', 'Market', 'Outcome'], how='left')
         
-        # === Ensure diagnostic columns exist before merging
+        # === Merge diagnostic columns
         for col in ['📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = ""
-        
         extra_cols = ['Game', 'Market', 'Outcome', '📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']
         df_extras = df_moves_raw[extra_cols].drop_duplicates()
         summary_df = summary_df.merge(df_extras, on=['Game', 'Market', 'Outcome'], how='left')
         
-        # === Merge Game_Start for EST formatting
+        # === Merge Game_Start for EST display
         if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
-            df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start', 'Model_Confidence_Tier']].dropna().drop_duplicates()
+            df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
             df_game_start['MergeKey'] = (
                 df_game_start['Game'] + "_" + df_game_start['Market'] + "_" + df_game_start['Event_Date']
             )
@@ -1707,7 +1705,7 @@ def render_scanner_tab(label, sport_key, container):
                 how='left'
             )
         
-        # === Format Game_Start into readable EST format
+        # === Format Game_Start → EST string
         def safe_to_est(dt):
             if pd.isna(dt): return ""
             try:
@@ -1721,6 +1719,9 @@ def render_scanner_tab(label, sport_key, container):
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
         summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
+        
+        # === Extract date-only column for filtering
+        summary_df['Event_Date_Only'] = pd.to_datetime(summary_df['Game_Start'], utc=True, errors='coerce').dt.date.astype(str)
         
         # === Rename columns for display
         summary_df.rename(columns={
@@ -1741,19 +1742,26 @@ def render_scanner_tab(label, sport_key, container):
         # === Drop duplicate rows
         summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
         
-        # === Filter by market
+        # === Filter by Market and Date
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
-        market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
-        filtered_df = summary_df if market == "All" else summary_df[summary_df['Market'] == market]
+        selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         
-        # === Columns to show in final table
+        date_only_options = ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique())
+        selected_date = st.selectbox(f"📅 Filter {label} by Date", date_only_options, key=f"{label}_date_filter")
+        
+        filtered_df = summary_df.copy()
+        if selected_market != "All":
+            filtered_df = filtered_df[filtered_df['Market'] == selected_market]
+        if selected_date != "All":
+            filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
+        
+        # === Columns to show
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
             'Model_Sharp_Win_Prob', 'Confidence\nTier',
             'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
-        
         table_df = filtered_df[view_cols].copy()
         table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]
         # === CSS Styling for All Tables (keep this once)
