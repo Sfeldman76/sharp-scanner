@@ -792,9 +792,37 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Final Cleanup + Placeholders
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
-        df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore', inplace=True)
+        # === Consensus line calculation ===
+        sharp_books = ['pinnacle', 'bookmaker', 'betonline']  # customize as needed
+        rec_books = ['fanduel', 'draftkings', 'pointsbet', 'betmgm']
         
-        if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
+        # Normalize bookmaker column
+        df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].str.lower()
+        
+        # Sharp consensus
+        df_sharp = df_moves_raw[df_moves_raw['Bookmaker'].isin(sharp_books)]
+        sharp_consensus = df_sharp.groupby(['Game_Key', 'Market', 'Outcome'])['Value'].mean().reset_index()
+        sharp_consensus.rename(columns={'Value': 'Sharp_Book_Consensus'}, inplace=True)
+        
+        # Rec consensus
+        df_rec = df_moves_raw[df_moves_raw['Bookmaker'].isin(rec_books)]
+        rec_consensus = df_rec.groupby(['Game_Key', 'Market', 'Outcome'])['Value'].mean().reset_index()
+        rec_consensus.rename(columns={'Value': 'Rec_Book_Consensus'}, inplace=True)
+        
+        # Merge into df_moves_raw
+        df_moves_raw = df_moves_raw.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        
+        # === Calculate movement vs open line (optional) ===
+        if 'First_Line_Value' in df_moves_raw.columns:
+            df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Sharp_Book_Consensus'] - df_moves_raw['First_Line_Value']
+            df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Rec_Book_Consensus'] - df_moves_raw['First_Line_Value']
+        df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore', inplace=True)
+        df_moves_raw['Sharp_Book_Consensus'] = df_moves_raw['Sharp_Book_Consensus'].round(2)
+        df_moves_raw['Rec_Book_Consensus'] = df_moves_raw['Rec_Book_Consensus'].round(2)
+        df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Move_From_Open_Sharp'].round(2)
+        df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Move_From_Open_Rec'].round(2)
+                if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
         
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
@@ -948,37 +976,47 @@ def render_scanner_tab(label, sport_key, container):
         df_moves = df_moves_raw.copy()
         
         
-        # === Upload line history
-        #if not df_audit.empty:
-            #df_audit['Snapshot_Timestamp'] = timestamp
-            #write_line_history_to_bigquery(df_audit)
-           
        
-        st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
-        
-        # === Normalize keys before merges
-        for col in ['Game', 'Market', 'Outcome']:
-            for df_ in [summary_df, df_moves, df_moves_raw]:
-                if col in df_.columns:
-                    df_[col] = df_[col].astype(str).str.strip().str.lower()
-        
-        if 'Event_Date' in summary_df.columns and 'Event_Date' in df_moves_raw.columns:
-            summary_df['Event_Date'] = summary_df['Event_Date'].astype(str)
-            df_moves_raw['Event_Date'] = df_moves_raw['Event_Date'].astype(str)
-        
-        # === Ensure required model columns exist
+           
+       st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
+
+        # === Merge model scores
         model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
         for col in model_cols:
             if col not in df_moves.columns:
                 df_moves[col] = None
         
-        # === Merge model scores
         model_cols_to_merge = ['Game', 'Market', 'Outcome'] + model_cols
         df_merge_scores = df_moves[model_cols_to_merge].drop_duplicates()
+        
+        # === Build initial summary_df from df_moves_raw
+        summary_df = df_moves_raw.copy()
+        summary_df['Event_Date'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True).dt.date.astype(str)
+        
+        # Ensure consensus-related columns exist
+        for col in [
+            'Recommended_Outcome', 'Rec_Book_Consensus', 'Sharp_Book_Consensus',
+            'Move_From_Open_Rec', 'Move_From_Open_Sharp'
+        ]:
+            if col not in summary_df.columns:
+                summary_df[col] = None
+        
+        # Merge model scores
         summary_df = summary_df.merge(df_merge_scores, on=['Game', 'Market', 'Outcome'], how='left')
+        
+        # Normalize string keys
+        for col in ['Game', 'Market', 'Outcome']:
+            for df_ in [summary_df, df_moves, df_moves_raw]:
+                if col in df_.columns:
+                    df_[col] = df_[col].astype(str).str.strip().str.lower()
+        
+        # Normalize event date for filtering
+        if 'Event_Date' in summary_df.columns and 'Event_Date' in df_moves_raw.columns:
+            summary_df['Event_Date'] = summary_df['Event_Date'].astype(str)
+            df_moves_raw['Event_Date'] = df_moves_raw['Event_Date'].astype(str)
+        
+        # Merge diagnostic columns
         df_moves_raw.rename(columns={'Confidence_Trend': '📊 Confidence Evolution'}, inplace=True)
-
-        # === Merge diagnostic columns
         for col in ['📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = ""
@@ -986,7 +1024,7 @@ def render_scanner_tab(label, sport_key, container):
         df_extras = df_moves_raw[extra_cols].drop_duplicates()
         summary_df = summary_df.merge(df_extras, on=['Game', 'Market', 'Outcome'], how='left')
         
-        # === Merge Game_Start for EST display
+        # Merge Game_Start for EST display
         if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
             df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
             df_game_start['MergeKey'] = (
@@ -1001,7 +1039,7 @@ def render_scanner_tab(label, sport_key, container):
                 how='left'
             )
         
-        # === Format Game_Start → EST string
+        # Format Game_Start → EST
         def safe_to_est(dt):
             if pd.isna(dt): return ""
             try:
@@ -1016,10 +1054,10 @@ def render_scanner_tab(label, sport_key, container):
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
         summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
         
-        # === Extract date-only column for filtering
+        # Extract date-only column
         summary_df['Event_Date_Only'] = pd.to_datetime(summary_df['Game_Start'], utc=True, errors='coerce').dt.date.astype(str)
         
-        # === Rename columns for display
+        # Rename for display
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
@@ -1035,10 +1073,10 @@ def render_scanner_tab(label, sport_key, container):
             'Direction': 'Line/Model Direction'
         }, inplace=True)
         
-        # === Drop duplicate rows
+        # Drop duplicate rows
         summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
         
-        # === Filter by Market and Date
+        # Filter by market and date
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         
@@ -1050,20 +1088,8 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
-        # === Final Deduplicated View (now safe — all fields guaranteed)
-        for col in ['Sharp_Consensus', 'Rec_Move', 'Sharp_Move']:
-            if col not in df_moves_raw.columns:
-                df_moves_raw[col] = None
         
-        df_moves = df_moves_raw.drop_duplicates(
-            subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last'
-        )[[
-            'Game', 'Market', 'Outcome', 'Sharp_Consensus', 'Rec_Move', 'Sharp_Move',
-            'Model_Sharp_Win_Prob', 'Sharp_Confidence_Tier', '📌 Model Reasoning',
-            '📊 Confidence Evolution', 'Tier_Change', 'Line_Model_Direction'
-        ]]
-
-        # === Columns to show
+        # Final table
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
