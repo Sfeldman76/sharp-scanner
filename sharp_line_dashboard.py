@@ -1654,14 +1654,7 @@ def render_scanner_tab(label, sport_key, container):
         
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
         
-        # === 8. Final Deduplicated View (keep latest)
-        df_moves = df_moves_raw.drop_duplicates(
-            subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last'
-        )[[
-            'Game', 'Market', 'Outcome', 'Sharp_Consensus', 'Rec_Move', 'Sharp_Move',
-            'Model_Sharp_Win_Prob', 'Sharp_Confidence_Tier', '📌 Model Reasoning',
-            'Confidence_Trend', 'Tier_Change', 'Line_Model_Direction'
-        ]]
+     
 
         # === Run backtest (if not already done this session)
 
@@ -1787,7 +1780,19 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
+        # === Final Deduplicated View (now safe — all fields guaranteed)
+        for col in ['Sharp_Consensus', 'Rec_Move', 'Sharp_Move']:
+            if col not in df_moves_raw.columns:
+                df_moves_raw[col] = None
         
+        df_moves = df_moves_raw.drop_duplicates(
+            subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last'
+        )[[
+            'Game', 'Market', 'Outcome', 'Sharp_Consensus', 'Rec_Move', 'Sharp_Move',
+            'Model_Sharp_Win_Prob', 'Sharp_Confidence_Tier', '📌 Model Reasoning',
+            '📊 Confidence Evolution', 'Tier_Change', 'Line_Model_Direction'
+        ]]
+
         # === Columns to show
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
