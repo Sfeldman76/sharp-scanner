@@ -33,7 +33,7 @@ def detect_and_save_all_sports():
             market_weights = read_market_weights_from_bigquery()
 
             df_moves, df_snap_unused, df_audit = detect_sharp_moves(
-                current=live,
+                current=current,
                 previous=previous,
                 sport_key=sport_key,
                 SHARP_BOOKS=SHARP_BOOKS,
