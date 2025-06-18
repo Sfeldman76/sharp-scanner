@@ -13,7 +13,7 @@ from utils import (
     detect_market_leaders,
     apply_blended_sharp_score,
     load_model_from_gcs,
-    write_to_bigquery,
+    #write_to_bigquery,
     build_game_key,
     fetch_scores_and_backtest
     
@@ -90,8 +90,8 @@ def detect_and_save_all_sports():
             if trained_models:
                 df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
                 if not df_scored.empty:
-                    write_to_bigquery(df_scored)
-                    logging.info(f"✅ Scored and saved {len(df_scored)} rows to sharp_scores_full.")
+                    #write_to_bigquery(df_scored)
+                    logging.info(f"✅ Scored {len(df_scored)} rows (not saved — backtest handles final write).")
                 else:
                     logging.info("ℹ️ No scored rows — model returned empty.")
             else:
