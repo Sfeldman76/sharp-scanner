@@ -263,8 +263,8 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Final_Confidence_Score', 'Model_Confidence'
     ]
     for col in model_cols:
-    if col not in df.columns:
-        df[col] = None  # Fill with nulls if missing
+        if col not in df.columns:
+            df[col] = None  # Fill with nulls if missing
         
     logging.info("🧪 Preview of model columns being written:")
     logging.info(df[model_cols].dropna(how='all').head(5).to_string())
