@@ -277,6 +277,7 @@ def read_market_weights_from_bigquery():
     except Exception as e:
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
+
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
     from collections import defaultdict
     import pandas as pd
@@ -285,29 +286,132 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     def normalize_label(label):
         return str(label).strip().lower().replace('.0', '')
 
+    def normalize_book_key(raw_key, sharp_books, rec_books):
+        for rec in rec_books:
+            if rec.replace(" ", "") in raw_key:
+                return rec.replace(" ", "")
+        for sharp in sharp_books:
+            if sharp in raw_key:
+                return sharp
+        return raw_key
+
+    def implied_prob(odds):
+        try:
+            odds = float(odds)
+            if odds > 0:
+                return 100 / (odds + 100)
+            else:
+                return abs(odds) / (abs(odds) + 100)
+        except:
+            return None
+
+    def compute_sharp_metrics(entries, open_val, mtype, label):
+
+        move_signal = limit_jump = prob_shift = time_score = 0
+        move_magnitude_score = 0.0
+        for limit, curr, _ in entries:
+            if open_val is not None and curr is not None:
+                try:
+                    sharp_move_delta = abs(curr - open_val)
+                    if sharp_move_delta >= 0.01:
+                        move_signal += 1
+                        move_magnitude_score += sharp_move_delta
+                    if mtype == 'totals':
+                        if 'under' in label and curr < open_val: move_signal += 1
+                        elif 'over' in label and curr > open_val: move_signal += 1
+                    elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
+                    elif mtype == 'h2h':
+                        imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
+                        if imp_now and imp_open and imp_now > imp_open:
+                            prob_shift += 1
+                except:
+                    continue
+
+            if limit is not None and limit >= 100:
+                limit_jump += 1
+
+            try:
+                hour = datetime.now().hour
+                time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
+            except:
+                time_score += 0.5
+
+        move_magnitude_score = min(move_magnitude_score, 5.0)
+        total_limit = sum([l or 0 for l, _, _ in entries])
+
+        return {
+            'Sharp_Move_Signal': move_signal,
+            'Sharp_Limit_Jump': limit_jump,
+            'Sharp_Prob_Shift': prob_shift,
+            'Sharp_Time_Score': time_score,
+            'Sharp_Limit_Total': total_limit,
+            'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2),
+            'SharpBetScore': round(
+                2 * move_signal +
+                2 * limit_jump +
+                1.5 * time_score +
+                1.0 * prob_shift +
+                0.001 * total_limit +
+                3.0 * move_magnitude_score, 2
+            )
+        }
+
+    def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
+        sharp_side_flags = {}
+        sharp_metrics_map = {}
+
+        for (game_name, mtype), label_map in sharp_limit_map.items():
+            scores = {}
+            label_signals = {}
+            for label, entries in label_map.items():
+                open_val, _ = line_open_map.get((game_name, mtype, label), (None, None))
+                metrics = compute_sharp_metrics(entries, open_val, mtype, label)
+
+                scores[label] = metrics['SharpBetScore']
+                label_signals[label] = metrics
+
+            if scores:
+                best_label = max(scores, key=scores.get)
+                sharp_side_flags[(game_name, mtype, best_label)] = 1
+                sharp_metrics_map[(game_name, mtype, best_label)] = label_signals.get(best_label, {})
+
+        for row in rows:
+            game_name = row.get('Game', '')
+            mtype = row.get('Market', '')
+            label = row.get('Outcome', '')
+            metrics = sharp_metrics_map.get((game_name, mtype, label), {})
+            is_sharp_side = int(sharp_side_flags.get((game_name, mtype, label), 0))
+
+            row.update({
+                'Ref Sharp Value': row.get('Value'),
+                'Ref Sharp Old Value': row.get('Old Value'),
+                'Delta vs Sharp': 0.0,
+                'SHARP_SIDE_TO_BET': is_sharp_side,
+                'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
+                'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
+                'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
+                'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0),
+                'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0),
+                'SharpBetScore': metrics.get('SharpBetScore', 0.0)
+            })
+
+        return rows
+
+    # === Begin main parsing
     if not current:
         print("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
-    
+
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
     sharp_lines = {}
     line_history_log = {}
     line_open_map = {}
-    sharp_side_flags = {}
-    sharp_metrics_map = {}
 
-    sport_scope_key = {
-        'MLB': 'baseball_mlb',
-        'NBA': 'basketball_nba'
-    }.get(sport_key.upper(), sport_key.lower())
-    confidence_weights = weights.get(sport_scope_key, {})
-
-    # === Safely flatten previous odds
     previous_odds_map = {}
     for g in previous_map.values():
         for book in g.get('bookmakers', []):
@@ -319,7 +423,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
                     previous_odds_map[(g.get('home_team'), g.get('away_team'), mtype, label, book_key)] = price
 
-    # === Parse current odds
     for game in current:
         home_team = game.get('home_team', '').strip().lower()
         away_team = game.get('away_team', '').strip().lower()
@@ -328,27 +431,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
         game_name = f"{home_team.title()} vs {away_team.title()}"
         event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
-        event_date = event_time.strftime("%Y-%m-%d") if pd.notnull(event_time) else ""
         game_hour = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
         gid = game.get('id')
         prev_game = previous_map.get(gid, {})
-        
+
         for book in game.get('bookmakers', []):
             book_key_raw = book.get('key', '').lower()
-            book_key = book_key_raw  # default
-        
-            # 🔄 Normalize to known sharp/rec books
-            for rec in REC_BOOKS:
-                if rec.replace(" ", "") in book_key_raw:
-                    book_key = rec.replace(" ", "")
-                    break
-            for sharp in SHARP_BOOKS:
-                if sharp in book_key_raw:
-                    book_key = sharp
-                    break
-        
+            book_key = normalize_book_key(book_key_raw, SHARP_BOOKS, REC_BOOKS)
             book_title = book.get('title', book_key)
-        
+
             for market in book.get('markets', []):
                 mtype = market.get('key', '').strip().lower()
                 if mtype not in ['spreads', 'totals', 'h2h']:
@@ -362,14 +453,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     old_val = previous_odds_map.get(prev_key)
 
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
-
                     entry = {
                         'Sport': sport_key.upper(),
                         'Game_Key': game_key,
                         'Time': snapshot_time,
                         'Game': game_name,
                         'Game_Start': event_time,
-                        'Event_Date': event_date,
                         'Market': mtype,
                         'Outcome': label,
                         'Bookmaker': book_title,
@@ -383,23 +472,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Commence_Hour': game_hour
                     }
 
-                    # Fallback to previous game override if available
-                    if prev_game:
-                        for prev_b in prev_game.get('bookmakers', []):
-                            if prev_b.get('key', '').lower() == book_key_raw:
-                                for prev_m in prev_b.get('markets', []):
-                                    if prev_m.get('key') == mtype:
-                                        for prev_o in prev_m.get('outcomes', []):
-                                            if normalize_label(prev_o.get('name')) == label:
-                                                prev_val = prev_o.get('point') if mtype != 'h2h' else prev_o.get('price')
-                                                if prev_val is not None:
-                                                    entry['Old Value'] = prev_val
-                                                    entry['Delta'] = round(val - prev_val, 2) if val is not None else None
-
                     rows.append(entry)
-                    if len(rows) % 100 == 0:
-                        print(f"📥 Processed {len(rows)} odds entries so far...")
-
                     line_history_log.setdefault(gid, []).append(entry.copy())
 
                     if val is not None:
@@ -410,178 +483,25 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         if (game_name, mtype, label) not in line_open_map:
                             line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
 
-    df_moves = pd.DataFrame(rows)
-    df_audit = pd.DataFrame([item for sublist in line_history_log.values() for item in sublist])
+    # 🔁 REFACTORED SHARP SCORING
+    rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
+
+
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
 
 
-
     
-    # === Sharp scoring logic
-    # === Sharp scoring logic (safe version)
-    for (game_name, mtype), label_map in sharp_limit_map.items():
-        scores = {}
-        label_signals = {}
-        for label, entries in label_map.items():
-            move_signal = limit_jump = prob_shift = time_score = 0
-            move_magnitude_score = 0.0
-    
-            for limit, curr, _ in entries:
-                open_val, _ = line_open_map.get((game_name, mtype, label), (None, None))
-                if open_val is not None and curr is not None:
-                    try:
-                        sharp_move_delta = abs(curr - open_val)
-                        if sharp_move_delta >= 0.01:
-                            move_signal += 1
-                            move_magnitude_score += sharp_move_delta
-    
-                        if mtype == 'totals':
-                            if 'under' in label and curr < open_val: move_signal += 1
-                            elif 'over' in label and curr > open_val: move_signal += 1
-                        elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
-                        elif mtype == 'h2h':
-                            imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
-                            if imp_now and imp_open and imp_now > imp_open:
-                                prob_shift += 1
-                    except:
-                        continue
-    
-                if limit is not None and limit >= 100:
-                    limit_jump += 1
-    
-                try:
-                    hour = datetime.now().hour
-                    time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
-                except:
-                    time_score += 0.5  # fallback
-    
-            move_magnitude_score = min(move_magnitude_score, 5.0)
-            total_limit = sharp_total_limit_map.get((game_name, mtype, label), 0)
-    
-            scores[label] = (
-                2 * move_signal +
-                2 * limit_jump +
-                1.5 * time_score +
-                1.0 * prob_shift +
-                0.001 * total_limit +
-                3.0 * move_magnitude_score
-            )
-    
-            label_signals[label] = {
-                'Sharp_Move_Signal': move_signal,
-                'Sharp_Limit_Jump': limit_jump,
-                'Sharp_Time_Score': time_score,
-                'Sharp_Prob_Shift': prob_shift,
-                'Sharp_Limit_Total': total_limit,
-                'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2)
-            }
-    
-        if scores:
-            best_label = max(scores, key=scores.get)
-            sharp_side_flags[(game_name, mtype, best_label)] = 1
-            sharp_metrics_map[(game_name, mtype, best_label)] = label_signals.get(best_label, {})
-
-    # === Assign sharp-side logic + metric scores to all rows
-    # === Assign sharp-side logic + metric scores
-    for row in rows:
-        game_name = row.get('Game', '')
-        mtype = row.get('Market', '')
-        label = row.get('Outcome', '')
-        metrics = sharp_metrics_map.get((game_name, mtype, label), {})
-        is_sharp_side = int(sharp_side_flags.get((game_name, mtype, label), 0))
-    
-        row.update({
-            'Ref Sharp Value': row.get('Value'),
-            'Ref Sharp Old Value': row.get('Old Value'),
-            'Delta vs Sharp': 0.0,
-            'SHARP_SIDE_TO_BET': is_sharp_side,
-            'Sharp_Move_Signal': metrics.get('Sharp_Move_Signal', 0),
-            'Sharp_Limit_Jump': metrics.get('Sharp_Limit_Jump', 0),
-            'Sharp_Time_Score': metrics.get('Sharp_Time_Score', 0),
-            'Sharp_Prob_Shift': metrics.get('Sharp_Prob_Shift', 0),
-            'Sharp_Limit_Total': metrics.get('Sharp_Limit_Total', 0)
-        })
-    
-        try:
-            row['SharpBetScore'] = round(
-                2.0 * row['Sharp_Move_Signal'] +
-                2.0 * row['Sharp_Limit_Jump'] +
-                1.5 * row['Sharp_Time_Score'] +
-                1.0 * row['Sharp_Prob_Shift'] +
-                0.001 * row['Sharp_Limit_Total'], 2
-            )
-        except:
-            row['SharpBetScore'] = 0.0
-
-    
+       # === Build main DataFrame
     df = pd.DataFrame(rows)
-    df_history = df.copy()  # needed for downstream sort on 'Time'
-
-    # === Intelligence scoring
-    def compute_weighted_signal(row, market_weights):
-        market = str(row.get('Market', '')).lower()
-        total_score = 0
-        max_possible = 0
+    df['Book'] = df['Book'].str.lower()
+    df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
     
-        component_importance = {
-            'Sharp_Move_Signal': 2.0,
-            'Sharp_Limit_Jump': 2.0,
-            'Sharp_Time_Score': 1.5,
-            'Sharp_Prob_Shift': 1.0,
-            'Sharp_Limit_Total': 0.001
-        }
-    
-        for comp, importance in component_importance.items():
-            val = row.get(comp)
-            if val is None:
-                continue
-    
-            try:
-                val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val).lower()
-                weight = market_weights.get(market, {}).get(comp, {}).get(val_key, 0.5)
-            except:
-                weight = 0.5
-    
-            total_score += weight * importance
-            max_possible += importance
-    
-        return round((total_score / max_possible) * 100 if max_possible else 50, 2)
-    
-    
-    def compute_confidence(row, market_weights):
-        try:
-            # Base scaled sharp signal
-            base_score = min(row.get('SharpBetScore', 0) / 50, 1.0) * 50
-    
-            # Empirical weight signal
-            weight_score = compute_weighted_signal(row, market_weights)
-    
-            # Limit positioning bonus
-            limit_position_bonus = 0
-            if row.get('LimitUp_NoMove_Flag') == 1:
-                limit_position_bonus = 15
-            elif row.get('Limit_Jump') == 1 and abs(row.get('Delta vs Sharp', 0)) > 0.25:
-                limit_position_bonus = 5
-    
-            # Market leadership bonus
-            market_lead_bonus = 5 if row.get('Market_Leader') else 0
-    
-            # Final blended score
-            final_conf = base_score + weight_score + limit_position_bonus + market_lead_bonus
-            return round(min(final_conf, 100), 2)
-    
-        except Exception as e:
-            print(f"⚠️ Confidence scoring error: {e}")
-            return 50.0  # fallback neutral score
-    
- 
-    sharp_count = df[df['SHARP_SIDE_TO_BET'] == 1].shape[0]
-   
-    # === Sort by timestamp and extract open lines
+    # === Historical sorting for open-line extraction
+    df_history = df.copy()
     df_history_sorted = df_history.sort_values('Time')
     
-    # Global open per market/outcome (first ever seen)
+    # === Extract open lines globally and per book
     line_open_df = (
         df_history_sorted.dropna(subset=['Value'])
         .groupby(['Game', 'Market', 'Outcome'])['Value']
@@ -590,7 +510,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .rename(columns={'Value': 'Open_Value'})
     )
     
-    # Per-book open value (first seen per book)
     line_open_per_book = (
         df_history_sorted.dropna(subset=['Value'])
         .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
@@ -598,7 +517,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .reset_index()
         .rename(columns={'Value': 'Open_Book_Value'})
     )
-    # === Extract opening limit for each (Game, Market, Outcome, Book)
+    
     open_limit_df = (
         df_history_sorted
         .dropna(subset=['Limit'])
@@ -607,18 +526,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .reset_index()
         .rename(columns={'Limit': 'Opening_Limit'})
     )
-
-    # === Early exit if empty
-    if df.empty:
-        return df, df_history
     
-    # === Merge opening lines into live odds
+    # === Merge open lines into df
     df = df.merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
     df = df.merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
     df = df.merge(open_limit_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
     df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+    
+    # === Additional sharp flags
     df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
     df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
         lambda h: 1.0 if 6 <= h <= 11 else 0.5 if h <= 15 else 0.2
@@ -626,10 +543,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Limit_NonZero'] = df['Limit'].where(df['Limit'] > 0)
     df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('max')
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('min')
-    
+
   
-    df['Book'] = df['Book'].str.lower()
+
     
+   # === Detect market leaders
     market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
     df = df.merge(
         market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
@@ -637,6 +555,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         how='left'
     )
     
+    # === Flag Pinnacle no-move behavior
     df['Is_Pinnacle'] = df['Book'] == 'pinnacle'
     df['LimitUp_NoMove_Flag'] = (
         (df['Is_Pinnacle']) &
@@ -644,89 +563,21 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         (df['Value'] == df['Open_Value'])
     ).astype(int)
     
+    # === Cross-market support (optional)
     df = detect_cross_market_sharp_support(df)
     df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
     df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
     df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
-    # ✅ Compute dynamic, market-calibrated confidence
-    df['True_Sharp_Confidence_Score'] = df.apply(
-        lambda r: compute_weighted_signal(r, confidence_weights), axis=1
-    )
-    df['Enhanced_Sharp_Confidence_Score'] = df.apply(
-        lambda r: compute_confidence(r, confidence_weights), axis=1
-    )
     
-    # ✅ Tiering based on enhanced score
-    df['Sharp_Confidence_Tier'] = pd.cut(
-        df['Enhanced_Sharp_Confidence_Score'],
-        bins=[-1, 25, 50, 75, float('inf')],
-        labels=['⚠️ Low', '✅ Medium', '⭐ High', '🔥 Steam']
-    )
+    # === Confidence scores and tiers
+    df = assign_confidence_scores(df, weights)
     
-    # === Sharp vs Rec Book Consensus Summary
-    rec_df = df[df['Book'].isin(REC_BOOKS)].copy()
-    sharp_df = df[df['Book'].isin(SHARP_BOOKS)].copy()
+    # === Summary consensus metrics
+    summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
     
-    def summarize_group(g):
-        return pd.Series({
-            'Rec_Book_Consensus': g[g['Book'].isin(REC_BOOKS)]['Value'].mean(),
-            'Sharp_Book_Consensus': g[g['Book'].isin(SHARP_BOOKS)]['Value'].mean(),
-            'Rec_Open': g[g['Book'].isin(REC_BOOKS)]['Open_Value'].mean(),
-            'Sharp_Open': g[g['Book'].isin(SHARP_BOOKS)]['Open_Value'].mean()
-        })
-    
-    summary_df = (
-        df.groupby(['Event_Date', 'Game', 'Market', 'Outcome'])
-        .apply(summarize_group)
-        .reset_index()
-    )
-    
-    # Restore 'Recommended_Outcome'
-    summary_df['Recommended_Outcome'] = summary_df['Outcome']
-    
-    # Compute move deltas
-    summary_df['Move_From_Open_Rec'] = (
-        summary_df['Rec_Book_Consensus'] - summary_df['Rec_Open']
-    ).fillna(0)
-    
-    summary_df['Move_From_Open_Sharp'] = (
-        summary_df['Sharp_Book_Consensus'] - summary_df['Sharp_Open']
-    ).fillna(0)
-    
-    # Merge sharp scoring values
-    sharp_scores = df[df['SharpBetScore'].notnull()][[
-        'Event_Date', 'Game', 'Market', 'Outcome',
-        'SharpBetScore',
-        'Enhanced_Sharp_Confidence_Score',
-        'Sharp_Confidence_Tier'
-    ]].drop_duplicates()
-    
-    summary_df = summary_df.merge(
-        sharp_scores,
-        on=['Event_Date', 'Game', 'Market', 'Outcome'],
-        how='left'
-    )
-    
-    summary_df[['SharpBetScore', 'Enhanced_Sharp_Confidence_Score']] = summary_df[[
-        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score'
-    ]].fillna(0)
-    
-    summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
-
-
-    required_sharp_cols = [
-        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score',
-        'Sharp_Confidence_Tier', 'True_Sharp_Confidence_Score'
-    ]
-    for col in required_sharp_cols:
-        if col not in df.columns:
-            df[col] = None
-
-    conf_df = df[df['Enhanced_Sharp_Confidence_Score'].notna()]
-   
+    # ✅ Final return (no field names changed)
     return df, df_history, summary_df
-
 
 
 def write_line_history_to_bigquery(df):
@@ -774,6 +625,17 @@ def write_line_history_to_bigquery(df):
         logging.error(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
     else:
         logging.info(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
+
+
+# === Confidence scores and tiers
+df = assign_confidence_scores(df, weights)
+
+# === Summary consensus metrics
+summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
+
+# ✅ Final return (no field names changed)
+return df, df_history, summary_df
+
         
 def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
