@@ -914,7 +914,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     
     df = pd.DataFrame(rows)
-    = df.copy()  # needed for downstream sort on 'Time'
+    df = df.copy()  # needed for downstream sort on 'Time'
 
     # === Intelligence scoring
     def compute_weighted_signal(row, market_weights):
