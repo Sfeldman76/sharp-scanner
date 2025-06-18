@@ -72,16 +72,21 @@ def detect_and_save_all_sports():
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
-            # === Backfill unscored rows only if models exist
+            # === Apply model scoring BEFORE writing to master
             if trained_models:
                 try:
-                    backfill_unscored_sharp_moves(sport_label, trained_models, days_back=backtest_days)
+                    df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
+                    if not df_scored.empty:
+                        df_moves = df_scored.copy()  # Overwrite with scored data
+                        logging.info(f"✅ Scored {len(df_moves)} rows, now writing to master.")
+                    else:
+                        logging.info("ℹ️ No scored rows — model returned empty.")
                 except Exception as e:
-                    logging.error(f"❌ Backfill failed for {sport_label}: {e}", exc_info=True)
+                    logging.error(f"❌ Model scoring failed for {sport_label}: {e}", exc_info=True)
             else:
-                logging.info(f"⏭ Skipping backfill for {sport_label} — no models.")
-
-            # === Write outputs
+                logging.info(f"ℹ️ No trained models found for {sport_label} — skipping scoring.")
+            
+            # === Write all outputs
             try:
                 df_snap = pd.DataFrame([
                     {
@@ -101,28 +106,19 @@ def detect_and_save_all_sports():
                     for outcome in market.get('outcomes', [])
                 ])
                 df_snap = build_game_key(df_snap)
-
-                write_sharp_moves_to_master(df_moves)
+            
+                write_sharp_moves_to_master(df_moves)  # ✅ Writes the scored version
                 write_line_history_to_bigquery(df_audit)
                 write_snapshot_to_gcs_parquet(current)
-
+                       
+                # ✅ Now backfill older unscored rows after writing the new ones
+                if trained_models:
+                    try:
+                        backfill_unscored_sharp_moves(sport_label, trained_models, days_back=7)
+                    except Exception as e:
+                        logging.error(f"❌ Backfill failed for {sport_label}: {e}", exc_info=True)
+                else:
+                    logging.info(f"⏭ Skipping backfill for {sport_label} — no models loaded.")
+            
             except Exception as e:
                 logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
-
-            # === Final model scoring (for logging/debug only)
-            if trained_models:
-                try:
-                    df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
-                    if not df_scored.empty:
-                        logging.info(f"✅ Scored {len(df_scored)} rows (not saved — backtest handles final write).")
-                    else:
-                        logging.info("ℹ️ No scored rows — model returned empty.")
-                except Exception as e:
-                    logging.error(f"❌ Model scoring failed for {sport_label}: {e}", exc_info=True)
-            else:
-                logging.info(f"ℹ️ No trained models found for {sport_label} — skipping scoring.")
-
-            logging.info(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
-
-        except Exception as e:
-            logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
