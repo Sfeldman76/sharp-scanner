@@ -62,14 +62,17 @@ def detect_and_save_all_sports():
                 trained_models = {}
 
             try:
-                # ✅ Backtest sharp picks against final scores
+                # Adjust backtest window for slower sports
+                backtest_days = 8 if sport_label in ['CFL', 'WNBA'] else 5
+                
                 fetch_scores_and_backtest(
                     sport_key=sport_key,
                     df_moves=df_moves,
-                    days_back=3,
+                    days_back=backtest_days,
                     api_key=API_KEY,
                     trained_models=trained_models
                 )
+
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
