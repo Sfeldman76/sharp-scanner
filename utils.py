@@ -627,14 +627,6 @@ def write_line_history_to_bigquery(df):
         logging.info(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
 
 
-# === Confidence scores and tiers
-df = assign_confidence_scores(df, weights)
-
-# === Summary consensus metrics
-summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
-
-# ✅ Final return (no field names changed)
-return df, df_history, summary_df
 
         
 def detect_market_leaders(df_history, sharp_books, rec_books):
@@ -934,7 +926,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 6. Calculate result
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
     if df_valid.empty:
-        st.warning("ℹ️ No valid sharp picks with scores to evaluate")
+        logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
 
     # === 6. Calculate result
