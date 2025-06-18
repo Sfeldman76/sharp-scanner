@@ -1176,12 +1176,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 def backfill_unscored_sharp_moves(sport_label: str, trained_models: dict, days_back: int = 8):
     """
     Scores and updates sharp_moves_master rows where model probability is missing.
-    Only runs on unscored rows to avoid overwriting.
+    Only runs if trained_models is not empty.
     """
     from google.cloud import bigquery
     bq_client = bigquery.Client()
 
     sport_label = sport_label.upper()
+
+    if not trained_models:
+        logging.info(f"⏭ Skipping backfill for {sport_label} — no trained models available.")
+        return
+
+    logging.info(f"📣 Starting backfill for {sport_label} using models: {list(trained_models.keys())}")
 
     query = f"""
         SELECT *
@@ -1205,6 +1211,10 @@ def backfill_unscored_sharp_moves(sport_label: str, trained_models: dict, days_b
 
     try:
         df_scored = apply_blended_sharp_score(df_unscored, trained_models)
+        if df_scored.empty:
+            logging.warning(f"⚠️ No rows scored for {sport_label}.")
+            return
+
         write_sharp_moves_to_master(df_scored)
         logging.info(f"✅ Backfilled {len(df_scored)} sharp moves for {sport_label}.")
     except Exception as e:
