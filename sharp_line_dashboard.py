@@ -719,12 +719,6 @@ def render_scanner_tab(label, sport_key, container):
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
 
-        # === 🔍 DEBUG PATCH
-        st.write(f"🔍 Rows loaded from BigQuery: {len(df_moves_raw)}")
-        st.write(f"📦 Columns available: {df_moves_raw.columns.tolist()}")
-        if not df_moves_raw.empty:
-            st.dataframe(df_moves_raw.head(5))
-
         # === Handle missing or incomplete data
         if df_moves_raw.empty:
             st.warning("⚠️ No sharp moves returned from BigQuery.")
@@ -959,11 +953,7 @@ def render_scanner_tab(label, sport_key, container):
             #df_audit['Snapshot_Timestamp'] = timestamp
             #write_line_history_to_bigquery(df_audit)
            
-        # === 6. Summary Table ===
-        if summary_df.empty:
-            st.info("ℹ️ No summary data available.")
-            return df_moves
-        
+       
         st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
         
         # === Normalize keys before merges
