@@ -1597,41 +1597,43 @@ def render_scanner_tab(label, sport_key, container):
         def build_trend_explanation(row):
             start = row.get('First_Sharp_Prob')
             now = row.get('Model_Sharp_Win_Prob')
+        
             if start is None or now is None:
                 return ""
         
             try:
-                start = float(start)
-                now = float(now)
+                start = float(start)                 # already in 0–100 scale
+                now = float(now) * 100               # normalize win prob to 0–100
             except:
                 return ""
         
             delta = now - start
-            threshold = 0.04
+            threshold = 4.0  # 4% swing threshold for a meaningful trend
             reason = []
         
             if delta >= threshold:
                 trend = "📈 Trending Up"
                 if row.get('Sharp_Prob_Shift', 0) > 0:
                     reason.append("confidence ↑")
-                if row.get('Sharp_Limit_Jump'):
+                if row.get('Sharp_Limit_Jump', 0):
                     reason.append("limit ↑")
-                if row.get('Is_Reinforced_MultiMarket'):
+                if row.get('Is_Reinforced_MultiMarket', 0):
                     reason.append("multi-market support")
             elif delta <= -threshold:
                 trend = "📉 Trending Down"
                 if row.get('Sharp_Prob_Shift', 0) < 0:
                     reason.append("confidence ↓")
-                if not row.get('Sharp_Limit_Jump'):
+                if not row.get('Sharp_Limit_Jump', 0):
                     reason.append("no limit activity")
-                if not row.get('Market_Leader'):
+                if not row.get('Market_Leader', 0):
                     reason.append("market resistance")
             else:
                 trend = "↔ Stable"
-                if abs(delta) > 0.01:
+                if abs(delta) > 1.0:
                     reason.append("minor shift")
         
             return f"{trend}: {start:.2f} → {now:.2f}" + (f" due to {', '.join(reason)}" if reason else "")
+
         
         df_moves_raw['📊 Confidence Evolution'] = df_moves_raw.apply(build_trend_explanation, axis=1)
 
