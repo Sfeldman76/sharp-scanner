@@ -16,7 +16,9 @@ from utils import (
     #write_to_bigquery,
     build_game_key,
     fetch_scores_and_backtest,
-    read_recent_sharp_moves
+    read_recent_sharp_moves, 
+    detect_cross_market_sharp_support, 
+    detect_market_leaders
 )
 
 def detect_and_save_all_sports():
