@@ -114,9 +114,12 @@ def detect_and_save_all_sports():
                 # ✅ Now backfill older unscored rows after writing the new ones
                 if trained_models:
                     try:
+                        logging.info(f"📊 Backfilling old unscored picks for {sport_label}...")
                         backfill_unscored_sharp_moves(sport_label, trained_models, days_back=7)
+                        logging.info(f"✅ Finished backfill for {sport_label}")
                     except Exception as e:
                         logging.error(f"❌ Backfill failed for {sport_label}: {e}", exc_info=True)
+
                 else:
                     logging.info(f"⏭ Skipping backfill for {sport_label} — no models loaded.")
             
