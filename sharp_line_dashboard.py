@@ -1144,7 +1144,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", hours: int = 336, save_to_gcs:
         'Is_Reinforced_MultiMarket',
         'Market_Leader',
         'LimitUp_NoMove_Flag',
-        'SharpBetScore',
         'Unique_Sharp_Books'
     ]
 
