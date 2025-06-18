@@ -20,7 +20,8 @@ from utils import (
     detect_cross_market_sharp_support, 
     assign_confidence_scores,
     summarize_consensus,
-    compute_weighted_signal
+    compute_weighted_signal,
+    compute_confidence
 )
 
 def detect_and_save_all_sports():
