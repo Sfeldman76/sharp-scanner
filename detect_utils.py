@@ -51,21 +51,17 @@ def detect_and_save_all_sports():
             )
             logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
 
-            try:
-                # 🔍 Load models and apply scoring
-                trained_models = {
-                    market: load_model_from_gcs(sport_label, market)
-                    for market in ['spreads', 'totals', 'h2h']
-                }
-                trained_models = {k: v for k, v in trained_models.items() if v}
-            except Exception as e:
-                logging.warning(f"⚠️ Failed to load models for {sport_label}: {e}", exc_info=True)
-                trained_models = {}
+            # === Load trained models
+            trained_models = {
+                market: load_model_from_gcs(sport_label, market)
+                for market in ['spreads', 'totals', 'h2h']
+            }
+            trained_models = {k: v for k, v in trained_models.items() if v}
+            logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys())}")
 
+            # === Run backtest + scoring if models exist
             try:
-                # Adjust backtest window for slower sports
-                backtest_days = 3 if sport_label in ['CFL', 'WNBA'] else 3
-                
+                backtest_days = 3  # Could be dynamic per sport
                 fetch_scores_and_backtest(
                     sport_key=sport_key,
                     df_moves=df_moves,
@@ -73,16 +69,20 @@ def detect_and_save_all_sports():
                     api_key=API_KEY,
                     trained_models=trained_models
                 )
-
-                
-                backfill_unscored_sharp_moves(sport_label, trained_models, days_back=backtest_days)
-
-            
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
+            # === Backfill unscored rows only if models exist
+            if trained_models:
+                try:
+                    backfill_unscored_sharp_moves(sport_label, trained_models, days_back=backtest_days)
+                except Exception as e:
+                    logging.error(f"❌ Backfill failed for {sport_label}: {e}", exc_info=True)
+            else:
+                logging.info(f"⏭ Skipping backfill for {sport_label} — no models.")
+
+            # === Write outputs
             try:
-                # Rebuild df_snap manually for snapshot logging
                 df_snap = pd.DataFrame([
                     {
                         'Game_ID': game.get('id'),
@@ -109,19 +109,18 @@ def detect_and_save_all_sports():
             except Exception as e:
                 logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
 
-            # 🧠 Apply model scoring separately
-            try:
-                if trained_models:
+            # === Final model scoring (for logging/debug only)
+            if trained_models:
+                try:
                     df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
                     if not df_scored.empty:
-                        # write_to_bigquery(df_scored)
                         logging.info(f"✅ Scored {len(df_scored)} rows (not saved — backtest handles final write).")
                     else:
                         logging.info("ℹ️ No scored rows — model returned empty.")
-                else:
-                    logging.info(f"ℹ️ No trained models found for {sport_label} — skipping scoring.")
-            except Exception as e:
-                logging.error(f"❌ Model scoring failed for {sport_label}: {e}", exc_info=True)
+                except Exception as e:
+                    logging.error(f"❌ Model scoring failed for {sport_label}: {e}", exc_info=True)
+            else:
+                logging.info(f"ℹ️ No trained models found for {sport_label} — skipping scoring.")
 
             logging.info(f"✅ Completed: {sport_label} — Moves: {len(df_moves)}")
 
