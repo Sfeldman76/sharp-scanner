@@ -107,11 +107,11 @@ def detect_and_save_all_sports():
                     for outcome in market.get('outcomes', [])
                 ])
                 df_snap = build_game_key(df_snap)
-            
+    
                 write_sharp_moves_to_master(df_moves)
                 write_line_history_to_bigquery(df_audit)
                 write_snapshot_to_gcs_parquet(current)
-            
+    
                 if trained_models:
                     try:
                         logging.info(f"📊 Backfilling old unscored picks for {sport_label}...")
@@ -121,5 +121,6 @@ def detect_and_save_all_sports():
                         logging.error(f"❌ Backfill failed for {sport_label}: {e}", exc_info=True)
                 else:
                     logging.info(f"⏭ Skipping backfill for {sport_label} — no models loaded.")
+    
             except Exception as e:
                 logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
