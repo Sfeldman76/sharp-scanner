@@ -715,7 +715,7 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            df_moves_raw = read_recent_sharp_moves(hours=2)
+            df_moves_raw = read_recent_sharp_moves(hours=12)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
 
