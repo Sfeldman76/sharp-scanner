@@ -60,6 +60,8 @@ st.markdown("""
 
 
 
+    
+
 
 # === Standard Imports ===
 import os
@@ -80,7 +82,6 @@ from google.oauth2 import service_account
 import pandas_gbq
 import pandas as pd
 import pandas_gbq  # ✅ Required for setting .context.project / .context.credentials
-from google.cloud import bigquery
 from google.cloud import storage
 from google.cloud import bigquery
 from pandas_gbq import to_gbq
@@ -2220,57 +2221,83 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     return df
     
-    
-# Safe predefinition
-df_nba_bt = pd.DataFrame()
-df_mlb_bt = pd.DataFrame()
+
+
+def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.DataFrame:
+    sport_label = sport_label.upper()
+
+    query_scores = f"""
+        SELECT 
+            Game_Key,
+            SHARP_HIT_BOOL,
+            SHARP_COVER_RESULT,
+            Snapshot_Timestamp AS Score_Timestamp
+        FROM `sharp_data.sharp_scores_full`
+        WHERE Sport = '{sport_label}'
+          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
+          AND Scored = TRUE
+    """
+
+    query_probs = f"""
+        SELECT 
+            Game_Key,
+            Bookmaker,
+            Market,
+            Outcome,
+            Model_Sharp_Win_Prob,
+            Model_Confidence_Tier,
+            SharpBetScore,
+            Enhanced_Sharp_Confidence_Score,
+            True_Sharp_Confidence_Score,
+            Snapshot_Timestamp AS Prob_Timestamp
+        FROM `sharp_data.sharp_moves_master`
+        WHERE Sport = '{sport_label}'
+          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
+    """
+
+    df_scores = bq_client.query(query_scores).to_dataframe()
+    df_probs = bq_client.query(query_probs).to_dataframe()
+
+    # Merge on Game_Key — inner join to ensure we have both outcome + model prediction
+    df_bt = df_scores.merge(df_probs, on="Game_Key", how="inner")
+    return df_bt
+
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
 
-        trained_models = {}
-        for market_type in ['spreads', 'totals', 'h2h']:
-            model_bundle = load_model_from_gcs(sport=sport_label, market=market_type)
+        df_bt = load_backtested_predictions(sport_label)
 
-            if model_bundle:
-                trained_models[market_type] = model_bundle
-
-
-
-        df_master = read_recent_sharp_moves(hours=168)
-        if df_master.empty:
-            st.warning(f"⚠️ No sharp picks found.")
+        if df_bt.empty:
+            st.warning(f"⚠️ No matched sharp picks with scored outcomes for {sport_label}")
             return
 
-        df_master = df_master[df_master['Sport'] == sport_label.upper()]
-        if df_master.empty:
-            st.warning(f"⚠️ No data for {sport_label}.")
-            return
-
-        df_bt = df_master.copy()
-
-        df_bt = df_bt[df_bt['Scored'] == True].copy()
-
-        # Clean & coerce
+        # Coerce to numeric
         df_bt['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt['Model_Sharp_Win_Prob'], errors='coerce')
-        df_bt['Model_Confidence'] = pd.to_numeric(df_bt['Model_Confidence'], errors='coerce')
+        df_bt['SharpBetScore'] = pd.to_numeric(df_bt['SharpBetScore'], errors='coerce')
 
-        # Define bins
+        # Quick summary view
+        bins = [0, 0.5, 0.55, 0.6, 0.65, 1.0]
+        df_bt['ProbBin'] = pd.cut(df_bt['Model_Sharp_Win_Prob'], bins)
+        win_rates = df_bt.groupby('ProbBin')['SHARP_HIT_BOOL'].mean().rename("Win %")
+        st.subheader("📊 Model Win Rate by Probability Bin")
+        st.dataframe(win_rates.reset_index())
+
+        # === Full calibration by Market
         prob_bins = np.linspace(0, 1, 11)
+        df_bt['Prob_Bin'] = pd.cut(df_bt['Model_Sharp_Win_Prob'], bins=prob_bins,
+                                   labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
+        df_bt['Conf_Bin'] = pd.cut(df_bt['SharpBetScore'], bins=prob_bins,
+                                   labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
 
-        # Bin probabilities
-        df_bt['Prob_Bin'] = pd.cut(df_bt['Model_Sharp_Win_Prob'], bins=prob_bins, labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
-        df_bt['Conf_Bin'] = pd.cut(df_bt['Model_Confidence'], bins=prob_bins, labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
-
-        # Group and summarize
         prob_summary = (
             df_bt.groupby(['Market', 'Prob_Bin'])['SHARP_HIT_BOOL']
             .agg(['count', 'mean'])
             .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
             .reset_index()
         )
-        
+
         conf_summary = (
             df_bt.groupby(['Market', 'Conf_Bin'])['SHARP_HIT_BOOL']
             .agg(['count', 'mean'])
@@ -2278,24 +2305,24 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             .reset_index()
         )
 
-
         st.markdown("#### 🔢 Model Probability Calibration by Market")
-        for market in prob_summary['Market'].unique():
+        for market in prob_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
             st.dataframe(
                 prob_summary[prob_summary['Market'] == market]
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
-        
+
         st.markdown("#### 🎯 Model Confidence Calibration by Market")
-        for market in conf_summary['Market'].unique():
+        for market in conf_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
             st.dataframe(
                 conf_summary[conf_summary['Market'] == market]
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
+
 
 tab_nba, tab_mlb, tab_cfl, tab_wnba = st.tabs(["🏀 NBA", "⚾ MLB", "🏈 CFL", "🏀 WNBA"])
 
