@@ -577,8 +577,8 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
 
 
             
-def detect_market_leaders(df_history, sharp_books, rec_books):
-    df_history = df_history.copy()
+def detect_market_leaders(df_historyfirst, sharp_books, rec_books):
+    df_history = df_historyfirst.copy()
     df_history['Time'] = pd.to_datetime(df_history['Time'])
     df_history['Book'] = df_history['Book'].str.lower()
 
@@ -615,6 +615,7 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     )
 
     return first_moves
+
 
 
 
