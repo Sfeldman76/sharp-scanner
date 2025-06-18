@@ -27,10 +27,10 @@ from utils import (
 
 def detect_and_save_all_sports():
     for sport_label in ["NBA", "MLB", "WNBA", "CFL"]:
-        sport_key = SPORTS[sport_label]
-        logging.info(f"🔍 Running sharp detection for {sport_label}...")
-
         try:
+            sport_key = SPORTS[sport_label]
+            logging.info(f"🔍 Running sharp detection for {sport_label}...")
+
             timestamp = pd.Timestamp.utcnow()
             current = fetch_live_odds(sport_key, API_KEY)
             logging.info(f"📥 Odds pulled: {len(current)} games")
@@ -51,7 +51,6 @@ def detect_and_save_all_sports():
             )
             logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
 
-            # === Load trained models
             trained_models = {
                 market: load_model_from_gcs(sport_label, market)
                 for market in ['spreads', 'totals', 'h2h']
@@ -59,9 +58,8 @@ def detect_and_save_all_sports():
             trained_models = {k: v for k, v in trained_models.items() if v}
             logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys())}")
 
-            # === Run backtest + scoring if models exist
             try:
-                backtest_days = 3  # Could be dynamic per sport
+                backtest_days = 3
                 fetch_scores_and_backtest(
                     sport_key=sport_key,
                     df_moves=df_moves,
@@ -72,12 +70,11 @@ def detect_and_save_all_sports():
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
-            # === Apply model scoring BEFORE writing to master
             if trained_models:
                 try:
                     df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
                     if not df_scored.empty:
-                        df_moves = df_scored.copy()  # Overwrite with scored data
+                        df_moves = df_scored.copy()
                         logging.info(f"✅ Scored {len(df_moves)} rows, now writing to master.")
                     else:
                         logging.info("ℹ️ No scored rows — model returned empty.")
@@ -85,9 +82,7 @@ def detect_and_save_all_sports():
                     logging.error(f"❌ Model scoring failed for {sport_label}: {e}", exc_info=True)
             else:
                 logging.info(f"ℹ️ No trained models found for {sport_label} — skipping scoring.")
-            
-            # === Write all outputs
-            # === Write all outputs
+
             try:
                 df_snap = pd.DataFrame([
                     {
@@ -107,11 +102,11 @@ def detect_and_save_all_sports():
                     for outcome in market.get('outcomes', [])
                 ])
                 df_snap = build_game_key(df_snap)
-    
+
                 write_sharp_moves_to_master(df_moves)
                 write_line_history_to_bigquery(df_audit)
                 write_snapshot_to_gcs_parquet(current)
-    
+
                 if trained_models:
                     try:
                         logging.info(f"📊 Backfilling old unscored picks for {sport_label}...")
@@ -121,6 +116,9 @@ def detect_and_save_all_sports():
                         logging.error(f"❌ Backfill failed for {sport_label}: {e}", exc_info=True)
                 else:
                     logging.info(f"⏭ Skipping backfill for {sport_label} — no models loaded.")
-    
+
             except Exception as e:
                 logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
+
+        except Exception as e:
+            logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
