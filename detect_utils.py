@@ -63,7 +63,7 @@ def detect_and_save_all_sports():
 
             try:
                 # Adjust backtest window for slower sports
-                backtest_days = 8 if sport_label in ['CFL', 'WNBA'] else 5
+                backtest_days = 3 if sport_label in ['CFL', 'WNBA'] else 3
                 
                 fetch_scores_and_backtest(
                     sport_key=sport_key,
