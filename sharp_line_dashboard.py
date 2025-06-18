@@ -1271,8 +1271,9 @@ def apply_blended_sharp_score(df, trained_models):
             raw_probs = model.predict_proba(df_market)[:, 1]
             calibrated_probs = iso.predict(raw_probs)
 
-            df.loc[df['Market'] == market_type, 'Model_Sharp_Win_Prob'] = raw_probs
-            df.loc[df['Market'] == market_type, 'Model_Confidence'] = calibrated_probs
+            df.loc[df_market.index, 'Model_Sharp_Win_Prob'] = raw_probs
+            df.loc[df_market.index, 'Model_Confidence'] = calibrated_probs
+
 
         except Exception as e:
             st.error(f"❌ Failed to apply model for {market_type}: {e}")
