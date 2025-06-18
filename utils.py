@@ -258,16 +258,17 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
             df[col] = df[col].where(df[col].notna(), None)
     # === Ensure model scoring fields are preserved
     model_cols = [
-        'Model_Sharp_Win_Prob',
-        'Model_Confidence_Tier',
-        'SharpBetScore',
-        'Enhanced_Sharp_Confidence_Score',
-        'True_Sharp_Confidence_Score'
+        'Model_Sharp_Win_Prob', 'Model_Confidence_Tier', 'SharpBetScore',
+        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+        'Final_Confidence_Score', 'Model_Confidence'
     ]
-    
     for col in model_cols:
-        if col not in df.columns:
-            df[col] = None  # Fill with nulls if missing
+    if col not in df.columns:
+        df[col] = None  # Fill with nulls if missing
+        
+    logging.info("🧪 Preview of model columns being written:")
+    logging.info(df[model_cols].dropna(how='all').head(5).to_string())
+
 
     try:
         logging.info(f"📤 Uploading to `{table}`...")
