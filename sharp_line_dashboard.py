@@ -719,11 +719,25 @@ def render_scanner_tab(label, sport_key, container):
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
 
-        if df_moves_raw.empty or 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
-            st.warning("⚠️ No sharp moves detected.")
+        # === 🔍 DEBUG PATCH
+        st.write(f"🔍 Rows loaded from BigQuery: {len(df_moves_raw)}")
+        st.write(f"📦 Columns available: {df_moves_raw.columns.tolist()}")
+        if not df_moves_raw.empty:
+            st.dataframe(df_moves_raw.head(5))
+
+        # === Handle missing or incomplete data
+        if df_moves_raw.empty:
+            st.warning("⚠️ No sharp moves returned from BigQuery.")
             return pd.DataFrame()
 
+        if 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
+            st.warning("⚠️ Column 'Enhanced_Sharp_Confidence_Score' is missing from sharp moves table.")
+            return pd.DataFrame()
+
+        # Continue to enrichment + scoring...
+
         # === Enrich and score
+        # === Enrich and Score ===
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         now = pd.Timestamp.utcnow()
@@ -731,8 +745,8 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
-
-        # === Load per-market models from GCS
+        
+        # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
         trained_models = st.session_state.get(model_key)
         
@@ -743,81 +757,65 @@ def render_scanner_tab(label, sport_key, container):
                 if model_bundle:
                     trained_models[market_type] = model_bundle
             st.session_state[model_key] = trained_models
-
         
-        # === Apply model scoring
         # === Apply model scoring
         if trained_models:
             try:
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
-             
         
                 if not df_pre_game.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
-                   
         
                     if not df_scored.empty:
                         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
                         score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
         
-                        # Check for missing columns
-                        missing = [col for col in merge_keys + score_cols if col not in df_scored.columns]
-                        if missing:
-                            st.warning(f"⚠️ Cannot merge scores — missing columns in df_scored: {missing}")
+                        missing_cols = [col for col in merge_keys + score_cols if col not in df_scored.columns]
+                        if missing_cols:
+                            st.warning(f"⚠️ Cannot merge — missing columns: {missing_cols}")
                             st.dataframe(df_scored.head(3))
                         else:
-                            try:
-                                df_moves_raw = df_moves_raw.merge(
-                                    df_scored[merge_keys + score_cols],
-                                    on=merge_keys,
-                                    how='left',
-                                    suffixes=('', '_scored'),
-                                    
-                                )
-                                for col in score_cols:
-                                    scored_col = f"{col}_scored" if f"{col}_scored" in df_moves_raw.columns else col
-                                    if scored_col in df_moves_raw.columns:
-                                        df_moves_raw[col] = df_moves_raw[scored_col]
-                                        if scored_col != col:
-                                            df_moves_raw.drop(columns=[scored_col], inplace=True)
-                                    else:
-                                        st.warning(f"⚠️ Missing expected scored column: {scored_col}")
-                            
-                            except Exception as merge_error:
-                                st.error(f"❌ Merge failed: {merge_error}")
-                                st.dataframe(df_scored[merge_keys + score_cols].head(5))
+                            df_moves_raw = df_moves_raw.merge(
+                                df_scored[merge_keys + score_cols],
+                                on=merge_keys,
+                                how='left',
+                                suffixes=('', '_scored')
+                            )
+        
+                            for col in score_cols:
+                                scored_col = f"{col}_scored"
+                                if scored_col in df_moves_raw.columns:
+                                    df_moves_raw[col] = df_moves_raw[scored_col]
+                                    df_moves_raw.drop(columns=[scored_col], inplace=True)
                     else:
-                        st.warning("⚠️ Model returned empty DataFrame during live scoring.")
+                        st.warning("⚠️ Scoring produced no output.")
                 else:
-                    st.info("ℹ️ No pre-game rows to score")
+                    st.info("ℹ️ No pre-game rows available for scoring.")
             except Exception as e:
-                st.error(f"⚠️ Failed to apply model scoring: {e}")
+                st.error(f"❌ Model scoring failed: {e}")
         else:
-            st.warning("⚠️ No per-market models available — skipping scoring.")
-
+            st.warning("⚠️ No trained models available for scoring.")
         
-        # === Clean up and fill required columns
+        # === Final Cleanup + Placeholders
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
-        df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore')
+        df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore', inplace=True)
         
-        # Add fallback for Ref_Sharp_Value
         if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
         
-        # Ensure scoring result placeholders
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
         
-        # Ensure model scoring outputs exist
-        model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
-        for col in model_cols:
+        for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
         
-        # Prepare final deduplicated scoring view
-        df_moves = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Bookmaker'], keep='first')[['Game', 'Market', 'Outcome'] + model_cols]
-                
+        # === Dedup view
+        df_moves = df_moves_raw.drop_duplicates(
+            subset=['Game_Key', 'Bookmaker'], keep='first'
+        )[['Game', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier']]
+        
         df_history = read_recent_sharp_moves(hours=72)
         df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
         df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
