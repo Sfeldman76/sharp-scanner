@@ -937,7 +937,24 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     except Exception as e:
         logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
         return None
-        
+
+def read_recent_sharp_moves(hours=500, table=BQ_FULL_TABLE):
+    try:
+        client = bq_client
+        query = f"""
+            SELECT * FROM `{table}`
+            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+        """
+        df = client.query(query).to_dataframe()
+        df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
+
+        print(f"✅ Loaded {len(df)} rows from BigQuery (last {hours}h)")
+        return df
+    except Exception as e:
+        print(f"❌ Failed to read from BigQuery: {e}")
+        return pd.DataFrame()
+       
+
 def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
     from pandas_gbq import to_gbq
 
