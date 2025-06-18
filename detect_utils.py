@@ -122,6 +122,5 @@ def detect_and_save_all_sports():
 
                 else:
                     logging.info(f"⏭ Skipping backfill for {sport_label} — no models loaded.")
-            
             except Exception as e:
                 logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
