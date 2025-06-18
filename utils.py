@@ -1198,20 +1198,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
 
-    # ✅ Upload to BigQuery
-    try:
-        from pandas_gbq import to_gbq
-        to_gbq(
-            df_scores_out,
-            destination_table='sharp_data.sharp_scores_full',
-            project_id=GCP_PROJECT_ID,
-            if_exists='append'
-        )
-        logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
-    except Exception as e:
-        logging.error(f"❌ Failed to upload scored picks: {e}")
+    from pandas_gbq import to_gbq
+    to_gbq(
+        df_scores_out,
+        destination_table='sharp_data.sharp_scores_full',
+        project_id=GCP_PROJECT_ID,
+        if_exists='append'
+    )
+    logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
 
     return df
+
     
  
     
