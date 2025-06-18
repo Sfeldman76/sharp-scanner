@@ -14,7 +14,9 @@ from utils import (
     apply_blended_sharp_score,
     load_model_from_gcs,
     write_to_bigquery,
-    build_game_key
+    build_game_key,
+    fetch_scores_and_backtest
+    
 )
 
 def detect_and_save_all_sports():
@@ -25,7 +27,7 @@ def detect_and_save_all_sports():
         try:
             timestamp = pd.Timestamp.utcnow()
             current = fetch_live_odds(sport_key, API_KEY)
-            logging.info(f"📥 Odds pulled: {len(live)} games")
+            logging.info(f"📥 Odds pulled: {len(current)} games")
 
             previous = read_latest_snapshot_from_bigquery()
             logging.info(f"📦 Previous snapshot loaded: {len(previous)} games")
@@ -43,6 +45,22 @@ def detect_and_save_all_sports():
             )
             logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
 
+            # 🔍 Load models and apply scoring
+            trained_models = {
+                market: load_model_from_gcs(sport_label, market)
+                for market in ['spreads', 'totals', 'h2h']
+            }
+            trained_models = {k: v for k, v in trained_models.items() if v}
+
+            # ✅ Backtest sharp picks against final scores
+            fetch_scores_and_backtest(
+                sport_key=sport_key,
+                df_moves=df_moves,
+                days_back=3,
+                api_key=API_KEY,
+                trained_models=trained_models
+            )
+
             # Rebuild df_snap manually for snapshot logging
             df_snap = pd.DataFrame([
                 {
@@ -56,7 +74,7 @@ def detect_and_save_all_sports():
                     'Limit': outcome.get('bet_limit'),
                     'Snapshot_Timestamp': timestamp
                 }
-                for game in live
+                for game in current
                 for book in game.get('bookmakers', [])
                 for market in book.get('markets', [])
                 for outcome in market.get('outcomes', [])
@@ -66,15 +84,9 @@ def detect_and_save_all_sports():
             # Save all output
             write_sharp_moves_to_master(df_moves)
             write_line_history_to_bigquery(df_audit)
-            write_snapshot_to_gcs_parquet(current)  # where `current` is the JSON list from `fetch_live_odds()`
+            write_snapshot_to_gcs_parquet(current)
 
-            # 🔍 Load models and apply scoring
-            trained_models = {
-                market: load_model_from_gcs(sport_label, market)
-                for market in ['spreads', 'totals', 'h2h']
-            }
-            trained_models = {k: v for k, v in trained_models.items() if v}  # remove missing
-
+            # 🧠 Apply model scoring
             if trained_models:
                 df_scored = apply_blended_sharp_score(df_moves.copy(), trained_models)
                 if not df_scored.empty:
