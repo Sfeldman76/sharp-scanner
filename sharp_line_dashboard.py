@@ -508,7 +508,82 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
 
+def compute_diagnostics(row):
+    TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
+    # === Tier Change
+    tier_current = TIER_ORDER.get(str(row.get('Model_Confidence_Tier')).strip(), 0)
+    tier_open = TIER_ORDER.get(str(row.get('First_Tier')).strip(), 0)
+    if pd.notna(row.get('First_Tier')):
+        if tier_current > tier_open:
+            tier_change = f"↑ {row.get('First_Tier')} → {row.get('Model_Confidence_Tier')}"
+        elif tier_current < tier_open:
+            tier_change = f"↓ {row.get('First_Tier')} → {row.get('Model_Confidence_Tier')}"
+        else:
+            tier_change = "↔ No Change"
+    else:
+        tier_change = "⚠️ Missing"
+
+    # === Confidence Evolution
+    try:
+        prob_start = float(row.get('First_Sharp_Prob', 0))
+        prob_now = float(row.get('Model_Sharp_Win_Prob', 0))
+        delta = prob_now - prob_start
+        if pd.isna(prob_start) or pd.isna(prob_now):
+            confidence_trend = "⚠️ Missing"
+        elif delta >= 0.04:
+            confidence_trend = f"📈 Trending Up: {prob_start:.2%} → {prob_now:.2%}"
+        elif delta <= -0.04:
+            confidence_trend = f"📉 Trending Down: {prob_start:.2%} → {prob_now:.2%}"
+        else:
+            confidence_trend = f"↔ Stable: {prob_start:.2%} → {prob_now:.2%}"
+    except:
+        confidence_trend = "⚠️ Error"
+
+    # === Line vs Model Direction
+    try:
+        prob_delta = prob_now - prob_start
+        line_delta = float(row.get('Value', 0)) - float(row.get('First_Line_Value', 0))
+        if prob_delta > 0.04 and line_delta < 0:
+            direction = "🟢 Model ↑ / Line ↓"
+        elif prob_delta < -0.04 and line_delta > 0:
+            direction = "🔴 Model ↓ / Line ↑"
+        elif prob_delta > 0.04 and line_delta > 0:
+            direction = "🟢 Aligned ↑"
+        elif prob_delta < -0.04 and line_delta < 0:
+            direction = "🔻 Aligned ↓"
+        else:
+            direction = "⚪ Mixed"
+    except:
+        direction = "⚪ Mixed"
+
+    # === Model Reasoning
+    reasons = []
+    try:
+        prob = float(row.get('Model_Sharp_Win_Prob', 0))
+        if prob >= 0.58: reasons.append("🔼 Strong Model Edge")
+        elif prob >= 0.52: reasons.append("↗️ Slight Model Lean")
+        elif prob <= 0.48: reasons.append("↘️ Slight Model Fade")
+        elif prob <= 0.42: reasons.append("🔽 Strong Model Fade")
+        else: reasons.append("🪙 Coinflip")
+    except:
+        reasons.append("⚠️ No model confidence")
+
+    if row.get('Sharp_Prob_Shift', 0) > 0: reasons.append("Confidence ↑")
+    if row.get('Sharp_Prob_Shift', 0) < 0: reasons.append("Confidence ↓")
+    if row.get('Sharp_Limit_Jump', 0): reasons.append("Limit Jump")
+    if row.get('Market_Leader', 0): reasons.append("Led Market Move")
+    if row.get('Is_Reinforced_MultiMarket', 0): reasons.append("Cross-Market Signal")
+    if row.get('LimitUp_NoMove_Flag', 0): reasons.append("Limit ↑ w/o Price Move")
+
+    reasoning = " | ".join(reasons)
+
+    return pd.Series({
+        'Tier_Change': tier_change,
+        '📊 Confidence Evolution': confidence_trend,
+        'Direction': direction,
+        '📌 Model Reasoning': reasoning
+    })
 
 
 def apply_blended_sharp_score(df, trained_models):
@@ -533,10 +608,10 @@ def apply_blended_sharp_score(df, trained_models):
         st.warning(f"⚠️ Could not compute fallback confidence score: {e}")
 
     df['Market'] = df['Market'].astype(str).str.lower()
-
+    total_start = time.time()
     for market_type, bundle in trained_models.items():
         start = time.time()
-        total_start = time.time()
+        
         model = bundle['model']
         iso = bundle['calibrator']
         df_market = df[df['Market'] == market_type].copy()
@@ -570,7 +645,7 @@ def apply_blended_sharp_score(df, trained_models):
         except Exception as e:
             st.error(f"❌ Failed to apply model for {market_type}: {e}")
         st.info(f"⏱️ Scored {market_type} in {time.time() - start:.2f}s")
-        st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
+    st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
     # Apply tiering only if Model_Sharp_Win_Prob exists
     if 'Model_Sharp_Win_Prob' in df.columns:
         df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
@@ -886,58 +961,10 @@ def render_scanner_tab(label, sport_key, container):
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = fallback
         
-        # === 5. Trend + Diagnostic Columns
-        TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
+ 
+        df_moves_raw = df_moves_raw.join(df_moves_raw.apply(compute_diagnostics, axis=1))
         
-        df_moves_raw['Tier_Change'] = df_moves_raw.apply(
-            lambda row: (
-                "↔ No Change" if TIER_ORDER.get(str(row['Model_Confidence_Tier']).strip(), 0) == TIER_ORDER.get(str(row['First_Tier']).strip(), 0)
-                else f"{'↑' if TIER_ORDER.get(str(row['Model_Confidence_Tier']).strip(), 0) > TIER_ORDER.get(str(row['First_Tier']).strip(), 0) else '↓'} {row['First_Tier']} → {row['Model_Confidence_Tier']}"
-            ) if pd.notna(row['First_Tier']) else "⚠️ Missing",
-            axis=1
-        )
-        
-        df_moves_raw['📊 Confidence Evolution'] = df_moves_raw.apply(
-            lambda row: (
-                "⚠️ Missing" if pd.isna(row['First_Sharp_Prob']) or pd.isna(row['Model_Sharp_Win_Prob']) else
-                f"{'📈 Trending Up' if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] >= 0.04 else '📉 Trending Down' if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] <= -0.04 else '↔ Stable'}: {row['First_Sharp_Prob']:.2%} → {row['Model_Sharp_Win_Prob']:.2%}"
-            ),
-            axis=1
-        )
-        
-        df_moves_raw['Direction'] = df_moves_raw.apply(
-            lambda row: (
-                "⚪ Mixed" if pd.isna(row['First_Sharp_Prob']) or pd.isna(row['Model_Sharp_Win_Prob']) or pd.isna(row['First_Line_Value']) or pd.isna(row['Value']) else
-                "🟢 Model ↑ / Line ↓" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] > 0.04 and row['Value'] - row['First_Line_Value'] < 0 else
-                "🔴 Model ↓ / Line ↑" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] < -0.04 and row['Value'] - row['First_Line_Value'] > 0 else
-                "🟢 Aligned ↑" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] > 0.04 and row['Value'] - row['First_Line_Value'] > 0 else
-                "🔻 Aligned ↓" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] < -0.04 and row['Value'] - row['First_Line_Value'] < 0 else
-                "⚪ Mixed"
-            ),
-            axis=1
-        )
-        
-        def build_model_reason(row):
-            reasons = []
-            try:
-                prob = float(row.get('Model_Sharp_Win_Prob', 0))
-                if prob >= 0.58: reasons.append("🔼 Strong Model Edge")
-                elif prob >= 0.52: reasons.append("↗️ Slight Model Lean")
-                elif prob <= 0.48: reasons.append("↘️ Slight Model Fade")
-                elif prob <= 0.42: reasons.append("🔽 Strong Model Fade")
-                else: reasons.append("🪙 Coinflip")
-            except:
-                reasons.append("⚠️ No model confidence")
-        
-            if row.get('Sharp_Prob_Shift', 0) > 0: reasons.append("Confidence ↑")
-            if row.get('Sharp_Prob_Shift', 0) < 0: reasons.append("Confidence ↓")
-            if row.get('Sharp_Limit_Jump', 0): reasons.append("Limit Jump")
-            if row.get('Market_Leader', 0): reasons.append("Led Market Move")
-            if row.get('Is_Reinforced_MultiMarket', 0): reasons.append("Cross-Market Signal")
-            if row.get('LimitUp_NoMove_Flag', 0): reasons.append("Limit ↑ w/o Price Move")
-            return " | ".join(reasons)
-        
-        df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
+     
         
         
         # === 6. Final Summary Table
