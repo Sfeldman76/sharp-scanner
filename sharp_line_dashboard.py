@@ -724,6 +724,9 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = read_recent_sharp_moves(hours=12)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
+        st.write("🎯 Filtering for sport:", label)
+        st.write("✅ Sharp moves before Game_Start filter:", len(df_moves_raw))
+        st.write("Sports in data:", df_moves_raw['Sport'].dropna().unique())
 
         # ✅ Filter by sport label (e.g., only NBA picks in NBA tab)
         df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.upper() == label.upper()]
@@ -735,7 +738,11 @@ def render_scanner_tab(label, sport_key, container):
 
         # === Filter to only live (upcoming) picks
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
+        st.write("📆 Earliest Game_Start:", df_moves_raw['Game_Start'].min())
+        st.write("📆 Latest Game_Start:", df_moves_raw['Game_Start'].max())
+
         df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] >= pd.Timestamp.utcnow()]
+        st.write("🟢 After filtering for live picks:", len(df_moves_raw))
 
         # ✅ DEBUG: Final live pick count
         st.write("🟢 After filtering for live picks:", len(df_moves_raw))
