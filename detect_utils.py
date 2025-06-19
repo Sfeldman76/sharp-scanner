@@ -22,7 +22,8 @@ from utils import (
     summarize_consensus,
     compute_weighted_signal,
     compute_confidence,
-    compute_line_hash
+    compute_line_hash,
+    compute_and_write_market_weights
 )
 
 def detect_and_save_all_sports():
