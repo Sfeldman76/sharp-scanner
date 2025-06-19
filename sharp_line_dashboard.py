@@ -559,7 +559,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_market = df_market.apply(pd.to_numeric, errors='coerce').fillna(0)
 
 
-            df_market = df_market[model_features].astype(float)
+         
 
             # Predict with calibration
             raw_probs = model.predict_proba(df_market)[:, 1]
