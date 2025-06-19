@@ -644,7 +644,10 @@ def fetch_scored_picks_from_bigquery(limit=50000):
         return pd.DataFrame()
         
 def render_scanner_tab(label, sport_key, container):
-    market_component_win_rates = read_market_weights_from_bigquery()
+    market_weights = read_market_weights_from_bigquery()
+    if not market_weights:
+        st.error("❌ No market weights found. Cannot compute confidence scores.")
+        return
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
 
@@ -732,7 +735,7 @@ def render_scanner_tab(label, sport_key, container):
         # === DEBUG
         st.info(f"📊 Loaded {len(df_moves_raw)} sharp moves rows")
         st.write(df_moves_raw.head(5))
-        st.stop()
+        
 
         # Continue to enrichment + scoring...
         df_moves_raw = df_moves_raw[df_moves_raw['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
