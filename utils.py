@@ -1107,6 +1107,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
     ]
 
+    try:
+       df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
+        # Optionally upload:
+        # to_gbq(df_weights, 'sharp_data.market_weights', project_id=GCP_PROJECT_ID, if_exists='replace')
+        logging.info(f"✅ Computed updated market weights for {sport_label.upper()}")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to compute market weights: {e}") 
+
     
     # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
