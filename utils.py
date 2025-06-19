@@ -240,7 +240,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         return
 
     df = df.copy()
-	
+    df = build_game_key(df)
     # ✅ Only keep rows from sharp and rec books
     allowed_books = SHARP_BOOKS + REC_BOOKS
     df = df[df['Book'].isin(allowed_books)]
