@@ -709,16 +709,7 @@ def render_scanner_tab(label, sport_key, container):
                 aggfunc="first"
             ).reset_index()
 
-        # === Load sharp moves from BigQuery (from Cloud Scheduler)
-        detection_key = f"sharp_moves_{sport_key_lower}"
-        if detection_key in st.session_state:
-            df_moves_raw = st.session_state[detection_key]
-            st.info(f"✅ Using cached sharp moves for {label}")
-        else:
-            df_moves_raw = read_recent_sharp_moves(hours=12)
-            st.session_state[detection_key] = df_moves_raw
-            st.success(f"📥 Loaded sharp moves from BigQuery")
-
+        # === Load sharp moves from BigQuery (from Cloud Scheduler)       
         # === Handle missing or incomplete data
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
         detection_key = f"sharp_moves_{sport_key_lower}"
@@ -736,7 +727,7 @@ def render_scanner_tab(label, sport_key, container):
         st.stop()
 
         # Continue to enrichment + scoring...
-
+        df_moves_raw = df_moves_raw[df_moves_raw['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
         # === Enrich and score
         # === Enrich and Score ===
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
