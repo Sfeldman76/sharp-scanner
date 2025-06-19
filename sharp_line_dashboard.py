@@ -720,13 +720,20 @@ def render_scanner_tab(label, sport_key, container):
             st.success(f"📥 Loaded sharp moves from BigQuery")
 
         # === Handle missing or incomplete data
-        if df_moves_raw.empty:
-            st.warning("⚠️ No sharp moves returned from BigQuery.")
-            return pd.DataFrame()
-
-        if 'Enhanced_Sharp_Confidence_Score' not in df_moves_raw.columns:
-            st.warning("⚠️ Column 'Enhanced_Sharp_Confidence_Score' is missing from sharp moves table.")
-            return pd.DataFrame()
+        # === Load sharp moves from BigQuery (from Cloud Scheduler)
+        detection_key = f"sharp_moves_{sport_key_lower}"
+        if detection_key in st.session_state:
+            df_moves_raw = st.session_state[detection_key]
+            st.info(f"✅ Using cached sharp moves for {label}")
+        else:
+            df_moves_raw = read_recent_sharp_moves(hours=12)
+            st.session_state[detection_key] = df_moves_raw
+            st.success(f"📥 Loaded sharp moves from BigQuery")
+        
+        # === DEBUG
+        st.info(f"📊 Loaded {len(df_moves_raw)} sharp moves rows")
+        st.write(df_moves_raw.head(5))
+        st.stop()
 
         # Continue to enrichment + scoring...
 
