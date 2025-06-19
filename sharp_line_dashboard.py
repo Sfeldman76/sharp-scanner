@@ -940,6 +940,7 @@ def render_scanner_tab(label, sport_key, container):
         
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
         
+        
         # === 6. Final Summary Table
         summary_cols = [
             'Game', 'Market', 'Game_Start', 'Outcome',
@@ -954,7 +955,23 @@ def render_scanner_tab(label, sport_key, container):
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
-        
+        summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
+        summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
+
+        summary_df.rename(columns={
+            'Game': 'Matchup',
+            'Outcome': 'Pick',
+            'Rec_Book_Consensus': 'Rec Line',
+            'Sharp_Book_Consensus': 'Sharp Line',
+            'Move_From_Open_Rec': 'Rec Move',
+            'Move_From_Open_Sharp': 'Sharp Move',
+            'Model_Sharp_Win_Prob': 'Model Prob',
+            'Model_Confidence_Tier': 'Confidence Tier',
+            '📌 Model Reasoning': 'Why Model Likes It',
+            '📊 Confidence Evolution': 'Confidence Trend',
+            'Tier_Change': 'Tier Δ',
+            'Direction': 'Line/Model Direction'
+        }, inplace=True)
         # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
