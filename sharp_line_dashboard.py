@@ -1040,10 +1040,12 @@ def render_scanner_tab(label, sport_key, container):
             .dropna(subset=model_cols)
             .drop_duplicates(subset=['Game', 'Market', 'Outcome'])
         )
-        
+        # 🛠️ Fix duplicate columns in df_moves_raw
+        df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()].copy()
+
         # === Build summary_df with only needed columns
         summary_cols = [
-            'Game', 'Market', 'Outcome', 'Game_Start', 'Outcome',
+            'Game', 'Market', 'Game_Start', 'Outcome',
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
             'Move_From_Open_Rec', 'Move_From_Open_Sharp',
             'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
