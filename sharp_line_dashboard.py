@@ -822,30 +822,36 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         
-        # === Calculate movement vs open line (optional) ===
+        # === Merge df_first BEFORE referencing 'First_Line_Value'
+        df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+        
+        # === DEBUG: Check merge success
+        if 'First_Line_Value' not in df_moves_raw.columns or df_moves_raw['First_Line_Value'].isna().all():
+            st.warning("⚠️ First_Line_Value missing — open line movement not calculated.")
+            st.write("df_first merge keys preview:")
+            st.write(df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].head())
+            st.write("df_moves_raw keys preview:")
+            st.write(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].head())
+        
         # === Calculate movement vs open line (optional)
         if 'First_Line_Value' in df_moves_raw.columns:
             df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Sharp_Book_Consensus'] - df_moves_raw['First_Line_Value']
             df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Rec_Book_Consensus'] - df_moves_raw['First_Line_Value']
         
-        # === Clean up & round values for display
-        df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore', inplace=True)
+        # === Round movement and consensus safely
+        for col in ['Move_From_Open_Sharp', 'Move_From_Open_Rec', 'Sharp_Book_Consensus', 'Rec_Book_Consensus']:
+            if col in df_moves_raw.columns:
+                df_moves_raw[col] = df_moves_raw[col].round(2)
         
-        df_moves_raw['Sharp_Book_Consensus'] = df_moves_raw['Sharp_Book_Consensus'].round(2)
-        df_moves_raw['Rec_Book_Consensus'] = df_moves_raw['Rec_Book_Consensus'].round(2)
-        df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Move_From_Open_Sharp'].round(2)
-        df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Move_From_Open_Rec'].round(2)
+        # === Drop merge artifacts
+        df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore', inplace=True)
         
         # === Fallback Ref_Sharp_Value
         if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
         
-        # === Ensure tracking columns exist
-        for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
-            if col not in df_moves_raw.columns:
-                df_moves_raw[col] = None
-        
-        for col in ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
+        # === Ensure scoring fields are present
+        for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
         
@@ -858,17 +864,7 @@ def render_scanner_tab(label, sport_key, container):
         df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
         df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
         
-        df_first = df_history.sort_values('Snapshot_Timestamp') \
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
-            .rename(columns={
-                'Value': 'First_Line_Value',
-                'Sharp_Confidence_Tier': 'First_Tier',
-                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
-
         
-        # === 3. Merge into full dataset
-        df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
         
         # === 4. Tier Change Detection
         TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
@@ -1105,13 +1101,13 @@ def render_scanner_tab(label, sport_key, container):
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
-        # Final table
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model_Sharp_Win_Prob', '\nTier',
-            'Why Model Prefers', ' Trend', 'Tier Δ', 'Line/Model Direction'
+            'Model_Sharp_Win_Prob', 'Confidence\nTier',
+            'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
+
         table_df = filtered_df[view_cols].copy()
         st.info(f"✅ Table DF shape: {table_df.shape}")
         st.write(table_df.head())
