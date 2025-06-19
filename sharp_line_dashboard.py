@@ -1043,7 +1043,7 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Build summary_df with only needed columns
         summary_cols = [
-            'Game', 'Market', 'Outcome', 'Game_Start', 'Recommended_Outcome',
+            'Game', 'Market', 'Outcome', 'Game_Start', 'Outcome',
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
             'Move_From_Open_Rec', 'Move_From_Open_Sharp',
             'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
@@ -1089,7 +1089,7 @@ def render_scanner_tab(label, sport_key, container):
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
-            'Recommended_Outcome': 'Pick\nSide',
+            'Outcome': 'Pick\nSide',
             'Rec_Book_Consensus': 'Rec\nConsensus',
             'Sharp_Book_Consensus': 'Sharp\nConsensus',
             'Model_Sharp_Win_Prob': 'Model Prob',
