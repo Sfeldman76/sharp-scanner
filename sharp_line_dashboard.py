@@ -1031,71 +1031,59 @@ def render_scanner_tab(label, sport_key, container):
         
         df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
            
+        # === Summary Header
         st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
-
-        # === Merge model scores
+        
+        # === Merge model scores (efficient dedup before merge)
         model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
-        for col in model_cols:
-            if col not in df_moves.columns:
-                df_moves[col] = None
+        df_merge_scores = (
+            df_moves[['Game', 'Market', 'Outcome'] + model_cols]
+            .dropna(subset=model_cols)
+            .drop_duplicates(subset=['Game', 'Market', 'Outcome'])
+        )
         
-        model_cols_to_merge = ['Game', 'Market', 'Outcome'] + model_cols
-        df_merge_scores = df_moves[model_cols_to_merge].drop_duplicates()
+        # === Build summary_df with only needed columns
+        summary_cols = [
+            'Game', 'Market', 'Outcome', 'Game_Start', 'Recommended_Outcome',
+            'Rec_Book_Consensus', 'Sharp_Book_Consensus',
+            'Move_From_Open_Rec', 'Move_From_Open_Sharp',
+            'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
+            '📌 Model Reasoning', '📊 Confidence Evolution',
+            'Tier_Change', 'Direction'
+        ]
+        summary_cols = [col for col in summary_cols if col in df_moves_raw.columns]
+        summary_df = df_moves_raw[summary_cols].copy()
         
-        # === Build initial summary_df from df_moves_raw
-        summary_df = df_moves_raw.copy()
+        # === Normalize string keys
+        for col in ['Game', 'Market', 'Outcome']:
+            if col in summary_df.columns:
+                summary_df[col] = summary_df[col].astype(str).str.strip().str.lower()
+        
+        # === Add Event_Date for filtering
         summary_df['Event_Date'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True).dt.date.astype(str)
         
-        # Ensure consensus-related columns exist
-        for col in [
-            'Recommended_Outcome', 'Rec_Book_Consensus', 'Sharp_Book_Consensus',
-            'Move_From_Open_Rec', 'Move_From_Open_Sharp'
-        ]:
-            if col not in summary_df.columns:
-                summary_df[col] = None
-        
-        # Merge model scores
+        # === Merge model scores
         summary_df = summary_df.merge(df_merge_scores, on=['Game', 'Market', 'Outcome'], how='left')
         
-        # Normalize string keys
-        for col in ['Game', 'Market', 'Outcome']:
-            for df_ in [summary_df, df_moves, df_moves_raw]:
-                if col in df_.columns:
-                    df_[col] = df_[col].astype(str).str.strip().str.lower()
+        # === Fill missing diagnostic fields
+        diagnostic_cols = ['📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']
+        for col in diagnostic_cols:
+            if col not in summary_df.columns:
+                summary_df[col] = ""
         
-        # Normalize event date for filtering
-        if 'Event_Date' in summary_df.columns and 'Event_Date' in df_moves_raw.columns:
-            summary_df['Event_Date'] = summary_df['Event_Date'].astype(str)
-            df_moves_raw['Event_Date'] = df_moves_raw['Event_Date'].astype(str)
-        
-        # Merge diagnostic columns
-        df_moves_raw.rename(columns={'Confidence_Trend': '📊 Confidence Evolution'}, inplace=True)
-        for col in ['📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']:
-            if col not in df_moves_raw.columns:
-                df_moves_raw[col] = ""
-        extra_cols = ['Game', 'Market', 'Outcome', '📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']
-        df_extras = df_moves_raw[extra_cols].drop_duplicates()
-        summary_df = summary_df.merge(df_extras, on=['Game', 'Market', 'Outcome'], how='left')
-        
-        # Ensure Game_Start is datetime and in UTC
+        # === Convert Game_Start to EST string
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
-        
-        # Drop any rows with missing Game_Start
         summary_df = summary_df[summary_df['Game_Start'].notna()]
-        
-        # Convert Game_Start to EST for display
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
-        
-        # Optional: filter out rows with invalid conversion
         summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
         
-        # Extract date-only column
-        summary_df['Event_Date_Only'] = pd.to_datetime(summary_df['Game_Start'], utc=True, errors='coerce').dt.date.astype(str)
-        # Clean column suffixes before rename
+        # === Extract date-only column
+        summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
+        
+        # === Clean column suffixes
         summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
-
-
-        # Rename for display
+        
+        # === Rename for display
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
             'Game': 'Matchup',
@@ -1112,40 +1100,40 @@ def render_scanner_tab(label, sport_key, container):
             'Direction': 'Line/Model Direction'
         }, inplace=True)
         
-        # Drop duplicate rows
-        summary_df = summary_df.drop_duplicates(subset=["Matchup", "Market", "Pick\nSide", "Date\n+ Time (EST)"])
-        
-        # Filter by market and date
+        # === Filter UI
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         
         date_only_options = ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique())
         selected_date = st.selectbox(f"📅 Filter {label} by Date", date_only_options, key=f"{label}_date_filter")
         
+        # === Filter by market/date
         filtered_df = summary_df.copy()
         if selected_market != "All":
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
+        # === Select view columns
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model Prob', 'Confidence\nTier', 
+            'Model Prob', 'Confidence\nTier',
             'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
-       # 🛡️ Defensive check before slicing view_cols
+        
         missing_cols = [col for col in view_cols if col not in filtered_df.columns]
         if missing_cols:
             st.error(f"❌ Missing columns in filtered_df: {missing_cols}")
             st.write("✅ Available columns:", filtered_df.columns.tolist())
-            return pd.DataFrame()  # 💥 Prevent crash
-
-
+            return pd.DataFrame()
+        
+        # === Render Table
         table_df = filtered_df[view_cols].copy()
         st.info(f"✅ Table DF shape: {table_df.shape}")
         st.write(table_df.head())
         table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]
+
         # === CSS Styling for All Tables (keep this once)
         st.markdown("""
         <style>
