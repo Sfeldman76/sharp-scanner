@@ -521,8 +521,8 @@ def compute_diagnostics_vectorized(df):
     for col in ['Model_Confidence_Tier', 'First_Tier']:
         if col not in df.columns:
             df[col] = ""
-        df[col] = df[col].astype(str).fillna("").str.strip()
-
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    
     # === Tier Mapping
     tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
     tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
