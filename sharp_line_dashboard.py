@@ -732,7 +732,8 @@ def render_scanner_tab(label, sport_key, container):
         label_lower = label.lower()
         
         # Normalize and match the sport field (e.g., 'basketball_nba' should match 'nba')
-        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.lower().str.contains(label_lower)]
+        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.lower() == sport_key_lower]
+
 
 
         # ✅ DEBUG: Show sport filtering
