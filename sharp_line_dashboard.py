@@ -92,7 +92,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 #from detect_utils import detect_and_save_all_sports
 import numpy as np
-
+from sklearn.isotonic import IsotonicRegression
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
