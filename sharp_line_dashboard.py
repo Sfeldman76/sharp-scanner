@@ -1090,72 +1090,71 @@ def render_scanner_tab(label, sport_key, container):
         """, unsafe_allow_html=True)
         
 
-table_df = summary_grouped[view_cols].copy()
+        
+        # === Render Sharp Picks Table (HTML Version)
+        table_df = summary_grouped[view_cols].copy()
+        table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
+        st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
+        st.success("✅ Finished rendering sharp picks table.")
+        st.caption(f"Showing {len(table_df)} rows")
 
-# === Render Sharp Picks Table (HTML Version)
-table_df = summary_grouped[view_cols].copy()
-table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
-st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
-st.success("✅ Finished rendering sharp picks table.")
-st.caption(f"Showing {len(table_df)} rows")
-
-# === 2. Render Live Odds Snapshot Table
-st.subheader(f"📊 Live Odds Snapshot – {label} (Odds + Limit)")
-odds_rows = []
-for game in live:
-    game_name = f"{game['home_team']} vs {game['away_team']}"
-    game_start = pd.to_datetime(game.get("commence_time"), utc=True) if game.get("commence_time") else pd.NaT
-
-    for book in game.get("bookmakers", []):
-        if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
-            continue
-
-        for market in book.get("markets", []):
-            if market.get("key") not in ['h2h', 'spreads', 'totals']:
+    # === 2. Render Live Odds Snapshot Table
+    st.subheader(f"📊 Live Odds Snapshot – {label} (Odds + Limit)")
+    odds_rows = []
+    for game in live:
+        game_name = f"{game['home_team']} vs {game['away_team']}"
+        game_start = pd.to_datetime(game.get("commence_time"), utc=True) if game.get("commence_time") else pd.NaT
+    
+        for book in game.get("bookmakers", []):
+            if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
                 continue
-
-            for outcome in market.get("outcomes", []):
-                price = outcome.get('point') if market['key'] != 'h2h' else outcome.get('price')
-                odds_rows.append({
-                    "Game": game_name,
-                    "Market": market["key"],
-                    "Outcome": outcome["name"],
-                    "Bookmaker": book["title"],
-                    "Value": price,
-                    "Limit": outcome.get("bet_limit", 0),
-                    "Game_Start": game_start
-                })
-
-df_odds_raw = pd.DataFrame(odds_rows)
-
-if not df_odds_raw.empty:
-    # Combine Value + Limit
-    df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-        lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
-        else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
-        axis=1
-    )
-
-    # Localize to EST
-    eastern = pytz_timezone('US/Eastern')
-    df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Start'].apply(
-        lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
-        else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
-        else ""
-    )
-
-    # Pivot into Bookmaker columns
-    df_display = df_odds_raw.pivot_table(
-        index=["Date + Time (EST)", "Game", "Market", "Outcome"],
-        columns="Bookmaker",
-        values="Value_Limit",
-        aggfunc="first"
-    ).reset_index()
-
-    # Render as HTML
-    table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
-    st.markdown(f"<div class='scrollable-table-container'>{table_html_2}</div>", unsafe_allow_html=True)
-    st.success(f"✅ Live odds snapshot rendered — {len(df_display)} rows.")
+    
+            for market in book.get("markets", []):
+                if market.get("key") not in ['h2h', 'spreads', 'totals']:
+                    continue
+    
+                for outcome in market.get("outcomes", []):
+                    price = outcome.get('point') if market['key'] != 'h2h' else outcome.get('price')
+                    odds_rows.append({
+                        "Game": game_name,
+                        "Market": market["key"],
+                        "Outcome": outcome["name"],
+                        "Bookmaker": book["title"],
+                        "Value": price,
+                        "Limit": outcome.get("bet_limit", 0),
+                        "Game_Start": game_start
+                    })
+    
+    df_odds_raw = pd.DataFrame(odds_rows)
+    
+    if not df_odds_raw.empty:
+        # Combine Value + Limit
+        df_odds_raw['Value_Limit'] = df_odds_raw.apply(
+            lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
+            else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
+            axis=1
+        )
+    
+        # Localize to EST
+        eastern = pytz_timezone('US/Eastern')
+        df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Start'].apply(
+            lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
+            else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
+            else ""
+        )
+    
+        # Pivot into Bookmaker columns
+        df_display = df_odds_raw.pivot_table(
+            index=["Date + Time (EST)", "Game", "Market", "Outcome"],
+            columns="Bookmaker",
+            values="Value_Limit",
+            aggfunc="first"
+        ).reset_index()
+    
+        # Render as HTML
+        table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
+        st.markdown(f"<div class='scrollable-table-container'>{table_html_2}</div>", unsafe_allow_html=True)
+        st.success(f"✅ Live odds snapshot rendered — {len(df_display)} rows.")
 
 def fetch_scores_and_backtest(*args, **kwargs):
     print("⚠️ fetch_scores_and_backtest() is deprecated in UI and will be handled by Cloud Scheduler.")
