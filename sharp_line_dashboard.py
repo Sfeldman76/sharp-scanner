@@ -814,13 +814,7 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ No trained models available for scoring.")
 
         
-        # === Load recent sharp picks for live display
-        df_moves_raw = read_recent_sharp_moves(hours=12)
-        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
-        # ✅ Filter to live picks only (not yet started)
-        df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] > pd.Timestamp.utcnow()]
-        
+               
         if df_moves_raw.empty:
             st.warning("⚠️ No live sharp picks available in the last 12 hours.")
             return pd.DataFrame()
