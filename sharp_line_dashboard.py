@@ -714,9 +714,7 @@ def render_scanner_tab(label, sport_key, container):
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
-        st.write("✅ Loaded sharp moves from BigQuery:", len(df_moves_raw))
-        st.write(df_moves_raw[['Game', 'Game_Start', 'Market', 'Outcome', 'Value', 'Model_Sharp_Win_Prob']].head(10))
-
+        
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
         detection_key = f"sharp_moves_{sport_key_lower}"
         if detection_key in st.session_state:
