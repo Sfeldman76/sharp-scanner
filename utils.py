@@ -9,6 +9,7 @@ from io import BytesIO
 import requests
 import numpy as np
 import logging
+import hashlib
 
 import pickle  # ✅ Add this at the top of your script
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -77,6 +78,10 @@ def normalize_team(t):
 def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
+
+def compute_line_hash(row):
+    key = f"{row['Game_Key']}|{row['Bookmaker']}|{row['Market']}|{row['Outcome']}|{row['Value']}|{row.get('Limit', '')}|{row.get('Sharp_Move_Signal', '')}"
+    return hashlib.md5(key.encode()).hexdigest()
 def build_game_key(df):
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
     missing = [col for col in required if col not in df.columns]
