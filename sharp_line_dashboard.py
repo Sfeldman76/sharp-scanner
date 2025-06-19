@@ -798,7 +798,16 @@ def render_scanner_tab(label, sport_key, container):
                 st.error(f"❌ Model scoring failed: {e}")
         else:
             st.warning("⚠️ No trained models available for scoring.")
+        # === Load recent sharp picks for live display
+        df_moves_raw = read_recent_sharp_moves(hours=12)
+        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         
+        # ✅ Filter to live picks only (not yet started)
+        df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] > pd.Timestamp.utcnow()]
+        
+        if df_moves_raw.empty:
+            st.warning("⚠️ No live sharp picks available in the last 12 hours.")
+            return pd.DataFrame()
         # === Final Cleanup + Placeholders
         df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
         # === Consensus line calculation ===
@@ -822,9 +831,13 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
                 # === 1. Load df_history and compute df_first
+        # === Load broader trend history for open line / tier comparison
         df_history = read_recent_sharp_moves(hours=72)
-        df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
+        
+        # ✅ Filter to only rows relevant to current live games
         df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
+        df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
+
         
         df_first = df_history.sort_values('Snapshot_Timestamp') \
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
@@ -833,6 +846,7 @@ def render_scanner_tab(label, sport_key, container):
                 'Sharp_Confidence_Tier': 'First_Tier',
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
+
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
 
