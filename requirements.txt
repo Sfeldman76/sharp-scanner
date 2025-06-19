@@ -12,8 +12,9 @@ pyarrow  # Required for BigQuery pandas interface
 joblib    # For saving isotonic calibrators
 
 # === Machine Learning ===
-xgboost
-scikit-learn
+xgboost==1.7.6
+scikit-learn==1.7.0
+
 
 # === Google Cloud SDKs ===
 google-auth
