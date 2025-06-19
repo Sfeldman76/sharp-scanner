@@ -13,7 +13,9 @@ import hashlib
 
 import pickle  # ✅ Add this at the top of your script
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
+from xgboost import XGBClassifier
+from sklearn.isotonic import IsotonicRegression
+from sklearn.model_selection import train_test_split
 from google.cloud import bigquery, storage
 
 # === Config ===
