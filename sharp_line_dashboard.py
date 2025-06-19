@@ -985,7 +985,7 @@ def render_scanner_tab(label, sport_key, container):
         
        
            
-		st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
+        st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
 
         # === Merge model scores
         model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
