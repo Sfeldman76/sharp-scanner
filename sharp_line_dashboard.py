@@ -1061,34 +1061,16 @@ def render_scanner_tab(label, sport_key, container):
         df_extras = df_moves_raw[extra_cols].drop_duplicates()
         summary_df = summary_df.merge(df_extras, on=['Game', 'Market', 'Outcome'], how='left')
         
-        # Merge Game_Start for EST display
-        if {'Event_Date', 'Market', 'Game'}.issubset(df_moves_raw.columns):
-            df_game_start = df_moves_raw[['Game', 'Market', 'Event_Date', 'Game_Start']].dropna().drop_duplicates()
-            df_game_start['MergeKey'] = (
-                df_game_start['Game'] + "_" + df_game_start['Market'] + "_" + df_game_start['Event_Date']
-            )
-            summary_df['MergeKey'] = (
-                summary_df['Game'] + "_" + summary_df['Market'] + "_" + summary_df['Event_Date']
-            )
-            summary_df = summary_df.merge(
-                df_game_start[['MergeKey', 'Game_Start']],
-                on='MergeKey',
-                how='left'
-            )
-        
-        # Format Game_Start → EST
-        def safe_to_est(dt):
-            if pd.isna(dt): return ""
-            try:
-                dt = pd.to_datetime(dt, errors='coerce')
-                if dt.tzinfo is None:
-                    dt = dt.tz_localize('UTC')
-                return dt.tz_convert('US/Eastern').strftime('%Y-%m-%d %I:%M %p')
-            except:
-                return ""
-        
+        # Ensure Game_Start is datetime and in UTC
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
-        summary_df['Date + Time (EST)'] = summary_df['Game_Start'].apply(safe_to_est)
+        
+        # Drop any rows with missing Game_Start
+        summary_df = summary_df[summary_df['Game_Start'].notna()]
+        
+        # Convert Game_Start to EST for display
+        summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
+        
+        # Optional: filter out rows with invalid conversion
         summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
         
         # Extract date-only column
