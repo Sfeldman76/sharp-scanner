@@ -538,6 +538,7 @@ def apply_blended_sharp_score(df, trained_models):
     df['Market'] = df['Market'].astype(str).str.lower()
 
     for market_type, bundle in trained_models.items():
+        start = time.time()
         model = bundle['model']
         iso = bundle['calibrator']
         df_market = df[df['Market'] == market_type].copy()
@@ -549,15 +550,14 @@ def apply_blended_sharp_score(df, trained_models):
             model_features = model.get_booster().feature_names
 
             # Ensure all required features exist and are numeric
-            for col in model_features:
-                if col not in df_market.columns:
-                    df_market[col] = 0
-                df_market[col] = (
-                    df_market[col]
-                    .astype(str)
-                    .replace({'True': 1, 'False': 0, 'true': 1, 'false': 0})
-                )
-                df_market[col] = pd.to_numeric(df_market[col], errors='coerce').fillna(0)
+            missing_cols = [col for col in model_features if col not in df_market.columns]
+            for col in missing_cols:
+                df_market[col] = 0
+            
+            df_market = df_market[model_features].copy()
+            df_market = df_market.replace({'True': 1, 'False': 0, 'true': 1, 'false': 0})
+            df_market = df_market.apply(pd.to_numeric, errors='coerce').fillna(0)
+
 
             df_market = df_market[model_features].astype(float)
 
@@ -571,7 +571,7 @@ def apply_blended_sharp_score(df, trained_models):
 
         except Exception as e:
             st.error(f"❌ Failed to apply model for {market_type}: {e}")
-
+        st.info(f"⏱️ Scored {market_type} in {time.time() - start:.2f}s")
     # Apply tiering only if Model_Sharp_Win_Prob exists
     if 'Model_Sharp_Win_Prob' in df.columns:
         df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
