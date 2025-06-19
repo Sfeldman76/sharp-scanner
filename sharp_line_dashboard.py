@@ -728,8 +728,12 @@ def render_scanner_tab(label, sport_key, container):
         st.write("✅ Sharp moves before Game_Start filter:", len(df_moves_raw))
         st.write("Sports in data:", df_moves_raw['Sport'].dropna().unique())
 
-        # ✅ Filter by sport label (e.g., only NBA picks in NBA tab)
-        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.upper() == label.upper()]
+        df_moves_raw['Sport'] = df_moves_raw['Sport'].astype(str)
+        label_lower = label.lower()
+        
+        # Normalize and match the sport field (e.g., 'basketball_nba' should match 'nba')
+        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.lower().str.contains(label_lower)]
+
 
         # ✅ DEBUG: Show sport filtering
         st.write("🎯 Filtering for sport:", label.upper())
