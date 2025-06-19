@@ -962,9 +962,18 @@ def render_scanner_tab(label, sport_key, container):
                 df_moves_raw[col] = fallback
         
  
-        df_moves_raw = df_moves_raw.join(df_moves_raw.apply(compute_diagnostics, axis=1))
+       
+        start = time.time()
+
+        # Only apply diagnostics to pre-game rows
+        pre_mask = df_moves_raw['Pre_Game'] == True
+        diagnostics_df = df_moves_raw[pre_mask].apply(compute_diagnostics, axis=1)
         
-     
+        # Assign results to only pre-game rows
+        for col in diagnostics_df.columns:
+            df_moves_raw.loc[pre_mask, col] = diagnostics_df[col]
+        
+        st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} pre-game rows in {time.time() - start:.2f}s")
         
         
         # === 6. Final Summary Table
