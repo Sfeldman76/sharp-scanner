@@ -240,7 +240,11 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         return
 
     df = df.copy()
-
+	
+    # ✅ Only keep rows from sharp and rec books
+    allowed_books = SHARP_BOOKS + REC_BOOKS
+    df = df[df['Book'].isin(allowed_books)]
+    
     # Safety: Ensure Game_Key exists
     if 'Game_Key' not in df.columns or df['Game_Key'].isnull().all():
         logging.warning("❌ No valid Game_Key present — skipping upload.")
