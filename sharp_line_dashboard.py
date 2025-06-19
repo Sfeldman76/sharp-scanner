@@ -512,35 +512,39 @@ def read_market_weights_from_bigquery():
         return {}
 
 def compute_diagnostics_vectorized(df):
+    import numpy as np
+    import pandas as pd
+
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
+    # === Ensure expected string columns exist and are cleaned
     for col in ['Model_Confidence_Tier', 'First_Tier']:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].astype(str).fillna("").str.strip()
-    
+
+    # === Tier Mapping
     tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
     tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
-    
-    
-    # Tier Change
+
+    # === Tier Change
     tier_change = np.where(
-        df['First_Tier'].notna(),
+        df['First_Tier'].notna() & (df['First_Tier'] != ""),
         np.where(
             tier_current > tier_open,
-            "↑ " + df['First_Tier'].astype(str) + " → " + df['Model_Confidence_Tier'].astype(str),
+            "↑ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
             np.where(
                 tier_current < tier_open,
-                "↓ " + df['First_Tier'].astype(str) + " → " + df['Model_Confidence_Tier'].astype(str),
+                "↓ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
                 "↔ No Change"
             )
         ),
         "⚠️ Missing"
     )
 
-    # Confidence Evolution
-    prob_start = pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
-    prob_now = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
+    # === Confidence Evolution
+    prob_start = pd.to_numeric(df.get('First_Sharp_Prob', 0), errors='coerce')
+    prob_now = pd.to_numeric(df.get('Model_Sharp_Win_Prob', 0), errors='coerce')
     delta = prob_now - prob_start
 
     confidence_trend = np.where(
@@ -557,8 +561,8 @@ def compute_diagnostics_vectorized(df):
         )
     )
 
-    # Direction (line vs model)
-    line_delta = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
+    # === Direction (model vs line)
+    line_delta = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
 
     direction = np.where(
         (delta > 0.04) & (line_delta < 0), "🟢 Model ↑ / Line ↓",
@@ -574,8 +578,8 @@ def compute_diagnostics_vectorized(df):
         )
     )
 
-    # Model Reasoning Base
-    prob = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce').fillna(0)
+    # === Model Reasoning Base
+    prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob', 0), errors='coerce').fillna(0)
     model_reason = np.select(
         [
             prob >= 0.58,
@@ -592,35 +596,32 @@ def compute_diagnostics_vectorized(df):
         default="🪙 Coinflip"
     )
 
-    # Combine all other reasoning flags
-    reasoning_parts = []
-    reasoning_parts.append(pd.Series(model_reason, index=df.index))
+    # === Additional Signals (vectorized append)
+    reasoning_parts = [pd.Series(model_reason, index=df.index)]
 
-    def add_reason(condition, text):
-        mask = condition.fillna(False)
-        reasoning_parts.append(mask.map(lambda x: text if x else "").astype(str))
+    def append_reason(condition, label):
+        mask = pd.Series(condition).fillna(False)
+        reasoning_parts.append(mask.map(lambda x: label if x else ""))
 
-    add_reason(df['Sharp_Prob_Shift'] > 0, "Confidence ↑")
-    add_reason(df['Sharp_Prob_Shift'] < 0, "Confidence ↓")
-    add_reason(df['Sharp_Limit_Jump'], "Limit Jump")
-    add_reason(df['Market_Leader'], "Led Market Move")
-    add_reason(df['Is_Reinforced_MultiMarket'], "Cross-Market Signal")
-    add_reason(df['LimitUp_NoMove_Flag'], "Limit ↑ w/o Price Move")
+    append_reason(df.get('Sharp_Prob_Shift', 0) > 0, "Confidence ↑")
+    append_reason(df.get('Sharp_Prob_Shift', 0) < 0, "Confidence ↓")
+    append_reason(df.get('Sharp_Limit_Jump', 0), "Limit Jump")
+    append_reason(df.get('Market_Leader', 0), "Led Market Move")
+    append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
+    append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
 
-    # Final reasoning string
     model_reasoning = pd.Series([
         " | ".join(filter(None, parts))
         for parts in zip(*reasoning_parts)
     ], index=df.index)
 
+    # === Final Output
     return pd.DataFrame({
         'Tier_Change': tier_change,
         '📊 Confidence Evolution': confidence_trend,
         'Direction': direction,
         '📌 Model Reasoning': model_reasoning
     })
-
-
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
