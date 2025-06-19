@@ -724,9 +724,7 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = read_recent_sharp_moves(hours=12)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
-        st.write("🎯 Filtering for sport:", label)
-        st.write("✅ Sharp moves before Game_Start filter:", len(df_moves_raw))
-        st.write("Sports in data:", df_moves_raw['Sport'].dropna().unique())
+       
 
         df_moves_raw['Sport'] = df_moves_raw['Sport'].astype(str)
         label_lower = label.lower()
@@ -737,36 +735,21 @@ def render_scanner_tab(label, sport_key, container):
 
 
         # ✅ DEBUG: Show sport filtering
-        st.write("🎯 Filtering for sport:", label.upper())
-        st.write("✅ Sharp moves before Game_Start filter:", len(df_moves_raw))
-        st.write("Sports in data:", df_moves_raw['Sport'].dropna().unique())
+    
 
         # === Filter to only live (upcoming) picks
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        st.write("📆 Earliest Game_Start:", df_moves_raw['Game_Start'].min())
-        st.write("📆 Latest Game_Start:", df_moves_raw['Game_Start'].max())
-
         df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] >= pd.Timestamp.utcnow()]
-        st.write("🟢 After filtering for live picks:", len(df_moves_raw))
+    
 
-        # ✅ DEBUG: Final live pick count
-        st.write("🟢 After filtering for live picks:", len(df_moves_raw))
-        if not df_moves_raw.empty:
-            st.dataframe(df_moves_raw[['Game', 'Game_Start', 'Market', 'Outcome', 'Value']].head(10))
-
-        # === Exit early if none remain
+              # === Exit early if none remain
         if df_moves_raw.empty:
             st.warning("⚠️ No live sharp picks available at this time.")
             return pd.DataFrame()
 
-        # === DEBUG
-        st.info(f"📊 Loaded {len(df_moves_raw)} sharp moves rows")
-        st.write(df_moves_raw.head(5))
-        
-
         # Continue to enrichment + scoring...
         df_moves_raw = df_moves_raw[df_moves_raw['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
-        # === Enrich and score
+        
         # === Enrich and Score ===
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
