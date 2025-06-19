@@ -1104,6 +1104,8 @@ def render_scanner_tab(label, sport_key, container):
             'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
         table_df = filtered_df[view_cols].copy()
+        st.info(f"✅ Table DF shape: {table_df.shape}")
+        st.write(table_df.head())
         table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]
         # === CSS Styling for All Tables (keep this once)
         st.markdown("""
@@ -1180,7 +1182,7 @@ def render_scanner_tab(label, sport_key, container):
         # === Render HTML Table
         table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
         st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
-        
+        st.success("✅ Finished rendering sharp picks table.")
         # === Optional footer
         st.caption(f"Showing {len(table_df)} rows")
         # === Live Odds Snapshot Table ===
