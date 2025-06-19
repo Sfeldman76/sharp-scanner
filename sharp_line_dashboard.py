@@ -1029,7 +1029,6 @@ def render_scanner_tab(label, sport_key, container):
         df_moves = df_moves_raw.copy()
         
         
-        df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
            
         # === Summary Header
         st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
@@ -1083,6 +1082,9 @@ def render_scanner_tab(label, sport_key, container):
         # === Clean column suffixes
         summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
         
+        # ✅ Drop any duplicate columns before renaming (fixes arrow error)
+        summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
+
         # === Rename for display
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
