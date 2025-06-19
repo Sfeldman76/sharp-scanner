@@ -591,7 +591,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
     df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
     df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
-    
+    # === Recompute Pre_Game / Post_Game before saving
+    df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
+    now = pd.Timestamp.utcnow()
+    df['Pre_Game'] = df['Game_Start'] > now
+    df['Post_Game'] = ~df['Pre_Game']
     # === Confidence scores and tiers
     df = assign_confidence_scores(df, weights)
     
