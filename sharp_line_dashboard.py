@@ -644,6 +644,8 @@ def fetch_scored_picks_from_bigquery(limit=50000):
         st.error(f"❌ Failed to fetch scored picks: {e}")
         return pd.DataFrame()
         
+
+
 def render_scanner_tab(label, sport_key, container):
     #market_weights = read_market_weights_from_bigquery()
     #if not market_weights:
@@ -724,7 +726,7 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = read_recent_sharp_moves(hours=12)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
-        
+        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.upper() == label.upper()]
         # === Keep only live picks
         now = pd.Timestamp.utcnow()
 
