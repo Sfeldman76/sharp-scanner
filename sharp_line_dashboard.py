@@ -1089,7 +1089,11 @@ def render_scanner_tab(label, sport_key, container):
         </style>
         """, unsafe_allow_html=True)
         
-       # === 1. Render Sharp Picks Table
+
+table_df = summary_grouped[view_cols].copy()
+
+# === Render Sharp Picks Table (HTML Version)
+table_df = summary_grouped[view_cols].copy()
 table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
 st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
 st.success("✅ Finished rendering sharp picks table.")
@@ -1151,7 +1155,7 @@ if not df_odds_raw.empty:
     # Render as HTML
     table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
     st.markdown(f"<div class='scrollable-table-container'>{table_html_2}</div>", unsafe_allow_html=True)
-    st.caption(f"Showing {len(df_display)} rows")
+    st.success(f"✅ Live odds snapshot rendered — {len(df_display)} rows.")
 
 def fetch_scores_and_backtest(*args, **kwargs):
     print("⚠️ fetch_scores_and_backtest() is deprecated in UI and will be handled by Cloud Scheduler.")
