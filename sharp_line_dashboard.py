@@ -1142,6 +1142,13 @@ def render_scanner_tab(label, sport_key, container):
             'Model Prob', 'Confidence\nTier', 
             'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
+       # 🛡️ Defensive check before slicing view_cols
+        missing_cols = [col for col in view_cols if col not in filtered_df.columns]
+        if missing_cols:
+            st.error(f"❌ Missing columns in filtered_df: {missing_cols}")
+            st.write("✅ Available columns:", filtered_df.columns.tolist())
+            return pd.DataFrame()  # 💥 Prevent crash
+
 
         table_df = filtered_df[view_cols].copy()
         st.info(f"✅ Table DF shape: {table_df.shape}")
