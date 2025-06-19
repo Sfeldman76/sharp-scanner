@@ -849,195 +849,98 @@ def render_scanner_tab(label, sport_key, container):
         df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
 
         
-        df_first = df_history.sort_values('Snapshot_Timestamp') \
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
+        # === 1. Build First Snapshot Table
+        df_first = (
+            df_history.sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
             .rename(columns={
                 'Value': 'First_Line_Value',
                 'Sharp_Confidence_Tier': 'First_Tier',
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
-
+        )
+        
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
-
-        # === 2. Merge First Line into raw moves
+        
+        # === 2. Merge First Snapshot into Raw Moves
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-
         
-        # === DEBUG: Check merge success
-        if 'First_Line_Value' not in df_moves_raw.columns or df_moves_raw['First_Line_Value'].isna().all():
-            st.warning("⚠️ First_Line_Value missing — open line movement not calculated.")
-            st.write("df_first merge keys preview:")
-            st.write(df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].head())
-            st.write("df_moves_raw keys preview:")
-            st.write(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].head())
+        # === 3. Movement Calculations
+        for col_name, col_calc in {
+            'Move_From_Open_Sharp': lambda df: df['Sharp_Book_Consensus'] - df['First_Line_Value'],
+            'Move_From_Open_Rec': lambda df: df['Rec_Book_Consensus'] - df['First_Line_Value']
+        }.items():
+            if 'First_Line_Value' in df_moves_raw.columns:
+                df_moves_raw[col_name] = col_calc(df_moves_raw).round(2)
         
-        # === Calculate movement vs open line (optional)
-        if 'First_Line_Value' in df_moves_raw.columns:
-            df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Sharp_Book_Consensus'] - df_moves_raw['First_Line_Value']
-            df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Rec_Book_Consensus'] - df_moves_raw['First_Line_Value']
-        
-        # === Round movement and consensus safely
-        for col in ['Move_From_Open_Sharp', 'Move_From_Open_Rec', 'Sharp_Book_Consensus', 'Rec_Book_Consensus']:
-            if col in df_moves_raw.columns:
-                df_moves_raw[col] = df_moves_raw[col].round(2)
-        
-        # === Drop merge artifacts
-        df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore', inplace=True)
-        
-        # === Fallback Ref_Sharp_Value
-        if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
-            df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
-        
-        # === Ensure scoring fields are present
-        for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier']:
+        # === 4. Ensure Required Fields
+        fallbacks = {
+            'Ref_Sharp_Value': df_moves_raw.get('Value'),
+            'SHARP_HIT_BOOL': None,
+            'SHARP_COVER_RESULT': None,
+            'Scored': None,
+            'Model_Sharp_Win_Prob': None,
+            'Model_Confidence_Tier': None,
+        }
+        for col, fallback in fallbacks.items():
             if col not in df_moves_raw.columns:
-                df_moves_raw[col] = None
+                df_moves_raw[col] = fallback
         
-        # === Dedup view
-        df_moves = df_moves_raw.drop_duplicates(
-            subset=['Game_Key', 'Bookmaker'], keep='first'
-        )[['Game', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier']]
-        
-
-        
-        
-        # === 4. Tier Change Detection
+        # === 5. Trend + Diagnostic Columns
         TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
         
-        def compute_tier_change(first, current):
-            try:
-                first_str = str(first).strip()
-                current_str = str(current).strip()
-                first_val = TIER_ORDER.get(first_str, 0)
-                current_val = TIER_ORDER.get(current_str, 0)
-                if current_val > first_val:
-                    return f"↑ {first} → {current}"
-                elif current_val < first_val:
-                    return f"↓ {first} → {current}"
-                return "↔ No Change"
-            except Exception:
-                return "⚠️ Missing"
-
-        # === 5. Confidence Trend
-        def build_trend_explanation(row):
-            start = row.get('First_Sharp_Prob')
-            now = row.get('Model_Sharp_Win_Prob')
-            if start is None or now is None:
-                return "⚠️ Missing"
-            try:
-                start = float(start)
-                now = float(now)
-            except:
-                return "⚠️ Error"
-            delta = now - start
-            threshold = 0.04
-            if delta >= threshold:
-                trend = "📈 Trending Up"
-            elif delta <= -threshold:
-                trend = "📉 Trending Down"
-            else:
-                trend = "↔ Stable"
-            return f"{trend}: {start:.2%} → {now:.2%}"
+        df_moves_raw['Tier_Change'] = df_moves_raw.apply(
+            lambda row: (
+                "↔ No Change" if TIER_ORDER.get(str(row['Model_Confidence_Tier']).strip(), 0) == TIER_ORDER.get(str(row['First_Tier']).strip(), 0)
+                else f"{'↑' if TIER_ORDER.get(str(row['Model_Confidence_Tier']).strip(), 0) > TIER_ORDER.get(str(row['First_Tier']).strip(), 0) else '↓'} {row['First_Tier']} → {row['Model_Confidence_Tier']}"
+            ) if pd.notna(row['First_Tier']) else "⚠️ Missing",
+            axis=1
+        )
         
-        df_moves_raw['Confidence_Trend'] = df_moves_raw.apply(build_trend_explanation, axis=1)
+        df_moves_raw['📊 Confidence Evolution'] = df_moves_raw.apply(
+            lambda row: (
+                "⚠️ Missing" if pd.isna(row['First_Sharp_Prob']) or pd.isna(row['Model_Sharp_Win_Prob']) else
+                f"{'📈 Trending Up' if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] >= 0.04 else '📉 Trending Down' if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] <= -0.04 else '↔ Stable'}: {row['First_Sharp_Prob']:.2%} → {row['Model_Sharp_Win_Prob']:.2%}"
+            ),
+            axis=1
+        )
         
-        # === 6. Line/Model Direction
-        def determine_direction(row):
-            try:
-                start_prob = float(row.get('First_Sharp_Prob', 0))
-                model_prob = float(row.get('Model_Sharp_Win_Prob', 0))
-                prob_delta = model_prob - start_prob
-            except:
-                prob_delta = 0
-            try:
-                line_delta = float(row.get('Value', 0)) - float(row.get('First_Line_Value', 0))
-            except:
-                line_delta = 0
-            if prob_delta > 0.04 and line_delta < 0:
-                return "🟢 Model ↑ / Line ↓"
-            elif prob_delta < -0.04 and line_delta > 0:
-                return "🔴 Model ↓ / Line ↑"
-            elif prob_delta > 0.04 and line_delta > 0:
-                return "🟢 Aligned ↑"
-            elif prob_delta < -0.04 and line_delta < 0:
-                return "🔻 Aligned ↓"
-            return "⚪ Mixed"
+        df_moves_raw['Direction'] = df_moves_raw.apply(
+            lambda row: (
+                "⚪ Mixed" if pd.isna(row['First_Sharp_Prob']) or pd.isna(row['Model_Sharp_Win_Prob']) or pd.isna(row['First_Line_Value']) or pd.isna(row['Value']) else
+                "🟢 Model ↑ / Line ↓" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] > 0.04 and row['Value'] - row['First_Line_Value'] < 0 else
+                "🔴 Model ↓ / Line ↑" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] < -0.04 and row['Value'] - row['First_Line_Value'] > 0 else
+                "🟢 Aligned ↑" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] > 0.04 and row['Value'] - row['First_Line_Value'] > 0 else
+                "🔻 Aligned ↓" if row['Model_Sharp_Win_Prob'] - row['First_Sharp_Prob'] < -0.04 and row['Value'] - row['First_Line_Value'] < 0 else
+                "⚪ Mixed"
+            ),
+            axis=1
+        )
         
-        df_moves_raw['Line_Model_Direction'] = df_moves_raw.apply(determine_direction, axis=1)
-        
-        # === 7. Model Reason Explanation
         def build_model_reason(row):
             reasons = []
             try:
                 prob = float(row.get('Model_Sharp_Win_Prob', 0))
-                if prob >= 0.58:
-                    reasons.append("🔼 Strong Model Edge")
-                elif prob >= 0.52:
-                    reasons.append("↗️ Slight Model Lean")
-                elif prob <= 0.48:
-                    reasons.append("↘️ Slight Model Fade")
-                elif prob <= 0.42:
-                    reasons.append("🔽 Strong Model Fade")
-                else:
-                    reasons.append("🪙 Coinflip")
+                if prob >= 0.58: reasons.append("🔼 Strong Model Edge")
+                elif prob >= 0.52: reasons.append("↗️ Slight Model Lean")
+                elif prob <= 0.48: reasons.append("↘️ Slight Model Fade")
+                elif prob <= 0.42: reasons.append("🔽 Strong Model Fade")
+                else: reasons.append("🪙 Coinflip")
             except:
                 reasons.append("⚠️ No model confidence")
         
-            if row.get('Sharp_Prob_Shift', 0) > 0:
-                reasons.append("Confidence ↑")
-            elif row.get('Sharp_Prob_Shift', 0) < 0:
-                reasons.append("Confidence ↓")
-        
-            if row.get('Sharp_Limit_Jump', 0):
-                reasons.append("Limit Jump")
-            if row.get('Market_Leader', 0):
-                reasons.append("Led Market Move")
-            if row.get('Is_Reinforced_MultiMarket', 0):
-                reasons.append("Cross-Market Signal")
-            if row.get('LimitUp_NoMove_Flag', 0):
-                reasons.append("Limit ↑ w/o Price Move")
-        
+            if row.get('Sharp_Prob_Shift', 0) > 0: reasons.append("Confidence ↑")
+            if row.get('Sharp_Prob_Shift', 0) < 0: reasons.append("Confidence ↓")
+            if row.get('Sharp_Limit_Jump', 0): reasons.append("Limit Jump")
+            if row.get('Market_Leader', 0): reasons.append("Led Market Move")
+            if row.get('Is_Reinforced_MultiMarket', 0): reasons.append("Cross-Market Signal")
+            if row.get('LimitUp_NoMove_Flag', 0): reasons.append("Limit ↑ w/o Price Move")
             return " | ".join(reasons)
         
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
-        st.info(f"✅ Merged historical trend baseline for {len(df_first)} unique lines.")
-
-     
-
-        # === Run backtest (if not already done this session)
-
-
-        #backtest_date_key = f"last_backtest_date_{sport_key_lower}"
-        today = datetime.utcnow().date()
         
-        #if st.session_state.get(backtest_date_key) != today:
-            #fetch_scores_and_backtest(
-                #sport_key, df_moves=None, api_key=API_KEY, trained_models=trained_models
-            #)
-            #st.session_state[backtest_date_key] = today
-            #st.success("✅ Backtesting and scoring completed for today.")
-        #else:
-            #st.info(f"⏭ Backtest already run today for {label.upper()} — skipping.")
-                           
-        df_moves = df_moves_raw.copy()
-        
-        
-           
-        # === Summary Header
-        st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
-        
-        # === Merge model scores (efficient dedup before merge)
-        model_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
-        df_merge_scores = (
-            df_moves[['Game', 'Market', 'Outcome'] + model_cols]
-            .dropna(subset=model_cols)
-            .drop_duplicates(subset=['Game', 'Market', 'Outcome'])
-        )
-        # 🛠️ Fix duplicate columns in df_moves_raw
-        df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()].copy()
-
-        # === Build summary_df with only needed columns
+        # === 6. Final Summary Table
         summary_cols = [
             'Game', 'Market', 'Game_Start', 'Outcome',
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
@@ -1046,95 +949,56 @@ def render_scanner_tab(label, sport_key, container):
             '📌 Model Reasoning', '📊 Confidence Evolution',
             'Tier_Change', 'Direction'
         ]
-        # Only keep columns that exist in the raw DataFrame
-        summary_cols = [col for col in summary_cols if col in df_moves_raw.columns]
-        summary_df = df_moves_raw[summary_cols].copy()
-        
-        # ✅ Safely normalize string columns
-        for col in ['Game', 'Market', 'Outcome']:
-            if col in summary_df.columns and isinstance(summary_df[col], pd.Series):
-                summary_df[col] = summary_df[col].astype(str).str.strip().str.lower()
-        
-        # 🛠️ Debug column types to ensure everything is clean
-        st.write("⚠️ Column types:", {col: type(summary_df[col]) for col in ['Game', 'Market', 'Outcome'] if col in summary_df.columns})
-
-        # === Add Event_Date for filtering
-        summary_df['Event_Date'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True).dt.date.astype(str)
-        
-        # === Merge model scores
-        summary_df = summary_df.merge(df_merge_scores, on=['Game', 'Market', 'Outcome'], how='left')
-        
-        # === Fill missing diagnostic fields
-        diagnostic_cols = ['📌 Model Reasoning', '📊 Confidence Evolution', 'Tier_Change', 'Direction']
-        for col in diagnostic_cols:
-            if col not in summary_df.columns:
-                summary_df[col] = ""
-        
-        # === Convert Game_Start to EST string
+        summary_df = df_moves_raw[[col for col in summary_cols if col in df_moves_raw.columns]].copy()
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
-        summary_df = summary_df[summary_df['Date + Time (EST)'] != ""]
-        
-        # === Extract date-only column
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
         
-        # === Clean column suffixes
-        summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
-        
-        # ✅ Drop any duplicate columns before renaming (fixes arrow error)
-        summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
-
-        # === Rename for display
-        summary_df.rename(columns={
-            'Date + Time (EST)': 'Date\n+ Time (EST)',
-            'Game': 'Matchup',
-            'Outcome': 'Pick\nSide',
-            'Rec_Book_Consensus': 'Rec\nConsensus',
-            'Sharp_Book_Consensus': 'Sharp\nConsensus',
-            'Model_Sharp_Win_Prob': 'Model Prob',
-            'Move_From_Open_Rec': 'Rec\nMove',
-            'Move_From_Open_Sharp': 'Sharp\nMove',
-            'Model_Confidence_Tier': 'Confidence\nTier',
-            '📌 Model Reasoning': 'Why Model Prefers',
-            '📊 Confidence Evolution': 'Confidence Trend',
-            'Tier_Change': 'Tier Δ',
-            'Direction': 'Line/Model Direction'
-        }, inplace=True)
-        
-        # === Filter UI
+        # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
         
         date_only_options = ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique())
         selected_date = st.selectbox(f"📅 Filter {label} by Date", date_only_options, key=f"{label}_date_filter")
         
-        # === Filter by market/date
+        # === Apply Filters
         filtered_df = summary_df.copy()
         if selected_market != "All":
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
-        # === Select view columns
+        # === Group by Matchup + Side + Timestamp
+        summary_grouped = (
+            filtered_df
+            .groupby(['Matchup', 'Market', 'Pick', 'Date + Time (EST)'], as_index=False)
+            .agg({
+                'Rec Line': 'mean',
+                'Sharp Line': 'mean',
+                'Rec Move': 'mean',
+                'Sharp Move': 'mean',
+                'Model Prob': 'mean',
+                'Confidence Tier': 'first',
+                'Why Model Likes It': lambda x: ' | '.join(sorted(set(x.dropna()))),
+                'Confidence Trend': 'first',
+                'Tier Δ': 'first',
+                'Line/Model Direction': 'first'
+            })
+        )
+        
+        # === Final Column Order for Display
         view_cols = [
-            'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
-            'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model Prob', 'Confidence\nTier',
-            'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
+            'Date + Time (EST)', 'Matchup', 'Market', 'Pick',
+            'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
+            'Model Prob', 'Confidence Tier',
+            'Why Model Likes It', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
         
-        missing_cols = [col for col in view_cols if col not in filtered_df.columns]
-        if missing_cols:
-            st.error(f"❌ Missing columns in filtered_df: {missing_cols}")
-            st.write("✅ Available columns:", filtered_df.columns.tolist())
-            return pd.DataFrame()
-        
-        # === Render Table
-        table_df = filtered_df[view_cols].copy()
-        st.info(f"✅ Table DF shape: {table_df.shape}")
-        st.write(table_df.head())
-        table_df.columns = [col.replace('\n', ' ') for col in table_df.columns]
+        # === Final Output
+        st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
+        st.info(f"✅ Summary table shape: {summary_grouped.shape}")
+        st.dataframe(summary_grouped[view_cols], use_container_width=True)
 
         # === CSS Styling for All Tables (keep this once)
         st.markdown("""
@@ -1208,358 +1072,74 @@ def render_scanner_tab(label, sport_key, container):
         </style>
         """, unsafe_allow_html=True)
         
-        # === Render HTML Table
-        table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
-        st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
-        st.success("✅ Finished rendering sharp picks table.")
-        # === Optional footer
-        st.caption(f"Showing {len(table_df)} rows")
-        # === Live Odds Snapshot Table ===
-        st.subheader(f" Live Odds Snapshot – {label} (Odds + Limit)")
-        odds_rows = []
-        for game in live:
-            game_name = f"{game['home_team']} vs {game['away_team']}"
-            game_start = pd.to_datetime(game.get("commence_time")) if game.get("commence_time") else pd.NaT
-        
-            for book in game.get("bookmakers", []):
-                if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
-                    continue  # ✅ Skip non-sharp/rec books
-        
-                for market in book.get("markets", []):
-                    if market.get('key') not in ['h2h', 'spreads', 'totals']:
-                        continue  # ✅ Skip non-target markets
-        
-                    for o in market.get("outcomes", []):
-                        price = o.get('point') if market['key'] != 'h2h' else o.get('price')
-                        odds_rows.append({
-                            "Game": game_name,
-                            "Market": market['key'],
-                            "Outcome": o["name"],
-                            "Bookmaker": book["title"],
-                            "Value": price,
-                            "Limit": o.get("bet_limit", 0),
-                            "Game_Start": game_start
-                        })
+       # === 1. Render Sharp Picks Table
+table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
+st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
+st.success("✅ Finished rendering sharp picks table.")
+st.caption(f"Showing {len(table_df)} rows")
 
-                
-        df_odds_raw = pd.DataFrame(odds_rows)
-        if not df_odds_raw.empty:
-            df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
-                else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
-                axis=1
-            )
-        
-            eastern = pytz_timezone('US/Eastern')
-            df_odds_raw['Date + Time (EST)'] = pd.to_datetime(df_odds_raw['Game_Start'], errors='coerce').apply(
-                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
-                else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
-                else ""
-            )
-        
-            # === Pivot Current Snapshot ===
-            df_display = df_odds_raw.pivot_table(
-                index=["Date + Time (EST)", "Game", "Market", "Outcome"],
-                columns="Bookmaker",
-                values="Value_Limit",
-                aggfunc="first"
-            ).reset_index()
-            
-            # === Compare to Previous Snapshot to Highlight Changes ===
-            if not df_prev_display.empty:
-                df_compare = df_display.merge(
-                    df_prev_display,
-                    on=["Date + Time (EST)", "Game", "Market", "Outcome"],
-                    suffixes=("", "_old"),
-                    how="left"
-                )
-                change_mask = pd.DataFrame(False, index=df_compare.index, columns=df_display.columns)
-                for col in df_display.columns:
-                    old_col = f"{col}_old"
-                    if old_col in df_compare.columns:
-                        change_mask[col] = df_compare[col] != df_compare[old_col]
-            else:
-                df_compare = df_display.copy()
-                change_mask = pd.DataFrame(False, index=df_display.index, columns=df_display.columns)
-            # === Live Odds Table: Skip pagination and use full scrollable display ===
-            paginated_df_2 = df_display.copy()
-            compare_slice = df_compare.copy()
-            mask_slice = change_mask.copy()
-            # === Render Custom HTML Table with Change Highlighting ===
-            def render_custom_html_table(df, highlight_cols, change_mask=None, df_compare=None):
-                def style_cell(val, col, row_idx):
-                    base = ""
-                    arrow = ""
-                    # Highlight sharp books
-                    if col in highlight_cols and val != "":
-                        base += "background-color:#d0f0c0; color:black; font-weight:600;"
-                    # Highlight changed values
-                    if change_mask is not None and col in change_mask.columns and change_mask.loc[row_idx, col]:
-                        old_val = df_compare.iloc[row_idx].get(f"{col}_old", "")
-                        new_val = df_compare.iloc[row_idx].get(col, "")
-                        try:
-                            val_float = float(str(new_val).split(" ")[0])
-                            old_float = float(str(old_val).split(" ")[0])
-                            if val_float > old_float:
-                                arrow = " 🔺"
-                                base += "background-color:#e6ffe6;"  # subtle green
-                            elif val_float < old_float:
-                                arrow = " 🔻"
-                                base += "background-color:#ffe6e6;"  # subtle red
-                        except:
-                            pass
-                    return base, arrow
-            
-                header_html = ''.join(f'<th>{col}</th>' for col in df.columns)
-                rows_html = ''
-                for i, row in df.iterrows():
-                    row_html = '<tr>'
-                    for col in df.columns:
-                        val = row[col]
-                        style, arrow = style_cell(val, col, i)
-                        display_val = f"{val}{arrow}" if pd.notnull(val) else ""
-                        row_html += f'<td style="{style}">{display_val}</td>'
-                    row_html += '</tr>'
-                    rows_html += row_html
-            
-                html = f"""
-                <table class="custom-table">
-                    <thead><tr>{header_html}</tr></thead>
-                    <tbody>{rows_html}</tbody>
-                </table>
-                """
-                return html
-            
-            html_table_2 = render_custom_html_table(
-                paginated_df_2,
-                highlight_cols=['Pinnacle', 'Bookmaker', 'BetOnline'],
-                change_mask=mask_slice,
-                df_compare=compare_slice
-            )
-            
-            st.markdown(f"<div class='scrollable-table-container'>{html_table_2}</div>", unsafe_allow_html=True)
+# === 2. Render Live Odds Snapshot Table
+st.subheader(f"📊 Live Odds Snapshot – {label} (Odds + Limit)")
+odds_rows = []
+for game in live:
+    game_name = f"{game['home_team']} vs {game['away_team']}"
+    game_start = pd.to_datetime(game.get("commence_time"), utc=True) if game.get("commence_time") else pd.NaT
 
-            st.caption(f"Showing {len(paginated_df_2)} rows")
+    for book in game.get("bookmakers", []):
+        if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
+            continue
 
+        for market in book.get("markets", []):
+            if market.get("key") not in ['h2h', 'spreads', 'totals']:
+                continue
 
-        return df_moves
+            for outcome in market.get("outcomes", []):
+                price = outcome.get('point') if market['key'] != 'h2h' else outcome.get('price')
+                odds_rows.append({
+                    "Game": game_name,
+                    "Market": market["key"],
+                    "Outcome": outcome["name"],
+                    "Bookmaker": book["title"],
+                    "Value": price,
+                    "Limit": outcome.get("bet_limit", 0),
+                    "Game_Start": game_start
+                })
 
-def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
+df_odds_raw = pd.DataFrame(odds_rows)
 
-    expected_label = [k for k, v in SPORTS.items() if v == sport_key]
-    sport_label = expected_label[0].upper() if expected_label else "NBA"
-
-    # === 1. Fetch completed games ===
-    try:
-        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-        response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
-        response.raise_for_status()
-        games = response.json()
-    except Exception as e:
-        st.error(f"❌ Failed to fetch scores: {e}")
-        return pd.DataFrame()
-
-    completed_games = [g for g in games if g.get("completed")]
-    st.info(f"✅ Completed games: {len(completed_games)}")
-
-    # === 2. Extract valid score rows ===
-    score_rows = []
-    for game in completed_games:
-        home = normalize_team(game.get("home_team", ""))
-        away = normalize_team(game.get("away_team", ""))
-        game_start = pd.to_datetime(game.get("commence_time"), utc=True)
-        merge_key = build_merge_key(home, away, game_start)
-        scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
-        if home in scores and away in scores:
-            score_rows.append({
-                'Merge_Key_Short': merge_key,
-                'Home_Team': home,
-                'Away_Team': away,
-                'Game_Start': game_start,
-                'Score_Home_Score': scores[home],
-                'Score_Away_Score': scores[away],
-                'Source': 'oddsapi',
-                'Inserted_Timestamp': pd.Timestamp.utcnow()
-            })
-
-    df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
-    df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
-    df_scores['Score_Home_Score'] = pd.to_numeric(df_scores['Score_Home_Score'], errors='coerce')
-    df_scores['Score_Away_Score'] = pd.to_numeric(df_scores['Score_Away_Score'], errors='coerce')
-    df_scores = df_scores.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
-
-    # === 3. Upload scores to `game_scores_final` ===
-    try:
-        existing_keys = bq_client.query("""
-            SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`
-        """).to_dataframe()
-        existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
-        new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
-       
- 
-
-        pass#to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-        pass#st.success(f"✅ Uploaded {len(new_scores)} new game scores")
-    except Exception as e:
-        pass#st.error(f"❌ Failed to upload game scores: {e}")
-        pass#st.code(new_scores.dtypes.to_string())
-
-    # === 4. Load recent sharp picks
-    df_master = read_recent_sharp_moves(hours=days_back * 72)
-    df_master = build_game_key(df_master)
-    df_master = ensure_columns(df_master, ['Game_Start'])
-    df_master = df_master[df_master['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
-
-    if df_master.empty:
-        st.warning("⚠️ No sharp picks to backtest")
-        return pd.DataFrame()
-
-    # === 5. Merge scores and filter
-    df = df_master.merge(
-        df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
-        on='Merge_Key_Short', how='inner'
+if not df_odds_raw.empty:
+    # Combine Value + Limit
+    df_odds_raw['Value_Limit'] = df_odds_raw.apply(
+        lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
+        else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
+        axis=1
     )
-    df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
-    df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
 
-    if 'Ref_Sharp_Value' not in df.columns:
-        df['Ref_Sharp_Value'] = df.get('Value')
-    else:
-        df['Ref_Sharp_Value'] = df['Ref_Sharp_Value'].combine_first(df.get('Value'))
-
-    # === 6. Calculate result
-    df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
-    if df_valid.empty:
-        st.warning("ℹ️ No valid sharp picks with scores to evaluate")
-        return pd.DataFrame()
-
-    # === 6. Calculate result
-    def calc_cover(row):
-        try:
-            h = float(row['Score_Home_Score'])
-            a = float(row['Score_Away_Score'])
-            val = float(row['Ref_Sharp_Value'])
-            market = str(row.get('Market', '')).lower()
-            outcome = str(row.get('Outcome', '')).lower()
-    
-            if market == 'totals':
-                if 'under' in outcome and h + a < val:
-                    return ['Win', 1]
-                elif 'over' in outcome and h + a > val:
-                    return ['Win', 1]
-                else:
-                    return ['Loss', 0]
-    
-            if market == 'spreads':
-                margin = h - a if row['Home_Team_Norm'] in outcome else a - h
-                hit = (margin > abs(val)) if val < 0 else (margin + val > 0)
-                return ['Win', 1] if hit else ['Loss', 0]
-    
-            if market == 'h2h':
-                home_win = row['Home_Team_Norm'] in outcome and h > a
-                away_win = row['Away_Team_Norm'] in outcome and a > h
-                return ['Win', 1] if home_win or away_win else ['Loss', 0]
-    
-            return [None, 0]
-        except Exception:
-            return [None, 0]
-    
-    result = df_valid.apply(calc_cover, axis=1, result_type='expand')
-    result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
-    df['SHARP_COVER_RESULT'] = None
-    df['SHARP_HIT_BOOL'] = None
-    df['Scored'] = False
-    df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
-    df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
-    # Ensure 'Unique_Sharp_Books' is present and numeric
-    if 'Unique_Sharp_Books' not in df.columns:
-        df['Unique_Sharp_Books'] = 0
-    df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
-
-    # === 7. Apply model scoring if available
-    if trained_models:
-        try:
-            df = apply_blended_sharp_score(df, trained_models)
-
-
-        except Exception as e:
-            st.warning(f"⚠️ Model scoring failed: {e}")
-    
-   # === 8. Final output DataFrame ===
-    score_cols = [
-        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
-        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
-        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
-        'Unique_Sharp_Books',
-        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
-    ]
-
-    
-    # Build full output
-    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
-    df_scores_out['Sport'] = sport_label.upper()
-    df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
-    # === Coerce and clean all fields BEFORE dedup and upload
-    df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
-    df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
-    df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').astype('Int64')
-    df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
-    df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce')
-    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
-    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
-    df_scores_out['LimitUp_NoMove_Flag'] = df_scores_out['LimitUp_NoMove_Flag'].fillna(False).astype(bool)
-    df_scores_out['SharpBetScore'] = pd.to_numeric(df_scores_out['SharpBetScore'], errors='coerce')
-    df_scores_out['Enhanced_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['Enhanced_Sharp_Confidence_Score'], errors='coerce')
-    df_scores_out['True_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['True_Sharp_Confidence_Score'], errors='coerce')
-    df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
-    df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
-    df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
-    df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
-    df_scores_out['Unique_Sharp_Books'] = pd.to_numeric(df_scores_out['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
-
-  
- 
-        # Debug: ensure schema matches
-    try:
-        import pyarrow as pa
-        pa.Table.from_pandas(df_scores_out)
-    except Exception as e:
-        st.error("❌ Parquet validation failed before upload")
-        st.code(str(e))
-        st.write(df_scores_out.dtypes)
-        st.stop()
-    # ✅ Define full deduplication fingerprint (ignore timestamp)
-    dedup_fingerprint_cols = score_cols.copy()  # includes all except timestamp
-    
-    # ✅ Remove local exact duplicates before querying BigQuery
-    df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
-    
-    # ✅ Query BigQuery for existing fingerprints (same line state, any time)
-    existing = bq_client.query(f"""
-        SELECT DISTINCT {', '.join(dedup_fingerprint_cols)}
-        FROM `sharp_data.sharp_scores_full`
-        WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-    """).to_dataframe()
-    
-    # ✅ Remove already-existing line states (not new even if timestamp is different)
-    df_scores_out = df_scores_out.merge(
-        existing,
-        on=dedup_fingerprint_cols,
-        how='left',
-        indicator=True
+    # Localize to EST
+    eastern = pytz_timezone('US/Eastern')
+    df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Start'].apply(
+        lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
+        else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
+        else ""
     )
-    df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
-    
-    # ✅ Final upload
-    if df_scores_out.empty:
-        st.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
-        return df, pd.DataFrame()
-    
- 
-    
-    return df
+
+    # Pivot into Bookmaker columns
+    df_display = df_odds_raw.pivot_table(
+        index=["Date + Time (EST)", "Game", "Market", "Outcome"],
+        columns="Bookmaker",
+        values="Value_Limit",
+        aggfunc="first"
+    ).reset_index()
+
+    # Render as HTML
+    table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
+    st.markdown(f"<div class='scrollable-table-container'>{table_html_2}</div>", unsafe_allow_html=True)
+    st.caption(f"Showing {len(df_display)} rows")
+
+def fetch_scores_and_backtest(*args, **kwargs):
+    print("⚠️ fetch_scores_and_backtest() is deprecated in UI and will be handled by Cloud Scheduler.")
+    return pd.DataFrame()
+
     
 
 
