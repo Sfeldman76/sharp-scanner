@@ -977,7 +977,7 @@ def render_scanner_tab(label, sport_key, container):
             return " | ".join(reasons)
         
         df_moves_raw['📌 Model Reasoning'] = df_moves_raw.apply(build_model_reason, axis=1)
-        logging.info(f"✅ Merged historical trend baseline for {len(df_first)} unique lines.")
+        st.info(f"✅ Merged historical trend baseline for {len(df_first)} unique lines.")
 
      
 
