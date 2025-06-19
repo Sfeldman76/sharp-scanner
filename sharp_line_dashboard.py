@@ -960,32 +960,32 @@ def render_scanner_tab(label, sport_key, container):
             if 'First_Line_Value' in df_moves_raw.columns:
                 df_moves_raw[col_name] = col_calc(df_moves_raw).round(2)
         
-        # === 4. Ensure Required Fields
         fallbacks = {
-            'Ref_Sharp_Value': df_moves_raw.get('Value'),
+            'Ref_Sharp_Value': df_moves_raw['Value'] if 'Value' in df_moves_raw.columns else None,
             'SHARP_HIT_BOOL': None,
             'SHARP_COVER_RESULT': None,
             'Scored': None,
             'Model_Sharp_Win_Prob': None,
             'Model_Confidence_Tier': None,
         }
-        for col, fallback in fallbacks.items():
-            if col not in df_moves_raw.columns:
-                df_moves_raw[col] = fallback
+        missing_cols = [col for col in fallbacks if col not in df_moves_raw.columns]
+        if missing_cols:
+            df_moves_raw = df_moves_raw.copy()  # prevent mutation triggers
+            for col in missing_cols:
+                df_moves_raw[col] = fallbacks[col]
+                
+        if 'Pre_Game' not in df_moves_raw.columns:
+            st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
+        else:
+            start = time.time()
+            pre_mask = df_moves_raw['Pre_Game'] == True
+            if pre_mask.sum() > 0:
+                diagnostics_df = df_moves_raw[pre_mask].apply(compute_diagnostics, axis=1)
+                for col in diagnostics_df.columns:
+                    df_moves_raw.loc[pre_mask, col] = diagnostics_df[col]
+                st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
+               
         
- 
-       
-        start = time.time()
-
-        # Only apply diagnostics to pre-game rows
-        pre_mask = df_moves_raw['Pre_Game'] == True
-        diagnostics_df = df_moves_raw[pre_mask].apply(compute_diagnostics, axis=1)
-        
-        # Assign results to only pre-game rows
-        for col in diagnostics_df.columns:
-            df_moves_raw.loc[pre_mask, col] = diagnostics_df[col]
-        
-        st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} pre-game rows in {time.time() - start:.2f}s")
         
         
         # === 6. Final Summary Table
