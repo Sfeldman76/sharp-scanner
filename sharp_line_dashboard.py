@@ -684,7 +684,7 @@ def render_scanner_tab(label, sport_key, container):
         df_snap = build_game_key(df_snap)
 
         # === Previous snapshot for live odds comparison
-        prev = read_latest_snapshot_from_bigquery(hours=2) or {}
+        prev = read_latest_snapshot_from_bigquery(hours=24) or {}
         df_prev_raw = pd.DataFrame([
             {
                 "Game": f"{game.get('home_team')} vs {game.get('away_team')}",
@@ -1086,6 +1086,7 @@ def render_scanner_tab(label, sport_key, container):
             'Recommended_Outcome': 'Pick\nSide',
             'Rec_Book_Consensus': 'Rec\nConsensus',
             'Sharp_Book_Consensus': 'Sharp\nConsensus',
+            'Model_Sharp_Win_Prob': 'Model Prob',
             'Move_From_Open_Rec': 'Rec\nMove',
             'Move_From_Open_Sharp': 'Sharp\nMove',
             'Model_Confidence_Tier': 'Confidence\nTier',
@@ -1114,7 +1115,7 @@ def render_scanner_tab(label, sport_key, container):
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model_Sharp_Win_Prob', 'Confidence\nTier',
+            'Model Prob', 'Confidence\nTier', 
             'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
 
