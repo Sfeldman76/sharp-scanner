@@ -925,12 +925,15 @@ def render_scanner_tab(label, sport_key, container):
         df_history = get_recent_history()
         st.info(f"⏱️ Loaded historical trend data in {time.time() - start:.2f}s")
                 
-        # ✅ Filter to only rows relevant to current live games
+        hist_start = time.time()
+
+        # === Filter to only current live games
         df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
         df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
-
+        st.info(f"⏱️ Filtered history to {len(df_history)} rows in {time.time() - hist_start:.2f}s")
         
-        # === 1. Build First Snapshot Table
+        # === Build First Snapshot
+        snap_start = time.time()
         df_first = (
             df_history.sort_values('Snapshot_Timestamp')
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
@@ -940,12 +943,14 @@ def render_scanner_tab(label, sport_key, container):
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
         )
+        st.info(f"📦 Built first snapshot table in {time.time() - snap_start:.2f}s")
         
+        # === Normalize and merge
+        merge_start = time.time()
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
-        
-        # === 2. Merge First Snapshot into Raw Moves
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+        st.info(f"🔗 Merged first snapshot into df_moves_raw in {time.time() - merge_start:.2f}s")
         
         # === 3. Movement Calculations
         for col_name, col_calc in {
