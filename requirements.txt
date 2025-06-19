@@ -13,7 +13,8 @@ joblib    # For saving isotonic calibrators
 
 # === Machine Learning ===
 xgboost==1.7.6
-scikit-learn==1.7.0
+scikit-learn==1.2.2
+
 
 
 # === Google Cloud SDKs ===
