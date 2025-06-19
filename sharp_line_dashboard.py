@@ -814,17 +814,24 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         
         # === Calculate movement vs open line (optional) ===
+        # === Calculate movement vs open line (optional)
         if 'First_Line_Value' in df_moves_raw.columns:
             df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Sharp_Book_Consensus'] - df_moves_raw['First_Line_Value']
             df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Rec_Book_Consensus'] - df_moves_raw['First_Line_Value']
+        
+        # === Clean up & round values for display
         df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col.endswith('_y')], errors='ignore', inplace=True)
+        
         df_moves_raw['Sharp_Book_Consensus'] = df_moves_raw['Sharp_Book_Consensus'].round(2)
         df_moves_raw['Rec_Book_Consensus'] = df_moves_raw['Rec_Book_Consensus'].round(2)
         df_moves_raw['Move_From_Open_Sharp'] = df_moves_raw['Move_From_Open_Sharp'].round(2)
         df_moves_raw['Move_From_Open_Rec'] = df_moves_raw['Move_From_Open_Rec'].round(2)
+        
+        # === Fallback Ref_Sharp_Value
         if 'Ref_Sharp_Value' not in df_moves_raw.columns and 'Value' in df_moves_raw.columns:
             df_moves_raw['Ref_Sharp_Value'] = df_moves_raw['Value']
         
+        # === Ensure tracking columns exist
         for col in ['SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored']:
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = None
