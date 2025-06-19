@@ -288,7 +288,10 @@ def read_recent_sharp_moves(hours=96, table=BQ_FULL_TABLE):
         print(f"❌ Failed to read from BigQuery: {e}")
         return pd.DataFrame()
 
-
+# ✅ Cached wrapper for diagnostics and line movement history
+@st.cache_data(ttl=600)
+def get_recent_history():
+    return read_recent_sharp_moves(hours=72)
        
 def read_latest_snapshot_from_bigquery(hours=2):
     try:
@@ -817,10 +820,7 @@ def render_scanner_tab(label, sport_key, container):
     
 
               # === Exit early if none remain
-        if df_moves_raw.empty:
-            st.warning("⚠️ No live sharp picks available at this time.")
-            return pd.DataFrame()
-
+       
         # Continue to enrichment + scoring...
         df_moves_raw = df_moves_raw[df_moves_raw['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
         
@@ -828,8 +828,13 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
         now = pd.Timestamp.utcnow()
-        df_moves_raw['Pre_Game'] = df_moves_raw['Game_Start'] > now
+        df_moves_raw['Pre_Game'] = df_moves_raw['Game_Start'] > pd.Timestamp.utcnow()
         df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
+        
+        # ✅ Check if there are any live picks worth scoring
+        if df_moves_raw['Pre_Game'].sum() == 0:
+            st.warning("⚠️ No live sharp picks available for scoring.")
+            return pd.DataFrame()
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
         
@@ -916,8 +921,10 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
                 # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
-        df_history = read_recent_sharp_moves(hours=72)
-        
+        start = time.time()
+        df_history = get_recent_history()
+        st.info(f"⏱️ Loaded historical trend data in {time.time() - start:.2f}s")
+                
         # ✅ Filter to only rows relevant to current live games
         df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
         df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
