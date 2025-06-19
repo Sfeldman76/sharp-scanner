@@ -821,9 +821,22 @@ def render_scanner_tab(label, sport_key, container):
         # Merge into df_moves_raw
         df_moves_raw = df_moves_raw.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
+                # === 1. Load df_history and compute df_first
+        df_history = read_recent_sharp_moves(hours=72)
+        df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
+        df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
         
-        # === Merge df_first BEFORE referencing 'First_Line_Value'
+        df_first = df_history.sort_values('Snapshot_Timestamp') \
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first') \
+            .rename(columns={
+                'Value': 'First_Line_Value',
+                'Sharp_Confidence_Tier': 'First_Tier',
+                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
+        
+        # === 2. Merge First Line into raw moves
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+
         
         # === DEBUG: Check merge success
         if 'First_Line_Value' not in df_moves_raw.columns or df_moves_raw['First_Line_Value'].isna().all():
@@ -860,10 +873,7 @@ def render_scanner_tab(label, sport_key, container):
             subset=['Game_Key', 'Bookmaker'], keep='first'
         )[['Game', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier']]
         
-        df_history = read_recent_sharp_moves(hours=72)
-        df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
-        df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
-        
+
         
         
         # === 4. Tier Change Detection
