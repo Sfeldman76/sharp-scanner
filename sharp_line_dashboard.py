@@ -731,7 +731,7 @@ def render_scanner_tab(label, sport_key, container):
         now = pd.Timestamp.utcnow()
 
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] > pd.Timestamp.utcnow()]
+     
         if df_moves_raw.empty:
             st.warning("⚠️ No live sharp picks available at this time.")
             return pd.DataFrame()
