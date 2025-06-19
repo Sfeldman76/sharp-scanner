@@ -953,13 +953,24 @@ def render_scanner_tab(label, sport_key, container):
         st.info(f"🔗 Merged first snapshot into df_moves_raw in {time.time() - merge_start:.2f}s")
         
         # === 3. Movement Calculations
-        for col_name, col_calc in {
-            'Move_From_Open_Sharp': lambda df: df['Sharp_Book_Consensus'] - df['First_Line_Value'],
-            'Move_From_Open_Rec': lambda df: df['Rec_Book_Consensus'] - df['First_Line_Value']
-        }.items():
-            if 'First_Line_Value' in df_moves_raw.columns:
-                df_moves_raw[col_name] = col_calc(df_moves_raw).round(2)
+        # === 3. Movement Calculations (Vectorized and Timed)
+        move_start = time.time()
+        if 'First_Line_Value' in df_moves_raw.columns:
+            if 'Sharp_Book_Consensus' in df_moves_raw.columns:
+                df_moves_raw['Move_From_Open_Sharp'] = (
+                    df_moves_raw['Sharp_Book_Consensus'] - df_moves_raw['First_Line_Value']
+                ).round(2)
         
+            if 'Rec_Book_Consensus' in df_moves_raw.columns:
+                df_moves_raw['Move_From_Open_Rec'] = (
+                    df_moves_raw['Rec_Book_Consensus'] - df_moves_raw['First_Line_Value']
+                ).round(2)
+        st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
+        
+        # === 4. Ensure Required Fields (Safe Copy + Timing)
+        fallback_start = time.time()
+        
+        # Only copy if we need to insert columns
         fallbacks = {
             'Ref_Sharp_Value': df_moves_raw['Value'] if 'Value' in df_moves_raw.columns else None,
             'SHARP_HIT_BOOL': None,
@@ -969,11 +980,17 @@ def render_scanner_tab(label, sport_key, container):
             'Model_Confidence_Tier': None,
         }
         missing_cols = [col for col in fallbacks if col not in df_moves_raw.columns]
+        
         if missing_cols:
-            df_moves_raw = df_moves_raw.copy()  # prevent mutation triggers
+            st.info(f"🧱 Adding missing columns: {missing_cols}")
+            df_moves_raw = df_moves_raw.copy()  # prevents mutation-triggered rerun
             for col in missing_cols:
-                df_moves_raw[col] = fallbacks[col]
-                
+                fallback_val = fallbacks[col]
+                # If fallback is a Series (like 'Value'), align by index; otherwise set scalar
+                df_moves_raw[col] = fallback_val if isinstance(fallback_val, pd.Series) else fallback_val
+        
+        st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
+                        
         if 'Pre_Game' not in df_moves_raw.columns:
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
         else:
