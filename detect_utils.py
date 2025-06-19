@@ -22,7 +22,6 @@ from utils import (
     summarize_consensus,
     compute_weighted_signal,
     compute_confidence,
-    backfill_unscored_sharp_moves,
     compute_line_hash
 )
 
