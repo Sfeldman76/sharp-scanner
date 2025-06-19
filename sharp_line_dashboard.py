@@ -470,7 +470,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         y = y.astype(int)
 
         # Train model
-        model = XGBClassifier(n_estimators=50, max_depth=4, learning_rate=0.1, use_label_encoder=False, eval_metric='logloss')
+        model = XGBClassifier(n_estimators=50, max_depth=4, learning_rate=0.1, eval_metric='logloss')
+
         model.fit(X, y)
 
         # Calibrate model
