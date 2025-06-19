@@ -1177,39 +1177,47 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
 
     return df
-def write_market_weights_to_bigquery(weights_dict):
+def compute_and_write_market_weights(df):
+    import pandas as pd
+
+    component_cols = [
+        'Sharp_Move_Signal',
+        'Sharp_Limit_Jump',
+        'Sharp_Prob_Shift',
+        'Sharp_Time_Score',
+        'Sharp_Limit_Total'
+    ]
+
     rows = []
 
-    for market, components in weights_dict.items():
-        for component, values in components.items():
-            for val_key, win_rate in values.items():
-                try:
-                    # === Debug: Log raw input
-                    print(f"🧪 Market={market}, Component={component}, Value={val_key}, Raw WinRate={win_rate}")
-                    
-                    # === Flatten if nested dict
-                    if isinstance(win_rate, dict) and 'value' in win_rate:
-                        win_rate = win_rate['value']
-                    if isinstance(win_rate, dict):
-                        raise ValueError("Nested dict still present")
+    for comp in component_cols:
+        df_temp = df[['Market', comp, 'SHARP_HIT_BOOL']].copy()
+        df_temp = df_temp.rename(columns={comp: 'Value'})
+        df_temp['Component'] = comp
+        df_temp['Value'] = df_temp['Value'].astype(str).str.lower()
+        df_temp = df_temp.dropna()
 
-                    # === Add row
-                    rows.append({
-                        'Market': market,
-                        'Component': component,
-                        'Value': str(val_key).lower(),
-                        'Win_Rate': float(win_rate)
-                    })
-                except Exception as e:
-                    print(f"⚠️ Skipped invalid win_rate for {market}/{component}/{val_key}: {e}")
+        # Group by Market, Component, Value
+        grouped = df_temp.groupby(['Market', 'Component', 'Value'])['SHARP_HIT_BOOL'].mean().reset_index()
+        grouped.rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'}, inplace=True)
+
+        for _, row in grouped.iterrows():
+            rows.append({
+                'Market': str(row['Market']).lower(),
+                'Component': row['Component'],
+                'Value': row['Value'],
+                'Win_Rate': round(row['Win_Rate'], 4)
+            })
 
     if not rows:
         print("⚠️ No valid market weights to upload.")
         return
 
-    df = pd.DataFrame(rows)
-    print(f"✅ Prepared {len(df)} rows for upload. Preview:")
-    print(df.head(5).to_string(index=False))
+    df_weights = pd.DataFrame(rows)
+    print(f"✅ Prepared {len(df_weights)} market weight rows. Sample:")
+    print(df_weights.head(10).to_string(index=False))
 
-          
+    # Optional: return df_weights for upload or inspection
+    return df_weights
+
 
