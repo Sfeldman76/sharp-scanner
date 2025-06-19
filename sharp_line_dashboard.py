@@ -1108,7 +1108,10 @@ def render_scanner_tab(label, sport_key, container):
         
         # Extract date-only column
         summary_df['Event_Date_Only'] = pd.to_datetime(summary_df['Game_Start'], utc=True, errors='coerce').dt.date.astype(str)
-        
+        # Clean column suffixes before rename
+        summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
+
+
         # Rename for display
         summary_df.rename(columns={
             'Date + Time (EST)': 'Date\n+ Time (EST)',
