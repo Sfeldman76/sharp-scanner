@@ -1177,6 +1177,39 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
 
     return df
+def write_market_weights_to_bigquery(weights_dict):
+    rows = []
+
+    for market, components in weights_dict.items():
+        for component, values in components.items():
+            for val_key, win_rate in values.items():
+                try:
+                    # === Debug: Log raw input
+                    print(f"🧪 Market={market}, Component={component}, Value={val_key}, Raw WinRate={win_rate}")
+                    
+                    # === Flatten if nested dict
+                    if isinstance(win_rate, dict) and 'value' in win_rate:
+                        win_rate = win_rate['value']
+                    if isinstance(win_rate, dict):
+                        raise ValueError("Nested dict still present")
+
+                    # === Add row
+                    rows.append({
+                        'Market': market,
+                        'Component': component,
+                        'Value': str(val_key).lower(),
+                        'Win_Rate': float(win_rate)
+                    })
+                except Exception as e:
+                    print(f"⚠️ Skipped invalid win_rate for {market}/{component}/{val_key}: {e}")
+
+    if not rows:
+        print("⚠️ No valid market weights to upload.")
+        return
+
+    df = pd.DataFrame(rows)
+    print(f"✅ Prepared {len(df)} rows for upload. Preview:")
+    print(df.head(5).to_string(index=False))
 
           
 
