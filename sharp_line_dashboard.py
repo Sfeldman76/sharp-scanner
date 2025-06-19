@@ -514,26 +514,14 @@ def read_market_weights_from_bigquery():
 def compute_diagnostics_vectorized(df):
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
-    # Convert tier columns safely to string before mapping
-    tier_current = (
-        df['Model_Confidence_Tier']
-        .astype(str)
-        .fillna("")
-        .str.strip()
-        .map(TIER_ORDER)
-        .fillna(0)
-        .astype(int)
-    )
-    tier_open = (
-        df['First_Tier']
-        .astype(str)
-        .fillna("")
-        .str.strip()
-        .map(TIER_ORDER)
-        .fillna(0)
-        .astype(int)
-    )
-
+    for col in ['Model_Confidence_Tier', 'First_Tier']:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(str).fillna("").str.strip()
+    
+    tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
+    tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
+    
     
     # Tier Change
     tier_change = np.where(
