@@ -644,10 +644,10 @@ def fetch_scored_picks_from_bigquery(limit=50000):
         return pd.DataFrame()
         
 def render_scanner_tab(label, sport_key, container):
-    market_weights = read_market_weights_from_bigquery()
-    if not market_weights:
-        st.error("❌ No market weights found. Cannot compute confidence scores.")
-        return
+    #market_weights = read_market_weights_from_bigquery()
+    #if not market_weights:
+        #st.error("❌ No market weights found. Cannot compute confidence scores.")
+        #return
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
 
@@ -1109,8 +1109,8 @@ def render_scanner_tab(label, sport_key, container):
         view_cols = [
             'Date\n+ Time (EST)', 'Matchup', 'Market', 'Pick\nSide',
             'Rec\nConsensus', 'Sharp\nConsensus', 'Rec\nMove', 'Sharp\nMove',
-            'Model_Sharp_Win_Prob', 'Confidence\nTier',
-            'Why Model Prefers', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
+            'Model_Sharp_Win_Prob', '\nTier',
+            'Why Model Prefers', ' Trend', 'Tier Δ', 'Line/Model Direction'
         ]
         table_df = filtered_df[view_cols].copy()
         st.info(f"✅ Table DF shape: {table_df.shape}")
