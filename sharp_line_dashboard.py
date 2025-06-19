@@ -23,9 +23,6 @@ div[data-testid="stDataFrame"] > div {
 """, unsafe_allow_html=True)
 
 
-# === Auto-refresh every 380 seconds ===
-st_autorefresh(interval=380 * 1000, key="data_refresh")
-
 
 st.markdown("""
 <style>
@@ -200,7 +197,7 @@ def ensure_columns(df, required_cols, fill_value=None):
     return df
 
 
-@st.cache_data(ttl=380)
+
 def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -274,8 +271,8 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-@st.cache_data(ttl=380)
-def read_recent_sharp_moves(hours=500, table=BQ_FULL_TABLE):
+
+def read_recent_sharp_moves(hours=96, table=BQ_FULL_TABLE):
     try:
         client = bq_client
         query = f"""
@@ -539,6 +536,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     for market_type, bundle in trained_models.items():
         start = time.time()
+        total_start = time.time()
         model = bundle['model']
         iso = bundle['calibrator']
         df_market = df[df['Market'] == market_type].copy()
@@ -572,6 +570,7 @@ def apply_blended_sharp_score(df, trained_models):
         except Exception as e:
             st.error(f"❌ Failed to apply model for {market_type}: {e}")
         st.info(f"⏱️ Scored {market_type} in {time.time() - start:.2f}s")
+        st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
     # Apply tiering only if Model_Sharp_Win_Prob exists
     if 'Model_Sharp_Win_Prob' in df.columns:
         df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
@@ -627,7 +626,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         
         
         
-@st.cache_data(ttl=300)
+
 def fetch_scored_picks_from_bigquery(limit=50000):
     query = f"""
         SELECT *
@@ -1099,63 +1098,73 @@ def render_scanner_tab(label, sport_key, container):
         st.caption(f"Showing {len(table_df)} rows")
 
     # === 2. Render Live Odds Snapshot Table
-    st.subheader(f"📊 Live Odds Snapshot – {label} (Odds + Limit)")
-    odds_rows = []
-    for game in live:
-        game_name = f"{game['home_team']} vs {game['away_team']}"
-        game_start = pd.to_datetime(game.get("commence_time"), utc=True) if game.get("commence_time") else pd.NaT
+    with st.container():  # or a dedicated tab/expander if you want
+        st.subheader(f"📊 Live Odds Snapshot – {label} (Odds + Limit)")
     
-        for book in game.get("bookmakers", []):
-            if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
-                continue
+        # ✅ Only this block will autorefresh
+        st_autorefresh(interval=180 * 1000, key=f"{label}_odds_refresh")  # every 3 minutes
     
-            for market in book.get("markets", []):
-                if market.get("key") not in ['h2h', 'spreads', 'totals']:
+        # === Live odds fetch + display logic
+        live = fetch_live_odds(sport_key)
+        odds_rows = []
+   
+    
+    
+        for game in live:
+            game_name = f"{game['home_team']} vs {game['away_team']}"
+            game_start = pd.to_datetime(game.get("commence_time"), utc=True) if game.get("commence_time") else pd.NaT
+        
+            for book in game.get("bookmakers", []):
+                if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
                     continue
+        
+                for market in book.get("markets", []):
+                    if market.get("key") not in ['h2h', 'spreads', 'totals']:
+                        continue
+        
+                    for outcome in market.get("outcomes", []):
+                        price = outcome.get('point') if market['key'] != 'h2h' else outcome.get('price')
+                        odds_rows.append({
+                            "Game": game_name,
+                            "Market": market["key"],
+                            "Outcome": outcome["name"],
+                            "Bookmaker": book["title"],
+                            "Value": price,
+                            "Limit": outcome.get("bet_limit", 0),
+                            "Game_Start": game_start
+                        })
+        
+        df_odds_raw = pd.DataFrame(odds_rows)
+        
+        if not df_odds_raw.empty:
+            # Combine Value + Limit
+            df_odds_raw['Value_Limit'] = df_odds_raw.apply(
+                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
+                else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
+                axis=1
+            )
+        
+            # Localize to EST
+            eastern = pytz_timezone('US/Eastern')
+            df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Start'].apply(
+                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
+                else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
+                else ""
+            )
+        
+            # Pivot into Bookmaker columns
+            df_display = df_odds_raw.pivot_table(
+                index=["Date + Time (EST)", "Game", "Market", "Outcome"],
+                columns="Bookmaker",
+                values="Value_Limit",
+                aggfunc="first"
+            ).reset_index()
+        
+            # Render as HTML
+            table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
+            st.markdown(f"<div class='scrollable-table-container'>{table_html_2}</div>", unsafe_allow_html=True)
+            st.success(f"✅ Live odds snapshot rendered — {len(df_display)} rows.")
     
-                for outcome in market.get("outcomes", []):
-                    price = outcome.get('point') if market['key'] != 'h2h' else outcome.get('price')
-                    odds_rows.append({
-                        "Game": game_name,
-                        "Market": market["key"],
-                        "Outcome": outcome["name"],
-                        "Bookmaker": book["title"],
-                        "Value": price,
-                        "Limit": outcome.get("bet_limit", 0),
-                        "Game_Start": game_start
-                    })
-    
-    df_odds_raw = pd.DataFrame(odds_rows)
-    
-    if not df_odds_raw.empty:
-        # Combine Value + Limit
-        df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-            lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
-            else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
-            axis=1
-        )
-    
-        # Localize to EST
-        eastern = pytz_timezone('US/Eastern')
-        df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Start'].apply(
-            lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
-            else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
-            else ""
-        )
-    
-        # Pivot into Bookmaker columns
-        df_display = df_odds_raw.pivot_table(
-            index=["Date + Time (EST)", "Game", "Market", "Outcome"],
-            columns="Bookmaker",
-            values="Value_Limit",
-            aggfunc="first"
-        ).reset_index()
-    
-        # Render as HTML
-        table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
-        st.markdown(f"<div class='scrollable-table-container'>{table_html_2}</div>", unsafe_allow_html=True)
-        st.success(f"✅ Live odds snapshot rendered — {len(df_display)} rows.")
-
 def fetch_scores_and_backtest(*args, **kwargs):
     print("⚠️ fetch_scores_and_backtest() is deprecated in UI and will be handled by Cloud Scheduler.")
     return pd.DataFrame()
