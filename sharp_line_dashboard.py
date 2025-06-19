@@ -1046,7 +1046,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves = df_moves_raw.copy()
         
         
-       
+        df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
            
         st.subheader(f"Sharp vs Rec Book Consensus Summary – {label}")
 
