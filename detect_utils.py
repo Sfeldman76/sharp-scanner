@@ -22,7 +22,8 @@ from utils import (
     summarize_consensus,
     compute_weighted_signal,
     compute_confidence,
-    backfill_unscored_sharp_moves
+    backfill_unscored_sharp_moves,
+    compute_line_hash
 )
 
 def detect_and_save_all_sports():
@@ -103,6 +104,10 @@ def detect_and_save_all_sports():
                 ])
                 df_snap = build_game_key(df_snap)
 
+                
+                # Before writing sharp_moves
+                df_moves["Line_Hash"] = df_moves.apply(compute_line_hash, axis=1)
+                df_moves = df_moves.drop_duplicates(subset=["Line_Hash"])
                 write_sharp_moves_to_master(df_moves)
                 write_line_history_to_bigquery(df_audit)
                 write_snapshot_to_gcs_parquet(current)
