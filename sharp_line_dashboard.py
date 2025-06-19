@@ -721,6 +721,14 @@ def render_scanner_tab(label, sport_key, container):
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
         
+        # === Keep only live picks
+        now = pd.Timestamp.utcnow()
+        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
+        df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] > now]
+        
+        if df_moves_raw.empty:
+            st.warning("⚠️ No live sharp picks available at this time.")
+            return pd.DataFrame()
         # === DEBUG
         st.info(f"📊 Loaded {len(df_moves_raw)} sharp moves rows")
         st.write(df_moves_raw.head(5))
