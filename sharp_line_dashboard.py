@@ -1050,14 +1050,18 @@ def render_scanner_tab(label, sport_key, container):
             '📌 Model Reasoning', '📊 Confidence Evolution',
             'Tier_Change', 'Direction'
         ]
+        # Only keep columns that exist in the raw DataFrame
         summary_cols = [col for col in summary_cols if col in df_moves_raw.columns]
         summary_df = df_moves_raw[summary_cols].copy()
         
-        # === Normalize string keys
+        # ✅ Safely normalize string columns
         for col in ['Game', 'Market', 'Outcome']:
-            if col in summary_df.columns:
+            if col in summary_df.columns and isinstance(summary_df[col], pd.Series):
                 summary_df[col] = summary_df[col].astype(str).str.strip().str.lower()
         
+        # 🛠️ Debug column types to ensure everything is clean
+        st.write("⚠️ Column types:", {col: type(summary_df[col]) for col in ['Game', 'Market', 'Outcome'] if col in summary_df.columns})
+
         # === Add Event_Date for filtering
         summary_df['Event_Date'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True).dt.date.astype(str)
         
