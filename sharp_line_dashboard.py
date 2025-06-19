@@ -714,9 +714,9 @@ def render_scanner_tab(label, sport_key, container):
                 values="Value_Limit",
                 aggfunc="first"
             ).reset_index()
+        st.write("✅ Loaded sharp moves from BigQuery:", len(df_moves_raw))
+        st.write(df_moves_raw[['Game', 'Game_Start', 'Market', 'Outcome', 'Value', 'Model_Sharp_Win_Prob']].head(10))
 
-        # === Load sharp moves from BigQuery (from Cloud Scheduler)       
-        # === Handle missing or incomplete data
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
         detection_key = f"sharp_moves_{sport_key_lower}"
         if detection_key in st.session_state:
@@ -726,15 +726,29 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = read_recent_sharp_moves(hours=12)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
-        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.upper() == label.upper()]
-        # === Keep only live picks
-        now = pd.Timestamp.utcnow()
 
+        # ✅ Filter by sport label (e.g., only NBA picks in NBA tab)
+        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.upper() == label.upper()]
+
+        # ✅ DEBUG: Show sport filtering
+        st.write("🎯 Filtering for sport:", label.upper())
+        st.write("✅ Sharp moves before Game_Start filter:", len(df_moves_raw))
+        st.write("Sports in data:", df_moves_raw['Sport'].dropna().unique())
+
+        # === Filter to only live (upcoming) picks
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-     
+        df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] >= pd.Timestamp.utcnow()]
+
+        # ✅ DEBUG: Final live pick count
+        st.write("🟢 After filtering for live picks:", len(df_moves_raw))
+        if not df_moves_raw.empty:
+            st.dataframe(df_moves_raw[['Game', 'Game_Start', 'Market', 'Outcome', 'Value']].head(10))
+
+        # === Exit early if none remain
         if df_moves_raw.empty:
             st.warning("⚠️ No live sharp picks available at this time.")
             return pd.DataFrame()
+
         # === DEBUG
         st.info(f"📊 Loaded {len(df_moves_raw)} sharp moves rows")
         st.write(df_moves_raw.head(5))
