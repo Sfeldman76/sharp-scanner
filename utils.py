@@ -1087,14 +1087,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df['Unique_Sharp_Books'] = 0
     df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
 
-    # === 7. Apply model scoring if available
-    if trained_models:
-        try:
-            df = apply_blended_sharp_score(df, trained_models)
-
-
-        except Exception as e:
-            st.warning(f"⚠️ Model scoring failed: {e}")
     
    # === 8. Final output DataFrame ===
     score_cols = [
@@ -1177,56 +1169,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
 
     return df
-
-def backfill_unscored_sharp_moves(sport_label: str, trained_models: dict, days_back: int = 8):
-    """
-    Scores and updates sharp_moves_master rows where model probability is missing.
-    Only runs if trained_models is not empty.
-    """
-    from google.cloud import bigquery
-    bq_client = bigquery.Client()
-
-    sport_label = sport_label.upper()
-
-    if not trained_models:
-        logging.info(f"⏭ Skipping backfill for {sport_label} — no trained models available.")
-        return
-
-    logging.info(f"📣 Starting backfill for {sport_label} using models: {list(trained_models.keys())}")
-
-    query = f"""
-        SELECT *
-        FROM `sharp_data.sharp_moves_master`
-        WHERE Sport = '{sport_label}'
-          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
-          AND Model_Sharp_Win_Prob IS NULL
-    """
-
-    try:
-        df_unscored = bq_client.query(query).to_dataframe()
-    except Exception as e:
-        logging.error(f"❌ Failed to query unscored sharp moves for {sport_label}: {e}")
-        return
-
-    if df_unscored.empty:
-        logging.info(f"⏭ No unscored sharp moves found for {sport_label}. Skipping backfill.")
-        return
-
-    logging.info(f"🔁 Scoring {len(df_unscored)} unscored sharp moves for {sport_label}...")
-
-    try:
-        df_scored = apply_blended_sharp_score(df_unscored, trained_models)
-        if df_scored.empty:
-            logging.warning(f"⚠️ No rows scored for {sport_label}.")
-            return
-
-        write_sharp_moves_to_master(df_scored)
-        logging.info(f"✅ Backfilled {len(df_scored)} sharp moves for {sport_label}.")
-    except Exception as e:
-        logging.exception(f"❌ Failed to backfill sharp move scoring for {sport_label}: {e}")
-
- 
-    
 
           
 
