@@ -996,13 +996,13 @@ def render_scanner_tab(label, sport_key, container):
                 'Rec Move': 'mean',
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
-                'Confidence Tier': 'first',
-                'Why Model Likes It': lambda x: ' | '.join(sorted(set(x.dropna()))),
-                'Confidence Trend': 'first',
-                'Tier Δ': 'first',
-                'Line/Model Direction': 'first'
-            })
-        )
+                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
+                    'Why Model Likes It': lambda x: ' | '.join(sorted(set(x.dropna()))),
+                    'Confidence Trend': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
+                    'Tier Δ': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
+                    'Line/Model Direction': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+                })
+            )
         
         # === Final Column Order for Display
         view_cols = [
