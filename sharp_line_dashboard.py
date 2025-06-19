@@ -833,7 +833,9 @@ def render_scanner_tab(label, sport_key, container):
                 'Sharp_Confidence_Tier': 'First_Tier',
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
-        
+        df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
+        df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
+
         # === 2. Merge First Line into raw moves
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
 
@@ -880,20 +882,19 @@ def render_scanner_tab(label, sport_key, container):
         TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
         
         def compute_tier_change(first, current):
-            if not first or not current:
+            try:
+                first_str = str(first).strip()
+                current_str = str(current).strip()
+                first_val = TIER_ORDER.get(first_str, 0)
+                current_val = TIER_ORDER.get(current_str, 0)
+                if current_val > first_val:
+                    return f"↑ {first} → {current}"
+                elif current_val < first_val:
+                    return f"↓ {first} → {current}"
+                return "↔ No Change"
+            except Exception:
                 return "⚠️ Missing"
-            first_val = TIER_ORDER.get(first.strip(), 0)
-            current_val = TIER_ORDER.get(current.strip(), 0)
-            if current_val > first_val:
-                return f"↑ {first} → {current}"
-            elif current_val < first_val:
-                return f"↓ {first} → {current}"
-            return "↔ No Change"
-        
-        df_moves_raw['Tier_Change'] = df_moves_raw.apply(
-            lambda row: compute_tier_change(row.get('First_Tier'), row.get('Sharp_Confidence_Tier')), axis=1
-        )
-        
+
         # === 5. Confidence Trend
         def build_trend_explanation(row):
             start = row.get('First_Sharp_Prob')
