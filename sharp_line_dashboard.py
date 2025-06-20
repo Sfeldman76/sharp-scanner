@@ -1434,11 +1434,11 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         if df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp picks found for {sport_label}")
             return
-
-        # === Merge master with final score labels
+        
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+        # === Merge master with final score labels
         df = df_master.merge(
-            df_scores[merge_keys + ['SHARP_HIT_BOOL', 'SharpBetScore', 'Model_Sharp_Win_Prob']],
+            df_scores[merge_keys + ['SHARP_HIT_BOOL', 'SharpBetScore']],
             on=merge_keys,
             how='inner'
         )
