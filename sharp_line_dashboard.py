@@ -440,7 +440,7 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
             print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
 
 
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 10):
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
     df_bt = load_backtested_predictions(sport, days_back)
@@ -1434,7 +1434,7 @@ def fetch_scores_and_backtest(*args, **kwargs):
 from google.cloud import bigquery
 import pandas as pd
 
-def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.DataFrame:
+def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.DataFrame:
     client = bigquery.Client(location="us")  # Correct location
     query = f"""
       
