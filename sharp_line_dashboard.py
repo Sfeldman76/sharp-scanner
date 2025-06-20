@@ -1135,24 +1135,29 @@ def render_scanner_tab(label, sport_key, container):
                
         
         
-        
         # === 6. Final Summary Table
         summary_cols = [
             'Game', 'Market', 'Game_Start', 'Outcome',
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
             'Move_From_Open_Rec', 'Move_From_Open_Sharp',
             'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
-            'Model Reasoning', 'Confidence Evolution',
-            'Tier_Change', 'Direction'
+            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It'
         ]
+        
+        # Make sure diagnostic columns exist even if not merged properly
+        for col in ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']:
+            if col not in df_moves_raw.columns:
+                df_moves_raw[col] = "⚠️ Missing"
+        
         summary_df = df_moves_raw[[col for col in summary_cols if col in df_moves_raw.columns]].copy()
+        
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
         summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
         summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
-
+        
         summary_df.rename(columns={
             'Game': 'Matchup',
             'Outcome': 'Pick',
@@ -1161,12 +1166,9 @@ def render_scanner_tab(label, sport_key, container):
             'Move_From_Open_Rec': 'Rec Move',
             'Move_From_Open_Sharp': 'Sharp Move',
             'Model_Sharp_Win_Prob': 'Model Prob',
-            'Model_Confidence_Tier': 'Confidence Tier',
-            'Model Reasoning': 'Why Model Likes It',
-            'Confidence Evolution': 'Confidence Trend',
-            'Tier_Change': 'Tier Δ',
-            'Direction': 'Line/Model Direction'
+            'Model_Confidence_Tier': 'Confidence Tier'
         }, inplace=True)
+        
         # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
@@ -1192,12 +1194,12 @@ def render_scanner_tab(label, sport_key, container):
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
-                    'Why Model Likes It': lambda x: ' | '.join(sorted(set(x.dropna()))),
-                    'Confidence Trend': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
-                    'Tier Δ': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
-                    'Line/Model Direction': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
-                })
-            )
+                'Why Model Likes It': lambda x: ' | '.join(sorted(set(x.dropna()))),
+                'Confidence Trend': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
+                'Tier Δ': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
+                'Line/Model Direction': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+            })
+        )
         
         # === Final Column Order for Display
         view_cols = [
