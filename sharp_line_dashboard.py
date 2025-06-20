@@ -511,7 +511,6 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
 
-
 def compute_diagnostics_vectorized(df):
     import numpy as np
     import pandas as pd
@@ -520,21 +519,13 @@ def compute_diagnostics_vectorized(df):
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
     try:
+        # === Clean tier columns
         for col in ['Model_Confidence_Tier', 'First_Tier']:
             if col not in df.columns:
-                st.warning(f"⚠️ Column missing: `{col}` — defaulting to empty string.")
+                st.warning(f"⚠️ Column `{col}` missing — filling with blank.")
                 df[col] = ""
             else:
-                # Handle edge case where cell is a list, Series, or garbage
-                def safe_strip(val):
-                    try:
-                        if isinstance(val, (list, pd.Series, dict)):
-                            return ""
-                        return str(val).strip() if pd.notna(val) else ""
-                    except Exception:
-                        return ""
-
-                df[col] = df[col].apply(safe_strip)
+                df[col] = df[col].apply(lambda x: str(x).strip() if pd.notna(x) else "")
 
         # === Tier Mapping
         tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
@@ -555,106 +546,101 @@ def compute_diagnostics_vectorized(df):
             "⚠️ Missing"
         )
 
-        df['Tier_Change'] = tier_change
+        # === Probabilities & Confidence Trend
+        if 'Model_Sharp_Win_Prob' in df.columns and 'First_Model_Prob' in df.columns:
+            prob_now = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
+            prob_start = pd.to_numeric(df['First_Model_Prob'], errors='coerce')
+            delta = prob_now - prob_start
 
-        st.info(f"✅ Diagnostics computed for {len(df)} rows.")
-        st.dataframe(df[['Model_Confidence_Tier', 'First_Tier', 'Tier_Change']].head())
+            confidence_trend = np.where(
+                prob_start.isna() | prob_now.isna(),
+                "⚠️ Missing",
+                np.where(
+                    delta >= 0.04,
+                    ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
+                    np.where(
+                        delta <= -0.04,
+                        ["📉 Trending Down: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
+                        ["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
+                    )
+                )
+            )
 
-        return df
+            # === Direction (Model vs Line)
+            line_delta = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
+            direction = np.where(
+                (delta > 0.04) & (line_delta < 0), "🟢 Model ↑ / Line ↓",
+                np.where(
+                    (delta < -0.04) & (line_delta > 0), "🔴 Model ↓ / Line ↑",
+                    np.where(
+                        (delta > 0.04) & (line_delta > 0), "🟢 Aligned ↑",
+                        np.where(
+                            (delta < -0.04) & (line_delta < 0), "🔻 Aligned ↓",
+                            "⚪ Mixed"
+                        )
+                    )
+                )
+            )
+        else:
+            delta = pd.Series([0] * len(df))
+            confidence_trend = "⚠️ Missing"
+            direction = "⚠️ Missing"
+            st.warning("⚠️ Missing probability columns for trend/direction.")
+
+        # === Model Reasoning
+        prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob', 0), errors='coerce').fillna(0)
+        model_reason = np.select(
+            [
+                prob >= 0.58,
+                prob >= 0.52,
+                prob <= 0.48,
+                prob <= 0.42
+            ],
+            [
+                "🔼 Strong Model Edge",
+                "↗️ Slight Model Lean",
+                "↘️ Slight Model Fade",
+                "🔽 Strong Model Fade"
+            ],
+            default="🪙 Coinflip"
+        )
+
+        reasoning_parts = [pd.Series(model_reason, index=df.index)]
+
+        def append_reason(condition, label):
+            mask = pd.Series(condition).fillna(False)
+            reasoning_parts.append(mask.map(lambda x: label if x else ""))
+
+        append_reason(df.get('Sharp_Prob_Shift', 0) > 0, "Confidence ↑")
+        append_reason(df.get('Sharp_Prob_Shift', 0) < 0, "Confidence ↓")
+        append_reason(df.get('Sharp_Limit_Jump', 0), "Limit Jump")
+        append_reason(df.get('Market_Leader', 0), "Led Market Move")
+        append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
+        append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
+
+        model_reasoning = pd.Series([
+            " | ".join(filter(None, parts))
+            for parts in zip(*reasoning_parts)
+        ], index=df.index)
+
+        # === Final DataFrame
+        diagnostics_df = pd.DataFrame({
+            'Tier_Change': tier_change,
+            '📊 Confidence Evolution': confidence_trend,
+            'Direction': direction,
+            '📌 Model Reasoning': model_reasoning
+        })
+
+        st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
+        st.dataframe(diagnostics_df.head())
+
+        return diagnostics_df
 
     except Exception as e:
         st.error("❌ Error computing diagnostics")
         st.exception(e)
-      
-
-    # === Confidence Evolution
-    # === Convert numeric model probabilities safely
-    if 'Model_Sharp_Win_Prob' in df.columns:
-        prob_now = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
-    else:
-        st.warning("⚠️ Column 'Model_Sharp_Win_Prob' missing — using 0 as fallback.")
-        prob_now = pd.Series([0] * len(df))
     
-    if 'First_Model_Prob' in df.columns:
-        prob_open = pd.to_numeric(df['First_Model_Prob'], errors='coerce')
-    else:
-        prob_open = pd.Series([0] * len(df))
-    
-    confidence_trend = np.where(
-        prob_start.isna() | prob_now.isna(),
-        "⚠️ Missing",
-        np.where(
-            delta >= 0.04,
-            ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
-            np.where(
-                delta <= -0.04,
-                ["📉 Trending Down: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
-                ["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
-            )
-        )
-    )
 
-    # === Direction (model vs line)
-    line_delta = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
-
-    direction = np.where(
-        (delta > 0.04) & (line_delta < 0), "🟢 Model ↑ / Line ↓",
-        np.where(
-            (delta < -0.04) & (line_delta > 0), "🔴 Model ↓ / Line ↑",
-            np.where(
-                (delta > 0.04) & (line_delta > 0), "🟢 Aligned ↑",
-                np.where(
-                    (delta < -0.04) & (line_delta < 0), "🔻 Aligned ↓",
-                    "⚪ Mixed"
-                )
-            )
-        )
-    )
-
-    # === Model Reasoning Base
-    prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob', 0), errors='coerce').fillna(0)
-    model_reason = np.select(
-        [
-            prob >= 0.58,
-            prob >= 0.52,
-            prob <= 0.48,
-            prob <= 0.42
-        ],
-        [
-            "🔼 Strong Model Edge",
-            "↗️ Slight Model Lean",
-            "↘️ Slight Model Fade",
-            "🔽 Strong Model Fade"
-        ],
-        default="🪙 Coinflip"
-    )
-
-    # === Additional Signals (vectorized append)
-    reasoning_parts = [pd.Series(model_reason, index=df.index)]
-
-    def append_reason(condition, label):
-        mask = pd.Series(condition).fillna(False)
-        reasoning_parts.append(mask.map(lambda x: label if x else ""))
-
-    append_reason(df.get('Sharp_Prob_Shift', 0) > 0, "Confidence ↑")
-    append_reason(df.get('Sharp_Prob_Shift', 0) < 0, "Confidence ↓")
-    append_reason(df.get('Sharp_Limit_Jump', 0), "Limit Jump")
-    append_reason(df.get('Market_Leader', 0), "Led Market Move")
-    append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
-    append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
-
-    model_reasoning = pd.Series([
-        " | ".join(filter(None, parts))
-        for parts in zip(*reasoning_parts)
-    ], index=df.index)
-
-    # === Final Output
-    return pd.DataFrame({
-        'Tier_Change': tier_change,
-        '📊 Confidence Evolution': confidence_trend,
-        'Direction': direction,
-        '📌 Model Reasoning': model_reasoning
-    })
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
