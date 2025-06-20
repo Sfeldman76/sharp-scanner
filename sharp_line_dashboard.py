@@ -517,20 +517,18 @@ def compute_diagnostics_vectorized(df):
 
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
-    # === Ensure columns exist and convert cleanly
+    # === Ensure columns exist and sanitize
     for col in ['Model_Confidence_Tier', 'First_Tier']:
         if col not in df.columns:
             df[col] = ""
-        elif pd.api.types.is_categorical_dtype(df[col]):
-            df[col] = df[col].astype(str)  # Avoid Category collision
-        df.loc[:, col] = df[col].astype(str).fillna("").str.strip()
+        else:
+            df[col] = df[col].fillna("").apply(lambda x: x.strip() if isinstance(x, str) else str(x).strip())
 
     # === Tier Mapping
     tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
     tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
 
-    # === Tier Change
-    # === Tier Change
+    # === Tier Change Logic
     tier_change = np.where(
         df['First_Tier'].notna() & (df['First_Tier'] != ""),
         np.where(
@@ -544,6 +542,10 @@ def compute_diagnostics_vectorized(df):
         ),
         "⚠️ Missing"
     )
+
+    df['Tier_Change'] = tier_change
+    
+    return df
 
     # === Confidence Evolution
     prob_start = pd.to_numeric(df.get('First_Sharp_Prob', 0), errors='coerce')
