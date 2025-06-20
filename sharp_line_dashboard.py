@@ -717,62 +717,81 @@ def apply_blended_sharp_score(df, trained_models):
         return pd.DataFrame()
 
     total_start = time.time()
+
     for market_type, bundle in trained_models.items():
         start = time.time()
-
         model = bundle['model']
         iso = bundle['calibrator']
-
         df_market = df[df['Market'] == market_type].copy()
         if df_market.empty:
             continue
 
-        # === Canonical-side filtering ===
+        # === Canonical side filtering ===
         if market_type == "spreads":
             df_market = df_market[df_market['Value'].notna()]
-            df_market = df_market[df_market['Value'] < 0]  # favorite only
+            df_canon = df_market[df_market['Value'] < 0]  # favorites
         elif market_type == "totals":
             df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
-            df_market = df_market[df_market['Outcome_Norm'] == 'over']
+            df_canon = df_market[df_market['Outcome_Norm'] == 'over']
         elif market_type == "h2h":
-            df_market['Home_Team_Norm'] = df_market['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+            df_market[['Home_Team_Norm', 'Away_Team_Norm']] = df_market['Game_Key'].str.extract(r'^([^_]+)_([^_]+)_')
+            df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
-            df_market = df_market[df_market['Outcome_Norm'] == df_market['Home_Team_Norm']]
+            df_canon = df_market[df_market['Outcome_Norm'] == df_market['Home_Team_Norm']]
+        else:
+            df_canon = df_market.copy()
 
-        if df_market.empty:
+        if df_canon.empty:
             continue
 
         # === Prepare input features
         model_features = model.get_booster().feature_names
         for col in model_features:
-            if col not in df_market.columns:
-                df_market[col] = 0
+            if col not in df_canon.columns:
+                df_canon[col] = 0
 
-        X_all = df_market[model_features].replace(
-            {'True': 1, 'False': 0, 'true': 1, 'false': 0}
-        ).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
-
-        # === Score with model and calibrator
-        raw_probs = model.predict_proba(X_all)[:, 1]
+        X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
+        raw_probs = model.predict_proba(X)[:, 1]
         calibrated_probs = iso.predict(raw_probs)
 
-        df.loc[df_market.index, 'Model_Sharp_Win_Prob'] = raw_probs
-        df.loc[df_market.index, 'Model_Confidence'] = calibrated_probs
+        df_canon['Model_Sharp_Win_Prob'] = raw_probs
+        df_canon['Model_Confidence'] = calibrated_probs
 
-        st.info(f"🎯 Scored {len(df_market)} rows for {market_type} in {time.time() - start:.2f}s")
+        # === Flip and apply to both sides
+        df_merged = df_market.merge(
+            df_canon[['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']],
+            on=['Game_Key', 'Bookmaker', 'Market', 'Outcome'],
+            how='left'
+        )
 
-    st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
+        # Mirror probabilities to opposite side if missing
+        if market_type in ["spreads", "h2h", "totals"]:
+            df_inverse = df_market[~df_market['Outcome'].isin(df_canon['Outcome'])]
+            df_inverse = df_inverse.merge(
+                df_canon[['Game_Key', 'Bookmaker', 'Market']],
+                on=['Game_Key', 'Bookmaker', 'Market'],
+                how='left'
+            )
+            if not df_inverse.empty:
+                df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
+                df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
+                df_merged = pd.concat([df_merged, df_inverse], ignore_index=True)
 
-    # === Assign confidence tiers
-    if 'Model_Sharp_Win_Prob' in df.columns:
-        df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
-        df['Model_Confidence_Tier'] = pd.cut(
-            df['Model_Sharp_Win_Prob'],
+        df_merged['Model_Confidence'] = df_merged['Model_Confidence'].fillna(0).clip(0, 1)
+        df_merged['Model_Confidence_Tier'] = pd.cut(
+            df_merged['Model_Sharp_Win_Prob'],
             bins=[0.0, 0.4, 0.5, 0.6, 1.0],
             labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
         )
 
-    return df
+        # === Write back to df by index
+        df.update(df_merged.set_index(df_merged.index)[['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']])
+
+        st.info(f"🎯 Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s")
+
+    st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
+    return df_merged
+
 
         
         
@@ -970,6 +989,7 @@ def render_scanner_tab(label, sport_key, container):
         
                 if not df_pre_game.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
+                    df_moves_raw = df_scored  # directly use it, skip the merge
         
                     if not df_scored.empty:
                         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
@@ -1447,65 +1467,67 @@ def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.Data
 
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
+    from google.cloud import bigquery
+    client = bigquery.Client(project="sharplogger", location="us")
+
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
 
         # === Normalize sport label
         sport_label_upper = sport_label.upper()
 
-        # === Load both datasets first
-        df_master = read_from_bigquery("sharp_data.sharp_moves_master")
-        df_scores = read_from_bigquery("sharp_data.sharp_scores_full")
+        # === Load both datasets directly from BigQuery with correct context
+        try:
+            df_master = client.query(f"""
+                SELECT * FROM `sharplogger.sharp_data.sharp_moves_master`
+                WHERE LOWER(Sport) = '{sport_label.lower()}'
+            """).to_dataframe()
 
-        if df_master is None or df_scores is None or df_master.empty or df_scores.empty:
-            st.warning(f"⚠️ No sharp data available for {sport_label}")
+            df_scores = client.query(f"""
+                SELECT * FROM `sharplogger.sharp_data.sharp_scores_full`
+                WHERE LOWER(Sport) = '{sport_label.lower()}'
+                AND SHARP_HIT_BOOL IS NOT NULL
+            """).to_dataframe()
+        except Exception as e:
+            st.error(f"❌ Failed to load BigQuery data: {e}")
             return
-
-        if 'Sport' in df_master.columns:
-            df_master = df_master[df_master['Sport'].str.upper().str.endswith(sport_label_upper)]
-        if 'Sport' in df_scores.columns:
-            df_scores = df_scores[df_scores['Sport'].str.upper() == sport_label_upper]
 
         if df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp picks found for {sport_label}")
             return
-        
+
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-        
+
         # Check for required columns before slicing
         required_score_cols = merge_keys + ['SHARP_HIT_BOOL']
         missing_in_scores = [col for col in required_score_cols if col not in df_scores.columns]
         if missing_in_scores:
             st.error(f"❌ Missing columns in df_scores: {missing_in_scores}")
-            st.stop()
-        
+            return
+
         required_master_cols = merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence']
         missing_in_master = [col for col in required_master_cols if col not in df_master.columns]
         if missing_in_master:
             st.error(f"❌ Missing columns in df_master: {missing_in_master}")
-            st.stop()
-        
-        # Normalize for merge
+            return
+
+        # Normalize merge key casing/whitespace
         for df_ in [df_master, df_scores]:
             for col in merge_keys:
                 if df_[col].dtype == "object":
                     df_[col] = df_[col].str.strip().str.lower()
-        
-        # Safe merge
-        df = df_master.merge(
-            df_scores[required_score_cols],
-            on=merge_keys,
-            how='inner'
-        )
-        
+
+        # === Merge
+        df = df_master.merge(df_scores[required_score_cols], on=merge_keys, how='inner')
+
         st.info(f"🔗 Rows after merge: {len(df)}")
         if df.empty:
-            st.error("❌ Merge failed — likely due to mismatched keys.")
+            st.error("❌ Merge returned 0 rows — likely due to mismatched keys.")
             st.write("🔍 Sample keys in df_master:", df_master[merge_keys].drop_duplicates().head())
             st.write("🔍 Sample keys in df_scores:", df_scores[merge_keys].drop_duplicates().head())
-            st.stop()
-        
-        # Proceed safely
+            return
+
+        # === Format + Clean
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
@@ -1561,9 +1583,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
-
-
-
 
 tab_nba, tab_mlb, tab_cfl, tab_wnba = st.tabs(["🏀 NBA", "⚾ MLB", "🏈 CFL", "🏀 WNBA"])
 
