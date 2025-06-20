@@ -511,41 +511,53 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
 
-def compute_diagnostics_vectorized(df):
+ddef compute_diagnostics_vectorized(df):
     import numpy as np
     import pandas as pd
+    import streamlit as st
 
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
-    # === Ensure columns exist and sanitize
-    for col in ['Model_Confidence_Tier', 'First_Tier']:
-        if col not in df.columns:
-            df[col] = ""
-        else:
-            df[col] = df[col].fillna("").apply(lambda x: x.strip() if isinstance(x, str) else str(x).strip())
+    try:
+        # === Ensure expected columns
+        for col in ['Model_Confidence_Tier', 'First_Tier']:
+            if col not in df.columns:
+                st.warning(f"⚠️ Column missing: `{col}` — defaulting to empty string.")
+                df[col] = ""
+            else:
+                # Cast to string to avoid Categorical type issues
+                df[col] = df[col].astype(str).fillna("").apply(lambda x: x.strip() if isinstance(x, str) else str(x).strip())
 
-    # === Tier Mapping
-    tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
-    tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
+        # === Tier Mapping
+        tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
+        tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
 
-    # === Tier Change Logic
-    tier_change = np.where(
-        df['First_Tier'].notna() & (df['First_Tier'] != ""),
-        np.where(
-            tier_current > tier_open,
-            "↑ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
+        # === Tier Change Summary
+        tier_change = np.where(
+            df['First_Tier'].notna() & (df['First_Tier'] != ""),
             np.where(
-                tier_current < tier_open,
-                "↓ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
-                "↔ No Change"
-            )
-        ),
-        "⚠️ Missing"
-    )
+                tier_current > tier_open,
+                "↑ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
+                np.where(
+                    tier_current < tier_open,
+                    "↓ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
+                    "↔ No Change"
+                )
+            ),
+            "⚠️ Missing"
+        )
 
-    df['Tier_Change'] = tier_change
-    
-    return df
+        df['Tier_Change'] = tier_change
+
+        # Debug output: sample of computed diagnostics
+        st.info(f"✅ Diagnostics computed for {len(df)} rows.")
+        st.dataframe(df[['Model_Confidence_Tier', 'First_Tier', 'Tier_Change']].head(5))
+
+        return df
+
+    except Exception as e:
+        st.error(f"❌ Error computing diagnostics: {e}")
+        st.stop()
 
     # === Confidence Evolution
     prob_start = pd.to_numeric(df.get('First_Sharp_Prob', 0), errors='coerce')
