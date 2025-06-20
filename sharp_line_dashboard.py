@@ -517,6 +517,12 @@ def compute_diagnostics_vectorized(df):
     import streamlit as st
 
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
+    TIER_ORDER_MODEL_CONFIDENCE = {
+        '⚠️ Weak Indication': 1,
+        '✅ Coinflip': 2,
+        '⭐ Lean': 3,
+        '🔥 Strong Indication': 4
+    }
 
     try:
         # === Clean tier columns
@@ -531,22 +537,26 @@ def compute_diagnostics_vectorized(df):
                     except:
                         return ""
                 df[col] = df[col].apply(safe_strip)
+                
         #st.write("🧪 Inside diagnostics — columns:", df.columns.tolist())
         #st.write("🧪 Inside diagnostics — dtype of Model_Confidence_Tier:", type(df['Model_Confidence_Tier']))
 
-        # === Defensive check for data corruption
+        # === Defensive check
         if isinstance(df['Model_Confidence_Tier'], pd.DataFrame):
             st.error("❌ 'Model_Confidence_Tier' is a DataFrame, not a Series.")
             st.stop()
-        st.write("🧪 Unique values in Model_Confidence_Tier:", df['Model_Confidence_Tier'].unique().tolist())
 
-        # === Tier Mapping
-        tier_current = pd.Series(df['Model_Confidence_Tier']).map(TIER_ORDER)
-        tier_current = pd.to_numeric(tier_current, errors='coerce').fillna(0).astype(int)
+        st.write("🧪 Unique values in Model_Confidence_Tier:", df['Model_Confidence_Tier'].unique().tolist())
         st.write("🧪 Unique values in First_Tier:", df['First_Tier'].unique().tolist())
 
-        tier_open = pd.Series(df['First_Tier']).map(TIER_ORDER)
+        # === Tier Mapping
+        tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER_MODEL_CONFIDENCE)
+        tier_current = pd.to_numeric(tier_current, errors='coerce').fillna(0).astype(int)
+
+        tier_open = df['First_Tier'].map(TIER_ORDER)
         tier_open = pd.to_numeric(tier_open, errors='coerce').fillna(0).astype(int)
+
+
 
         # === Tier Change
         tier_change = np.where(
