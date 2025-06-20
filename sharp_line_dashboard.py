@@ -1095,34 +1095,25 @@ def render_scanner_tab(label, sport_key, container):
                         
         # === Final Diagnostics (Only for upcoming pre-game picks)
         # === Final Diagnostics (Only for upcoming pre-game picks)
+        # === Final Diagnostics (Only for upcoming pre-game picks)
+        # === Final Diagnostics (Only for pre-game picks)
         if 'Pre_Game' not in df_moves_raw.columns:
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
         else:
-            # ✅ Capture current time once and make timezone-aware
-            now = pd.Timestamp.utcnow().tz_convert('UTC') if pd.Timestamp.utcnow().tzinfo else pd.Timestamp.utcnow().tz_localize('UTC')
-
+            pre_mask = df_moves_raw['Pre_Game']
         
-            # ✅ Ensure Game_Start is timezone-aware UTC
-            df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        
-            # ✅ Filter only upcoming pre-game picks
-            pre_mask = df_moves_raw['Pre_Game'] & (df_moves_raw['Game_Start'] >= now)
-        
-            if df_moves_raw is None or df_moves_raw.empty or pre_mask.sum() == 0:
+            if df_moves_raw.empty or pre_mask.sum() == 0:
                 st.warning("⚠️ No live pre-game picks to compute diagnostics.")
                 return pd.DataFrame()
-
         
-            # === Defensive fix for corrupted tier field
+            # Defensive fix for corrupted tier column
             if 'Model_Confidence_Tier' in df_moves_raw.columns:
                 if isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
                     st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series by selecting first column")
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
         
-            # === Drop duplicate columns
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
         
-            # === Run diagnostics only on valid future rows
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
         
             if diagnostics_df is None:
@@ -1130,7 +1121,7 @@ def render_scanner_tab(label, sport_key, container):
                 return pd.DataFrame()
         
             st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
-        
+
         
         
                     
@@ -1412,7 +1403,17 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
         # === Load all predictions
         df_bt = load_backtested_predictions()  # <--- loads ALL sports
-        df_bt = df_bt[df_bt['Sport'].str.upper() == sport_label.upper()]  # <--- filters to current tab
+        # Normalize sport label (e.g., "NBA")
+        sport_label_upper = sport_label.upper()
+        
+        # Filter df_bt (scores table) if 'Sport' exists
+        if 'Sport' in df_bt.columns:
+            df_bt = df_bt[df_bt['Sport'].str.upper() == sport_label_upper]
+        
+        # Filter df_master (moves table) if 'Sport' exists
+        if 'Sport' in df_master.columns:
+            df_master = df_master[df_master['Sport'].str.upper().str.endswith(sport_label_upper)]
+
 
         if df_bt.empty:
             st.warning(f"⚠️ No matched sharp picks with scored outcomes for {sport_label}")
