@@ -1117,13 +1117,18 @@ def render_scanner_tab(label, sport_key, container):
             # Clean any duplicate column names again, just in case
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
             
-            # Now run diagnostics
+           # === Now run diagnostics
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
-
-    
+            
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
                 return pd.DataFrame()
+            
+            # ✅ Merge diagnostics back into main df
+            df_moves_raw.loc[pre_mask, diagnostics_df.columns] = diagnostics_df
+            
+            st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
+
 
             
             st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
