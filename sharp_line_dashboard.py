@@ -805,7 +805,9 @@ def apply_blended_sharp_score(df, trained_models):
         st.info(f"🎯 Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s")
 
     st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
-    return df_merged
+    
+    
+    return df
 
 
         
@@ -1017,7 +1019,7 @@ def render_scanner_tab(label, sport_key, container):
                         df_scored = df_scored.sample(20000, random_state=42)
         
                     # ✅ Use fully-scored result directly
-                    df_moves_raw = df_scored
+                    df_moves_raw.update(df_scored.set_index(df_scored.index)[['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']])
                 else:
                     st.info("ℹ️ No pre-game rows available for scoring.")
         
