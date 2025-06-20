@@ -653,13 +653,13 @@ def compute_diagnostics_vectorized(df):
             st.exception(e)
             model_reasoning = pd.Series(["🪙 Unavailable"] * len(df), index=df.index)
 
-        # === Final Output
         diagnostics_df = pd.DataFrame({
-            'Tier_Change': tier_change,
-            '📊 Confidence Evolution': confidence_trend,
-            'Direction': direction,
-            '📌 Model Reasoning': model_reasoning
+            'Tier Δ': tier_change,
+            'Confidence Trend': confidence_trend,
+            'Line/Model Direction': direction,
+            'Why Model Likes It': model_reasoning
         })
+
 
         st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
         st.dataframe(diagnostics_df.head())
