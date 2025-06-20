@@ -1094,17 +1094,23 @@ def render_scanner_tab(label, sport_key, container):
         st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
                         
         # === Final Diagnostics (Only for upcoming pre-game picks)
+        # === Final Diagnostics (Only for upcoming pre-game picks)
         if 'Pre_Game' not in df_moves_raw.columns:
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
         else:
-            now = pd.Timestamp.utcnow()
+            # ✅ Capture current time once and make timezone-aware
+            now = pd.Timestamp.utcnow().tz_localize('UTC')
         
-            # ✅ Only upcoming games (Pre_Game = True AND Game_Start in future)
-            pre_mask = (df_moves_raw['Pre_Game']) & (df_moves_raw['Game_Start'] >= now)
+            # ✅ Ensure Game_Start is timezone-aware UTC
+            df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
+        
+            # ✅ Filter only upcoming pre-game picks
+            pre_mask = df_moves_raw['Pre_Game'] & (df_moves_raw['Game_Start'] >= now)
         
             if df_moves_raw is None or df_moves_raw.empty or pre_mask.sum() == 0:
                 st.warning("⚠️ No live pre-game picks to compute diagnostics.")
                 return pd.DataFrame()
+
         
             # === Defensive fix for corrupted tier field
             if 'Model_Confidence_Tier' in df_moves_raw.columns:
