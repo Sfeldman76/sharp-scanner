@@ -10,6 +10,8 @@ requests
 pytz
 pyarrow  # Required for BigQuery pandas interface
 joblib    # For saving isotonic calibrators
+streamlit-option-menu
+
 
 # === Machine Learning ===
 xgboost
