@@ -458,14 +458,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         if df_market.empty:
             continue
 
-        # ✅ Normalize outcome and filter to canonical side only
         df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+
+        # === Canonical side filtering ===
         if market == "totals":
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
+
         elif market == "spreads":
-            df_market = df_market[df_market['Outcome_Norm'].isin(['favorite', 'home'])]
+            # Use spread value to infer favorite (spread < 0)
+            df_market = df_market[df_market['Value'].notna()]
+            df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
+            df_market = df_market[df_market['Side_Label'] == 'favorite']
+
         elif market == "h2h":
-            df_market = df_market[df_market['Outcome_Norm'] == 'home']
+            # Compare Outcome to Home_Team_Norm
+            df_market['Home_Team_Norm'] = df_market['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+            df_market['Away_Team_Norm'] = df_market['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+            df_market['Side_Label'] = np.where(
+                df_market['Outcome_Norm'] == df_market['Home_Team_Norm'], 'home',
+                np.where(df_market['Outcome_Norm'] == df_market['Away_Team_Norm'], 'away', 'unknown')
+            )
+            df_market = df_market[df_market['Side_Label'] == 'home']
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             st.warning(f"⚠️ Not enough data to train {market.upper()} model.")
@@ -496,9 +509,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
     if not trained_models:
         st.error("❌ No models trained.")
 
-     
-
-     
 
 
 
@@ -1431,38 +1441,43 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         if df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp picks found for {sport_label}")
             return
-
+        
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-
-        if 'SHARP_HIT_BOOL' not in df_scores.columns:
-            st.error("❌ 'SHARP_HIT_BOOL' missing from sharp_scores_full table.")
-            return
-
-        required_master_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence']
-        missing_master = [col for col in required_master_cols if col not in df_master.columns]
-        if missing_master:
-            st.error(f"❌ Missing columns in sharp_moves_master: {missing_master}")
-            return
-        # Ensure consistent merge key formatting
-        merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+        
+        # Check for required columns before slicing
+        required_score_cols = merge_keys + ['SHARP_HIT_BOOL']
+        missing_in_scores = [col for col in required_score_cols if col not in df_scores.columns]
+        if missing_in_scores:
+            st.error(f"❌ Missing columns in df_scores: {missing_in_scores}")
+            st.stop()
+        
+        required_master_cols = merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence']
+        missing_in_master = [col for col in required_master_cols if col not in df_master.columns]
+        if missing_in_master:
+            st.error(f"❌ Missing columns in df_master: {missing_in_master}")
+            st.stop()
+        
+        # Normalize for merge
         for df_ in [df_master, df_scores]:
             for col in merge_keys:
                 if df_[col].dtype == "object":
                     df_[col] = df_[col].str.strip().str.lower()
-
-        # ✅ Merge only needed columns
+        
+        # Safe merge
         df = df_master.merge(
-            df_scores[merge_keys + ['SHARP_HIT_BOOL']],
+            df_scores[required_score_cols],
             on=merge_keys,
             how='inner'
         )
+        
         st.info(f"🔗 Rows after merge: {len(df)}")
         if df.empty:
-            st.error("❌ Merge failed — likely due to mismatched keys even after normalization.")
+            st.error("❌ Merge failed — likely due to mismatched keys.")
             st.write("🔍 Sample keys in df_master:", df_master[merge_keys].drop_duplicates().head())
             st.write("🔍 Sample keys in df_scores:", df_scores[merge_keys].drop_duplicates().head())
             st.stop()
-        # ✅ Type conversion
+        
+        # Proceed safely
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
