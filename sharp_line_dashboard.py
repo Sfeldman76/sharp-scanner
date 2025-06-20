@@ -1403,7 +1403,7 @@ def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.Data
         import streamlit as st
         st.error(f"❌ Failed to load predictions: {e}")
         return pd.DataFrame()
-)
+
 
 
 
