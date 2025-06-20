@@ -520,14 +520,21 @@ def compute_diagnostics_vectorized(df):
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
     try:
-        # === Clean string columns safely, avoiding Categorical/fillna crash
         for col in ['Model_Confidence_Tier', 'First_Tier']:
             if col not in df.columns:
                 st.warning(f"⚠️ Column missing: `{col}` — defaulting to empty string.")
                 df[col] = ""
             else:
-                # Convert to string first, then safely strip
-                df[col] = df[col].apply(lambda x: str(x).strip() if pd.notna(x) else "")
+                # Handle edge case where cell is a list, Series, or garbage
+                def safe_strip(val):
+                    try:
+                        if isinstance(val, (list, pd.Series, dict)):
+                            return ""
+                        return str(val).strip() if pd.notna(val) else ""
+                    except Exception:
+                        return ""
+
+                df[col] = df[col].apply(safe_strip)
 
         # === Tier Mapping
         tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
@@ -535,7 +542,7 @@ def compute_diagnostics_vectorized(df):
 
         # === Tier Change
         tier_change = np.where(
-            df['First_Tier'].notna() & (df['First_Tier'] != ""),
+            df['First_Tier'] != "",
             np.where(
                 tier_current > tier_open,
                 "↑ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
@@ -550,18 +557,15 @@ def compute_diagnostics_vectorized(df):
 
         df['Tier_Change'] = tier_change
 
-        # Debug preview
         st.info(f"✅ Diagnostics computed for {len(df)} rows.")
         st.dataframe(df[['Model_Confidence_Tier', 'First_Tier', 'Tier_Change']].head())
 
         return df
 
     except Exception as e:
-        st.error(f"❌ Error computing diagnostics: {e}")
+        st.error("❌ Error computing diagnostics")
         st.exception(e)
-        st.stop()
-
- 
+      
 
     # === Confidence Evolution
     prob_start = pd.to_numeric(df.get('First_Sharp_Prob', 0), errors='coerce')
