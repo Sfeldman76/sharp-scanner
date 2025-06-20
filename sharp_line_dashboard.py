@@ -40,7 +40,11 @@ st.markdown("""
 .custom-table th, .custom-table td {
     border: 1px solid #444;
     padding: 8px;
-    text-align: center;
+    text-align: left;
+    word-break: break-word;
+    white-space: normal;
+    max-width: 220px;  /* or whatever max width fits your layout */
+}
 }
 .custom-table th {
     background-color: #1f2937;
