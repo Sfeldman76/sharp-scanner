@@ -531,8 +531,8 @@ def compute_diagnostics_vectorized(df):
                     except:
                         return ""
                 df[col] = df[col].apply(safe_strip)
-        st.write("🧪 Inside diagnostics — columns:", df.columns.tolist())
-        st.write("🧪 Inside diagnostics — dtype of Model_Confidence_Tier:", type(df['Model_Confidence_Tier']))
+        #st.write("🧪 Inside diagnostics — columns:", df.columns.tolist())
+        #st.write("🧪 Inside diagnostics — dtype of Model_Confidence_Tier:", type(df['Model_Confidence_Tier']))
 
         # === Defensive check for data corruption
         if isinstance(df['Model_Confidence_Tier'], pd.DataFrame):
@@ -1090,9 +1090,17 @@ def render_scanner_tab(label, sport_key, container):
             if df_moves_raw is None or df_moves_raw.empty:
                 st.warning("⚠️ No data to compute diagnostics.")
                 return pd.DataFrame()
-            st.write("🧪 DEBUG: Model_Confidence_Tier type before diagnostics:", type(df_moves_raw['Model_Confidence_Tier']))
-            st.write("🧪 Columns with that name:", [c for c in df_moves_raw.columns if 'Model_Confidence_Tier' in c])
+            #st.write("🧪 DEBUG: Model_Confidence_Tier type before diagnostics:", type(df_moves_raw['Model_Confidence_Tier']))
+            #st.write("🧪 Columns with that name:", [c for c in df_moves_raw.columns if 'Model_Confidence_Tier' in c])
 
+            if df_moves_raw is None or df_moves_raw.empty:
+                st.warning("⚠️ No data to compute diagnostics.")
+                return pd.DataFrame()
+            
+            # 🔥 Add this line
+            df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
+            
+            # Diagnostics
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
