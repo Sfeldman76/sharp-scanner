@@ -511,7 +511,7 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
 
-ddef compute_diagnostics_vectorized(df):
+def compute_diagnostics_vectorized(df):
     import numpy as np
     import pandas as pd
     import streamlit as st
