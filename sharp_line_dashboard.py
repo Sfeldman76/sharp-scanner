@@ -1131,7 +1131,7 @@ def render_scanner_tab(label, sport_key, container):
 
 
             
-            st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
+      
                
         
         
@@ -1142,7 +1142,7 @@ def render_scanner_tab(label, sport_key, container):
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
             'Move_From_Open_Rec', 'Move_From_Open_Sharp',
             'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
-            '📌 Model Reasoning', '📊 Confidence Evolution',
+            'Model Reasoning', 'Confidence Evolution',
             'Tier_Change', 'Direction'
         ]
         summary_df = df_moves_raw[[col for col in summary_cols if col in df_moves_raw.columns]].copy()
@@ -1162,8 +1162,8 @@ def render_scanner_tab(label, sport_key, container):
             'Move_From_Open_Sharp': 'Sharp Move',
             'Model_Sharp_Win_Prob': 'Model Prob',
             'Model_Confidence_Tier': 'Confidence Tier',
-            '📌 Model Reasoning': 'Why Model Likes It',
-            '📊 Confidence Evolution': 'Confidence Trend',
+            'Model Reasoning': 'Why Model Likes It',
+            'Confidence Evolution': 'Confidence Trend',
             'Tier_Change': 'Tier Δ',
             'Direction': 'Line/Model Direction'
         }, inplace=True)
