@@ -440,7 +440,7 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
             print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
 
 
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 10):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
     df_bt = load_backtested_predictions(sport, days_back)
