@@ -568,10 +568,18 @@ def compute_diagnostics_vectorized(df):
       
 
     # === Confidence Evolution
-    prob_start = pd.to_numeric(df.get('First_Sharp_Prob', 0), errors='coerce')
-    prob_now = pd.to_numeric(df.get('Model_Sharp_Win_Prob', 0), errors='coerce')
-    delta = prob_now - prob_start
-
+    # === Convert numeric model probabilities safely
+    if 'Model_Sharp_Win_Prob' in df.columns:
+        prob_now = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
+    else:
+        st.warning("⚠️ Column 'Model_Sharp_Win_Prob' missing — using 0 as fallback.")
+        prob_now = pd.Series([0] * len(df))
+    
+    if 'First_Model_Prob' in df.columns:
+        prob_open = pd.to_numeric(df['First_Model_Prob'], errors='coerce')
+    else:
+        prob_open = pd.Series([0] * len(df))
+    
     confidence_trend = np.where(
         prob_start.isna() | prob_now.isna(),
         "⚠️ Missing",
