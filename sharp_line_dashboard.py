@@ -1113,7 +1113,11 @@ def render_scanner_tab(label, sport_key, container):
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
             
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-            
+            dedup_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+            before = df_moves_raw[pre_mask].shape[0]
+            df_moves_raw = df_moves_raw.drop_duplicates(subset=dedup_cols + ['Snapshot_Timestamp'])
+            after = df_moves_raw[pre_mask].shape[0]
+            st.info(f"🧹 Deduplicated diagnostics rows: {before} → {after}")
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
             
             if diagnostics_df is None:
