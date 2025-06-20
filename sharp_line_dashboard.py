@@ -716,11 +716,7 @@ def compute_diagnostics_vectorized(df):
 
     
 def apply_blended_sharp_score(df, trained_models):
-    import numpy as np
-    import pandas as pd
-    import streamlit as st
     import time
-
     st.info("🔍 Entered apply_blended_sharp_score()")
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
@@ -731,6 +727,7 @@ def apply_blended_sharp_score(df, trained_models):
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
+    all_scored = []
     total_start = time.time()
 
     for market_type, bundle in trained_models.items():
@@ -744,7 +741,7 @@ def apply_blended_sharp_score(df, trained_models):
         # === Canonical side filtering ===
         if market_type == "spreads":
             df_market = df_market[df_market['Value'].notna()]
-            df_canon = df_market[df_market['Value'] < 0]  # favorites
+            df_canon = df_market[df_market['Value'] < 0]  # favorite only
         elif market_type == "totals":
             df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
             df_canon = df_market[df_market['Outcome_Norm'] == 'over']
@@ -759,7 +756,6 @@ def apply_blended_sharp_score(df, trained_models):
         if df_canon.empty:
             continue
 
-        # === Prepare input features
         model_features = model.get_booster().feature_names
         for col in model_features:
             if col not in df_canon.columns:
@@ -771,44 +767,34 @@ def apply_blended_sharp_score(df, trained_models):
 
         df_canon['Model_Sharp_Win_Prob'] = raw_probs
         df_canon['Model_Confidence'] = calibrated_probs
+        df_canon['Was_Canonical'] = True
 
-        # === Flip and apply to both sides
-        df_merged = df_market.merge(
-            df_canon[['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']],
-            on=['Game_Key', 'Bookmaker', 'Market', 'Outcome'],
+        # === Build inverse side
+        df_inverse = df_market[~df_market['Outcome'].isin(df_canon['Outcome'])].copy()
+        df_inverse = df_inverse.merge(
+            df_canon[['Game_Key', 'Bookmaker', 'Market']],
+            on=['Game_Key', 'Bookmaker', 'Market'],
             how='left'
         )
+        if not df_inverse.empty:
+            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_canon['Model_Sharp_Win_Prob'].values
+            df_inverse['Model_Confidence'] = 1 - df_canon['Model_Confidence'].values
+            df_inverse['Was_Canonical'] = False
 
-        # Mirror probabilities to opposite side if missing
-        if market_type in ["spreads", "h2h", "totals"]:
-            df_inverse = df_market[~df_market['Outcome'].isin(df_canon['Outcome'])]
-            df_inverse = df_inverse.merge(
-                df_canon[['Game_Key', 'Bookmaker', 'Market']],
-                on=['Game_Key', 'Bookmaker', 'Market'],
-                how='left'
-            )
-            if not df_inverse.empty:
-                df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
-                df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
-                df_merged = pd.concat([df_merged, df_inverse], ignore_index=True)
-
-        df_merged['Model_Confidence'] = df_merged['Model_Confidence'].fillna(0).clip(0, 1)
-        df_merged['Model_Confidence_Tier'] = pd.cut(
-            df_merged['Model_Sharp_Win_Prob'],
+        df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+        df_scored['Model_Confidence'] = df_scored['Model_Confidence'].fillna(0).clip(0, 1)
+        df_scored['Model_Confidence_Tier'] = pd.cut(
+            df_scored['Model_Sharp_Win_Prob'],
             bins=[0.0, 0.4, 0.5, 0.6, 1.0],
             labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
         )
 
-        # === Write back to df by index
-        df.update(df_merged.set_index(df_merged.index)[['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']])
-
         st.info(f"🎯 Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s")
+        all_scored.append(df_scored)
 
+    df_final = pd.concat(all_scored, ignore_index=True)
     st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
-    
-    
-    return df
-
+    return df_final
 
         
         
