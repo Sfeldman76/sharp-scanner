@@ -835,14 +835,13 @@ def apply_blended_sharp_score(df, trained_models):
 
     st.info("🔍 Entered apply_blended_sharp_score()")
     df = df.copy()
+    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
 
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
-
-    df['Market'] = df['Market'].astype(str).str.lower()
 
     total_start = time.time()
     for market_type, bundle in trained_models.items():
@@ -855,52 +854,22 @@ def apply_blended_sharp_score(df, trained_models):
         if df_market.empty:
             continue
 
-        # Normalize outcome
-        df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
-
-        # Define canonical side logic
-        if market_type == 'totals':
-            canon_mask = df_market['Outcome_Norm'] == 'over'
-        elif market_type == 'spreads':
-            canon_mask = df_market['Outcome_Norm'].isin(['favorite', 'home'])  # adjust to your labeling
-        elif market_type == 'h2h':
-            canon_mask = df_market['Outcome_Norm'] == 'home'
-        else:
-            canon_mask = pd.Series([False] * len(df_market), index=df_market.index)
-
-        df_canon = df_market[canon_mask].copy()
-        if df_canon.empty:
-            continue
-
+        # Prepare input features
         model_features = model.get_booster().feature_names
         for col in model_features:
-            if col not in df_canon.columns:
-                df_canon[col] = 0
-
-        X = df_canon[model_features].replace(
+            if col not in df_market.columns:
+                df_market[col] = 0
+        
+        X_all = df_market[model_features].replace(
             {'True': 1, 'False': 0, 'true': 1, 'false': 0}
         ).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
-
-        raw_probs = model.predict_proba(X)[:, 1]
+        
+        raw_probs = model.predict_proba(X_all)[:, 1]
         calibrated_probs = iso.predict(raw_probs)
-
-        # Apply model output to canonical side
-        df.loc[df_canon.index, 'Model_Sharp_Win_Prob'] = raw_probs
-        df.loc[df_canon.index, 'Model_Confidence'] = calibrated_probs
-
-        # Assign 1 - p to the opposing side
-        opp_mask = df_market.index.difference(df_canon.index)
-        for idx in opp_mask:
-            match = df_market.loc[idx]
-            # Find opposing side
-            opp_pair = df_canon[
-                (df_canon['Game_Key'] == match['Game_Key']) &
-                (df_canon['Market'] == match['Market'])
-            ]
-            if not opp_pair.empty:
-                p = opp_pair['Model_Sharp_Win_Prob'].values[0]
-                df.at[idx, 'Model_Sharp_Win_Prob'] = 1 - p
-                df.at[idx, 'Model_Confidence'] = 1 - opp_pair['Model_Confidence'].values[0]
+        
+        # Assign predictions directly to all rows
+        df.loc[df_market.index, 'Model_Sharp_Win_Prob'] = raw_probs
+        df.loc[df_market.index, 'Model_Confidence'] = calibrated_probs
 
         st.info(f"⏱️ Scored {market_type} in {time.time() - start:.2f}s")
 
