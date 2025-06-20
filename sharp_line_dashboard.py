@@ -552,8 +552,8 @@ def compute_diagnostics_vectorized(df):
             st.error("❌ 'Model_Confidence_Tier' is a DataFrame, not a Series.")
             st.stop()
 
-        st.write("🧪 Unique values in Model_Confidence_Tier:", df['Model_Confidence_Tier'].unique().tolist())
-        st.write("🧪 Unique values in First_Tier:", df['First_Tier'].unique().tolist())
+        #st.write("🧪 Unique values in Model_Confidence_Tier:", df['Model_Confidence_Tier'].unique().tolist())
+        #st.write("🧪 Unique values in First_Tier:", df['First_Tier'].unique().tolist())
 
         # === Tier Mapping
         tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER_MODEL_CONFIDENCE)
@@ -651,8 +651,8 @@ def compute_diagnostics_vectorized(df):
         append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
 
         try:
-            st.write("🧪 reasoning_parts lengths:", [len(part) for part in reasoning_parts])
-            st.write("🧪 df index length:", len(df.index))
+            #st.write("🧪 reasoning_parts lengths:", [len(part) for part in reasoning_parts])
+            #st.write("🧪 df index length:", len(df.index))
         
             model_reasoning = pd.Series([
                 " | ".join(filter(None, parts))
@@ -1093,45 +1093,41 @@ def render_scanner_tab(label, sport_key, container):
         
         st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
                         
+        # === Final Diagnostics (Only for upcoming pre-game picks)
         if 'Pre_Game' not in df_moves_raw.columns:
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
         else:
-            pre_mask = df_moves_raw['Pre_Game'] == True
-            start = time.time()
-            if df_moves_raw is None or df_moves_raw.empty:
-                st.warning("⚠️ No data to compute diagnostics.")
+            now = pd.Timestamp.utcnow()
+        
+            # ✅ Only upcoming games (Pre_Game = True AND Game_Start in future)
+            pre_mask = (df_moves_raw['Pre_Game']) & (df_moves_raw['Game_Start'] >= now)
+        
+            if df_moves_raw is None or df_moves_raw.empty or pre_mask.sum() == 0:
+                st.warning("⚠️ No live pre-game picks to compute diagnostics.")
                 return pd.DataFrame()
-            #st.write("🧪 DEBUG: Model_Confidence_Tier type before diagnostics:", type(df_moves_raw['Model_Confidence_Tier']))
-            #st.write("🧪 Columns with that name:", [c for c in df_moves_raw.columns if 'Model_Confidence_Tier' in c])
-
-            if df_moves_raw is None or df_moves_raw.empty:
-                st.warning("⚠️ No data to compute diagnostics.")
-                return pd.DataFrame()
-            
-           # === Ultimate repair for Model_Confidence_Tier
+        
+            # === Defensive fix for corrupted tier field
             if 'Model_Confidence_Tier' in df_moves_raw.columns:
                 if isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
                     st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series by selecting first column")
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
-            
-            # Clean any duplicate column names again, just in case
+        
+            # === Drop duplicate columns
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-            
-           # === Now run diagnostics
+        
+            # === Run diagnostics only on valid future rows
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
-            
+        
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
                 return pd.DataFrame()
-            
-            # ✅ Merge diagnostics back into main df
-            df_moves_raw.loc[pre_mask, diagnostics_df.columns] = diagnostics_df
-            
+        
             st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
-
-
-            
-      
+        
+        
+        
+                    
+              
                
         
         
@@ -1373,27 +1369,32 @@ def fetch_scores_and_backtest(*args, **kwargs):
     
 
 
-def load_backtested_predictions(sport: str = "NBA", days_back: int = 7):
+def load_backtested_predictions(days_back: int = 7):
     from google.cloud import bigquery
     import pandas as pd
 
+    client = bigquery.Client()
     query = f"""
-        SELECT *
-        FROM `sharplogger.sharp_data.sharp_scores_full`
-        WHERE SHARP_HIT_BOOL IS NOT NULL
-          AND Model_Sharp_Win_Prob IS NOT NULL
-          AND DATE(Game_Start) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
-          AND Sport = '{sport.upper()}'
+        SELECT 
+            Game_Key, Bookmaker, Market, Outcome,
+            Sharp_Move_Signal, Sharp_Limit_Jump, Sharp_Prob_Shift,
+            Sharp_Time_Score, Sharp_Limit_Total,
+            Is_Reinforced_MultiMarket, Market_Leader, LimitUp_NoMove_Flag,
+            SharpBetScore, Enhanced_Sharp_Confidence_Score, True_Sharp_Confidence_Score,
+            SHARP_HIT_BOOL, SHARP_COVER_RESULT, Scored, Snapshot_Timestamp, Sport
+        FROM `sharp_data.sharp_scores_final`
+        WHERE 
+            Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
+            AND SHARP_HIT_BOOL IS NOT NULL
     """
-
     try:
-        client = bigquery.Client(location="US")
         df = client.query(query).to_dataframe()
-        df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
         return df
     except Exception as e:
+        import streamlit as st
         st.error(f"❌ Failed to load predictions: {e}")
         return pd.DataFrame()
+
 
 
 
@@ -1401,6 +1402,19 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
 
+
+        # === Load all predictions
+        df_bt = load_backtested_predictions()  # <--- loads ALL sports
+        df_bt = df_bt[df_bt['Sport'].str.upper() == sport_label.upper()]  # <--- filters to current tab
+
+        if df_bt.empty:
+            st.warning(f"⚠️ No matched sharp picks with scored outcomes for {sport_label}")
+            return
+
+        # Coerce to numeric for safety
+        df_bt['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt['Model_Sharp_Win_Prob'], errors='coerce')
+        df_bt['SharpBetScore'] = pd.to_numeric(df_bt['SharpBetScore'], errors='coerce')
+        
         # === Load both datasets
         df_master = read_from_bigquery("sharp_data.sharp_moves_master")
         df_scores = read_from_bigquery("sharp_data.sharp_scores_final")
