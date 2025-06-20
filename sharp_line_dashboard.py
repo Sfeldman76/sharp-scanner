@@ -662,7 +662,7 @@ def compute_diagnostics_vectorized(df):
 
 
         st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
-        st.dataframe(diagnostics_df.head())
+       
 
         return diagnostics_df
 
@@ -1212,7 +1212,7 @@ def render_scanner_tab(label, sport_key, container):
         # === Final Output
         st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
         st.info(f"✅ Summary table shape: {summary_grouped.shape}")
-        st.dataframe(summary_grouped[view_cols], use_container_width=True)
+        
 
         # === CSS Styling for All Tables (keep this once)
         st.markdown("""
