@@ -520,12 +520,13 @@ def compute_diagnostics_vectorized(df):
 
     try:
         # === Clean tier columns
+        # === Clean tier columns
         for col in ['Model_Confidence_Tier', 'First_Tier']:
             if col not in df.columns:
                 st.warning(f"⚠️ Column `{col}` missing — filling with blank.")
                 df[col] = ""
             else:
-               def safe_strip(x):
+                def safe_strip(x):
                     try:
                         return str(x).strip()
                     except:
