@@ -219,7 +219,14 @@ def fetch_live_odds(sport_key):
         st.error(f"❌ Odds API Error: {e}")
 
         return []
-
+def read_from_bigquery(table_name):
+    from google.cloud import bigquery
+    try:
+        client = bigquery.Client()
+        return client.query(f"SELECT * FROM `{table_name}`").to_dataframe()
+    except Exception as e:
+        st.error(f"❌ Failed to load `{table_name}`: {e}")
+        return pd.DataFrame()
 def safe_to_gbq(df, table, replace=False):
     mode = 'replace' if replace else 'append'
     for attempt in range(3):
@@ -1366,17 +1373,27 @@ def fetch_scores_and_backtest(*args, **kwargs):
     
 
 
-def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.DataFrame:
-    sport_label = sport_label.upper()
+def load_backtested_predictions(sport: str = "NBA", days_back: int = 7):
+    from google.cloud import bigquery
+    import pandas as pd
+
     query = f"""
         SELECT *
-        FROM `sharp_data.sharp_scores_final`
-        WHERE Sport = '{sport_label}'
-          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
-          AND Scored = TRUE
+        FROM `sharplogger.sharp_data.sharp_scores_full`
+        WHERE SHARP_HIT_BOOL IS NOT NULL
+          AND Model_Sharp_Win_Prob IS NOT NULL
+          AND DATE(Game_Start) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
+          AND Sport = '{sport.upper()}'
     """
-    df = bq_client.query(query).to_dataframe()
-    return df
+
+    try:
+        client = bigquery.Client(location="US")
+        df = client.query(query).to_dataframe()
+        df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"❌ Failed to load predictions: {e}")
+        return pd.DataFrame()
 
 
 
