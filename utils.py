@@ -831,9 +831,9 @@ def detect_cross_market_sharp_support(df_moves, score_threshold=25):
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
+    import streamlit as st
 
-
-    logging.info("🔍 Entered apply_blended_sharp_score()")
+    st.info("🔍 Entered apply_blended_sharp_score()")
     df = df.copy()
 
     try:
@@ -842,50 +842,71 @@ def apply_blended_sharp_score(df, trained_models):
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
-    try:
-        if 'Enhanced_Sharp_Confidence_Score' in df.columns:
-            df['Final_Confidence_Score'] = pd.to_numeric(df['Enhanced_Sharp_Confidence_Score'], errors='coerce') / 100
-            df['Final_Confidence_Score'] = df['Final_Confidence_Score'].clip(0, 1)
-    except Exception as e:
-        logging.warning(f"⚠️ Could not compute fallback confidence score: {e}")
-
     df['Market'] = df['Market'].astype(str).str.lower()
 
+    total_start = time.time()
     for market_type, bundle in trained_models.items():
+        start = time.time()
+        
         model = bundle['model']
         iso = bundle['calibrator']
-        df_market = df[df['Market'] == market_type].copy()
 
+        df_market = df[df['Market'] == market_type].copy()
         if df_market.empty:
             continue
 
-        try:
-            model_features = model.get_booster().feature_names
+        # Normalize outcome
+        df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
 
-            # Ensure all required features exist and are numeric
-            for col in model_features:
-                if col not in df_market.columns:
-                    df_market[col] = 0
-                df_market[col] = (
-                    df_market[col]
-                    .astype(str)
-                    .replace({'True': 1, 'False': 0, 'true': 1, 'false': 0})
-                )
-                df_market[col] = pd.to_numeric(df_market[col], errors='coerce').fillna(0)
+        # Define canonical side logic
+        if market_type == 'totals':
+            canon_mask = df_market['Outcome_Norm'] == 'over'
+        elif market_type == 'spreads':
+            canon_mask = df_market['Outcome_Norm'].isin(['favorite', 'home'])  # adjust to your labeling
+        elif market_type == 'h2h':
+            canon_mask = df_market['Outcome_Norm'] == 'home'
+        else:
+            canon_mask = pd.Series([False] * len(df_market), index=df_market.index)
 
-            df_market = df_market[model_features].astype(float)
+        df_canon = df_market[canon_mask].copy()
+        if df_canon.empty:
+            continue
 
-            # Predict with calibration
-            raw_probs = model.predict_proba(df_market)[:, 1]
-            calibrated_probs = iso.predict(raw_probs)
+        model_features = model.get_booster().feature_names
+        for col in model_features:
+            if col not in df_canon.columns:
+                df_canon[col] = 0
 
-            df.loc[df['Market'] == market_type, 'Model_Sharp_Win_Prob'] = raw_probs
-            df.loc[df['Market'] == market_type, 'Model_Confidence'] = calibrated_probs
+        X = df_canon[model_features].replace(
+            {'True': 1, 'False': 0, 'true': 1, 'false': 0}
+        ).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
 
-        except Exception as e:
-            logging.error(f"❌ Failed to apply model for {market_type}: {e}")
+        raw_probs = model.predict_proba(X)[:, 1]
+        calibrated_probs = iso.predict(raw_probs)
 
-    # Apply tiering only if Model_Sharp_Win_Prob exists
+        # Apply model output to canonical side
+        df.loc[df_canon.index, 'Model_Sharp_Win_Prob'] = raw_probs
+        df.loc[df_canon.index, 'Model_Confidence'] = calibrated_probs
+
+        # Assign 1 - p to the opposing side
+        opp_mask = df_market.index.difference(df_canon.index)
+        for idx in opp_mask:
+            match = df_market.loc[idx]
+            # Find opposing side
+            opp_pair = df_canon[
+                (df_canon['Game_Key'] == match['Game_Key']) &
+                (df_canon['Market'] == match['Market'])
+            ]
+            if not opp_pair.empty:
+                p = opp_pair['Model_Sharp_Win_Prob'].values[0]
+                df.at[idx, 'Model_Sharp_Win_Prob'] = 1 - p
+                df.at[idx, 'Model_Confidence'] = 1 - opp_pair['Model_Confidence'].values[0]
+
+        st.info(f"⏱️ Scored {market_type} in {time.time() - start:.2f}s")
+
+    st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
+
+    # Assign tiers
     if 'Model_Sharp_Win_Prob' in df.columns:
         df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
         df['Model_Confidence_Tier'] = pd.cut(
@@ -894,9 +915,8 @@ def apply_blended_sharp_score(df, trained_models):
             labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
         )
 
-    #st.success("✅ Model scoring complete (per-market)")
     return df
- 
+
 
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
