@@ -1419,45 +1419,60 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
 
-        df_bt = load_backtested_predictions(sport_label)
+        # === Load both datasets
+        df_master = read_from_bigquery("sharp_data.sharp_moves_master")
+        df_scores = read_from_bigquery("sharp_data.sharp_scores_final")
 
-        if df_bt.empty:
-            st.warning(f"⚠️ No matched sharp picks with scored outcomes for {sport_label}")
+        # === Filter by sport
+        df_master = df_master[df_master['Sport'] == sport_label.upper()]
+        df_scores = df_scores[df_scores['Sport'] == sport_label.upper()]
+
+        if df_master.empty or df_scores.empty:
+            st.warning(f"⚠️ No scored data available for {sport_label}")
             return
 
-        # Coerce to numeric
-        df_bt['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt['Model_Sharp_Win_Prob'], errors='coerce')
-        df_bt['SharpBetScore'] = pd.to_numeric(df_bt['SharpBetScore'], errors='coerce')
+        # === Merge final outcome into master line history
+        keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+        df = df_master.merge(
+            df_scores[['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL', 'SharpBetScore']],
+            on=keys,
+            how='inner'
+        )
 
-        # Quick summary view
-        bins = [0, 0.5, 0.55, 0.6, 0.65, 1.0]
-        df_bt['ProbBin'] = pd.cut(df_bt['Model_Sharp_Win_Prob'], bins)
-        win_rates = df_bt.groupby('ProbBin')['SHARP_HIT_BOOL'].mean().rename("Win %")
-        st.subheader("📊 Model Win Rate by Probability Bin")
-        st.dataframe(win_rates.reset_index())
+        # === Coerce
+        df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
+        df['SharpBetScore'] = pd.to_numeric(df['SharpBetScore'], errors='coerce')
+        df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
+        df = df[df['SHARP_HIT_BOOL'].notna()]
 
-        # === Full calibration by Market
+        # === Create bins
         prob_bins = np.linspace(0, 1, 11)
-        df_bt['Prob_Bin'] = pd.cut(df_bt['Model_Sharp_Win_Prob'], bins=prob_bins,
-                                   labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
-        df_bt['Conf_Bin'] = pd.cut(df_bt['SharpBetScore'], bins=prob_bins,
-                                   labels=[f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])])
+        labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
+        df['Prob_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=labels)
+        df['Conf_Bin'] = pd.cut(df['SharpBetScore'], bins=prob_bins, labels=labels)
 
+        # === Summary tables
         prob_summary = (
-            df_bt.groupby(['Market', 'Prob_Bin'])['SHARP_HIT_BOOL']
+            df.groupby(['Market', 'Prob_Bin'])['SHARP_HIT_BOOL']
             .agg(['count', 'mean'])
             .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
             .reset_index()
         )
 
         conf_summary = (
-            df_bt.groupby(['Market', 'Conf_Bin'])['SHARP_HIT_BOOL']
+            df.groupby(['Market', 'Conf_Bin'])['SHARP_HIT_BOOL']
             .agg(['count', 'mean'])
             .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
             .reset_index()
         )
 
-        st.markdown("#### 🔢 Model Probability Calibration by Market")
+        # === Win Rate by Bin (Global)
+        st.subheader("📊 Overall Model Win Rate by Probability Bin")
+        bin_summary = df.groupby('Prob_Bin')['SHARP_HIT_BOOL'].agg(['count', 'mean']).rename(columns={'count': 'Picks', 'mean': 'Win_Rate'}).reset_index()
+        st.dataframe(bin_summary.style.format({'Win_Rate': '{:.1%}'}))
+
+        # === Probability Calibration by Market
+        st.markdown("#### 📉 Probability Calibration by Market")
         for market in prob_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
             st.dataframe(
@@ -1466,7 +1481,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .style.format({'Win_Rate': '{:.1%}'})
             )
 
-        st.markdown("#### 🎯 Model Confidence Calibration by Market")
+        # === Confidence Calibration by Market
+        st.markdown("#### 🎯 Confidence Score Calibration by Market")
         for market in conf_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
             st.dataframe(
