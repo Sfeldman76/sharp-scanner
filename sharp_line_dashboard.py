@@ -525,8 +525,15 @@ def compute_diagnostics_vectorized(df):
                 st.warning(f"⚠️ Column `{col}` missing — filling with blank.")
                 df[col] = ""
             else:
-                df[col] = df[col].apply(lambda x: str(x).strip() if pd.notna(x) else "")
+               def safe_strip(x):
+                    try:
+                        return str(x).strip()
+                    except:
+                        return ""
+                
+                df[col] = df[col].apply(safe_strip)
 
+        
         # === Tier Mapping
         tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
         tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
@@ -1048,10 +1055,15 @@ def render_scanner_tab(label, sport_key, container):
         else:
             pre_mask = df_moves_raw['Pre_Game'] == True
             start = time.time()
-            
+            if df_moves_raw is None or df_moves_raw.empty:
+                st.warning("⚠️ No data to compute diagnostics.")
+                return pd.DataFrame()
+
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
-            for col in diagnostics_df.columns:
-                df_moves_raw.loc[pre_mask, col] = diagnostics_df[col]
+            if diagnostics_df is None:
+                st.warning("⚠️ Diagnostics function returned None.")
+                return pd.DataFrame()
+
             
             st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
                
