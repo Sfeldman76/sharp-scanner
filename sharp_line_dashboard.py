@@ -1409,8 +1409,10 @@ import pandas as pd
 def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.DataFrame:
     client = bigquery.Client(location="us")  # Correct location
     query = f"""
+      
         SELECT 
             Game_Key, Bookmaker, Market, Outcome,
+            Value,  -- ✅ Needed for spreads/totals canonical side filtering
             Sharp_Move_Signal, Sharp_Limit_Jump, Sharp_Prob_Shift,
             Sharp_Time_Score, Sharp_Limit_Total,
             Is_Reinforced_MultiMarket, Market_Leader, LimitUp_NoMove_Flag,
@@ -1422,6 +1424,8 @@ def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.Data
             AND SHARP_HIT_BOOL IS NOT NULL
             AND Sport = '{sport_label}'
     """
+
+  
     try:
         df = client.query(query).to_dataframe()
         return df
