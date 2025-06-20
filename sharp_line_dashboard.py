@@ -517,16 +517,19 @@ def compute_diagnostics_vectorized(df):
 
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
 
-    # === Ensure expected string columns exist and are cleaned
+    # === Ensure columns exist and convert cleanly
     for col in ['Model_Confidence_Tier', 'First_Tier']:
         if col not in df.columns:
             df[col] = ""
-        df[col] = df[col].astype(str).str.strip()
-    
+        elif pd.api.types.is_categorical_dtype(df[col]):
+            df[col] = df[col].astype(str)  # Avoid Category collision
+        df.loc[:, col] = df[col].astype(str).fillna("").str.strip()
+
     # === Tier Mapping
     tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
     tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
 
+    # === Tier Change
     # === Tier Change
     tier_change = np.where(
         df['First_Tier'].notna() & (df['First_Tier'] != ""),
