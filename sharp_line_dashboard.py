@@ -538,10 +538,15 @@ def compute_diagnostics_vectorized(df):
         if isinstance(df['Model_Confidence_Tier'], pd.DataFrame):
             st.error("❌ 'Model_Confidence_Tier' is a DataFrame, not a Series.")
             st.stop()
+        st.write("🧪 Unique values in Model_Confidence_Tier:", df['Model_Confidence_Tier'].unique().tolist())
 
         # === Tier Mapping
-        tier_current = pd.Series(df['Model_Confidence_Tier']).map(TIER_ORDER).fillna(0).astype(int)
-        tier_open = pd.Series(df['First_Tier']).map(TIER_ORDER).fillna(0).astype(int)
+        tier_current = pd.Series(df['Model_Confidence_Tier']).map(TIER_ORDER)
+        tier_current = pd.to_numeric(tier_current, errors='coerce').fillna(0).astype(int)
+        st.write("🧪 Unique values in First_Tier:", df['First_Tier'].unique().tolist())
+
+        tier_open = pd.Series(df['First_Tier']).map(TIER_ORDER)
+        tier_open = pd.to_numeric(tier_open, errors='coerce').fillna(0).astype(int)
 
         # === Tier Change
         tier_change = np.where(
@@ -561,11 +566,13 @@ def compute_diagnostics_vectorized(df):
         # === Return or attach to df
         df['Tier_Change'] = tier_change
  
-
     except Exception as e:
         st.error("❌ Error computing diagnostics")
         st.exception(e)
+        st.write("🧪 Final debug snapshot:", df.head(3))
+        st.write("🧪 Column dtypes:", df.dtypes)
         return None
+
 
         # === Probabilities & Confidence Trend
         if 'Model_Sharp_Win_Prob' in df.columns and 'First_Model_Prob' in df.columns:
