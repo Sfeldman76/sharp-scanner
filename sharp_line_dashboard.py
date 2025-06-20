@@ -520,7 +520,6 @@ def compute_diagnostics_vectorized(df):
 
     try:
         # === Clean tier columns
-        # === Clean tier columns
         for col in ['Model_Confidence_Tier', 'First_Tier']:
             if col not in df.columns:
                 st.warning(f"⚠️ Column `{col}` missing — filling with blank.")
@@ -531,13 +530,16 @@ def compute_diagnostics_vectorized(df):
                         return str(x).strip()
                     except:
                         return ""
-                
                 df[col] = df[col].apply(safe_strip)
 
-        
+        # === Defensive check for data corruption
+        if isinstance(df['Model_Confidence_Tier'], pd.DataFrame):
+            st.error("❌ 'Model_Confidence_Tier' is a DataFrame, not a Series.")
+            st.stop()
+
         # === Tier Mapping
-        tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER).fillna(0).astype(int)
-        tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
+        tier_current = pd.Series(df['Model_Confidence_Tier']).map(TIER_ORDER).fillna(0).astype(int)
+        tier_open = pd.Series(df['First_Tier']).map(TIER_ORDER).fillna(0).astype(int)
 
         # === Tier Change
         tier_change = np.where(
@@ -553,6 +555,15 @@ def compute_diagnostics_vectorized(df):
             ),
             "⚠️ Missing"
         )
+
+        # === Return or attach to df
+        df['Tier_Change'] = tier_change
+ 
+
+    except Exception as e:
+        st.error("❌ Error computing diagnostics")
+        st.exception(e)
+        return None
 
         # === Probabilities & Confidence Trend
         if 'Model_Sharp_Win_Prob' in df.columns and 'First_Model_Prob' in df.columns:
