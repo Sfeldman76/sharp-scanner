@@ -94,6 +94,9 @@ import pyarrow.parquet as pq
 #from detect_utils import detect_and_save_all_sports
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
+import requests
+
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -440,6 +443,9 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
             print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
 
 
+from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
+
+
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
@@ -465,27 +471,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
 
         elif market == "spreads":
-            # Use spread value to infer favorite (spread < 0)
             df_market = df_market[df_market['Value'].notna()]
             df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
             df_market = df_market[df_market['Side_Label'] == 'favorite']
 
-        
-            
         elif market == "h2h":
-            # Extract home and away teams from Game_Key
             df_market[['Home_Team_Norm', 'Away_Team_Norm']] = df_market['Game_Key'].str.extract(r'^([^_]+)_([^_]+)_')
             df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].str.lower().str.strip()
             df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
-        
-            # Optional: Add side label for logging/debugging
+
             df_market['Side_Label'] = np.where(
                 df_market['Outcome_Norm'] == df_market['Home_Team_Norm'], 'home',
                 np.where(df_market['Outcome_Norm'] == df_market['Away_Team_Norm'], 'away', 'unknown')
             )
-        
-            # Filter to canonical side only: home
+
             df_market = df_market[df_market['Side_Label'] == 'home']
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
@@ -509,15 +509,30 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         raw_probs = model.predict_proba(X)[:, 1]
         iso.fit(raw_probs, y)
 
+        # === Evaluation Metrics ===
+        from sklearn.metrics import (
+            roc_auc_score, accuracy_score, log_loss, brier_score_loss
+        )
+        y_pred = (raw_probs >= 0.5).astype(int)
+
+        auc = roc_auc_score(y, raw_probs)
+        acc = accuracy_score(y, y_pred)
+        logloss = log_loss(y, raw_probs)
+        brier = brier_score_loss(y, raw_probs)
+
+        # === Save model ===
         save_model_to_gcs(model, iso, sport, market, bucket_name=GCS_BUCKET)
         trained_models[market] = {"model": model, "calibrator": iso}
 
-        st.success(f"✅ Trained + saved model for {market.upper()}")
+        st.success(f"""✅ Trained + saved model for {market.upper()}
+- AUC: {auc:.4f}
+- Accuracy: {acc:.4f}
+- Log Loss: {logloss:.4f}
+- Brier Score: {brier:.4f}
+""")
 
     if not trained_models:
         st.error("❌ No models trained.")
-
-
 
 
 
@@ -970,6 +985,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
         
+        
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
         trained_models = st.session_state.get(model_key)
@@ -982,64 +998,33 @@ def render_scanner_tab(label, sport_key, container):
                     trained_models[market_type] = model_bundle
             st.session_state[model_key] = trained_models
         
-        # === Apply model scoring
+        # === Apply model scoring if models are loaded
         if trained_models:
             try:
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
         
                 if not df_pre_game.empty:
+                    # ✅ Score pre-game picks
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
-                    df_moves_raw = df_scored  # directly use it, skip the merge
+                    st.info(f"📊 Scored pre-game rows: {len(df_scored)}")
         
-                    if not df_scored.empty:
-                        merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-                        score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']
+                    # 🧹 Remove duplicates (optional)
+                    df_scored = df_scored.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
         
-                        missing_cols = [col for col in merge_keys + score_cols if col not in df_scored.columns]
-                        if missing_cols:
-                            st.warning(f"⚠️ Cannot merge — missing columns: {missing_cols}")
-                            st.dataframe(df_scored.head(3))
-                        else:
-                            df_moves_raw = df_moves_raw.merge(
-                                df_scored[merge_keys + score_cols],
-                                on=merge_keys,
-                                how='left',
-                                suffixes=('', '_scored')
-                            )
-                            
-                            # Clean up any residual suffixes (e.g., _scored, _x, _y)
-                            df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
-
+                    # 🧪 Cap to avoid memory issues in diagnostics
+                    if len(df_scored) > 20000:
+                        st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
+                        df_scored = df_scored.sample(20000, random_state=42)
         
-                            # === Safe column resolution after merge
-                            # === Safe column resolution after merge
-                            for col in score_cols:
-                                possible_sources = [f"{col}_scored", f"{col}_x", f"{col}_y"]
-                                available = [c for c in possible_sources if c in df_moves_raw.columns]
-                            
-                                if available:
-                                    # Backfill from first non-null among suffix columns
-                                    df_moves_raw[col] = df_moves_raw[available].bfill(axis=1).iloc[:, 0]
-                                    df_moves_raw.drop(columns=available, inplace=True)
-                            
-                                    # Final safety: if somehow still DataFrame, squeeze
-                                    if isinstance(df_moves_raw[col], pd.DataFrame):
-                                        df_moves_raw[col] = df_moves_raw[col].squeeze()
-                            
-                            # === Now safe to drop residual suffixes
-                            df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
-
-
-                    else:
-                        st.warning("⚠️ Scoring produced no output.")
+                    # ✅ Use fully-scored result directly
+                    df_moves_raw = df_scored
                 else:
                     st.info("ℹ️ No pre-game rows available for scoring.")
+        
             except Exception as e:
                 st.error(f"❌ Model scoring failed: {e}")
         else:
             st.warning("⚠️ No trained models available for scoring.")
-
-        
                
         if df_moves_raw.empty:
             st.warning("⚠️ No live sharp picks available in the last 12 hours.")
