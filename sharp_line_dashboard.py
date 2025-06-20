@@ -1419,45 +1419,49 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         df_master = read_from_bigquery("sharp_data.sharp_moves_master")
         df_scores = read_from_bigquery("sharp_data.sharp_scores_full")
 
-        # === Abort early if missing
         if df_master is None or df_scores is None or df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp data available for {sport_label}")
             return
 
-        # === Filter by sport (only if column exists)
         if 'Sport' in df_master.columns:
             df_master = df_master[df_master['Sport'].str.upper().str.endswith(sport_label_upper)]
         if 'Sport' in df_scores.columns:
             df_scores = df_scores[df_scores['Sport'].str.upper() == sport_label_upper]
 
-        # === Abort if nothing left after filtering
         if df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp picks found for {sport_label}")
             return
-        
+
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-        # === Merge master with final score labels
+
+        if 'SHARP_HIT_BOOL' not in df_scores.columns:
+            st.error("❌ 'SHARP_HIT_BOOL' missing from sharp_scores_full table.")
+            return
+
+        required_master_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence']
+        missing_master = [col for col in required_master_cols if col not in df_master.columns]
+        if missing_master:
+            st.error(f"❌ Missing columns in sharp_moves_master: {missing_master}")
+            return
+
+        # ✅ Merge only needed columns
         df = df_master.merge(
-            df_scores[merge_keys + ['SHARP_HIT_BOOL', 'SharpBetScore']],
+            df_scores[merge_keys + ['SHARP_HIT_BOOL']],
             on=merge_keys,
             how='inner'
         )
 
-        # === Coerce types
+        # ✅ Type conversion
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
-        df['SharpBetScore'] = pd.to_numeric(df['SharpBetScore'], errors='coerce')
+        df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
         df = df[df['SHARP_HIT_BOOL'].notna()]
 
-        if df.empty:
-            st.warning(f"⚠️ No scored outcomes available for {sport_label}")
-            return
-
-        # === Create bin labels
+        # === Binning
         prob_bins = np.linspace(0, 1, 11)
         bin_labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
         df['Prob_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
-        df['Conf_Bin'] = pd.cut(df['SharpBetScore'], bins=prob_bins, labels=bin_labels)
+        df['Conf_Bin'] = pd.cut(df['Model_Confidence'], bins=prob_bins, labels=bin_labels)
 
         # === Summary tables
         prob_summary = (
@@ -1503,6 +1507,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
+
 
 
 
