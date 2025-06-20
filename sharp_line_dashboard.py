@@ -949,11 +949,20 @@ def render_scanner_tab(label, sport_key, container):
                             df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
 
         
+                            # === Safe column resolution after merge
                             for col in score_cols:
-                                scored_col = f"{col}_scored"
-                                if scored_col in df_moves_raw.columns:
-                                    df_moves_raw[col] = df_moves_raw[scored_col]
-                                    df_moves_raw.drop(columns=[scored_col], inplace=True)
+                                possible_sources = [f"{col}_scored", f"{col}_x", f"{col}_y"]
+                                available = [c for c in possible_sources if c in df_moves_raw.columns]
+                            
+                                if available:
+                                    # Backfill from first non-null among suffix columns
+                                    df_moves_raw[col] = df_moves_raw[available].bfill(axis=1).iloc[:, 0]
+                                    df_moves_raw.drop(columns=available, inplace=True)
+                            
+                                # Final guarantee: squeeze to Series if somehow it's still a DataFrame
+                                if isinstance(df_moves_raw[col], pd.DataFrame):
+                                    df_moves_raw[col] = df_moves_raw[col].squeeze()
+
                     else:
                         st.warning("⚠️ Scoring produced no output.")
                 else:
@@ -969,7 +978,11 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ No live sharp picks available in the last 12 hours.")
             return pd.DataFrame()
         # === Final Cleanup + Placeholders
-        df_moves_raw = df_moves_raw.rename(columns=lambda x: x.rstrip('_x'))
+        # By this point, all value conflicts between _x/_y/_scored were resolved with .bfill()
+        # So we safely drop suffixes for final column cleanup
+        df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
+      
+
         # === Consensus line calculation ===
         sharp_books = ['pinnacle', 'bookmaker', 'betonline']  # customize as needed
         rec_books = ['fanduel', 'draftkings', 'pointsbet', 'betmgm']
