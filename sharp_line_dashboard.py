@@ -470,14 +470,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
             df_market = df_market[df_market['Side_Label'] == 'favorite']
 
+        
+            
         elif market == "h2h":
-            # Compare Outcome to Home_Team_Norm
-            df_market['Home_Team_Norm'] = df_market['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-            df_market['Away_Team_Norm'] = df_market['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+            # Extract home and away teams from Game_Key
+            df_market[['Home_Team_Norm', 'Away_Team_Norm']] = df_market['Game_Key'].str.extract(r'^([^_]+)_([^_]+)_')
+            df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].str.lower().str.strip()
+            df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].str.lower().str.strip()
+            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+        
+            # Optional: Add side label for logging/debugging
             df_market['Side_Label'] = np.where(
                 df_market['Outcome_Norm'] == df_market['Home_Team_Norm'], 'home',
                 np.where(df_market['Outcome_Norm'] == df_market['Away_Team_Norm'], 'away', 'unknown')
             )
+        
+            # Filter to canonical side only: home
             df_market = df_market[df_market['Side_Label'] == 'home']
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
