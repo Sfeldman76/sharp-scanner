@@ -429,29 +429,37 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
             print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
 
 
-ef train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
     df_bt = load_backtested_predictions(sport, days_back)
-
     if df_bt.empty:
         st.warning("⚠️ No historical sharp picks available to train model.")
         return
 
     df_bt = df_bt.copy()
-    df_bt['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt['Model_Sharp_Win_Prob'], errors='coerce')
-    df_bt['SharpBetScore'] = pd.to_numeric(df_bt['SharpBetScore'], errors='coerce')
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
 
     trained_models = {}
 
     for market in ['spreads', 'totals', 'h2h']:
         df_market = df_bt[df_bt['Market'] == market].copy()
+        if df_market.empty:
+            continue
+
+        # ✅ Normalize outcome and filter to canonical side only
+        df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+        if market == "totals":
+            df_market = df_market[df_market['Outcome_Norm'] == 'over']
+        elif market == "spreads":
+            df_market = df_market[df_market['Outcome_Norm'].isin(['favorite', 'home'])]
+        elif market == "h2h":
+            df_market = df_market[df_market['Outcome_Norm'] == 'home']
+
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             st.warning(f"⚠️ Not enough data to train {market.upper()} model.")
             continue
 
-        # Use basic features — expand if needed
         features = [
             'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
             'Sharp_Time_Score', 'Sharp_Limit_Total',
@@ -459,27 +467,16 @@ ef train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         ]
         df_market = ensure_columns(df_market, features, 0)
 
-        X = df_market[features]
-        y = df_market['SHARP_HIT_BOOL']
+        X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+        y = df_market['SHARP_HIT_BOOL'].astype(int)
 
-        # Clean and convert
-        for col in features:
-            X[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
-
-        X = X.astype(float)
-        y = y.astype(int)
-
-        # Train model
         model = XGBClassifier(n_estimators=50, max_depth=4, learning_rate=0.1, eval_metric='logloss')
-
         model.fit(X, y)
 
-        # Calibrate model
         iso = IsotonicRegression(out_of_bounds='clip')
         raw_probs = model.predict_proba(X)[:, 1]
         iso.fit(raw_probs, y)
 
-        # Save to GCS
         save_model_to_gcs(model, iso, sport, market, bucket_name=GCS_BUCKET)
         trained_models[market] = {"model": model, "calibrator": iso}
 
