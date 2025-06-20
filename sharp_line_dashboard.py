@@ -1105,22 +1105,28 @@ def render_scanner_tab(label, sport_key, container):
             if df_moves_raw.empty or pre_mask.sum() == 0:
                 st.warning("⚠️ No live pre-game picks to compute diagnostics.")
                 return pd.DataFrame()
-        
+            
             # Defensive fix for corrupted tier column
             if 'Model_Confidence_Tier' in df_moves_raw.columns:
                 if isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
                     st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series by selecting first column")
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
-        
+            
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-        
+            
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
-        
+            
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
                 return pd.DataFrame()
-        
+            
+            # ✅ Safe to merge
+            df_moves_raw.loc[pre_mask, diagnostics_df.columns] = diagnostics_df.values
+            
             st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
+
+        
+           
 
         
         
@@ -1400,60 +1406,52 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
 
-
-        # === Load all predictions
-        df_bt = load_backtested_predictions()  # <--- loads ALL sports
-        # Normalize sport label (e.g., "NBA")
+        # === Normalize sport label
         sport_label_upper = sport_label.upper()
-        
-        # Filter df_bt (scores table) if 'Sport' exists
-        if 'Sport' in df_bt.columns:
-            df_bt = df_bt[df_bt['Sport'].str.upper() == sport_label_upper]
-        
-        # Filter df_master (moves table) if 'Sport' exists
+
+        # === Load both datasets first
+        df_master = read_from_bigquery("sharp_data.sharp_moves_master")
+        df_scores = read_from_bigquery("sharp_data.sharp_scores_full")
+
+        # === Abort early if missing
+        if df_master is None or df_scores is None or df_master.empty or df_scores.empty:
+            st.warning(f"⚠️ No sharp data available for {sport_label}")
+            return
+
+        # === Filter by sport (only if column exists)
         if 'Sport' in df_master.columns:
             df_master = df_master[df_master['Sport'].str.upper().str.endswith(sport_label_upper)]
+        if 'Sport' in df_scores.columns:
+            df_scores = df_scores[df_scores['Sport'].str.upper() == sport_label_upper]
 
-
-        if df_bt.empty:
-            st.warning(f"⚠️ No matched sharp picks with scored outcomes for {sport_label}")
-            return
-
-        # Coerce to numeric for safety
-        df_bt['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt['Model_Sharp_Win_Prob'], errors='coerce')
-        df_bt['SharpBetScore'] = pd.to_numeric(df_bt['SharpBetScore'], errors='coerce')
-        
-        # === Load both datasets
-        df_master = read_from_bigquery("sharp_data.sharp_moves_master")
-        df_scores = read_from_bigquery("sharp_data.sharp_scores_final")
-
-        # === Filter by sport
-        df_master = df_master[df_master['Sport'] == sport_label.upper()]
-        df_scores = df_scores[df_scores['Sport'] == sport_label.upper()]
-
+        # === Abort if nothing left after filtering
         if df_master.empty or df_scores.empty:
-            st.warning(f"⚠️ No scored data available for {sport_label}")
+            st.warning(f"⚠️ No sharp picks found for {sport_label}")
             return
 
-        # === Merge final outcome into master line history
-        keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+        # === Merge master with final score labels
+        merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
         df = df_master.merge(
-            df_scores[['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL', 'SharpBetScore']],
-            on=keys,
+            df_scores[merge_keys + ['SHARP_HIT_BOOL', 'SharpBetScore', 'Model_Sharp_Win_Prob']],
+            on=merge_keys,
             how='inner'
         )
 
-        # === Coerce
+        # === Coerce types
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
         df['SharpBetScore'] = pd.to_numeric(df['SharpBetScore'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
         df = df[df['SHARP_HIT_BOOL'].notna()]
 
-        # === Create bins
+        if df.empty:
+            st.warning(f"⚠️ No scored outcomes available for {sport_label}")
+            return
+
+        # === Create bin labels
         prob_bins = np.linspace(0, 1, 11)
-        labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
-        df['Prob_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=labels)
-        df['Conf_Bin'] = pd.cut(df['SharpBetScore'], bins=prob_bins, labels=labels)
+        bin_labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
+        df['Prob_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
+        df['Conf_Bin'] = pd.cut(df['SharpBetScore'], bins=prob_bins, labels=bin_labels)
 
         # === Summary tables
         prob_summary = (
@@ -1470,9 +1468,14 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             .reset_index()
         )
 
-        # === Win Rate by Bin (Global)
+        # === Global bin win rate
         st.subheader("📊 Overall Model Win Rate by Probability Bin")
-        bin_summary = df.groupby('Prob_Bin')['SHARP_HIT_BOOL'].agg(['count', 'mean']).rename(columns={'count': 'Picks', 'mean': 'Win_Rate'}).reset_index()
+        bin_summary = (
+            df.groupby('Prob_Bin')['SHARP_HIT_BOOL']
+            .agg(['count', 'mean'])
+            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
+            .reset_index()
+        )
         st.dataframe(bin_summary.style.format({'Win_Rate': '{:.1%}'}))
 
         # === Probability Calibration by Market
@@ -1485,7 +1488,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .style.format({'Win_Rate': '{:.1%}'})
             )
 
-        # === Confidence Calibration by Market
+        # === Confidence Score Calibration by Market
         st.markdown("#### 🎯 Confidence Score Calibration by Market")
         for market in conf_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
@@ -1494,6 +1497,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
+
 
 
 tab_nba, tab_mlb, tab_cfl, tab_wnba = st.tabs(["🏀 NBA", "⚾ MLB", "🏈 CFL", "🏀 WNBA"])
