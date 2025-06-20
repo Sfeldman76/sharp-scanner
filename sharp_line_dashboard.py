@@ -537,11 +537,7 @@ def compute_diagnostics_vectorized(df):
                     except:
                         return ""
                 df[col] = df[col].apply(safe_strip)
-                
-        #st.write("🧪 Inside diagnostics — columns:", df.columns.tolist())
-        #st.write("🧪 Inside diagnostics — dtype of Model_Confidence_Tier:", type(df['Model_Confidence_Tier']))
 
-        # === Defensive check
         if isinstance(df['Model_Confidence_Tier'], pd.DataFrame):
             st.error("❌ 'Model_Confidence_Tier' is a DataFrame, not a Series.")
             st.stop()
@@ -555,8 +551,6 @@ def compute_diagnostics_vectorized(df):
 
         tier_open = df['First_Tier'].map(TIER_ORDER)
         tier_open = pd.to_numeric(tier_open, errors='coerce').fillna(0).astype(int)
-
-
 
         # === Tier Change
         tier_change = np.where(
@@ -573,16 +567,7 @@ def compute_diagnostics_vectorized(df):
             "⚠️ Missing"
         )
 
-        # === Return or attach to df
         df['Tier_Change'] = tier_change
- 
-    except Exception as e:
-        st.error("❌ Error computing diagnostics")
-        st.exception(e)
-        st.write("🧪 Final debug snapshot:", df.head(3))
-        st.write("🧪 Column dtypes:", df.dtypes)
-        return None
-
 
         # === Probabilities & Confidence Trend
         if 'Model_Sharp_Win_Prob' in df.columns and 'First_Model_Prob' in df.columns:
@@ -604,7 +589,6 @@ def compute_diagnostics_vectorized(df):
                 )
             )
 
-            # === Direction (Model vs Line)
             line_delta = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
             direction = np.where(
                 (delta > 0.04) & (line_delta < 0), "🟢 Model ↑ / Line ↓",
@@ -656,12 +640,20 @@ def compute_diagnostics_vectorized(df):
         append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
         append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
 
-        model_reasoning = pd.Series([
-            " | ".join(filter(None, parts))
-            for parts in zip(*reasoning_parts)
-        ], index=df.index)
+        try:
+            st.write("🧪 reasoning_parts lengths:", [len(part) for part in reasoning_parts])
+            st.write("🧪 df index length:", len(df.index))
+        
+            model_reasoning = pd.Series([
+                " | ".join(filter(None, parts))
+                for parts in zip(*reasoning_parts)
+            ], index=df.index)
+        except Exception as e:
+            st.warning("⚠️ Failed to compute model_reasoning — using default")
+            st.exception(e)
+            model_reasoning = pd.Series(["🪙 Unavailable"] * len(df), index=df.index)
 
-        # === Final DataFrame
+        # === Final Output
         diagnostics_df = pd.DataFrame({
             'Tier_Change': tier_change,
             '📊 Confidence Evolution': confidence_trend,
@@ -677,6 +669,8 @@ def compute_diagnostics_vectorized(df):
     except Exception as e:
         st.error("❌ Error computing diagnostics")
         st.exception(e)
+        return None
+
     
 
 def apply_blended_sharp_score(df, trained_models):
