@@ -1373,7 +1373,7 @@ def fetch_scores_and_backtest(*args, **kwargs):
     
 
 
-def load_backtested_predictions(days_back: int = 7):
+def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.DataFrame:
     from google.cloud import bigquery
     import pandas as pd
 
@@ -1390,6 +1390,7 @@ def load_backtested_predictions(days_back: int = 7):
         WHERE 
             Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
             AND SHARP_HIT_BOOL IS NOT NULL
+            AND Sport = '{sport_label.upper()}'
     """
     try:
         df = client.query(query).to_dataframe()
@@ -1398,6 +1399,7 @@ def load_backtested_predictions(days_back: int = 7):
         import streamlit as st
         st.error(f"❌ Failed to load predictions: {e}")
         return pd.DataFrame()
+)
 
 
 
