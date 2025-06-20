@@ -1377,12 +1377,11 @@ def fetch_scores_and_backtest(*args, **kwargs):
     
 
 
+from google.cloud import bigquery
+import pandas as pd
+
 def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.DataFrame:
-    from google.cloud import bigquery
-    import pandas as pd
-
-    client = bigquery.Client(project="sharplogger")  # explicitly set project
-
+    client = bigquery.Client(location="us")  # Correct location
     query = f"""
         SELECT 
             Game_Key, Bookmaker, Market, Outcome,
@@ -1391,11 +1390,11 @@ def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.Data
             Is_Reinforced_MultiMarket, Market_Leader, LimitUp_NoMove_Flag,
             SharpBetScore, Enhanced_Sharp_Confidence_Score, True_Sharp_Confidence_Score,
             SHARP_HIT_BOOL, SHARP_COVER_RESULT, Scored, Snapshot_Timestamp, Sport
-        FROM `sharplogger.sharp_data.sharp_scores_final`
+        FROM `sharplogger.sharp_data.sharp_scores_full`
         WHERE 
             Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
             AND SHARP_HIT_BOOL IS NOT NULL
-            AND Sport = '{sport_label.upper()}'
+            AND Sport = '{sport_label}'
     """
     try:
         df = client.query(query).to_dataframe()
@@ -1404,7 +1403,6 @@ def load_backtested_predictions(sport_label: str, days_back: int = 3) -> pd.Data
         import streamlit as st
         st.error(f"❌ Failed to load predictions: {e}")
         return pd.DataFrame()
-
 
 
 
@@ -1445,6 +1443,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         if missing_master:
             st.error(f"❌ Missing columns in sharp_moves_master: {missing_master}")
             return
+        # Ensure consistent merge key formatting
+        merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+        for df_ in [df_master, df_scores]:
+            for col in merge_keys:
+                if df_[col].dtype == "object":
+                    df_[col] = df_[col].str.strip().str.lower()
 
         # ✅ Merge only needed columns
         df = df_master.merge(
@@ -1452,7 +1456,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             on=merge_keys,
             how='inner'
         )
-
+        st.info(f"🔗 Rows after merge: {len(df)}")
+        if df.empty:
+            st.error("❌ Merge failed — likely due to mismatched keys even after normalization.")
+            st.write("🔍 Sample keys in df_master:", df_master[merge_keys].drop_duplicates().head())
+            st.write("🔍 Sample keys in df_scores:", df_scores[merge_keys].drop_duplicates().head())
+            st.stop()
         # ✅ Type conversion
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
