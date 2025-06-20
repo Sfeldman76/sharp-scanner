@@ -1099,7 +1099,8 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
         else:
             # ✅ Capture current time once and make timezone-aware
-            now = pd.Timestamp.utcnow().tz_localize('UTC')
+            now = pd.Timestamp.utcnow().tz_convert('UTC') if pd.Timestamp.utcnow().tzinfo else pd.Timestamp.utcnow().tz_localize('UTC')
+
         
             # ✅ Ensure Game_Start is timezone-aware UTC
             df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
