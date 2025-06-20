@@ -531,6 +531,8 @@ def compute_diagnostics_vectorized(df):
                     except:
                         return ""
                 df[col] = df[col].apply(safe_strip)
+        st.write("🧪 Inside diagnostics — columns:", df.columns.tolist())
+        st.write("🧪 Inside diagnostics — dtype of Model_Confidence_Tier:", type(df['Model_Confidence_Tier']))
 
         # === Defensive check for data corruption
         if isinstance(df['Model_Confidence_Tier'], pd.DataFrame):
@@ -950,6 +952,7 @@ def render_scanner_tab(label, sport_key, container):
 
         
                             # === Safe column resolution after merge
+                            # === Safe column resolution after merge
                             for col in score_cols:
                                 possible_sources = [f"{col}_scored", f"{col}_x", f"{col}_y"]
                                 available = [c for c in possible_sources if c in df_moves_raw.columns]
@@ -959,9 +962,13 @@ def render_scanner_tab(label, sport_key, container):
                                     df_moves_raw[col] = df_moves_raw[available].bfill(axis=1).iloc[:, 0]
                                     df_moves_raw.drop(columns=available, inplace=True)
                             
-                                # Final guarantee: squeeze to Series if somehow it's still a DataFrame
-                                if isinstance(df_moves_raw[col], pd.DataFrame):
-                                    df_moves_raw[col] = df_moves_raw[col].squeeze()
+                                    # Final safety: if somehow still DataFrame, squeeze
+                                    if isinstance(df_moves_raw[col], pd.DataFrame):
+                                        df_moves_raw[col] = df_moves_raw[col].squeeze()
+                            
+                            # === Now safe to drop residual suffixes
+                            df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
+
 
                     else:
                         st.warning("⚠️ Scoring produced no output.")
@@ -1083,6 +1090,8 @@ def render_scanner_tab(label, sport_key, container):
             if df_moves_raw is None or df_moves_raw.empty:
                 st.warning("⚠️ No data to compute diagnostics.")
                 return pd.DataFrame()
+            st.write("🧪 DEBUG: Model_Confidence_Tier type before diagnostics:", type(df_moves_raw['Model_Confidence_Tier']))
+            st.write("🧪 Columns with that name:", [c for c in df_moves_raw.columns if 'Model_Confidence_Tier' in c])
 
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
             if diagnostics_df is None:
