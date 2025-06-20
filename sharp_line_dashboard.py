@@ -692,11 +692,11 @@ def compute_diagnostics_vectorized(df):
         return None
 
     
-
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
     import streamlit as st
+    import time
 
     st.info("🔍 Entered apply_blended_sharp_score()")
     df = df.copy()
@@ -711,7 +711,7 @@ def apply_blended_sharp_score(df, trained_models):
     total_start = time.time()
     for market_type, bundle in trained_models.items():
         start = time.time()
-        
+
         model = bundle['model']
         iso = bundle['calibrator']
 
@@ -719,28 +719,43 @@ def apply_blended_sharp_score(df, trained_models):
         if df_market.empty:
             continue
 
-        # Prepare input features
+        # === Canonical-side filtering ===
+        if market_type == "spreads":
+            df_market = df_market[df_market['Value'].notna()]
+            df_market = df_market[df_market['Value'] < 0]  # favorite only
+        elif market_type == "totals":
+            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+            df_market = df_market[df_market['Outcome_Norm'] == 'over']
+        elif market_type == "h2h":
+            df_market['Home_Team_Norm'] = df_market['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+            df_market = df_market[df_market['Outcome_Norm'] == df_market['Home_Team_Norm']]
+
+        if df_market.empty:
+            continue
+
+        # === Prepare input features
         model_features = model.get_booster().feature_names
         for col in model_features:
             if col not in df_market.columns:
                 df_market[col] = 0
-        
+
         X_all = df_market[model_features].replace(
             {'True': 1, 'False': 0, 'true': 1, 'false': 0}
         ).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
-        
+
+        # === Score with model and calibrator
         raw_probs = model.predict_proba(X_all)[:, 1]
         calibrated_probs = iso.predict(raw_probs)
-        
-        # Assign predictions directly to all rows
+
         df.loc[df_market.index, 'Model_Sharp_Win_Prob'] = raw_probs
         df.loc[df_market.index, 'Model_Confidence'] = calibrated_probs
 
-        st.info(f"⏱️ Scored {market_type} in {time.time() - start:.2f}s")
+        st.info(f"🎯 Scored {len(df_market)} rows for {market_type} in {time.time() - start:.2f}s")
 
     st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
 
-    # Assign tiers
+    # === Assign confidence tiers
     if 'Model_Sharp_Win_Prob' in df.columns:
         df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
         df['Model_Confidence_Tier'] = pd.cut(
@@ -750,6 +765,7 @@ def apply_blended_sharp_score(df, trained_models):
         )
 
     return df
+
         
         
 from io import BytesIO
