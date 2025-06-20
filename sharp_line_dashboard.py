@@ -1097,11 +1097,19 @@ def render_scanner_tab(label, sport_key, container):
                 st.warning("⚠️ No data to compute diagnostics.")
                 return pd.DataFrame()
             
-            # 🔥 Add this line
+           # === Ultimate repair for Model_Confidence_Tier
+            if 'Model_Confidence_Tier' in df_moves_raw.columns:
+                if isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
+                    st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series by selecting first column")
+                    df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
+            
+            # Clean any duplicate column names again, just in case
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
             
-            # Diagnostics
+            # Now run diagnostics
             diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
+
+    
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
                 return pd.DataFrame()
