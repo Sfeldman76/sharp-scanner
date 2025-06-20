@@ -600,16 +600,16 @@ def compute_diagnostics_vectorized(df):
             df['First_Tier'] != "",
             np.where(
                 tier_current > tier_open,
-                "↑ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
+                "↑ " + df['First_Tier'].astype(str) + " → " + df['Model_Confidence_Tier'].astype(str),
                 np.where(
                     tier_current < tier_open,
-                    "↓ " + df['First_Tier'] + " → " + df['Model_Confidence_Tier'],
+                    "↓ " + df['First_Tier'].astype(str) + " → " + df['Model_Confidence_Tier'].astype(str),
                     "↔ No Change"
                 )
             ),
             "⚠️ Missing"
         )
-
+        
         df['Tier_Change'] = tier_change
 
         # === Probabilities & Confidence Trend
@@ -1458,19 +1458,17 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     with tab:
         st.subheader(f"📈 Model Calibration – {sport_label}")
 
-        # === Normalize sport label
         sport_label_upper = sport_label.upper()
 
-        # === Load both datasets directly from BigQuery with correct context
         try:
             df_master = client.query(f"""
                 SELECT * FROM `sharplogger.sharp_data.sharp_moves_master`
-                WHERE LOWER(Sport) = '{sport_label.lower()}'
+                WHERE Sport = '{sport_label_upper}'
             """).to_dataframe()
 
             df_scores = client.query(f"""
                 SELECT * FROM `sharplogger.sharp_data.sharp_scores_full`
-                WHERE LOWER(Sport) = '{sport_label.lower()}'
+                WHERE Sport = '{sport_label_upper}'
                 AND SHARP_HIT_BOOL IS NOT NULL
             """).to_dataframe()
         except Exception as e:
@@ -1479,11 +1477,15 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
         if df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp picks found for {sport_label}")
+            available_sports = client.query("""
+                SELECT DISTINCT Sport FROM `sharplogger.sharp_data.sharp_scores_full`
+            """).to_dataframe()
+            st.info("📦 Available sports in sharp_scores_full:")
+            st.dataframe(available_sports)
             return
 
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
 
-        # Check for required columns before slicing
         required_score_cols = merge_keys + ['SHARP_HIT_BOOL']
         missing_in_scores = [col for col in required_score_cols if col not in df_scores.columns]
         if missing_in_scores:
@@ -1496,23 +1498,35 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.error(f"❌ Missing columns in df_master: {missing_in_master}")
             return
 
-        # Normalize merge key casing/whitespace
+        # Normalize merge key casing
         for df_ in [df_master, df_scores]:
             for col in merge_keys:
                 if df_[col].dtype == "object":
                     df_[col] = df_[col].str.strip().str.lower()
 
-        # === Merge
-        df = df_master.merge(df_scores[required_score_cols], on=merge_keys, how='inner')
+        # Debug: Show merge key samples before merge
+        st.markdown("🔑 **Sample keys in df_master:**")
+        st.dataframe(df_master[merge_keys].drop_duplicates().head())
 
+        st.markdown("🔑 **Sample keys in df_scores:**")
+        st.dataframe(df_scores[merge_keys].drop_duplicates().head())
+
+        # Merge
+        df = df_master.merge(df_scores[required_score_cols], on=merge_keys, how='inner')
         st.info(f"🔗 Rows after merge: {len(df)}")
+
+        # Debug: If merge fails, show mismatches
         if df.empty:
             st.error("❌ Merge returned 0 rows — likely due to mismatched keys.")
-            st.write("🔍 Sample keys in df_master:", df_master[merge_keys].drop_duplicates().head())
-            st.write("🔍 Sample keys in df_scores:", df_scores[merge_keys].drop_duplicates().head())
+            st.markdown("🧩 **Mismatch diagnostics:**")
+            df_master_keys = df_master[merge_keys].drop_duplicates()
+            df_score_keys = df_scores[merge_keys].drop_duplicates()
+
+            mismatch_debug = df_master_keys.merge(df_score_keys, on=merge_keys, how='outer', indicator=True)
+            st.dataframe(mismatch_debug[mismatch_debug['_merge'] != 'both'])
             return
 
-        # === Format + Clean
+        # === Clean + Format
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
@@ -1539,7 +1553,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             .reset_index()
         )
 
-        # === Global bin win rate
+        # === Output tables
         st.subheader("📊 Overall Model Win Rate by Probability Bin")
         bin_summary = (
             df.groupby('Prob_Bin')['SHARP_HIT_BOOL']
@@ -1549,7 +1563,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         )
         st.dataframe(bin_summary.style.format({'Win_Rate': '{:.1%}'}))
 
-        # === Probability Calibration by Market
         st.markdown("#### 📉 Probability Calibration by Market")
         for market in prob_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
@@ -1559,7 +1572,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .style.format({'Win_Rate': '{:.1%}'})
             )
 
-        # === Confidence Score Calibration by Market
         st.markdown("#### 🎯 Confidence Score Calibration by Market")
         for market in conf_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
@@ -1568,7 +1580,6 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
-
 tab_nba, tab_mlb, tab_cfl, tab_wnba = st.tabs(["🏀 NBA", "⚾ MLB", "🏈 CFL", "🏀 WNBA"])
 
 # --- NBA Tab Block
