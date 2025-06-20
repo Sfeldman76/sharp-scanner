@@ -1051,8 +1051,13 @@ def render_scanner_tab(label, sport_key, container):
         merge_start = time.time()
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
+        
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
         st.info(f"🔗 Merged first snapshot into df_moves_raw in {time.time() - merge_start:.2f}s")
+        
+        # ✅ Alias First_Model_Prob from First_Sharp_Prob (needed for trend logic)
+        if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
+            df_moves_raw['First_Model_Prob'] = df_moves_raw['First_Sharp_Prob']
         
         # === 3. Movement Calculations
         # === 3. Movement Calculations (Vectorized and Timed)
