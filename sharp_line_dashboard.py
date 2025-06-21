@@ -1015,7 +1015,7 @@ def render_scanner_tab(label, sport_key, container):
         
         # ✅ Check if there are any live picks worth scoring
         if df_moves_raw['Pre_Game'].sum() == 0:
-            st.warning("⚠️ No live sharp picks available for scoring.")
+            st.info("⚠️ No pre-game picks available for scoring.")
             return pd.DataFrame()
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
