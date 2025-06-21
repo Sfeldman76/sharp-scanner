@@ -822,65 +822,44 @@ def apply_blended_sharp_score(df, trained_models):
                 df_canon[inverse_keys].drop_duplicates().set_index(inverse_keys).index
             )].copy()
 
-            df_canon_for_join = (
-                df_canon[['Game_Key', 'Bookmaker', 'Market', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
-                .drop_duplicates(subset=['Game_Key', 'Bookmaker', 'Market'])
-            )
-
-            # === Inverse-side mirroring ===
+            # Step 1: Assign a canonical 'Side' key (e.g. for spreads: favorite/underdog)
+            # Step 1: Assign Mirror Key
+            df_canon['Mirror_Key'] = df_canon['Game_Key'].str.replace('_' + df_canon['Outcome_Norm'], '', regex=False)
+            df_inverse['Mirror_Key'] = df_inverse['Game_Key'].str.replace('_' + df_inverse['Outcome_Norm'], '', regex=False)
+            
+            # Step 2: Merge on Mirror Key
             df_inverse = df_inverse.merge(
-                df_canon_for_join,
-                on=['Game_Key', 'Bookmaker', 'Market'],
+                df_canon[['Mirror_Key', 'Model_Sharp_Win_Prob', 'Model_Confidence']],
+                on='Mirror_Key',
                 how='left'
             )
             
-            # 🧼 Clean up merge suffixes
-            df_inverse.rename(columns={
-                'Model_Sharp_Win_Prob_y': 'Model_Sharp_Win_Prob',
-                'Model_Confidence_y': 'Model_Confidence'
-            }, inplace=True)
-            df_inverse.drop(columns=['Model_Sharp_Win_Prob_x', 'Model_Confidence_x'], errors='ignore', inplace=True)
-                        
-            # 🧪 Debug print BEFORE any flipping or filtering
-            st.write("🧪 df_inverse.columns", df_inverse.columns.tolist())
-            
+            # Step 3: Flip model scores
             flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
             df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
             df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
             df_inverse['Was_Canonical'] = False
             
-            
-            # 🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}
             st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
             
-            # ✅ Combine both canonical and inverse rows
+            # Combine
             combined = pd.concat([df_canon, df_inverse], ignore_index=True)
             
-            # 🛡️ Defensive check
-            if 'Model_Sharp_Win_Prob' not in combined.columns:
-                st.error(f"❌ [BUG] Model_Sharp_Win_Prob missing after concat — df_canon has: {list(df_canon.columns)}")
-                st.error(f"❌ [BUG] df_inverse has: {list(df_inverse.columns)}")
-                return pd.DataFrame()
-
-           
-            before = len(combined)
+            # 🛡️ Final clean-up
             combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
-            after = len(combined)
-            st.info(f"🧹 Removed {before - after} unscored rows (inverse picks with no canonical match)")
-
             combined['Model_Confidence'] = combined['Model_Confidence'].fillna(0).clip(0, 1)
             combined['Model_Confidence_Tier'] = pd.cut(
                 combined['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
-
+            
+            combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)  # ❌ outside loop
             st.success(f"✅ Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s — rows: {len(combined)}")
             scored_all.append(combined)
 
         except Exception as e:
-            st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")
-
+            st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
     # Final combine
     if scored_all:
         df_scored = pd.concat(scored_all, ignore_index=True)
