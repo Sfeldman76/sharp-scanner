@@ -1491,7 +1491,25 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             return
 
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-
+        # Show what markets/outcomes exist
+        st.markdown("🔍 Market breakdown in df_scores with SHARP_HIT_BOOL:")
+        st.dataframe(
+            df_scores[df_scores['SHARP_HIT_BOOL'].notna()]
+            .groupby(['Market', 'Outcome'])
+            .size()
+            .reset_index(name='Rows with SHARP_HIT_BOOL')
+            .sort_values('Rows with SHARP_HIT_BOOL', ascending=False)
+        )
+        
+        # Show exact matches between master and scores BEFORE merging
+        common = df_master.merge(
+            df_scores[df_scores['SHARP_HIT_BOOL'].notna()],
+            on=['Game_Key', 'Bookmaker', 'Market', 'Outcome'],
+            how='inner'
+        )
+        
+        st.success(f"✅ Exact pre-merge matches with SHARP_HIT_BOOL: {len(common)}")
+        st.dataframe(common[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'SHARP_HIT_BOOL']].head(10))
         # Defensive check for SHARP_HIT_BOOL presence and values
         if 'SHARP_HIT_BOOL' not in df_scores.columns or df_scores['SHARP_HIT_BOOL'].isnull().all():
             st.error("⚠️ No valid SHARP_HIT_BOOL values available in df_scores — cannot evaluate accuracy.")
