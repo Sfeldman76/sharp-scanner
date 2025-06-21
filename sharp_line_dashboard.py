@@ -807,10 +807,14 @@ def apply_blended_sharp_score(df, trained_models):
 
             raw_probs = model.predict_proba(X)[:, 1]
             calibrated_probs = iso.predict(raw_probs)
-
+            
             df_canon['Model_Sharp_Win_Prob'] = raw_probs
             df_canon['Model_Confidence'] = calibrated_probs
             df_canon['Was_Canonical'] = True
+            
+            st.write(f"✅ Assigned scoring columns for {market_type.upper()}:")
+            st.write("🧪 df_canon HEAD (after assign):", df_canon.head(2).to_dict())
+            st.write("🧪 df_canon COLUMNS:", df_canon.columns.tolist())
 
             # Inverse-side mirroring
             inverse_keys = ['Game_Key', 'Bookmaker', 'Market']
@@ -831,7 +835,8 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Was_Canonical'] = False
 
             st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
-
+            st.write(f"📌 Pre-merge df_canon columns for {market_type}: {df_canon.columns.tolist()}")
+            st.write(f"📌 Pre-merge df_inverse columns for {market_type}: {df_inverse.columns.tolist()}")
             combined = pd.concat([df_canon, df_inverse], ignore_index=True)
             before = len(combined)
             combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
