@@ -821,15 +821,27 @@ def apply_blended_sharp_score(df, trained_models):
         st.info(f"🎯 Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s")
 
     # Combine all market types
+        # Combine all market types
     if scored_all:
         df_scored = pd.concat(scored_all, ignore_index=True)
+
+        # 🔒 Final safety check to ensure all scoring columns are present
+        required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
+        for col in required_cols:
+            if col not in df_scored.columns:
+                df_scored[col] = np.nan  # Fill missing columns if any
+
+        # ✅ Drop unscored rows (i.e., failed inverse + no canonical match)
+        before = len(df_scored)
+        df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+        after = len(df_scored)
+        st.info(f"🧹 Final drop of unscored rows: {before - after}")
+
         st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
         return df_scored
     else:
         st.warning("⚠️ No rows scored by models.")
         return pd.DataFrame()
-    st.write("🧪 scored_all length:", len(scored_all))    
-        
         
 from io import BytesIO
 import pickle
