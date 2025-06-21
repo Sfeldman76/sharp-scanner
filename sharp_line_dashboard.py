@@ -1385,12 +1385,16 @@ def render_scanner_tab(label, sport_key, container):
             )
         
             # Pivot into Bookmaker columns
-            df_display = df_odds_raw.pivot_table(
-                index=["Date + Time (EST)", "Game", "Market", "Outcome"],
-                columns="Bookmaker",
-                values="Value_Limit",
-                aggfunc="first"
-            ).reset_index()
+            df_display = (
+                df_odds_raw.pivot_table(
+                    index=["Date + Time (EST)", "Game", "Market", "Outcome"],
+                    columns="Bookmaker",
+                    values="Value_Limit",
+                    aggfunc="first"
+                )
+                .rename_axis(columns=None)  # Removes the "Bookmaker" column level name
+                .reset_index()
+            )
         
             # Render as HTML
             table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
