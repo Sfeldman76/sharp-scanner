@@ -825,21 +825,22 @@ def apply_blended_sharp_score(df, trained_models):
             # Step 1: Assign a canonical 'Side' key (e.g. for spreads: favorite/underdog)
             # Step 1: Assign Mirror Key
             df_canon['Mirror_Key'] = df_canon['Game_Key'].str.replace('_' + df_canon['Outcome_Norm'], '', regex=False)
+            
             df_inverse['Mirror_Key'] = df_inverse['Game_Key'].str.replace('_' + df_inverse['Outcome_Norm'], '', regex=False)
+            # Step 1: Drop duplicates from df_canon to ensure safe join
+            df_canon_for_join = df_canon[['Mirror_Key', 'Model_Sharp_Win_Prob', 'Model_Confidence']].drop_duplicates('Mirror_Key')
             
-            # Step 2: Merge on Mirror Key
-            df_inverse = df_inverse.merge(
-                df_canon[['Mirror_Key', 'Model_Sharp_Win_Prob', 'Model_Confidence']],
-                on='Mirror_Key',
-                how='left'
-            )
+            # Step 2: Join on Mirror_Key (inverse rows to canonical)
+            df_inverse = df_inverse.merge(df_canon_for_join, on='Mirror_Key', how='left', suffixes=('', '_canon'))
             
-            # Step 3: Flip model scores
+            # Step 3: Flip predictions
             flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
             df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
             df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
-            
             df_inverse['Was_Canonical'] = False
+         
+            
+         
     
             st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
     
