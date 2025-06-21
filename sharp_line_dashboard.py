@@ -790,9 +790,10 @@ def apply_blended_sharp_score(df, trained_models):
         df_canon['Was_Canonical'] = True
         
         # === Inverse-side mirroring ===
-        inverse_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+        # Only exclude based on Game_Key, Bookmaker, Market — NOT Outcome
+        inverse_keys = ['Game_Key', 'Bookmaker', 'Market']
         df_inverse = df_market[~df_market[inverse_keys].set_index(inverse_keys).index.isin(
-            df_canon[inverse_keys].set_index(inverse_keys).index
+            df_canon[inverse_keys].drop_duplicates().set_index(inverse_keys).index
         )].copy()
         
         # ✅ Deduplicate canonical records to avoid ambiguous joins
@@ -1582,11 +1583,23 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
         # ✅ Confirm columns in merged result
         st.write("✅ preview_merge columns:", preview_merge.columns.tolist())
-        cols_to_display = [col for col in merge_keys + ['SHARP_HIT_BOOL'] if col in preview_merge.columns]
-        if 'SHARP_HIT_BOOL' not in preview_merge.columns:
-            st.error("❌ SHARP_HIT_BOOL is STILL missing — check prior steps.")
-        else:
+        
+        # Prefer the SHARP_HIT_BOOL from scores (likely '_y' after merge)
+        score_col = None
+        if 'SHARP_HIT_BOOL_y' in preview_merge.columns:
+            score_col = 'SHARP_HIT_BOOL_y'
+        elif 'SHARP_HIT_BOOL' in preview_merge.columns:
+            score_col = 'SHARP_HIT_BOOL'
+        
+        # Build display columns
+        cols_to_display = merge_keys + ([score_col] if score_col else [])
+        
+        if score_col:
+            st.success(f"✅ Using '{score_col}' as SHARP_HIT_BOOL column")
             st.dataframe(preview_merge[cols_to_display].head(10))
+        else:
+            st.error("❌ SHARP_HIT_BOOL not found in preview_merge after merge.")
+            st.dataframe(preview_merge.head(10))
 
         # === Required columns check
         required_master_cols = merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence']
