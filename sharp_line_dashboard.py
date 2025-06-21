@@ -1057,7 +1057,13 @@ def render_scanner_tab(label, sport_key, container):
                     df_pre_game = ensure_columns(df_pre_game, ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier'])
         
                     # ✅ Score pre-game picks
+                    # ✅ Score pre-game picks
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
+                    
+                    # 🔎 Inspect what's returned
+                    st.write("🧪 df_scored HEAD:", df_scored.head(5))
+                    st.write("🧪 df_scored COLUMNS:", df_scored.columns.tolist())
+                    st.write("🧪 df_scored SHAPE:", df_scored.shape)
         
                     # 🔒 Ensure scoring columns exist (in case nothing was scored)
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
