@@ -1574,11 +1574,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
         # === Filter scores to rows that have valid SHARP_HIT_BOOL
         df_scores_filtered = (
-            df_scores[df_scores['SHARP_HIT_BOOL'].notna()][
-                ['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL']
-            ].copy()
+            df_scores[df_scores['SHARP_HIT_BOOL'].notna()]
+            [['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL']]
+            .drop_duplicates(subset=['Game_Key', 'Bookmaker', 'Market', 'Outcome'])
+            .copy()
         )
-
+        df_master = df_master.drop_duplicates(subset=['Game_Key', 'Bookmaker', 'Market', 'Outcome'])
         # === Early diagnostics
         st.markdown("🔍 Market breakdown in df_scores with SHARP_HIT_BOOL:")
         st.dataframe(
