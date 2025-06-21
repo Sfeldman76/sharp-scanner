@@ -1053,22 +1053,27 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
         
                 if not df_pre_game.empty:
+                    # 🛡️ Ensure required columns exist to avoid merge or diagnostic issues
+                    df_pre_game = ensure_columns(df_pre_game, ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier'])
+        
                     # ✅ Score pre-game picks
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
-                    
-                    # 🔒 Defensive filter to avoid downstream crash
-                    # 🔒 Fill missing scoring fields explicitly
-                    df_scored = df_scored.copy()
+        
+                    # 🔒 Ensure scoring columns exist (in case nothing was scored)
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
                         if col not in df_scored.columns:
                             df_scored[col] = np.nan
-                    
+        
+                    # ✅ Drop rows that failed scoring entirely
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
-                    if df_scored.empty:   
+                    if df_scored.empty:
+                        st.warning("⚠️ No rows successfully scored — skipping further analysis.")
                         return pd.DataFrame()
+        
                     st.write("🧪 df_scored columns:", df_scored.columns.tolist())
                     st.write("🧪 Sample scored rows:", df_scored.head(2))
-                    # 🧹 Remove duplicates (optional)
+        
+                    # 🧹 Optional deduplication
                     df_scored = df_scored.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
         
                     # 🧪 Cap to avoid memory issues in diagnostics
@@ -1076,7 +1081,7 @@ def render_scanner_tab(label, sport_key, container):
                         st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
                         df_scored = df_scored.sample(20000, random_state=42)
         
-                    # ✅ Use fully-scored result directly
+                    # ✅ Merge scored predictions into main dataframe
                     merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
                     df_moves_raw = df_moves_raw.merge(
                         df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
@@ -1084,6 +1089,7 @@ def render_scanner_tab(label, sport_key, container):
                         how='left'
                     )
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
+        
                 else:
                     st.info("ℹ️ No pre-game rows available for scoring.")
         
@@ -1091,7 +1097,7 @@ def render_scanner_tab(label, sport_key, container):
                 st.error(f"❌ Model scoring failed: {e}")
         else:
             st.warning("⚠️ No trained models available for scoring.")
-               
+        
         if df_moves_raw.empty:
             st.warning("⚠️ No live sharp picks available in the last 12 hours.")
             return pd.DataFrame()
