@@ -1617,7 +1617,13 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         # === Final merge for analysis
         df = df_master.merge(df_scores_filtered, on=merge_keys, how='inner')
         st.info(f"🔗 Rows after merge: {len(df)}")
-
+        # Normalize SHARP_HIT_BOOL column
+        if 'SHARP_HIT_BOOL_y' in df.columns:
+            df['SHARP_HIT_BOOL'] = df['SHARP_HIT_BOOL_y']
+        elif 'SHARP_HIT_BOOL' not in df.columns:
+            st.error("❌ SHARP_HIT_BOOL missing in merged dataframe.")
+            st.dataframe(df.head())
+            return
         if df.empty:
             st.error("❌ Merge returned 0 rows — likely due to mismatched keys.")
             st.markdown("🧩 **Mismatch diagnostics:**")
