@@ -1499,33 +1499,38 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         st.markdown("🔑 **Sample keys in df_scores:**")
         st.dataframe(df_scores[merge_keys].drop_duplicates().head())
 
-        # Merge
+        # === Merge
         df = df_master.merge(df_scores[required_score_cols], on=merge_keys, how='inner')
         st.info(f"🔗 Rows after merge: {len(df)}")
-
-        # Debug: If merge fails, show mismatches
+        
+        # === Fail gracefully if merge didn't return anything
         if df.empty:
             st.error("❌ Merge returned 0 rows — likely due to mismatched keys.")
             st.markdown("🧩 **Mismatch diagnostics:**")
             df_master_keys = df_master[merge_keys].drop_duplicates()
             df_score_keys = df_scores[merge_keys].drop_duplicates()
-
             mismatch_debug = df_master_keys.merge(df_score_keys, on=merge_keys, how='outer', indicator=True)
             st.dataframe(mismatch_debug[mismatch_debug['_merge'] != 'both'])
             return
-
-        # === Clean + Format
+        
+        # === Defensive column check
+        if 'SHARP_HIT_BOOL' not in df.columns:
+            st.error("❌ 'SHARP_HIT_BOOL' missing after merge — cannot continue.")
+            st.dataframe(df.head())
+            return
+        
+        # === Now safe to clean and bin
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
         df = df[df['SHARP_HIT_BOOL'].notna()]
-
+        
         # === Binning
         prob_bins = np.linspace(0, 1, 11)
         bin_labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
         df['Prob_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
         df['Conf_Bin'] = pd.cut(df['Model_Confidence'], bins=prob_bins, labels=bin_labels)
-
+        
         # === Summary tables
         prob_summary = (
             df.groupby(['Market', 'Prob_Bin'])['SHARP_HIT_BOOL']
