@@ -778,10 +778,12 @@ def apply_blended_sharp_score(df, trained_models):
             if col not in df_canon.columns:
                 df_canon[col] = 0
         X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
-
+        if df_canon.empty:
+            st.warning(f"⚠️ No canonical rows found for {market_type.upper()} — skipping.")
+            continue
         raw_probs = model.predict_proba(X)[:, 1]
         calibrated_probs = iso.predict(raw_probs)
-
+		
         df_canon['Model_Sharp_Win_Prob'] = raw_probs
         df_canon['Model_Confidence'] = calibrated_probs
         df_canon['Was_Canonical'] = True
@@ -1039,7 +1041,18 @@ def render_scanner_tab(label, sport_key, container):
                 if not df_pre_game.empty:
                     # ✅ Score pre-game picks
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
-                    st.info(f"📊 Scored pre-game rows: {len(df_scored)}")
+                    
+                    # 🔒 Defensive filter to avoid downstream crash
+                    required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
+                    missing_cols = [col for col in required_cols if col not in df_scored.columns]
+                    if missing_cols:
+                        st.error(f"❌ Model scoring failed: missing columns {missing_cols}")
+                        st.stop()
+                    
+                    df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+                    if df_scored.empty:
+                        st.warning("⚠️ Scoring returned only NaNs — skipping merge.")
+                        return pd.DataFrame()st.info(f"📊 Scored pre-game rows: {len(df_scored)}")
                     st.write("🧪 df_scored columns:", df_scored.columns.tolist())
                     st.write("🧪 Sample scored rows:", df_scored.head(2))
                     # 🧹 Remove duplicates (optional)
