@@ -1057,11 +1057,11 @@ def render_scanner_tab(label, sport_key, container):
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
                     
                     # 🔒 Defensive filter to avoid downstream crash
-                    required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
-                    missing_cols = [col for col in required_cols if col not in df_scored.columns]
-                    if missing_cols:
-                        st.error(f"❌ Model scoring failed: missing columns {missing_cols}")
-                        st.stop()
+                    # 🔒 Fill missing scoring fields explicitly
+                    df_scored = df_scored.copy()
+                    for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
+                        if col not in df_scored.columns:
+                            df_scored[col] = np.nan
                     
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:   
