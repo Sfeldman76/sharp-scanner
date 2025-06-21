@@ -832,7 +832,10 @@ def apply_blended_sharp_score(df, trained_models):
             
             # Step 2: Join on Mirror_Key (inverse rows to canonical)
             df_inverse = df_inverse.merge(df_canon_for_join, on='Mirror_Key', how='left', suffixes=('', '_canon'))
-            
+            # === Canonical override assignment (rename + clean)
+            df_inverse['Model_Sharp_Win_Prob'] = df_inverse['Model_Sharp_Win_Prob_canon']
+            df_inverse['Model_Confidence'] = df_inverse['Model_Confidence_canon']
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_canon', 'Model_Confidence_canon'], errors='ignore', inplace=True)
             # Step 3: Flip predictions
             flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
             df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
