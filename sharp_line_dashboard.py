@@ -838,14 +838,15 @@ def apply_blended_sharp_score(df, trained_models):
             flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
             df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
             df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
+            
             df_inverse['Was_Canonical'] = False
-            
+    
             st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
-            
-            # Combine
+    
+            # Combine canonical and inverse
             combined = pd.concat([df_canon, df_inverse], ignore_index=True)
-            
-            # 🛡️ Final clean-up
+    
+            # 🛡️ Final cleanup inside the try-block
             combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
             combined['Model_Confidence'] = combined['Model_Confidence'].fillna(0).clip(0, 1)
             combined['Model_Confidence_Tier'] = pd.cut(
@@ -853,29 +854,29 @@ def apply_blended_sharp_score(df, trained_models):
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
-            
-            combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)  # ❌ outside loop
+            combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
+    
             st.success(f"✅ Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s — rows: {len(combined)}")
             scored_all.append(combined)
-
+    
         except Exception as e:
-            st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
-    # Final combine
+            st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")
+    
+    # === Final combine (outside the loop)
     if scored_all:
         df_scored = pd.concat(scored_all, ignore_index=True)
         missing_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
         for col in missing_cols:
             if col not in df_scored.columns:
                 df_scored[col] = np.nan
-
+    
         df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
         st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
         return df_scored
-
     else:
         st.warning("⚠️ No market types scored — returning empty DataFrame.")
         return pd.DataFrame()
-        
+            
 from io import BytesIO
 import pickle
 from google.cloud import storage
