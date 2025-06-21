@@ -784,43 +784,54 @@ def apply_blended_sharp_score(df, trained_models):
         raw_probs = model.predict_proba(X)[:, 1]
         calibrated_probs = iso.predict(raw_probs)
 		
+                # === Canonical-side scoring ===
         df_canon['Model_Sharp_Win_Prob'] = raw_probs
         df_canon['Model_Confidence'] = calibrated_probs
         df_canon['Was_Canonical'] = True
-
-        # Inverse side mirroring
-        # Inverse side mirroring (only if canonical side exists)
-        # Inverse picks (opposite outcome not in canonical)
+        
+        # === Inverse-side mirroring ===
         inverse_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
         df_inverse = df_market[~df_market[inverse_keys].set_index(inverse_keys).index.isin(
             df_canon[inverse_keys].set_index(inverse_keys).index
         )].copy()
         
-        # Join against canonical rows (remove Outcome from join to allow flipping)
+        # ✅ Deduplicate canonical records to avoid ambiguous joins
+        df_canon_for_join = (
+            df_canon[['Game_Key', 'Bookmaker', 'Market', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
+            .drop_duplicates(subset=['Game_Key', 'Bookmaker', 'Market'])
+        )
+        
+        # ✅ Merge inverse side to canonical (exclude Outcome to flip properly)
         df_inverse = df_inverse.merge(
-            df_canon[['Game_Key', 'Bookmaker', 'Market', 'Model_Sharp_Win_Prob', 'Model_Confidence']],
+            df_canon_for_join,
             on=['Game_Key', 'Bookmaker', 'Market'],
             how='left'
         )
         
-        # Flip the prediction
-        df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
-        df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
+        # ✅ Flip values only where matched
+        flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
+        df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
+        df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
         df_inverse['Was_Canonical'] = False
+        
+        st.info(f"🪞 Successfully flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
+        
+        # === Combine both
         combined = pd.concat([df_canon, df_inverse], ignore_index=True)
-        # ✅ Drop rows where Model_Sharp_Win_Prob is still NaN (unscored inverses)
+        
+        # ✅ Drop unscored (merge-failed) inverse rows
         before = len(combined)
         combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
         after = len(combined)
-        st.info(f"🧹 Removed {before - after} unscored rows (missing canonical side)")
-        # Tier assignment
+        st.info(f"🧹 Removed {before - after} unscored rows (inverse picks with no canonical match)")
+        
+        # === Tier assignment
         combined['Model_Confidence'] = combined['Model_Confidence'].fillna(0).clip(0, 1)
         combined['Model_Confidence_Tier'] = pd.cut(
             combined['Model_Sharp_Win_Prob'],
             bins=[0.0, 0.4, 0.5, 0.6, 1.0],
             labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
         )
-
         scored_all.append(combined)
         st.info(f"🎯 Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s")
 
@@ -1507,8 +1518,6 @@ def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.Dat
 
 
 
-
-
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     from google.cloud import bigquery
     client = bigquery.Client(project="sharplogger", location="us")
@@ -1551,7 +1560,11 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                     df_[col] = df_[col].str.strip().str.lower()
 
         # === Filter scores to rows that have valid SHARP_HIT_BOOL
-        df_scores_filtered = df_scores[df_scores['SHARP_HIT_BOOL'].notna()][merge_keys + ['SHARP_HIT_BOOL']].copy()
+        df_scores_filtered = (
+            df_scores[df_scores['SHARP_HIT_BOOL'].notna()][
+                ['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL']
+            ].copy()
+        )
 
         # === Early diagnostics
         st.markdown("🔍 Market breakdown in df_scores with SHARP_HIT_BOOL:")
@@ -1566,7 +1579,14 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         # === Show pre-merge sample matches
         preview_merge = df_master.merge(df_scores_filtered, on=merge_keys, how='inner')
         st.success(f"✅ Pre-merge matches with SHARP_HIT_BOOL: {len(preview_merge)}")
-        st.dataframe(preview_merge[merge_keys + ['SHARP_HIT_BOOL']].head(10))
+
+        # ✅ Confirm columns in merged result
+        st.write("✅ preview_merge columns:", preview_merge.columns.tolist())
+        cols_to_display = [col for col in merge_keys + ['SHARP_HIT_BOOL'] if col in preview_merge.columns]
+        if 'SHARP_HIT_BOOL' not in preview_merge.columns:
+            st.error("❌ SHARP_HIT_BOOL is STILL missing — check prior steps.")
+        else:
+            st.dataframe(preview_merge[cols_to_display].head(10))
 
         # === Required columns check
         required_master_cols = merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence']
@@ -1575,7 +1595,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.error(f"❌ Missing columns in df_master: {missing_in_master}")
             return
 
-        # === Merge
+        # === Final merge for analysis
         df = df_master.merge(df_scores_filtered, on=merge_keys, how='inner')
         st.info(f"🔗 Rows after merge: {len(df)}")
 
