@@ -787,8 +787,9 @@ def apply_blended_sharp_score(df, trained_models):
         df_canon['Was_Canonical'] = True
 
         # Inverse side mirroring
+        # Inverse side mirroring (only if canonical side exists)
         df_inverse = df_market[~df_market['Outcome'].isin(df_canon['Outcome'])].copy()
-        if not df_inverse.empty:
+        if not df_inverse.empty and not df_canon.empty:
             inverse_base = df_canon[['Game_Key', 'Bookmaker', 'Market', 'Model_Sharp_Win_Prob', 'Model_Confidence']].drop_duplicates()
             df_inverse = df_inverse.merge(
                 inverse_base,
@@ -798,6 +799,8 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
+        else:
+            df_inverse = pd.DataFrame()  # fallback: no inverse side created
         st.write("🧪 df_canon rows after scoring:", len(df_canon))
         st.write("🧪 df_inverse head:", df_inverse.head(2))
         combined = pd.concat([df_canon, df_inverse], ignore_index=True)
