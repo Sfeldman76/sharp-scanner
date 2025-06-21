@@ -1021,7 +1021,13 @@ def render_scanner_tab(label, sport_key, container):
                         df_scored = df_scored.sample(20000, random_state=42)
         
                     # ✅ Use fully-scored result directly
-                    df_moves_raw.update(df_scored.set_index(df_scored.index)[['Model_Sharp_Win_Prob', 'Model_Confidence_Tier']])
+                    merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+                    df_moves_raw = df_moves_raw.merge(
+                        df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
+                        on=merge_keys,
+                        how='left'
+                    )
+                    df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
                 else:
                     st.info("ℹ️ No pre-game rows available for scoring.")
         
