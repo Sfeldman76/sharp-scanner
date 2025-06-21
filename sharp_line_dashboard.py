@@ -787,7 +787,8 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
-
+        st.write("🧪 df_canon rows after scoring:", len(df_canon))
+        st.write("🧪 df_inverse head:", df_inverse.head(2))
         combined = pd.concat([df_canon, df_inverse], ignore_index=True)
 
         # Tier assignment
@@ -809,7 +810,7 @@ def apply_blended_sharp_score(df, trained_models):
     else:
         st.warning("⚠️ No rows scored by models.")
         return pd.DataFrame()
-        
+    st.write("🧪 scored_all length:", len(scored_all))    
         
         
 from io import BytesIO
@@ -1009,7 +1010,8 @@ def render_scanner_tab(label, sport_key, container):
                     # ✅ Score pre-game picks
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
                     st.info(f"📊 Scored pre-game rows: {len(df_scored)}")
-        
+                    st.write("🧪 df_scored columns:", df_scored.columns.tolist())
+                    st.write("🧪 Sample scored rows:", df_scored.head(2))
                     # 🧹 Remove duplicates (optional)
                     df_scored = df_scored.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
         
@@ -1521,7 +1523,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         if missing_in_scores:
             st.error(f"❌ Missing columns in df_scores: {missing_in_scores}")
             return
-
+        
         required_master_cols = merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence']
         missing_in_master = [col for col in required_master_cols if col not in df_master.columns]
         if missing_in_master:
