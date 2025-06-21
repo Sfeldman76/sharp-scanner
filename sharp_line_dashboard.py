@@ -827,17 +827,31 @@ def apply_blended_sharp_score(df, trained_models):
                 .drop_duplicates(subset=['Game_Key', 'Bookmaker', 'Market'])
             )
 
+            # === Inverse-side mirroring ===
             df_inverse = df_inverse.merge(df_canon_for_join, on=['Game_Key', 'Bookmaker', 'Market'], how='left')
-
+            
+            # 🧪 Debug print BEFORE any flipping or filtering
+            st.write("🧪 df_inverse.columns", df_inverse.columns.tolist())
+            
             flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
             df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
             df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
             df_inverse['Was_Canonical'] = False
-
+            
+            
+            # 🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}
             st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
-            st.write(f"📌 Pre-merge df_canon columns for {market_type}: {df_canon.columns.tolist()}")
-            st.write(f"📌 Pre-merge df_inverse columns for {market_type}: {df_inverse.columns.tolist()}")
+            
+            # ✅ Combine both canonical and inverse rows
             combined = pd.concat([df_canon, df_inverse], ignore_index=True)
+            
+            # 🛡️ Defensive check
+            if 'Model_Sharp_Win_Prob' not in combined.columns:
+                st.error(f"❌ [BUG] Model_Sharp_Win_Prob missing after concat — df_canon has: {list(df_canon.columns)}")
+                st.error(f"❌ [BUG] df_inverse has: {list(df_inverse.columns)}")
+                return pd.DataFrame()
+
+           
             before = len(combined)
             combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
             after = len(combined)
