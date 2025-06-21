@@ -1132,6 +1132,16 @@ def render_scanner_tab(label, sport_key, container):
                         on=merge_keys,
                         how='left'
                     )
+                                        # Drop suffixes if merge created any conflicts
+                    df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
+                    
+                    # Coerce Model_Confidence_Tier to string just in case it's categorical
+                    if 'Model_Confidence_Tier' in df_moves_raw.columns:
+                        df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
+                    else:
+                        st.error("❌ Model_Confidence_Tier is missing after merge — check merge_keys or column conflicts.")
+                        st.write("🔍 Available columns:", df_moves_raw.columns.tolist())
+                        return pd.DataFrame()
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
         
                 else:
