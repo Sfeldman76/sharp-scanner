@@ -1051,8 +1051,8 @@ def render_scanner_tab(label, sport_key, container):
                     
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:
-                        st.warning("⚠️ Scoring returned only NaNs — skipping merge.")
-                        return pd.DataFrame()st.info(f"📊 Scored pre-game rows: {len(df_scored)}")
+                        st.info("📊 No pre-game rows available for scoring.")
+                        return pd.DataFrame()
                     st.write("🧪 df_scored columns:", df_scored.columns.tolist())
                     st.write("🧪 Sample scored rows:", df_scored.head(2))
                     # 🧹 Remove duplicates (optional)
