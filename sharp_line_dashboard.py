@@ -744,7 +744,7 @@ def apply_blended_sharp_score(df, trained_models):
     import streamlit as st
     import time
 
-    st.info("🔍 Entered `apply_blended_sharp_score()`")
+    #st.info("🔍 Entered `apply_blended_sharp_score()`")
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
 
@@ -770,7 +770,7 @@ def apply_blended_sharp_score(df, trained_models):
                 continue
 
             df_market = df[df['Market'] == market_type].copy()
-            st.info(f"📊 {market_type.upper()} — rows available: {len(df_market)}")
+            #st.info(f"📊 {market_type.upper()} — rows available: {len(df_market)}")
 
             if df_market.empty:
                 st.warning(f"⚠️ No rows found for {market_type.upper()}")
@@ -791,7 +791,7 @@ def apply_blended_sharp_score(df, trained_models):
             else:
                 df_canon = df_market.copy()
 
-            st.info(f"📎 Canonical rows for {market_type.upper()}: {len(df_canon)}")
+            #st.info(f"📎 Canonical rows for {market_type.upper()}: {len(df_canon)}")
             if df_canon.empty:
                 st.warning(f"⚠️ No canonical rows for {market_type.upper()} — skipping.")
                 continue
@@ -802,8 +802,8 @@ def apply_blended_sharp_score(df, trained_models):
                     df_canon[col] = 0
 
             X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
-            st.write(f"📐 Model features for {market_type}:", model_features)
-            st.write(f"📐 Input shape: {X.shape}")
+            #st.write(f"📐 Model features for {market_type}:", model_features)
+            #st.write(f"📐 Input shape: {X.shape}")
 
             raw_probs = model.predict_proba(X)[:, 1]
             calibrated_probs = iso.predict(raw_probs)
@@ -812,9 +812,9 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Model_Confidence'] = calibrated_probs
             df_canon['Was_Canonical'] = True
             
-            st.write(f"✅ Assigned scoring columns for {market_type.upper()}:")
-            st.write("🧪 df_canon HEAD (after assign):", df_canon.head(2).to_dict())
-            st.write("🧪 df_canon COLUMNS:", df_canon.columns.tolist())
+            #st.write(f"✅ Assigned scoring columns for {market_type.upper()}:")
+            #st.write("🧪 df_canon HEAD (after assign):", df_canon.head(2).to_dict())
+            #st.write("🧪 df_canon COLUMNS:", df_canon.columns.tolist())
 
             # Inverse-side mirroring
             inverse_keys = ['Game_Key', 'Bookmaker', 'Market']
@@ -845,7 +845,7 @@ def apply_blended_sharp_score(df, trained_models):
             
          
     
-            st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
+            #st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
     
             # Combine canonical and inverse
             combined = pd.concat([df_canon, df_inverse], ignore_index=True)
@@ -860,7 +860,7 @@ def apply_blended_sharp_score(df, trained_models):
             )
             combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
     
-            st.success(f"✅ Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s — rows: {len(combined)}")
+            #st.success(f"✅ Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s — rows: {len(combined)}")
             scored_all.append(combined)
     
         except Exception as e:
@@ -1075,58 +1075,54 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
         
                 if not df_pre_game.empty:
-                    # 🛡️ Ensure required columns exist to avoid merge or diagnostic issues
+                    # 🛡️ Ensure required columns exist
                     df_pre_game = ensure_columns(df_pre_game, ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier'])
         
                     # ✅ Score pre-game picks
-                    # ✅ Score pre-game picks
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
-                    
+        
                     # 🔎 Inspect what's returned
                     st.write("🧪 df_scored HEAD:", df_scored.head(5))
                     st.write("🧪 df_scored COLUMNS:", df_scored.columns.tolist())
                     st.write("🧪 df_scored SHAPE:", df_scored.shape)
         
-                    # 🔒 Ensure scoring columns exist (in case nothing was scored)
+                    # 🔒 Ensure scoring columns exist
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
                         if col not in df_scored.columns:
                             df_scored[col] = np.nan
         
-                    # ✅ Drop rows that failed scoring entirely
+                    # ✅ Filter out unscored rows
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:
                         st.warning("⚠️ No rows successfully scored — skipping further analysis.")
                         return pd.DataFrame()
         
-                    st.write("🧪 df_scored columns:", df_scored.columns.tolist())
-                    st.write("🧪 Sample scored rows:", df_scored.head(2))
-        
                     # 🧹 Optional deduplication
                     df_scored = df_scored.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
         
-                    # 🧪 Cap to avoid memory issues in diagnostics
+                    # 🧪 Cap for safety
                     if len(df_scored) > 20000:
                         st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
                         df_scored = df_scored.sample(20000, random_state=42)
         
-                    # ✅ Merge scored predictions into main dataframe
+                    # ✅ Merge scored predictions into full dataset
                     merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
                     df_moves_raw = df_moves_raw.merge(
                         df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
                         on=merge_keys,
                         how='left'
                     )
-                                        # Drop suffixes if merge created any conflicts
+        
+                    # 🧼 Final suffix cleanup
                     df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
-                    
-                    # Coerce Model_Confidence_Tier to string just in case it's categorical
+        
+                    # 🔄 Enforce string type for tier column
                     if 'Model_Confidence_Tier' in df_moves_raw.columns:
                         df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
                     else:
-                        st.error("❌ Model_Confidence_Tier is missing after merge — check merge_keys or column conflicts.")
+                        st.error("❌ Model_Confidence_Tier missing after merge — check merge keys or scoring logic.")
                         st.write("🔍 Available columns:", df_moves_raw.columns.tolist())
                         return pd.DataFrame()
-                    df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
         
                 else:
                     st.info("ℹ️ No pre-game rows available for scoring.")
@@ -1136,14 +1132,13 @@ def render_scanner_tab(label, sport_key, container):
         else:
             st.warning("⚠️ No trained models available for scoring.")
         
+        # Final guard
         if df_moves_raw.empty:
             st.warning("⚠️ No live sharp picks available in the last 12 hours.")
             return pd.DataFrame()
-        # === Final Cleanup + Placeholders
-        # By this point, all value conflicts between _x/_y/_scored were resolved with .bfill()
-        # So we safely drop suffixes for final column cleanup
+        
+        # === Final cleanup
         df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
-      
 
         # === Consensus line calculation ===
         sharp_books = ['pinnacle', 'bookmaker', 'betonline']  # customize as needed
