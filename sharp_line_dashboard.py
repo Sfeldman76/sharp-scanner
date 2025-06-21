@@ -769,16 +769,18 @@ def apply_blended_sharp_score(df, trained_models):
         df_canon['Model_Confidence'] = calibrated_probs
         df_canon['Was_Canonical'] = True
 
-        # === Build inverse side
+        # Build inverse side safely
         df_inverse = df_market[~df_market['Outcome'].isin(df_canon['Outcome'])].copy()
-        df_inverse = df_inverse.merge(
-            df_canon[['Game_Key', 'Bookmaker', 'Market']],
-            on=['Game_Key', 'Bookmaker', 'Market'],
-            how='left'
-        )
+        
         if not df_inverse.empty:
-            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_canon['Model_Sharp_Win_Prob'].values
-            df_inverse['Model_Confidence'] = 1 - df_canon['Model_Confidence'].values
+            inverse_scores = df_canon[['Game_Key', 'Bookmaker', 'Market', 'Model_Sharp_Win_Prob', 'Model_Confidence']].drop_duplicates()
+            df_inverse = df_inverse.merge(
+                inverse_scores,
+                on=['Game_Key', 'Bookmaker', 'Market'],
+                how='left'
+            )
+            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
+            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
 
         df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
@@ -1477,6 +1479,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             return
 
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+
+        # Defensive check for SHARP_HIT_BOOL presence and values
+        if 'SHARP_HIT_BOOL' not in df_scores.columns or df_scores['SHARP_HIT_BOOL'].isnull().all():
+            st.error("⚠️ No valid SHARP_HIT_BOOL values available in df_scores — cannot evaluate accuracy.")
+            st.dataframe(df_scores.head(10))
+            return
 
         required_score_cols = merge_keys + ['SHARP_HIT_BOOL']
         missing_in_scores = [col for col in required_score_cols if col not in df_scores.columns]
