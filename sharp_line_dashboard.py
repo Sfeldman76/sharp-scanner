@@ -1050,8 +1050,7 @@ def render_scanner_tab(label, sport_key, container):
                         st.stop()
                     
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
-                    if df_scored.empty:
-                        st.info("📊 No pre-game rows available for scoring.")
+                    if df_scored.empty:   
                         return pd.DataFrame()
                     st.write("🧪 df_scored columns:", df_scored.columns.tolist())
                     st.write("🧪 Sample scored rows:", df_scored.head(2))
