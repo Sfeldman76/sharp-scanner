@@ -831,76 +831,146 @@ def detect_cross_market_sharp_support(df_moves, score_threshold=25):
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
-    import streamlit as st
+   
     import time
 
-    st.info("🔍 Entered apply_blended_sharp_score()")
+    #st.info("🔍 Entered `apply_blended_sharp_score()`")
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
 
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
-        st.error(f"❌ Cleanup failed: {e}")
+        logging.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
     total_start = time.time()
+    scored_all = []
+
     for market_type, bundle in trained_models.items():
         start = time.time()
+        logging.info(f"🧪 Starting scoring for market: `{market_type}`")
 
-        model = bundle['model']
-        iso = bundle['calibrator']
+        try:
+            model = bundle.get('model')
+            iso = bundle.get('calibrator')
 
-        df_market = df[df['Market'] == market_type].copy()
-        if df_market.empty:
-            continue
+            if model is None or iso is None:
+                logging.warning(f"⚠️ Skipping {market_type.upper()} — model or calibrator missing")
+                continue
 
-        # === Canonical-side filtering ===
-        if market_type == "spreads":
-            df_market = df_market[df_market['Value'].notna()]
-            df_market = df_market[df_market['Value'] < 0]  # favorite only
-        elif market_type == "totals":
-            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
-            df_market = df_market[df_market['Outcome_Norm'] == 'over']
-        elif market_type == "h2h":
-            df_market['Home_Team_Norm'] = df_market['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
-            df_market = df_market[df_market['Outcome_Norm'] == df_market['Home_Team_Norm']]
+            df_market = df[df['Market'] == market_type].copy()
+            #st.info(f"📊 {market_type.upper()} — rows available: {len(df_market)}")
 
-        if df_market.empty:
-            continue
+            if df_market.empty:
+                logging.warning(f"⚠️ No rows found for {market_type.upper()}")
+                continue
 
-        # === Prepare input features
-        model_features = model.get_booster().feature_names
-        for col in model_features:
-            if col not in df_market.columns:
-                df_market[col] = 0
+            # Canonical filtering
+            if market_type == "spreads":
+                df_market = df_market[df_market['Value'].notna()]
+                df_canon = df_market[df_market['Value'] < 0].copy()
+            elif market_type == "totals":
+                df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+                df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
+            elif market_type == "h2h":
+                df_market[['Home_Team_Norm', 'Away_Team_Norm']] = df_market['Game_Key'].str.extract(r'^([^_]+)_([^_]+)_')
+                df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].str.lower().str.strip()
+                df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+                df_canon = df_market[df_market['Outcome_Norm'] == df_market['Home_Team_Norm']].copy()
+            else:
+                df_canon = df_market.copy()
 
-        X_all = df_market[model_features].replace(
-            {'True': 1, 'False': 0, 'true': 1, 'false': 0}
-        ).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+            #st.info(f"📎 Canonical rows for {market_type.upper()}: {len(df_canon)}")
+            if df_canon.empty:
+                logging.warning(f"⚠️ No canonical rows for {market_type.upper()} — skipping.")
+                continue
 
-        # === Score with model and calibrator
-        raw_probs = model.predict_proba(X_all)[:, 1]
-        calibrated_probs = iso.predict(raw_probs)
+            model_features = model.get_booster().feature_names
+            for col in model_features:
+                if col not in df_canon.columns:
+                    df_canon[col] = 0
 
-        df.loc[df_market.index, 'Model_Sharp_Win_Prob'] = raw_probs
-        df.loc[df_market.index, 'Model_Confidence'] = calibrated_probs
+            X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
+            #st.write(f"📐 Model features for {market_type}:", model_features)
+            #st.write(f"📐 Input shape: {X.shape}")
 
-        st.info(f"🎯 Scored {len(df_market)} rows for {market_type} in {time.time() - start:.2f}s")
+            raw_probs = model.predict_proba(X)[:, 1]
+            calibrated_probs = iso.predict(raw_probs)
+            
+            df_canon['Model_Sharp_Win_Prob'] = raw_probs
+            df_canon['Model_Confidence'] = calibrated_probs
+            df_canon['Was_Canonical'] = True
+            
+            #st.write(f"✅ Assigned scoring columns for {market_type.upper()}:")
+            #st.write("🧪 df_canon HEAD (after assign):", df_canon.head(2).to_dict())
+            #st.write("🧪 df_canon COLUMNS:", df_canon.columns.tolist())
 
-    st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s")
+            # Inverse-side mirroring
+            inverse_keys = ['Game_Key', 'Bookmaker', 'Market']
+            df_inverse = df_market[~df_market[inverse_keys].set_index(inverse_keys).index.isin(
+                df_canon[inverse_keys].drop_duplicates().set_index(inverse_keys).index
+            )].copy()
 
-    # === Assign confidence tiers
-    if 'Model_Sharp_Win_Prob' in df.columns:
-        df['Model_Confidence'] = df['Model_Confidence'].fillna(0).clip(0, 1)
-        df['Model_Confidence_Tier'] = pd.cut(
-            df['Model_Sharp_Win_Prob'],
-            bins=[0.0, 0.4, 0.5, 0.6, 1.0],
-            labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
-        )
-
-    return df
+            # Step 1: Assign a canonical 'Side' key (e.g. for spreads: favorite/underdog)
+            # Step 1: Assign Mirror Key
+            df_canon['Mirror_Key'] = df_canon['Game_Key'].str.replace('_' + df_canon['Outcome_Norm'], '', regex=False)
+            
+            df_inverse['Mirror_Key'] = df_inverse['Game_Key'].str.replace('_' + df_inverse['Outcome_Norm'], '', regex=False)
+            # Step 1: Drop duplicates from df_canon to ensure safe join
+            df_canon_for_join = df_canon[['Mirror_Key', 'Model_Sharp_Win_Prob', 'Model_Confidence']].drop_duplicates('Mirror_Key')
+            
+            # Step 2: Join on Mirror_Key (inverse rows to canonical)
+            df_inverse = df_inverse.merge(df_canon_for_join, on='Mirror_Key', how='left', suffixes=('', '_canon'))
+            # === Canonical override assignment (rename + clean)
+            df_inverse['Model_Sharp_Win_Prob'] = df_inverse['Model_Sharp_Win_Prob_canon']
+            df_inverse['Model_Confidence'] = df_inverse['Model_Confidence_canon']
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_canon', 'Model_Confidence_canon'], errors='ignore', inplace=True)
+            # Step 3: Flip predictions
+            flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
+            df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
+            df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
+            df_inverse['Was_Canonical'] = False
+         
+            
+         
+    
+            #st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
+    
+            # Combine canonical and inverse
+            combined = pd.concat([df_canon, df_inverse], ignore_index=True)
+    
+            # 🛡️ Final cleanup inside the try-block
+            combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
+            combined['Model_Confidence'] = combined['Model_Confidence'].fillna(0).clip(0, 1)
+            combined['Model_Confidence_Tier'] = pd.cut(
+                combined['Model_Sharp_Win_Prob'],
+                bins=[0.0, 0.4, 0.5, 0.6, 1.0],
+                labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
+            )
+            combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
+    
+            #st.success(f"✅ Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s — rows: {len(combined)}")
+            scored_all.append(combined)
+    
+        except Exception as e:
+            logging.exception(f"❌ Failed scoring {market_type.upper()}: {e}")
+    
+    # === Final combine (outside the loop)
+    if scored_all:
+        df_scored = pd.concat(scored_all, ignore_index=True)
+        missing_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
+        for col in missing_cols:
+            if col not in df_scored.columns:
+                df_scored[col] = np.nan
+    
+        df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+        logging.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
+        return df_scored
+    else:
+        logging.warning("⚠️ No market types scored — returning empty DataFrame.")
+        return pd.DataFrame()
+            
 
 
 
