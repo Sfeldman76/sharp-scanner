@@ -828,8 +828,19 @@ def apply_blended_sharp_score(df, trained_models):
             )
 
             # === Inverse-side mirroring ===
-            df_inverse = df_inverse.merge(df_canon_for_join, on=['Game_Key', 'Bookmaker', 'Market'], how='left')
+            df_inverse = df_inverse.merge(
+                df_canon_for_join,
+                on=['Game_Key', 'Bookmaker', 'Market'],
+                how='left'
+            )
             
+            # 🧼 Clean up merge suffixes
+            df_inverse.rename(columns={
+                'Model_Sharp_Win_Prob_y': 'Model_Sharp_Win_Prob',
+                'Model_Confidence_y': 'Model_Confidence'
+            }, inplace=True)
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_x', 'Model_Confidence_x'], errors='ignore', inplace=True)
+                        
             # 🧪 Debug print BEFORE any flipping or filtering
             st.write("🧪 df_inverse.columns", df_inverse.columns.tolist())
             
