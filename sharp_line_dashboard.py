@@ -456,7 +456,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
 
     df_bt = df_bt.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
-
+    # Smart deduplication before training
+    # Smart deduplication: Keep unique signals (not just by Game/Market/Bookmaker)
+    dedup_cols = [
+        'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Time_Score', 'Sharp_Limit_Total',
+        'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag'
+    ]
+    
+    before = len(df_bt)
+    df_bt = df_bt.drop_duplicates(subset=dedup_cols, keep='last')
+    after = len(df_bt)
+    st.info(f"🧹 Deduplicated exact signal rows: {before} → {after}")
     trained_models = {}
 
     for market in ['spreads', 'totals', 'h2h']:
