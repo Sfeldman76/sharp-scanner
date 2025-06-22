@@ -1080,13 +1080,6 @@ def render_scanner_tab(label, sport_key, container):
         
                     # ✅ Score pre-game picks
                     df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
-                    st.write("🔎 Was_Canonical breakdown:", df_scored['Was_Canonical'].value_counts(dropna=False))
-                    st.write("🔎 Sample canonical rows:", df_scored[df_scored['Was_Canonical'] == True].head())
-                    st.write("🔎 Sample inverse rows:", df_scored[df_scored['Was_Canonical'] == False].head())
-                    # 🔎 Inspect what's returned
-                    #st.write("🧪 df_scored HEAD:", df_scored.head(5))
-                    #st.write("🧪 df_scored COLUMNS:", df_scored.columns.tolist())
-                    #st.write("🧪 df_scored SHAPE:", df_scored.shape)
         
                     # 🔒 Ensure scoring columns exist
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
@@ -1099,81 +1092,35 @@ def render_scanner_tab(label, sport_key, container):
                         st.warning("⚠️ No rows successfully scored — skipping further analysis.")
                         return pd.DataFrame()
         
-                    # 🧹 Optional deduplication
-                    df_scored = df_scored.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
-        
                     # 🧪 Cap for safety
                     if len(df_scored) > 20000:
                         st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
                         df_scored = df_scored.sample(20000, random_state=42)
         
                     # ✅ Merge scored predictions into full dataset
-                    # ✅ Prepare merge_keys
-                    # 🧹 Optional deduplication (if needed)
-                    # 🧹 Optional deduplication
-                    df_scored = df_scored.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
-                    # === Safe mirror-aware merge
-                    merge_keys = ['Game_Key', 'Market', 'Bookmaker']
-                    
-                    # Normalize both for merge
-                    # ✅ Mirror-safe key
-                    # ✅ Add Mirror_Key in both DataFrames
-                    # ✅ Mirror-safe merge keys
-                    df_moves_raw['Outcome_Norm'] = df_moves_raw['Outcome'].str.lower().str.strip()
-                    df_scored['Outcome_Norm'] = df_scored['Outcome'].str.lower().str.strip()
-                    
-                    df_moves_raw['Mirror_Key'] = df_moves_raw['Game_Key'].str.replace('_' + df_moves_raw['Outcome_Norm'], '', regex=False)
-                    df_scored['Mirror_Key'] = df_scored['Game_Key'].str.replace('_' + df_scored['Outcome_Norm'], '', regex=False)
-                    
-                    # 🔍 Confirm contents before merge
-                    st.write("🔍 df_scored Mirror_Key sample:", df_scored[['Game_Key', 'Outcome_Norm', 'Mirror_Key', 'Was_Canonical']].drop_duplicates().head())
-                    st.write("🔍 df_moves_raw Mirror_Key sample:", df_moves_raw[['Game_Key', 'Outcome_Norm', 'Mirror_Key']].drop_duplicates().head())
-                    
-                    # ✅ Canonical-only deduped scores
-                    df_canon_scores = df_scored[df_scored['Was_Canonical'] == True].drop_duplicates(
-                        subset=['Mirror_Key', 'Market', 'Bookmaker']
-                    )[['Mirror_Key', 'Market', 'Bookmaker', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']]
-                    
-                    # 🔎 Count rows expected to match before merge
-                    pre_merge = df_moves_raw[['Mirror_Key', 'Market', 'Bookmaker']].drop_duplicates()
-                    st.info(f"🔗 Mirror merge targets: {len(pre_merge)} rows")
-                    
-                    # === Merge into raw DataFrame (preserves both sides)
+                    merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+                    df_scored = df_scored.drop_duplicates(subset=merge_keys)
+        
                     df_moves_raw = df_moves_raw.merge(
-                        df_canon_scores,
-                        on=['Mirror_Key', 'Market', 'Bookmaker'],
+                        df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
+                        on=merge_keys,
                         how='left'
                     )
-                    
-                    # ✅ Report matched rows
-                    post_merge = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].notna()]
-                    st.info(f"✅ Rows that got scores after mirror merge: {len(post_merge)} of {len(df_moves_raw)}")
-                    
-                    # ✅ Final cleanup
-                    df_moves_raw.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
+        
+                    # 🧼 Final suffix cleanup
                     df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
-                    missing_df = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()]
-                    if not missing_df.empty:
-                        st.write("❌ Missing merge examples:")
-                        st.write(missing_df[['Game_Key', 'Outcome', 'Outcome_Norm', 'Mirror_Key', 'Market', 'Bookmaker']].drop_duplicates().head(10))
-                    
-                        st.write("🔍 Canonical score merge keys:")
-                        st.write(df_canon_scores[['Mirror_Key', 'Market', 'Bookmaker']].drop_duplicates().head(10))
+        
                     # 🔒 Ensure Model_Confidence_Tier is valid
                     if 'Model_Confidence_Tier' in df_moves_raw.columns:
                         df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
                     else:
-                        st.error("❌ Model_Confidence_Tier missing after merge — check merge keys or scoring logic.")
+                        st.error("❌ Model_Confidence_Tier missing after merge — check scoring logic.")
                         st.write("🔍 Available columns:", df_moves_raw.columns.tolist())
                         return pd.DataFrame()
-                    
+        
                     # 📊 Log final missing counts
                     num_missing = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
                     st.info(f"🧪 Rows with missing model probability after final merge: {num_missing}")
-                                        
-                       
-                    
-                   
         
                 else:
                     st.info("ℹ️ No pre-game rows available for scoring.")
@@ -1182,6 +1129,7 @@ def render_scanner_tab(label, sport_key, container):
                 st.error(f"❌ Model scoring failed: {e}")
         else:
             st.warning("⚠️ No trained models available for scoring.")
+        
         
         # Final guard
         if df_moves_raw.empty:
