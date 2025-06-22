@@ -1098,37 +1098,44 @@ def render_scanner_tab(label, sport_key, container):
                         df_scored = df_scored.sample(20000, random_state=42)
         
                     # ✅ Merge scored predictions into full dataset
+                     # === Normalize merge keys before joining
                     merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
-                    df_scored = df_scored.drop_duplicates(subset=merge_keys)
-                    pre_merge_keys = df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Outcome']].drop_duplicates()
-                    scored_keys = df_scored[['Game_Key', 'Market', 'Bookmaker', 'Outcome']].drop_duplicates()
-                    st.write("🧪 df_scored sample:", df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob']].head(10))
-                    st.write("🧪 Outcome counts in scored:", df_scored['Outcome'].value_counts())
-                    st.write("🔍 Merge keys in raw:", pre_merge_keys.head())
-                    st.write("🔍 Merge keys in scored:", scored_keys.head())
+                    for col in merge_keys:
+                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+                    
+                    # 🧪 Diagnostic: Merge keys snapshot
+                    st.write("🔍 Raw (df_moves_raw) merge keys sample:")
+                    st.dataframe(df_moves_raw[merge_keys].drop_duplicates().head())
+                    
+                    st.write("🔍 Scored (df_scored) merge keys sample:")
+                    st.dataframe(df_scored[merge_keys + ['Model_Sharp_Win_Prob']].drop_duplicates().head())
+                    
+                    # === Perform merge
                     df_moves_raw = df_moves_raw.merge(
                         df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
                         on=merge_keys,
                         how='left'
                     )
-        
-                    # 🧼 Final suffix cleanup
-                    df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
-        
-                    # 🔒 Ensure Model_Confidence_Tier is valid
-                    if 'Model_Confidence_Tier' in df_moves_raw.columns:
-                        df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
-                    else:
-                        st.error("❌ Model_Confidence_Tier missing after merge — check scoring logic.")
-                        st.write("🔍 Available columns:", df_moves_raw.columns.tolist())
-                        return pd.DataFrame()
-        
-                    # 📊 Log final missing counts
-                    num_missing = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
-                    st.info(f"🧪 Rows with missing model probability after final merge: {num_missing}")
-        
-                else:
-                    st.info("ℹ️ No pre-game rows available for scoring.")
+                    
+                    # 🧪 Check for missing model probabilities after merge
+                    missing_score_rows = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()]
+                    st.warning(f"⚠️ Missing model probability in {len(missing_score_rows)} rows after merge.")
+                    if not missing_score_rows.empty:
+                        st.dataframe(missing_score_rows[merge_keys].head())
+                    
+                    # ✅ Ensure columns exist for downstream summary
+                    fallback_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
+                    for col in fallback_cols:
+                        if col not in df_moves_raw.columns:
+                            df_moves_raw[col] = np.nan
+                    
+                    # 🧪 Check sample of successfully scored rows
+                    st.success("✅ Sample of scored rows in df_moves_raw:")
+                    st.dataframe(df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].notna()][
+                        merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
+                    ].head())
+
         
             except Exception as e:
                 st.error(f"❌ Model scoring failed: {e}")
@@ -1288,6 +1295,7 @@ def render_scanner_tab(label, sport_key, container):
         
         
         # === 6. Final Summary Table
+       # === Final Summary Table Build (modified to log coverage)
         summary_cols = [
             'Game', 'Market', 'Game_Start', 'Outcome',
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
@@ -1296,13 +1304,7 @@ def render_scanner_tab(label, sport_key, container):
             'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It'
         ]
         
-        # Make sure diagnostic columns exist even if not merged properly
-        for col in ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']:
-            if col not in df_moves_raw.columns:
-                df_moves_raw[col] = "⚠️ Missing"
-        
         summary_df = df_moves_raw[[col for col in summary_cols if col in df_moves_raw.columns]].copy()
-        
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
@@ -1320,7 +1322,17 @@ def render_scanner_tab(label, sport_key, container):
             'Model_Sharp_Win_Prob': 'Model Prob',
             'Model_Confidence_Tier': 'Confidence Tier'
         }, inplace=True)
+        st.write("🧪 Non-null model probs in summary_df:", summary_df['Model Prob'].notna().sum())
+        st.write("🧪 Distinct confidence tiers:", summary_df['Confidence Tier'].dropna().unique().tolist())
+        # ✅ Log preview before rendering
+        st.info(f"✅ Summary table shape (before render): {summary_df.shape}")
+        st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
+                # Make sure diagnostic columns exist even if not merged properly
+        for col in ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']:
+            if col not in df_moves_raw.columns:
+                df_moves_raw[col] = "⚠️ Missing"
         
+       
         # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
