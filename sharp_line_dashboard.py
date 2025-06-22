@@ -965,8 +965,6 @@ def ensure_opposite_side_rows(df, scored_df):
 
     return df
 
-# ✅ Call it:
-df_moves_raw = ensure_opposite_side_rows(df_moves_raw, df_scored)
 
 def render_scanner_tab(label, sport_key, container):
     #market_weights = read_market_weights_from_bigquery()
