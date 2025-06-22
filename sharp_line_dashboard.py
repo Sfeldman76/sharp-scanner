@@ -841,10 +841,34 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Confidence'] = df_inverse['Model_Confidence_canon']
             df_inverse.drop(columns=['Model_Sharp_Win_Prob_canon', 'Model_Confidence_canon'], errors='ignore', inplace=True)
             # Step 3: Flip predictions
+            # Step 3: Flip predictions
             flip_mask = df_inverse['Model_Sharp_Win_Prob'].notna()
             df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob'] = 1 - df_inverse.loc[flip_mask, 'Model_Sharp_Win_Prob']
             df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
             df_inverse['Was_Canonical'] = False
+            
+            # ✅ Flip the outcome to the other side
+            # Build outcome map per Game_Key from df_market
+            outcome_map = (
+                df_market
+                .groupby('Game_Key')['Outcome']
+                .unique()
+                .to_dict()
+            )
+            
+            # Function to get the other side
+            def flip_outcome(row):
+                current = row['Outcome'].strip().lower()
+                all_outcomes = outcome_map.get(row['Game_Key'], [])
+                for alt in all_outcomes:
+                    if alt.strip().lower() != current:
+                        return alt
+                return None  # fallback
+            
+            df_inverse['Outcome'] = df_inverse.apply(flip_outcome, axis=1)
+            
+            # Drop rows where opposite outcome couldn't be found
+            df_inverse = df_inverse[df_inverse['Outcome'].notna()]
          
             # ✅ Tag scored rows BEFORE filtering
             df_canon['Scored_By_Model'] = True
