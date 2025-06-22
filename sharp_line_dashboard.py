@@ -1340,7 +1340,7 @@ def render_scanner_tab(label, sport_key, container):
                 suffixes=('', '_diagnostics')
             )
             
-            # Fill diagnostics columns if missing
+            # Fill diagnostics columns if missing (prefer diagnostics merge first)
             diagnostic_cols = {
                 'Confidence Trend': 'Confidence Trend_diagnostics',
                 'Why Model Likes It': 'Why Model Likes It_diagnostics',
@@ -1352,17 +1352,16 @@ def render_scanner_tab(label, sport_key, container):
                 if diag_col in df_moves_raw.columns:
                     df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
                 else:
-                    df_moves_raw[final_col] = "⚠️ Missing"diagnostic_cols = ['Confidence Trend', 'Why Model Likes It', 'Tier Δ', 'Line/Model Direction']
-                        for col in diagnostic_cols:
-                            if col not in df_moves_raw.columns:
-                                df_moves_raw[col] = "⚠️ Missing"
-                            else:
-                    # Replace empty with fallback
+                    df_moves_raw[final_col] = "⚠️ Missing"
+            
+            # Extra fallback: fill any blank values in the final columns
+            for col in diagnostic_cols.keys():
+                if col not in df_moves_raw.columns:
+                    df_moves_raw[col] = "⚠️ Missing"
+                else:
                     df_moves_raw[col] = df_moves_raw[col].fillna("⚠️ Missing")
                     
-            st.info(f"🧠 Applied diagnostics to {after} rows in {time.time() - start:.2f}s")
-        
-                
+                            
         
                     
               
