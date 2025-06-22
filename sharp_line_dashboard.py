@@ -980,7 +980,7 @@ def render_scanner_tab(label, sport_key, container):
 
         # === Previous snapshot for live odds comparison
         # === Previous snapshot for live odds comparison
-        prev = read_latest_snapshot_from_bigquery(hours=24) or {}
+        prev = read_latest_snapshot_from_bigquery(hours=48) or {}
         
         df_prev_raw = pd.DataFrame([
             {
@@ -1023,15 +1023,10 @@ def render_scanner_tab(label, sport_key, container):
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
             
-            df_moves_raw = read_recent_sharp_moves(hours=12)
+            df_moves_raw = read_recent_sharp_moves(hours=48)
             st.write("✅ Raw rows loaded:", len(df_moves_raw))
             st.dataframe(df_moves_raw.head(3))
-           
-            
-           
-        
-        
-      
+              
         # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
         missing = [col for col in required_cols if col not in df_moves_raw.columns]
