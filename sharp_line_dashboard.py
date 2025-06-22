@@ -1305,38 +1305,43 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
         else:
             pre_mask = df_moves_raw['Pre_Game']
-        
+            
             if df_moves_raw.empty or pre_mask.sum() == 0:
                 st.warning("⚠️ No live pre-game picks to compute diagnostics.")
                 return pd.DataFrame()
-            
+        
             # Defensive fix for corrupted tier column
             if 'Model_Confidence_Tier' in df_moves_raw.columns:
                 if isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
                     st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series by selecting first column")
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
-            
+        
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
+        
+            # ✅ Deduplicate only the Pre_Game slice
             dedup_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-            before = df_moves_raw[pre_mask].shape[0]
-            df_moves_raw = df_moves_raw.drop_duplicates(subset=dedup_cols + ['Snapshot_Timestamp'])
-            after = df_moves_raw[pre_mask].shape[0]
+            df_pre = df_moves_raw[pre_mask].copy()
+            before = len(df_pre)
+            df_pre = df_pre.sort_values('Snapshot_Timestamp', ascending=False)
+            df_pre = df_pre.drop_duplicates(subset=dedup_cols, keep='first')
+            after = len(df_pre)
             st.info(f"🧹 Deduplicated diagnostics rows: {before} → {after}")
-            diagnostics_df = compute_diagnostics_vectorized(df_moves_raw[pre_mask].copy())
-            
+        
+            # ✅ Compute diagnostics
+            diagnostics_df = compute_diagnostics_vectorized(df_pre.copy())
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
                 return pd.DataFrame()
-            
-            # ✅ Safe to merge
-            df_moves_raw.loc[pre_mask, diagnostics_df.columns] = diagnostics_df.values
-            
-            st.info(f"🧠 Applied diagnostics to {pre_mask.sum()} rows in {time.time() - start:.2f}s")
-
         
-           
-
+            # ✅ Safe merge back into df_moves_raw
+            df_moves_raw.set_index(dedup_cols, inplace=True)
+            df_pre.set_index(dedup_cols, inplace=True)
+            df_moves_raw.update(diagnostics_df.set_index(dedup_cols))
+            df_moves_raw.reset_index(inplace=True)
         
+            st.info(f"🧠 Applied diagnostics to {after} rows in {time.time() - start:.2f}s")
+        
+                
         
                     
               
