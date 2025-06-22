@@ -807,6 +807,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scored_By_Model'] = True
     
             # === Mirror logic
+            # === Mirror logic
             inverse_keys = ['Game_Key', 'Bookmaker', 'Market']
             def extract_mirror_key(row):
                 try:
@@ -816,10 +817,11 @@ def apply_blended_sharp_score(df, trained_models):
             
             df_market['Mirror_Key'] = df_market.apply(extract_mirror_key, axis=1)
             df_canon['Mirror_Key'] = df_canon.apply(extract_mirror_key, axis=1)
+            
             df_inverse = df_market[~df_market[inverse_keys].set_index(inverse_keys).index.isin(
                 df_canon[inverse_keys].drop_duplicates().set_index(inverse_keys).index
             )].copy()
-    
+            
             # Flip outcomes
             outcome_map = df_market.groupby('Game_Key')['Outcome'].unique().to_dict()
             def flip_outcome(row):
@@ -828,11 +830,11 @@ def apply_blended_sharp_score(df, trained_models):
                     if o.strip().lower() != current:
                         return o
                 return None
+            
             df_inverse['Outcome'] = df_inverse.apply(flip_outcome, axis=1)
             df_inverse = df_inverse[df_inverse['Outcome'].notna()]
             df_inverse['Outcome_Norm'] = df_inverse['Outcome'].str.lower().str.strip()
-            df_inverse['Mirror_Key'] = df_inverse['Game_Key'].str.replace('_' + df_inverse['Outcome_Norm'], '', regex=False)
-    
+            # ❌ Do NOT overwrite Mirror_Key here again!
             df_canon_for_join = df_canon[['Mirror_Key', 'Model_Sharp_Win_Prob', 'Model_Confidence']].drop_duplicates('Mirror_Key')
             df_inverse = df_inverse.merge(df_canon_for_join, on='Mirror_Key', how='left', suffixes=('', '_canon'))
             flip_mask = df_inverse['Model_Sharp_Win_Prob_canon'].notna()
