@@ -872,10 +872,10 @@ def apply_blended_sharp_score(df, trained_models):
         missing_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
         for col in missing_cols:
             if col not in df_scored.columns:
-                df_scored[col] = np.nan
-    
+                df_scored[col] = np.nan   
         df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
         st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
+        df_scored['Scored_By_Model'] = True  # ✅ Tag
         return df_scored
     else:
         st.warning("⚠️ No market types scored — returning empty DataFrame.")
@@ -939,7 +939,34 @@ def fetch_scored_picks_from_bigquery(limit=50000):
         st.error(f"❌ Failed to fetch scored picks: {e}")
         return pd.DataFrame()
         
+# ✅ Step: Fill missing opposite picks (mirror rows that didn’t exist pre-merge)
+def ensure_opposite_side_rows(df, scored_df):
+    
+    #Ensure both sides of each market are represented by injecting the mirrored side if missing.
+    
+    merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
 
+    # Identify which scored rows are not already in df
+    scored_keys = scored_df[merge_keys].drop_duplicates()
+    existing_keys = df[merge_keys].drop_duplicates()
+    missing = scored_keys.merge(existing_keys, how='left', on=merge_keys, indicator=True)
+    missing = missing[missing['_merge'] == 'left_only'].drop(columns=['_merge'])
+
+    if not missing.empty:
+        injected = scored_df.merge(missing, on=merge_keys, how='inner')
+        st.info(f"➕ Injected {len(injected)} mirrored rows not present in original data.")
+        # Fill missing fields with NaNs
+        for col in df.columns:
+            if col not in injected.columns:
+                injected[col] = np.nan
+        df = pd.concat([df, injected[df.columns]], ignore_index=True)
+    else:
+        st.info("✅ No mirrored rows needed — both sides already present.")
+
+    return df
+
+# ✅ Call it:
+df_moves_raw = ensure_opposite_side_rows(df_moves_raw, df_scored)
 
 def render_scanner_tab(label, sport_key, container):
     #market_weights = read_market_weights_from_bigquery()
@@ -1107,7 +1134,7 @@ def render_scanner_tab(label, sport_key, container):
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
                         if col not in df_scored.columns:
                             df_scored[col] = np.nan
-         # === Normalize merge keys before joining
+                    # === Normalize merge keys before joining
                     merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
                     for col in merge_keys:
                         df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
@@ -1136,7 +1163,13 @@ def render_scanner_tab(label, sport_key, container):
                         on=merge_keys,
                         how='left'
                     )
-                    
+                                        # Count how many scored picks made it into df_moves_raw
+                    if 'Scored_By_Model' in df_moves_raw.columns:
+                        model_scored = df_moves_raw['Scored_By_Model'].fillna(False).sum()
+                        st.info(f"✅ Scored picks present after merge: {model_scored} / {len(df_scored)}")
+                    else:
+                        st.warning("⚠️ Scored_By_Model column missing after merge.")
+                    df_moves_raw = ensure_opposite_side_rows(df_moves_raw, df_scored)
                     # 🧪 Check for missing model probabilities after merge
                     missing_score_rows = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()]
                     st.warning(f"⚠️ Missing model probability in {len(missing_score_rows)} rows after merge.")
@@ -1308,8 +1341,10 @@ def render_scanner_tab(label, sport_key, container):
                     
               
                
-        
-        
+        st.write("📊 Final summary preview:")
+        st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
+        st.write("🧮 Total with model prob:", summary_df['Model Prob'].notna().sum())
+                
         # === 6. Final Summary Table
        # === Final Summary Table Build (modified to log coverage)
         summary_cols = [
