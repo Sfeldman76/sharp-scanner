@@ -1115,23 +1115,26 @@ def render_scanner_tab(label, sport_key, container):
                     
                     # Normalize both for merge
                     # ✅ Mirror-safe key
+                    # ✅ Add Mirror_Key in both DataFrames
                     df_moves_raw['Outcome_Norm'] = df_moves_raw['Outcome'].str.lower().str.strip()
                     df_scored['Outcome_Norm'] = df_scored['Outcome'].str.lower().str.strip()
-                    
                     df_moves_raw['Mirror_Key'] = df_moves_raw['Game_Key'].str.replace('_' + df_moves_raw['Outcome_Norm'], '', regex=False)
                     df_scored['Mirror_Key'] = df_scored['Game_Key'].str.replace('_' + df_scored['Outcome_Norm'], '', regex=False)
                     
-                    # ✅ Drop dupes and merge
-                    df_scored_merge = df_scored.drop_duplicates(subset=['Mirror_Key', 'Market', 'Bookmaker'])
+                    # ✅ Build canonical scores (dedup by mirror key to avoid overwrite)
+                    df_canon_scores = df_scored[df_scored['Was_Canonical'] == True].drop_duplicates(
+                        subset=['Mirror_Key', 'Market', 'Bookmaker']
+                    )[['Mirror_Key', 'Market', 'Bookmaker', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']]
                     
+                    # ✅ Merge scores into all rows (canonical and inverse)
                     df_moves_raw = df_moves_raw.merge(
-                        df_scored_merge[['Mirror_Key', 'Market', 'Bookmaker', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
+                        df_canon_scores,
                         on=['Mirror_Key', 'Market', 'Bookmaker'],
                         how='left'
                     )
                     
                     df_moves_raw.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
-                   
+                 
                     
                     
                     num_missing = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
