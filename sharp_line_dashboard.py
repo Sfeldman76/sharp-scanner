@@ -1437,12 +1437,7 @@ def render_scanner_tab(label, sport_key, container):
         st.write("🧪 Non-null model probs in summary_df:", summary_df['Model Prob'].notna().sum())
         st.write("🧪 Distinct confidence tiers:", summary_df['Confidence Tier'].dropna().unique().tolist())
         # ✅ Log preview before rendering
-        st.info(f"✅ Summary table shape (before render): {summary_df.shape}")
-        st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
-                # Make sure diagnostic columns exist even if not merged properly
-        for col in ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']:
-            if col not in df_moves_raw.columns:
-                df_moves_raw[col] = "⚠️ Missing"
+       
         
                  
         st.write("📊 Final summary preview:")
