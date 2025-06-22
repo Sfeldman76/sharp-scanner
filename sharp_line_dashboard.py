@@ -1024,28 +1024,12 @@ def render_scanner_tab(label, sport_key, container):
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
         
-        # === Filter to sport
-        SPORT_BQ_MAP = {
-            "NBA": "BASKETBALL_NBA",
-            "WNBA": "BASKETBALL_WNBA",
-            "MLB": "BASEBALL_MLB",
-            "CFL": "AMERICANFOOTBALL_CFL"
-        }
-        
-        bq_sport = SPORT_BQ_MAP.get(label.upper())
-        if 'Sport' not in df_moves_raw.columns:
-            st.error("❌ 'Sport' column missing in df_moves_raw — cannot filter.")
-            return pd.DataFrame()
-        
-        if bq_sport:
-            df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == bq_sport]
-            if df_moves_raw.empty:
-                st.warning(f"⚠️ No sharp picks found for sport: {bq_sport}")
-                return pd.DataFrame()
-        else:
-            st.warning(f"⚠️ No BQ sport match for {label}")
-            return pd.DataFrame()
-        
+       
+            
+           if 'Sport' in df_moves_raw.columns:
+        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.contains(label.upper(), na=False)]
+        st.info(f"🔍 Filtered to sport label: {label.upper()} — Rows: {len(df_move
+      
         # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
         missing = [col for col in required_cols if col not in df_moves_raw.columns]
