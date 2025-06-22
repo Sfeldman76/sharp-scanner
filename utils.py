@@ -831,7 +831,7 @@ def detect_cross_market_sharp_support(df_moves, score_threshold=25):
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
-   
+    import streamlit as st
     import time
 
     #st.info("🔍 Entered `apply_blended_sharp_score()`")
@@ -849,7 +849,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     for market_type, bundle in trained_models.items():
         start = time.time()
-        logging.info(f"🧪 Starting scoring for market: `{market_type}`")
+    logging.info(f"🧪 Starting scoring for market: `{market_type}`")
 
         try:
             model = bundle.get('model')
@@ -863,7 +863,7 @@ def apply_blended_sharp_score(df, trained_models):
             #st.info(f"📊 {market_type.upper()} — rows available: {len(df_market)}")
 
             if df_market.empty:
-                logging.warning(f"⚠️ No rows found for {market_type.upper()}")
+                st.warning(f"⚠️ No rows found for {market_type.upper()}")
                 continue
 
             # Canonical filtering
@@ -971,9 +971,6 @@ def apply_blended_sharp_score(df, trained_models):
         logging.warning("⚠️ No market types scored — returning empty DataFrame.")
         return pd.DataFrame()
             
-
-
-
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
