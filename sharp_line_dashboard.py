@@ -869,22 +869,48 @@ def apply_blended_sharp_score(df, trained_models):
     
         except Exception as e:
             st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")
-    
-    # === Final combine (outside the loop)
-    if scored_all:
-        df_scored = pd.concat(scored_all, ignore_index=True)
-        missing_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
-        for col in missing_cols:
-            if col not in df_scored.columns:
-                df_scored[col] = np.nan   
-        df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
-        st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
-        df_scored['Scored_By_Model'] = True  # ✅ Tag
-        return df_scored
-    else:
-        st.warning("⚠️ No market types scored — returning empty DataFrame.")
-        return pd.DataFrame()
-            
+        # === Final combine (outside the loop)
+        # === Final combine (outside the loop)
+        if scored_all:
+            df_scored = pd.concat(scored_all, ignore_index=True)
+        
+            # ✅ Tag scored rows BEFORE any filtering
+            df_scored['Scored_By_Model'] = True
+        
+            # Fill missing scoring columns if not present
+            missing_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
+            for col in missing_cols:
+                if col not in df_scored.columns:
+                    df_scored[col] = np.nan
+        
+            # ✅ Filter to rows with valid model probability
+            df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+        
+            st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
+        
+            # === Debug: Confirm both sides of each market exist after mirroring
+            pair_check = (
+                df_scored
+                .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
+                .nunique()
+                .reset_index()
+                .rename(columns={'Outcome': 'Num_Outcomes'})
+            )
+        
+            missing_pairs = pair_check[pair_check['Num_Outcomes'] < 2]
+        
+            if not missing_pairs.empty:
+                st.warning(f"⚠️ {len(missing_pairs)} markets are missing one side after scoring.")
+                st.dataframe(missing_pairs.head())
+            else:
+                st.info("✅ All scored markets have both sides present.")
+        
+            return df_scored
+        
+        else:
+            st.warning("⚠️ No market types scored — returning empty DataFrame.")
+            return pd.DataFrame()
+   
 from io import BytesIO
 import pickle
 from google.cloud import storage
@@ -1348,9 +1374,7 @@ def render_scanner_tab(label, sport_key, container):
                     
               
                
-        st.write("📊 Final summary preview:")
-        st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
-        st.write("🧮 Total with model prob:", summary_df['Model Prob'].notna().sum())
+       
                 
         # === 6. Final Summary Table
        # === Final Summary Table Build (modified to log coverage)
@@ -1390,7 +1414,10 @@ def render_scanner_tab(label, sport_key, container):
             if col not in df_moves_raw.columns:
                 df_moves_raw[col] = "⚠️ Missing"
         
-       
+                 
+        st.write("📊 Final summary preview:")
+        st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
+        st.write("🧮 Total with model prob:", summary_df['Model Prob'].notna().sum())
         # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
