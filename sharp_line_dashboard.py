@@ -1015,20 +1015,22 @@ def render_scanner_tab(label, sport_key, container):
             ).reset_index()
         
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
+        
         detection_key = f"sharp_moves_{sport_key_lower}"
+        
         if detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            df_moves_raw = read_recent_sharp_moves(hours=12)  # ✅ FIXED HERE
-            st.session_state[detection_key] = df_moves_raw
-            st.success(f"📥 Loaded sharp moves from BigQuery")
-        
-       
             
-           if 'Sport' in df_moves_raw.columns:
-        df_moves_raw = df_moves_raw[df_moves_raw['Sport'].str.contains(label.upper(), na=False)]
-        st.info(f"🔍 Filtered to sport label: {label.upper()} — Rows: {len(df_move
+            df_moves_raw = read_recent_sharp_moves(hours=12)
+            st.write("✅ Raw rows loaded:", len(df_moves_raw))
+            st.dataframe(df_moves_raw.head(3))
+           
+            
+           
+        
+        
       
         # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
