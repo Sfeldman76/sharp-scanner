@@ -846,29 +846,25 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
             df_inverse['Was_Canonical'] = False
          
-            # ✅ Tag both canonical and inverse before combining
+            # ✅ Tag scored rows BEFORE filtering
             df_canon['Scored_By_Model'] = True
             df_inverse['Scored_By_Model'] = True
             
-            # Combine canonical and inverse
             combined = pd.concat([df_canon, df_inverse], ignore_index=True)
             
             # 🛡️ Final cleanup
-            combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
-    
-            # 🛡️ Final cleanup inside the try-block
-           
+            combined = combined[combined['Model_Sharp_Win_Prob'].notna()]  # ✅ after tagging
             combined['Model_Confidence'] = combined['Model_Confidence'].fillna(0).clip(0, 1)
             combined['Model_Confidence_Tier'] = pd.cut(
                 combined['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
+            
             combined.drop(columns=['Mirror_Key'], errors='ignore', inplace=True)
-    
-            #st.success(f"✅ Scored + mirrored {market_type.upper()} in {time.time() - start:.2f}s — rows: {len(combined)}")
+            
             scored_all.append(combined)
-    
+                
         except Exception as e:
             st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")
         # === Final combine (outside the loop)
@@ -897,7 +893,16 @@ def apply_blended_sharp_score(df, trained_models):
                 .reset_index()
                 .rename(columns={'Outcome': 'Num_Outcomes'})
             )
-        
+            st.write("🧪 Sample outcome distribution:")
+            
+            outcome_debug = (
+                df_scored
+                .groupby(['Game_Key', 'Market'])['Outcome']
+                .apply(lambda x: list(x))
+                .reset_index(name='Scored Outcomes')
+            )
+            
+            st.dataframe(outcome_debug.head())
             missing_pairs = pair_check[pair_check['Num_Outcomes'] < 2]
         
             if not missing_pairs.empty:
