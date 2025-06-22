@@ -1024,7 +1024,23 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = read_recent_sharp_moves(hours=48)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
+        # === Filter to current tab's sport
+        SPORT_BQ_MAP = {
+            "NBA": "BASKETBALL_NBA",
+            "WNBA": "BASKETBALL_WNBA",
+            "MLB": "BASEBALL_MLB",
+            "CFL": "AMERICANFOOTBALL_CFL"
+        }
         
+        bq_sport = SPORT_BQ_MAP.get(label.upper())
+        
+        if 'Sport' in df_moves_raw.columns and bq_sport:
+            before = len(df_moves_raw)
+            df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == bq_sport]
+            after = len(df_moves_raw)
+            st.info(f"🏷️ Filtered to sport = {bq_sport}: {before} → {after} rows")
+        else:
+            st.warning("⚠️ Could not filter by Sport — missing column or mapping.")
         # ✅ Snapshot log
         st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
         st.dataframe(df_moves_raw.head(3))
@@ -1053,7 +1069,17 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Build game keys (for merging)
         df_moves_raw = build_game_key(df_moves_raw)
+        # === Keep only sharp picks for upcoming games (filter by Game_Start, not Pre_Game)
+        st.info("🕒 Filtering to truly live (upcoming) picks based on Game_Start...")
         
+        now = pd.Timestamp.utcnow()
+        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
+        
+        before = len(df_moves_raw)
+        df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] > now]
+        after = len(df_moves_raw)
+        
+        st.info(f"✅ Game_Start > now: filtered {before} → {after} rows")
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
         trained_models = st.session_state.get(model_key)
@@ -1069,11 +1095,9 @@ def render_scanner_tab(label, sport_key, container):
         # === Apply model scoring if models are loaded
         if trained_models:
             try:
-                if 'Pre_Game' not in df_moves_raw.columns:
-                    st.error("❌ `Pre_Game` column missing — cannot filter picks for scoring.")
-                    return pd.DataFrame()
+            
         
-                df_pre_game_picks = df_moves_raw[df_moves_raw['Pre_Game']].copy()
+                df_pre_game_picks = df_moves_raw.copy()
         
                 if not df_pre_game_picks.empty:
                     df_pre_game_picks = ensure_columns(df_pre_game_picks, ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier'])
