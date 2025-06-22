@@ -849,7 +849,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     for market_type, bundle in trained_models.items():
         start = time.time()
-    logging.info(f"🧪 Starting scoring for market: `{market_type}`")
+    	logging.info(f"🧪 Starting scoring for market: `{market_type}`")
 
         try:
             model = bundle.get('model')
