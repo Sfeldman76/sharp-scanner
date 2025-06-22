@@ -1015,18 +1015,20 @@ def render_scanner_tab(label, sport_key, container):
             ).reset_index()
         
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
-        
         detection_key = f"sharp_moves_{sport_key_lower}"
         
         if detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            
             df_moves_raw = read_recent_sharp_moves(hours=48)
-            st.write("✅ Raw rows loaded:", len(df_moves_raw))
-            st.dataframe(df_moves_raw.head(3))
-              
+            st.session_state[detection_key] = df_moves_raw
+            st.success(f"📥 Loaded sharp moves from BigQuery")
+        
+        # ✅ Snapshot log
+        st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
+        st.dataframe(df_moves_raw.head(3))
+        
         # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
         missing = [col for col in required_cols if col not in df_moves_raw.columns]
@@ -1040,6 +1042,16 @@ def render_scanner_tab(label, sport_key, container):
             st.dataframe(df_moves_raw.head())
             return pd.DataFrame()
         
+        # ✅ Deduplicate snapshot duplicates (exact matches except timestamp)
+        if 'Snapshot_Timestamp' in df_moves_raw.columns:
+            dedup_cols = [col for col in df_moves_raw.columns if col != 'Snapshot_Timestamp']
+            before = len(df_moves_raw)
+            df_moves_raw = df_moves_raw.sort_values('Snapshot_Timestamp', ascending=False)
+            df_moves_raw = df_moves_raw.drop_duplicates(subset=dedup_cols, keep='first')
+            after = len(df_moves_raw)
+            st.info(f"🧹 Deduplicated {before - after} snapshot rows (kept latest per unique pick).")
+        
+        # === Build game keys (for merging)
         df_moves_raw = build_game_key(df_moves_raw)
         
         # === Load per-market models from GCS (once per session)
