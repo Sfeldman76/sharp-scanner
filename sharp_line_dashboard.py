@@ -711,7 +711,7 @@ def compute_diagnostics_vectorized(df):
             #st.write("🧪 df index length:", len(df.index))
         
             model_reasoning = pd.Series([
-                " | ".join(filter(None, parts))
+                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # removes duplicates, preserves order
                 for parts in zip(*reasoning_parts)
             ], index=df.index)
         except Exception as e:
