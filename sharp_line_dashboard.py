@@ -1037,16 +1037,21 @@ def render_scanner_tab(label, sport_key, container):
         
 
               # === Exit early if none remain
-       
-        # === Filter only known books (no filtering by Game_Start!)
-        df_moves_raw = df_moves_raw[df_moves_raw['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
+               
+               # === Defensive check before build_game_key ===
+        required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
+        missing = [col for col in required_cols if col not in df_moves_raw.columns]
         
-        # === Parse datetime only (do NOT reassign Pre_Game)
-        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        df_moves_raw['Snapshot_Timestamp'] = timestamp
+        if df_moves_raw.empty:
+            st.warning("⚠️ No picks returned — df_moves_raw is empty before build_game_key")
+            return pd.DataFrame()
         
-        # === Ensure we're working with the right sport and keys
-        df_moves_raw['Sport'] = label.upper()
+        if missing:
+            st.error(f"❌ Required columns missing before build_game_key: {missing}")
+            st.dataframe(df_moves_raw.head())  # show malformed rows for debugging
+            return pd.DataFrame()
+        
+        # ✅ Safe to proceed
         df_moves_raw = build_game_key(df_moves_raw)
        
         # ✅ Check if there are any live picks worth scoring
