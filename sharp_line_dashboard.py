@@ -846,16 +846,18 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse.loc[flip_mask, 'Model_Confidence'] = 1 - df_inverse.loc[flip_mask, 'Model_Confidence']
             df_inverse['Was_Canonical'] = False
          
+            # ✅ Tag both canonical and inverse before combining
+            df_canon['Scored_By_Model'] = True
+            df_inverse['Scored_By_Model'] = True
             
-         
-    
-            #st.info(f"🪞 Flipped {flip_mask.sum()} inverse picks for {market_type.upper()}")
-    
             # Combine canonical and inverse
             combined = pd.concat([df_canon, df_inverse], ignore_index=True)
+            
+            # 🛡️ Final cleanup
+            combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
     
             # 🛡️ Final cleanup inside the try-block
-            combined = combined[combined['Model_Sharp_Win_Prob'].notna()]
+           
             combined['Model_Confidence'] = combined['Model_Confidence'].fillna(0).clip(0, 1)
             combined['Model_Confidence_Tier'] = pd.cut(
                 combined['Model_Sharp_Win_Prob'],
@@ -874,8 +876,7 @@ def apply_blended_sharp_score(df, trained_models):
         if scored_all:
             df_scored = pd.concat(scored_all, ignore_index=True)
         
-            # ✅ Tag scored rows BEFORE any filtering
-            df_scored['Scored_By_Model'] = True
+           
         
             # Fill missing scoring columns if not present
             missing_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
