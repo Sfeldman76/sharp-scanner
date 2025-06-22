@@ -808,9 +808,14 @@ def apply_blended_sharp_score(df, trained_models):
     
             # === Mirror logic
             inverse_keys = ['Game_Key', 'Bookmaker', 'Market']
-            df_market['Mirror_Key'] = df_market['Game_Key'].str.replace('_' + df_market['Outcome'].str.lower().str.strip(), '', regex=False)
-            df_canon['Mirror_Key'] = df_canon['Game_Key'].str.replace('_' + df_canon['Outcome'].str.lower().str.strip(), '', regex=False)
-    
+            def extract_mirror_key(row):
+                try:
+                    return row['Game_Key'].replace("_" + str(row['Outcome']).strip().lower(), "")
+                except:
+                    return row['Game_Key']
+            
+            df_market['Mirror_Key'] = df_market.apply(extract_mirror_key, axis=1)
+            df_canon['Mirror_Key'] = df_canon.apply(extract_mirror_key, axis=1)
             df_inverse = df_market[~df_market[inverse_keys].set_index(inverse_keys).index.isin(
                 df_canon[inverse_keys].drop_duplicates().set_index(inverse_keys).index
             )].copy()
@@ -1334,11 +1339,22 @@ def render_scanner_tab(label, sport_key, container):
             )
             
             # Fill diagnostics columns if missing
-            diagnostic_cols = ['Confidence Trend', 'Why Model Likes It', 'Tier Δ', 'Line/Model Direction']
-            for col in diagnostic_cols:
-                if col not in df_moves_raw.columns:
-                    df_moves_raw[col] = "⚠️ Missing"
+            diagnostic_cols = {
+                'Confidence Trend': 'Confidence Trend_diagnostics',
+                'Why Model Likes It': 'Why Model Likes It_diagnostics',
+                'Tier Δ': 'Tier Δ_diagnostics',
+                'Line/Model Direction': 'Line/Model Direction_diagnostics',
+            }
+            
+            for final_col, diag_col in diagnostic_cols.items():
+                if diag_col in df_moves_raw.columns:
+                    df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
                 else:
+                    df_moves_raw[final_col] = "⚠️ Missing"diagnostic_cols = ['Confidence Trend', 'Why Model Likes It', 'Tier Δ', 'Line/Model Direction']
+                        for col in diagnostic_cols:
+                            if col not in df_moves_raw.columns:
+                                df_moves_raw[col] = "⚠️ Missing"
+                            else:
                     # Replace empty with fallback
                     df_moves_raw[col] = df_moves_raw[col].fillna("⚠️ Missing")
                     
