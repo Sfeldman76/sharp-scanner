@@ -979,7 +979,9 @@ def render_scanner_tab(label, sport_key, container):
         df_snap = build_game_key(df_snap)
 
         # === Previous snapshot for live odds comparison
+        # === Previous snapshot for live odds comparison
         prev = read_latest_snapshot_from_bigquery(hours=24) or {}
+        
         df_prev_raw = pd.DataFrame([
             {
                 "Game": f"{game.get('home_team')} vs {game.get('away_team')}",
@@ -995,6 +997,8 @@ def render_scanner_tab(label, sport_key, container):
             for market in book.get("markets", [])
             for o in market.get("outcomes", [])
         ])
+        
+        # === Format and display snapshot table
         df_prev_display = pd.DataFrame()
         if not df_prev_raw.empty:
             df_prev_raw['Value_Limit'] = df_prev_raw.apply(
@@ -1016,29 +1020,33 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            df_moves_raw = read_recent_sharp_moves(hours=12)
+            df_moves_raw = read_recent_sharp_moves(hours=12)  # ✅ FIXED HERE
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
-       
-
-        df_moves_raw['Sport'] = df_moves_raw['Sport'].astype(str)
-        label_lower = label.lower()
         
-        # Normalize and match the sport field (e.g., 'basketball_nba' should match 'nba')
+        # === Filter to sport
+        SPORT_BQ_MAP = {
+            "NBA": "BASKETBALL_NBA",
+            "WNBA": "BASKETBALL_WNBA",
+            "MLB": "BASEBALL_MLB",
+            "CFL": "AMERICANFOOTBALL_CFL"
+        }
         
-
-
-
-        # ✅ DEBUG: Show sport filtering
-    
-
-        # === Filter to only live (upcoming) picks
-        df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
+        bq_sport = SPORT_BQ_MAP.get(label.upper())
+        if 'Sport' not in df_moves_raw.columns:
+            st.error("❌ 'Sport' column missing in df_moves_raw — cannot filter.")
+            return pd.DataFrame()
         
-
-              # === Exit early if none remain
-               
-               # === Defensive check before build_game_key ===
+        if bq_sport:
+            df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == bq_sport]
+            if df_moves_raw.empty:
+                st.warning(f"⚠️ No sharp picks found for sport: {bq_sport}")
+                return pd.DataFrame()
+        else:
+            st.warning(f"⚠️ No BQ sport match for {label}")
+            return pd.DataFrame()
+        
+        # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
         missing = [col for col in required_cols if col not in df_moves_raw.columns]
         
@@ -1048,18 +1056,10 @@ def render_scanner_tab(label, sport_key, container):
         
         if missing:
             st.error(f"❌ Required columns missing before build_game_key: {missing}")
-            st.dataframe(df_moves_raw.head())  # show malformed rows for debugging
+            st.dataframe(df_moves_raw.head())
             return pd.DataFrame()
         
-        # ✅ Safe to proceed
         df_moves_raw = build_game_key(df_moves_raw)
-       
-        # ✅ Check if there are any live picks worth scoring
-        if df_moves_raw['Pre_Game'].sum() == 0:
-            st.info("⚠️ No pre-game picks available for scoring.")
-            return pd.DataFrame()
-        st.write("🧪 Pre_Game rows loaded:", df_moves_raw['Pre_Game'].sum())
-        st.dataframe(df_moves_raw[df_moves_raw['Pre_Game']].head())
         
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
@@ -1090,7 +1090,14 @@ def render_scanner_tab(label, sport_key, container):
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
                         if col not in df_scored.columns:
                             df_scored[col] = np.nan
-        
+         # === Normalize merge keys before joining
+                    merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+                    for col in merge_keys:
+                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+                    # 🧪 Diagnostic: Merge keys snapshot
+                    st.write("🔍 Raw (df_moves_raw) merge keys sample:")
+                    st.dataframe(df_moves_raw[merge_keys].drop_duplicates().head())
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:
                         st.warning("⚠️ No rows successfully scored — possibly merge key mismatch or scoring failure.")
@@ -1101,14 +1108,7 @@ def render_scanner_tab(label, sport_key, container):
                         st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
                         df_scored = df_scored.sample(20000, random_state=42)
         
-                    # === Normalize merge keys before joining
-                    merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
-                    for col in merge_keys:
-                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
-                    # 🧪 Diagnostic: Merge keys snapshot
-                    st.write("🔍 Raw (df_moves_raw) merge keys sample:")
-                    st.dataframe(df_moves_raw[merge_keys].drop_duplicates().head())
+                
                     
                     st.write("🔍 Scored (df_scored) merge keys sample:")
                     st.dataframe(df_scored[merge_keys + ['Model_Sharp_Win_Prob']].drop_duplicates().head())
@@ -1145,10 +1145,7 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ No trained models available for scoring.")
         
         
-        # Final guard
-        if df_moves_raw.empty:
-            st.warning("⚠️ No live sharp picks available in the last 12 hours.")
-            return pd.DataFrame()
+      
         
         # === Final cleanup
         df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
