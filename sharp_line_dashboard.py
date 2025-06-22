@@ -1437,7 +1437,9 @@ def render_scanner_tab(label, sport_key, container):
         st.write("🧪 Non-null model probs in summary_df:", summary_df['Model Prob'].notna().sum())
         st.write("🧪 Distinct confidence tiers:", summary_df['Confidence Tier'].dropna().unique().tolist())
         # ✅ Log preview before rendering
-       
+       for col in ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']:
+            if col not in summary_df.columns:
+                summary_df[col] = "⚠️ Missing"
         
                  
         st.write("📊 Final summary preview:")
