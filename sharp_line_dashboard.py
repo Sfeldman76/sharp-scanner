@@ -1034,8 +1034,7 @@ def render_scanner_tab(label, sport_key, container):
 
         # === Filter to only live (upcoming) picks
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
-        df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] >= pd.Timestamp.utcnow()]
-    
+        
 
               # === Exit early if none remain
        
@@ -1045,17 +1044,13 @@ def render_scanner_tab(label, sport_key, container):
         # === Enrich and Score ===
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
-        now = pd.Timestamp.utcnow()
-        df_moves_raw['Pre_Game'] = df_moves_raw['Game_Start'] > pd.Timestamp.utcnow()
-        df_moves_raw['Post_Game'] = ~df_moves_raw['Pre_Game']
-        
+       
         # ✅ Check if there are any live picks worth scoring
         if df_moves_raw['Pre_Game'].sum() == 0:
             st.info("⚠️ No pre-game picks available for scoring.")
             return pd.DataFrame()
         df_moves_raw['Sport'] = label.upper()
         df_moves_raw = build_game_key(df_moves_raw)
-        
         
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
@@ -1072,38 +1067,36 @@ def render_scanner_tab(label, sport_key, container):
         # === Apply model scoring if models are loaded
         if trained_models:
             try:
-                df_pre_game = df_moves_raw[df_moves_raw['Pre_Game']].copy()
+                if 'Pre_Game' not in df_moves_raw.columns:
+                    st.error("❌ `Pre_Game` column missing — cannot filter picks for scoring.")
+                    return pd.DataFrame()
         
-                if not df_pre_game.empty:
-                    # 🛡️ Ensure required columns exist
-                    df_pre_game = ensure_columns(df_pre_game, ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier'])
+                df_pre_game_picks = df_moves_raw[df_moves_raw['Pre_Game']].copy()
         
-                    # ✅ Score pre-game picks
-                    df_scored = apply_blended_sharp_score(df_pre_game, trained_models)
+                if not df_pre_game_picks.empty:
+                    df_pre_game_picks = ensure_columns(df_pre_game_picks, ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier'])
         
-                    # 🔒 Ensure scoring columns exist
+                    df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
+        
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
                         if col not in df_scored.columns:
                             df_scored[col] = np.nan
         
-                    # ✅ Filter out unscored rows
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:
-                        st.warning("⚠️ No rows successfully scored — skipping further analysis.")
+                        st.warning("⚠️ No rows successfully scored — possibly merge key mismatch or scoring failure.")
+                        st.dataframe(df_pre_game_picks[merge_keys + ['Market', 'Outcome']].head())
                         return pd.DataFrame()
         
-                    # 🧪 Cap for safety
                     if len(df_scored) > 20000:
                         st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
                         df_scored = df_scored.sample(20000, random_state=42)
         
-                    # ✅ Merge scored predictions into full dataset
-                     # === Normalize merge keys before joining
+                    # === Normalize merge keys before joining
                     merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
                     for col in merge_keys:
                         df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
                         df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
-                    
                     # 🧪 Diagnostic: Merge keys snapshot
                     st.write("🔍 Raw (df_moves_raw) merge keys sample:")
                     st.dataframe(df_moves_raw[merge_keys].drop_duplicates().head())
