@@ -1038,19 +1038,23 @@ def render_scanner_tab(label, sport_key, container):
 
               # === Exit early if none remain
        
-        # Continue to enrichment + scoring...
+        # === Filter only known books (no filtering by Game_Start!)
         df_moves_raw = df_moves_raw[df_moves_raw['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
         
-        # === Enrich and Score ===
+        # === Parse datetime only (do NOT reassign Pre_Game)
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         df_moves_raw['Snapshot_Timestamp'] = timestamp
+        
+        # === Ensure we're working with the right sport and keys
+        df_moves_raw['Sport'] = label.upper()
+        df_moves_raw = build_game_key(df_moves_raw)
        
         # ✅ Check if there are any live picks worth scoring
         if df_moves_raw['Pre_Game'].sum() == 0:
             st.info("⚠️ No pre-game picks available for scoring.")
             return pd.DataFrame()
-        df_moves_raw['Sport'] = label.upper()
-        df_moves_raw = build_game_key(df_moves_raw)
+        st.write("🧪 Pre_Game rows loaded:", df_moves_raw['Pre_Game'].sum())
+        st.dataframe(df_moves_raw[df_moves_raw['Pre_Game']].head())
         
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
