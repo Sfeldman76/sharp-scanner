@@ -1107,24 +1107,28 @@ def render_scanner_tab(label, sport_key, container):
         
                     # ✅ Merge scored predictions into full dataset
                     # ✅ Prepare merge_keys
+                    # 🧹 Optional deduplication (if needed)
+                    # 🧹 Optional deduplication
+                    df_scored = df_scored.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
+                    
+                    # ✅ Merge scored predictions into raw
                     merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
-                    
-                    # ✅ Ensure df_moves_raw has unique rows to merge with scored predictions
-                    df_scored_merge = df_moves_raw[merge_keys].drop_duplicates()
-                    
-                    # ✅ Inject model scores back (ensures both canonical + inverse sides included)
-                    df_scored_final = df_scored_merge.merge(
+                    df_moves_raw = df_moves_raw.merge(
                         df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
                         on=merge_keys,
                         how='left'
                     )
                     
-                    # ✅ Now merge that into raw
-                    df_moves_raw = df_moves_raw.merge(
-                        df_scored_final,
-                        on=merge_keys,
-                        how='left'
-                    )
+                    # 🧼 Final suffix cleanup
+                    df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
+                    
+                    # 🔄 Ensure tier column is string type
+                    if 'Model_Confidence_Tier' in df_moves_raw.columns:
+                        df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].astype(str)
+                    else:
+                        st.error("❌ Model_Confidence_Tier missing after merge — check merge keys or scoring logic.")
+                        st.write("🔍 Available columns:", df_moves_raw.columns.tolist())
+                        return pd.DataFrame()
                     num_missing = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
                     st.info(f"🧪 Rows with missing model probability after merge: {num_missing}")     
                     # 🧼 Final suffix cleanup
