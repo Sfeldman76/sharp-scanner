@@ -1325,11 +1325,23 @@ def render_scanner_tab(label, sport_key, container):
                 return pd.DataFrame()
         
             # ✅ Safe merge back into df_moves_raw
-            df_moves_raw.set_index(dedup_cols, inplace=True)
-            df_pre.set_index(dedup_cols, inplace=True)
-            df_moves_raw.update(diagnostics_df.set_index(dedup_cols))
-            df_moves_raw.reset_index(inplace=True)
-        
+            # Merge diagnostics explicitly
+            df_moves_raw = df_moves_raw.merge(
+                diagnostics_df,
+                on=dedup_cols,
+                how='left',
+                suffixes=('', '_diagnostics')
+            )
+            
+            # Fill diagnostics columns if missing
+            diagnostic_cols = ['Confidence Trend', 'Why Model Likes It', 'Tier Δ', 'Line/Model Direction']
+            for col in diagnostic_cols:
+                if col not in df_moves_raw.columns:
+                    df_moves_raw[col] = "⚠️ Missing"
+                else:
+                    # Replace empty with fallback
+                    df_moves_raw[col] = df_moves_raw[col].fillna("⚠️ Missing")
+                    
             st.info(f"🧠 Applied diagnostics to {after} rows in {time.time() - start:.2f}s")
         
                 
