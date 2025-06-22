@@ -720,6 +720,10 @@ def compute_diagnostics_vectorized(df):
             model_reasoning = pd.Series(["🪙 Unavailable"] * len(df), index=df.index)
 
         diagnostics_df = pd.DataFrame({
+            'Game_Key': df['Game_Key'],
+            'Market': df['Market'],
+            'Outcome': df['Outcome'],
+            'Bookmaker': df['Bookmaker'],
             'Tier Δ': tier_change,
             'Confidence Trend': confidence_trend,
             'Line/Model Direction': direction,
