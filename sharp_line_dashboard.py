@@ -1100,7 +1100,12 @@ def render_scanner_tab(label, sport_key, container):
                     # ✅ Merge scored predictions into full dataset
                     merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
                     df_scored = df_scored.drop_duplicates(subset=merge_keys)
-        
+                    pre_merge_keys = df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Outcome']].drop_duplicates()
+                    scored_keys = df_scored[['Game_Key', 'Market', 'Bookmaker', 'Outcome']].drop_duplicates()
+                    st.write("🧪 df_scored sample:", df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob']].head(10))
+                    st.write("🧪 Outcome counts in scored:", df_scored['Outcome'].value_counts())
+                    st.write("🔍 Merge keys in raw:", pre_merge_keys.head())
+                    st.write("🔍 Merge keys in scored:", scored_keys.head())
                     df_moves_raw = df_moves_raw.merge(
                         df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
                         on=merge_keys,
