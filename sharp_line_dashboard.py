@@ -883,11 +883,9 @@ def apply_blended_sharp_score(df, trained_models):
             num_failed = len(df_canon) - num_flipped
             
             if num_failed > 0:
+                st.success(f"🔁 Flip Results: {num_flipped} flipped, {num_failed} failed")
+                st.dataframe(d
 
-
-            st.success(f"🔁 Flip Results: {num_flipped} flipped, {num_failed} failed")
-            if num_failed:
-                st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome']].head())
 
             if not isinstance(flipped_debug, pd.Series):
                 st.error("❌ `flipped_debug` is not a Series — invalid result from apply()")
