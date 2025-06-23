@@ -775,282 +775,98 @@ def apply_blended_sharp_score(df, trained_models):
                 continue
 
             df_market = df[df['Market'] == market_type].copy()
-            st.write(f"📊 Found {df_market.shape[0]} rows for market `{market_type}`")
             if df_market.empty:
                 st.warning(f"⚠️ No rows to score for {market_type.upper()}")
                 continue
 
-            df_market['Outcome'] = df_market['Outcome'].astype(str)
-            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+            df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
+            df_market['Outcome_Norm'] = df_market['Outcome']
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
 
-            # Show all rows where only one outcome exists
-            outcome_counts = (
-                df_market.groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome_Norm']
-                .nunique()
-                .reset_index(name='Num_Outcomes')
-            )
-            
-            single_side = outcome_counts[outcome_counts['Num_Outcomes'] < 2]
-            
-            #st.warning(f"⚠️ Found {len(single_side)} markets with only 1 side present before scoring")
-            #st.dataframe(single_side.head(10))
-            
-            # Optional: preview what those single-sided entries actually are
-            if not single_side.empty:
-                keys = single_side[['Game_Key', 'Market', 'Bookmaker']].drop_duplicates()
-                df_debug = df_market.merge(keys, on=['Game_Key', 'Market', 'Bookmaker'], how='inner')
-                st.write("🧪 Raw data for single-sided markets:")
-                st.dataframe(df_debug[['Game_Key', 'Outcome', 'Bookmaker', 'Value']].sort_values('Game_Key').head(10))
-
-            # === Prepare model features up front ===
-            model_features = model.get_booster().feature_names
-            missing_feats = [col for col in model_features if col not in df_market.columns]
-            for col in missing_feats:
-                df_market[col] = 0
-            
-            # === Score canonical rows ===
+            # Canonical selection
             if market_type == "spreads":
-                df_market = df_market[df_market['Value'].notna()]
                 df_canon = df_market[df_market['Value'] < 0].copy()
-                st.write("📌 Canonical selection: rows where spread < 0 (favorites)")
+                st.write("📌 Canonical: spread < 0 (favorite)")
             elif market_type == "totals":
                 df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
-                st.write("📌 Canonical selection: rows with outcome = 'over'")
+                st.write("📌 Canonical: outcome == 'over'")
             elif market_type == "h2h":
                 df_market = df_market[df_market['Value'].notna()]
-                df_market['ML_Num'] = df_market['Value']
                 df_canon = (
-                    df_market.sort_values('ML_Num')
-                    .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'])
+                    df_market.sort_values("Value")
+                    .drop_duplicates(subset=['Game_Key', 'Bookmaker'])
                     .copy()
                 )
-                st.write("📌 Canonical selection: lowest moneyline (favorite)")
+                st.write("📌 Canonical: lowest moneyline (favorite)")
             else:
                 df_canon = df_market.copy()
-                st.write("📌 Canonical selection: all rows used")
-            
-            # Score canonical
-            X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
-            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X_canon)[:, 1]
+
+            if df_canon.empty:
+                st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
+                continue
+
+            # Fill missing model features
+            model_features = model.get_booster().feature_names
+            for col in model_features:
+                if col not in df_canon:
+                    df_canon[col] = 0
+
+            X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
+            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
             df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
             df_canon['Was_Canonical'] = True
-            df_canon['Scored_By_Model'] = True
             df_canon['Scoring_Market'] = market_type
-            
-            # === Score non-canonical side ===
-            for col in ['Game_Key', 'Market', 'Bookmaker', 'Outcome']:
-                df_market[col] = df_market[col].astype(str).str.strip().str.lower()
-                df_canon[col] = df_canon[col].astype(str).str.strip().str.lower()
 
-            merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+            # Create inverse rows
+            df_inverse = df_canon.copy()
+            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
+            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
+            df_inverse['Was_Canonical'] = False
 
+            # Flip outcomes
+            def flip_outcome(row):
+                if market_type == "totals":
+                    return "under" if row['Outcome_Norm'] == "over" else "over"
+                elif market_type in ["spreads", "h2h"]:
+                    return "underdog" if "favorite" in row['Outcome_Norm'] else "favorite"
+                return row['Outcome_Norm']
 
-            df_canon_keys = df_canon[merge_keys].drop_duplicates()
-            df_market_keys = df_market[merge_keys].drop_duplicates()
-            
-            non_canon = df_market.merge(df_canon_keys, on=merge_keys, how='left', indicator=True)
-            non_canon = non_canon[non_canon['_merge'] == 'left_only'].drop(columns=['_merge'])
-            
-            if not non_canon.empty:
-                st.info(f"🔄 Found {non_canon.shape[0]} non-canonical rows — scoring them too")
-                X_nc = non_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
-                non_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X_nc)[:, 1]
-                non_canon['Model_Confidence'] = iso.predict(non_canon['Model_Sharp_Win_Prob'])
-                non_canon['Was_Canonical'] = False
-                non_canon['Scored_By_Model'] = True
-                non_canon['Scoring_Market'] = market_type
-                df_scored = pd.concat([df_canon, non_canon], ignore_index=True)
-            else:
-                df_scored = df_canon
+            df_inverse['Outcome'] = df_inverse.apply(flip_outcome, axis=1)
+            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
 
-        
+            # Combine
+            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+            df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
 
-            st.write("📊 Canonical outcomes:")
-            st.dataframe(df_canon[['Game_Key', 'Outcome']].head())
-            
-            st.write("📊 Non-canonical outcomes:")
-            st.dataframe(non_canon[['Game_Key', 'Outcome']].head())
-
-            # === Flip Setup ===
-            df_market['Game_Key_Base'] = df_market['Game_Key'].str.replace(r'_[^_]+$', '', regex=True)
-            df_canon['Game_Key_Base'] = df_canon['Game_Key'].str.replace(r'_[^_]+$', '', regex=True)
-
-            outcome_map = (
-                df_market
-                .groupby('Game_Key_Base')['Outcome']
-                .apply(lambda x: sorted(set(str(v).strip().lower() for v in x if pd.notna(v))))
-                .to_dict()
-            )
-
-            #st.write("📘 Full outcome_map keys sample:")
-            #st.json({k: v for i, (k, v) in enumerate(outcome_map.items()) if i < 5})
-            #st.write("🧪 Canon Game_Key_Base sample:", df_canon['Game_Key_Base'].dropna().unique()[:5])
-            #st.write("🧪 Outcome Map Keys:", list(outcome_map.keys())[:5])
-            
-            def get_inverse_rows(row):
-                try:
-                    game_key_base = row.get('Game_Key_Base')
-                    current = str(row.get('Outcome')).strip().lower()
-                    options = outcome_map.get(game_key_base, [])
-            
-                    # Normalize outcome options
-                    if isinstance(options, (pd.Series, pd.Index, np.ndarray, dict)):
-                        options = list(options)
-                    options = [str(o).strip().lower() for o in options if pd.notna(o)]
-            
-                   # st.write({
-                    #    "🔍 Flip Debug": {
-                     #       "Game_Key_Base": game_key_base,
-                      #      "Current Outcome": current,
-                       #     "Available Options": options,
-                        #}
-                    #})
-            
-                    # Validation
-                    if len(options) != 2:
-                        st.warning(f"⚠️ Invalid outcome list for {game_key_base}: {options}")
-                        return None
-                    if current not in options:
-                        st.warning(f"⚠️ Current outcome not in options: {current}")
-                        return None
-            
-                    # Flip
-                    flipped = [o for o in options if o != current]
-                    if not flipped:
-                        st.warning(f"⚠️ Could not flip — no other option found: {current}")
-                        return None
-            
-                    # Copy and modify row
-                    inverse_row = row.copy(deep=True)
-                    inverse_row['Outcome'] = flipped[0]
-                    inverse_row['Outcome_Norm'] = flipped[0]
-                    inverse_row['Model_Sharp_Win_Prob'] = 1 - row['Model_Sharp_Win_Prob']
-                    inverse_row['Model_Confidence'] = 1 - row['Model_Confidence']
-                    inverse_row['Was_Canonical'] = False
-                    inverse_row['Scored_By_Model'] = True
-            
-                    # ✅ Return flipped row
-                    #st.success(f"✅ Flipped: {current} → {flipped[0]} for {game_key_base}")
-                    if isinstance(inverse_row, dict):
-                        return pd.Series(inverse_row)
-                    return inverse_row
-
-            
-                except Exception as e:
-                    st.error(f"❌ Flip error on Game_Key_Base: {row.get('Game_Key_Base')}, Outcome: {row.get('Outcome')} → {e}")
-                    return None
-
-       
-            # Remove rows where core fields needed for flipping are missing
-            required_cols = ['Game_Key', 'Outcome', 'Game_Key_Base', 'Model_Sharp_Win_Prob', 'Model_Confidence']
-            df_canon = df_canon.dropna(subset=required_cols).copy()
-            st.write("🧪 Sample of df_canon before flipping:")
-            st.dataframe(df_canon[required_cols].head(10))
-            # Now run the flip logic safely
-            flipped_debug = df_canon.apply(get_inverse_rows, axis=1)
-            
-            # ✅ Count flipped rows
-            # ✅ Flip results tracking
-            if isinstance(flipped_debug, pd.Series):
-                num_flipped = flipped_debug.notna().sum()
-                num_failed = len(df_canon) - num_flipped
-            
-                st.success(f"🔁 Flip Results: {num_flipped} flipped, {num_failed} failed")
-            
-                # 🧪 Show failed if applicable
-                if num_failed > 0:
-                    st.write("📛 Debugging failed flip rows:")
-                    st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome', 'Game_Key_Base']].head(10))
-            
-                # ✅ Build DataFrame from flipped rows
-                df_inverse = pd.DataFrame([row for row in flipped_debug if isinstance(row, pd.Series)])
-            
-            else:
-                st.warning("⚠️ Flip logic did not return a Series — no flipped rows processed.")
-                df_inverse = pd.DataFrame()
-
-
-            # Ensure all columns from df_canon are in df_inverse before concat
-            missing_cols = set(df_canon.columns) - set(df_inverse.columns)
-            for col in missing_cols:
-                df_inverse[col] = np.nan
-            
-            # Ensure same column order
-            df_inverse = df_inverse[df_canon.columns]
-
-            # 🔗 Combine canonical and flipped
-            df_combined = pd.concat([df_canon, df_inverse], ignore_index=True)
-
-            df_combined = df_combined[df_combined['Model_Sharp_Win_Prob'].notna()]
-            
-            # 🎯 Add tiering
-            df_combined['Model_Confidence_Tier'] = pd.cut(
-                df_combined['Model_Sharp_Win_Prob'],
+            # Tiering
+            df_scored['Model_Confidence_Tier'] = pd.cut(
+                df_scored['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
-            
-            # ✅ Show preview
-            st.write(f"📦 Combined predictions: {df_combined.shape[0]} rows")
-            st.dataframe(df_combined[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Was_Canonical']].head())
 
-            scored_all.append(df_combined)
+            st.success(f"✅ Scored {len(df_scored)} rows for {market_type.upper()}")
+            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Was_Canonical']].head())
+            scored_all.append(df_scored)
 
         except Exception as e:
-            st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")
+            st.error(f"❌ Failed scoring {market_type.upper()}")
             st.code(traceback.format_exc())
 
+    # Combine all scored rows
     try:
         if scored_all:
-            df_scored = pd.concat(scored_all, ignore_index=True)
-            df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
-            st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
-    
-            # 🧪 Fix the ambiguous Series check
-            if 'Game_Key' not in df_scored.columns:
-                st.error("❌ 'Game_Key' missing from df_scored — cannot proceed.")
-                st.dataframe(df_scored.head())
-                return df_scored
-    
-            # ✅ QA: Ensure each Game_Key has exactly 2 scored sides
-            pair_check = (
-                df_combined
-                .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
-                .nunique()
-                .reset_index(name='Num_Sides')
-            )
-            
-            # ✅ Markets with exactly 2 sides (GOOD)
-            balanced = pair_check[pair_check['Num_Sides'] == 2]
-            
-            # ⚠️ Markets still missing a side (BAD)
-            unbalanced = pair_check[pair_check['Num_Sides'] < 2]
-            
-            st.info(f"📊 QA: {len(balanced)} markets have both sides scored.")
-            if not unbalanced.empty:
-                st.warning(f"⚠️ {len(unbalanced)} markets are still missing a side after flipping.")
-                debug_keys = unbalanced['Game_Key'].unique().tolist()[:5]
-                st.write("🔍 Affected Game_Keys (sample):", debug_keys)
-                st.dataframe(
-                    df_combined[df_combined['Game_Key'].isin(debug_keys)][
-                        ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Model_Sharp_Win_Prob']
-                    ].sort_values('Game_Key')
-                )
-
-            return df_scored
-    
+            df_final = pd.concat(scored_all, ignore_index=True)
+            df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
+            st.success(f"✅ Final model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_final)}")
+            return df_final
         else:
             st.warning("⚠️ No market types scored — returning empty DataFrame.")
             return pd.DataFrame()
-    
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        st.error("❌ Exception occurred during model scoring")
-        st.code(tb)
+        st.error("❌ Exception during final aggregation")
+        st.code(traceback.format_exc())
         return pd.DataFrame()
-
 
 
         
