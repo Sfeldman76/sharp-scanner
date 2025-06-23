@@ -828,33 +828,54 @@ def apply_blended_sharp_score(df, trained_models):
             def get_inverse_rows(row):
                 game_key_base = row.get('Game_Key_Base', None)
                 if not game_key_base:
+                    st.warning(f"⚠️ Missing Game_Key_Base in row: {row.get('Game_Key')}")
                     return None
             
-                options = outcome_map.get(game_key_base, [])
-                
-                # Normalize and flatten options
+                options = outcome_map.get(game_key_base, None)
+                if options is None:
+                    st.warning(f"⚠️ No entry in outcome_map for: {game_key_base}")
+                    return None
+            
+                # Normalize
                 if isinstance(options, (pd.Series, pd.Index, np.ndarray, dict)):
+                    st.warning(f"⚠️ Converting malformed options for {game_key_base}: {type(options)}")
                     options = list(options)
                 options = [str(o).strip().lower() for o in options if pd.notna(o)]
             
                 current = str(row.get('Outcome', '')).strip().lower()
             
-                # Ensure it's a clean 2-outcome market and flip is valid
-                if len(options) != 2 or current not in options:
+                # Start debug output
+                st.write(f"🔍 Checking flip for Game_Key_Base: `{game_key_base}`")
+                st.write(f"  Original Outcome: `{current}`")
+                st.write(f"  Options from map: {options}")
+            
+                # Explicit boolean-safe checks
+                if not isinstance(current, str):
+                    st.warning(f"⚠️ Outcome is not a string: {current}")
+                    return None
+                if len(options) != 2:
+                    st.warning(f"⚠️ Invalid number of outcomes for {game_key_base}: {options}")
+                    return None
+                if current not in options:
+                    st.warning(f"⚠️ Current outcome `{current}` not found in: {options}")
                     return None
             
-                flipped = next((o for o in options if o != current), None)
+                flipped = [o for o in options if o != current]
                 if not flipped:
+                    st.warning(f"⚠️ Could not determine flip for {current} in {options}")
                     return None
+            
+                st.success(f"✅ Flip successful: {current} → {flipped[0]}")
             
                 inverse_row = row.copy()
-                inverse_row['Outcome'] = flipped
-                inverse_row['Outcome_Norm'] = flipped
+                inverse_row['Outcome'] = flipped[0]
+                inverse_row['Outcome_Norm'] = flipped[0]
                 inverse_row['Model_Sharp_Win_Prob'] = 1 - row['Model_Sharp_Win_Prob']
                 inverse_row['Model_Confidence'] = 1 - row['Model_Confidence']
                 inverse_row['Was_Canonical'] = False
                 inverse_row['Scored_By_Model'] = True
                 return inverse_row
+
 
             if 'Game_Key_Base' not in df_canon.columns or 'Outcome' not in df_canon.columns:
                 st.error("❌ Required columns missing from df_canon before flipping")
