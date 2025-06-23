@@ -1170,7 +1170,7 @@ def render_scanner_tab(label, sport_key, container):
         
                     # === Perform merge with all required columns
                    # === Perform merge with all required columns
-                   merge_columns = merge_keys + [
+                    merge_columns = merge_keys + [
                         'Model_Sharp_Win_Prob',
                         'Model_Confidence',
                         'Model_Confidence_Tier',
