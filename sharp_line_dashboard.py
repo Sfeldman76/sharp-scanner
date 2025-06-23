@@ -1195,6 +1195,8 @@ def render_scanner_tab(label, sport_key, container):
                     st.dataframe(df_scored[merge_keys + ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']].head())
                     
                     # === Merge
+                    pre_merge_rows = len(df_moves_raw)  # ✅ fix: define before merge
+                    
                     df_merged = df_moves_raw.merge(
                         df_scored.drop(columns=['Snapshot_Timestamp']),  # Optional: Drop timestamp after use
                         on=merge_keys,
