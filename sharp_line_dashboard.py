@@ -1170,47 +1170,33 @@ def render_scanner_tab(label, sport_key, container):
         
                     # === Perform merge with all required columns
                    # === Perform merge with all required columns
-                    merge_columns = merge_keys + [
+                   merge_columns = merge_keys + [
                         'Model_Sharp_Win_Prob',
                         'Model_Confidence',
                         'Model_Confidence_Tier',
-                        'Scored_By_Model'  # ✅ Required downstream
+                        'Scored_By_Model',
+                        'Snapshot_Timestamp'
                     ]
                     
-                    # 🔍 Row counts before merge
-                    pre_merge_rows = len(df_moves_raw)
-                    scored_rows = len(df_scored)
-                    st.info(f"📊 Pre-merge: {pre_merge_rows} raw rows | {scored_rows} scored rows")
-                  
-                    # 🧪 Check if df_scored has duplicates on merge keys
-                    dupes = df_scored.duplicated(subset=merge_keys).sum()
-                    if dupes > 0:
-                        st.warning(f"⚠️ df_scored has {dupes} duplicate rows on merge keys!")
-                        st.dataframe(df_scored[df_scored.duplicated(subset=merge_keys, keep=False)].head())
+                    # Only keep required columns first
+                    df_scored = df_scored[merge_columns].copy()
                     
-                    # Perform merge with row validation
-                    if 'Snapshot_Timestamp' in df_scored.columns:
-                        df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
+                    # 🧹 Normalize keys again just to be safe
+                    for col in merge_keys:
+                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
                     
-                        # ✅ Keep only the most recent row per Game_Key + Market + Bookmaker + Outcome
-                        df_scored = (
-                            df_scored
-                            .sort_values('Snapshot_Timestamp', ascending=False)
-                            .drop_duplicates(subset=merge_keys, keep='first')
-                        )
-                        st.info("📌 Deduplicated to latest Snapshot_Timestamp per merge key.")
-                    else:
-                        df_scored = (
-                            df_scored
-                            .sort_values('Model_Confidence', ascending=False)
-                            .drop_duplicates(subset=merge_keys, keep='first')
-                        )
-                        st.warning("⚠️ Snapshot_Timestamp missing — falling back to highest Model_Confidence.")
-
+                    # ✅ Deduplicate using most recent snapshot
+                    df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
+                    df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False).drop_duplicates(subset=merge_keys, keep='first')
                     
-                    # ✅ Now perform the actual merge
+                    st.info("📌 Deduplicated to latest Snapshot_Timestamp per merge key.")
+                    st.write("🧪 Post-deduplication sample:")
+                    st.dataframe(df_scored[merge_keys + ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']].head())
+                    
+                    # === Merge
                     df_merged = df_moves_raw.merge(
-                        df_scored[merge_columns],
+                        df_scored.drop(columns=['Snapshot_Timestamp']),  # Optional: Drop timestamp after use
                         on=merge_keys,
                         how='left'
                     )
