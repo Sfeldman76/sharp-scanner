@@ -492,22 +492,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             st.info(f"🧪 Class distribution: {df_market['SHARP_HIT_BOOL'].value_counts().to_dict()}")
         
         elif market == "h2h":
-            df_market[['Home_Team_Norm', 'Away_Team_Norm']] = df_market['Game_Key'].str.extract(r'^([^_]+)_([^_]+)_')
-            df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].str.lower().str.strip()
-            df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].str.lower().str.strip()
+            df_market = df_market[df_market['Value'].notna()]
             df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
         
-            df_market['Side_Label'] = np.where(
-                df_market['Outcome_Norm'] == df_market['Home_Team_Norm'], 'home',
-                np.where(df_market['Outcome_Norm'] == df_market['Away_Team_Norm'], 'away', 'unknown')
-            )
-            df_market = df_market[df_market['Side_Label'] == 'home']
-            st.info(f"🧪 {sport.upper()} H2H home-side rows: {df_market.shape[0]}")
+            # Canonical H2H: use only favorite-side picks
+            df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
+            df_market = df_market[df_market['Side_Label'] == 'favorite']
+        
+            st.info(f"🧪 {sport.upper()} H2H favorite-side rows: {df_market.shape[0]}")
             st.info(f"🧪 Class distribution: {df_market['SHARP_HIT_BOOL'].value_counts().to_dict()}")
-            df_market['Side_Label'] = np.where(
-                df_market['Outcome_Norm'] == df_market['Home_Team_Norm'], 'home',
-                np.where(df_market['Outcome_Norm'] == df_market['Away_Team_Norm'], 'away', 'unknown')
-            )
+        
+        
+            
 
             
             
