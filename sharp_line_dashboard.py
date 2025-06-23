@@ -786,10 +786,10 @@ def apply_blended_sharp_score(df, trained_models):
             # Canonical selection
             if market_type == "spreads":
                 df_canon = df_market[df_market['Value'] < 0].copy()
-                st.write("📌 Canonical: spread < 0 (favorite)")
+                st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
             elif market_type == "totals":
                 df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
-                st.write("📌 Canonical: outcome == 'over'")
+                st.info(f"📌 Canonical: {df_canon.shape[0]} rows with outcome = 'over'")
             elif market_type == "h2h":
                 df_market = df_market[df_market['Value'].notna()]
                 df_canon = (
@@ -797,7 +797,7 @@ def apply_blended_sharp_score(df, trained_models):
                     .drop_duplicates(subset=['Game_Key', 'Bookmaker'])
                     .copy()
                 )
-                st.write("📌 Canonical: lowest moneyline (favorite)")
+                st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (lowest ML)")
             else:
                 df_canon = df_market.copy()
 
@@ -805,7 +805,6 @@ def apply_blended_sharp_score(df, trained_models):
                 st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
                 continue
 
-            # Fill missing model features
             model_features = model.get_booster().feature_names
             for col in model_features:
                 if col not in df_canon:
@@ -823,7 +822,6 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
 
-            # Flip outcomes
             def flip_outcome(row):
                 if market_type == "totals":
                     return "under" if row['Outcome_Norm'] == "over" else "over"
@@ -834,26 +832,34 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Outcome'] = df_inverse.apply(flip_outcome, axis=1)
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
 
-            # Combine
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
 
-            # Tiering
+            # 🎯 Tier assignment
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
 
-            st.success(f"✅ Scored {len(df_scored)} rows for {market_type.upper()}")
-            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Was_Canonical']].head())
+            # 🧪 Debug output
+            st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+
+            st.write("📊 Probability Distribution:")
+            st.bar_chart(df_scored['Model_Sharp_Win_Prob'])
+
+            # Outcome check
+            outcome_pairs = df_scored.groupby(['Game_Key', 'Market'])['Outcome_Norm'].nunique().reset_index(name='Unique_Sides')
+            if outcome_pairs['Unique_Sides'].min() < 2:
+                st.warning("⚠️ Some games may be missing the inverse side")
+
             scored_all.append(df_scored)
 
         except Exception as e:
             st.error(f"❌ Failed scoring {market_type.upper()}")
             st.code(traceback.format_exc())
 
-    # Combine all scored rows
     try:
         if scored_all:
             df_final = pd.concat(scored_all, ignore_index=True)
