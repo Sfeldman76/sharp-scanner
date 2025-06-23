@@ -498,19 +498,13 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
 
-            flip_maps = (
-                df_inverse.groupby(['Game_Key'])['Outcome_Norm']
-                .unique()
-                .apply(lambda x: {x[0]: x[1], x[1]: x[0]} if len(x) == 2 else {})
-                .to_dict()
-            )
-
-            def flip_from_map(row):
-                mapping = flip_maps.get(row['Game_Key'], {})
-                return mapping.get(row['Outcome_Norm'], row['Outcome_Norm'])
-
-            df_inverse['Outcome'] = df_inverse.apply(flip_from_map, axis=1)
+            outcome_flips = {
+                'over': 'under', 'under': 'over',
+                'favorite': 'underdog', 'underdog': 'favorite'
+            }
+            df_inverse['Outcome'] = df_inverse['Outcome_Norm'].map(outcome_flips).fillna(df_inverse['Outcome_Norm'])
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+
             df_inverse['Scored_By_Model'] = True
 
             required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
@@ -554,8 +548,7 @@ def apply_blended_sharp_score(df, trained_models):
         logger.debug(traceback.format_exc())
         return pd.DataFrame()
 
-def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS):
-
+def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
 
     if not current:
         logger.warning("⚠️ No current odds data provided.")
