@@ -899,13 +899,13 @@ def apply_blended_sharp_score(df, trained_models):
                         options = list(options)
                     options = [str(o).strip().lower() for o in options if pd.notna(o)]
             
-                    st.write({
-                        "🔍 Flip Debug": {
-                            "Game_Key_Base": game_key_base,
-                            "Current Outcome": current,
-                            "Available Options": options,
-                        }
-                    })
+                   # st.write({
+                    #    "🔍 Flip Debug": {
+                     #       "Game_Key_Base": game_key_base,
+                      #      "Current Outcome": current,
+                       #     "Available Options": options,
+                        #}
+                    #})
             
                     # Validation
                     if len(options) != 2:
