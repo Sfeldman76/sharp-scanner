@@ -778,12 +778,11 @@ def apply_blended_sharp_score(df, trained_models):
             if df_market.empty:
                 st.warning(f"⚠️ No rows to score for {market_type.upper()}")
                 continue
-
+             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
-            df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
+         
 
-            # Canonical selection
             if market_type == "spreads":
                 df_canon = df_market[df_market['Value'] < 0].copy()
                 st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
@@ -815,52 +814,37 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
-            df_canon['Scored_By_Model'] = True  #
-            # Create inverse rows
-            # Copy canonical rows
-            df_inverse = df_canon.copy()
-            
-            # Flip win probabilities
-            df_inverse = df_canon.copy(deep=True)
+            df_canon['Scored_By_Model'] = True
 
-            # 🔁 Flip win probabilities
+            # === Hardcoded flipping logic ===
+            df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
-            
-            # 🔁 Flip outcome safely using per-Game_Key mapping
-            flip_maps = (
-                df_inverse.groupby(['Game_Key'])['Outcome_Norm']
-                .unique()
-                .apply(lambda x: {x[0]: x[1], x[1]: x[0]} if len(x) == 2 else {})
-                .to_dict()
-            )
-            bad_mappings = {k: v for k, v in flip_maps.items() if len(v) < 1 or list(v.keys())[0] == list(v.values())[0]}
-            if bad_mappings:
-                st.warning(f"⚠️ {len(bad_mappings)} games have bad flip mappings.")
-                st.json({k: v for k, v in list(bad_mappings.items())[:5]})
-            def flip_from_map(row):
-                mapping = flip_maps.get(row['Game_Key'], {})
-                return mapping.get(row['Outcome_Norm'], row['Outcome_Norm'])  # fallback if not found
-            
-            df_inverse['Outcome'] = df_inverse.apply(flip_from_map, axis=1)
-            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            df_inverse['Flip_Matched'] = df_inverse['Outcome'] != df_canon['Outcome_Norm'].values
-            flip_success_rate = df_inverse['Flip_Matched'].mean()
-            failed_flips = df_inverse[~df_inverse['Flip_Matched']]
-            st.info(f"🔁 Flip success rate: {flip_success_rate:.2%} ({failed_flips.shape[0]} failed)")
-            
-            if not failed_flips.empty:
-                st.write("📛 Sample of failed flips:")
-                st.dataframe(failed_flips[['Game_Key', 'Market', 'Outcome', 'Outcome_Norm']].head())
 
+                     # === Hardcoded outcome flipping ===
+            if market_type == "totals":
+                df_inverse['Outcome'] = df_inverse['Outcome_Norm'].map({'over': 'under', 'under': 'over'})
+            elif market_type in ["spreads", "h2h"]:
+                # Flip to the other team name
+                df_inverse['Outcome'] = np.where(
+                    df_inverse['Outcome_Norm'] == df_inverse['Home_Team_Norm'],
+                    df_inverse['Away_Team_Norm'],
+                    df_inverse['Home_Team_Norm']
+                )
+            else:
+                df_inverse['Outcome'] = df_inverse['Outcome_Norm']  # No change
+            
+            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+
+
+             # ✅ Validate required columns exist
             required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
             missing_cols = [col for col in required_cols if col not in df_inverse.columns]
             if missing_cols:
                 st.error(f"❌ Inverse rows missing required columns: {missing_cols}")
                 st.dataframe(df_inverse.head())
-
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
@@ -875,17 +859,16 @@ def apply_blended_sharp_score(df, trained_models):
             # 🧪 Debug output
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
-            scored_all.append(df_scored)
-          
 
-            # Outcome check
+            scored_all.append(df_scored)
+
+            # === Outcome coverage check ===
             missing_inverse = (
                 df_scored
                 .groupby(['Game_Key', 'Market'])['Outcome_Norm']
                 .nunique()
                 .reset_index(name='Num_Outcomes')
             )
-            
             num_issues = (missing_inverse['Num_Outcomes'] < 2).sum()
             if num_issues > 0:
                 st.warning(f"⚠️ {num_issues} games are missing one side (only 1 unique outcome).")
