@@ -518,7 +518,9 @@ def apply_blended_sharp_score(df, trained_models):
         logger.debug(traceback.format_exc())
         return pd.DataFrame()
 
-def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS):
+def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS):
+
+
     if not current:
         logger.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
