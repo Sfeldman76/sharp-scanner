@@ -836,7 +836,10 @@ def apply_blended_sharp_score(df, trained_models):
                 .apply(lambda x: {x[0]: x[1], x[1]: x[0]} if len(x) == 2 else {})
                 .to_dict()
             )
-            
+            bad_mappings = {k: v for k, v in flip_maps.items() if len(v) < 1 or list(v.keys())[0] == list(v.values())[0]}
+            if bad_mappings:
+                st.warning(f"⚠️ {len(bad_mappings)} games have bad flip mappings.")
+                st.json({k: v for k, v in list(bad_mappings.items())[:5]})
             def flip_from_map(row):
                 mapping = flip_maps.get(row['Game_Key'], {})
                 return mapping.get(row['Outcome_Norm'], row['Outcome_Norm'])  # fallback if not found
@@ -844,7 +847,14 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Outcome'] = df_inverse.apply(flip_from_map, axis=1)
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             df_inverse['Flip_Matched'] = df_inverse['Outcome'] != df_canon['Outcome_Norm'].values
+            flip_success_rate = df_inverse['Flip_Matched'].mean()
+            failed_flips = df_inverse[~df_inverse['Flip_Matched']]
+            st.info(f"🔁 Flip success rate: {flip_success_rate:.2%} ({failed_flips.shape[0]} failed)")
             
+            if not failed_flips.empty:
+                st.write("📛 Sample of failed flips:")
+                st.dataframe(failed_flips[['Game_Key', 'Market', 'Outcome', 'Outcome_Norm']].head())
+
             required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
             missing_cols = [col for col in required_cols if col not in df_inverse.columns]
             if missing_cols:
