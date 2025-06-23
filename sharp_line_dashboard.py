@@ -826,22 +826,27 @@ def apply_blended_sharp_score(df, trained_models):
 
             # === Define inverse row builder ===
             def get_inverse_rows(row):
-                game_key_base = row['Game_Key_Base']
+                game_key_base = row.get('Game_Key_Base', None)
+                if not game_key_base:
+                    return None
+            
                 options = outcome_map.get(game_key_base, [])
-
-                if isinstance(options, (pd.Series, pd.Index)):
-                    options = list(options.astype(str))
-                else:
-                    options = list(map(str, options))
-
-                current = str(row['Outcome']).strip().lower()
+                
+                # Normalize and flatten options
+                if isinstance(options, (pd.Series, pd.Index, np.ndarray, dict)):
+                    options = list(options)
+                options = [str(o).strip().lower() for o in options if pd.notna(o)]
+            
+                current = str(row.get('Outcome', '')).strip().lower()
+            
+                # Ensure it's a clean 2-outcome market and flip is valid
                 if len(options) != 2 or current not in options:
                     return None
-
+            
                 flipped = next((o for o in options if o != current), None)
-                if flipped is None:
+                if not flipped:
                     return None
-
+            
                 inverse_row = row.copy()
                 inverse_row['Outcome'] = flipped
                 inverse_row['Outcome_Norm'] = flipped
@@ -851,6 +856,9 @@ def apply_blended_sharp_score(df, trained_models):
                 inverse_row['Scored_By_Model'] = True
                 return inverse_row
 
+            if 'Game_Key_Base' not in df_canon.columns or 'Outcome' not in df_canon.columns:
+                st.error("❌ Required columns missing from df_canon before flipping")
+                st.dataframe(df_canon.head())
             # === Apply flip logic ===
             flipped_debug = df_canon.apply(get_inverse_rows, axis=1)
             num_flipped = flipped_debug.notna().sum()
