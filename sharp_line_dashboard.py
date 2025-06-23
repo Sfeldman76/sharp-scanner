@@ -819,7 +819,14 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scoring_Market'] = market_type
             
             # === Score non-canonical side ===
-            non_canon = df_market[~df_market['Game_Key'].isin(df_canon['Game_Key'])].copy()
+      
+            merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+            df_canon_keys = df_canon[merge_keys].drop_duplicates()
+            df_market_keys = df_market[merge_keys].drop_duplicates()
+            
+            non_canon = df_market.merge(df_canon_keys, on=merge_keys, how='left', indicator=True)
+            non_canon = non_canon[non_canon['_merge'] == 'left_only'].drop(columns=['_merge'])
+            
             if not non_canon.empty:
                 st.info(f"🔄 Found {non_canon.shape[0]} non-canonical rows — scoring them too")
                 X_nc = non_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
@@ -831,12 +838,14 @@ def apply_blended_sharp_score(df, trained_models):
                 df_scored = pd.concat([df_canon, non_canon], ignore_index=True)
             else:
                 df_scored = df_canon
-     
+
         
 
-         
-            st.success(f"✅ Model predictions applied — previewing top rows:")
-            st.dataframe(df_canon[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']].head())
+            st.write("📊 Canonical outcomes:")
+            st.dataframe(df_canon[['Game_Key', 'Outcome']].head())
+            
+            st.write("📊 Non-canonical outcomes:")
+            st.dataframe(non_canon[['Game_Key', 'Outcome']].head())
 
             # === Flip Setup ===
             df_market['Game_Key_Base'] = df_market['Game_Key'].str.replace(r'_[^_]+$', '', regex=True)
