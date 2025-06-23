@@ -876,11 +876,10 @@ def apply_blended_sharp_score(df, trained_models):
                 except Exception as err:
                     st.error(f"❌ Flip error on row {row.get('Game_Key')}: {err}")
                     return None
-
             # === Safely apply flip logic ===
             flipped_debug = df_canon.apply(get_inverse_rows, axis=1)
             
-            # ✅ Ensure num_flipped is always defined
+            # ✅ Count flipped rows
             if isinstance(flipped_debug, pd.Series):
                 num_flipped = flipped_debug.notna().sum()
             else:
@@ -891,12 +890,11 @@ def apply_blended_sharp_score(df, trained_models):
             st.success(f"🔁 Flip Results: {num_flipped} flipped, {num_failed} failed")
             
             if num_failed > 0:
-                st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome']].head())
-
-            st.write("📛 Debugging failed flip rows:")
-            st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome', 'Game_Key_Base']].head(10))
-
-            inverse_rows = flipped_debug.dropna().tolist()
+                st.write("📛 Debugging failed flip rows:")
+                st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome', 'Game_Key_Base']].head(10))
+            
+            # ✅ Safely collect flipped rows
+            inverse_rows = [row for row in flipped_debug if isinstance(row, dict)]
             df_inverse = pd.DataFrame(inverse_rows)
 
             df_combined = pd.concat([df_canon, df_inverse], ignore_index=True)
