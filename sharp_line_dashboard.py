@@ -844,26 +844,32 @@ def apply_blended_sharp_score(df, trained_models):
                 try:
                     game_key_base = row.get('Game_Key_Base')
                     options = outcome_map.get(game_key_base, [])
-
+            
+                    # Normalize outcome options
                     if isinstance(options, (pd.Series, pd.Index, np.ndarray, dict)):
                         options = list(options)
                     options = [str(o).strip().lower() for o in options if pd.notna(o)]
                     current = str(row.get('Outcome')).strip().lower()
-
+            
                     st.write(f"🔄 Flip attempt — Game_Key_Base: {game_key_base}, current: {current}, options: {options}")
-
-                    if len(options) != 2:
-                        st.warning(f"⚠️ Invalid outcome count: {options}")
+            
+                    # Validate options
+                    if len(options) != 2 or not all(isinstance(o, str) for o in options):
+                        st.warning(f"⚠️ Invalid or bad options list: {options} (Game_Key_Base: {game_key_base})")
                         return None
                     if current not in options:
                         st.warning(f"⚠️ Outcome not found in options: {current}")
                         return None
-
+            
                     flipped = [o for o in options if o != current]
                     if not flipped:
-                        st.warning(f"⚠️ Could not flip: {current}")
+                        st.warning(f"⚠️ Could not flip — no other option found: {current}")
                         return None
-
+                    if flipped[0] == current:
+                        st.warning(f"⚠️ Flip value same as current — skipping: {current}")
+                        return None
+            
+                    # Construct flipped row
                     inverse_row = row.copy()
                     inverse_row['Outcome'] = flipped[0]
                     inverse_row['Outcome_Norm'] = flipped[0]
@@ -871,12 +877,16 @@ def apply_blended_sharp_score(df, trained_models):
                     inverse_row['Model_Confidence'] = 1 - row['Model_Confidence']
                     inverse_row['Was_Canonical'] = False
                     inverse_row['Scored_By_Model'] = True
+            
+                    st.success(f"✅ Flip result: {inverse_row['Outcome']} from {current}")
                     return inverse_row
-
+            
                 except Exception as err:
                     st.error(f"❌ Flip error on row {row.get('Game_Key')}: {err}")
                     return None
-          
+
+
+       
             # Remove rows where core fields needed for flipping are missing
             required_cols = ['Game_Key', 'Outcome', 'Game_Key_Base', 'Model_Sharp_Win_Prob', 'Model_Confidence']
             df_canon = df_canon.dropna(subset=required_cols).copy()
