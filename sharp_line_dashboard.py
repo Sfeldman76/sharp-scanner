@@ -822,23 +822,40 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
-
-                     # === Hardcoded outcome flipping ===
+            
+            # === Flip the outcome
             if market_type == "totals":
                 df_inverse['Outcome'] = df_inverse['Outcome_Norm'].map({'over': 'under', 'under': 'over'})
             elif market_type in ["spreads", "h2h"]:
-                # Flip to the other team name
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Outcome_Norm'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
             else:
-                df_inverse['Outcome'] = df_inverse['Outcome_Norm']  # No change
+                df_inverse['Outcome'] = df_inverse['Outcome_Norm']
             
+            # === Set flipped Outcome as new normalized outcome
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-
-
+            
+            # === Recompute keys after flipping outcome
+            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], errors='coerce', utc=True).dt.floor('h')
+            df_inverse['Market_Norm'] = df_inverse['Market']
+            
+            df_inverse['Game_Key'] = (
+                df_inverse['Home_Team_Norm'] + "_" +
+                df_inverse['Away_Team_Norm'] + "_" +
+                df_inverse['Commence_Hour'].astype(str) + "_" +
+                df_inverse['Market_Norm'] + "_" +
+                df_inverse['Outcome_Norm']
+            )
+            
+            df_inverse['Merge_Key_Short'] = (
+                df_inverse['Home_Team_Norm'] + "_" +
+                df_inverse['Away_Team_Norm'] + "_" +
+                df_inverse['Commence_Hour'].astype(str)
+            )
+            
              # ✅ Validate required columns exist
             required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
             missing_cols = [col for col in required_cols if col not in df_inverse.columns]
