@@ -953,9 +953,9 @@ def apply_blended_sharp_score(df, trained_models):
                     .head(2)
                 )
                 st.dataframe(sample[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Was_Canonical']])
-                    except Exception as e:
-                        st.error(f"❌ Failed scoring {market_type.upper()}")
-                        st.code(traceback.format_exc())
+            except Exception as e:
+                st.error(f"❌ Failed scoring {market_type.upper()}")
+                st.code(traceback.format_exc())
 
     try:
         if scored_all:
