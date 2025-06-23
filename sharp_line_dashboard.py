@@ -1190,13 +1190,23 @@ def render_scanner_tab(label, sport_key, container):
                     
                     # Perform merge with row validation
                     if 'Snapshot_Timestamp' in df_scored.columns:
-                        df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False) \
-                                             .drop_duplicates(subset=merge_keys, keep='first')
-                        st.info("📌 Using latest Snapshot_Timestamp to deduplicate scored predictions.")
+                        df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
+                    
+                        # ✅ Keep only the most recent row per Game_Key + Market + Bookmaker + Outcome
+                        df_scored = (
+                            df_scored
+                            .sort_values('Snapshot_Timestamp', ascending=False)
+                            .drop_duplicates(subset=merge_keys, keep='first')
+                        )
+                        st.info("📌 Deduplicated to latest Snapshot_Timestamp per merge key.")
                     else:
-                        df_scored = df_scored.sort_values('Model_Confidence', ascending=False) \
-                                             .drop_duplicates(subset=merge_keys, keep='first')
-                        st.warning("⚠️ Snapshot_Timestamp missing — using highest Model_Confidence to deduplicate.")
+                        df_scored = (
+                            df_scored
+                            .sort_values('Model_Confidence', ascending=False)
+                            .drop_duplicates(subset=merge_keys, keep='first')
+                        )
+                        st.warning("⚠️ Snapshot_Timestamp missing — falling back to highest Model_Confidence.")
+
                     
                     # ✅ Now perform the actual merge
                     df_merged = df_moves_raw.merge(
