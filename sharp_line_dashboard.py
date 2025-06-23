@@ -476,7 +476,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         if df_market.empty:
             continue
 
-        df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+        df_market['Outcome_Norm'] = df_market['Outcome'].astype(str).str.lower().str.strip()
 
         # === Canonical side filtering ===
         if market == "totals":
@@ -492,9 +492,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             st.info(f"🧪 Class distribution: {df_market['SHARP_HIT_BOOL'].value_counts().to_dict()}")
         
         elif market == "h2h":
-            df_market = df_market[df_market['Value'].notna()]
-            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
-        
+            df_market = df_market[df_market['Value'].notna()]             
             # Canonical H2H: use only favorite-side picks
             df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
             df_market = df_market[df_market['Side_Label'] == 'favorite']
@@ -771,7 +769,7 @@ def apply_blended_sharp_score(df, trained_models):
                 st.warning(f"⚠️ No rows found for {market_type.upper()}")
                 continue
 
-            df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
+            df_market['Outcome_Norm'] = df_market['Outcome'].astype(str).str.lower().str.strip()
 
             if market_type == "spreads":
                 df_market = df_market[df_market['Value'].notna()]
@@ -827,6 +825,9 @@ def apply_blended_sharp_score(df, trained_models):
                                    .isin(df_canon[merge_keys].apply(tuple, axis=1))].copy()
 
             df_inverse['Outcome'] = df_inverse.apply(flip_outcome, axis=1)
+            missing_flips = df_inverse['Outcome'].isna().sum()
+            if missing_flips > 0:
+                st.warning(f"⚠️ {missing_flips} rows in inverse set could not be flipped — likely cause of missing market sides.")
             df_inverse = df_inverse[df_inverse['Outcome'].notna()]
             df_inverse['Outcome_Norm'] = df_inverse['Outcome'].str.lower().str.strip()
 
