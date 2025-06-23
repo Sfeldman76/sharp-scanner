@@ -96,7 +96,7 @@ import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
 import requests
-
+import traceback
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -1177,32 +1177,25 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre_game_picks = df_moves_raw.copy()
         
                 if not df_pre_game_picks.empty:
-                           
                     df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-        
-                    for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']:
+
+                    # ✅ Ensure Snapshot_Timestamp exists for dedup
+                    if 'Snapshot_Timestamp' not in df_scored.columns:
+                        df_scored['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+                    
+                    # ✅ Ensure required scoring columns exist before merge
+                    required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
+                    for col in required_score_cols:
                         if col not in df_scored.columns:
                             df_scored[col] = np.nan
-        
-                    # === Normalize merge keys before joining
-                    merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
-                    for col in merge_keys:
-                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
-        
-                    # 🧪 Diagnostic: Merge keys snapshot
-                    st.write("🔍 Raw (df_moves_raw) merge keys sample:")
-                    st.dataframe(df_moves_raw[merge_keys].drop_duplicates().head())
-        
+                    
+                    # ✅ Drop rows where Model_Sharp_Win_Prob is still null (scoring failed)
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:
-                        st.warning("⚠️ No rows successfully scored — possibly merge key mismatch or scoring failure.")
-                        st.dataframe(df_pre_game_picks[merge_keys + ['Market', 'Outcome']].head())
+                        st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
+                        st.dataframe(df_pre_game_picks.head(5))
                         return pd.DataFrame()
-        
-                    if len(df_scored) > 20000:
-                        st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
-                        df_scored = df_scored.sample(20000, random_state=42)
+
         
                     st.write("🔍 Scored (df_scored) merge keys sample:")
                     st.dataframe(df_scored[merge_keys + ['Model_Sharp_Win_Prob']].drop_duplicates().head())
@@ -1245,7 +1238,11 @@ def render_scanner_tab(label, sport_key, container):
                         on=merge_keys,
                         how='left'
                     )
-                    
+                    unscored = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()]
+                    if not unscored.empty:
+                        st.warning(f"⚠️ {len(unscored)} rows still missing score after merge:")
+                        st.dataframe(unscored[merge_keys + ['Value']].head())
+
                     # ✅ Row comparison post-merge
                     post_merge_rows = len(df_merged)
                     st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
@@ -1273,7 +1270,13 @@ def render_scanner_tab(label, sport_key, container):
 
         
             except Exception as e:
-                st.error(f"❌ Model scoring failed: {e}")
+                error_type = type(e).__name__
+                error_msg = str(e)
+                full_trace = traceback.format_exc()
+            
+                st.error(f"❌ Model scoring failed — {error_type}: {error_msg}")
+                st.code(full_trace, language='python')  # Optional: display full traceback
+                st.warning("📛 Check the traceback above for where the failure occurred.")
         else:
             st.warning("⚠️ No trained models available for scoring.")
 
