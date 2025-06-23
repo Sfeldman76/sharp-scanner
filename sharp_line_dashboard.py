@@ -860,9 +860,41 @@ def apply_blended_sharp_score(df, trained_models):
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
 
+            # === Append scored results
             scored_all.append(df_scored)
-
-            # === Outcome coverage check ===
+            
+            # === Outcome pairing check for spreads/h2h
+            if market_type in ['spreads', 'h2h']:
+                df_pairs = (
+                    df_scored
+                    .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
+                    .unique()
+                    .reset_index()
+                )
+                df_pairs['Outcome_Pair'] = df_pairs['Outcome'].apply(sorted)
+                df_pairs['Pair_Valid'] = df_pairs['Outcome_Pair'].apply(lambda x: len(x) == 2 and x[0] != x[1])
+                invalid_pairs = df_pairs[~df_pairs['Pair_Valid']]
+                st.write(f"🔍 Outcome pairing check ({market_type}): {len(invalid_pairs)} invalid")
+                if not invalid_pairs.empty:
+                    st.dataframe(invalid_pairs.head())
+            
+            # === Flip probability consistency check
+            check_flip = df_scored.pivot_table(
+                index=['Game_Key', 'Market', 'Bookmaker'],
+                columns='Was_Canonical',
+                values='Model_Sharp_Win_Prob',
+                aggfunc='first'
+            ).dropna(subset=[True, False], how='any')  # Ensures both sides exist
+            
+            check_flip['sum'] = check_flip[True] + check_flip[False]
+            check_flip['Valid_Inverse'] = np.isclose(check_flip['sum'], 1.0, atol=0.01)
+            
+            st.write("🔁 Flip probability validation:")
+            invalid_probs = check_flip[~check_flip['Valid_Inverse']]
+            if not invalid_probs.empty:
+                st.dataframe(invalid_probs.reset_index().head())
+            
+            # === Unique outcome count per Game_Key/Market
             missing_inverse = (
                 df_scored
                 .groupby(['Game_Key', 'Market'])['Outcome_Norm']
@@ -871,8 +903,16 @@ def apply_blended_sharp_score(df, trained_models):
             )
             num_issues = (missing_inverse['Num_Outcomes'] < 2).sum()
             if num_issues > 0:
-                st.warning(f"⚠️ {num_issues} games are missing one side (only 1 unique outcome).")
+                st.warning(f"⚠️ {num_issues} Game × Market groups are missing an outcome")
                 st.dataframe(missing_inverse[missing_inverse['Num_Outcomes'] < 2].head())
+            
+            # === Sample preview of H2H matchups
+            if market_type == "h2h":
+                sample = df_scored[df_scored['Market'] == 'h2h'] \
+                    .groupby(['Game_Key', 'Bookmaker']) \
+                    .head(2)
+                st.write("🧪 H2H Sample (first 2 rows per bookmaker):")
+                st.dataframe(sample[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Was_Canonical']])
 
         except Exception as e:
             st.error(f"❌ Failed scoring {market_type.upper()}")
