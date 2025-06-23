@@ -1177,8 +1177,7 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre_game_picks = df_moves_raw.copy()
         
                 if not df_pre_game_picks.empty:
-                    df_pre_game_picks = ensure_columns(df_pre_game_picks, ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier'])
-        
+                           
                     df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
         
                     for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']:
