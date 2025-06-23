@@ -1189,18 +1189,22 @@ def render_scanner_tab(label, sport_key, container):
                         st.dataframe(df_scored[df_scored.duplicated(subset=merge_keys, keep=False)].head())
                     
                     # Perform merge with row validation
-                    try:
-                        df_merged = df_moves_raw.merge(
-                            df_scored[merge_columns],
-                            on=merge_keys,
-                            how='left',
-                            validate='many_to_one'  # ✅ ensures one score row per match
-                        )
-                    except Exception as e:
-                        st.error(f"❌ Merge validation failed: {e}")
-                        return pd.DataFrame()
-                    st.write("✅ Post-merge check: Any scored probabilities?")
-                    st.write(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
+                    if 'Snapshot_Timestamp' in df_scored.columns:
+                        df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False) \
+                                             .drop_duplicates(subset=merge_keys, keep='first')
+                        st.info("📌 Using latest Snapshot_Timestamp to deduplicate scored predictions.")
+                    else:
+                        df_scored = df_scored.sort_values('Model_Confidence', ascending=False) \
+                                             .drop_duplicates(subset=merge_keys, keep='first')
+                        st.warning("⚠️ Snapshot_Timestamp missing — using highest Model_Confidence to deduplicate.")
+                    
+                    # ✅ Now perform the actual merge
+                    df_merged = df_moves_raw.merge(
+                        df_scored[merge_columns],
+                        on=merge_keys,
+                        how='left'
+                    )
+                    
                     # ✅ Row comparison post-merge
                     post_merge_rows = len(df_merged)
                     st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
@@ -1213,6 +1217,10 @@ def render_scanner_tab(label, sport_key, container):
                     
                     # ✅ Replace df_moves_raw safely
                     df_moves_raw = df_merged
+                    
+                    # ✅ Post-merge validation
+                    st.write("✅ Post-merge check: Any scored probabilities?")
+                    st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
                     
                     # 🚨 Check for missing scoring results
                     missing_rows = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
