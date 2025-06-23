@@ -245,7 +245,8 @@ def inject_missing_inverse_outcomes(df):
     df = df.copy()
     df['Outcome_Norm'] = df['Outcome'].str.lower().str.strip()
 
-    key_cols = ['Game_Key', 'Market', 'Book']
+    key_cols = ['Merge_Key_Short', 'Market', 'Book']
+
     added_rows = []
 
     for keys, group in df.groupby(key_cols):
