@@ -877,9 +877,13 @@ def apply_blended_sharp_score(df, trained_models):
                     st.error(f"❌ Flip error on row {row.get('Game_Key')}: {err}")
                     return None
 
-            flipped_debug = df_canon.apply(get_inverse_rows, axis=1)
-            num_flipped = flipped_debug.notna().sum()
+            if isinstance(num_flipped, pd.Series):
+                num_flipped = num_flipped.sum()
+            
             num_failed = len(df_canon) - num_flipped
+            
+            if num_failed > 0:
+
 
             st.success(f"🔁 Flip Results: {num_flipped} flipped, {num_failed} failed")
             if num_failed:
@@ -888,6 +892,8 @@ def apply_blended_sharp_score(df, trained_models):
             if not isinstance(flipped_debug, pd.Series):
                 st.error("❌ `flipped_debug` is not a Series — invalid result from apply()")
                 return pd.DataFrame()
+            st.write("📛 Debugging failed flip rows:")
+            st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome', 'Game_Key_Base']].head(10))
 
             inverse_rows = flipped_debug.dropna().tolist()
             df_inverse = pd.DataFrame(inverse_rows)
