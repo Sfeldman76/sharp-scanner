@@ -1216,7 +1216,10 @@ def render_scanner_tab(label, sport_key, container):
                         'Scored_By_Model',
                         'Snapshot_Timestamp'
                     ]
-                    
+                    # Ensure Snapshot_Timestamp exists
+                    if 'Snapshot_Timestamp' not in df_scored.columns:
+                        df_scored['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
                     # Only keep required columns first
                     df_scored = df_scored[merge_columns].copy()
                     
