@@ -868,11 +868,17 @@ def apply_blended_sharp_score(df, trained_models):
           
 
             # Outcome check
-            outcome_pairs = df_scored.groupby(['Game_Key', 'Market'])['Outcome_Norm'].nunique().reset_index(name='Unique_Sides')
-            if outcome_pairs['Unique_Sides'].min() < 2:
-                st.warning("⚠️ Some games may be missing the inverse side")
-
-            scored_all.append(df_scored)
+            missing_inverse = (
+                df_scored
+                .groupby(['Game_Key', 'Market'])['Outcome_Norm']
+                .nunique()
+                .reset_index(name='Num_Outcomes')
+            )
+            
+            num_issues = (missing_inverse['Num_Outcomes'] < 2).sum()
+            if num_issues > 0:
+                st.warning(f"⚠️ {num_issues} games are missing one side (only 1 unique outcome).")
+                st.dataframe(missing_inverse[missing_inverse['Num_Outcomes'] < 2].head())
 
         except Exception as e:
             st.error(f"❌ Failed scoring {market_type.upper()}")
