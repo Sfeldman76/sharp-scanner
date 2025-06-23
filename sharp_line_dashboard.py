@@ -821,9 +821,16 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse = df_canon.copy()
             
             # Flip win probabilities
+            df_inverse = df_canon.copy(deep=True)
+            # Flip values
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
+            df_inverse['Scored_By_Model'] = True
+            # Flip outcome
+            df_inverse['Outcome'] = df_inverse['Outcome_Norm'].map(flip_dict)  # or similar logic
+            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+
             
             # Flip Outcome safely
             # Use this instead of .apply(flip_outcome, axis=1)
@@ -864,7 +871,7 @@ def apply_blended_sharp_score(df, trained_models):
             # 🧪 Debug output
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
-
+            scored_all.append(df_scored)
           
 
             # Outcome check
