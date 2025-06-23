@@ -876,35 +876,51 @@ def apply_blended_sharp_score(df, trained_models):
                 except Exception as err:
                     st.error(f"❌ Flip error on row {row.get('Game_Key')}: {err}")
                     return None
-            # === Safely apply flip logic ===
+          
+            # Remove rows where core fields needed for flipping are missing
+            required_cols = ['Game_Key', 'Outcome', 'Game_Key_Base', 'Model_Sharp_Win_Prob', 'Model_Confidence']
+            df_canon = df_canon.dropna(subset=required_cols).copy()
+            st.write("🧪 Sample of df_canon before flipping:")
+            st.dataframe(df_canon[required_cols].head(10))
+            # Now run the flip logic safely
             flipped_debug = df_canon.apply(get_inverse_rows, axis=1)
             
             # ✅ Count flipped rows
+            # ✅ Flip results tracking
             if isinstance(flipped_debug, pd.Series):
                 num_flipped = flipped_debug.notna().sum()
+                num_failed = len(df_canon) - num_flipped
+            
+                st.success(f"🔁 Flip Results: {num_flipped} flipped, {num_failed} failed")
+            
+                # 🧪 Show failed if applicable
+                if num_failed > 0:
+                    st.write("📛 Debugging failed flip rows:")
+                    st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome', 'Game_Key_Base']].head(10))
+            
+                # ✅ Collect valid flipped rows
+                inverse_rows = [row for row in flipped_debug if isinstance(row, dict)]
             else:
                 num_flipped = 0
+                num_failed = len(df_canon)
+                inverse_rows = []
+                st.warning("⚠️ Flip logic did not return a Series — no flipped rows processed.")
             
-            num_failed = len(df_canon) - num_flipped
-            
-            st.success(f"🔁 Flip Results: {num_flipped} flipped, {num_failed} failed")
-            
-            if num_failed > 0:
-                st.write("📛 Debugging failed flip rows:")
-                st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome', 'Game_Key_Base']].head(10))
-            
-            # ✅ Safely collect flipped rows
-            inverse_rows = [row for row in flipped_debug if isinstance(row, dict)]
+            # ➕ Build flipped DataFrame
             df_inverse = pd.DataFrame(inverse_rows)
-
+            
+            # 🔗 Combine canonical and flipped
             df_combined = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_combined = df_combined[df_combined['Model_Sharp_Win_Prob'].notna()]
+            
+            # 🎯 Add tiering
             df_combined['Model_Confidence_Tier'] = pd.cut(
                 df_combined['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
-
+            
+            # ✅ Show preview
             st.write(f"📦 Combined predictions: {df_combined.shape[0]} rows")
             st.dataframe(df_combined[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Was_Canonical']].head())
 
