@@ -783,6 +783,26 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Outcome'] = df_market['Outcome'].astype(str)
             df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
+
+            # Show all rows where only one outcome exists
+            outcome_counts = (
+                df_market.groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome_Norm']
+                .nunique()
+                .reset_index(name='Num_Outcomes')
+            )
+            
+            single_side = outcome_counts[outcome_counts['Num_Outcomes'] < 2]
+            
+            st.warning(f"⚠️ Found {len(single_side)} markets with only 1 side present before scoring")
+            st.dataframe(single_side.head(10))
+            
+            # Optional: preview what those single-sided entries actually are
+            if not single_side.empty:
+                keys = single_side[['Game_Key', 'Market', 'Bookmaker']].drop_duplicates()
+                df_debug = df_market.merge(keys, on=['Game_Key', 'Market', 'Bookmaker'], how='inner')
+                st.write("🧪 Raw data for single-sided markets:")
+                st.dataframe(df_debug[['Game_Key', 'Outcome', 'Bookmaker', 'Value']].sort_values('Game_Key').head(10))
+
             # === Prepare model features up front ===
             model_features = model.get_booster().feature_names
             missing_feats = [col for col in model_features if col not in df_market.columns]
@@ -819,8 +839,11 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scoring_Market'] = market_type
             
             # === Score non-canonical side ===
-      
-            merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+            for col in ['Game_Key', 'Market', 'Bookmaker', 'Outcome']:
+                df_market[col] = df_market[col].astype(str).str.strip().str.lower()
+                df_canon[col] = df_canon[col].astype(str).str.strip().str.lower()
+
+          
             df_canon_keys = df_canon[merge_keys].drop_duplicates()
             df_market_keys = df_market[merge_keys].drop_duplicates()
             
