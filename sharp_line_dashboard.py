@@ -1131,10 +1131,9 @@ def render_scanner_tab(label, sport_key, container):
             st.session_state[model_key] = trained_models
         
         # === Apply model scoring if models are loaded
+        # === Apply model scoring if models are loaded
         if trained_models:
             try:
-            
-        
                 df_pre_game_picks = df_moves_raw.copy()
         
                 if not df_pre_game_picks.empty:
@@ -1142,17 +1141,20 @@ def render_scanner_tab(label, sport_key, container):
         
                     df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
         
-                    for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']:
+                    for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']:
                         if col not in df_scored.columns:
                             df_scored[col] = np.nan
+        
                     # === Normalize merge keys before joining
                     merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
                     for col in merge_keys:
                         df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
                         df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+        
                     # 🧪 Diagnostic: Merge keys snapshot
                     st.write("🔍 Raw (df_moves_raw) merge keys sample:")
                     st.dataframe(df_moves_raw[merge_keys].drop_duplicates().head())
+        
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:
                         st.warning("⚠️ No rows successfully scored — possibly merge key mismatch or scoring failure.")
@@ -1163,48 +1165,57 @@ def render_scanner_tab(label, sport_key, container):
                         st.warning("⚠️ Too many rows after scoring — trimming for diagnostics.")
                         df_scored = df_scored.sample(20000, random_state=42)
         
-                
-                    
                     st.write("🔍 Scored (df_scored) merge keys sample:")
                     st.dataframe(df_scored[merge_keys + ['Model_Sharp_Win_Prob']].drop_duplicates().head())
-                    
-                    # === Perform merge
+        
+                    # === Perform merge with all required columns
+                    merge_columns = merge_keys + [
+                        'Model_Sharp_Win_Prob',
+                        'Model_Confidence',
+                        'Model_Confidence_Tier',
+                        'Scored_By_Model'  # ✅ include this
+                    ]
+        
                     df_moves_raw = df_moves_raw.merge(
-                        df_scored[merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']],
+                        df_scored[merge_columns],
                         on=merge_keys,
                         how='left'
                     )
-                                        # Count how many scored picks made it into df_moves_raw
+        
+                    # Count how many scored picks made it into df_moves_raw
                     if 'Scored_By_Model' in df_moves_raw.columns:
                         model_scored = df_moves_raw['Scored_By_Model'].fillna(False).sum()
                         st.info(f"✅ Scored picks present after merge: {model_scored} / {len(df_scored)}")
                     else:
                         st.warning("⚠️ Scored_By_Model column missing after merge.")
+        
+                    # === Mirror if needed
                     df_moves_raw = ensure_opposite_side_rows(df_moves_raw, df_scored)
+        
                     # 🧪 Check for missing model probabilities after merge
                     missing_score_rows = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()]
                     st.warning(f"⚠️ Missing model probability in {len(missing_score_rows)} rows after merge.")
                     if not missing_score_rows.empty:
-                        st.dataframe(missing_score_rows[merge_keys].head())
-                    
+                        st.write("🔍 Merge failures (sample):")
+                        st.dataframe(missing_score_rows[merge_keys].drop_duplicates().head())
+        
                     # ✅ Ensure columns exist for downstream summary
                     fallback_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
                     for col in fallback_cols:
                         if col not in df_moves_raw.columns:
                             df_moves_raw[col] = np.nan
-                    
+        
                     # 🧪 Check sample of successfully scored rows
                     st.success("✅ Sample of scored rows in df_moves_raw:")
                     st.dataframe(df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].notna()][
                         merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']
                     ].head())
-
         
             except Exception as e:
                 st.error(f"❌ Model scoring failed: {e}")
         else:
             st.warning("⚠️ No trained models available for scoring.")
-        
+
         
       
         
