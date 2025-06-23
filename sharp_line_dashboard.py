@@ -843,7 +843,7 @@ def apply_blended_sharp_score(df, trained_models):
             
             df_inverse['Outcome'] = df_inverse.apply(flip_from_map, axis=1)
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-        
+            df_inverse['Flip_Matched'] = df_inverse['Outcome'] != df_canon['Outcome_Norm'].values
             
             required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
             missing_cols = [col for col in required_cols if col not in df_inverse.columns]
