@@ -816,14 +816,14 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
 
-            # === Hardcoded flipping logic ===
+            # === Copy and flip
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
             
-            # === Flip the outcome
+            # === Flip outcome BEFORE computing keys
             if market_type == "totals":
                 df_inverse['Outcome'] = df_inverse['Outcome_Norm'].map({'over': 'under', 'under': 'over'})
             elif market_type in ["spreads", "h2h"]:
@@ -835,13 +835,11 @@ def apply_blended_sharp_score(df, trained_models):
             else:
                 df_inverse['Outcome'] = df_inverse['Outcome_Norm']
             
-            # === Set flipped Outcome as new normalized outcome
-            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            df_inverse['Outcome_Norm'] = df_inverse['Outcome']  # 💡 Update this too
             
-            # === Recompute keys after flipping outcome
+            # === Recompute Game_Key AFTER outcome has changed
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], errors='coerce', utc=True).dt.floor('h')
             df_inverse['Market_Norm'] = df_inverse['Market']
-            
             df_inverse['Game_Key'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
                 df_inverse['Away_Team_Norm'] + "_" +
@@ -849,7 +847,6 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Market_Norm'] + "_" +
                 df_inverse['Outcome_Norm']
             )
-            
             df_inverse['Merge_Key_Short'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
                 df_inverse['Away_Team_Norm'] + "_" +
