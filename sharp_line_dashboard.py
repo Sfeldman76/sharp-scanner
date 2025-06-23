@@ -822,19 +822,14 @@ def apply_blended_sharp_score(df, trained_models):
             
             # Flip win probabilities
             df_inverse = df_canon.copy(deep=True)
-            # Flip values
+
+            # 🔁 Flip win probabilities
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
-            # Flip outcome
-            df_inverse['Outcome'] = df_inverse['Outcome_Norm'].map(flip_dict)  # or similar logic
-            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-
             
-            # Flip Outcome safely
-            # Use this instead of .apply(flip_outcome, axis=1)
-            # Build flip mapping per Game_Key
+            # 🔁 Flip outcome safely using per-Game_Key mapping
             flip_maps = (
                 df_inverse.groupby(['Game_Key'])['Outcome_Norm']
                 .unique()
@@ -844,12 +839,11 @@ def apply_blended_sharp_score(df, trained_models):
             
             def flip_from_map(row):
                 mapping = flip_maps.get(row['Game_Key'], {})
-                return mapping.get(row['Outcome_Norm'], row['Outcome_Norm'])
+                return mapping.get(row['Outcome_Norm'], row['Outcome_Norm'])  # fallback if not found
             
             df_inverse['Outcome'] = df_inverse.apply(flip_from_map, axis=1)
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            df_inverse['Scored_By_Model'] = True  # ✅ Match schema with df_canon
-
+        
             
             required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
             missing_cols = [col for col in required_cols if col not in df_inverse.columns]
