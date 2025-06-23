@@ -883,54 +883,60 @@ def apply_blended_sharp_score(df, trained_models):
                 .to_dict()
             )
 
-            st.write("🧭 Outcome map (sample):", dict(list(outcome_map.items())[:5]))
-
+            st.write("📘 Full outcome_map keys sample:")
+            st.json({k: v for i, (k, v) in enumerate(outcome_map.items()) if i < 5})
+            st.write("🧪 Canon Game_Key_Base sample:", df_canon['Game_Key_Base'].dropna().unique()[:5])
+            st.write("🧪 Outcome Map Keys:", list(outcome_map.keys())[:5])
+            
             def get_inverse_rows(row):
                 try:
                     game_key_base = row.get('Game_Key_Base')
+                    current = str(row.get('Outcome')).strip().lower()
                     options = outcome_map.get(game_key_base, [])
             
                     # Normalize outcome options
                     if isinstance(options, (pd.Series, pd.Index, np.ndarray, dict)):
                         options = list(options)
                     options = [str(o).strip().lower() for o in options if pd.notna(o)]
-                    current = str(row.get('Outcome')).strip().lower()
             
-                    st.write(f"🔄 Flip attempt — Game_Key_Base: {game_key_base}, current: {current}, options: {options}")
+                    st.write({
+                        "🔍 Flip Debug": {
+                            "Game_Key_Base": game_key_base,
+                            "Current Outcome": current,
+                            "Available Options": options,
+                        }
+                    })
             
-                    # Validate options
-                    if len(options) != 2 or not all(isinstance(o, str) for o in options):
-                        st.warning(f"⚠️ Invalid or bad options list: {options} (Game_Key_Base: {game_key_base})")
+                    # Validation
+                    if len(options) != 2:
+                        st.warning(f"⚠️ Invalid outcome list for {game_key_base}: {options}")
                         return None
                     if current not in options:
-                        st.warning(f"⚠️ Outcome not found in options: {current}")
+                        st.warning(f"⚠️ Current outcome not in options: {current}")
                         return None
             
+                    # Flip
                     flipped = [o for o in options if o != current]
                     if not flipped:
                         st.warning(f"⚠️ Could not flip — no other option found: {current}")
                         return None
-                    if flipped[0] == current:
-                        st.warning(f"⚠️ Flip value same as current — skipping: {current}")
-                        return None
             
-                    # Construct flipped row
+                    # Copy and modify row
                     inverse_row = row.copy(deep=True)
                     inverse_row['Outcome'] = flipped[0]
-                    inverse_row['Outcome_Norm'] = flipped[0].lower()
-
+                    inverse_row['Outcome_Norm'] = flipped[0]
                     inverse_row['Model_Sharp_Win_Prob'] = 1 - row['Model_Sharp_Win_Prob']
                     inverse_row['Model_Confidence'] = 1 - row['Model_Confidence']
                     inverse_row['Was_Canonical'] = False
                     inverse_row['Scored_By_Model'] = True
             
-                    st.success(f"✅ Flip result: {inverse_row['Outcome']} from {current}")
+                    # ✅ Return flipped row
+                    st.success(f"✅ Flipped: {current} → {flipped[0]} for {game_key_base}")
                     return inverse_row
             
-                except Exception as err:
-                    st.error(f"❌ Flip error on row {row.get('Game_Key')}: {err}")
+                except Exception as e:
+                    st.error(f"❌ Flip error on Game_Key_Base: {row.get('Game_Key_Base')}, Outcome: {row.get('Outcome')} → {e}")
                     return None
-
 
        
             # Remove rows where core fields needed for flipping are missing
@@ -1004,21 +1010,31 @@ def apply_blended_sharp_score(df, trained_models):
                 st.dataframe(df_scored.head())
                 return df_scored
     
-            # ✅ Safe groupby
+            # ✅ QA: Ensure each Game_Key has exactly 2 scored sides
             pair_check = (
-                df_scored.groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
-                .nunique().reset_index().rename(columns={'Outcome': 'Num_Outcomes'})
+                df_combined
+                .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
+                .nunique()
+                .reset_index(name='Num_Sides')
             )
-            missing = pair_check[pair_check['Num_Outcomes'] < 2]
-            if not missing.empty:
-                st.warning(f"⚠️ {len(missing)} markets are missing one side after scoring.")
-                st.dataframe(missing)
-                debug_games = missing['Game_Key'].unique().tolist()[:5]
-                st.info("🔍 Showing affected rows from those games:")
-                st.dataframe(df_scored[df_scored['Game_Key'].isin(debug_games)][['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob']])
-            else:
-                st.info("✅ All scored markets have both sides present.")
-    
+            
+            # ✅ Markets with exactly 2 sides (GOOD)
+            balanced = pair_check[pair_check['Num_Sides'] == 2]
+            
+            # ⚠️ Markets still missing a side (BAD)
+            unbalanced = pair_check[pair_check['Num_Sides'] < 2]
+            
+            st.info(f"📊 QA: {len(balanced)} markets have both sides scored.")
+            if not unbalanced.empty:
+                st.warning(f"⚠️ {len(unbalanced)} markets are still missing a side after flipping.")
+                debug_keys = unbalanced['Game_Key'].unique().tolist()[:5]
+                st.write("🔍 Affected Game_Keys (sample):", debug_keys)
+                st.dataframe(
+                    df_combined[df_combined['Game_Key'].isin(debug_keys)][
+                        ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Model_Sharp_Win_Prob']
+                    ].sort_values('Game_Key')
+                )
+
             return df_scored
     
         else:
