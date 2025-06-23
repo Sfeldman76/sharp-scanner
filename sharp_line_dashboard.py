@@ -809,43 +809,35 @@ def apply_blended_sharp_score(df, trained_models):
                 if col not in df_canon:
                     df_canon[col] = 0
 
+            # === Canonical scoring
             X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
             df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
             df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
-
-            # === Copy and flip
-            # Check which games have both sides already
-            sufficient_outcomes = df_market.groupby(['Game_Key'])['Outcome_Norm'].nunique().reset_index()
-            sufficient_outcomes = sufficient_outcomes[sufficient_outcomes['Outcome_Norm'] >= 2]
-            games_with_both = set(sufficient_outcomes['Game_Key'])
             
-            # Filter out from df_canon those that already have both sides
-            df_canon = df_canon[~df_canon['Game_Key'].isin(games_with_both)]
+            # === Build Inverse
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
             
-            # === Flip outcome BEFORE computing keys
-            if market_type == "totals":
-                df_inverse['Outcome'] = df_inverse['Outcome_Norm'].map({'over': 'under', 'under': 'over'})
-            elif market_type in ["spreads", "h2h"]:
+            # Flip Outcome
+            if market_type == 'totals':
+                df_inverse['Outcome'] = df_inverse['Outcome'].map({'over': 'under', 'under': 'over'})
+            elif market_type in ['spreads', 'h2h']:
                 df_inverse['Outcome'] = np.where(
-                    df_inverse['Outcome_Norm'] == df_inverse['Home_Team_Norm'],
+                    df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-            else:
-                df_inverse['Outcome'] = df_inverse['Outcome_Norm']
             
-            df_inverse['Outcome_Norm'] = df_inverse['Outcome']  # 💡 Update this too
+            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-            # === Recompute Game_Key AFTER outcome has changed
-            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], errors='coerce', utc=True).dt.floor('h')
+            # Rebuild Game_Key and Merge_Key_Short
+            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             df_inverse['Market_Norm'] = df_inverse['Market']
             df_inverse['Game_Key'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
@@ -860,13 +852,12 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Commence_Hour'].astype(str)
             )
             
-             # ✅ Validate required columns exist
-            required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
-            missing_cols = [col for col in required_cols if col not in df_inverse.columns]
-            if missing_cols:
-                st.error(f"❌ Inverse rows missing required columns: {missing_cols}")
-                st.dataframe(df_inverse.head())
-
+            # ✅ Drop any inverse row that duplicates an existing one
+            existing_keys = df_canon[['Game_Key', 'Bookmaker']].drop_duplicates()
+            df_inverse = df_inverse.merge(existing_keys, on=['Game_Key', 'Bookmaker'], how='left', indicator=True)
+            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+            
+            # Combine
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
 
