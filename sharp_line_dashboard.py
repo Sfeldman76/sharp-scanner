@@ -824,7 +824,7 @@ def apply_blended_sharp_score(df, trained_models):
                         # === Flip + Mirror Logic (build inverse rows from canon directly) ===
             st.write(f"🧪 Canonical rows for {market_type}: {df_canon.shape[0]}")
             st.dataframe(df_canon[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob']].head())
-            outcome_map = df_market.groupby('Game_Key')['Outcome'].unique().to_dict()
+            outcome_map = df_market.groupby('Game_Key')['Outcome'].apply(lambda x: list(set(map(str, x)))).to_dict()
             st.write("🧭 Sample outcome_map entries:", dict(list(outcome_map.items())[:5]))
             def get_inverse_rows(row):
                 game_key = row['Game_Key']
