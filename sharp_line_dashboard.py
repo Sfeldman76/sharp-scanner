@@ -1204,7 +1204,31 @@ def render_scanner_tab(label, sport_key, container):
         
                     
                     st.success(f"🎯 Model scoring successful — scored {len(df_scored)} rows.")
+                    merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
 
+                    # Normalize keys just to be safe
+                    for col in merge_keys:
+                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+                    
+                    # Drop to just merge keys for both
+                    raw_keys_df = df_moves_raw[merge_keys].drop_duplicates()
+                    scored_keys_df = df_scored[merge_keys].drop_duplicates()
+                    
+                    # Show side-by-side samples
+                    st.subheader("🔍 Merge Key Samples")
+                    st.markdown("#### df_moves_raw merge keys (sample)")
+                    st.dataframe(raw_keys_df.head(10))
+                    
+                    st.markdown("#### df_scored merge keys (sample)")
+                    st.dataframe(scored_keys_df.head(10))
+                    
+                    # Compare unmatched keys
+                    merged_keys = raw_keys_df.merge(scored_keys_df, on=merge_keys, how='left', indicator=True)
+                    unmatched = merged_keys[merged_keys['_merge'] == 'left_only']
+                    st.markdown("#### ❌ Merge key mismatches (in raw but not scored):")
+                    st.dataframe(unmatched[merge_keys].head(10))
+                    st.info(f"🚨 Total unmatched raw keys: {len(unmatched)} out of {len(raw_keys_df)}")
                     # === Perform merge with all required columns
                    # === Perform merge with all required columns
                     merge_columns = merge_keys + [
