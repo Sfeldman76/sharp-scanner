@@ -1190,15 +1190,19 @@ def render_scanner_tab(label, sport_key, container):
                             df_scored[col] = np.nan
                     
                     # ✅ Drop rows where Model_Sharp_Win_Prob is still null (scoring failed)
+                    merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+
                     df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
                     if df_scored.empty:
                         st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
                         st.dataframe(df_pre_game_picks.head(5))
                         return pd.DataFrame()
-
-        
+                    
                     st.write("🔍 Scored (df_scored) merge keys sample:")
                     st.dataframe(df_scored[merge_keys + ['Model_Sharp_Win_Prob']].drop_duplicates().head())
+
+        
+                    
                     st.success(f"🎯 Model scoring successful — scored {len(df_scored)} rows.")
 
                     # === Perform merge with all required columns
