@@ -793,8 +793,8 @@ def apply_blended_sharp_score(df, trained_models):
             
             single_side = outcome_counts[outcome_counts['Num_Outcomes'] < 2]
             
-            st.warning(f"⚠️ Found {len(single_side)} markets with only 1 side present before scoring")
-            st.dataframe(single_side.head(10))
+            #st.warning(f"⚠️ Found {len(single_side)} markets with only 1 side present before scoring")
+            #st.dataframe(single_side.head(10))
             
             # Optional: preview what those single-sided entries actually are
             if not single_side.empty:
@@ -883,10 +883,10 @@ def apply_blended_sharp_score(df, trained_models):
                 .to_dict()
             )
 
-            st.write("📘 Full outcome_map keys sample:")
-            st.json({k: v for i, (k, v) in enumerate(outcome_map.items()) if i < 5})
-            st.write("🧪 Canon Game_Key_Base sample:", df_canon['Game_Key_Base'].dropna().unique()[:5])
-            st.write("🧪 Outcome Map Keys:", list(outcome_map.keys())[:5])
+            #st.write("📘 Full outcome_map keys sample:")
+            #st.json({k: v for i, (k, v) in enumerate(outcome_map.items()) if i < 5})
+            #st.write("🧪 Canon Game_Key_Base sample:", df_canon['Game_Key_Base'].dropna().unique()[:5])
+            #st.write("🧪 Outcome Map Keys:", list(outcome_map.keys())[:5])
             
             def get_inverse_rows(row):
                 try:
@@ -931,8 +931,11 @@ def apply_blended_sharp_score(df, trained_models):
                     inverse_row['Scored_By_Model'] = True
             
                     # ✅ Return flipped row
-                    st.success(f"✅ Flipped: {current} → {flipped[0]} for {game_key_base}")
+                    #st.success(f"✅ Flipped: {current} → {flipped[0]} for {game_key_base}")
+                    if isinstance(inverse_row, dict):
+                        return pd.Series(inverse_row)
                     return inverse_row
+
             
                 except Exception as e:
                     st.error(f"❌ Flip error on Game_Key_Base: {row.get('Game_Key_Base')}, Outcome: {row.get('Outcome')} → {e}")
@@ -1237,8 +1240,8 @@ def render_scanner_tab(label, sport_key, container):
         else:
             st.warning("⚠️ Could not filter by Sport — missing column or mapping.")
         # ✅ Snapshot log
-        st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
-        st.dataframe(df_moves_raw.head(3))
+        #st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
+        #st.dataframe(df_moves_raw.head(3))
         
         # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
