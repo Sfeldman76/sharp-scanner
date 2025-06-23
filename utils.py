@@ -380,7 +380,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             )
         }
 
-  import numpy as np
+import numpy as np
 import pandas as pd
 import logging
 import time
