@@ -915,9 +915,10 @@ def apply_blended_sharp_score(df, trained_models):
                         return None
             
                     # Construct flipped row
-                    inverse_row = row.copy()
+                    inverse_row = row.copy(deep=True)
                     inverse_row['Outcome'] = flipped[0]
-                    inverse_row['Outcome_Norm'] = flipped[0]
+                    inverse_row['Outcome_Norm'] = flipped[0].lower()
+
                     inverse_row['Model_Sharp_Win_Prob'] = 1 - row['Model_Sharp_Win_Prob']
                     inverse_row['Model_Confidence'] = 1 - row['Model_Confidence']
                     inverse_row['Was_Canonical'] = False
@@ -953,19 +954,25 @@ def apply_blended_sharp_score(df, trained_models):
                     st.write("📛 Debugging failed flip rows:")
                     st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome', 'Game_Key_Base']].head(10))
             
-                # ✅ Collect valid flipped rows
-                inverse_rows = [row for row in flipped_debug if isinstance(row, dict)]
+                # ✅ Build DataFrame from flipped rows
+                df_inverse = pd.DataFrame([row for row in flipped_debug if isinstance(row, pd.Series)])
+            
             else:
-                num_flipped = 0
-                num_failed = len(df_canon)
-                inverse_rows = []
                 st.warning("⚠️ Flip logic did not return a Series — no flipped rows processed.")
+                df_inverse = pd.DataFrame()
+
+
+            # Ensure all columns from df_canon are in df_inverse before concat
+            missing_cols = set(df_canon.columns) - set(df_inverse.columns)
+            for col in missing_cols:
+                df_inverse[col] = np.nan
             
-            # ➕ Build flipped DataFrame
-            df_inverse = pd.DataFrame(inverse_rows)
-            
+            # Ensure same column order
+            df_inverse = df_inverse[df_canon.columns]
+
             # 🔗 Combine canonical and flipped
             df_combined = pd.concat([df_canon, df_inverse], ignore_index=True)
+
             df_combined = df_combined[df_combined['Model_Sharp_Win_Prob'].notna()]
             
             # 🎯 Add tiering
