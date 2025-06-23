@@ -1181,7 +1181,7 @@ def render_scanner_tab(label, sport_key, container):
                     pre_merge_rows = len(df_moves_raw)
                     scored_rows = len(df_scored)
                     st.info(f"📊 Pre-merge: {pre_merge_rows} raw rows | {scored_rows} scored rows")
-                    
+                  
                     # 🧪 Check if df_scored has duplicates on merge keys
                     dupes = df_scored.duplicated(subset=merge_keys).sum()
                     if dupes > 0:
@@ -1199,7 +1199,8 @@ def render_scanner_tab(label, sport_key, container):
                     except Exception as e:
                         st.error(f"❌ Merge validation failed: {e}")
                         return pd.DataFrame()
-                    
+                    st.write("✅ Post-merge check: Any scored probabilities?")
+                    st.write(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
                     # ✅ Row comparison post-merge
                     post_merge_rows = len(df_merged)
                     st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
