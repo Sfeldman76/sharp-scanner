@@ -1206,7 +1206,8 @@ def render_scanner_tab(label, sport_key, container):
         
                     st.write("🔍 Scored (df_scored) merge keys sample:")
                     st.dataframe(df_scored[merge_keys + ['Model_Sharp_Win_Prob']].drop_duplicates().head())
-        
+                    st.success(f"🎯 Model scoring successful — scored {len(df_scored)} rows.")
+
                     # === Perform merge with all required columns
                    # === Perform merge with all required columns
                     merge_columns = merge_keys + [
