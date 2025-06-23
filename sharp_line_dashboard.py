@@ -948,7 +948,7 @@ def apply_blended_sharp_score(df, trained_models):
         st.error("❌ Exception occurred during model scoring")
         st.code(tb)
         return pd.DataFrame()
-    ()
+
 
 
         
