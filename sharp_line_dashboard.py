@@ -843,7 +843,9 @@ def apply_blended_sharp_score(df, trained_models):
                 df_market[col] = df_market[col].astype(str).str.strip().str.lower()
                 df_canon[col] = df_canon[col].astype(str).str.strip().str.lower()
 
-          
+            merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+
+
             df_canon_keys = df_canon[merge_keys].drop_duplicates()
             df_market_keys = df_market[merge_keys].drop_duplicates()
             
