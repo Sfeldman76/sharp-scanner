@@ -815,22 +815,41 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
-
+            df_canon['Scored_By_Model'] = True  #
             # Create inverse rows
+            # Copy canonical rows
             df_inverse = df_canon.copy()
+            
+            # Flip win probabilities
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
-
-            def flip_outcome(row):
-                if market_type == "totals":
-                    return "under" if row['Outcome_Norm'] == "over" else "over"
-                elif market_type in ["spreads", "h2h"]:
-                    return "underdog" if "favorite" in row['Outcome_Norm'] else "favorite"
-                return row['Outcome_Norm']
-
-            df_inverse['Outcome'] = df_inverse.apply(flip_outcome, axis=1)
+            
+            # Flip Outcome safely
+            # Use this instead of .apply(flip_outcome, axis=1)
+            # Build flip mapping per Game_Key
+            flip_maps = (
+                df_inverse.groupby(['Game_Key'])['Outcome_Norm']
+                .unique()
+                .apply(lambda x: {x[0]: x[1], x[1]: x[0]} if len(x) == 2 else {})
+                .to_dict()
+            )
+            
+            def flip_from_map(row):
+                mapping = flip_maps.get(row['Game_Key'], {})
+                return mapping.get(row['Outcome_Norm'], row['Outcome_Norm'])
+            
+            df_inverse['Outcome'] = df_inverse.apply(flip_from_map, axis=1)
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            df_inverse['Scored_By_Model'] = True  # ✅ Match schema with df_canon
+
+            
+            required_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Scored_By_Model']
+            missing_cols = [col for col in required_cols if col not in df_inverse.columns]
+            if missing_cols:
+                st.error(f"❌ Inverse rows missing required columns: {missing_cols}")
+                st.dataframe(df_inverse.head())
+
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
@@ -846,8 +865,7 @@ def apply_blended_sharp_score(df, trained_models):
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
 
-            st.write("📊 Probability Distribution:")
-            st.bar_chart(df_scored['Model_Sharp_Win_Prob'])
+          
 
             # Outcome check
             outcome_pairs = df_scored.groupby(['Game_Key', 'Market'])['Outcome_Norm'].nunique().reset_index(name='Unique_Sides')
