@@ -743,12 +743,12 @@ def compute_diagnostics_vectorized(df):
         st.exception(e)
         return None
 
-    
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
     import streamlit as st
     import time
+    import traceback
 
     st.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
 
@@ -885,6 +885,10 @@ def apply_blended_sharp_score(df, trained_models):
             if num_failed:
                 st.dataframe(df_canon[flipped_debug.isna()][['Game_Key', 'Outcome']].head())
 
+            if not isinstance(flipped_debug, pd.Series):
+                st.error("❌ `flipped_debug` is not a Series — invalid result from apply()")
+                return pd.DataFrame()
+
             inverse_rows = flipped_debug.dropna().tolist()
             df_inverse = pd.DataFrame(inverse_rows)
 
@@ -903,33 +907,48 @@ def apply_blended_sharp_score(df, trained_models):
 
         except Exception as e:
             st.exception(f"❌ Failed scoring {market_type.upper()}: {e}")
+            st.code(traceback.format_exc())
 
-    if scored_all:
-        df_scored = pd.concat(scored_all, ignore_index=True)
-        df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+    try:
+        if scored_all:
+            df_scored = pd.concat(scored_all, ignore_index=True)
+            df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+            st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
     
-        if 'Game_Key' not in df_scored.columns:
-            st.error("❌ 'Game_Key' missing from df_scored.")
+            # 🧪 Fix the ambiguous Series check
+            if 'Game_Key' not in df_scored.columns:
+                st.error("❌ 'Game_Key' missing from df_scored — cannot proceed.")
+                st.dataframe(df_scored.head())
+                return df_scored
+    
+            # ✅ Safe groupby
+            pair_check = (
+                df_scored.groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
+                .nunique().reset_index().rename(columns={'Outcome': 'Num_Outcomes'})
+            )
+            missing = pair_check[pair_check['Num_Outcomes'] < 2]
+            if not missing.empty:
+                st.warning(f"⚠️ {len(missing)} markets are missing one side after scoring.")
+                st.dataframe(missing)
+                debug_games = missing['Game_Key'].unique().tolist()[:5]
+                st.info("🔍 Showing affected rows from those games:")
+                st.dataframe(df_scored[df_scored['Game_Key'].isin(debug_games)][['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob']])
+            else:
+                st.info("✅ All scored markets have both sides present.")
+    
+            return df_scored
+    
+        else:
+            st.warning("⚠️ No market types scored — returning empty DataFrame.")
             return pd.DataFrame()
     
-        st.success(f"✅ Model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_scored)}")
-    
-        pair_check = (
-            df_scored.groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
-            .nunique().reset_index().rename(columns={'Outcome': 'Num_Outcomes'})
-        )
-    
-        missing = pair_check[pair_check['Num_Outcomes'] < 2]
-        if not missing.empty:
-            st.warning(f"⚠️ {len(missing)} markets are missing one side after scoring.")
-            st.dataframe(missing)
-        else:
-            st.info("✅ All scored markets have both sides present.")
-    
-        return df_scored
-    else:
-        st.warning("⚠️ No market types scored — returning empty DataFrame.")
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        st.error("❌ Exception occurred during model scoring")
+        st.code(tb)
         return pd.DataFrame()
+    ()
 
 
         
