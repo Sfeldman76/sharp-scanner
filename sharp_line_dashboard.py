@@ -783,7 +783,13 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Outcome'] = df_market['Outcome'].astype(str)
             df_market['Outcome_Norm'] = df_market['Outcome'].str.lower().str.strip()
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
-
+            # === Prepare model features up front ===
+            model_features = model.get_booster().feature_names
+            missing_feats = [col for col in model_features if col not in df_market.columns]
+            for col in missing_feats:
+                df_market[col] = 0
+            
+            # === Score canonical rows ===
             if market_type == "spreads":
                 df_market = df_market[df_market['Value'].notna()]
                 df_canon = df_market[df_market['Value'] < 0].copy()
@@ -803,27 +809,32 @@ def apply_blended_sharp_score(df, trained_models):
             else:
                 df_canon = df_market.copy()
                 st.write("📌 Canonical selection: all rows used")
-
-            st.write(f"🧮 Canonical rows: {df_canon.shape[0]}")
-            if df_canon.empty:
-                st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
-                continue
-
-            model_features = model.get_booster().feature_names
-            missing_feats = [col for col in model_features if col not in df_canon.columns]
-            if missing_feats:
-                st.warning(f"⚠️ Missing model features: {missing_feats}")
-                for col in missing_feats:
-                    df_canon[col] = 0
-
-            X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
-
-            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
+            
+            # Score canonical
+            X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
+            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X_canon)[:, 1]
             df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
             df_canon['Was_Canonical'] = True
             df_canon['Scored_By_Model'] = True
             df_canon['Scoring_Market'] = market_type
+            
+            # === Score non-canonical side ===
+            non_canon = df_market[~df_market['Game_Key'].isin(df_canon['Game_Key'])].copy()
+            if not non_canon.empty:
+                st.info(f"🔄 Found {non_canon.shape[0]} non-canonical rows — scoring them too")
+                X_nc = non_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
+                non_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X_nc)[:, 1]
+                non_canon['Model_Confidence'] = iso.predict(non_canon['Model_Sharp_Win_Prob'])
+                non_canon['Was_Canonical'] = False
+                non_canon['Scored_By_Model'] = True
+                non_canon['Scoring_Market'] = market_type
+                df_scored = pd.concat([df_canon, non_canon], ignore_index=True)
+            else:
+                df_scored = df_canon
+     
+        
 
+         
             st.success(f"✅ Model predictions applied — previewing top rows:")
             st.dataframe(df_canon[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']].head())
 
