@@ -778,7 +778,7 @@ def apply_blended_sharp_score(df, trained_models):
             if df_market.empty:
                 st.warning(f"⚠️ No rows to score for {market_type.upper()}")
                 continue
-             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
+            df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
          
