@@ -234,41 +234,6 @@ def read_latest_snapshot_from_bigquery(hours=2):
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
 
-def inject_missing_inverse_outcomes(df):
-    outcome_flips = {
-        'over': 'under',
-        'under': 'over',
-        'favorite': 'underdog',
-        'underdog': 'favorite'
-    }
-
-    df = df.copy()
-    df['Outcome_Norm'] = df['Outcome'].str.lower().str.strip()
-
-    key_cols = ['Merge_Key_Short', 'Market', 'Book']
-
-    added_rows = []
-
-    for keys, group in df.groupby(key_cols):
-        outcomes = group['Outcome_Norm'].unique().tolist()
-        for outcome in outcomes:
-            inverse = outcome_flips.get(outcome)
-            if inverse and inverse not in outcomes:
-                row_to_copy = group.iloc[0].copy()
-                row_to_copy['Outcome'] = inverse
-                row_to_copy['Outcome_Norm'] = inverse
-                row_to_copy['Model_Sharp_Win_Prob'] = None
-                row_to_copy['Model_Confidence'] = None
-                row_to_copy['Reason'] = "🔁 Injected missing inverse"
-                added_rows.append(row_to_copy)
-
-    if added_rows:
-        df = pd.concat([df, pd.DataFrame(added_rows)], ignore_index=True)
-        logging.warning(f"➕ Injected {len(added_rows)} missing inverse outcomes.")
-    else:
-        logging.info("✅ All games have both sides present.")
-
-    return df
 
 
 def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
@@ -278,7 +243,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     df = df.copy()
     df = build_game_key(df)
-    df = inject_missing_inverse_outcomes(df)
+    
     # ✅ Only keep rows from sharp and rec books
     allowed_books = SHARP_BOOKS + REC_BOOKS
     df = df[df['Book'].isin(allowed_books)]
