@@ -785,7 +785,7 @@ def apply_blended_sharp_score(df, trained_models):
 
             if market_type == "spreads":
                 df_canon = df_market[df_market['Value'] < 0].copy()
-                st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
+                #st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
             elif market_type == "totals":
                 df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
                 #st.info(f"📌 Canonical: {df_canon.shape[0]} rows with outcome = 'over'")
@@ -882,15 +882,21 @@ def apply_blended_sharp_score(df, trained_models):
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
 
-            st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
-            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+            #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
             if market_type == 'spreads':
                 st.subheader("🔎 Spread Flip Debug")
-                st.dataframe(
-                    df_scored[['Game_Key', 'Outcome_Norm', 'Rec Line', 'Sharp Line', 'Model_Sharp_Win_Prob']]
-                    .sort_values(['Game_Key', 'Rec Line'])
-                    .head(20)
-                )
+            
+                # Use original column names from the scoring step
+                spread_cols = ['Game_Key', 'Outcome_Norm', 'Rec_Book_Consensus', 'Sharp_Book_Consensus', 'Model_Sharp_Win_Prob']
+                existing_cols = [col for col in spread_cols if col in df_scored.columns]
+            
+                if existing_cols:
+                    st.dataframe(
+                        df_scored[existing_cols].sort_values(['Game_Key', existing_cols[2]]).head(20)
+                    )
+                else:
+                    st.warning("⚠️ Spread debug columns not available in df_scored.")
             scored_all.append(df_scored)
 
         except Exception as e:
