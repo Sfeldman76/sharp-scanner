@@ -1574,12 +1574,13 @@ def render_scanner_tab(label, sport_key, container):
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
-                'Why Model Likes It': lambda x: ' | '.join(sorted(set(x.dropna()))),
-                'Confidence Trend': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
-                'Tier Δ': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
-                'Line/Model Direction': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+                'Why Model Likes It': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing",
+                'Confidence Trend': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing",
+                'Tier Δ': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing",
+                'Line/Model Direction': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing"
             })
         )
+
         
         # === Final Column Order for Display
         view_cols = [
