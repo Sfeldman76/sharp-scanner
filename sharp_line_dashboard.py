@@ -766,7 +766,7 @@ def apply_blended_sharp_score(df, trained_models):
     scored_all = []
 
     for market_type, bundle in trained_models.items():
-        st.markdown(f"---\n### 🧪 Scoring Market: `{market_type}`")
+        #st.markdown(f"---\n### 🧪 Scoring Market: `{market_type}`")
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
@@ -785,10 +785,10 @@ def apply_blended_sharp_score(df, trained_models):
 
             if market_type == "spreads":
                 df_canon = df_market[df_market['Value'] < 0].copy()
-                st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
+                #st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
             elif market_type == "totals":
                 df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
-                st.info(f"📌 Canonical: {df_canon.shape[0]} rows with outcome = 'over'")
+                #st.info(f"📌 Canonical: {df_canon.shape[0]} rows with outcome = 'over'")
             elif market_type == "h2h":
                 df_market = df_market[df_market['Value'].notna()]
                 df_canon = (
@@ -796,7 +796,7 @@ def apply_blended_sharp_score(df, trained_models):
                     .drop_duplicates(subset=['Game_Key', 'Bookmaker'])
                     .copy()
                 )
-                st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (lowest ML)")
+                #st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (lowest ML)")
             else:
                 df_canon = df_market.copy()
 
@@ -865,8 +865,8 @@ def apply_blended_sharp_score(df, trained_models):
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
 
-            st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
-            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+            #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
 
             scored_all.append(df_scored)
 
@@ -891,8 +891,8 @@ def apply_blended_sharp_score(df, trained_models):
                     .rename_axis('Outcome')
                     .reset_index(name='Count')
                 )
-                st.markdown("### 🔢 Totals Breakdown (Over/Under)")
-                st.dataframe(totals_summary)
+                #st.markdown("### 🔢 Totals Breakdown (Over/Under)")
+                #st.dataframe(totals_summary)
     
             # Spreads pairing
             if 'spreads' in df_final['Market'].unique():
@@ -903,7 +903,7 @@ def apply_blended_sharp_score(df, trained_models):
                     .reset_index(name='Unique_Sides')
                 )
                 num_spread_pairs = (spread_pairs['Unique_Sides'] == 2).sum()
-                st.markdown(f"### 🧮 Spreads: {num_spread_pairs} properly paired (2 sides) out of {len(spread_pairs)}")
+               # st.markdown(f"### 🧮 Spreads: {num_spread_pairs} properly paired (2 sides) out of {len(spread_pairs)}")
     
             # H2H pairing
             if 'h2h' in df_final['Market'].unique():
@@ -914,7 +914,7 @@ def apply_blended_sharp_score(df, trained_models):
                     .reset_index(name='Unique_Sides')
                 )
                 num_h2h_pairs = (h2h_pairs['Unique_Sides'] == 2).sum()
-                st.markdown(f"### 🧮 H2H: {num_h2h_pairs} properly paired (2 sides) out of {len(h2h_pairs)}")
+                #st.markdown(f"### 🧮 H2H: {num_h2h_pairs} properly paired (2 sides) out of {len(h2h_pairs)}")
     
             st.success(f"✅ Final model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_final)}")
             return df_final
@@ -1210,19 +1210,19 @@ def render_scanner_tab(label, sport_key, container):
                     raw_keys_df = df_moves_raw[merge_keys].drop_duplicates()
                     scored_keys_df = df_scored[merge_keys].drop_duplicates()
         
-                    st.subheader("🔍 Merge Key Samples")
-                    st.markdown("#### df_moves_raw merge keys (sample)")
-                    st.dataframe(raw_keys_df.head(10))
+                    #st.subheader("🔍 Merge Key Samples")
+                    #st.markdown("#### df_moves_raw merge keys (sample)")
+                    #st.dataframe(raw_keys_df.head(10))
         
-                    st.markdown("#### df_scored merge keys (sample)")
-                    st.dataframe(scored_keys_df.head(10))
+                    #st.markdown("#### df_scored merge keys (sample)")
+                    #st.dataframe(scored_keys_df.head(10))
         
                     # Compare unmatched keys
                     merged_keys = raw_keys_df.merge(scored_keys_df, on=merge_keys, how='left', indicator=True)
                     unmatched = merged_keys[merged_keys['_merge'] == 'left_only']
-                    st.markdown("#### ❌ Merge key mismatches (in raw but not scored):")
-                    st.dataframe(unmatched[merge_keys].head(10))
-                    st.info(f"🚨 Total unmatched raw keys: {len(unmatched)} out of {len(raw_keys_df)}")
+                    #st.markdown("#### ❌ Merge key mismatches (in raw but not scored):")
+                    #st.dataframe(unmatched[merge_keys].head(10))
+                    #st.info(f"🚨 Total unmatched raw keys: {len(unmatched)} out of {len(raw_keys_df)}")
         
                     # === Finalize scoring set for merge
                     merge_columns = merge_keys + [
@@ -1237,9 +1237,9 @@ def render_scanner_tab(label, sport_key, container):
                     df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
                     df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False).drop_duplicates(subset=merge_keys, keep='first')
         
-                    st.info("📌 Deduplicated to latest Snapshot_Timestamp per merge key.")
-                    st.write("🧪 Post-deduplication sample:")
-                    st.dataframe(df_scored[merge_keys + ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']].head())
+                    #st.info("📌 Deduplicated to latest Snapshot_Timestamp per merge key.")
+                    #st.write("🧪 Post-deduplication sample:")
+                    #st.dataframe(df_scored[merge_keys + ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']].head())
         
                     # === Perform the merge
                     pre_merge_rows = len(df_moves_raw)
@@ -1282,8 +1282,8 @@ def render_scanner_tab(label, sport_key, container):
                         how='left',
                         validate='many_to_one'
                     )
-                    st.subheader("🧪 Columns in df_merged after merge")
-                    st.write(df_merged.columns.tolist())
+                    #st.subheader("🧪 Columns in df_merged after merge")
+                    #st.write(df_merged.columns.tolist())
 
                     # ✅ First flatten column names (replace _x/_y suffixes)
                     df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
@@ -1295,7 +1295,7 @@ def render_scanner_tab(label, sport_key, container):
                     df_moves_raw = df_merged
 
                     post_merge_rows = len(df_merged)
-                    st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
+                    #st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
                     
                     # ✅ Identify and drop exact suffix dupes before flattening
                                
