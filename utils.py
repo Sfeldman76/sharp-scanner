@@ -337,56 +337,56 @@ def normalize_book_key(raw_key, sharp_books, rec_books):
         except:
             return None
 
-    def compute_sharp_metrics(entries, open_val, mtype, label):
+def compute_sharp_metrics(entries, open_val, mtype, label):
 
-        move_signal = limit_jump = prob_shift = time_score = 0
-        move_magnitude_score = 0.0
-        for limit, curr, _ in entries:
-            if open_val is not None and curr is not None:
-                try:
-                    sharp_move_delta = abs(curr - open_val)
-                    if sharp_move_delta >= 0.01:
-                        move_signal += 1
-                        move_magnitude_score += sharp_move_delta
-                    if mtype == 'totals':
-                        if 'under' in label and curr < open_val: move_signal += 1
-                        elif 'over' in label and curr > open_val: move_signal += 1
-                    elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
-                    elif mtype == 'h2h':
-                        imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
-                        if imp_now and imp_open and imp_now > imp_open:
-                            prob_shift += 1
-                except:
-                    continue
-
-            if limit is not None and limit >= 100:
-                limit_jump += 1
-
+    move_signal = limit_jump = prob_shift = time_score = 0
+    move_magnitude_score = 0.0
+    for limit, curr, _ in entries:
+        if open_val is not None and curr is not None:
             try:
-                hour = datetime.now().hour
-                time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
+                sharp_move_delta = abs(curr - open_val)
+                if sharp_move_delta >= 0.01:
+                    move_signal += 1
+                    move_magnitude_score += sharp_move_delta
+                if mtype == 'totals':
+                    if 'under' in label and curr < open_val: move_signal += 1
+                    elif 'over' in label and curr > open_val: move_signal += 1
+                elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
+                elif mtype == 'h2h':
+                    imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
+                    if imp_now and imp_open and imp_now > imp_open:
+                        prob_shift += 1
             except:
-                time_score += 0.5
+                continue
 
-        move_magnitude_score = min(move_magnitude_score, 5.0)
-        total_limit = sum([l or 0 for l, _, _ in entries])
+        if limit is not None and limit >= 100:
+            limit_jump += 1
 
-        return {
-            'Sharp_Move_Signal': move_signal,
-            'Sharp_Limit_Jump': limit_jump,
-            'Sharp_Prob_Shift': prob_shift,
-            'Sharp_Time_Score': time_score,
-            'Sharp_Limit_Total': total_limit,
-            'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2),
-            'SharpBetScore': round(
-                2 * move_signal +
-                2 * limit_jump +
-                1.5 * time_score +
-                1.0 * prob_shift +
-                0.001 * total_limit +
-                3.0 * move_magnitude_score, 2
-            )
-        }
+        try:
+            hour = datetime.now().hour
+            time_score += 1.0 if 6 <= hour <= 11 else 0.5 if hour <= 15 else 0.2
+        except:
+            time_score += 0.5
+
+    move_magnitude_score = min(move_magnitude_score, 5.0)
+    total_limit = sum([l or 0 for l, _, _ in entries])
+
+    return {
+        'Sharp_Move_Signal': move_signal,
+        'Sharp_Limit_Jump': limit_jump,
+        'Sharp_Prob_Shift': prob_shift,
+        'Sharp_Time_Score': time_score,
+        'Sharp_Limit_Total': total_limit,
+        'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2),
+        'SharpBetScore': round(
+            2 * move_signal +
+            2 * limit_jump +
+            1.5 * time_score +
+            1.0 * prob_shift +
+            0.001 * total_limit +
+            3.0 * move_magnitude_score, 2
+        )
+    }
 
 import numpy as np
 import pandas as pd
@@ -423,8 +423,13 @@ def apply_blended_sharp_score(df, trained_models):
     import traceback
 
     logging.info("### 🛠️ Running `apply_blended_sharp_score()`")
-
     df = df.copy()
+    # 🚫 Guard clause to prevent KeyError
+    if df.empty or 'Market' not in df.columns:
+        logging.warning("⚠️ df_moves is empty or missing 'Market' column — skipping scoring.")
+        return pd.DataFrame()
+   
+    
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
 
     try:
