@@ -778,10 +778,10 @@ def apply_blended_sharp_score(df, trained_models):
             if df_market.empty:
                 st.warning(f"⚠️ No rows to score for {market_type.upper()}")
                 continue
+
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
-         
 
             if market_type == "spreads":
                 df_canon = df_market[df_market['Value'] < 0].copy()
@@ -809,34 +809,31 @@ def apply_blended_sharp_score(df, trained_models):
                 if col not in df_canon:
                     df_canon[col] = 0
 
-            # === Canonical scoring
             X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
             df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
             df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
-            
-            # === Build Inverse
+
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
-            
-            # Flip Outcome
-            if market_type == 'totals':
+
+            # Flip outcome
+            if market_type == "totals":
                 df_inverse['Outcome'] = df_inverse['Outcome'].map({'over': 'under', 'under': 'over'})
-            elif market_type in ['spreads', 'h2h']:
+            elif market_type in ["spreads", "h2h"]:
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-            
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            
-            # Rebuild Game_Key and Merge_Key_Short
+
+            # Rebuild keys
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             df_inverse['Market_Norm'] = df_inverse['Market']
             df_inverse['Game_Key'] = (
@@ -851,111 +848,72 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Away_Team_Norm'] + "_" +
                 df_inverse['Commence_Hour'].astype(str)
             )
-            
-            # ✅ Drop any inverse row that duplicates an existing one
+
+            # Drop any duplicate inverse rows
             existing_keys = df_canon[['Game_Key', 'Bookmaker']].drop_duplicates()
             df_inverse = df_inverse.merge(existing_keys, on=['Game_Key', 'Bookmaker'], how='left', indicator=True)
             df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
-            
-            # Combine
+
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
 
-            # 🎯 Tier assignment
+            # Tier assignment
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
 
-            # 🧪 Debug output
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
-
-            # === Append scored results
             scored_all.append(df_scored)
-            
-            # === Outcome pairing check for spreads/h2h
-            if market_type in ['spreads', 'h2h']:
-                # Step 1: Confirm each Game_Key has 2 distinct Outcome_Norm
-                paired = (
-                    df_scored
-                    .groupby(['Game_Key', 'Market'])['Outcome_Norm']
-                    .nunique()
-                    .reset_index(name='Num_Unique_Outcomes')
-                )
-                st.write("✅ Games missing an outcome side (should be none):")
-                st.dataframe(paired[paired['Num_Unique_Outcomes'] < 2].head())
-            
-                # Step 2: Validate exact pairing across Bookmakers
-                df_pairs = (
-                    df_scored
-                    .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
-                    .unique()
-                    .reset_index(name='Outcome_List')
-                )
-                df_pairs['Outcome_Pair'] = df_pairs['Outcome_List'].apply(sorted)
-                df_pairs['Pair_Valid'] = df_pairs['Outcome_Pair'].apply(lambda x: len(x) == 2 and x[0] != x[1])
-            
-                invalid_pairs = df_pairs[~df_pairs['Pair_Valid']]
-                st.write(f"🔍 Outcome pairing check ({market_type}): {len(invalid_pairs)} invalid")
-                if not invalid_pairs.empty:
-                    st.dataframe(invalid_pairs.head())
-                # === Flip probability consistency check
-                try:
-                    check_flip = (
-                        df_scored
-                        .pivot_table(
-                            index=['Game_Key', 'Market', 'Bookmaker'],
-                            columns='Was_Canonical',
-                            values='Model_Sharp_Win_Prob',
-                            aggfunc='first'
-                        )
-                        .dropna(subset=[True, False], how='any')  # Only keep rows with both canonical and inverse
-                    )
-                
-                    check_flip['Prob_Sum'] = check_flip[True] + check_flip[False]
-                    check_flip['Valid_Inverse'] = np.isclose(check_flip['Prob_Sum'], 1.0, atol=0.01)
-                
-                    st.subheader("🔁 Flip Probability Validation")
-                    st.info(f"✅ Valid Inverse Probabilities: {(check_flip['Valid_Inverse'].mean() * 100):.2f}%")
-                
-                    invalid_probs = check_flip[~check_flip['Valid_Inverse']]
-                    if not invalid_probs.empty:
-                        st.warning(f"⚠️ {len(invalid_probs)} entries failed inverse validation")
-                        st.dataframe(invalid_probs.reset_index().head())
-                except Exception as e:
-                    st.error("❌ Flip probability validation failed")
-                    st.code(traceback.format_exc())
-                            # === Unique outcome count per Game_Key/Market
-            # === Check if both sides exist per Game × Market
-            missing_inverse = (
+
+            # Validation checks
+            paired = (
                 df_scored
                 .groupby(['Game_Key', 'Market'])['Outcome_Norm']
                 .nunique()
-                .reset_index(name='Num_Outcomes')
+                .reset_index(name='Num_Unique_Outcomes')
             )
-            
-            num_issues = (missing_inverse['Num_Outcomes'] < 2).sum()
+            num_issues = (paired['Num_Unique_Outcomes'] < 2).sum()
             if num_issues > 0:
-                st.warning(f"⚠️ {num_issues} Game × Market groups are missing an outcome (only 1 unique side)")
-                st.dataframe(missing_inverse[missing_inverse['Num_Outcomes'] < 2].head())
-            
-            # === Optional: Summary info
-            st.info(f"✅ Total Game × Market groups: {len(missing_inverse)} — Fully paired: {len(missing_inverse) - num_issues}")
-            
-            # === Sample H2H outcome preview
-            if market_type == "h2h":
-                st.subheader("🧪 H2H Sample — First 2 Rows per Bookmaker")
-                sample = (
-                    df_scored[df_scored['Market'] == 'h2h']
-                    .groupby(['Game_Key', 'Bookmaker'])
-                    .head(2)
+                st.warning(f"⚠️ {num_issues} Game × Market groups are missing an outcome")
+                st.dataframe(paired[paired['Num_Unique_Outcomes'] < 2].head())
+
+            df_pairs = (
+                df_scored
+                .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
+                .unique()
+                .reset_index(name='Outcome_List')
+            )
+            df_pairs['Outcome_Pair'] = df_pairs['Outcome_List'].apply(sorted)
+            df_pairs['Pair_Valid'] = df_pairs['Outcome_Pair'].apply(lambda x: len(x) == 2 and x[0] != x[1])
+            invalid_pairs = df_pairs[~df_pairs['Pair_Valid']]
+            st.write(f"🔍 Outcome pairing check ({market_type}): {len(invalid_pairs)} invalid")
+            if not invalid_pairs.empty:
+                st.dataframe(invalid_pairs.head())
+
+            check_flip = (
+                df_scored
+                .pivot_table(
+                    index=['Game_Key', 'Market', 'Bookmaker'],
+                    columns='Was_Canonical',
+                    values='Model_Sharp_Win_Prob',
+                    aggfunc='first'
                 )
-                st.dataframe(sample[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Was_Canonical']])
-            except Exception as e:
-                st.error(f"❌ Failed scoring {market_type.upper()}")
-                st.code(traceback.format_exc())
+                .dropna(subset=[True, False], how='any')
+            )
+            check_flip['Prob_Sum'] = check_flip[True] + check_flip[False]
+            check_flip['Valid_Inverse'] = np.isclose(check_flip['Prob_Sum'], 1.0, atol=0.01)
+            st.subheader("🔁 Flip Probability Validation")
+            st.info(f"✅ Valid Inverse Probabilities: {(check_flip['Valid_Inverse'].mean() * 100):.2f}%")
+            if not check_flip[~check_flip['Valid_Inverse']].empty:
+                st.warning("⚠️ Some flipped probabilities are inconsistent.")
+                st.dataframe(check_flip[~check_flip['Valid_Inverse']].reset_index().head())
+
+        except Exception as e:
+            st.error(f"❌ Failed scoring {market_type.upper()}")
+            st.code(traceback.format_exc())
 
     try:
         if scored_all:
@@ -970,8 +928,6 @@ def apply_blended_sharp_score(df, trained_models):
         st.error("❌ Exception during final aggregation")
         st.code(traceback.format_exc())
         return pd.DataFrame()
-
-
         
 from io import BytesIO
 import pickle
