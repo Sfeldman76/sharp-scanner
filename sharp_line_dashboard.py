@@ -1572,6 +1572,7 @@ def render_scanner_tab(label, sport_key, container):
         # === Group numeric + categorical fields ONLY
         summary_grouped = (
             filtered_df
+            .sort_values(by=['Date + Time (EST)', 'Matchup', 'Market', 'Outcome'])
             .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome', 'Date + Time (EST)'], as_index=False)
             .agg({
                 'Rec Line': 'mean',
