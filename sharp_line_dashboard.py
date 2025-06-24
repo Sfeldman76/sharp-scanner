@@ -828,18 +828,24 @@ def apply_blended_sharp_score(df, trained_models):
 
             if market_type == 'totals':
                 df_inverse['Outcome'] = df_inverse['Outcome'].map({'over': 'under', 'under': 'over'})
-            elif market_type in ['h2h']:
+            elif market_type in ['h2h', 'spreads']:
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
+                
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             # ✅ Flip direction-sensitive fields for spreads
+            # ✅ Flip Rec Line, Sharp Line, and Sharp Move
             if market_type == 'spreads':
                 for col in ['Rec Line', 'Sharp Line', 'Sharp Move']:
-                    if col in df_inverse.columns and df_inverse[col].notna().any():
-                        df_inverse[col] = df_inverse[col].copy() * -1
+                    if col in df_inverse.columns and col in df_canon.columns:
+                        df_inverse[col] = np.where(
+                            df_inverse['Outcome'] == df_canon['Home_Team_Norm'],
+                            df_canon[col],
+                            -df_canon[col]
+                        )
             
             # === Rebuild keys
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
