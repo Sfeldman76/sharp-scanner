@@ -26,8 +26,8 @@ from utils import (
     compute_and_write_market_weights,
     build_game_key,
     normalize_book_key, 
-    apply_sharp_scoring
-    compute_sharp_metrics,
+    apply_sharp_scoring,
+    compute_sharp_metrics
 )
 
 def detect_and_save_all_sports():
