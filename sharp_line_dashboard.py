@@ -898,7 +898,28 @@ def apply_blended_sharp_score(df, trained_models):
                 else:
                     st.warning("⚠️ Spread debug columns not available in df_scored.")
             scored_all.append(df_scored)
-
+            st.subheader("🔍 Spread Flip Debug (Unique Game + Side)")
+    
+            df_debug = (
+                df_scored[df_scored['Market'] == 'spreads']
+                .drop_duplicates(subset=['Game_Key', 'Outcome'])
+                .sort_values(['Game_Key', 'Outcome'])
+                [['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob']]
+            )
+            
+            st.dataframe(df_debug.head(100))
+            st.subheader("🧪 Spread Symmetry Check")
+    
+            pair_check = (
+                df_scored[df_scored['Market'] == 'spreads']
+                .groupby('Game_Key')['Model_Sharp_Win_Prob']
+                .agg(['min', 'max', lambda x: round(abs(x.iloc[0] + x.iloc[1] - 1), 4)])
+                .rename(columns={'<lambda_0>': 'Symmetry_Error'})
+                .reset_index()
+            )
+            
+            st.dataframe(pair_check.head(100))
+            
         except Exception as e:
             st.error(f"❌ Failed scoring {market_type.upper()}")
             st.code(traceback.format_exc())
