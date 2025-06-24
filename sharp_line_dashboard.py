@@ -1532,7 +1532,7 @@ def render_scanner_tab(label, sport_key, container):
         
         summary_df.rename(columns={
             'Game': 'Matchup',
-            'Outcome': 'Pick',
+           
             'Rec_Book_Consensus': 'Rec Line',
             'Sharp_Book_Consensus': 'Sharp Line',
             'Move_From_Open_Rec': 'Rec Move',
@@ -1566,7 +1566,7 @@ def render_scanner_tab(label, sport_key, container):
        
         summary_grouped = (
             filtered_df
-            .groupby(['Game_Key', 'Matchup', 'Market', 'Pick', 'Date + Time (EST)'], as_index=False)
+            .groupby(['Game_Key', 'Matchup', 'Market', "Outcome", 'Date + Time (EST)'], as_index=False)
             .agg({
                 'Rec Line': 'mean',
                 'Sharp Line': 'mean',
@@ -1584,7 +1584,7 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Final Column Order for Display
         view_cols = [
-            'Date + Time (EST)', 'Matchup', 'Market', 'Pick',
+            'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
             'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
             'Model Prob', 'Confidence Tier',
             'Why Model Likes It', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
