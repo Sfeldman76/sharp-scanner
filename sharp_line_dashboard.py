@@ -1563,7 +1563,7 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
         # === Group by Matchup + Side + Timestamp
-        summary_df['Game_Key'] = df_moves_raw['Game_Key']  # propagate from raw
+       
         summary_grouped = (
             filtered_df
             .groupby(['Game_Key', 'Matchup', 'Market', 'Pick', 'Date + Time (EST)'], as_index=False)
