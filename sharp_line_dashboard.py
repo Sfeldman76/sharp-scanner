@@ -1335,37 +1335,37 @@ def render_scanner_tab(label, sport_key, container):
         # === Final cleanup
         df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
         
+        # === Final cleanup
+        df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].str.lower()
-      
-        # Ensure Outcome_Norm is present
-        df_moves_raw['Outcome_Norm'] = df_moves_raw['Outcome'].astype(str).str.strip().str.lower()
+        
+        # Normalize Outcome column (unify terminology)
+        df_moves_raw['Outcome'] = df_moves_raw['Outcome'].astype(str).str.strip().str.lower()
         
         # Define sharp and rec splits
         df_sharp = df_moves_raw[df_moves_raw['Bookmaker'].isin(SHARP_BOOKS)]
         df_rec = df_moves_raw[df_moves_raw['Bookmaker'].isin(REC_BOOKS)]
         
-        # ✅ Compute SHARP consensus per outcome (e.g. -1.5 for Orioles, +1.5 for Rangers)
+        # ✅ Compute SHARP consensus per side
         sharp_consensus = (
-            df_sharp.groupby(['Game_Key', 'Market', 'Outcome_Norm'])['Value']
+            df_sharp.groupby(['Game_Key', 'Market', 'Outcome'])['Value']
             .mean()
             .reset_index()
             .rename(columns={'Value': 'Sharp_Book_Consensus'})
         )
         
-        # ✅ Compute REC consensus per outcome
+        # ✅ Compute REC consensus per side
         rec_consensus = (
-            df_rec.groupby(['Game_Key', 'Market', 'Outcome_Norm'])['Value']
+            df_rec.groupby(['Game_Key', 'Market', 'Outcome'])['Value']
             .mean()
             .reset_index()
             .rename(columns={'Value': 'Rec_Book_Consensus'})
         )
         
         # ✅ Merge outcome-specific consensus lines into raw dataset
-        df_moves_raw = df_moves_raw.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome_Norm'], how='left')
-        df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome_Norm'], how='left')
-                        
-                
-                # === 1. Load df_history and compute df_first
+        df_moves_raw = df_moves_raw.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        df_moves_raw = df_moves_raw.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')        
+        # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
         start = time.time()
         df_history = get_recent_history()
