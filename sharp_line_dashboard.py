@@ -828,7 +828,7 @@ def apply_blended_sharp_score(df, trained_models):
 
             if market_type == 'totals':
                 df_inverse['Outcome'] = df_inverse['Outcome'].map({'over': 'under', 'under': 'over'})
-            elif market_type in ['spreads', 'h2h']:
+            elif market_type in ['h2h']:
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
