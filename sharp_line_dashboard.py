@@ -1341,16 +1341,21 @@ def render_scanner_tab(label, sport_key, container):
         
         # Normalize bookmaker column
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].str.lower()
+        # Compute consensus line per matchup (not per outcome)
+        sharp_consensus = (
+            df_sharp.groupby(['Game_Key_Base', 'Market'])['Value']
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Sharp_Book_Consensus'})
+        )
         
-        # Sharp consensus
-        df_sharp = df_moves_raw[df_moves_raw['Bookmaker'].isin(sharp_books)]
-        sharp_consensus = df_sharp.groupby(['Game_Key', 'Market', 'Outcome'])['Value'].mean().reset_index()
-        sharp_consensus.rename(columns={'Value': 'Sharp_Book_Consensus'}, inplace=True)
-        
-        # Rec consensus
-        df_rec = df_moves_raw[df_moves_raw['Bookmaker'].isin(rec_books)]
-        rec_consensus = df_rec.groupby(['Game_Key', 'Market', 'Outcome'])['Value'].mean().reset_index()
-        rec_consensus.rename(columns={'Value': 'Rec_Book_Consensus'}, inplace=True)
+        rec_consensus = (
+            df_rec.groupby(['Game_Key_Base', 'Market'])['Value']
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Rec_Book_Consensus'})
+        )
+      \
         
         # Merge into df_moves_raw
         df_moves_raw = df_moves_raw.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
