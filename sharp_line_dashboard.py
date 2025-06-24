@@ -874,7 +874,7 @@ def apply_blended_sharp_score(df, trained_models):
             st.error(f"❌ Failed scoring {market_type.upper()}")
             st.code(traceback.format_exc())
 
-    try:
+
     try:
         if scored_all:
             df_final = pd.concat(scored_all, ignore_index=True)
