@@ -1622,14 +1622,17 @@ def render_scanner_tab(label, sport_key, container):
             on=['Game_Key', 'Market', 'Outcome'],
             how='left'
         )
+        
+        # NEW: Rename _y if collision happened
         for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
             if f"{col}_y" in summary_grouped.columns:
                 summary_grouped[col] = summary_grouped[f"{col}_y"]
-                summary_grouped.drop(columns=[f"{col}_x", f"{col}_y"], inplace=True, errors='ignore')
-
-        st.write("🔍 Preview: summary_grouped keys")
-        st.dataframe(summary_grouped[['Game_Key', 'Market', 'Outcome']].drop_duplicates().head())
         
+        # Check if it's present
+        st.write("✅ Summary diagnostics check")
+        st.dataframe(summary_grouped[['Game_Key', 'Outcome', 'Confidence Trend']].head())
+        st.write("🔍 Preview: summary_grouped keys")
+        st.dataframe(summary_grouped[['Game_Key', 'Market', 'Outcome']].drop_duplicates().head())        
         st.write("🔍 Preview: diagnostics_df keys")
         st.dataframe(diagnostic_df[['Game_Key', 'Market', 'Outcome']].drop_duplicates().head())
 
