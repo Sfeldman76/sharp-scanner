@@ -1454,7 +1454,10 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
         
             dedup_cols_diag = ['Game_Key', 'Market', 'Outcome']  # 🔥 Bookmaker removed for match flexibility
-            df_pre = df_moves_raw[pre_mask].copy()
+            # Only keep games that exist in summary_grouped
+            relevant_game_keys = summary_df['Game_Key'].unique()
+            df_pre = df_moves_raw[df_moves_raw['Game_Key'].isin(relevant_game_keys) & df_moves_raw['Pre_Game']].copy()
+
             before = len(df_pre)
             df_pre = df_pre.sort_values('Snapshot_Timestamp', ascending=False)
             df_pre = df_pre.drop_duplicates(subset=dedup_cols_diag, keep='first')
@@ -1590,6 +1593,10 @@ def render_scanner_tab(label, sport_key, container):
             summary_grouped[col] = summary_grouped[col].astype(str).str.strip().str.lower()
             diagnostic_df[col] = diagnostic_df[col].astype(str).str.strip().str.lower()
         
+        # 🧪 Add these diagnostics RIGHT HERE before merging
+        st.write("🧪 Unique Game_Keys in summary:", summary_grouped['Game_Key'].unique()[:5])
+        st.write("🧪 Unique Game_Keys in diagnostics:", diagnostic_df['Game_Key'].unique()[:5])
+
         # === Merge diagnostics back into grouped summary
         summary_grouped = summary_grouped.merge(
             diagnostic_df,
