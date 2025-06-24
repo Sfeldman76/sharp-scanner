@@ -751,6 +751,7 @@ def apply_blended_sharp_score(df, trained_models):
     import traceback
 
     st.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
+
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
 
@@ -815,7 +816,10 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
 
-            # === Inverse Construction
+            # ✅ Store canonical outcome keys for later duplicate filtering
+            canon_keys = df_canon[['Bookmaker', 'Outcome_Norm']].drop_duplicates()
+
+            # === Build Inverse
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
@@ -830,13 +834,11 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-            else:
-                df_inverse['Outcome'] = df_inverse['Outcome_Norm']
-
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+
+            # === Rebuild keys
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             df_inverse['Market_Norm'] = df_inverse['Market']
-
             df_inverse['Game_Key'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
                 df_inverse['Away_Team_Norm'] + "_" +
@@ -844,15 +846,14 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Market_Norm'] + "_" +
                 df_inverse['Outcome_Norm']
             )
-
             df_inverse['Merge_Key_Short'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
                 df_inverse['Away_Team_Norm'] + "_" +
                 df_inverse['Commence_Hour'].astype(str)
             )
 
-            existing_keys = df_canon[['Game_Key', 'Bookmaker']].drop_duplicates()
-            df_inverse = df_inverse.merge(existing_keys, on=['Game_Key', 'Bookmaker'], how='left', indicator=True)
+            # ✅ Remove inverse rows where the Outcome already exists in canonical
+            df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Outcome_Norm'], how='left', indicator=True)
             df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
@@ -886,7 +887,6 @@ def apply_blended_sharp_score(df, trained_models):
         st.error("❌ Exception during final aggregation")
         st.code(traceback.format_exc())
         return pd.DataFrame()
-        
 from io import BytesIO
 import pickle
 from google.cloud import storage
