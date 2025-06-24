@@ -1261,7 +1261,13 @@ def render_scanner_tab(label, sport_key, container):
                     
                     # ✅ Only keep necessary columns (avoids silent drop)
                     # ✅ Only keep necessary columns (avoids silent drop)
-                    df_scored_clean = df_scored[merge_keys + ['Model_Sharp_Win_Prob']].copy()
+                    model_cols = [
+                        'Model_Sharp_Win_Prob',
+                        'Model_Confidence',
+                        'Model_Confidence_Tier',
+                        'Scored_By_Model'
+                    ]
+                    df_scored_clean = df_scored[merge_keys + model_cols].copy()
                     
                     # === Perform the merge
                     pre_merge_rows = len(df_moves_raw)
