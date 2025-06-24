@@ -1265,28 +1265,29 @@ def render_scanner_tab(label, sport_key, container):
                     
                     # === Perform the merge
                     pre_merge_rows = len(df_moves_raw)
+                    # === Perform the merge
                     df_merged = df_moves_raw.merge(
                         df_scored_clean,
                         on=merge_keys,
                         how='left',
-                        validate='many_to_one'  # catches bad merges
+                        validate='many_to_one'
                     )
                     
+                    # ✅ First flatten column names (replace _x/_y suffixes)
+                    df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
+                    
+                    # ✅ Then drop any true duplicates (leftovers after flattening)
+                    df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
+                    
+                    # ✅ Assign final cleaned frame
+                    df_moves_raw = df_merged
+
                     post_merge_rows = len(df_merged)
                     st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
                     
                     # ✅ Identify and drop exact suffix dupes before flattening
-                    cols_to_remove = [col for col in df_merged.columns if col.endswith('_x') or col.endswith('_y')]
-                    if cols_to_remove:
-                        st.warning(f"⚠️ Dropping these suffixed columns before flattening: {cols_to_remove}")
-                        df_merged.drop(columns=cols_to_remove, inplace=True)
+                               
                     
-                    # ✅ Then apply flattening safely
-                    df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
-                    
-                    # ✅ Now assign back
-                    df_moves_raw = df_merged
-
                     # ✅ Final validation
                     st.write("✅ Post-merge check: Any scored probabilities?")
                     if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
