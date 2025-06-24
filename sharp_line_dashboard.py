@@ -751,7 +751,6 @@ def apply_blended_sharp_score(df, trained_models):
     import traceback
 
     st.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
-
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
 
@@ -816,26 +815,28 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
 
+            # === Inverse Construction
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
 
-            # Flip outcome
-            if market_type == "totals":
+            if market_type == 'totals':
                 df_inverse['Outcome'] = df_inverse['Outcome'].map({'over': 'under', 'under': 'over'})
-            elif market_type in ["spreads", "h2h"]:
+            elif market_type in ['spreads', 'h2h']:
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            else:
+                df_inverse['Outcome'] = df_inverse['Outcome_Norm']
 
-            # Rebuild keys
+            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             df_inverse['Market_Norm'] = df_inverse['Market']
+
             df_inverse['Game_Key'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
                 df_inverse['Away_Team_Norm'] + "_" +
@@ -843,13 +844,13 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Market_Norm'] + "_" +
                 df_inverse['Outcome_Norm']
             )
+
             df_inverse['Merge_Key_Short'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
                 df_inverse['Away_Team_Norm'] + "_" +
                 df_inverse['Commence_Hour'].astype(str)
             )
 
-            # Drop any duplicate inverse rows
             existing_keys = df_canon[['Game_Key', 'Bookmaker']].drop_duplicates()
             df_inverse = df_inverse.merge(existing_keys, on=['Game_Key', 'Bookmaker'], how='left', indicator=True)
             df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
@@ -857,7 +858,6 @@ def apply_blended_sharp_score(df, trained_models):
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
 
-            # Tier assignment
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
@@ -866,50 +866,8 @@ def apply_blended_sharp_score(df, trained_models):
 
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+
             scored_all.append(df_scored)
-
-            # Validation checks
-            paired = (
-                df_scored
-                .groupby(['Game_Key', 'Market'])['Outcome_Norm']
-                .nunique()
-                .reset_index(name='Num_Unique_Outcomes')
-            )
-            num_issues = (paired['Num_Unique_Outcomes'] < 2).sum()
-            if num_issues > 0:
-                st.warning(f"⚠️ {num_issues} Game × Market groups are missing an outcome")
-                st.dataframe(paired[paired['Num_Unique_Outcomes'] < 2].head())
-
-            df_pairs = (
-                df_scored
-                .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
-                .unique()
-                .reset_index(name='Outcome_List')
-            )
-            df_pairs['Outcome_Pair'] = df_pairs['Outcome_List'].apply(sorted)
-            df_pairs['Pair_Valid'] = df_pairs['Outcome_Pair'].apply(lambda x: len(x) == 2 and x[0] != x[1])
-            invalid_pairs = df_pairs[~df_pairs['Pair_Valid']]
-            st.write(f"🔍 Outcome pairing check ({market_type}): {len(invalid_pairs)} invalid")
-            if not invalid_pairs.empty:
-                st.dataframe(invalid_pairs.head())
-
-            check_flip = (
-                df_scored
-                .pivot_table(
-                    index=['Game_Key', 'Market', 'Bookmaker'],
-                    columns='Was_Canonical',
-                    values='Model_Sharp_Win_Prob',
-                    aggfunc='first'
-                )
-                .dropna(subset=[True, False], how='any')
-            )
-            check_flip['Prob_Sum'] = check_flip[True] + check_flip[False]
-            check_flip['Valid_Inverse'] = np.isclose(check_flip['Prob_Sum'], 1.0, atol=0.01)
-            st.subheader("🔁 Flip Probability Validation")
-            st.info(f"✅ Valid Inverse Probabilities: {(check_flip['Valid_Inverse'].mean() * 100):.2f}%")
-            if not check_flip[~check_flip['Valid_Inverse']].empty:
-                st.warning("⚠️ Some flipped probabilities are inconsistent.")
-                st.dataframe(check_flip[~check_flip['Valid_Inverse']].reset_index().head())
 
         except Exception as e:
             st.error(f"❌ Failed scoring {market_type.upper()}")
