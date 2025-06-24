@@ -835,7 +835,12 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Home_Team_Norm']
                 )
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-
+            # ✅ Flip direction-sensitive fields for spreads
+            if market_type == 'spreads':
+                for col in ['Rec Line', 'Sharp Line', 'Sharp Move']:
+                    if col in df_inverse.columns and df_inverse[col].notna().any():
+                        df_inverse[col] = df_inverse[col].copy() * -1
+            
             # === Rebuild keys
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             df_inverse['Market_Norm'] = df_inverse['Market']
