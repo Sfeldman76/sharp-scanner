@@ -494,8 +494,8 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scored_By_Model'] = True
 
             # ✅ Store canonical outcome keys for later duplicate filtering
-            canon_keys = df_canon[['Bookmaker', 'Outcome_Norm']].drop_duplicates()
-
+           
+            
             # === Build Inverse
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
@@ -528,11 +528,17 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Away_Team_Norm'] + "_" +
                 df_inverse['Commence_Hour'].astype(str)
             )
-
+            
             # ✅ Remove inverse rows where the Outcome already exists in canonical
-            df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Outcome_Norm'], how='left', indicator=True)
-            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+            if market_type == "h2h":
+                canon_keys = df_canon[['Bookmaker', 'Game_Key']].drop_duplicates()
+                df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Game_Key'], how='left', indicator=True)
+            else:
+                canon_keys = df_canon[['Bookmaker', 'Outcome_Norm']].drop_duplicates()
+                df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Outcome_Norm'], how='left', indicator=True)
 
+            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+        
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
 
