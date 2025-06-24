@@ -1243,33 +1243,58 @@ def render_scanner_tab(label, sport_key, container):
         
                     # === Perform the merge
                     pre_merge_rows = len(df_moves_raw)
+                    
+                    # 🚨 Defensive check: ensure scoring column exists before dropping anything
+                    if 'Model_Sharp_Win_Prob' not in df_scored.columns:
+                        st.error("❌ Model_Sharp_Win_Prob missing from df_scored before merge!")
+                        st.dataframe(df_scored.head())
+                        raise ValueError("Model_Sharp_Win_Prob missing — merge will fail.")
+                    
+                    # Optional: check and log if merge keys are consistent
+                    for col in merge_keys:
+                        if col not in df_moves_raw.columns or col not in df_scored.columns:
+                            st.error(f"❌ Merge key '{col}' missing in one of the DataFrames.")
+                            raise ValueError(f"Missing merge key: {col}")
+                        # Normalize string columns to ensure merge alignment
+                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+                    
+                    # ✅ Only keep necessary columns (avoids silent drop)
+                    df_scored_clean = df_scored[merge_keys + ['Model_Sharp_Win_Prob']].copy()
+                    
                     df_merged = df_moves_raw.merge(
-                        df_scored.drop(columns=['Snapshot_Timestamp']),
+                        df_scored_clean,
                         on=merge_keys,
-                        how='left'
+                        how='left',
+                        validate='many_to_one'  # catches bad merges
                     )
-        
+                    
                     post_merge_rows = len(df_merged)
                     st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
-        
+                    
+                    # 🚨 Row explosion warning
                     if post_merge_rows > pre_merge_rows * 1.5:
                         st.warning("⚠️ Row explosion detected! Merge may be too loose.")
                         st.dataframe(df_merged[merge_keys + ['Model_Sharp_Win_Prob']].head())
                         raise ValueError("🚫 Merge caused row explosion — likely merge_keys are too loose.")
-        
+                    
                     df_moves_raw = df_merged
-        
+                    
                     # ✅ Final validation
                     st.write("✅ Post-merge check: Any scored probabilities?")
-                    st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
-        
-                    missing_rows = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
-                    if missing_rows > 0:
-                        st.warning(f"⚠️ {missing_rows} rows missing model score after merge — check key mismatch.")
-                        st.dataframe(df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()][merge_keys].head())
+                    if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
+                        st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
                     else:
-                        st.success("✅ All rows successfully scored.")
-          
+                        st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
+                    
+                        missing_rows = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
+                        if missing_rows > 0:
+                            st.warning(f"⚠️ {missing_rows} rows missing model score after merge — check key mismatch.")
+                            st.dataframe(df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()][merge_keys].head())
+                        else:
+                            st.success("✅ All rows successfully scored.")
+                    
+                              
        
             except Exception as e:
                 error_type = type(e).__name__
