@@ -853,9 +853,12 @@ def apply_blended_sharp_score(df, trained_models):
             )
 
             # ✅ Remove inverse rows where the Outcome already exists in canonical
-            if market_type == "h2h":
+            # ✅ Remove inverse rows only if already present in canonical — use Game_Key for spreads/h2h
+            if market_type in ["spreads", "h2h"]:
                 canon_keys = df_canon[['Bookmaker', 'Game_Key']].drop_duplicates()
                 df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Game_Key'], how='left', indicator=True)
+                df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+            # Leave totals completely untouched (always generate 'under' from 'over')
             else:
                 canon_keys = df_canon[['Bookmaker', 'Outcome_Norm']].drop_duplicates()
                 df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Outcome_Norm'], how='left', indicator=True)
@@ -1430,7 +1433,7 @@ def render_scanner_tab(label, sport_key, container):
                 # If fallback is a Series (like 'Value'), align by index; otherwise set scalar
                 df_moves_raw[col] = fallback_val if isinstance(fallback_val, pd.Series) else fallback_val
         
-        st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
+        #st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
                         
         # === Final Diagnostics (Only for upcoming pre-game picks)
         # === Final Diagnostics (Only for upcoming pre-game picks)
@@ -1463,7 +1466,7 @@ def render_scanner_tab(label, sport_key, container):
                 df_moves_raw['Pre_Game'] & df_moves_raw['Game_Key'].isin(relevant_game_keys)
             ].copy()
 
-            st.info(f"📦 Computing diagnostics for {len(df_pre)} rows across {df_pre['Game_Key'].nunique()} unique games")
+            #st.info(f"📦 Computing diagnostics for {len(df_pre)} rows across {df_pre['Game_Key'].nunique()} unique games")
 
 
             before = len(df_pre)
@@ -1484,8 +1487,8 @@ def render_scanner_tab(label, sport_key, container):
                 how='left',
                 suffixes=('', '_diagnostics')
             )
-            st.write("✅ Diagnostics merged sample:")
-            st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
+            #st.write("✅ Diagnostics merged sample:")
+            #st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
 
             # Fill diagnostics columns if missing (prefer diagnostics merge first)
             diagnostic_cols = {
@@ -1598,8 +1601,8 @@ def render_scanner_tab(label, sport_key, container):
             diagnostics_df_clean[col] = diagnostics_df_clean[col].astype(str).str.strip().str.lower()
         
         # 🧪 Add these diagnostics RIGHT HERE before merging
-        st.write("🧪 Unique Game_Keys in summary:", summary_grouped['Game_Key'].unique()[:5])
-        st.write("🧪 Unique Game_Keys in diagnostics:", diagnostics_df_clean['Game_Key'].unique()[:5])
+        #st.write("🧪 Unique Game_Keys in summary:", summary_grouped['Game_Key'].unique()[:5])
+        #st.write("🧪 Unique Game_Keys in diagnostics:", diagnostics_df_clean['Game_Key'].unique()[:5])
         merge_keys = ['Game_Key', 'Market', 'Outcome']
         
         merged_check = summary_grouped[merge_keys].merge(
@@ -1612,8 +1615,8 @@ def render_scanner_tab(label, sport_key, container):
         only_in_summary = merged_check[merged_check['_merge'] == 'left_only']
         only_in_diagnostics = merged_check[merged_check['_merge'] == 'right_only']
         
-        st.warning(f"🚫 {len(only_in_summary)} keys in summary not matched in diagnostics")
-        st.warning(f"🚫 {len(only_in_diagnostics)} keys in diagnostics not matched in summary")
+        #st.warning(f"🚫 {len(only_in_summary)} keys in summary not matched in diagnostics")
+        #st.warning(f"🚫 {len(only_in_diagnostics)} keys in diagnostics not matched in summary")
         
         if not only_in_summary.empty:
             st.dataframe(only_in_summary.head())
@@ -1638,7 +1641,7 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Diagnostic merge audit
         num_diagnostics = summary_grouped['Confidence Trend'].ne('⚠️ Missing').sum()
-        st.success(f"✅ Diagnostics successfully populated on {num_diagnostics} / {len(summary_grouped)} rows")
+        #st.success(f"✅ Diagnostics successfully populated on {num_diagnostics} / {len(summary_grouped)} rows")
         missing_merge = summary_grouped['Confidence Trend'].isna().sum()
         st.warning(f"⚠️ Diagnostics missing for {missing_merge} rows after merge")
         
