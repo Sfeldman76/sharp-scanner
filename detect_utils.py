@@ -25,7 +25,8 @@ from utils import (
     compute_line_hash,
     compute_and_write_market_weights,
     build_game_key,
-    normalize_book_key
+    normalize_book_key, 
+    apply_sharp_scoring
 
 )
 
