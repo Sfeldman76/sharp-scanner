@@ -875,9 +875,47 @@ def apply_blended_sharp_score(df, trained_models):
             st.code(traceback.format_exc())
 
     try:
+    try:
         if scored_all:
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
+            
+            # === Final Scoring Summary ===
+            st.markdown("## 📊 Scoring Summary")
+            
+            # Totals breakdown
+            if 'totals' in df_final['Market'].unique():
+                totals_summary = (
+                    df_final[df_final['Market'] == 'totals']['Outcome_Norm']
+                    .value_counts()
+                    .rename_axis('Outcome')
+                    .reset_index(name='Count')
+                )
+                st.markdown("### 🔢 Totals Breakdown (Over/Under)")
+                st.dataframe(totals_summary)
+    
+            # Spreads pairing
+            if 'spreads' in df_final['Market'].unique():
+                spread_pairs = (
+                    df_final[df_final['Market'] == 'spreads']
+                    .groupby(['Game_Key', 'Bookmaker'])['Outcome_Norm']
+                    .nunique()
+                    .reset_index(name='Unique_Sides')
+                )
+                num_spread_pairs = (spread_pairs['Unique_Sides'] == 2).sum()
+                st.markdown(f"### 🧮 Spreads: {num_spread_pairs} properly paired (2 sides) out of {len(spread_pairs)}")
+    
+            # H2H pairing
+            if 'h2h' in df_final['Market'].unique():
+                h2h_pairs = (
+                    df_final[df_final['Market'] == 'h2h']
+                    .groupby(['Game_Key', 'Bookmaker'])['Outcome_Norm']
+                    .nunique()
+                    .reset_index(name='Unique_Sides')
+                )
+                num_h2h_pairs = (h2h_pairs['Unique_Sides'] == 2).sum()
+                st.markdown(f"### 🧮 H2H: {num_h2h_pairs} properly paired (2 sides) out of {len(h2h_pairs)}")
+    
             st.success(f"✅ Final model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_final)}")
             return df_final
         else:
@@ -887,6 +925,7 @@ def apply_blended_sharp_score(df, trained_models):
         st.error("❌ Exception during final aggregation")
         st.code(traceback.format_exc())
         return pd.DataFrame()
+        
 from io import BytesIO
 import pickle
 from google.cloud import storage
@@ -1136,7 +1175,15 @@ def render_scanner_tab(label, sport_key, container):
         
                 if not df_pre_game_picks.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-        
+                    st.subheader("📊 Diagnostic: df_scored rows per market and missing prob")
+                    if df_scored.empty:
+                        st.warning("⚠️ df_scored is completely empty.")
+                    else:
+                        st.dataframe(
+                            df_scored.groupby('Market')['Model_Sharp_Win_Prob']
+                            .apply(lambda x: x.notna().sum())
+                            .reset_index(name='Scored_Rows')
+                        )
                     # ✅ Ensure Snapshot_Timestamp exists for dedup
                     if 'Snapshot_Timestamp' not in df_scored.columns:
                         df_scored['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
