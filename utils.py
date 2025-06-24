@@ -213,7 +213,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         logging.exception("❌ Failed to upload snapshot to GCS.")
 
-def read_latest_snapshot_from_bigquery(hours=2):
+def read_latest_snapshot_from_bigquery(hours=24):
     try:
         query = f"""
             SELECT * FROM `{SNAPSHOTS_TABLE}`
