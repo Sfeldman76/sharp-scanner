@@ -1596,7 +1596,11 @@ def render_scanner_tab(label, sport_key, container):
             on=['Game_Key', 'Market', 'Outcome'],
             how='left'
         )
-        
+        # Fill empty diagnostics with ⚠️ Missing
+        diagnostic_fields = ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
+        for col in diagnostic_fields:
+            summary_grouped[col] = summary_grouped[col].fillna("⚠️ Missing")
+
         # === Diagnostic merge audit
         num_diagnostics = summary_grouped['Confidence Trend'].ne('⚠️ Missing').sum()
         st.success(f"✅ Diagnostics successfully populated on {num_diagnostics} / {len(summary_grouped)} rows")
