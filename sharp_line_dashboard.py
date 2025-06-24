@@ -1175,7 +1175,7 @@ def render_scanner_tab(label, sport_key, container):
         
                 if not df_pre_game_picks.empty:
                     df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-                    st.subheader("📊 Diagnostic: df_scored rows per market and missing prob")
+                    #st.subheader("📊 Diagnostic: df_scored rows per market and missing prob")
                     if df_scored.empty:
                         st.warning("⚠️ df_scored is completely empty.")
                     else:
@@ -1301,7 +1301,7 @@ def render_scanner_tab(label, sport_key, container):
                                
                     
                     # ✅ Final validation
-                    st.write("✅ Post-merge check: Any scored probabilities?")
+                    #st.write("✅ Post-merge check: Any scored probabilities?")
                     if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
                         st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
                     else:
@@ -1536,10 +1536,10 @@ def render_scanner_tab(label, sport_key, container):
             'Model_Confidence_Tier': 'Confidence Tier'
         }, inplace=True)
         
-        st.write("🧪 Non-null model probs in summary_df:", summary_df['Model Prob'].notna().sum())
-        st.write("🧪 Distinct confidence tiers:", summary_df['Confidence Tier'].dropna().unique().tolist())
-        st.write("📊 Final summary preview:")
-        st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
+        #st.write("🧪 Non-null model probs in summary_df:", summary_df['Model Prob'].notna().sum())
+        #st.write("🧪 Distinct confidence tiers:", summary_df['Confidence Tier'].dropna().unique().tolist())
+        #st.write("📊 Final summary preview:")
+        #st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
                 
                          
         
