@@ -315,18 +315,17 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
 
+def normalize_label(label):
+     return str(label).strip().lower().replace('.0', '')
 
-    def normalize_label(label):
-        return str(label).strip().lower().replace('.0', '')
-
-    def normalize_book_key(raw_key, sharp_books, rec_books):
-        for rec in rec_books:
-            if rec.replace(" ", "") in raw_key:
-                return rec.replace(" ", "")
-        for sharp in sharp_books:
-            if sharp in raw_key:
-                return sharp
-        return raw_key
+def normalize_book_key(raw_key, sharp_books, rec_books):
+    for rec in rec_books:
+        if rec.replace(" ", "") in raw_key:
+            return rec.replace(" ", "")
+    for sharp in sharp_books:
+        if sharp in raw_key:
+            return sharp
+    return raw_key
 
     def implied_prob(odds):
         try:
