@@ -854,16 +854,13 @@ def apply_blended_sharp_score(df, trained_models):
 
             # ✅ Remove inverse rows where the Outcome already exists in canonical
             # ✅ Remove inverse rows only if already present in canonical — use Game_Key for spreads/h2h
-            if market_type in ["spreads", "h2h"]:
-                canon_keys = df_canon[['Bookmaker', 'Game_Key']].drop_duplicates()
-                df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Game_Key'], how='left', indicator=True)
-                df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
-            # Leave totals completely untouched (always generate 'under' from 'over')
-            else:
+            # ✅ Only deduplicate for totals — spreads and h2h generate inverse only from canonical
+            if market_type == 'totals':
                 canon_keys = df_canon[['Bookmaker', 'Outcome_Norm']].drop_duplicates()
                 df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Outcome_Norm'], how='left', indicator=True)
-
-            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+                df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+            # No deduplication for spreads or h2h
+            
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
