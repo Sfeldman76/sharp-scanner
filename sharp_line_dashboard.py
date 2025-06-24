@@ -1588,65 +1588,59 @@ def render_scanner_tab(label, sport_key, container):
         diagnostic_cols = ['Game_Key', 'Market', 'Outcome',
                            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
         
-        diagnostic_df = df_moves_raw[diagnostic_cols].drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
+        # === Re-merge diagnostics AFTER groupby using clean diagnostics_df
+        diagnostics_df_clean = diagnostics_df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
         
         # ✅ Normalize merge keys on both sides
-        for col in ['Outcome', 'Market', 'Game_Key']:
+        for col in ['Game_Key', 'Market', 'Outcome']:
             summary_grouped[col] = summary_grouped[col].astype(str).str.strip().str.lower()
-            diagnostic_df[col] = diagnostic_df[col].astype(str).str.strip().str.lower()
+            diagnostics_df_clean[col] = diagnostics_df_clean[col].astype(str).str.strip().str.lower()
         
         # 🧪 Add these diagnostics RIGHT HERE before merging
         st.write("🧪 Unique Game_Keys in summary:", summary_grouped['Game_Key'].unique()[:5])
-        st.write("🧪 Unique Game_Keys in diagnostics:", diagnostic_df['Game_Key'].unique()[:5])
+        st.write("🧪 Unique Game_Keys in diagnostics:", diagnostics_df_clean['Game_Key'].unique()[:5])
         merge_keys = ['Game_Key', 'Market', 'Outcome']
-
+        
         merged_check = summary_grouped[merge_keys].merge(
-            diagnostic_df[merge_keys],
+            diagnostics_df_clean[merge_keys],
             on=merge_keys,
             how='outer',
             indicator=True
         )
         
         only_in_summary = merged_check[merged_check['_merge'] == 'left_only']
-        only_in_diagnostic = merged_check[merged_check['_merge'] == 'right_only']
+        only_in_diagnostics = merged_check[merged_check['_merge'] == 'right_only']
         
         st.warning(f"🚫 {len(only_in_summary)} keys in summary not matched in diagnostics")
         st.warning(f"🚫 {len(only_in_diagnostics)} keys in diagnostics not matched in summary")
         
         if not only_in_summary.empty:
             st.dataframe(only_in_summary.head())
-
+        
         # === Merge diagnostics back into grouped summary
         summary_grouped = summary_grouped.merge(
-            diagnostic_df,
+            diagnostics_df_clean,
             on=['Game_Key', 'Market', 'Outcome'],
             how='left'
         )
         
-        # NEW: Rename _y if collision happened
+        # ✅ Resolve _y suffixes (only if collision occurred)
         for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
             if f"{col}_y" in summary_grouped.columns:
                 summary_grouped[col] = summary_grouped[f"{col}_y"]
+                summary_grouped.drop(columns=[f"{col}_x", f"{col}_y"], inplace=True, errors='ignore')
         
-        # Check if it's present
-        st.write("✅ Summary diagnostics check")
-        st.dataframe(summary_grouped[['Game_Key', 'Outcome', 'Confidence Trend']].head())
-        st.write("🔍 Preview: summary_grouped keys")
-        st.dataframe(summary_grouped[['Game_Key', 'Market', 'Outcome']].drop_duplicates().head())        
-        st.write("🔍 Preview: diagnostics_df keys")
-        st.dataframe(diagnostic_df[['Game_Key', 'Market', 'Outcome']].drop_duplicates().head())
-
         # Fill empty diagnostics with ⚠️ Missing
         diagnostic_fields = ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
         for col in diagnostic_fields:
             summary_grouped[col] = summary_grouped[col].fillna("⚠️ Missing")
-
+        
         # === Diagnostic merge audit
         num_diagnostics = summary_grouped['Confidence Trend'].ne('⚠️ Missing').sum()
         st.success(f"✅ Diagnostics successfully populated on {num_diagnostics} / {len(summary_grouped)} rows")
         missing_merge = summary_grouped['Confidence Trend'].isna().sum()
         st.warning(f"⚠️ Diagnostics missing for {missing_merge} rows after merge")
-
+        
         # === Final Column Order for Display
         view_cols = [
             'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
@@ -1656,7 +1650,6 @@ def render_scanner_tab(label, sport_key, container):
         ]
         summary_grouped = summary_grouped[view_cols]
 
-  
         
         # === Final Output
         st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
