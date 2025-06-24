@@ -397,6 +397,24 @@ import traceback
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
+def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
+    for r in rows:
+        # Identify the key for this market
+        game_key = (r['Game'], r['Market'], r['Outcome'])
+
+        # Get all relevant line movements for this label
+        entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome'], [])
+
+        # Get the original opening line from the stored line_open_map
+        open_val = line_open_map.get(game_key, (None,))[0]
+
+        # Compute sharp signals and update the row dict
+        r.update(compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome']))
+
+    return rows
+
+    
 def apply_blended_sharp_score(df, trained_models):
     import numpy as np
     import pandas as pd
@@ -404,14 +422,14 @@ def apply_blended_sharp_score(df, trained_models):
     import time
     import traceback
 
-    logging.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
+    logging.info("### 🛠️ Running `apply_blended_sharp_score()`")
 
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
 
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-        logging.success("🧹 Cleaned up duplicate suffix columns (_x, _y)")
+        logging.info("🧹 Cleaned up duplicate suffix columns (_x, _y)")
     except Exception as e:
         logging.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
@@ -420,7 +438,7 @@ def apply_blended_sharp_score(df, trained_models):
     scored_all = []
 
     for market_type, bundle in trained_models.items():
-        logging.markdown(f"---\n### 🧪 Scoring Market: `{market_type}`")
+        logging.info(f"---\n### 🧪 Scoring Market: `{market_type}`")
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
@@ -520,13 +538,13 @@ def apply_blended_sharp_score(df, trained_models):
             )
 
             logging.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
-            logging.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+            logging.info(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
 
             scored_all.append(df_scored)
 
         except Exception as e:
             logging.error(f"❌ Failed scoring {market_type.upper()}")
-            logging.code(traceback.format_exc())
+            logging.error(traceback.format_exc())
 
 
     try:
@@ -535,7 +553,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
             
             # === Final Scoring Summary ===
-            logging.markdown("## 📊 Scoring Summary")
+            logging.info("## 📊 Scoring Summary")
             
             # Totals breakdown
             if 'totals' in df_final['Market'].unique():
@@ -545,8 +563,8 @@ def apply_blended_sharp_score(df, trained_models):
                     .rename_axis('Outcome')
                     .reset_index(name='Count')
                 )
-                logging.markdown("### 🔢 Totals Breakdown (Over/Under)")
-                logging.dataframe(totals_summary)
+                logging.info("### 🔢 Totals Breakdown (Over/Under)")
+                logging.info(totals_summary)
     
             # Spreads pairing
             if 'spreads' in df_final['Market'].unique():
@@ -557,7 +575,7 @@ def apply_blended_sharp_score(df, trained_models):
                     .reset_index(name='Unique_Sides')
                 )
                 num_spread_pairs = (spread_pairs['Unique_Sides'] == 2).sum()
-                logging.markdown(f"### 🧮 Spreads: {num_spread_pairs} properly paired (2 sides) out of {len(spread_pairs)}")
+                logging.info(f"### 🧮 Spreads: {num_spread_pairs} properly paired (2 sides) out of {len(spread_pairs)}")
     
             # H2H pairing
             if 'h2h' in df_final['Market'].unique():
@@ -568,16 +586,16 @@ def apply_blended_sharp_score(df, trained_models):
                     .reset_index(name='Unique_Sides')
                 )
                 num_h2h_pairs = (h2h_pairs['Unique_Sides'] == 2).sum()
-                logging.markdown(f"### 🧮 H2H: {num_h2h_pairs} properly paired (2 sides) out of {len(h2h_pairs)}")
+                logging.info(f"### 🧮 H2H: {num_h2h_pairs} properly paired (2 sides) out of {len(h2h_pairs)}")
     
-            logging.success(f"✅ Final model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_final)}")
+            logging.info(f"✅ Final model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_final)}")
             return df_final
         else:
             logging.warning("⚠️ No market types scored — returning empty DataFrame.")
             return pd.DataFrame()
     except Exception as e:
         logging.error("❌ Exception during final aggregation")
-        logging.code(traceback.format_exc())
+        logging.error(traceback.format_exc())
         return pd.DataFrame()
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
@@ -1110,10 +1128,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
  
 
         pass#to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-        pass#logging.success(f"✅ Uploaded {len(new_scores)} new game scores")
+        pass#logging.info(f"✅ Uploaded {len(new_scores)} new game scores")
     except Exception as e:
         pass#logging.error(f"❌ Failed to upload game scores: {e}")
-        pass#logging.code(new_scores.dtypes.to_string())
+        pass#logging.error(new_scores.dtypes.to_string())
 
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
@@ -1240,7 +1258,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
         logging.error("❌ Parquet validation failed before upload")
-        logging.code(str(e))
+        logging.error(str(e))
         logging.write(df_scores_out.dtypes)
         logging.stop()
     # ✅ Define full deduplication fingerprint (ignore timestamp)
