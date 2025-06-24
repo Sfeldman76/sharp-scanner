@@ -757,7 +757,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-        st.success("🧹 Cleaned up duplicate suffix columns (_x, _y)")
+        #st.success("🧹 Cleaned up duplicate suffix columns (_x, _y)")
     except Exception as e:
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
@@ -887,7 +887,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
             
             # === Final Scoring Summary ===
-            st.markdown("## 📊 Scoring Summary")
+            #st.markdown("## 📊 Scoring Summary")
             
             # Totals breakdown
             if 'totals' in df_final['Market'].unique():
@@ -922,7 +922,7 @@ def apply_blended_sharp_score(df, trained_models):
                 num_h2h_pairs = (h2h_pairs['Unique_Sides'] == 2).sum()
                 #st.markdown(f"### 🧮 H2H: {num_h2h_pairs} properly paired (2 sides) out of {len(h2h_pairs)}")
     
-            st.success(f"✅ Final model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_final)}")
+            #st.success(f"✅ Final model scoring completed in {time.time() - total_start:.2f}s — total rows: {len(df_final)}")
             return df_final
         else:
             st.warning("⚠️ No market types scored — returning empty DataFrame.")
@@ -1563,9 +1563,10 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
         # === Group by Matchup + Side + Timestamp
+        summary_df['Game_Key'] = df_moves_raw['Game_Key']  # propagate from raw
         summary_grouped = (
             filtered_df
-            .groupby(['Matchup', 'Market', 'Pick', 'Date + Time (EST)'], as_index=False)
+            .groupby(['Game_Key', 'Matchup', 'Market', 'Pick', 'Date + Time (EST)'], as_index=False)
             .agg({
                 'Rec Line': 'mean',
                 'Sharp Line': 'mean',
@@ -1587,6 +1588,8 @@ def render_scanner_tab(label, sport_key, container):
             'Model Prob', 'Confidence Tier',
             'Why Model Likes It', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
+        summary_grouped = summary_grouped[view_cols]
+
         
         # === Final Output
         st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
