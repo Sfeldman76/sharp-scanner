@@ -1457,30 +1457,29 @@ def render_scanner_tab(label, sport_key, container):
         
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
         
-            # ✅ Deduplicate only the Pre_Game slice
-            dedup_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+            dedup_cols_diag = ['Game_Key', 'Market', 'Outcome']  # 🔥 Bookmaker removed for match flexibility
             df_pre = df_moves_raw[pre_mask].copy()
             before = len(df_pre)
             df_pre = df_pre.sort_values('Snapshot_Timestamp', ascending=False)
-            df_pre = df_pre.drop_duplicates(subset=dedup_cols, keep='first')
+            df_pre = df_pre.drop_duplicates(subset=dedup_cols_diag, keep='first')
             after = len(df_pre)
-            st.info(f"🧹 Deduplicated diagnostics rows: {before} → {after}")
-        
-            # ✅ Compute diagnostics
+            st.info(f"🧹 Deduplicated diagnostics rows: {before} → {after} using {dedup_cols_diag}")
+            
             diagnostics_df = compute_diagnostics_vectorized(df_pre.copy())
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
                 return pd.DataFrame()
-        
-            # ✅ Safe merge back into df_moves_raw
-            # Merge diagnostics explicitly
+            
+            # 🚨 Safe merge using relaxed keys
             df_moves_raw = df_moves_raw.merge(
                 diagnostics_df,
-                on=dedup_cols,
+                on=dedup_cols_diag,
                 how='left',
                 suffixes=('', '_diagnostics')
             )
-            
+            st.write("✅ Diagnostics merged sample:")
+            st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ']].drop_duplicates().head())
+
             # Fill diagnostics columns if missing (prefer diagnostics merge first)
             diagnostic_cols = {
                 'Confidence Trend': 'Confidence Trend_diagnostics',
