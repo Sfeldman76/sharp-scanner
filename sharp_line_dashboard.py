@@ -1474,7 +1474,7 @@ def render_scanner_tab(label, sport_key, container):
                 suffixes=('', '_diagnostics')
             )
             st.write("✅ Diagnostics merged sample:")
-            st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ']].drop_duplicates().head())
+            st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
 
             # Fill diagnostics columns if missing (prefer diagnostics merge first)
             diagnostic_cols = {
@@ -1518,9 +1518,12 @@ def render_scanner_tab(label, sport_key, container):
             'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It'
         ]
         
-        summary_df = df_moves_raw[[col for col in summary_cols if col in df_moves_raw.columns]].copy()
+        summary_df = df_moves_raw[
+            [col for col in summary_cols if col in df_moves_raw.columns] + ['Game_Key']
+        ].copy()
+
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
-        summary_df['Game_Key'] = df_moves_raw['Game_Key']
+        
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
