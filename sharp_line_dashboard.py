@@ -1538,8 +1538,8 @@ def render_scanner_tab(label, sport_key, container):
                 how='left',
                 suffixes=('', '_diagnostics')
             )
-            #st.write("✅ Diagnostics merged sample:")
-            #st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
+            st.write("✅ Diagnostics merged sample:")
+            st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
 
             # Fill diagnostics columns if missing (prefer diagnostics merge first)
             diagnostic_cols = {
