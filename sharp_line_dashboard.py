@@ -1334,7 +1334,8 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Final cleanup
         df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
-        
+        # Create Game_Key_Base by removing the outcome suffix from Game_Key
+        df_moves_raw['Game_Key_Base'] = df_moves_raw['Game_Key'].str.rsplit('_', n=1).str[0]
                 # Normalize bookmaker column
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].str.lower()
         
