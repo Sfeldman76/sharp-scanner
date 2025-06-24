@@ -1564,22 +1564,35 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Group by Matchup + Side + Timestamp
        
+        # === Group numeric + categorical fields ONLY
         summary_grouped = (
             filtered_df
-            .groupby(['Game_Key', 'Matchup', 'Market', "Outcome", 'Date + Time (EST)'], as_index=False)
+            .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome', 'Date + Time (EST)'], as_index=False)
             .agg({
                 'Rec Line': 'mean',
                 'Sharp Line': 'mean',
                 'Rec Move': 'mean',
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
-                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
-                'Why Model Likes It': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing",
-                'Confidence Trend': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing",
-                'Tier Δ': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing",
-                'Line/Model Direction': lambda x: x[x != "⚠️ Missing"].iloc[0] if (x != "⚠️ Missing").any() else "⚠️ Missing"
+                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
             })
         )
+        
+        # === Re-merge diagnostics AFTER groupby
+        diagnostic_cols = ['Game_Key', 'Market', 'Outcome',
+                           'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
+        
+        # Use your already deduped diagnostics_df OR create from df_moves_raw:
+        diagnostic_df = df_moves_raw[diagnostic_cols].drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
+        
+        # Merge back into grouped summary
+        summary_grouped = summary_grouped.merge(
+            diagnostic_df,
+            on=['Game_Key', 'Market', 'Outcome'],
+            how='left'
+        )
+        num_diagnostics = summary_grouped['Confidence Trend'].ne('⚠️ Missing').sum()
+        st.success(f"✅ Diagnostics successfully populated on {num_diagnostics} / {len(summary_grouped)} rows")
 
         
         # === Final Column Order for Display
