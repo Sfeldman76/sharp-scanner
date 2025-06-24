@@ -885,12 +885,12 @@ def apply_blended_sharp_score(df, trained_models):
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
             if market_type == 'spreads':
-            st.subheader("🔎 Spread Flip Debug")
-            st.dataframe(
-                df_scored[['Game_Key', 'Outcome_Norm', 'Rec Line', 'Sharp Line', 'Model_Sharp_Win_Prob']]
-                .sort_values(['Game_Key', 'Rec Line'])
-                .head(20)
-            )
+                st.subheader("🔎 Spread Flip Debug")
+                st.dataframe(
+                    df_scored[['Game_Key', 'Outcome_Norm', 'Rec Line', 'Sharp Line', 'Model_Sharp_Win_Prob']]
+                    .sort_values(['Game_Key', 'Rec Line'])
+                    .head(20)
+                )
             scored_all.append(df_scored)
 
         except Exception as e:
