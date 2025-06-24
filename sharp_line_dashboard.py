@@ -1185,11 +1185,7 @@ def render_scanner_tab(label, sport_key, container):
                     if df_scored.empty:
                         st.warning("⚠️ df_scored is completely empty.")
                     else:
-                        st.dataframe(
-                            df_scored.groupby('Market')['Model_Sharp_Win_Prob']
-                            .apply(lambda x: x.notna().sum())
-                            .reset_index(name='Scored_Rows')
-                        )
+                        pass#st.dataframe(df_scored.groupby('Market')['Model_Sharp_Win_Prob'].notna().groupby(level=0).sum().reset_index(name='Scored_Rows'))
                     # ✅ Ensure Snapshot_Timestamp exists for dedup
                     if 'Snapshot_Timestamp' not in df_scored.columns:
                         df_scored['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
@@ -1311,7 +1307,7 @@ def render_scanner_tab(label, sport_key, container):
                     if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
                         st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
                     else:
-                        st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
+                        #st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
                     
                         missing_rows = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
                         if missing_rows > 0:
@@ -1524,6 +1520,7 @@ def render_scanner_tab(label, sport_key, container):
         
         summary_df = df_moves_raw[[col for col in summary_cols if col in df_moves_raw.columns]].copy()
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
+        summary_df['Game_Key'] = df_moves_raw['Game_Key']
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
