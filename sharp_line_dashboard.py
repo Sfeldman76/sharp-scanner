@@ -1456,11 +1456,14 @@ def render_scanner_tab(label, sport_key, container):
             dedup_cols_diag = ['Game_Key', 'Market', 'Outcome']  # 🔥 Bookmaker removed for match flexibility
             # Only keep games that exist in summary_grouped
             # Restrict diagnostics to only games that are going to appear in the summary
-            relevant_game_keys = df_moves_raw[df_moves_raw['Game_Start'] > pd.Timestamp.utcnow()]['Game_Key'].unique()
-            
+            relevant_game_keys = df_moves_raw['Game_Key'].unique()
+
+            # Filter to Pre_Game AND in summary-bound Game_Keys
             df_pre = df_moves_raw[
                 df_moves_raw['Pre_Game'] & df_moves_raw['Game_Key'].isin(relevant_game_keys)
             ].copy()
+
+            st.info(f"📦 Computing diagnostics for {len(df_pre)} rows across {df_pre['Game_Key'].nunique()} unique games")
 
 
             before = len(df_pre)
