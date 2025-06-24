@@ -24,7 +24,9 @@ from utils import (
     compute_confidence,
     compute_line_hash,
     compute_and_write_market_weights,
-    build_game_key
+    build_game_key,
+    normalize_book_key
+
 )
 
 def detect_and_save_all_sports():
@@ -107,7 +109,12 @@ def detect_and_save_all_sports():
 
                 
                 # Before writing sharp_moves
-                df_moves["Line_Hash"] = df_moves.apply(compute_line_hash, axis=1)
+                if not df_moves.empty and df_moves.columns.size > 0:
+                    df_moves["Line_Hash"] = df_moves.apply(compute_line_hash, axis=1)
+                    df_moves = df_moves.drop_duplicates(subset=["Line_Hash"])
+                else:
+                    logging.warning(f"⚠️ df_moves is empty or has no columns — skipping Line_Hash computation for {sport_label}")
+                    continue
                 df_moves = df_moves.drop_duplicates(subset=["Line_Hash"])
                 write_sharp_moves_to_master(df_moves)
                 write_line_history_to_bigquery(df_audit)
