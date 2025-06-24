@@ -1265,6 +1265,10 @@ def render_scanner_tab(label, sport_key, container):
                     
                     # === Perform the merge
                     pre_merge_rows = len(df_moves_raw)
+                    df_moves_raw = df_moves_raw.drop(columns=['Model_Sharp_Win_Prob'], errors='ignore')
+                    score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
+                    df_moves_raw = df_moves_raw.drop(columns=score_cols, errors='ignore')
+
                     # === Perform the merge
                     df_merged = df_moves_raw.merge(
                         df_scored_clean,
@@ -1272,7 +1276,9 @@ def render_scanner_tab(label, sport_key, container):
                         how='left',
                         validate='many_to_one'
                     )
-                    
+                    st.subheader("🧪 Columns in df_merged after merge")
+                    st.write(df_merged.columns.tolist())
+
                     # ✅ First flatten column names (replace _x/_y suffixes)
                     df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
                     
