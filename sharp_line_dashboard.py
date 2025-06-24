@@ -1601,14 +1601,14 @@ def render_scanner_tab(label, sport_key, container):
         merge_keys = ['Game_Key', 'Market', 'Outcome']
 
         merged_check = summary_grouped[merge_keys].merge(
-            diagnostics_df[merge_keys],
+            diagnostic_df[merge_keys],
             on=merge_keys,
             how='outer',
             indicator=True
         )
         
         only_in_summary = merged_check[merged_check['_merge'] == 'left_only']
-        only_in_diagnostics = merged_check[merged_check['_merge'] == 'right_only']
+        only_in_diagnostic = merged_check[merged_check['_merge'] == 'right_only']
         
         st.warning(f"🚫 {len(only_in_summary)} keys in summary not matched in diagnostics")
         st.warning(f"🚫 {len(only_in_diagnostics)} keys in diagnostics not matched in summary")
