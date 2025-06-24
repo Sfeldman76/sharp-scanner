@@ -1596,6 +1596,13 @@ def render_scanner_tab(label, sport_key, container):
             on=['Game_Key', 'Market', 'Outcome'],
             how='left'
         )
+
+        st.write("🔍 Preview: summary_grouped keys")
+        st.dataframe(summary_grouped[['Game_Key', 'Market', 'Outcome']].drop_duplicates().head())
+        
+        st.write("🔍 Preview: diagnostics_df keys")
+        st.dataframe(diagnostic_df[['Game_Key', 'Market', 'Outcome']].drop_duplicates().head())
+
         # Fill empty diagnostics with ⚠️ Missing
         diagnostic_fields = ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
         for col in diagnostic_fields:
