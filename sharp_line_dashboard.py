@@ -752,37 +752,48 @@ def apply_blended_sharp_score(df, trained_models):
     except Exception as e:
         st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
-
     total_start = time.time()
     scored_all = []
-    # ✅ Ensure each Game_Key has at least 2 distinct Outcomes (both sides)
-    sided_games = (
-        df_market.groupby(['Game_Key'])['Outcome']
-        .nunique()
-        .reset_index(name='Num_Sides')
-    )
-    valid_games = sided_games[sided_games['Num_Sides'] >= 2]['Game_Key']
     
-    # Keep only games with both sides
-    df_market = df_market[df_market['Game_Key'].isin(valid_games)].copy()
-
     for market_type, bundle in trained_models.items():
-        #st.markdown(f"---\n### 🧪 Scoring Market: `{market_type}`")
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
             if model is None or iso is None:
                 st.warning(f"⚠️ Skipping {market_type.upper()} — model or calibrator missing")
                 continue
-
+    
+            # ✅ Assign df_market first
             df_market = df[df['Market'] == market_type].copy()
             if df_market.empty:
                 st.warning(f"⚠️ No rows to score for {market_type.upper()}")
                 continue
-
+    
+            # ✅ Then normalize and prepare
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
+    
+            # ✅ Now filter to Game_Keys that have both sides
+            sided_games = (
+                df_market.groupby(['Game_Key'])['Outcome']
+                .nunique()
+                .reset_index(name='Num_Sides')
+            )
+            one_sided = sided_games_check[sided_games_check['Num_Sides'] < 2]
+            two_sided = sided_games_check[sided_games_check['Num_Sides'] == 2]
+            
+            st.subheader(f"🧪 {market_type.upper()} — Two-Sided Game Check")
+            st.info(f"✅ {len(two_sided)} games have both sides")
+            if not one_sided.empty:
+                st.warning(f"⚠️ {len(one_sided)} games missing a second side (not invertible)")
+                st.dataframe(one_sided.head())
+            else:
+                st.success("✅ All games have two sides")
+            valid_games = sided_games[sided_games['Num_Sides'] >= 2]['Game_Key']
+            df_market = df_market[df_market['Game_Key'].isin(valid_games)].copy()
+
+
 
             if market_type == "spreads":
                 df_market = df_market[df_market['Value'].notna()]
