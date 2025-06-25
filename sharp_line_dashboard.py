@@ -865,6 +865,17 @@ def apply_blended_sharp_score(df, trained_models):
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+            # 🧪 Show both sides of each matchup with Value and Probability
+            st.subheader(f"🧪 {market_type.upper()} — Side-by-Side Debug")
+            
+            sample_games = (
+                df_scored[df_scored['Market'] == market_type]
+                .sort_values(['Game_Key', 'Outcome'])
+                [['Game_Key', 'Bookmaker', 'Outcome', 'Value', 'Model_Sharp_Win_Prob', 'Was_Canonical']]
+                .head(40)
+            )
+            
+            st.dataframe(sample_games)
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
@@ -872,8 +883,8 @@ def apply_blended_sharp_score(df, trained_models):
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
 
-            #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
-            #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+            st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
 
             scored_all.append(df_scored)
 
