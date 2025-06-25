@@ -875,7 +875,6 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
-            
             elif market_type == "h2h":
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
@@ -889,11 +888,13 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse.merge(
                     df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
                     on=['Game_Key_Base', 'Outcome'],
-                    how='left'
+                    how='left',
+                    suffixes=('', '_opponent')  # 🛠️ Critical fix
                 )
-                df_inverse['Value'] = df_inverse['Value'].astype(float)
+                df_inverse['Value'] = df_inverse['Value_opponent'].astype(float)  # 🛠️ Use correct column
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
             
+                         
                 # 🧪 H2H Debug
                 st.markdown("### 🧪 H2H Opposite Team Odds Check")
                 odds_debug = (
@@ -1263,7 +1264,9 @@ def render_scanner_tab(label, sport_key, container):
                 # ✅ Ensure uniqueness before indexing
                 df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
                 df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
-        
+                df_pre_game_picks = df_pre_game_picks.sort_values('Snapshot_Timestamp', ascending=False)
+                df_pre_game_picks = df_pre_game_picks.drop_duplicates(subset=merge_keys, keep='first')
+
                 df_pre_game_picks.set_index(merge_keys, inplace=True)
                 df_scored.set_index(merge_keys, inplace=True)
         
