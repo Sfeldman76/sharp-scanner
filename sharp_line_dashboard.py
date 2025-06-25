@@ -58,12 +58,6 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-
-
-
-    
-
-
 # === Standard Imports ===
 import os
 import json
@@ -743,12 +737,9 @@ def compute_diagnostics_vectorized(df):
         st.exception(e)
         return None
 
+
 def apply_blended_sharp_score(df, trained_models):
-    import pandas as pd
-    import numpy as np
-    import streamlit as st
-    import time
-    import traceback
+
 
     st.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
 
@@ -757,15 +748,16 @@ def apply_blended_sharp_score(df, trained_models):
 
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
+        #st.success("🧹 Cleaned up duplicate suffix columns (_x, _y)")
     except Exception as e:
         st.error(f"❌ Cleanup failed: {e}")
-        st.code(traceback.format_exc())
-        st.stop()
+        return pd.DataFrame()
 
     total_start = time.time()
     scored_all = []
 
     for market_type, bundle in trained_models.items():
+        #st.markdown(f"---\n### 🧪 Scoring Market: `{market_type}`")
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
@@ -784,8 +776,10 @@ def apply_blended_sharp_score(df, trained_models):
 
             if market_type == "spreads":
                 df_canon = df_market[df_market['Value'] < 0].copy()
+                #st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
             elif market_type == "totals":
-                df_canon = df_market[df_market['Outcome'] == 'over'].copy()
+                df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
+                #st.info(f"📌 Canonical: {df_canon.shape[0]} rows with outcome = 'over'")
             elif market_type == "h2h":
                 df_market = df_market[df_market['Value'].notna()]
                 df_canon = (
@@ -793,6 +787,7 @@ def apply_blended_sharp_score(df, trained_models):
                     .drop_duplicates(subset=['Game_Key', 'Bookmaker'])
                     .copy()
                 )
+                #st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (lowest ML)")
             else:
                 df_canon = df_market.copy()
 
@@ -800,12 +795,10 @@ def apply_blended_sharp_score(df, trained_models):
                 st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
                 continue
 
-            # Ensure model features exist
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
             df_canon[missing_cols] = 0
 
-            # Score canonical rows
             X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
             df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
             df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
@@ -813,84 +806,74 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
 
-            # === Inversion logic ===
-            if market_type in ['totals', 'spreads', 'h2h']:
-                df_inverse = df_canon.copy()
-                df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
-                df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
-                df_inverse['Was_Canonical'] = False
-                df_inverse['Scored_By_Model'] = True
+            # ✅ Store canonical outcome keys for later duplicate filtering
+        
 
-                if market_type == 'totals':
-                    df_inverse['Outcome'] = df_inverse['Outcome'].map({'over': 'under', 'under': 'over'})
-                    canon_keys = df_canon[['Bookmaker', 'Outcome']].drop_duplicates()
-                    df_inverse = df_inverse.merge(canon_keys, on=['Bookmaker', 'Outcome'], how='left', indicator=True)
-                    df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+            # === Build Inverse
+            df_inverse = df_canon.copy(deep=True)
+            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
+            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
+            df_inverse['Was_Canonical'] = False
+            df_inverse['Scored_By_Model'] = True
 
-                else:  # spreads or h2h
-                    df_inverse['Favorite_Team'] = np.where(df_inverse['Value'] < 0, df_inverse['Outcome'], None)
-                    df_inverse['Underdog_Team'] = np.where(df_inverse['Value'] > 0, df_inverse['Outcome'], None)
+            if market_type == 'totals':
+                df_inverse['Outcome'] = df_inverse['Outcome'].map({'over': 'under', 'under': 'over'})
+               
 
-                    df_inverse[['Favorite_Team', 'Underdog_Team']] = df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']].transform(lambda g: g.ffill().bfill())
-                    df_inverse = df_inverse[df_inverse['Favorite_Team'].notna() & df_inverse['Underdog_Team'].notna()]
-
-                    df_inverse['Outcome'] = np.where(
-                        df_inverse['Outcome'] == df_inverse['Favorite_Team'],
-                        df_inverse['Underdog_Team'],
-                        df_inverse['Favorite_Team']
-                    )
-
-                # Rebuild keys
-                df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-                df_inverse['Market_Norm'] = df_inverse['Market']
-                df_inverse['Game_Key'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market_Norm'] + "_" +
-                    df_inverse['Outcome']
-                )
-                df_inverse['Merge_Key_Short'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str)
+            elif market_type in ['spreads', 'h2h']:
+                # Identify real roles
+                df_inverse['Favorite_Team'] = np.where(df_inverse['Value'] < 0, df_inverse['Outcome'], None)
+                df_inverse['Underdog_Team'] = np.where(df_inverse['Value'] > 0, df_inverse['Outcome'], None)
+                
+                # Fill both sides so we can flip
+                df_inverse[['Favorite_Team', 'Underdog_Team']] = df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']].transform(lambda g: g.ffill().bfill())
+                
+                # Flip only outcome (NOT value)
+                df_inverse = df_inverse[df_inverse['Favorite_Team'].notna() & df_inverse['Underdog_Team'].notna()]
+                df_inverse['Outcome'] = np.where(
+                    df_inverse['Outcome'] == df_inverse['Favorite_Team'],
+                    df_inverse['Underdog_Team'],
+                    df_inverse['Favorite_Team']
                 )
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
 
-                df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-            else:
-                df_scored = df_canon
 
+            # === Rebuild keys
+            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+            df_inverse['Market_Norm'] = df_inverse['Market']
+            df_inverse['Game_Key'] = (
+                df_inverse['Home_Team_Norm'] + "_" +
+                df_inverse['Away_Team_Norm'] + "_" +
+                df_inverse['Commence_Hour'].astype(str) + "_" +
+                df_inverse['Market_Norm'] + "_" +
+                df_inverse['Outcome_Norm']
+            )
+            df_inverse['Merge_Key_Short'] = (
+                df_inverse['Home_Team_Norm'] + "_" +
+                df_inverse['Away_Team_Norm'] + "_" +
+                df_inverse['Commence_Hour'].astype(str)
+            )
+
+            canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
+            df_inverse = df_inverse.merge(
+                canon_keys,
+                on=['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm'],
+                how='left',
+                indicator=True
+            )
+            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+
+            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
 
-            if market_type == 'spreads':
-                st.subheader("🔍 Spread Flip Debug (Unique Game + Side)")
-                df_debug = (
-                    df_scored[df_scored['Market'] == 'spreads']
-                    .drop_duplicates(subset=['Game_Key', 'Outcome'])
-                    .sort_values(['Game_Key', 'Outcome'])
-                    [['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob']]
-                )
-                st.dataframe(df_debug.head(20))
-
-                st.subheader("🧪 Spread Symmetry Check")
-                pair_check = (
-                    df_scored[df_scored['Market'] == 'spreads']
-                    .groupby('Game_Key')['Model_Sharp_Win_Prob']
-                    .agg([
-                        'min',
-                        'max',
-                        lambda x: round(abs(x.iloc[0] + x.iloc[1] - 1), 4) if len(x) == 2 else None
-                    ])
-                    .rename(columns={'<lambda_0>': 'Symmetry_Error'})
-                    .reset_index()
-                )
-                st.dataframe(pair_check.head(20))
+            #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
 
             scored_all.append(df_scored)
 
@@ -898,11 +881,11 @@ def apply_blended_sharp_score(df, trained_models):
             st.error(f"❌ Failed scoring {market_type.upper()}")
             st.code(traceback.format_exc())
 
-    # === Final return
     try:
         if scored_all:
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
+            
             return df_final
         else:
             st.warning("⚠️ No market types scored — returning empty DataFrame.")
@@ -911,6 +894,7 @@ def apply_blended_sharp_score(df, trained_models):
         st.error("❌ Exception during final aggregation")
         st.code(traceback.format_exc())
         return pd.DataFrame()
+        
 from io import BytesIO
 import pickle
 from google.cloud import storage
