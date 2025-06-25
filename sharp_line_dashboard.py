@@ -774,10 +774,30 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Outcome_Norm'] = df_market['Outcome']
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
                
+            # Normalize
+            df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
+            df_market['Outcome_Norm'] = df_market['Outcome']
+            df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
+            df_market['Commence_Hour'] = pd.to_datetime(df_market['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             
+            # ✅ Build a clean Game_Key and Game_Key_Base
+            df_market['Game_Key'] = (
+                df_market['Home_Team_Norm'] + "_" +
+                df_market['Away_Team_Norm'] + "_" +
+                df_market['Commence_Hour'].astype(str) + "_" +
+                df_market['Market'] + "_" +
+                df_market['Outcome_Norm']
+            )
+            
+            df_market['Game_Key_Base'] = (
+                df_market['Home_Team_Norm'] + "_" +
+                df_market['Away_Team_Norm'] + "_" +
+                df_market['Commence_Hour'].astype(str) + "_" +
+                df_market['Market']
+            )
+
             # Dynamically strip the outcome-specific suffix from Game_Key
-            pattern = rf'_{market_type}_.+$'  # e.g. _spreads_baltimore orioles → ''
-            df_market['Game_Key_Base'] = df_market['Game_Key'].str.replace(pattern, f'_{market_type}', regex=True)
+        
             sided_games_check = (
                 df_market.groupby(['Game_Key_Base'])['Outcome']
                 .nunique()
@@ -875,15 +895,15 @@ def apply_blended_sharp_score(df, trained_models):
             
                 # Look up opponent's Value from df_full_market
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Game_Key', 'Outcome', 'Value']],
-                    left_on=['Game_Key', 'Outcome'],
-                    right_on=['Game_Key', 'Outcome'],
+                    df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
+                    left_on=['Game_Key_Base', 'Outcome'],
+                    right_on=['Game_Key_Base', 'Outcome'],
                     how='left',
                     suffixes=('', '_opponent')
-                )            
-                # Copy value if found
+                )
                 df_inverse['Value'] = df_inverse['Value_opponent']
 
+            
                    
             
               
