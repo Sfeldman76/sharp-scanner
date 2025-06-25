@@ -1262,13 +1262,13 @@ def render_scanner_tab(label, sport_key, container):
                     st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
                     st.dataframe(df_pre_game_picks.head(5))
                     return pd.DataFrame()
-        
-                # ✅ Normalize merge keys
                 for col in merge_keys:
                     if col in df_scored.columns:
                         df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
-                    if col in df_moves_raw.columns:
-                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                    if col in df_pre_game_picks.columns:
+                        df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
+                st.write("✅ Merge keys normalized.")
+                st.write("📋 df_scored head:", df_scored[merge_keys].head())
         
                 # ✅ Deduplicate and finalize scored output
                 df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
