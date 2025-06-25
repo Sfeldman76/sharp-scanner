@@ -904,6 +904,15 @@ def apply_blended_sharp_score(df, trained_models):
                     suffixes=('', '_opponent')
                 )
                 df_inverse['Value'] = df_inverse['Value_opponent']
+                if market_type == "spreads":
+                    df_inverse['Value'] = -1 * df_inverse['Value']
+                dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+                pre_dedup = len(df_inverse)
+                df_inverse = df_inverse.drop_duplicates(subset=dedup_keys)
+                post_dedup = len(df_inverse)
+                
+                st.success(f"✅ Inverse rows deduplicated: {pre_dedup:,} → {post_dedup:,}")
+                
                 missing_values = df_inverse[df_inverse['Value_opponent'].isna()]
                 if not missing_values.empty:
                     st.warning("⚠️ Some inverse rows failed to find a Value from df_full_market")
