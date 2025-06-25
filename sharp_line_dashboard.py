@@ -774,23 +774,36 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
 
-            if market_type == "spreads":
+           if market_type == "spreads":
+                df_market = df_market[df_market['Value'].notna()]
+                
+                # Step 1: canonical = favorite side (Value < 0)
                 df_canon = df_market[df_market['Value'] < 0].copy()
-                #st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (spread < 0)")
-            elif market_type == "totals":
-                df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
-                #st.info(f"📌 Canonical: {df_canon.shape[0]} rows with outcome = 'over'")
+                
+                # Step 2: save full market for inverse pairing
+                df_full_market = df_market.copy()
+            
             elif market_type == "h2h":
                 df_market = df_market[df_market['Value'].notna()]
+                
+                # Step 1: canonical = team with lowest moneyline per game
                 df_canon = (
                     df_market.sort_values("Value")
                     .drop_duplicates(subset=['Game_Key', 'Bookmaker'])
                     .copy()
                 )
-                #st.info(f"📌 Canonical: {df_canon.shape[0]} favorites (lowest ML)")
+                
+                # Step 2: save full market for inverse pairing
+                df_full_market = df_market.copy()
+            
+            elif market_type == "totals":
+                df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
+                df_full_market = df_market.copy()
+            
             else:
                 df_canon = df_market.copy()
-
+                df_full_market = df_market.copy()
+         
             if df_canon.empty:
                 st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
                 continue
@@ -807,7 +820,11 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scored_By_Model'] = True
 
             # ✅ Store canonical outcome keys for later duplicate filtering
-        
+            st.subheader(f"🧪 {market_type.upper()} — Canonical Check")
+            st.dataframe(df_canon[['Game_Key', 'Outcome', 'Value']].head(10))
+            st.write("🧮 Value Sign Counts")
+            st.write(df_canon['Value'].apply(lambda x: '<0' if x < 0 else '>0' if x > 0 else '0').value_counts())
+
 
             # === Build Inverse from already-scored df_canon
            # === Build inverse from scored canonical
@@ -816,6 +833,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
+            
             if market_type == "totals":
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
