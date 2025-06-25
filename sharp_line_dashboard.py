@@ -810,32 +810,56 @@ def apply_blended_sharp_score(df, trained_models):
         
 
             # === Build Inverse from already-scored df_canon
-            # Step 1: Build inverse from scored canonical
+           # === Build inverse from scored canonical
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
-            
-            # Step 2: Flip outcome (after assigning scores)
             if market_type == "totals":
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
-            
             elif market_type in ["spreads", "h2h"]:
+                # Flip outcome BEFORE dedup
                 df_inverse['Favorite_Team'] = np.where(df_inverse['Value'] < 0, df_inverse['Outcome'], None)
                 df_inverse['Underdog_Team'] = np.where(df_inverse['Value'] > 0, df_inverse['Outcome'], None)
-                df_inverse[['Favorite_Team', 'Underdog_Team']] = df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']].transform(lambda g: g.ffill().bfill())
+            
+                df_inverse[['Favorite_Team', 'Underdog_Team']] = (
+                    df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']]
+                    .transform(lambda g: g.ffill().bfill())
+                )
+    
                 df_inverse = df_inverse[df_inverse['Favorite_Team'].notna() & df_inverse['Underdog_Team'].notna()]
+            
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Favorite_Team'],
                     df_inverse['Underdog_Team'],
                     df_inverse['Favorite_Team']
-                )
+                )        
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+                
+            st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
+            st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
-            # ✅ Step 3: Now deduplicate after Outcome_Norm has been updated
+            if df_inverse.empty:
+                st.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
+            else:
+                st.dataframe(
+                    df_inverse[['Game_Key', 'Bookmaker', 'Outcome', 'Value', 'Model_Sharp_Win_Prob', 'Was_Canonical']]
+                    .sort_values('Game_Key')
+                    .head(20)
+                )
+
+            # ✅ Rebuild Merge_Key_Short BEFORE dedup
+            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+            df_inverse['Merge_Key_Short'] = (
+                df_inverse['Home_Team_Norm'] + "_" +
+                df_inverse['Away_Team_Norm'] + "_" +
+                df_inverse['Commence_Hour'].astype(str)
+            )
+            
+            # ✅ Now deduplicate
             canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
             df_inverse = df_inverse.merge(
                 canon_keys,
@@ -844,24 +868,7 @@ def apply_blended_sharp_score(df, trained_models):
                 indicator=True
             )
             df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
-
             
-
-            # === Rebuild keys
-            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-            df_inverse['Market_Norm'] = df_inverse['Market']
-            df_inverse['Game_Key'] = (
-                df_inverse['Home_Team_Norm'] + "_" +
-                df_inverse['Away_Team_Norm'] + "_" +
-                df_inverse['Commence_Hour'].astype(str) + "_" +
-                df_inverse['Market_Norm'] + "_" +
-                df_inverse['Outcome_Norm']
-            )
-            df_inverse['Merge_Key_Short'] = (
-                df_inverse['Home_Team_Norm'] + "_" +
-                df_inverse['Away_Team_Norm'] + "_" +
-                df_inverse['Commence_Hour'].astype(str)
-            )
 
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
