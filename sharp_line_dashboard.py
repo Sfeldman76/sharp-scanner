@@ -1246,7 +1246,6 @@ def render_scanner_tab(label, sport_key, container):
                 # Normalize keys before scoring
                      
                 # ✅ Only score new rows
-                df_to_score = df_pre_game_picks[df_pre_game_picks['Model_Sharp_Win_Prob'].isna()].copy()
                 df_scored = pd.DataFrame()
         
                 if not df_to_score.empty:
