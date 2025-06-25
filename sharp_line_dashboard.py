@@ -797,14 +797,7 @@ def apply_blended_sharp_score(df, trained_models):
             )
 
             # Dynamically strip the outcome-specific suffix from Game_Key
-        
-         
             df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
-
-
-
-    
-    
             # ✅ NOW apply canonical filtering based on market_type
             if market_type == "spreads":
                 df_market = df_market[df_market['Value'].notna()]
@@ -943,7 +936,6 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Away_Team_Norm'] + "_" +
                 df_inverse['Commence_Hour'].astype(str)
             )
-           
 
             # ✅ Now deduplicate
             canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
@@ -954,8 +946,6 @@ def apply_blended_sharp_score(df, trained_models):
                 indicator=True
             )
             df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
-            
-
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
@@ -1498,7 +1488,7 @@ def render_scanner_tab(label, sport_key, container):
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
         )
-        st.info(f"📦 Built first snapshot table in {time.time() - snap_start:.2f}s")
+        #st.info(f"📦 Built first snapshot table in {time.time() - snap_start:.2f}s")
         
         # === Normalize and merge
         merge_start = time.time()
@@ -1506,7 +1496,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
         
         df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-        st.info(f"🔗 Merged first snapshot into df_moves_raw in {time.time() - merge_start:.2f}s")
+        #st.info(f"🔗 Merged first snapshot into df_moves_raw in {time.time() - merge_start:.2f}s")
         
         # ✅ Alias First_Model_Prob from First_Sharp_Prob (needed for trend logic)
         if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
@@ -1589,7 +1579,7 @@ def render_scanner_tab(label, sport_key, container):
             df_pre = df_pre.sort_values('Snapshot_Timestamp', ascending=False)
             df_pre = df_pre.drop_duplicates(subset=dedup_cols_diag, keep='first')
             after = len(df_pre)
-            st.info(f"🧹 Deduplicated diagnostics rows: {before} → {after} using {dedup_cols_diag}")
+            #st.info(f"🧹 Deduplicated diagnostics rows: {before} → {after} using {dedup_cols_diag}")
             
             diagnostics_df = compute_diagnostics_vectorized(df_pre.copy())
             if diagnostics_df is None:
@@ -1603,8 +1593,8 @@ def render_scanner_tab(label, sport_key, container):
                 how='left',
                 suffixes=('', '_diagnostics')
             )
-            st.write("✅ Diagnostics merged sample:")
-            st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
+            #st.write("✅ Diagnostics merged sample:")
+            #st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
 
             # Fill diagnostics columns if missing (prefer diagnostics merge first)
             diagnostic_cols = {
