@@ -1653,7 +1653,7 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
         # ✅ Filter to scored rows only
-        filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
+        #filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
         
         # ✅ Normalize keys
         for col in ['Game_Key', 'Market', 'Outcome']:
