@@ -848,6 +848,14 @@ def apply_blended_sharp_score(df, trained_models):
             if df_canon.empty:
                 st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
                 continue
+            # === Deduplicate canonical rows
+            dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
+
+            pre_dedup_canon = len(df_canon)
+            df_canon = df_canon.drop_duplicates(subset=dedup_keys)
+            post_dedup_canon = len(df_canon)
+            
+            st.success(f"✅ Canonical rows deduplicated: {pre_dedup_canon:,} → {post_dedup_canon:,}")
 
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
@@ -906,7 +914,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 if market_type == "spreads":
                     df_inverse['Value'] = -1 * df_inverse['Value']
-                dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+                dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
                 pre_dedup = len(df_inverse)
                 df_inverse = df_inverse.drop_duplicates(subset=dedup_keys)
                 post_dedup = len(df_inverse)
