@@ -809,39 +809,37 @@ def apply_blended_sharp_score(df, trained_models):
             # ✅ Store canonical outcome keys for later duplicate filtering
         
 
-            # === Build Inverse
-            df_inverse = df_canon.copy(deep=True)
-            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
-            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
-            df_inverse['Was_Canonical'] = False
-            df_inverse['Scored_By_Model'] = True
-
-            if market_type == 'totals':
+            # === Build Inverse from already-scored df_canon
+                df_inverse = df_canon.copy(deep=True)
+                df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
+                df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
+                df_inverse['Was_Canonical'] = False
+                df_inverse['Scored_By_Model'] = True
+                
                 if market_type == 'totals':
-                    # Only build inverse if original was 'over'
                     df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                     df_inverse['Outcome'] = 'under'
                     df_inverse['Outcome_Norm'] = 'under'
-
-               
-
-            elif market_type in ['spreads', 'h2h']:
-                # Identify real roles
-                df_inverse['Favorite_Team'] = np.where(df_inverse['Value'] < 0, df_inverse['Outcome'], None)
-                df_inverse['Underdog_Team'] = np.where(df_inverse['Value'] > 0, df_inverse['Outcome'], None)
                 
-                # Fill both sides so we can flip
-                df_inverse[['Favorite_Team', 'Underdog_Team']] = df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']].transform(lambda g: g.ffill().bfill())
+                elif market_type in ['spreads', 'h2h']:
+                    # Do NOT copy again — you're already working from df_inverse
+                    df_inverse['Favorite_Team'] = np.where(df_inverse['Value'] < 0, df_inverse['Outcome'], None)
+                    df_inverse['Underdog_Team'] = np.where(df_inverse['Value'] > 0, df_inverse['Outcome'], None)
                 
-                # Flip only outcome (NOT value)
-                df_inverse = df_inverse[df_inverse['Favorite_Team'].notna() & df_inverse['Underdog_Team'].notna()]
-                df_inverse['Outcome'] = np.where(
-                    df_inverse['Outcome'] == df_inverse['Favorite_Team'],
-                    df_inverse['Underdog_Team'],
-                    df_inverse['Favorite_Team']
-                )
-                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-
+                    df_inverse[['Favorite_Team', 'Underdog_Team']] = (
+                        df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']].transform(lambda g: g.ffill().bfill())
+                    )
+                
+                    df_inverse = df_inverse[df_inverse['Favorite_Team'].notna() & df_inverse['Underdog_Team'].notna()]
+                
+                    df_inverse['Outcome'] = np.where(
+                        df_inverse['Outcome'] == df_inverse['Favorite_Team'],
+                        df_inverse['Underdog_Team'],
+                        df_inverse['Favorite_Team']
+                    )
+                    df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+                
+            
 
             # === Rebuild keys
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
