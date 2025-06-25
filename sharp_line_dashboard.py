@@ -876,7 +876,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
             
-                # Flip outcome: assign to the *other* team
+                # ✅ Flip outcome ONCE only
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
@@ -884,7 +884,7 @@ def apply_blended_sharp_score(df, trained_models):
                 )
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-                # Merge to get the opponent's price
+                # ✅ Merge using flipped outcome
                 df_inverse = df_inverse.merge(
                     df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
                     on=['Game_Key_Base', 'Outcome'],
@@ -892,11 +892,13 @@ def apply_blended_sharp_score(df, trained_models):
                     suffixes=('', '_opponent')
                 )
                 df_inverse['Value'] = df_inverse['Value_opponent'].astype(float)
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
             
-                df_inverse = df_inverse.drop_duplicates(
-                    subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
-                )
-
+                # Debug (Optional)
+                missing_values = df_inverse[df_inverse['Value'].isna()]
+                if not missing_values.empty:
+                    st.warning("⚠️ H2H inverse rows missing odds")
+                    st.dataframe(missing_values[['Game_Key_Base', 'Outcome']].head(10))
             
                          
                 # 🧪 H2H Debug
