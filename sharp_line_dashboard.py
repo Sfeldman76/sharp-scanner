@@ -1252,14 +1252,19 @@ def render_scanner_tab(label, sport_key, container):
                     return pd.DataFrame()
         
                 # ✅ Merge scores back into pre_game_picks
+                # ✅ Drop duplicates first to ensure index uniqueness
+                df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
+                df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
+                
                 df_pre_game_picks.set_index(merge_keys, inplace=True)
                 df_scored.set_index(merge_keys, inplace=True)
-        
+                
                 for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Was_Canonical', 'Scored_By_Model']:
                     if col in df_scored.columns:
                         df_pre_game_picks[col] = df_pre_game_picks[col].combine_first(df_scored[col])
-        
+                
                 df_pre_game_picks.reset_index(inplace=True)
+
 
               
         
@@ -1424,7 +1429,7 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Final combined DataFrame
         df_moves_final = pd.concat(df_final_parts, ignore_index=True)
-
+        df_moves_raw = df_moves_final.copy()
         # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
         start = time.time()
@@ -1609,6 +1614,7 @@ def render_scanner_tab(label, sport_key, container):
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
             'Move_From_Open_Rec', 'Move_From_Open_Sharp'
         ]
+        st.write("📋 Columns in summary_df:", summary_df.columns.tolist())
         summary_df.rename(columns={
             'Game': 'Matchup',
             'Rec_Book_Consensus': 'Rec Line',
