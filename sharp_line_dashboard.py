@@ -1436,7 +1436,7 @@ def render_scanner_tab(label, sport_key, container):
 
 
 
-# === 1. Load df_history and compute df_first
+        # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
         start = time.time()
         df_history = get_recent_history()
@@ -1646,6 +1646,20 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
+        # ✅ Start from scored rows only
+        # === Apply Filters
+        filtered_df = summary_df.copy()
+        if selected_market != "All":
+            filtered_df = filtered_df[filtered_df['Market'] == selected_market]
+        if selected_date != "All":
+            filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
+        
+        # ✅ Filter to rows with model scores only
+        filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
+        
+        # ✅ Normalize keys
+        for col in ['Game_Key', 'Market', 'Outcome']:
+            filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
         
         # ✅ Deduplicate to most recent snapshot per outcome
         filtered_df = (
@@ -1660,14 +1674,13 @@ def render_scanner_tab(label, sport_key, container):
         # === Group numeric + categorical fields ONLY
         summary_grouped = (
             filtered_df
-            .sort_values(by=['Date + Time (EST)', 'Matchup', 'Market', 'Outcome'])
             .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome', 'Date + Time (EST)'], as_index=False)
             .agg({
-                'Rec Line': 'mean',
-                'Sharp Line': 'mean',
-                'Rec Move': 'mean',
-                'Sharp Move': 'mean',
-                'Model Prob': 'mean',
+                'Rec Line': 'first',
+                'Sharp Line': 'first',
+                'Rec Move': 'first',
+                'Sharp Move': 'first',
+                'Model Prob': 'first',
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
             })
         )
