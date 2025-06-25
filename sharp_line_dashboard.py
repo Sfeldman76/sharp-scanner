@@ -930,16 +930,13 @@ def apply_blended_sharp_score(df, trained_models):
                 )
                 df_inverse['Value'] = -1 * df_inverse['Value_opponent']
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
-            
-            
-                            
-            
-        
-
+  
+                missing_values = df_inverse[df_inverse['Value'].isna()]
                 if not missing_values.empty:
-                    st.warning("⚠️ Some inverse rows failed to find a Value from df_full_market")
+                    st.warning("⚠️ Some inverse SPREADS rows failed to find a Value from df_full_market")
                     st.dataframe(missing_values[['Game_Key_Base', 'Outcome', 'Value_opponent']].head(10))
-
+            
+            
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
@@ -1262,13 +1259,20 @@ def render_scanner_tab(label, sport_key, container):
                     return pd.DataFrame()
         
                 # ✅ Ensure uniqueness before indexing
+              # ✅ Normalize first
+                for col in merge_keys:
+                    df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
+                    df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+                
+                # ✅ Then deduplicate and set index
                 df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
                 df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
                 df_pre_game_picks = df_pre_game_picks.sort_values('Snapshot_Timestamp', ascending=False)
                 df_pre_game_picks = df_pre_game_picks.drop_duplicates(subset=merge_keys, keep='first')
-
+                
                 df_pre_game_picks.set_index(merge_keys, inplace=True)
                 df_scored.set_index(merge_keys, inplace=True)
+
         
                 # ✅ Assert index uniqueness
                 assert df_pre_game_picks.index.is_unique, "❌ df_pre_game_picks index is not unique"
@@ -1468,7 +1472,10 @@ def render_scanner_tab(label, sport_key, container):
         # === Final combined DataFrame
         df_moves_final = pd.concat(df_final_parts, ignore_index=True)
         df_moves_raw = df_moves_final.copy()
-        # === 1. Load df_history and compute df_first
+       
+
+
+# === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
         start = time.time()
         df_history = get_recent_history()
