@@ -883,6 +883,8 @@ def apply_blended_sharp_score(df, trained_models):
             elif market_type in ["spreads", "h2h"]:
           
                 # Use home/away to infer opponent
+                df_inverse['Outcome'] = df_inverse['Outcome'].astype(str).str.lower().str.strip()
+                df_full_market['Outcome'] = df_full_market['Outcome'].astype(str).str.lower().str.strip()
                 df_inverse['Opponent_Team'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
@@ -902,6 +904,11 @@ def apply_blended_sharp_score(df, trained_models):
                     suffixes=('', '_opponent')
                 )
                 df_inverse['Value'] = df_inverse['Value_opponent']
+                missing_values = df_inverse[df_inverse['Value_opponent'].isna()]
+                if not missing_values.empty:
+                    st.warning("⚠️ Some inverse rows failed to find a Value from df_full_market")
+                    st.dataframe(missing_values[['Game_Key_Base', 'Outcome', 'Value_opponent']].head(10))
+
 
             
                    
@@ -927,7 +934,8 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Away_Team_Norm'] + "_" +
                 df_inverse['Commence_Hour'].astype(str)
             )
-            
+           
+
             # ✅ Now deduplicate
             canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
             df_inverse = df_inverse.merge(
