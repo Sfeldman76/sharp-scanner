@@ -763,68 +763,59 @@ def apply_blended_sharp_score(df, trained_models):
                 st.warning(f"⚠️ Skipping {market_type.upper()} — model or calibrator missing")
                 continue
     
-            # ✅ Assign df_market first
+            # ✅ Must assign this first!
             df_market = df[df['Market'] == market_type].copy()
             if df_market.empty:
                 st.warning(f"⚠️ No rows to score for {market_type.upper()}")
                 continue
     
-            # ✅ Then normalize and prepare
-            df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
+            # Normalize fields
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
+            df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
     
-            # ✅ Now filter to Game_Keys that have both sides
-            sided_games = (
+            # ✅ Two-sided check BEFORE canonical filtering
+            sided_games_check = (
                 df_market.groupby(['Game_Key'])['Outcome']
                 .nunique()
                 .reset_index(name='Num_Sides')
             )
+    
             one_sided = sided_games_check[sided_games_check['Num_Sides'] < 2]
             two_sided = sided_games_check[sided_games_check['Num_Sides'] == 2]
-            
+    
             st.subheader(f"🧪 {market_type.upper()} — Two-Sided Game Check")
             st.info(f"✅ {len(two_sided)} games have both sides")
+    
             if not one_sided.empty:
                 st.warning(f"⚠️ {len(one_sided)} games missing a second side (not invertible)")
                 st.dataframe(one_sided.head())
             else:
                 st.success("✅ All games have two sides")
-            valid_games = sided_games[sided_games['Num_Sides'] >= 2]['Game_Key']
-            df_market = df_market[df_market['Game_Key'].isin(valid_games)].copy()
-
-
-
+    
+            # ✅ NOW apply canonical filtering based on market_type
             if market_type == "spreads":
                 df_market = df_market[df_market['Value'].notna()]
-                
-                # Step 1: canonical = favorite side (Value < 0)
                 df_canon = df_market[df_market['Value'] < 0].copy()
-                
-                # Step 2: save full market for inverse pairing
                 df_full_market = df_market.copy()
-            
+    
             elif market_type == "h2h":
                 df_market = df_market[df_market['Value'].notna()]
-                
-                # Step 1: canonical = team with lowest moneyline per game
                 df_canon = (
                     df_market.sort_values("Value")
                     .drop_duplicates(subset=['Game_Key', 'Bookmaker'])
                     .copy()
                 )
-                
-                # Step 2: save full market for inverse pairing
                 df_full_market = df_market.copy()
-            
+    
             elif market_type == "totals":
                 df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
                 df_full_market = df_market.copy()
-            
+    
             else:
                 df_canon = df_market.copy()
                 df_full_market = df_market.copy()
-         
+    
             if df_canon.empty:
                 st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
                 continue
