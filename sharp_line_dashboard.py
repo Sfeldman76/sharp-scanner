@@ -796,6 +796,15 @@ def apply_blended_sharp_score(df, trained_models):
                 df_market['Market']
             )
 
+            # ✅ Two-sided check block (REQUIRED for valid_games to exist)
+            sided_games_check = (
+                df_market.groupby(['Game_Key_Base'])['Outcome']
+                .nunique()
+                .reset_index(name='Num_Sides')
+            )
+            
+            valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
+
             # Dynamically strip the outcome-specific suffix from Game_Key
             df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
             # ✅ NOW apply canonical filtering based on market_type
