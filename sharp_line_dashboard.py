@@ -1415,43 +1415,65 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].str.lower()
         df_moves_raw['Outcome'] = df_moves_raw['Outcome'].astype(str).str.strip().str.lower()
         
-        # Split sharp vs rec books
+        # --- Split sharp vs rec books ---
         df_sharp = df_moves_raw[df_moves_raw['Bookmaker'].isin(SHARP_BOOKS)].copy()
         df_rec = df_moves_raw[df_moves_raw['Bookmaker'].isin(REC_BOOKS)].copy()
         
         # === h2h — outcome-specific consensus
         df_h2h = df_moves_raw[df_moves_raw['Market'] == 'h2h'].copy()
+        
         sharp_h2h = (
             df_sharp[df_sharp['Market'] == 'h2h']
             .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-            .mean().reset_index().rename(columns={'Value': 'Sharp Line'})
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Sharp_Book_Consensus'})  # OLD NAME
         )
+        
         rec_h2h = (
             df_rec[df_rec['Market'] == 'h2h']
             .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-            .mean().reset_index().rename(columns={'Value': 'Rec Line'})
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Rec_Book_Consensus'})  # OLD NAME
         )
+        
         df_h2h = df_h2h.merge(sharp_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_h2h = df_h2h.merge(rec_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
         
-        # === spreads — shared consensus per Game_Key + Market only
+        # Calculate movement from open
+        df_h2h['Move_From_Open_Sharp'] = df_h2h['Value'] - df_h2h['Sharp_Book_Consensus']
+        df_h2h['Move_From_Open_Rec'] = df_h2h['Value'] - df_h2h['Rec_Book_Consensus']
+        
+        # === spreads — shared consensus (same for both sides)
         df_spread = df_moves_raw[df_moves_raw['Market'] == 'spreads'].copy()
+        
         sharp_spread = (
             df_sharp[df_sharp['Market'] == 'spreads']
             .groupby(['Game_Key', 'Market'])['Value']
-            .mean().reset_index().rename(columns={'Value': 'Sharp Line'})
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Sharp_Book_Consensus'})  # OLD NAME
         )
+        
         rec_spread = (
             df_rec[df_rec['Market'] == 'spreads']
             .groupby(['Game_Key', 'Market'])['Value']
-            .mean().reset_index().rename(columns={'Value': 'Rec Line'})
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Rec_Book_Consensus'})  # OLD NAME
         )
+        
         df_spread = df_spread.merge(sharp_spread, on=['Game_Key', 'Market'], how='left')
         df_spread = df_spread.merge(rec_spread, on=['Game_Key', 'Market'], how='left')
         
-        # === Final concat
+        # Calculate movement from open
+        df_spread['Move_From_Open_Sharp'] = df_spread['Value'] - df_spread['Sharp_Book_Consensus']
+        df_spread['Move_From_Open_Rec'] = df_spread['Value'] - df_spread['Rec_Book_Consensus']
+        
+        # === Final concat with legacy field names
         df_moves_final = pd.concat([df_h2h, df_spread], ignore_index=True)
-                
+
         # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
         start = time.time()
