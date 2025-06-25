@@ -1259,7 +1259,7 @@ def render_scanner_tab(label, sport_key, container):
         
                 # ✅ Score everything unconditionally
                 df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-        
+                st.write("📋 df_scored.columns BEFORE normalization:", df_scored.columns.tolist())
                 if df_scored.empty:
                     st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
                     st.dataframe(df_pre_game_picks.head(5))
@@ -1267,6 +1267,13 @@ def render_scanner_tab(label, sport_key, container):
         
                 # ✅ Ensure uniqueness before indexing
                 merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+                if 'Game_Key' not in df_scored.columns:
+                    df_scored['Game_Key'] = (
+                        df_scored['Home_Team_Norm'] + "_" +
+                        df_scored['Away_Team_Norm'] + "_" +
+                        pd.to_datetime(df_scored['Game_Start'], utc=True, errors='coerce').dt.floor('h').astype(str) +
+                        "_" + df_scored['Market'] + "_" + df_scored['Outcome']
+                    )
 
                 # ✅ Normalize merge key columns BEFORE setting index
                 for col in merge_keys:
