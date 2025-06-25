@@ -774,7 +774,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
 
-           if market_type == "spreads":
+            if market_type == "spreads":
                 df_market = df_market[df_market['Value'].notna()]
                 
                 # Step 1: canonical = favorite side (Value < 0)
