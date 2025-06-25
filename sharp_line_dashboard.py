@@ -798,29 +798,12 @@ def apply_blended_sharp_score(df, trained_models):
 
             # Dynamically strip the outcome-specific suffix from Game_Key
         
-            sided_games_check = (
-                df_market.groupby(['Game_Key_Base'])['Outcome']
-                .nunique()
-                .reset_index(name='Num_Sides')
-            )
-            # Use the same pattern to filter by valid games
-            valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
-            #✅ Correct way using the already-built Game_Key_Base
+         
             df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
 
 
 
-            one_sided = sided_games_check[sided_games_check['Num_Sides'] < 2]
-            two_sided = sided_games_check[sided_games_check['Num_Sides'] == 2]
     
-            st.subheader(f"🧪 {market_type.upper()} — Two-Sided Game Check")
-            st.info(f"✅ {len(two_sided)} games have both sides")
-    
-            if not one_sided.empty:
-                st.warning(f"⚠️ {len(one_sided)} games missing a second side (not invertible)")
-                st.dataframe(one_sided.head())
-            else:
-                st.success("✅ All games have two sides")
     
             # ✅ NOW apply canonical filtering based on market_type
             if market_type == "spreads":
@@ -912,17 +895,30 @@ def apply_blended_sharp_score(df, trained_models):
                     suffixes=('', '_opponent')
                 )
                 df_inverse['Value'] = df_inverse['Value_opponent']
+                
                 if market_type == "spreads":
                     df_inverse['Value'] = -1 * df_inverse['Value']
                 dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
                 pre_dedup = len(df_inverse)
                 df_inverse = df_inverse.drop_duplicates(subset=dedup_keys)
                 post_dedup = len(df_inverse)
+
+
+                st.markdown("### 🧪 H2H Opposite Team Odds Check")
+                odds_debug = (
+                    df_inverse[['Game_Key_Base', 'Outcome', 'Value']]
+                    .dropna()
+                    .groupby('Game_Key_Base')['Value']
+                    .nunique()
+                    .reset_index(name='Distinct_Odds')
+                )
                 
+                st.write("🎯 Distinct odds per H2H matchup:")
+                st.dataframe(odds_debug.sort_values('Distinct_Odds', ascending=False).head(10))
                 st.success(f"✅ Inverse rows deduplicated: {pre_dedup:,} → {post_dedup:,}")
                 
                 missing_values = df_inverse[df_inverse['Value'].isna()]
-                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+        
 
                 if not missing_values.empty:
                     st.warning("⚠️ Some inverse rows failed to find a Value from df_full_market")
