@@ -1594,12 +1594,13 @@ def render_scanner_tab(label, sport_key, container):
         
             # === Diagnostic base = most recent pick per outcome (latest model score)
             df_pre = (
-                df_moves_raw[df_moves_raw['Pre_Game']]
+            
+                df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].notna()]
                 .sort_values('Snapshot_Timestamp', ascending=False)
-                .drop_duplicates(subset=dedup_cols_diag, keep='first')
+                .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
                 .copy()
             )
-        
+
             # === Must have Model_Sharp_Win_Prob to compute diagnostic trend
             df_pre = df_pre[df_pre['Model_Sharp_Win_Prob'].notna()]
         
