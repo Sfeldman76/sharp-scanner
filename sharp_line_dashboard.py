@@ -876,23 +876,30 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
             elif market_type == "h2h":
-                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
+                df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
-                df_inverse['Opponent_Team'] = np.where(
-                    df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
+            
+                # Flip outcome: assign to the *other* team
+                df_inverse['Outcome'] = np.where(
+                    df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-                df_inverse['Outcome'] = df_inverse['Opponent_Team']
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            
+                # Merge to get the opponent's price
                 df_inverse = df_inverse.merge(
                     df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
                     on=['Game_Key_Base', 'Outcome'],
                     how='left',
-                    suffixes=('', '_opponent')  # 🛠️ Critical fix
+                    suffixes=('', '_opponent')
                 )
-                df_inverse['Value'] = df_inverse['Value_opponent'].astype(float)  # 🛠️ Use correct column
-                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+                df_inverse['Value'] = df_inverse['Value_opponent'].astype(float)
+            
+                df_inverse = df_inverse.drop_duplicates(
+                    subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
+                )
+
             
                          
                 # 🧪 H2H Debug
@@ -1259,12 +1266,14 @@ def render_scanner_tab(label, sport_key, container):
                     return pd.DataFrame()
         
                 # ✅ Ensure uniqueness before indexing
-              # ✅ Normalize first
+                merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+
+                # ✅ Normalize merge key columns BEFORE setting index
                 for col in merge_keys:
                     df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
                     df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
                 
-                # ✅ Then deduplicate and set index
+                # ✅ Deduplicate and set index AFTER normalization
                 df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
                 df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
                 df_pre_game_picks = df_pre_game_picks.sort_values('Snapshot_Timestamp', ascending=False)
@@ -1272,6 +1281,7 @@ def render_scanner_tab(label, sport_key, container):
                 
                 df_pre_game_picks.set_index(merge_keys, inplace=True)
                 df_scored.set_index(merge_keys, inplace=True)
+
 
         
                 # ✅ Assert index uniqueness
