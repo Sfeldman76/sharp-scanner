@@ -1561,9 +1561,7 @@ def render_scanner_tab(label, sport_key, container):
         
         #st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
                         
-        # === Final Diagnostics (Only for upcoming pre-game picks)
-        # === Final Diagnostics (Only for upcoming pre-game picks)
-        # === Final Diagnostics (Only for upcoming pre-game picks)
+      
         # === Final Diagnostics (Only for pre-game picks)
         if 'Pre_Game' not in df_moves_raw.columns:
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
@@ -1582,61 +1580,56 @@ def render_scanner_tab(label, sport_key, container):
         
             df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
         
-            dedup_cols_diag = ['Game_Key', 'Market', 'Outcome']  # 🔥 Bookmaker removed for match flexibility
-            # Only keep games that exist in summary_grouped
-            # Restrict diagnostics to only games that are going to appear in the summary
-            relevant_game_keys = df_moves_raw['Game_Key'].unique()
-
-            # Filter to Pre_Game AND in summary-bound Game_Keys
-            df_pre = df_moves_raw[
-                df_moves_raw['Pre_Game'] & df_moves_raw['Game_Key'].isin(relevant_game_keys)
-            ].copy()
-
-            #st.info(f"📦 Computing diagnostics for {len(df_pre)} rows across {df_pre['Game_Key'].nunique()} unique games")
-
-
-            before = len(df_pre)
-            df_pre = df_pre.sort_values('Snapshot_Timestamp', ascending=False)
-            df_pre = df_pre.drop_duplicates(subset=dedup_cols_diag, keep='first')
-            after = len(df_pre)
-            #st.info(f"🧹 Deduplicated diagnostics rows: {before} → {after} using {dedup_cols_diag}")
-            
+            dedup_cols_diag = ['Game_Key', 'Market', 'Outcome']  # Bookmaker intentionally omitted for general merge
+        
+            # === Diagnostic base = most recent pick per outcome (latest model score)
+            df_pre = (
+                df_moves_raw[df_moves_raw['Pre_Game']]
+                .sort_values('Snapshot_Timestamp', ascending=False)
+                .drop_duplicates(subset=dedup_cols_diag, keep='first')
+                .copy()
+            )
+        
+            # === Must have Model_Sharp_Win_Prob to compute diagnostic trend
+            df_pre = df_pre[df_pre['Model_Sharp_Win_Prob'].notna()]
+        
+            if df_pre.empty:
+                st.warning("⚠️ No valid scored pre-game picks for diagnostics.")
+                return pd.DataFrame()
+        
             diagnostics_df = compute_diagnostics_vectorized(df_pre.copy())
             if diagnostics_df is None:
                 st.warning("⚠️ Diagnostics function returned None.")
                 return pd.DataFrame()
-            
-            # 🚨 Safe merge using relaxed keys
+        
+            # === Merge diagnostics back into df_moves_raw
             df_moves_raw = df_moves_raw.merge(
                 diagnostics_df,
                 on=dedup_cols_diag,
                 how='left',
                 suffixes=('', '_diagnostics')
             )
-            #st.write("✅ Diagnostics merged sample:")
-            #st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ','Line/Model Direction','Why Model Likes It']].drop_duplicates().head())
-
-            # Fill diagnostics columns if missing (prefer diagnostics merge first)
+        
+            # === Assign or fill fallback values for diagnostics columns
             diagnostic_cols = {
                 'Confidence Trend': 'Confidence Trend_diagnostics',
                 'Why Model Likes It': 'Why Model Likes It_diagnostics',
                 'Tier Δ': 'Tier Δ_diagnostics',
                 'Line/Model Direction': 'Line/Model Direction_diagnostics',
             }
-            
+        
             for final_col, diag_col in diagnostic_cols.items():
                 if diag_col in df_moves_raw.columns:
                     df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
                 else:
                     df_moves_raw[final_col] = "⚠️ Missing"
-            
-            # Extra fallback: fill any blank values in the final columns
+        
             for col in diagnostic_cols.keys():
                 if col not in df_moves_raw.columns:
                     df_moves_raw[col] = "⚠️ Missing"
                 else:
                     df_moves_raw[col] = df_moves_raw[col].fillna("⚠️ Missing")
- 
+
        
         # ✅ Fill missing diagnostics if needed
         # ✅ Ensure diagnostics columns are present in df_moves_raw BEFORE building summary_df
