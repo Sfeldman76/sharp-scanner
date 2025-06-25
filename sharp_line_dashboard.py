@@ -773,14 +773,23 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
-    
-            # ✅ Two-sided check BEFORE canonical filtering
+               
+            
+            # Dynamically strip the outcome-specific suffix from Game_Key
+            pattern = rf'_{market_type}_.+$'  # e.g. _spreads_baltimore orioles → ''
+            df_market['Game_Key_Base'] = df_market['Game_Key'].str.replace(pattern, f'_{market_type}', regex=True)
             sided_games_check = (
-                df_market.groupby(['Game_Key'])['Outcome']
+                df_market.groupby(['Game_Key_Base'])['Outcome']
                 .nunique()
                 .reset_index(name='Num_Sides')
             )
-    
+            # Use the same pattern to filter by valid games
+            valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
+            df_market = df_market[
+                df_market['Game_Key'].str.replace(pattern, f'_{market_type}', regex=True).isin(valid_games)
+            ].copy()
+
+
             one_sided = sided_games_check[sided_games_check['Num_Sides'] < 2]
             two_sided = sided_games_check[sided_games_check['Num_Sides'] == 2]
     
@@ -850,6 +859,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
+                
             elif market_type in ["spreads", "h2h"]:
           
                 # Use home/away to infer opponent
@@ -870,8 +880,7 @@ def apply_blended_sharp_score(df, trained_models):
                     right_on=['Game_Key', 'Outcome'],
                     how='left',
                     suffixes=('', '_opponent')
-                )
-            
+                )            
                 # Copy value if found
                 df_inverse['Value'] = df_inverse['Value_opponent']
 
