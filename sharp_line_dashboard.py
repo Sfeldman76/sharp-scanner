@@ -816,14 +816,11 @@ def apply_blended_sharp_score(df, trained_models):
                 df_full_market = df_market.copy()
     
             elif market_type == "h2h":
+                
                 df_market = df_market[df_market['Value'].notna()]
+                df_canon = df_market[df_market['Value'] < 0].copy()
                 df_full_market = df_market.copy()
-                df_canon = (
-                    df_market.sort_values("Value")
-                    .drop_duplicates(subset=['Game_Key', 'Bookmaker'])
-                    .copy()
-                )
-       
+               
     
             elif market_type == "totals":
                 df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
