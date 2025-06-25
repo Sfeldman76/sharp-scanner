@@ -91,6 +91,8 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
 import requests
 import traceback
+from io import BytesIO
+
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -873,40 +875,26 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
-                
-            elif market_type in ["spreads", "h2h"]:
-          
-                # Use home/away to infer opponent
-                df_inverse['Outcome'] = df_inverse['Outcome'].astype(str).str.lower().str.strip()
-                df_full_market['Outcome'] = df_full_market['Outcome'].astype(str).str.lower().str.strip()
+            
+            elif market_type == "h2h":
+                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
+                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
                 df_inverse['Opponent_Team'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-            
-                # Replace outcome with opponent
                 df_inverse['Outcome'] = df_inverse['Opponent_Team']
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            
-                # Look up opponent's Value from df_full_market
                 df_inverse = df_inverse.merge(
                     df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
-                    left_on=['Game_Key_Base', 'Outcome'],
-                    right_on=['Game_Key_Base', 'Outcome'],
-                    how='left',
-                    suffixes=('', '_opponent')
+                    on=['Game_Key_Base', 'Outcome'],
+                    how='left'
                 )
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                
-                if market_type == "spreads":
-                    df_inverse['Value'] = -1 * df_inverse['Value']
-                dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
-                pre_dedup = len(df_inverse)
-                df_inverse = df_inverse.drop_duplicates(subset=dedup_keys)
-                post_dedup = len(df_inverse)
-
-
+                df_inverse['Value'] = df_inverse['Value'].astype(float)
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+            
+                # 🧪 H2H Debug
                 st.markdown("### 🧪 H2H Opposite Team Odds Check")
                 odds_debug = (
                     df_inverse[['Game_Key_Base', 'Outcome', 'Value']]
@@ -915,12 +903,36 @@ def apply_blended_sharp_score(df, trained_models):
                     .nunique()
                     .reset_index(name='Distinct_Odds')
                 )
-                
                 st.write("🎯 Distinct odds per H2H matchup:")
                 st.dataframe(odds_debug.sort_values('Distinct_Odds', ascending=False).head(10))
-                st.success(f"✅ Inverse rows deduplicated: {pre_dedup:,} → {post_dedup:,}")
-                
+            
                 missing_values = df_inverse[df_inverse['Value'].isna()]
+                if not missing_values.empty:
+                    st.warning("⚠️ Some inverse H2H rows failed to find Value from df_full_market")
+                    st.dataframe(missing_values[['Game_Key_Base', 'Outcome']].head(10))
+            
+            elif market_type == "spreads":
+                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
+                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
+                df_inverse['Opponent_Team'] = np.where(
+                    df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
+                    df_inverse['Away_Team_Norm'],
+                    df_inverse['Home_Team_Norm']
+                )
+                df_inverse['Outcome'] = df_inverse['Opponent_Team']
+                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+                df_inverse = df_inverse.merge(
+                    df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
+                    on=['Game_Key_Base', 'Outcome'],
+                    how='left',
+                    suffixes=('', '_opponent')
+                )
+                df_inverse['Value'] = -1 * df_inverse['Value_opponent']
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+            
+            
+                            
+            
         
 
                 if not missing_values.empty:
@@ -1000,9 +1012,6 @@ def apply_blended_sharp_score(df, trained_models):
         st.code(traceback.format_exc())
         return pd.DataFrame()
         
-from io import BytesIO
-import pickle
-from google.cloud import storage
 
 def save_model_to_gcs(model, calibrator, sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
@@ -1251,18 +1260,22 @@ def render_scanner_tab(label, sport_key, container):
                     st.dataframe(df_pre_game_picks.head(5))
                     return pd.DataFrame()
         
-                # ✅ Merge scores back into pre_game_picks
-                # ✅ Drop duplicates first to ensure index uniqueness
+                # ✅ Ensure uniqueness before indexing
                 df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
                 df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
-                
+        
                 df_pre_game_picks.set_index(merge_keys, inplace=True)
                 df_scored.set_index(merge_keys, inplace=True)
-                
+        
+                # ✅ Assert index uniqueness
+                assert df_pre_game_picks.index.is_unique, "❌ df_pre_game_picks index is not unique"
+                assert df_scored.index.is_unique, "❌ df_scored index is not unique"
+        
+                # ✅ Merge scores back safely
                 for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Was_Canonical', 'Scored_By_Model']:
                     if col in df_scored.columns:
                         df_pre_game_picks[col] = df_pre_game_picks[col].combine_first(df_scored[col])
-                
+        
                 df_pre_game_picks.reset_index(inplace=True)
 
 
@@ -1366,45 +1379,67 @@ def render_scanner_tab(label, sport_key, container):
         
         # === h2h — outcome-specific consensus
         df_h2h = df_moves_raw[df_moves_raw['Market'] == 'h2h'].copy()
-        if not df_h2h.empty:
-            sharp_h2h = (
-                df_sharp[df_sharp['Market'] == 'h2h']
-                .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-                .mean().reset_index()
-                .rename(columns={'Value': 'Sharp_Book_Consensus'})
-            )
-            rec_h2h = (
-                df_rec[df_rec['Market'] == 'h2h']
-                .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-                .mean().reset_index()
-                .rename(columns={'Value': 'Rec_Book_Consensus'})
-            )
-            df_h2h = df_h2h.merge(sharp_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
-            df_h2h = df_h2h.merge(rec_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
+
+        # Compute sharp and rec consensus per Outcome (not per game!)
+        sharp_h2h = (
+            df_sharp[df_sharp['Market'] == 'h2h']
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Sharp_Book_Consensus'})
+        )
+        
+        rec_h2h = (
+            df_rec[df_rec['Market'] == 'h2h']
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
+            .mean()
+            .reset_index()
+            .rename(columns={'Value': 'Rec_Book_Consensus'})
+        )
+        
+        # Merge outcome-specific lines
+        df_h2h = df_h2h.merge(sharp_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        df_h2h = df_h2h.merge(rec_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        
+        # Calculate movement from OPEN LINE if First_Line_Value is present
+        if 'First_Line_Value' in df_h2h.columns:
+            df_h2h['Move_From_Open_Sharp'] = df_h2h['Sharp_Book_Consensus'] - df_h2h['First_Line_Value']
+            df_h2h['Move_From_Open_Rec'] = df_h2h['Rec_Book_Consensus'] - df_h2h['First_Line_Value']
+        else:
             df_h2h['Move_From_Open_Sharp'] = df_h2h['Value'] - df_h2h['Sharp_Book_Consensus']
             df_h2h['Move_From_Open_Rec'] = df_h2h['Value'] - df_h2h['Rec_Book_Consensus']
-            df_final_parts.append(df_h2h)
+
         
         # === spreads — shared line per matchup (not per side)
         df_spread = df_moves_raw[df_moves_raw['Market'] == 'spreads'].copy()
-        if not df_spread.empty:
-            sharp_spread = (
-                df_sharp[df_sharp['Market'] == 'spreads']
-                .groupby(['Game_Key', 'Market'])['Value']
-                .mean().reset_index()
-                .rename(columns={'Value': 'Sharp_Book_Consensus'})
-            )
-            rec_spread = (
-                df_rec[df_rec['Market'] == 'spreads']
-                .groupby(['Game_Key', 'Market'])['Value']
-                .mean().reset_index()
-                .rename(columns={'Value': 'Rec_Book_Consensus'})
-            )
-            df_spread = df_spread.merge(sharp_spread, on=['Game_Key', 'Market'], how='left')
-            df_spread = df_spread.merge(rec_spread, on=['Game_Key', 'Market'], how='left')
+
+        # Step 1: Compute consensus per outcome (NOT average of both)
+        sharp_spread = (
+            df_sharp[df_sharp['Market'] == 'spreads']
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
+            .mean().reset_index()
+            .rename(columns={'Value': 'Sharp_Book_Consensus'})
+        )
+        rec_spread = (
+            df_rec[df_rec['Market'] == 'spreads']
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
+            .mean().reset_index()
+            .rename(columns={'Value': 'Rec_Book_Consensus'})
+        )
+        
+        # Step 2: Merge based on team (outcome)
+        df_spread = df_spread.merge(sharp_spread, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        df_spread = df_spread.merge(rec_spread, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        
+        # Step 3: Compute move from open using FIRST LINE (baseline)
+        if 'First_Line_Value' in df_spread.columns:
+            df_spread['Move_From_Open_Sharp'] = df_spread['Sharp_Book_Consensus'] - df_spread['First_Line_Value']
+            df_spread['Move_From_Open_Rec'] = df_spread['Rec_Book_Consensus'] - df_spread['First_Line_Value']
+        else:
+            # fallback to raw delta (less meaningful)
             df_spread['Move_From_Open_Sharp'] = df_spread['Value'] - df_spread['Sharp_Book_Consensus']
             df_spread['Move_From_Open_Rec'] = df_spread['Value'] - df_spread['Rec_Book_Consensus']
-            df_final_parts.append(df_spread)
+
         
         # === totals — outcome-specific (e.g. over/under)
         df_total = df_moves_raw[df_moves_raw['Market'] == 'totals'].copy()
