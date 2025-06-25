@@ -1470,9 +1470,18 @@ def render_scanner_tab(label, sport_key, container):
             df_final_parts.append(df_total)
         
         # === Final combined DataFrame
-        df_moves_final = pd.concat(df_final_parts, ignore_index=True)
-        df_moves_raw = df_moves_final.copy()
-       
+        # Append all market frames if they exist
+        for df_market in [df_h2h, df_spread, df_total]:
+            if not df_market.empty:
+                df_final_parts.append(df_market)
+        
+        if df_final_parts:
+            df_moves_final = pd.concat(df_final_parts, ignore_index=True)
+            df_moves_raw = df_moves_final.copy()
+        else:
+            st.warning("⚠️ No market data added to summary — all frames empty.")
+            return pd.DataFrame()
+
 
 
 # === 1. Load df_history and compute df_first
