@@ -805,9 +805,9 @@ def apply_blended_sharp_score(df, trained_models):
             )
             # Use the same pattern to filter by valid games
             valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
-            df_market = df_market[
-                df_market['Game_Key'].str.replace(pattern, f'_{market_type}', regex=True).isin(valid_games)
-            ].copy()
+            #✅ Correct way using the already-built Game_Key_Base
+            df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
+
 
 
             one_sided = sided_games_check[sided_games_check['Num_Sides'] < 2]
