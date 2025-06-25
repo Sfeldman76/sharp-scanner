@@ -755,6 +755,16 @@ def apply_blended_sharp_score(df, trained_models):
 
     total_start = time.time()
     scored_all = []
+    # ✅ Ensure each Game_Key has at least 2 distinct Outcomes (both sides)
+    sided_games = (
+        df_market.groupby(['Game_Key'])['Outcome']
+        .nunique()
+        .reset_index(name='Num_Sides')
+    )
+    valid_games = sided_games[sided_games['Num_Sides'] >= 2]['Game_Key']
+    
+    # Keep only games with both sides
+    df_market = df_market[df_market['Game_Key'].isin(valid_games)].copy()
 
     for market_type, bundle in trained_models.items():
         #st.markdown(f"---\n### 🧪 Scoring Market: `{market_type}`")
@@ -839,18 +849,30 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
             elif market_type in ["spreads", "h2h"]:
-                # Merge in the other side from the full market
+          
+                # Use home/away to infer opponent
+                df_inverse['Opponent_Team'] = np.where(
+                    df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
+                    df_inverse['Away_Team_Norm'],
+                    df_inverse['Home_Team_Norm']
+                )
+            
+                # Replace outcome with opponent
+                df_inverse['Outcome'] = df_inverse['Opponent_Team']
+                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            
+                # Look up opponent's Value from df_full_market
                 df_inverse = df_inverse.merge(
                     df_full_market[['Game_Key', 'Outcome', 'Value']],
-                    on='Game_Key',
+                    left_on=['Game_Key', 'Outcome'],
+                    right_on=['Game_Key', 'Outcome'],
+                    how='left',
                     suffixes=('', '_opponent')
                 )
             
-                # Keep only the opposite team (not the canonical favorite)
-                df_inverse = df_inverse[df_inverse['Outcome'] != df_inverse['Outcome_opponent']].copy()
-                df_inverse['Outcome'] = df_inverse['Outcome_opponent']
-                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+                # Copy value if found
                 df_inverse['Value'] = df_inverse['Value_opponent']
+
                    
             
               
