@@ -913,17 +913,13 @@ def apply_blended_sharp_score(df, trained_models):
                 
                 st.success(f"✅ Inverse rows deduplicated: {pre_dedup:,} → {post_dedup:,}")
                 
-                missing_values = df_inverse[df_inverse['Value_opponent'].isna()]
+                missing_values = df_inverse[df_inverse['Value'].isna()]
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+
                 if not missing_values.empty:
                     st.warning("⚠️ Some inverse rows failed to find a Value from df_full_market")
                     st.dataframe(missing_values[['Game_Key_Base', 'Outcome', 'Value_opponent']].head(10))
 
-
-            
-                   
-            
-              
-                
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
