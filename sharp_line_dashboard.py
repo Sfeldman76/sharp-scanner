@@ -839,23 +839,21 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
             elif market_type in ["spreads", "h2h"]:
-                # Flip outcome BEFORE dedup
-                df_inverse['Favorite_Team'] = np.where(df_inverse['Value'] < 0, df_inverse['Outcome'], None)
-                df_inverse['Underdog_Team'] = np.where(df_inverse['Value'] > 0, df_inverse['Outcome'], None)
-            
-                df_inverse[['Favorite_Team', 'Underdog_Team']] = (
-                    df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']]
-                    .transform(lambda g: g.ffill().bfill())
+                # Merge in the other side from the full market
+                df_inverse = df_inverse.merge(
+                    df_full_market[['Game_Key', 'Outcome', 'Value']],
+                    on='Game_Key',
+                    suffixes=('', '_opponent')
                 )
-    
-                df_inverse = df_inverse[df_inverse['Favorite_Team'].notna() & df_inverse['Underdog_Team'].notna()]
             
-                df_inverse['Outcome'] = np.where(
-                    df_inverse['Outcome'] == df_inverse['Favorite_Team'],
-                    df_inverse['Underdog_Team'],
-                    df_inverse['Favorite_Team']
-                )        
+                # Keep only the opposite team (not the canonical favorite)
+                df_inverse = df_inverse[df_inverse['Outcome'] != df_inverse['Outcome_opponent']].copy()
+                df_inverse['Outcome'] = df_inverse['Outcome_opponent']
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+                df_inverse['Value'] = df_inverse['Value_opponent']
+                   
+            
+              
                 
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
