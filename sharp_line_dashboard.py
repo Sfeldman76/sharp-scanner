@@ -1243,28 +1243,25 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre_game_picks = df_moves_raw.copy()
                 merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
         
-                # Normalize keys before scoring
-                     
-                # ✅ Only score new rows
-                df_scored = pd.DataFrame()
+                # ✅ Score everything unconditionally
+                df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
         
-                if not df_to_score.empty:
-                    df_scored = apply_blended_sharp_score(df_to_score, trained_models)
+                if df_scored.empty:
+                    st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
+                    st.dataframe(df_pre_game_picks.head(5))
+                    return pd.DataFrame()
         
-                    if df_scored.empty:
-                        st.warning("⚠️ df_scored is completely empty.")
-                    else:
-                        # ✅ Merge scores back safely without overwriting
-                        df_pre_game_picks.set_index(merge_keys, inplace=True)
-                        df_scored.set_index(merge_keys, inplace=True)
+                # ✅ Merge scores back into pre_game_picks
+                df_pre_game_picks.set_index(merge_keys, inplace=True)
+                df_scored.set_index(merge_keys, inplace=True)
         
-                        for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Was_Canonical', 'Scored_By_Model']:
-                            if col in df_scored.columns:
-                                df_pre_game_picks[col] = df_pre_game_picks[col].combine_first(df_scored[col])
+                for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Was_Canonical', 'Scored_By_Model']:
+                    if col in df_scored.columns:
+                        df_pre_game_picks[col] = df_pre_game_picks[col].combine_first(df_scored[col])
         
-                        df_pre_game_picks.reset_index(inplace=True)
-                else:
-                    st.info("✅ All rows already have scores. Nothing new to score.")
+                df_pre_game_picks.reset_index(inplace=True)
+
+              
         
                 # Ensure all required columns exist
                 required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
