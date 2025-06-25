@@ -1240,155 +1240,169 @@ def render_scanner_tab(label, sport_key, container):
         if trained_models:
             try:
                 df_pre_game_picks = df_moves_raw.copy()
-                merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
-        
+                merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
+                
                 # Normalize keys before scoring
                 for col in merge_keys:
-                    df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
+                    if col in df_pre_game_picks.columns:
+                        df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
         
-                if not df_pre_game_picks.empty:
-                    df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-                    #st.subheader("📊 Diagnostic: df_scored rows per market and missing prob")
+                # ✅ Only score new rows
+                df_to_score = df_pre_game_picks[df_pre_game_picks['Model_Sharp_Win_Prob'].isna()].copy()
+                df_scored = pd.DataFrame()
+        
+                if not df_to_score.empty:
+                    df_scored = apply_blended_sharp_score(df_to_score, trained_models)
+        
                     if df_scored.empty:
                         st.warning("⚠️ df_scored is completely empty.")
                     else:
-                        pass#st.dataframe(df_scored.groupby('Market')['Model_Sharp_Win_Prob'].notna().groupby(level=0).sum().reset_index(name='Scored_Rows'))
-                    # ✅ Ensure Snapshot_Timestamp exists for dedup
-                    if 'Snapshot_Timestamp' not in df_scored.columns:
-                        df_scored['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+                        # ✅ Merge scores back safely without overwriting
+                        df_pre_game_picks.set_index(merge_keys, inplace=True)
+                        df_scored.set_index(merge_keys, inplace=True)
         
-                    # ✅ Ensure required scoring columns exist before merge
-                    required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
-                    for col in required_score_cols:
-                        if col not in df_scored.columns:
-                            df_scored[col] = np.nan
+                        for col in ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Was_Canonical', 'Scored_By_Model']:
+                            if col in df_scored.columns:
+                                df_pre_game_picks[col] = df_pre_game_picks[col].combine_first(df_scored[col])
         
-                    # ✅ Drop rows where Model_Sharp_Win_Prob is still null (scoring failed)
-                    df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
-                    if df_scored.empty:
-                        st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
-                        st.dataframe(df_pre_game_picks.head(5))
-                        return pd.DataFrame()
+                        df_pre_game_picks.reset_index(inplace=True)
+                else:
+                    st.info("✅ All rows already have scores. Nothing new to score.")
         
-                    # Normalize keys again for both sides
-                    for col in merge_keys:
-                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+                # === Now ensure all necessary columns exist, even if no scoring happened
+                required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
+                for col in required_score_cols:
+                    if col not in df_pre_game_picks.columns:
+                        df_pre_game_picks[col] = np.nan
         
-                    # Show merge key comparison
-                    raw_keys_df = df_moves_raw[merge_keys].drop_duplicates()
-                    scored_keys_df = df_scored[merge_keys].drop_duplicates()
-        
-                    #st.subheader("🔍 Merge Key Samples")
-                    #st.markdown("#### df_moves_raw merge keys (sample)")
-                    #st.dataframe(raw_keys_df.head(10))
-        
-                    #st.markdown("#### df_scored merge keys (sample)")
-                    #st.dataframe(scored_keys_df.head(10))
-        
-                    # Compare unmatched keys
-                    merged_keys = raw_keys_df.merge(scored_keys_df, on=merge_keys, how='left', indicator=True)
-                    unmatched = merged_keys[merged_keys['_merge'] == 'left_only']
-                    #st.markdown("#### ❌ Merge key mismatches (in raw but not scored):")
-                    #st.dataframe(unmatched[merge_keys].head(10))
-                    #st.info(f"🚨 Total unmatched raw keys: {len(unmatched)} out of {len(raw_keys_df)}")
-        
-                    # === Finalize scoring set for merge
-                    merge_columns = merge_keys + [
-                        'Model_Sharp_Win_Prob',
-                        'Model_Confidence',
-                        'Model_Confidence_Tier',
-                        'Scored_By_Model',
-                        'Snapshot_Timestamp'
-                    ]
-        
-                    df_scored = df_scored[merge_columns].copy()
-                    df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
-                    df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False).drop_duplicates(subset=merge_keys, keep='first')
-        
-                    #st.info("📌 Deduplicated to latest Snapshot_Timestamp per merge key.")
-                    #st.write("🧪 Post-deduplication sample:")
-                    #st.dataframe(df_scored[merge_keys + ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']].head())
-        
-                    # === Perform the merge
-                    pre_merge_rows = len(df_moves_raw)
-                    
-                    # 🚨 Defensive check: ensure scoring column exists before dropping anything
-                    if 'Model_Sharp_Win_Prob' not in df_scored.columns:
-                        st.error("❌ Model_Sharp_Win_Prob missing from df_scored before merge!")
-                        st.dataframe(df_scored.head())
-                        raise ValueError("Model_Sharp_Win_Prob missing — merge will fail.")
-                    
-                    # Optional: check and log if merge keys are consistent
-                    for col in merge_keys:
-                        if col not in df_moves_raw.columns or col not in df_scored.columns:
-                            st.error(f"❌ Merge key '{col}' missing in one of the DataFrames.")
-                            raise ValueError(f"Missing merge key: {col}")
-                        # Normalize string columns to ensure merge alignment
-                        df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
-                    
-                    # ✅ Only keep necessary columns (avoids silent drop)
-                    # ✅ Only keep necessary columns (avoids silent drop)
-                    model_cols = [
-                        'Model_Sharp_Win_Prob',
-                        'Model_Confidence',
-                        'Model_Confidence_Tier',
-                        'Scored_By_Model'
-                    ]
-                    df_scored_clean = df_scored[merge_keys + model_cols].copy()
-                    
-                    # === Perform the merge
-                    pre_merge_rows = len(df_moves_raw)
-                    df_moves_raw = df_moves_raw.drop(columns=['Model_Sharp_Win_Prob'], errors='ignore')
-                    score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
-                    df_moves_raw = df_moves_raw.drop(columns=score_cols, errors='ignore')
+             
 
-                    # === Perform the merge
-                    df_merged = df_moves_raw.merge(
-                        df_scored_clean,
-                        on=merge_keys,
-                        how='left',
-                        validate='many_to_one'
-                    )
-                    #st.subheader("🧪 Columns in df_merged after merge")
-                    #st.write(df_merged.columns.tolist())
+                if df_scored.empty:
+                    st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
+                    st.dataframe(df_pre_game_picks.head(5))
+                    return pd.DataFrame()
+        
+            
+                # Normalize keys again for both sides
+                for col in merge_keys:
+                    df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                    df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+    
+                # Show merge key comparison
+                raw_keys_df = df_moves_raw[merge_keys].drop_duplicates()
+                scored_keys_df = df_scored[merge_keys].drop_duplicates()
+    
+                #st.subheader("🔍 Merge Key Samples")
+                #st.markdown("#### df_moves_raw merge keys (sample)")
+                #st.dataframe(raw_keys_df.head(10))
+    
+                #st.markdown("#### df_scored merge keys (sample)")
+                #st.dataframe(scored_keys_df.head(10))
+    
+                # Compare unmatched keys
+            merged_keys = raw_keys_df.merge(scored_keys_df, on=merge_keys, how='left', indicator=True)
+            unmatched = merged_keys[merged_keys['_merge'] == 'left_only']
+            #st.markdown("#### ❌ Merge key mismatches (in raw but not scored):")
+            #st.dataframe(unmatched[merge_keys].head(10))
+            #st.info(f"🚨 Total unmatched raw keys: {len(unmatched)} out of {len(raw_keys_df)}")
 
-                    # ✅ First flatten column names (replace _x/_y suffixes)
-                    df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
-                    
-                    # ✅ Then drop any true duplicates (leftovers after flattening)
-                    df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
-                    
-                    # ✅ Assign final cleaned frame
-                    df_moves_raw = df_merged
+            # === Finalize scoring set for merge
+            merge_columns = merge_keys + [
+                'Model_Sharp_Win_Prob',
+                'Model_Confidence',
+                'Model_Confidence_Tier',
+                'Scored_By_Model',
+                'Snapshot_Timestamp'
+            ]
 
-                    post_merge_rows = len(df_merged)
-                    #st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
-                    
-                    # ✅ Identify and drop exact suffix dupes before flattening
-                               
-                    
-                    # ✅ Final validation
-                    #st.write("✅ Post-merge check: Any scored probabilities?")
-                    if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
-                        st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
-                    else:
-                        #st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
-                        raw_keys_df = df_moves_raw[merge_keys].drop_duplicates()
-                        scored_keys_df = df_scored_clean[merge_keys].drop_duplicates()
-                        
-                        unmatched = raw_keys_df.merge(scored_keys_df, on=merge_keys, how='left', indicator=True)
-                        unmatched_rows = unmatched[unmatched['_merge'] == 'left_only']
-                        st.warning(f"🚨 {len(unmatched_rows)} unmatched keys in raw vs scored")
-                        st.dataframe(unmatched_rows.head(40))
-                        missing_rows = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
-                        if missing_rows > 0:
-                            st.warning(f"⚠️ {missing_rows} rows missing model score after merge — check key mismatch.")
-                            st.dataframe(df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()][merge_keys].head())
-                        else:
-                            st.success("✅ All rows successfully scored.")
-                    
+            df_scored = df_scored[merge_columns].copy()
+            df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
+            df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False).drop_duplicates(subset=merge_keys, keep='first')
+
+            #st.info("📌 Deduplicated to latest Snapshot_Timestamp per merge key.")
+            #st.write("🧪 Post-deduplication sample:")
+            #st.dataframe(df_scored[merge_keys + ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']].head())
+
+            # === Perform the merge
+            pre_merge_rows = len(df_moves_raw)
+            
+            # 🚨 Defensive check: ensure scoring column exists before dropping anything
+            if 'Model_Sharp_Win_Prob' not in df_scored.columns:
+                st.error("❌ Model_Sharp_Win_Prob missing from df_scored before merge!")
+                st.dataframe(df_scored.head())
+                raise ValueError("Model_Sharp_Win_Prob missing — merge will fail.")
+            
+            # Optional: check and log if merge keys are consistent
+            for col in merge_keys:
+                if col not in df_moves_raw.columns or col not in df_scored.columns:
+                    st.error(f"❌ Merge key '{col}' missing in one of the DataFrames.")
+                    raise ValueError(f"Missing merge key: {col}")
+                # Normalize string columns to ensure merge alignment
+                df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
+            
+            # ✅ Only keep necessary columns (avoids silent drop)
+            # ✅ Only keep necessary columns (avoids silent drop)
+            model_cols = [
+                'Model_Sharp_Win_Prob',
+                'Model_Confidence',
+                'Model_Confidence_Tier',
+                'Scored_By_Model'
+            ]
+            df_scored_clean = df_scored[merge_keys + model_cols].copy()
+
+            
+            # === Perform the merge
+            pre_merge_rows = len(df_moves_raw)
+            df_moves_raw = df_moves_raw.drop(columns=['Model_Sharp_Win_Prob'], errors='ignore')
+            score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
+            df_moves_raw = df_moves_raw.drop(columns=score_cols, errors='ignore')
+
+            # === Perform the merge
+            df_merged = df_moves_raw.merge(
+                df_scored_clean,
+                on=merge_keys,
+                how='left',
+                validate='many_to_one'
+            )
+            #st.subheader("🧪 Columns in df_merged after merge")
+            #st.write(df_merged.columns.tolist())
+
+            # ✅ First flatten column names (replace _x/_y suffixes)
+            df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
+            
+            # ✅ Then drop any true duplicates (leftovers after flattening)
+            df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
+            
+            # ✅ Assign final cleaned frame
+            df_moves_raw = df_merged
+
+            post_merge_rows = len(df_merged)
+            #st.info(f"📊 Post-merge row count: {post_merge_rows} (Δ = {post_merge_rows - pre_merge_rows})")
+            
+            # ✅ Identify and drop exact suffix dupes before flattening
+                       
+            
+            # ✅ Final validation
+            #st.write("✅ Post-merge check: Any scored probabilities?")
+            if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
+                st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
+            else:
+                #st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
+                raw_keys_df = df_moves_raw[merge_keys].drop_duplicates()
+                scored_keys_df = df_scored_clean[merge_keys].drop_duplicates()
+                
+                unmatched = raw_keys_df.merge(scored_keys_df, on=merge_keys, how='left', indicator=True)
+                unmatched_rows = unmatched[unmatched['_merge'] == 'left_only']
+                st.warning(f"🚨 {len(unmatched_rows)} unmatched keys in raw vs scored")
+                st.dataframe(unmatched_rows.head(40))
+                missing_rows = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
+                if missing_rows > 0:
+                    st.warning(f"⚠️ {missing_rows} rows missing model score after merge — check key mismatch.")
+                    st.dataframe(df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].isna()][merge_keys].head())
+                else:
+                    st.success("✅ All rows successfully scored.")
+                
                               
        
             except Exception as e:
