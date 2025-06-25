@@ -1641,34 +1641,28 @@ def render_scanner_tab(label, sport_key, container):
         
      
         # === Apply Filters
-        filtered_df = summary_df.copy()
-        if selected_market != "All":
-            filtered_df = filtered_df[filtered_df['Market'] == selected_market]
-        if selected_date != "All":
-            filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
-        # ✅ Start from scored rows only
         # === Apply Filters
         filtered_df = summary_df.copy()
+        
+        # ✅ Apply UI filters
         if selected_market != "All":
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
-        # ✅ Filter to rows with model scores only
+        # ✅ Filter to scored rows only
         filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
         
         # ✅ Normalize keys
         for col in ['Game_Key', 'Market', 'Outcome']:
             filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
         
-        # ✅ Deduplicate to most recent snapshot per outcome
+        # ✅ Deduplicate to latest per Outcome
         filtered_df = (
             filtered_df
             .sort_values('Snapshot_Timestamp', ascending=False)
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
         )
-        
-#
         # === Group by Matchup + Side + Timestamp
        
         # === Group numeric + categorical fields ONLY
