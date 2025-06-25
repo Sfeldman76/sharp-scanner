@@ -810,35 +810,41 @@ def apply_blended_sharp_score(df, trained_models):
         
 
             # === Build Inverse from already-scored df_canon
+            # Step 1: Build inverse from scored canonical
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
             
-            if market_type == 'totals':
+            # Step 2: Flip outcome (after assigning scores)
+            if market_type == "totals":
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
             
-            elif market_type in ['spreads', 'h2h']:
-                # Do NOT copy again — you're already working from df_inverse
+            elif market_type in ["spreads", "h2h"]:
                 df_inverse['Favorite_Team'] = np.where(df_inverse['Value'] < 0, df_inverse['Outcome'], None)
                 df_inverse['Underdog_Team'] = np.where(df_inverse['Value'] > 0, df_inverse['Outcome'], None)
-            
-                df_inverse[['Favorite_Team', 'Underdog_Team']] = (
-                    df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']].transform(lambda g: g.ffill().bfill())
-                )
-            
+                df_inverse[['Favorite_Team', 'Underdog_Team']] = df_inverse.groupby('Game_Key')[['Favorite_Team', 'Underdog_Team']].transform(lambda g: g.ffill().bfill())
                 df_inverse = df_inverse[df_inverse['Favorite_Team'].notna() & df_inverse['Underdog_Team'].notna()]
-            
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Favorite_Team'],
                     df_inverse['Underdog_Team'],
                     df_inverse['Favorite_Team']
                 )
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-                
+            
+            # ✅ Step 3: Now deduplicate after Outcome_Norm has been updated
+            canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
+            df_inverse = df_inverse.merge(
+                canon_keys,
+                on=['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm'],
+                how='left',
+                indicator=True
+            )
+            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+
             
 
             # === Rebuild keys
@@ -857,14 +863,6 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Commence_Hour'].astype(str)
             )
 
-            canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
-            df_inverse = df_inverse.merge(
-                canon_keys,
-                on=['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm'],
-                how='left',
-                indicator=True
-            )
-            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
