@@ -1271,7 +1271,13 @@ def render_scanner_tab(label, sport_key, container):
                         st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
                     else:
                         #st.dataframe(df_moves_raw[['Model_Sharp_Win_Prob']].dropna().head())
-                    
+                        raw_keys_df = df_moves_raw[merge_keys].drop_duplicates()
+                        scored_keys_df = df_scored_clean[merge_keys].drop_duplicates()
+                        
+                        unmatched = raw_keys_df.merge(scored_keys_df, on=merge_keys, how='left', indicator=True)
+                        unmatched_rows = unmatched[unmatched['_merge'] == 'left_only']
+                        st.warning(f"🚨 {len(unmatched_rows)} unmatched keys in raw vs scored")
+                        st.dataframe(unmatched_rows.head(40))
                         missing_rows = df_moves_raw['Model_Sharp_Win_Prob'].isna().sum()
                         if missing_rows > 0:
                             st.warning(f"⚠️ {missing_rows} rows missing model score after merge — check key mismatch.")
