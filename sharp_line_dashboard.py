@@ -918,7 +918,7 @@ def apply_blended_sharp_score(df, trained_models):
                 # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
-           elif market_type == "spreads":
+            elif market_type == "spreads":
                 # Normalize
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
