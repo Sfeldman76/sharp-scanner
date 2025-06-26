@@ -885,7 +885,7 @@ def apply_blended_sharp_score(df, trained_models):
                 # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
-           elif market_type == "spreads":
+            elif market_type == "spreads":
                 # ✅ Only use rows that were originally canonical
                 df_inverse = df_inverse[df_inverse['Was_Canonical'] == True].copy()
             
