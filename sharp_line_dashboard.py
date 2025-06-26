@@ -784,8 +784,13 @@ def apply_blended_sharp_score(df, trained_models):
             df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
             # ✅ NOW apply canonical filtering based on market_type
             if market_type == "spreads":
-                df_market = df_market[df_market['Value'].notna()]
-                df_canon = df_market[df_market['Value'] < 0].copy()
+                
+                # ✅ Pick canonical row with most negative value per Game_Key_Base
+                df_market = df_market[df_market['Value'].notna()].copy()
+                df_canon = (
+                    df_market.loc[df_market.groupby(['Game_Key_Base'])['Value'].idxmin()]
+                    .copy()
+                )
                 df_full_market = df_market.copy()
     
             elif market_type == "h2h":
