@@ -866,72 +866,26 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
             elif market_type == "h2h":
+                # Flip outcome to opposing team
                 df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
             
-                # ✅ Flip outcome ONCE only
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            
-                # ✅ Merge using flipped outcome
-                df_inverse = df_inverse.merge(
-                    df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
-                    on=['Game_Key_Base', 'Outcome'],
-                    how='left',
-                    suffixes=('', '_opponent')
-                )
-                df_inverse['Value'] = df_inverse['Value_opponent'].astype(float)
-                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
-            
-                # Debug (Optional)
-                missing_values = df_inverse[df_inverse['Value'].isna()]
-                if not missing_values.empty:
-                    st.warning("⚠️ H2H inverse rows missing odds")
-                    st.dataframe(missing_values[['Game_Key_Base', 'Outcome']].head(10))
-            
-                         
-                # 🧪 H2H Debug
-                st.markdown("### 🧪 H2H Opposite Team Odds Check")
-                odds_debug = (
-                    df_inverse[['Game_Key_Base', 'Outcome', 'Value']]
-                    .dropna()
-                    .groupby('Game_Key_Base')['Value']
-                    .nunique()
-                    .reset_index(name='Distinct_Odds')
-                )
-                st.write("🎯 Distinct odds per H2H matchup:")
-                st.dataframe(odds_debug.sort_values('Distinct_Odds', ascending=False).head(10))
-            
-                missing_values = df_inverse[df_inverse['Value'].isna()]
-                if not missing_values.empty:
-                    st.warning("⚠️ Some inverse H2H rows failed to find Value from df_full_market")
-                    st.dataframe(missing_values[['Game_Key_Base', 'Outcome']].head(10))
-            
-            elif market_type == "spreads":
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
-                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
-            
-                df_inverse['Opponent_Team'] = np.where(
-                    df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
-                    df_inverse['Away_Team_Norm'],
-                    df_inverse['Home_Team_Norm']
-                )
-                df_inverse['Outcome'] = df_inverse['Opponent_Team'].str.lower().str.strip()
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-
             
-                # Recalculate Game_Key based on updated Outcome
+                # Rebuild Game_Key and Game_Key_Base using flipped outcome
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
                     df_inverse['Away_Team_Norm'] + "_" +
                     df_inverse['Commence_Hour'].astype(str) + "_" +
                     df_inverse['Market'] + "_" +
-                    df_inverse['Outcome_Norm']
+                    df_inverse['Outcome']
                 )
                 df_inverse['Game_Key_Base'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
@@ -940,7 +894,49 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Market']
                 )
             
-                # Merge opponent line from df_full_market
+                # Merge value from df_full_market for the flipped outcome
+                df_inverse = df_inverse.merge(
+                    df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
+                    on=['Game_Key_Base', 'Outcome'],
+                    how='left',
+                    suffixes=('', '_opponent')
+                )
+                df_inverse['Value'] = df_inverse['Value'].fillna(df_inverse['Value_opponent'])  # just in case
+                df_inverse = df_inverse.drop(columns=['Value_opponent'], errors='ignore')
+            
+                # Deduplicate
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+
+            elif market_type == "spreads":
+                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
+                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
+            
+                # Flip team
+                df_inverse['Opponent_Team'] = np.where(
+                    df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
+                    df_inverse['Away_Team_Norm'],
+                    df_inverse['Home_Team_Norm']
+                )
+                df_inverse['Outcome'] = df_inverse['Opponent_Team'].str.lower().str.strip()
+                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            
+                # Rebuild Game_Key and Game_Key_Base with new Outcome
+                df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+                df_inverse['Game_Key'] = (
+                    df_inverse['Home_Team_Norm'] + "_" +
+                    df_inverse['Away_Team_Norm'] + "_" +
+                    df_inverse['Commence_Hour'].astype(str) + "_" +
+                    df_inverse['Market'] + "_" +
+                    df_inverse['Outcome']
+                )
+                df_inverse['Game_Key_Base'] = (
+                    df_inverse['Home_Team_Norm'] + "_" +
+                    df_inverse['Away_Team_Norm'] + "_" +
+                    df_inverse['Commence_Hour'].astype(str) + "_" +
+                    df_inverse['Market']
+                )
+            
+                # Merge opponent line
                 df_inverse = df_inverse.merge(
                     df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
                     on=['Game_Key_Base', 'Outcome'],
@@ -948,10 +944,9 @@ def apply_blended_sharp_score(df, trained_models):
                     suffixes=('', '_opponent')
                 )
             
-                # Deduplicate canonical values
+                # Fallback from canonical if needed
                 canon_value_map = df_canon[['Game_Key', 'Value']].drop_duplicates(subset=['Game_Key'], keep='first')
             
-                # Merge canonical value for fallback
                 df_inverse = df_inverse.merge(
                     canon_value_map,
                     on='Game_Key',
@@ -959,28 +954,23 @@ def apply_blended_sharp_score(df, trained_models):
                     suffixes=('', '_canonical')
                 )
             
-                # Invert line
+                # Assign inverse value
                 df_inverse['Value'] = np.where(
                     df_inverse['Value_opponent'].notna(),
                     -1 * df_inverse['Value_opponent'],
                     -1 * df_inverse['Value_canonical']
                 )
-                fallback_used = df_inverse['Value_opponent'].isna().sum()
-                if fallback_used > 0:
-                    st.info(f"ℹ️ Used fallback from canonical Value for {fallback_used} rows")
-
-                st.write("📊 df_inverse shape after both merges (spread):", df_inverse.shape)
-  
-                # Optional: warn if any row still has no value
-                missing_value_rows = df_inverse[df_inverse['Value'].isna()]
-                if not missing_value_rows.empty:
-                    st.warning(f"⚠️ {len(missing_value_rows)} SPREAD inverse rows have no Value at all.")
-                    st.dataframe(missing_value_rows[['Game_Key', 'Outcome', 'Bookmaker']].head(10))
             
+                fallback_count = df_inverse['Value_opponent'].isna().sum()
+                if fallback_count > 0:
+                    st.info(f"ℹ️ Used fallback canonical inversion for {fallback_count} SPREAD rows")
+            
+                # Clean up
+                df_inverse.drop(columns=['Value_opponent', 'Value_canonical'], inplace=True, errors='ignore')
+            
+                # Deduplicate
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
-                
-                            
-            
+       
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
@@ -1016,14 +1006,7 @@ def apply_blended_sharp_score(df, trained_models):
             # 🧪 Show both sides of each matchup with Value and Probability
             st.subheader(f"🧪 {market_type.upper()} — Side-by-Side Debug")
             
-            sample_games = (
-                df_scored[df_scored['Market'] == market_type]
-                .sort_values(['Game_Key', 'Outcome'])
-                [['Game_Key', 'Bookmaker', 'Outcome', 'Value', 'Model_Sharp_Win_Prob', 'Was_Canonical']]
-                .head(40)
-            )
-            
-            st.dataframe(sample_games)
+           
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
