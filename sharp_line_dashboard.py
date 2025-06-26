@@ -1356,6 +1356,17 @@ def render_scanner_tab(label, sport_key, container):
         st.info(f"⏱️ Filtered history to {len(df_history)} rows in {time.time() - hist_start:.2f}s")
         
         # === Build First Snapshot
+        # Build First Snapshot (from historical values)
+        df_first = (
+            df_history.sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+            .rename(columns={
+                'Value': 'First_Line_Value',
+                'Sharp_Confidence_Tier': 'First_Tier',
+                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
+        )
+
         # === Normalize and merge first snapshot into df_moves_raw
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
