@@ -1434,8 +1434,7 @@ def render_scanner_tab(label, sport_key, container):
             df_moves_raw = df_moves_final.copy()
         else:
             st.warning("⚠️ No market data added to summary — all frames empty.")
-            return pd.DataFrame()
-
+            
 
 
         # === 1. Load df_history and compute df_first
