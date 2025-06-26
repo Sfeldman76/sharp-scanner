@@ -959,26 +959,13 @@ def apply_blended_sharp_score(df, trained_models):
                     how='left',
                     suffixes=('', '_opponent')
                 )
-            
-                # Fallback to canonical if opponent value not found
-                canon_value_map = df_canon[['Game_Key', 'Value']].drop_duplicates(subset=['Game_Key'], keep='first')
-                df_inverse = df_inverse.merge(
-                    canon_value_map,
-                    on='Game_Key',
-                    how='left',
-                    suffixes=('', '_canonical')
-                )
-            
-                df_inverse['Value'] = np.where(
-                    df_inverse['Value_opponent'].notna(),
-                    -1 * df_inverse['Value_opponent'],
-                    -1 * df_inverse['Value_canonical']
-                )
-            
-                fallback_count = df_inverse['Value_opponent'].isna().sum()
-                if fallback_count > 0:
-                    st.info(f"ℹ️ Used fallback canonical inversion for {fallback_count} SPREAD rows")
-            
+                df_inverse['Value'] = -1 * df_inverse['Value_opponent']
+
+                # Drop temp column
+                df_inverse.drop(columns=['Value_opponent'], inplace=True)
+              
+              
+      
                 df_inverse.drop(columns=['Value_opponent', 'Value_canonical'], inplace=True, errors='ignore')
             
                 # Final deduplication
