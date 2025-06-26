@@ -885,21 +885,26 @@ def apply_blended_sharp_score(df, trained_models):
                 # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
-            elif market_type == "spreads":
-                # Normalize
-                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
-                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
+           elif market_type == "spreads":
+                # ✅ Only use rows that were originally canonical
+                df_inverse = df_inverse[df_inverse['Was_Canonical'] == True].copy()
             
-                # Flip outcome to opposing team
+                # ✅ Normalize Outcome and team columns
+                df_inverse['Outcome'] = df_inverse['Outcome'].str.strip().str.lower()
+                df_inverse['Home_Team_Norm'] = df_inverse['Home_Team_Norm'].str.strip().str.lower()
+                df_inverse['Away_Team_Norm'] = df_inverse['Away_Team_Norm'].str.strip().str.lower()
+                df_full_market['Outcome'] = df_full_market['Outcome'].str.strip().str.lower()
+            
+                # ✅ Flip Outcome to opposing team
                 df_inverse['Opponent_Team'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-                df_inverse['Outcome'] = df_inverse['Opponent_Team'].str.lower().str.strip()
+                df_inverse['Outcome'] = df_inverse['Opponent_Team']
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-                # Rebuild keys with flipped Outcome
+                # ✅ Rebuild Game_Key and Game_Key_Base
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
@@ -915,32 +920,26 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Market']
                 )
             
-                # ✅ Construct a Team_Key for clean Value merge
+                # ✅ Build Team_Key and merge Value from canonical side
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-  
+            
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_canonical')
                 )
-                
-                # ✅ Always flip the canonical line value
-                df_inverse['Value'] = -1 * df_inverse['Value_canonical']
-                
-                # Drop temporary column
-                df_inverse.drop(columns=['Value_canonical'], inplace=True)
-
-              
-              
-      
-                df_inverse.drop(columns=['Value_opponent', 'Value_canonical'], inplace=True, errors='ignore')
             
-                # Final deduplication
+                # ✅ Flip the canonical value to get the inverse
+                df_inverse['Value'] = -1 * df_inverse['Value_canonical']
+                df_inverse.drop(columns=['Value_canonical'], inplace=True, errors='ignore')
+            
+                # ✅ Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+            
 
-       
+                  
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
