@@ -1546,7 +1546,10 @@ def render_scanner_tab(label, sport_key, container):
         
         date_only_options = ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique())
         selected_date = st.selectbox(f"📅 Filter {label} by Date", date_only_options, key=f"{label}_date_filter")
- 
+        
+        
+        filtered_df = summary_df.copy()
+
         # ✅ Apply UI filters
         if selected_market != "All":
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
