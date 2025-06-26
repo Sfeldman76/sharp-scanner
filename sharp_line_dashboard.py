@@ -1545,16 +1545,20 @@ def render_scanner_tab(label, sport_key, container):
             )
 
             # === Must have Model_Sharp_Win_Prob to compute diagnostic trend
-            df_pre = df_pre[df_pre['Model_Sharp_Win_Prob'].notna()]
-        
+            # Must have scored rows to continue
+            df_pre = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].notna()]
+            
             if df_pre.empty:
-                st.warning("⚠️ No valid scored pre-game picks for diagnostics.")
-                return pd.DataFrame()
-        
-            diagnostics_df = compute_diagnostics_vectorized(df_pre.copy())
-            if diagnostics_df is None:
-                st.warning("⚠️ Diagnostics function returned None.")
-                return pd.DataFrame()
+                st.warning("⚠️ No valid scored pre-game picks for diagnostics — fallback mode.")
+                
+                for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
+                    df_moves_raw[col] = "⚠️ Missing"
+                
+                diagnostics_df = pd.DataFrame(columns=['Game_Key', 'Market', 'Outcome'])
+            else:
+                diagnostics_df = compute_diagnostics_vectorized(df_pre.copy())
+                    
+           
         
             # === Merge diagnostics back into df_moves_raw
             df_moves_raw = df_moves_raw.merge(
