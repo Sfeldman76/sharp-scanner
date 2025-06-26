@@ -853,13 +853,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
 
-            # ✅ Store canonical outcome keys for later duplicate filtering
-            st.subheader(f"🧪 {market_type.upper()} — Canonical Check")
-            st.dataframe(df_canon[['Game_Key', 'Outcome', 'Value']].head(10))
-            st.write("🧮 Value Sign Counts")
-            st.write(df_canon['Value'].apply(lambda x: '<0' if x < 0 else '>0' if x > 0 else '0').value_counts())
-
-
+           
             # === Build Inverse from already-scored df_canon
            # === Build inverse from scored canonical
             df_inverse = df_canon.copy(deep=True)
@@ -1283,52 +1277,55 @@ def render_scanner_tab(label, sport_key, container):
                         df_scored[col] = np.nan
         
                 # ✅ Defensive check
+                # ✅ Defensive check
                 if 'Model_Sharp_Win_Prob' not in df_scored.columns:
                     st.error("❌ Model_Sharp_Win_Prob missing from df_scored before merge!")
                     st.dataframe(df_scored.head())
                     raise ValueError("Model_Sharp_Win_Prob missing — merge will fail.")
+                
+                # ✅ Backup Pre_Game
                 if 'Pre_Game' in df_moves_raw.columns:
                     pre_game_map = df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Pre_Game']]
                 else:
                     st.warning("⚠️ Pre_Game missing in df_moves_raw before merge — won't be preserved.")
                     pre_game_map = pd.DataFrame()
-                # ✅ Finalize for merge
+                
+                # ✅ Prepare scored data for merge
                 merge_columns = merge_keys + required_score_cols + ['Snapshot_Timestamp']
                 df_scored = df_scored[merge_columns].copy()
                 df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
-        
-                # ✅ Merge into df_moves_raw
-                df_moves_raw = df_moves_raw.drop(columns=required_score_cols, errors='ignore')
+                
                 df_scored_clean = df_scored[merge_keys + required_score_cols].copy()
-        
-                df_merged = df_moves_raw.merge(
+                
+                # ✅ Merge model scores into df_moves_raw
+                df_moves_raw = df_moves_raw.merge(
                     df_scored_clean,
                     on=merge_keys,
                     how='left',
                     validate='many_to_one'
                 )
-                 # Now restore Pre_Game if it was saved
+                
+                # ✅ Clean suffixes
+                df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
+                df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
+                
+                # ✅ Restore Pre_Game
                 if not pre_game_map.empty:
-                    if 'Pre_Game' in df_merged.columns:
-                        df_merged = df_merged.drop(columns='Pre_Game')  # Avoid duplicate error
-                    df_merged = df_merged.merge(
+                    if 'Pre_Game' in df_moves_raw.columns:
+                        df_moves_raw = df_moves_raw.drop(columns='Pre_Game')  # Avoid duplication
+                    df_moves_raw = df_moves_raw.merge(
                         pre_game_map,
                         on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
                         how='left'
                     )
                     st.success("✅ Re-attached Pre_Game to df_moves_raw after scoring merge")
                 
-                
-   
-                # ✅ Final cleanup
-                df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
-                df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
-                df_moves_raw = df_merged
-        
+                # ✅ Final check
                 if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
                     st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
                 else:
                     st.success("✅ All rows successfully scored.")
+
         
             except Exception as e:
                 error_type = type(e).__name__
