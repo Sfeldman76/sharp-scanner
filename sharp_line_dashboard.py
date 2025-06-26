@@ -1720,11 +1720,13 @@ def render_scanner_tab(label, sport_key, container):
             st.dataframe(only_in_summary.head())
         
         # === Merge diagnostics back into grouped summary
+        diagnostic_fields = ['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
         summary_grouped = summary_grouped.merge(
-            diagnostics_df_clean,
+            diagnostics_df_clean[diagnostic_fields],
             on=['Game_Key', 'Market', 'Outcome'],
             how='left'
         )
+
         
         # ✅ Resolve _y suffixes (only if collision occurred)
         for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
@@ -1736,13 +1738,7 @@ def render_scanner_tab(label, sport_key, container):
         diagnostic_fields = ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
         for col in diagnostic_fields:
             summary_grouped[col] = summary_grouped[col].fillna("⚠️ Missing")
-        
-        # === Diagnostic merge audit
-        num_diagnostics = summary_grouped['Confidence Trend'].ne('⚠️ Missing').sum()
-        #st.success(f"✅ Diagnostics successfully populated on {num_diagnostics} / {len(summary_grouped)} rows")
-        missing_merge = summary_grouped['Confidence Trend'].isna().sum()
-        st.warning(f"⚠️ Diagnostics missing for {missing_merge} rows after merge")
-        
+
         # === Final Column Order for Display
         view_cols = [
             'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
