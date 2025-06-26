@@ -914,21 +914,46 @@ def apply_blended_sharp_score(df, trained_models):
             elif market_type == "spreads":
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
+            
                 df_inverse['Opponent_Team'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
+            
                 df_inverse['Outcome'] = df_inverse['Opponent_Team']
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            
+                # Merge opponent line from df_full_market
                 df_inverse = df_inverse.merge(
                     df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
                     on=['Game_Key_Base', 'Outcome'],
                     how='left',
                     suffixes=('', '_opponent')
                 )
-                df_inverse['Value'] = -1 * df_inverse['Value_opponent']
+            
+                # Merge canonical value (for fallback)
+                df_inverse = df_inverse.merge(
+                    df_canon[['Game_Key', 'Value']],
+                    on='Game_Key',
+                    how='left',
+                    suffixes=('', '_canonical')
+                )
+            
+                # Calculate inverse line
+                df_inverse['Value'] = np.where(
+                    df_inverse['Value_opponent'].notna(),
+                    -1 * df_inverse['Value_opponent'],
+                    -1 * df_inverse['Value_canonical']  # ✅ safe fallback
+                )
+            
+                # Optional debug: how many rows used fallback
+                fallback_count = df_inverse['Value_opponent'].isna().sum()
+                if fallback_count > 0:
+                    st.info(f"ℹ️ Used fallback canonical value inversion for {fallback_count} SPREAD rows")
+            
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+
   
                 missing_values = df_inverse[df_inverse['Value'].isna()]
                 if not missing_values.empty:
@@ -1367,7 +1392,7 @@ def render_scanner_tab(label, sport_key, container):
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
         )
 
-        # === Normalize and merge first snapshot into df_moves_raw
+                # === Normalize and merge first snapshot into df_moves_raw
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
         
@@ -1379,7 +1404,7 @@ def render_scanner_tab(label, sport_key, container):
         if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
             df_moves_raw['First_Model_Prob'] = df_moves_raw['First_Sharp_Prob']
         
-        # === Define df_pre (filtered scored picks for upcoming games)
+        # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
         df_pre = df_moves_raw[
             (df_moves_raw['Pre_Game'] == True) &
@@ -1387,14 +1412,19 @@ def render_scanner_tab(label, sport_key, container):
             (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
         ].copy()
         
-        # Deduplicate and normalize
-        df_pre = df_pre.drop_duplicates(
-            subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last'
-        )
+        # Normalize + deduplicate
+        df_pre = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         df_pre['Bookmaker'] = df_pre['Bookmaker'].str.lower()
         df_pre['Outcome'] = df_pre['Outcome'].astype(str).str.strip().str.lower()
         
-        # === Compute consensus lines and line movement
+        # === Rename BEFORE using summary_cols
+        df_pre.rename(columns={
+            'Game': 'Matchup',
+            'Model_Sharp_Win_Prob': 'Model Prob',
+            'Model_Confidence_Tier': 'Confidence Tier'
+        }, inplace=True)
+        
+        # === Compute consensus lines
         sharp_consensus = (
             df_pre[df_pre['Bookmaker'].isin(SHARP_BOOKS)]
             .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
@@ -1405,25 +1435,48 @@ def render_scanner_tab(label, sport_key, container):
             .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
             .mean().reset_index(name='Rec Line')
         )
+        
         df_pre = df_pre.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_pre = df_pre.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         
+        # Define summary columns
+        summary_cols = [
+            'Matchup', 'Market', 'Game_Start', 'Outcome',
+            'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
+            'Model Prob', 'Confidence Tier',
+            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
+            'Game_Key'
+        ]
+        
+        # Create df_summary_base
+        df_summary_base = (
+            df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+            .copy()
+        )
+        
+        # Ensure required columns exist
+        for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
+            if col not in df_summary_base.columns:
+                df_summary_base[col] = np.nan
+                      
         # Line movement calculations
+        # === Calculate line movement on df_summary_base
         move_start = time.time()
-        if 'First_Line_Value' in df_pre.columns:
-            if 'Sharp Line' in df_pre.columns:
-                df_pre['Sharp Move'] = (df_pre['Sharp Line'] - df_pre['First_Line_Value']).round(2)
-            if 'Rec Line' in df_pre.columns:
-                df_pre['Rec Move'] = (df_pre['Rec Line'] - df_pre['First_Line_Value']).round(2)
+        if 'First_Line_Value' in df_summary_base.columns:
+            if 'Sharp Line' in df_summary_base.columns:
+                df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
+            if 'Rec Line' in df_summary_base.columns:
+                df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
         st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
+
         
         # === Compute diagnostics from df_pre (upcoming + scored)
-        if df_pre.empty:
+        if df_summary_base.empty:
             st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                 df_moves_raw[col] = "⚠️ Missing"
         else:
-            diagnostics_df = compute_diagnostics_vectorized(df_pre)
+            diagnostics_df = compute_diagnostics_vectorized(df_summary_base)
             diag_keys = ['Game_Key', 'Market', 'Outcome']
         
             df_moves_raw = df_moves_raw.merge(
@@ -1449,24 +1502,11 @@ def render_scanner_tab(label, sport_key, container):
         # === 6. Final Summary Table ===
 
         # Define the core columns we want to extract
-       # === Rename df_pre columns BEFORE selecting summary_cols
-        df_pre.rename(columns={
-            'Game': 'Matchup',
-            'Model_Sharp_Win_Prob': 'Model Prob',
-            'Model_Confidence_Tier': 'Confidence Tier'
-        }, inplace=True)
-        
-        # Define the core columns we want to extract — match these to the renamed names
-        summary_cols = [
-            'Matchup', 'Market', 'Game_Start', 'Outcome',
-            'Rec Line', 'Sharp Line',
-            'Rec Move', 'Sharp Move',
-            'Model Prob', 'Confidence Tier',
-            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
-            'Game_Key'
-        ]
 
-        summary_df = df_pre[[col for col in summary_cols if col in df_pre.columns]].copy()
+        # Define the core columns we want to extract — match these to the renamed names
+        
+        summary_df = df_summary_base[[col for col in summary_cols if col in df_summary_base.columns]].copy()
+
         
         # Convert and format datetime columns
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
