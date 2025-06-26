@@ -959,7 +959,7 @@ def apply_blended_sharp_score(df, trained_models):
                     how='left',
                     suffixes=('', '_opponent')
                 )
-                df_inverse['Value'] = -1 * df_inverse['Value_opponent']
+                df_inverse['Value'] = df_inverse['Value_opponent']
 
                 # Drop temp column
                 df_inverse.drop(columns=['Value_opponent'], inplace=True)
