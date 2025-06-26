@@ -1540,8 +1540,7 @@ def render_scanner_tab(label, sport_key, container):
         # Optional: final sort if needed
         #summary_df.sort_values(by=['Game_Start', 'Matchup', 'Market'], inplace=True)
         
-                                 
-         filtered_df = df_moves_raw[df_moves_raw['Scored_By_Model'] == True]
+   
         # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
