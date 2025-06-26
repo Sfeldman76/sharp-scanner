@@ -951,18 +951,20 @@ def apply_blended_sharp_score(df, trained_models):
                 # ✅ Construct a Team_Key for clean Value merge
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-            
-                # Merge value using Team_Key
+  
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value']],
                     on='Team_Key',
                     how='left',
-                    suffixes=('', '_opponent')
+                    suffixes=('', '_canonical')
                 )
-                df_inverse['Value'] = df_inverse['Value_opponent']
+                
+                # ✅ Always flip the canonical line value
+                df_inverse['Value'] = -1 * df_inverse['Value_canonical']
+                
+                # Drop temporary column
+                df_inverse.drop(columns=['Value_canonical'], inplace=True)
 
-                # Drop temp column
-                df_inverse.drop(columns=['Value_opponent'], inplace=True)
               
               
       
