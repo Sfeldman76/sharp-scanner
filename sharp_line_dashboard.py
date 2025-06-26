@@ -1655,6 +1655,11 @@ def render_scanner_tab(label, sport_key, container):
         diagnostic_cols = ['Game_Key', 'Market', 'Outcome',
                            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
         
+        # ✅ SAFEGUARD: assign diagnostics_df if missing
+        if 'diagnostics_df' not in locals():
+            st.warning("⚠️ diagnostics_df missing — assigning empty DataFrame fallback")
+            diagnostics_df = pd.DataFrame(columns=diagnostic_cols)
+        
         # === Re-merge diagnostics AFTER groupby using clean diagnostics_df
         diagnostics_df_clean = diagnostics_df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
         
@@ -1662,6 +1667,7 @@ def render_scanner_tab(label, sport_key, container):
         for col in ['Game_Key', 'Market', 'Outcome']:
             summary_grouped[col] = summary_grouped[col].astype(str).str.strip().str.lower()
             diagnostics_df_clean[col] = diagnostics_df_clean[col].astype(str).str.strip().str.lower()
+        
         
         # 🧪 Add these diagnostics RIGHT HERE before merging
         #st.write("🧪 Unique Game_Keys in summary:", summary_grouped['Game_Key'].unique()[:5])
