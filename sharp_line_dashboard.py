@@ -1450,7 +1450,7 @@ def render_scanner_tab(label, sport_key, container):
 
         # Define the core columns we want to extract
         summary_cols = [
-            'Game', 'Market', 'Game_Start', 'Outcome',
+            'Matchup', 'Market', 'Game_Start', 'Outcome',
             'Rec Line', 'Sharp Line',
             'Rec Move', 'Sharp Move',
             'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
@@ -1482,16 +1482,33 @@ def render_scanner_tab(label, sport_key, container):
         summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
         
         # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
-        dupes = summary_df.groupby(['Game_Key', 'Market', 'Outcome']).size()
-        dupes = dupes[dupes > 1]
+        # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
+        # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
+        dupes = (
+            summary_df.groupby(['Game_Key', 'Market', 'Outcome'])
+            .size()
+            .reset_index(name='count')
+            .query("count > 1")
+        )
         
         if not dupes.empty:
             st.warning(f"🚨 Found {len(dupes)} duplicated Game_Key-Market-Outcome combinations")
-            dupe_keys = dupes.index.tolist()
-            st.dataframe(summary_df[
-                summary_df.set_index(['Game_Key', 'Market', 'Outcome']).index.isin(dupe_keys)
-            ])
         
+            # Merge back to see actual duplicated rows
+            duped_rows = summary_df.merge(
+                dupes[['Game_Key', 'Market', 'Outcome']],
+                on=['Game_Key', 'Market', 'Outcome'],
+                how='inner'
+            ).sort_values(['Game_Key', 'Market', 'Outcome'])
+        
+            st.dataframe(duped_rows.head(10))
+        
+            # 🧪 Inspect what’s actually varying across the duplicates
+            diff_cols = summary_df.columns.difference(['Game_Key', 'Market', 'Outcome'])
+            st.write("🧪 Sample differences across duplicate rows:")
+            st.dataframe(duped_rows[diff_cols].drop_duplicates())
+
+
         # === Preview & column check
         #st.write("📋 Columns in summary_df:", summary_df.columns.tolist())
         
