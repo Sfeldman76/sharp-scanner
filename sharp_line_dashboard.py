@@ -1515,86 +1515,59 @@ def render_scanner_tab(label, sport_key, container):
         #st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
                         
       
-        # === Final Diagnostics (Only for pre-game picks)
+       # === Final Diagnostics (Only for pre-game picks)
         if 'Pre_Game' not in df_moves_raw.columns:
             st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
         else:
-            pre_mask = df_moves_raw['Pre_Game']
-            
-            if df_moves_raw.empty or pre_mask.sum() == 0:
+            if df_moves_raw.empty or df_moves_raw['Pre_Game'].sum() == 0:
                 st.warning("⚠️ No live pre-game picks to compute diagnostics.")
-                return pd.DataFrame()
-        
-            # Defensive fix for corrupted tier column
-            if 'Model_Confidence_Tier' in df_moves_raw.columns:
-                if isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
-                    st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series by selecting first column")
-                    df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
-        
-            df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-        
-            dedup_cols_diag = ['Game_Key', 'Market', 'Outcome']  # Bookmaker intentionally omitted for general merge
-        
-            # === Diagnostic base = most recent pick per outcome (latest model score)
-            df_pre = (
-            
-                df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].notna()]
-                .sort_values('Snapshot_Timestamp', ascending=False)
-                .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
-                .copy()
-            )
-
-            # === Must have Model_Sharp_Win_Prob to compute diagnostic trend
-            # Must have scored rows to continue
-            df_pre = df_moves_raw[df_moves_raw['Model_Sharp_Win_Prob'].notna()]
-            
-            if df_pre.empty:
-                st.warning("⚠️ No valid scored pre-game picks for diagnostics — fallback mode.")
-                
                 for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                     df_moves_raw[col] = "⚠️ Missing"
-                
-                diagnostics_df = pd.DataFrame(columns=['Game_Key', 'Market', 'Outcome'])
             else:
-                diagnostics_df = compute_diagnostics_vectorized(df_pre.copy())
-                    
-           
+                # Defensive: ensure 'Model_Confidence_Tier' is a Series
+                if 'Model_Confidence_Tier' in df_moves_raw.columns and isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
+                    st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series from DataFrame")
+                    df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
         
-            # === Merge diagnostics back into df_moves_raw
-            df_moves_raw = df_moves_raw.merge(
-                diagnostics_df,
-                on=dedup_cols_diag,
-                how='left',
-                suffixes=('', '_diagnostics')
-            )
+                # Drop duplicated columns (common after merging)
+                df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
         
-            # === Assign or fill fallback values for diagnostics columns
-            diagnostic_cols = {
-                'Confidence Trend': 'Confidence Trend_diagnostics',
-                'Why Model Likes It': 'Why Model Likes It_diagnostics',
-                'Tier Δ': 'Tier Δ_diagnostics',
-                'Line/Model Direction': 'Line/Model Direction_diagnostics',
-            }
+                # Filter to upcoming scored picks
+                df_pre = df_moves_raw[
+                    (df_moves_raw['Pre_Game'] == True) &
+                    (df_moves_raw['Model_Sharp_Win_Prob'].notna())
+                ].copy()
         
-            for final_col, diag_col in diagnostic_cols.items():
-                if diag_col in df_moves_raw.columns:
-                    df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
+                if df_pre.empty:
+                    st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
+                    for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
+                        df_moves_raw[col] = "⚠️ Missing"
                 else:
-                    df_moves_raw[final_col] = "⚠️ Missing"
+                    # Compute diagnostics
+                    diagnostics_df = compute_diagnostics_vectorized(df_pre)
         
-            for col in diagnostic_cols.keys():
-                if col not in df_moves_raw.columns:
-                    df_moves_raw[col] = "⚠️ Missing"
-                else:
-                    df_moves_raw[col] = df_moves_raw[col].fillna("⚠️ Missing")
-
-       
-        # ✅ Fill missing diagnostics if needed
-        # ✅ Ensure diagnostics columns are present in df_moves_raw BEFORE building summary_df
-        for col in ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']:
-            if col not in df_moves_raw.columns:
-                df_moves_raw[col] = "⚠️ Missing"
+                    # Merge diagnostics back
+                    diag_keys = ['Game_Key', 'Market', 'Outcome']
+                    df_moves_raw = df_moves_raw.merge(
+                        diagnostics_df,
+                        on=diag_keys,
+                        how='left',
+                        suffixes=('', '_diagnostics')
+                    )
         
+                    # Assign merged columns or fallback
+                    diagnostic_cols = {
+                        'Confidence Trend': 'Confidence Trend_diagnostics',
+                        'Why Model Likes It': 'Why Model Likes It_diagnostics',
+                        'Tier Δ': 'Tier Δ_diagnostics',
+                        'Line/Model Direction': 'Line/Model Direction_diagnostics',
+                    }
+        
+                    for final_col, diag_col in diagnostic_cols.items():
+                        if diag_col in df_moves_raw.columns:
+                            df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
+                        else:
+                            df_moves_raw[final_col] = "⚠️ Missing"
         # === 6. Final Summary Table
         summary_cols = [
             'Game', 'Market', 'Game_Start', 'Outcome',
