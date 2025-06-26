@@ -1540,15 +1540,20 @@ def render_scanner_tab(label, sport_key, container):
                 for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                     df_moves_raw[col] = "⚠️ Missing"
             else:
-                # Defensive: ensure 'Model_Confidence_Tier' is a Series
+                # Defensive: ensure Model_Confidence_Tier is not a DataFrame
                 if 'Model_Confidence_Tier' in df_moves_raw.columns and isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
                     st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series from DataFrame")
                     df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
         
-                # Drop duplicated columns (common after merging)
+                # Drop duplicated columns
                 df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
         
-                # Filter to upcoming scored picks
+                # ✅ Diagnostic preview
+                st.write("🟢 'Pre_Game' column found.")
+                st.write("🔢 Pre_Game distribution:", df_moves_raw['Pre_Game'].value_counts(dropna=False))
+                st.write("✅ Sample model probs:", df_moves_raw['Model_Sharp_Win_Prob'].dropna().head())
+        
+                # ✅ Define df_pre properly
                 df_pre = df_moves_raw[
                     (df_moves_raw['Pre_Game'] == True) &
                     (df_moves_raw['Model_Sharp_Win_Prob'].notna())
@@ -1559,11 +1564,9 @@ def render_scanner_tab(label, sport_key, container):
                     for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                         df_moves_raw[col] = "⚠️ Missing"
                 else:
-                    # Compute diagnostics
                     diagnostics_df = compute_diagnostics_vectorized(df_pre)
-        
-                    # Merge diagnostics back
                     diag_keys = ['Game_Key', 'Market', 'Outcome']
+        
                     df_moves_raw = df_moves_raw.merge(
                         diagnostics_df,
                         on=diag_keys,
@@ -1571,7 +1574,6 @@ def render_scanner_tab(label, sport_key, container):
                         suffixes=('', '_diagnostics')
                     )
         
-                    # Assign merged columns or fallback
                     diagnostic_cols = {
                         'Confidence Trend': 'Confidence Trend_diagnostics',
                         'Why Model Likes It': 'Why Model Likes It_diagnostics',
@@ -1584,6 +1586,8 @@ def render_scanner_tab(label, sport_key, container):
                             df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
                         else:
                             df_moves_raw[final_col] = "⚠️ Missing"
+                    
+                    
         # === 6. Final Summary Table
         summary_cols = [
             'Game', 'Market', 'Game_Start', 'Outcome',
