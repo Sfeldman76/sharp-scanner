@@ -576,9 +576,7 @@ def read_market_weights_from_bigquery():
         return {}
 
 def compute_diagnostics_vectorized(df):
-    import numpy as np
-    import pandas as pd
-    import streamlit as st
+
 
     TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
     TIER_ORDER_MODEL_CONFIDENCE = {
@@ -732,7 +730,8 @@ def compute_diagnostics_vectorized(df):
         st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
        
 
-        return_df
+        return diagnostics_df
+
 
     except Exception as e:
         st.error("❌ Error computing ")
