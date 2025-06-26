@@ -608,7 +608,7 @@ def compute_diagnostics_vectorized(df):
         #st.write("🧪 Unique values in First_Tier:", df['First_Tier'].unique().tolist())
 
         # === Tier Mapping
-        tier_current = df['Model_Confidence_Tier'].map(TIER_ORDER_MODEL_CONFIDENCE)
+        tier_current = df['Confidence_Tier'].map(TIER_ORDER_MODEL_CONFIDENCE)
         tier_current = pd.to_numeric(tier_current, errors='coerce').fillna(0).astype(int)
 
         tier_open = df['First_Tier'].map(TIER_ORDER)
@@ -632,8 +632,8 @@ def compute_diagnostics_vectorized(df):
         df['Tier_Change'] = tier_change
 
         # === Probabilities & Confidence Trend
-        if 'Model_Sharp_Win_Prob' in df.columns and 'First_Model_Prob' in df.columns:
-            prob_now = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
+        if 'Model Prob' in df.columns and 'First_Model_Prob' in df.columns:
+            prob_now = pd.to_numeric(df['Model Prob'], errors='coerce')
             prob_start = pd.to_numeric(df['First_Model_Prob'], errors='coerce')
             delta = prob_now - prob_start
 
