@@ -982,24 +982,15 @@ def apply_blended_sharp_score(df, trained_models):
                     .sort_values('Game_Key')
                     .head(20)
                 )
-
-            # ✅ Rebuild Merge_Key_Short BEFORE dedup
-            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-            df_inverse['Merge_Key_Short'] = (
-                df_inverse['Home_Team_Norm'] + "_" +
-                df_inverse['Away_Team_Norm'] + "_" +
-                df_inverse['Commence_Hour'].astype(str)
-            )
-
-            # ✅ Now deduplicate
-            canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
+            canon_keys = df_canon[['Bookmaker', 'Game_Key']].drop_duplicates()
             df_inverse = df_inverse.merge(
                 canon_keys,
-                on=['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm'],
+                on=['Bookmaker', 'Game_Key'],
                 how='left',
                 indicator=True
             )
             df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
+
 
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
