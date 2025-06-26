@@ -732,10 +732,10 @@ def compute_diagnostics_vectorized(df):
         st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
        
 
-        return diagnostics_df
+        return _df
 
     except Exception as e:
-        st.error("❌ Error computing diagnostics")
+        st.error("❌ Error computing ")
         st.exception(e)
         return None
 
@@ -1528,12 +1528,12 @@ def render_scanner_tab(label, sport_key, container):
         #st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
                         
       
-       # === Final Diagnostics (Only for pre-game picks)
+       # === Final  (Only for pre-game picks)
         if 'Pre_Game' not in df_moves_raw.columns:
-            st.warning("⚠️ Skipping diagnostics — Pre_Game column missing")
+            st.warning("⚠️ Skipping  — Pre_Game column missing")
         else:
             if df_moves_raw.empty or df_moves_raw['Pre_Game'].sum() == 0:
-                st.warning("⚠️ No live pre-game picks to compute diagnostics.")
+                st.warning("⚠️ No live pre-game picks to compute .")
                 for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                     df_moves_raw[col] = "⚠️ Missing"
             else:
@@ -1551,10 +1551,18 @@ def render_scanner_tab(label, sport_key, container):
                 st.write("✅ Sample model probs:", df_moves_raw['Model_Sharp_Win_Prob'].dropna().head())
         
                 # ✅ Define df_pre properly
+                now = pd.Timestamp.utcnow()
+
                 df_pre = df_moves_raw[
                     (df_moves_raw['Pre_Game'] == True) &
-                    (df_moves_raw['Model_Sharp_Win_Prob'].notna())
+                    (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
+                    (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
                 ].copy()
+                df_pre = df_pre.drop_duplicates(
+                    subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                    keep='last'
+                )
+
         
                 if df_pre.empty:
                     st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
