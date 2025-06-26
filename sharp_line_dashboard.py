@@ -619,10 +619,10 @@ def compute_diagnostics_vectorized(df):
             df['First_Tier'] != "",
             np.where(
                 tier_current > tier_open,
-                "↑ " + df['First_Tier'].astype(str) + " → " + df['Model_Confidence_Tier'].astype(str),
+                "↑ " + df['First_Tier'].astype(str) + " → " + df['Confidence_Tier'].astype(str),
                 np.where(
                     tier_current < tier_open,
-                    "↓ " + df['First_Tier'].astype(str) + " → " + df['Model_Confidence_Tier'].astype(str),
+                    "↓ " + df['First_Tier'].astype(str) + " → " + df['Confidence_Tier'].astype(str),
                     "↔ No Change"
                 )
             ),
