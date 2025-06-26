@@ -12,6 +12,7 @@ import logging
 import hashlib
 import time
 
+import traceback
 import pickle  # ✅ Add this at the top of your script
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 from xgboost import XGBClassifier
@@ -488,7 +489,7 @@ def apply_blended_sharp_score(df, trained_models):
                 logger.warning(f"⚠️ No canonical rows for {market_type.upper()}")
                 continue
 
-            dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
+            dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
             pre_dedup_canon = len(df_canon)
             df_canon = df_canon.drop_duplicates(subset=dedup_keys)
             post_dedup_canon = len(df_canon)
