@@ -605,6 +605,9 @@ def apply_blended_sharp_score(df, trained_models):
 
     try:
         if scored_all:
+            if 'Game_Key_Base' in df_final.columns:
+                df_final = df_final.drop(columns=['Game_Key_Base'])
+                logger.debug("🧹 Dropped 'Game_Key_Base' column before returning final scored DataFrame.")
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
             logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
