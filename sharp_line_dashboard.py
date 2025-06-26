@@ -1341,117 +1341,6 @@ def render_scanner_tab(label, sport_key, container):
 
         # === Final cleanup
         df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
-        df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].str.lower()
-        df_moves_raw['Outcome'] = df_moves_raw['Outcome'].astype(str).str.strip().str.lower()
-        
-        # --- Split sharp vs rec books
-        df_sharp = df_moves_raw[df_moves_raw['Bookmaker'].isin(SHARP_BOOKS)].copy()
-        df_rec = df_moves_raw[df_moves_raw['Bookmaker'].isin(REC_BOOKS)].copy()
-        
-        df_final_parts = []
-        
-        # === h2h — outcome-specific consensus
-        df_h2h = df_moves_raw[df_moves_raw['Market'] == 'h2h'].copy()
-
-        # Compute sharp and rec consensus per Outcome (not per game!)
-        sharp_h2h = (
-            df_sharp[df_sharp['Market'] == 'h2h']
-            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-            .mean()
-            .reset_index()
-            .rename(columns={'Value': 'Sharp_Book_Consensus'})
-        )
-        
-        rec_h2h = (
-            df_rec[df_rec['Market'] == 'h2h']
-            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-            .mean()
-            .reset_index()
-            .rename(columns={'Value': 'Rec_Book_Consensus'})
-        )
-        
-        # Merge outcome-specific lines
-        df_h2h = df_h2h.merge(sharp_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
-        df_h2h = df_h2h.merge(rec_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
-        df_h2h = df_h2h.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
- 
-        # Calculate movement from OPEN LINE if First_Line_Value is present
-        if 'First_Line_Value' in df_h2h.columns:
-            df_h2h['Move_From_Open_Sharp'] = df_h2h['Sharp_Book_Consensus'] - df_h2h['First_Line_Value']
-            df_h2h['Move_From_Open_Rec'] = df_h2h['Rec_Book_Consensus'] - df_h2h['First_Line_Value']
-        else:
-            df_h2h['Move_From_Open_Sharp'] = df_h2h['Value'] - df_h2h['Sharp_Book_Consensus']
-            df_h2h['Move_From_Open_Rec'] = df_h2h['Value'] - df_h2h['Rec_Book_Consensus']
-
-        
-        # === spreads — shared line per matchup (not per side)
-        df_spread = df_moves_raw[df_moves_raw['Market'] == 'spreads'].copy()
-
-        # Step 1: Compute consensus per outcome (NOT average of both)
-        sharp_spread = (
-            df_sharp[df_sharp['Market'] == 'spreads']
-            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-            .mean().reset_index()
-            .rename(columns={'Value': 'Sharp_Book_Consensus'})
-        )
-        rec_spread = (
-            df_rec[df_rec['Market'] == 'spreads']
-            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-            .mean().reset_index()
-            .rename(columns={'Value': 'Rec_Book_Consensus'})
-        )
-        
-        # Step 2: Merge based on team (outcome)
-        df_spread = df_spread.merge(sharp_spread, on=['Game_Key', 'Market', 'Outcome'], how='left')
-        df_spread = df_spread.merge(rec_spread, on=['Game_Key', 'Market', 'Outcome'], how='left')
-        df_spread = df_spread.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
-
-        # Step 3: Compute move from open using FIRST LINE (baseline)
-        if 'First_Line_Value' in df_spread.columns:
-            df_spread['Move_From_Open_Sharp'] = df_spread['Sharp_Book_Consensus'] - df_spread['First_Line_Value']
-            df_spread['Move_From_Open_Rec'] = df_spread['Rec_Book_Consensus'] - df_spread['First_Line_Value']
-        else:
-            # fallback to raw delta (less meaningful)
-            df_spread['Move_From_Open_Sharp'] = df_spread['Value'] - df_spread['Sharp_Book_Consensus']
-            df_spread['Move_From_Open_Rec'] = df_spread['Value'] - df_spread['Rec_Book_Consensus']
-
-        
-        # === totals — outcome-specific (e.g. over/under)
-        df_total = df_moves_raw[df_moves_raw['Market'] == 'totals'].copy()
-        if not df_total.empty:
-            sharp_total = (
-                df_sharp[df_sharp['Market'] == 'totals']
-                .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-                .mean().reset_index()
-                .rename(columns={'Value': 'Sharp_Book_Consensus'})
-            )
-            rec_total = (
-                df_rec[df_rec['Market'] == 'totals']
-                .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
-                .mean().reset_index()
-                .rename(columns={'Value': 'Rec_Book_Consensus'})
-            )
-            df_total = df_total.merge(sharp_total, on=['Game_Key', 'Market', 'Outcome'], how='left')
-            df_total = df_total.merge(rec_total, on=['Game_Key', 'Market', 'Outcome'], how='left')
-            df_total = df_total.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
-
-            df_total['Move_From_Open_Sharp'] = df_total['Value'] - df_total['Sharp_Book_Consensus']
-            df_total['Move_From_Open_Rec'] = df_total['Value'] - df_total['Rec_Book_Consensus']
-            df_final_parts.append(df_total)
-        
-        # === Final combined DataFrame
-        # Append all market frames if they exist
-        for df_market in [df_h2h, df_spread, df_total]:
-            if not df_market.empty:
-                df_final_parts.append(df_market)
-        
-        if df_final_parts:
-            df_moves_final = pd.concat(df_final_parts, ignore_index=True)
-            df_moves_raw = df_moves_final.copy()
-        else:
-            st.warning("⚠️ No market data added to summary — all frames empty.")
-            
-
 
         # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
@@ -1467,187 +1356,138 @@ def render_scanner_tab(label, sport_key, container):
         st.info(f"⏱️ Filtered history to {len(df_history)} rows in {time.time() - hist_start:.2f}s")
         
         # === Build First Snapshot
-        snap_start = time.time()
-        df_first = (
-            df_history.sort_values('Snapshot_Timestamp')
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-            .rename(columns={
-                'Value': 'First_Line_Value',
-                'Sharp_Confidence_Tier': 'First_Tier',
-                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
-        )
-        #st.info(f"📦 Built first snapshot table in {time.time() - snap_start:.2f}s")
-        
-        # === Normalize and merge
-        merge_start = time.time()
+        # === Normalize and merge first snapshot into df_moves_raw
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
         df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
         
-        df_moves_raw = df_moves_raw.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-        #st.info(f"🔗 Merged first snapshot into df_moves_raw in {time.time() - merge_start:.2f}s")
+        df_moves_raw = df_moves_raw.merge(
+            df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left'
+        )
         
-        # ✅ Alias First_Model_Prob from First_Sharp_Prob (needed for trend logic)
+        # Alias for clarity in trend logic
         if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
             df_moves_raw['First_Model_Prob'] = df_moves_raw['First_Sharp_Prob']
         
-        # === 3. Movement Calculations
-        # === 3. Movement Calculations (Vectorized and Timed)
-        move_start = time.time()
-        if 'First_Line_Value' in df_moves_raw.columns:
-            if 'Sharp_Book_Consensus' in df_moves_raw.columns:
-                df_moves_raw['Move_From_Open_Sharp'] = (
-                    df_moves_raw['Sharp_Book_Consensus'] - df_moves_raw['First_Line_Value']
-                ).round(2)
-        
-            if 'Rec_Book_Consensus' in df_moves_raw.columns:
-                df_moves_raw['Move_From_Open_Rec'] = (
-                    df_moves_raw['Rec_Book_Consensus'] - df_moves_raw['First_Line_Value']
-                ).round(2)
-        st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
-        
-        # === 4. Ensure Required Fields (Safe Copy + Timing)
-        fallback_start = time.time()
-        
-        # Only copy if we need to insert columns
-        fallbacks = {
-            'Ref_Sharp_Value': df_moves_raw['Value'] if 'Value' in df_moves_raw.columns else None,
-            'SHARP_HIT_BOOL': None,
-            'SHARP_COVER_RESULT': None,
-            'Scored': None,
-            'Model_Sharp_Win_Prob': None,
-            'Model_Confidence_Tier': None,
-        }
-        missing_cols = [col for col in fallbacks if col not in df_moves_raw.columns]
-        
-        if missing_cols:
-            st.info(f"🧱 Adding missing columns: {missing_cols}")
-            df_moves_raw = df_moves_raw.copy()  # prevents mutation-triggered rerun
-            for col in missing_cols:
-                fallback_val = fallbacks[col]
-                # If fallback is a Series (like 'Value'), align by index; otherwise set scalar
-                df_moves_raw[col] = fallback_val if isinstance(fallback_val, pd.Series) else fallback_val
-        
-        #st.info(f"🧱 Fallback column insertion completed in {time.time() - fallback_start:.2f}s")
-                        
-      
-       # === Final  (Only for pre-game picks)
-        if 'Pre_Game' not in df_moves_raw.columns:
-            st.warning("⚠️ Skipping  — Pre_Game column missing")
-        else:
-            if df_moves_raw.empty or df_moves_raw['Pre_Game'].sum() == 0:
-                st.warning("⚠️ No live pre-game picks to compute .")
-                for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
-                    df_moves_raw[col] = "⚠️ Missing"
-            else:
-                # Defensive: ensure Model_Confidence_Tier is not a DataFrame
-                if 'Model_Confidence_Tier' in df_moves_raw.columns and isinstance(df_moves_raw['Model_Confidence_Tier'], pd.DataFrame):
-                    st.warning("⚠️ Forcing 'Model_Confidence_Tier' to Series from DataFrame")
-                    df_moves_raw['Model_Confidence_Tier'] = df_moves_raw['Model_Confidence_Tier'].iloc[:, 0]
-        
-                # Drop duplicated columns
-                df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-        
-                # ✅ Diagnostic preview
-                st.write("🟢 'Pre_Game' column found.")
-                st.write("🔢 Pre_Game distribution:", df_moves_raw['Pre_Game'].value_counts(dropna=False))
-                st.write("✅ Sample model probs:", df_moves_raw['Model_Sharp_Win_Prob'].dropna().head())
-        
-                # ✅ Define df_pre properly
-                now = pd.Timestamp.utcnow()
-
-                df_pre = df_moves_raw[
-                    (df_moves_raw['Pre_Game'] == True) &
-                    (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
-                    (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
-                ].copy()
-                df_pre = df_pre.drop_duplicates(
-                    subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                    keep='last'
-                )
-
-        
-                if df_pre.empty:
-                    st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
-                    for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
-                        df_moves_raw[col] = "⚠️ Missing"
-                else:
-                    diagnostics_df = compute_diagnostics_vectorized(df_pre)
-                    diag_keys = ['Game_Key', 'Market', 'Outcome']
-        
-                    df_moves_raw = df_moves_raw.merge(
-                        diagnostics_df,
-                        on=diag_keys,
-                        how='left',
-                        suffixes=('', '_diagnostics')
-                    )
-        
-                    diagnostic_cols = {
-                        'Confidence Trend': 'Confidence Trend_diagnostics',
-                        'Why Model Likes It': 'Why Model Likes It_diagnostics',
-                        'Tier Δ': 'Tier Δ_diagnostics',
-                        'Line/Model Direction': 'Line/Model Direction_diagnostics',
-                    }
-        
-                    for final_col, diag_col in diagnostic_cols.items():
-                        if diag_col in df_moves_raw.columns:
-                            df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
-                        else:
-                            df_moves_raw[final_col] = "⚠️ Missing"
-                    
-                    
-        # === 6. Final Summary Table
-        summary_cols = [
-            'Game', 'Market', 'Game_Start', 'Outcome',
-            'Rec_Book_Consensus', 'Sharp_Book_Consensus',
-            'Move_From_Open_Rec', 'Move_From_Open_Sharp',
-            'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
-            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It'
-        ]
-        
-        summary_df = df_moves_raw[
-            [col for col in summary_cols if col in df_moves_raw.columns] + ['Game_Key']
+        # === Define df_pre (filtered scored picks for upcoming games)
+        now = pd.Timestamp.utcnow()
+        df_pre = df_moves_raw[
+            (df_moves_raw['Pre_Game'] == True) &
+            (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
+            (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
         ].copy()
         
+        # Deduplicate and normalize
+        df_pre = df_pre.drop_duplicates(
+            subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last'
+        )
+        df_pre['Bookmaker'] = df_pre['Bookmaker'].str.lower()
+        df_pre['Outcome'] = df_pre['Outcome'].astype(str).str.strip().str.lower()
+        
+        # === Compute consensus lines and line movement
+        sharp_consensus = (
+            df_pre[df_pre['Bookmaker'].isin(SHARP_BOOKS)]
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
+            .mean().reset_index(name='Sharp Line')
+        )
+        rec_consensus = (
+            df_pre[df_pre['Bookmaker'].isin(REC_BOOKS)]
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Value']
+            .mean().reset_index(name='Rec Line')
+        )
+        df_pre = df_pre.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        df_pre = df_pre.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
+        
+        # Line movement calculations
+        move_start = time.time()
+        if 'First_Line_Value' in df_pre.columns:
+            if 'Sharp Line' in df_pre.columns:
+                df_pre['Sharp Move'] = (df_pre['Sharp Line'] - df_pre['First_Line_Value']).round(2)
+            if 'Rec Line' in df_pre.columns:
+                df_pre['Rec Move'] = (df_pre['Rec Line'] - df_pre['First_Line_Value']).round(2)
+        st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
+        
+        # === Compute diagnostics from df_pre (upcoming + scored)
+        if df_pre.empty:
+            st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
+            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
+                df_moves_raw[col] = "⚠️ Missing"
+        else:
+            diagnostics_df = compute_diagnostics_vectorized(df_pre)
+            diag_keys = ['Game_Key', 'Market', 'Outcome']
+        
+            df_moves_raw = df_moves_raw.merge(
+                diagnostics_df,
+                on=diag_keys,
+                how='left',
+                suffixes=('', '_diagnostics')
+            )
+        
+            # Cleanly attach diagnostic columns with fallback
+            diagnostic_cols = {
+                'Confidence Trend': 'Confidence Trend_diagnostics',
+                'Why Model Likes It': 'Why Model Likes It_diagnostics',
+                'Tier Δ': 'Tier Δ_diagnostics',
+                'Line/Model Direction': 'Line/Model Direction_diagnostics',
+            }
+            for final_col, diag_col in diagnostic_cols.items():
+                if diag_col in df_moves_raw.columns:
+                    df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
+                else:
+                    df_moves_raw[final_col] = "⚠️ Missing"
+
+        # === 6. Final Summary Table ===
+
+        # Define the core columns we want to extract
+        summary_cols = [
+            'Game', 'Market', 'Game_Start', 'Outcome',
+            'Rec Line', 'Sharp Line',
+            'Rec Move', 'Sharp Move',
+            'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
+            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
+            'Game_Key'
+        ]
+        
+        # Rename df_pre columns before copying to summary
+        df_pre.rename(columns={
+            'Game': 'Matchup',
+            'Rec Line': 'Rec Line',
+            'Sharp Line': 'Sharp Line',
+            'Rec Move': 'Rec Move',
+            'Sharp Move': 'Sharp Move',
+            'Model_Sharp_Win_Prob': 'Model Prob',
+            'Model_Confidence_Tier': 'Confidence Tier'
+        }, inplace=True)
+        
+        summary_df = df_pre[[col for col in summary_cols if col in df_pre.columns]].copy()
+        
+        # Convert and format datetime columns
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
+        
+        # Clean column suffixes and duplicates if any remain
         summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
         summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
         
-        # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome rows
+        # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
         dupes = summary_df.groupby(['Game_Key', 'Market', 'Outcome']).size()
         dupes = dupes[dupes > 1]
         
         if not dupes.empty:
             st.warning(f"🚨 Found {len(dupes)} duplicated Game_Key-Market-Outcome combinations")
-            st.dataframe(
-                summary_df[summary_df.set_index(['Game_Key', 'Market', 'Outcome']).index.isin(dupes.index)]
-            )
-
+            dupe_keys = dupes.index.tolist()
+            st.dataframe(summary_df[
+                summary_df.set_index(['Game_Key', 'Market', 'Outcome']).index.isin(dupe_keys)
+            ])
         
-        required_cols = [
-            'Rec_Book_Consensus', 'Sharp_Book_Consensus',
-            'Move_From_Open_Rec', 'Move_From_Open_Sharp'
-        ]
-        st.write("📋 Columns in summary_df:", summary_df.columns.tolist())
-        summary_df.rename(columns={
-            'Game': 'Matchup',
-            'Rec_Book_Consensus': 'Rec Line',
-            'Sharp_Book_Consensus': 'Sharp Line',
-            'Move_From_Open_Rec': 'Rec Move',
-            'Move_From_Open_Sharp': 'Sharp Move',
-            'Model_Sharp_Win_Prob': 'Model Prob',
-            'Model_Confidence_Tier': 'Confidence Tier'
-        }, inplace=True)
+        # === Preview & column check
+        #st.write("📋 Columns in summary_df:", summary_df.columns.tolist())
         
-        #st.write("🧪 Non-null model probs in summary_df:", summary_df['Model Prob'].notna().sum())
-        #st.write("🧪 Distinct confidence tiers:", summary_df['Confidence Tier'].dropna().unique().tolist())
-        #st.write("📊 Final summary preview:")
-        #st.dataframe(summary_df[['Matchup', 'Market', 'Pick', 'Model Prob', 'Confidence Tier']].head(10))
-                
-                         
+        # Optional: final sort if needed
+        #summary_df.sort_values(by=['Game_Start', 'Matchup', 'Market'], inplace=True)
+        
+                                 
         
         # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
