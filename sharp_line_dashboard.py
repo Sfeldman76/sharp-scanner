@@ -920,8 +920,9 @@ def apply_blended_sharp_score(df, trained_models):
                         df_inverse['Away_Team_Norm'],
                         df_inverse['Home_Team_Norm']
                     )
-                    df_inverse['Outcome'] = df_inverse['Opponent_Team']
+                    df_inverse['Outcome'] = df_inverse['Opponent_Team'].str.lower().str.strip()
                     df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+
                 
                     # Recalculate Game_Key based on updated Outcome
                     df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
@@ -930,7 +931,13 @@ def apply_blended_sharp_score(df, trained_models):
                         df_inverse['Away_Team_Norm'] + "_" +
                         df_inverse['Commence_Hour'].astype(str) + "_" +
                         df_inverse['Market'] + "_" +
-                        df_inverse['Outcome']
+                        df_inverse['Outcome_Norm']
+                    )
+                    df_inverse['Game_Key_Base'] = (
+                        df_inverse['Home_Team_Norm'] + "_" +
+                        df_inverse['Away_Team_Norm'] + "_" +
+                        df_inverse['Commence_Hour'].astype(str) + "_" +
+                        df_inverse['Market']
                     )
                 
                     # Merge opponent line from df_full_market
@@ -958,13 +965,12 @@ def apply_blended_sharp_score(df, trained_models):
                         -1 * df_inverse['Value_opponent'],
                         -1 * df_inverse['Value_canonical']
                     )
-                
+                    fallback_used = df_inverse['Value_opponent'].isna().sum()
+                    if fallback_used > 0:
+                        st.info(f"ℹ️ Used fallback from canonical Value for {fallback_used} rows")
+
                     st.write("📊 df_inverse shape after both merges (spread):", df_inverse.shape)
-                
-                    fallback_count = df_inverse['Value_opponent'].isna().sum()
-                    if fallback_count > 0:
-                        st.info(f"ℹ️ Used fallback canonical value inversion for {fallback_count} SPREAD rows")
-                
+      
                     # Optional: warn if any row still has no value
                     missing_value_rows = df_inverse[df_inverse['Value'].isna()]
                     if not missing_value_rows.empty:
@@ -1574,26 +1580,24 @@ def render_scanner_tab(label, sport_key, container):
         
         date_only_options = ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique())
         selected_date = st.selectbox(f"📅 Filter {label} by Date", date_only_options, key=f"{label}_date_filter")
-        
-     
-        # === Apply Filters
-        # === Apply Filters
-        filtered_df = summary_df.copy()
-        
+ 
         # ✅ Apply UI filters
         if selected_market != "All":
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
             
-        #filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
+        filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
         # ✅ Normalize keys
-        #for col in ['Game_Key', 'Market', 'Outcome']:
-            #filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
+        for col in ['Game_Key', 'Market', 'Outcome']:
+            filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
         
-        # Re-insert Date + Time (EST) after groupby
-       
-        filtered_df = filtered_df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+               
+        filtered_df = (
+            filtered_df
+            .sort_values('Snapshot_Timestamp', ascending=False)
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
+        )
 
         # === Group numeric + categorical fields ONLY
         summary_grouped = (
@@ -1608,13 +1612,36 @@ def render_scanner_tab(label, sport_key, container):
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
             })
         )
-        summary_grouped = summary_grouped.merge(
-            summary_df[['Game_Key', 'Date + Time (EST)']].drop_duplicates(),
-            on='Game_Key',
-            how='left'
-        )
+        if 'Date + Time (EST)' in summary_df.columns:
+            summary_grouped = summary_grouped.merge(
+                summary_df[['Game_Key', 'Date + Time (EST)']].drop_duplicates(),
+                on='Game_Key',
+                how='left'
+            )
+        else:
+            st.warning("⚠️ 'Date + Time (EST)' not found in summary_df — timestamp merge skipped.")
         
-      
+        st.subheader("📊 Debug — Grouped DF Columns")
+        st.write(summary_grouped.columns.tolist())
+        st.write(f"✅ Filtered rows: {len(filtered_df)}")
+        st.dataframe(filtered_df[['Game_Key', 'Market', 'Outcome', 'Model Prob']].head(10))
+
+        
+        required_cols = ['Model Prob', 'Confidence Tier']
+        for col in required_cols:
+            if col not in summary_grouped.columns:
+                summary_grouped[col] = np.nan if 'Prob' in col else ""
+        if 'Model_Sharp_Win_Prob' in filtered_df.columns:
+            filtered_df['Model Prob'] = filtered_df['Model_Sharp_Win_Prob']
+        else:
+            st.warning("⚠️ Model_Sharp_Win_Prob missing — assigning Model Prob = 0")
+            filtered_df['Model Prob'] = 0
+        if 'Model_Confidence_Tier' in filtered_df.columns:
+            filtered_df['Confidence Tier'] = filtered_df['Model_Confidence_Tier']
+        else:
+            filtered_df['Confidence Tier'] = ""
+
+            
         # === Re-merge diagnostics AFTER groupby
         diagnostic_cols = ['Game_Key', 'Market', 'Outcome',
                            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
