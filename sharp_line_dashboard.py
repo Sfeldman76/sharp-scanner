@@ -1651,23 +1651,18 @@ def render_scanner_tab(label, sport_key, container):
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
             
-        filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
+        #filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
         # ✅ Normalize keys
-        for col in ['Game_Key', 'Market', 'Outcome']:
-            filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
+        #for col in ['Game_Key', 'Market', 'Outcome']:
+            #filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
         
-        # ✅ Deduplicate to latest per Outcome
-        filtered_df = (
-           filtered_df
-           .sort_values('Snapshot_Timestamp', ascending=False)
-           .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
-        )
+        
         # === Group by Matchup + Side + Timestamp
        
         # === Group numeric + categorical fields ONLY
         summary_grouped = (
             filtered_df
-            .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome', 'Date + Time (EST)'], as_index=False)
+            .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome'], as_index=False)
             .agg({
                 'Rec Line': 'first',
                 'Sharp Line': 'first',
