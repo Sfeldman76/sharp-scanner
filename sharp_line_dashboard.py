@@ -1449,26 +1449,23 @@ def render_scanner_tab(label, sport_key, container):
         # === 6. Final Summary Table ===
 
         # Define the core columns we want to extract
-        summary_cols = [
-            'Matchup', 'Market', 'Game_Start', 'Outcome',
-            'Rec Line', 'Sharp Line',
-            'Rec Move', 'Sharp Move',
-            'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
-            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
-            'Game_Key'
-        ]
-        
-        # Rename df_pre columns before copying to summary
+       # === Rename df_pre columns BEFORE selecting summary_cols
         df_pre.rename(columns={
             'Game': 'Matchup',
-            'Rec Line': 'Rec Line',
-            'Sharp Line': 'Sharp Line',
-            'Rec Move': 'Rec Move',
-            'Sharp Move': 'Sharp Move',
             'Model_Sharp_Win_Prob': 'Model Prob',
             'Model_Confidence_Tier': 'Confidence Tier'
         }, inplace=True)
         
+        # Define the core columns we want to extract — match these to the renamed names
+        summary_cols = [
+            'Matchup', 'Market', 'Game_Start', 'Outcome',
+            'Rec Line', 'Sharp Line',
+            'Rec Move', 'Sharp Move',
+            'Model Prob', 'Confidence Tier',
+            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
+            'Game_Key'
+        ]
+
         summary_df = df_pre[[col for col in summary_cols if col in df_pre.columns]].copy()
         
         # Convert and format datetime columns
@@ -1542,9 +1539,8 @@ def render_scanner_tab(label, sport_key, container):
         
         # Re-insert Date + Time (EST) after groupby
        
-        summary_df = summary_df.drop_duplicates(
-            subset=['Game_Key', 'Market', 'Outcome'], keep='last'
-        )
+        filtered_df = filtered_df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+
         # === Group numeric + categorical fields ONLY
         summary_grouped = (
             filtered_df
