@@ -1479,6 +1479,8 @@ def render_scanner_tab(label, sport_key, container):
 
         df_summary_base.drop(columns=[col for col in df_summary_base.columns if col.endswith('_x')], inplace=True)
         df_summary_base.columns = [col.replace('_y', '') if col.endswith('_y') else col for col in df_summary_base.columns]
+        # Remove true duplicate column names (keep the first occurrence)
+        df_summary_base = df_summary_base.loc[:, ~df_summary_base.columns.duplicated()]
 
 
         st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
