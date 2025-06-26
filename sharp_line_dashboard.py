@@ -588,7 +588,7 @@ def compute_diagnostics_vectorized(df):
 
     try:
         # === Clean tier columns
-        for col in ['Model_Confidence_Tier', 'First_Tier']:
+        for col in ['Confidence_Tier', 'First_Tier']:
             if col not in df.columns:
                 st.warning(f"⚠️ Column `{col}` missing — filling with blank.")
                 df[col] = ""
@@ -600,8 +600,8 @@ def compute_diagnostics_vectorized(df):
                         return ""
                 df[col] = df[col].apply(safe_strip)
 
-        if isinstance(df['Model_Confidence_Tier'], pd.DataFrame):
-            st.error("❌ 'Model_Confidence_Tier' is a DataFrame, not a Series.")
+        if isinstance(df['Confidence_Tier'], pd.DataFrame):
+            st.error("❌ 'Confidence_Tier' is a DataFrame, not a Series.")
             st.stop()
 
         #st.write("🧪 Unique values in Model_Confidence_Tier:", df['Model_Confidence_Tier'].unique().tolist())
@@ -672,7 +672,14 @@ def compute_diagnostics_vectorized(df):
             st.warning("⚠️ Missing probability columns for trend/direction.")
 
         # === Model Reasoning
-        prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob', 0), errors='coerce').fillna(0)
+        if 'Model_Sharp_Win_Prob' in df.columns:
+            prob = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce').fillna(0)
+        elif 'Model Prob' in df.columns:
+            prob = pd.to_numeric(df['Model Prob'], errors='coerce').fillna(0)
+        else:
+            st.warning("⚠️ Model probability missing — assigning zero fallback.")
+            prob = pd.Series([0] * len(df))
+
         model_reason = np.select(
             [
                 prob >= 0.58,
@@ -894,24 +901,29 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Market']
                 )
             
-                # Merge value from df_full_market for the flipped outcome
+                # ✅ Build Team_Key for safe merge
+                df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
+                df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
+            
+                # ✅ Merge opponent Value cleanly
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
-                    on=['Game_Key_Base', 'Outcome'],
+                    df_full_market[['Team_Key', 'Value']],
+                    on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
-                df_inverse['Value'] = df_inverse['Value'].fillna(df_inverse['Value_opponent'])  # just in case
-                df_inverse = df_inverse.drop(columns=['Value_opponent'], errors='ignore')
+                df_inverse['Value'] = df_inverse['Value_opponent']
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
             
-                # Deduplicate
+                # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
-            elif market_type == "spreads":
+           elif market_type == "spreads":
+                # Normalize
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
             
-                # Flip team
+                # Flip outcome to opposing team
                 df_inverse['Opponent_Team'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
@@ -920,7 +932,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Outcome'] = df_inverse['Opponent_Team'].str.lower().str.strip()
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-                # Rebuild Game_Key and Game_Key_Base with new Outcome
+                # Rebuild keys with flipped Outcome
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
@@ -936,17 +948,20 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Market']
                 )
             
-                # Merge opponent line
+                # ✅ Construct a Team_Key for clean Value merge
+                df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
+                df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
+            
+                # Merge value using Team_Key
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
-                    on=['Game_Key_Base', 'Outcome'],
+                    df_full_market[['Team_Key', 'Value']],
+                    on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
             
-                # Fallback from canonical if needed
+                # Fallback to canonical if opponent value not found
                 canon_value_map = df_canon[['Game_Key', 'Value']].drop_duplicates(subset=['Game_Key'], keep='first')
-            
                 df_inverse = df_inverse.merge(
                     canon_value_map,
                     on='Game_Key',
@@ -954,7 +969,6 @@ def apply_blended_sharp_score(df, trained_models):
                     suffixes=('', '_canonical')
                 )
             
-                # Assign inverse value
                 df_inverse['Value'] = np.where(
                     df_inverse['Value_opponent'].notna(),
                     -1 * df_inverse['Value_opponent'],
@@ -965,11 +979,11 @@ def apply_blended_sharp_score(df, trained_models):
                 if fallback_count > 0:
                     st.info(f"ℹ️ Used fallback canonical inversion for {fallback_count} SPREAD rows")
             
-                # Clean up
                 df_inverse.drop(columns=['Value_opponent', 'Value_canonical'], inplace=True, errors='ignore')
             
-                # Deduplicate
+                # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+
        
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
@@ -1475,6 +1489,10 @@ def render_scanner_tab(label, sport_key, container):
         
         if 'Model_Confidence_Tier' in df_summary_base.columns and 'Confidence Tier' not in df_summary_base.columns:
             df_summary_base['Confidence Tier'] = df_summary_base['Model_Confidence_Tier']
+
+        summary_df.drop(columns=[col for col in summary_df.columns if col.endswith('_x')], inplace=True)
+        summary_df.columns = [col.replace('_y', '') if col.endswith('_y') else col for col in summary_df.columns]
+
         st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         st.write(f"🔢 Rows: {len(df_summary_base)}")
         st.write("📋 Columns:", df_summary_base.columns.tolist())
