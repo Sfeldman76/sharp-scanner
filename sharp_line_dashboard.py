@@ -925,14 +925,17 @@ def apply_blended_sharp_score(df, trained_models):
                 # ✅ Build Team_Key and merge Value from canonical side
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-            
+                st.dataframe(df_inverse[['Team_Key', 'Outcome']].drop_duplicates().head())
+                st.dataframe(df_full_market[['Team_Key', 'Outcome']].drop_duplicates().head())
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_canonical')
                 )
-            
+                if 'Value_canonical' not in df_inverse.columns:
+                    st.error("❌ 'Value_canonical' not created — merge failed!")
+                    st.dataframe(df_inverse[['Team_Key', 'Outcome']].head())
                 # ✅ Flip value exactly once
                 df_inverse['Value'] = -1 * df_inverse['Value_canonical']
                 df_inverse.drop(columns=['Value_canonical'], inplace=True, errors='ignore')
@@ -940,7 +943,7 @@ def apply_blended_sharp_score(df, trained_models):
                 # ✅ Now flip probabilities AFTER the team flip
                 df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
                 df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
-            
+                st.dataframe(df_inverse[['Outcome', 'Value', 'Model_Sharp_Win_Prob']].head(10))
                 # ✅ Dedup
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
                   
