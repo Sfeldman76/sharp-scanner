@@ -887,7 +887,7 @@ def apply_blended_sharp_score(df, trained_models):
 
             elif market_type == "spreads":
                 # ✅ Only use rows that were originally canonical
-                df_inverse = df_inverse[df_inverse['Was_Canonical'] == True].copy()
+                
             
                 # ✅ Normalize Outcome and team columns
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.strip().str.lower()
@@ -1415,7 +1415,8 @@ def render_scanner_tab(label, sport_key, container):
             'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
             'Model Prob', 'Confidence Tier',
             'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
-            'Game_Key'
+            'Game_Key',  # ✅ already there
+            'Snapshot_Timestamp'  # ✅ add this line
         ]
         
         # Create df_summary_base
