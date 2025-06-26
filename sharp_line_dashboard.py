@@ -589,9 +589,8 @@ def compute_diagnostics_vectorized(df):
             df[col] = df[col].astype(str).str.strip()
 
         # === Step 2: Tier Change
-        tier_current = df['Confidence Tier'].map(TIER_ORDER_MODEL_CONFIDENCE).fillna(0).astype(int)
-        tier_open = df['First_Tier'].map(TIER_ORDER_MODEL_CONFIDENCE).fillna(0).astype(int)
-
+        tier_current = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
+        tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
         tier_change = np.where(
             df['First_Tier'] != "",
             np.where(
