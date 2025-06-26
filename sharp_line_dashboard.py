@@ -1373,7 +1373,8 @@ def render_scanner_tab(label, sport_key, container):
         # Merge outcome-specific lines
         df_h2h = df_h2h.merge(sharp_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_h2h = df_h2h.merge(rec_h2h, on=['Game_Key', 'Market', 'Outcome'], how='left')
-        
+        df_h2h = df_h2h.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+ 
         # Calculate movement from OPEN LINE if First_Line_Value is present
         if 'First_Line_Value' in df_h2h.columns:
             df_h2h['Move_From_Open_Sharp'] = df_h2h['Sharp_Book_Consensus'] - df_h2h['First_Line_Value']
@@ -1403,7 +1404,8 @@ def render_scanner_tab(label, sport_key, container):
         # Step 2: Merge based on team (outcome)
         df_spread = df_spread.merge(sharp_spread, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_spread = df_spread.merge(rec_spread, on=['Game_Key', 'Market', 'Outcome'], how='left')
-        
+        df_spread = df_spread.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+
         # Step 3: Compute move from open using FIRST LINE (baseline)
         if 'First_Line_Value' in df_spread.columns:
             df_spread['Move_From_Open_Sharp'] = df_spread['Sharp_Book_Consensus'] - df_spread['First_Line_Value']
@@ -1431,6 +1433,8 @@ def render_scanner_tab(label, sport_key, container):
             )
             df_total = df_total.merge(sharp_total, on=['Game_Key', 'Market', 'Outcome'], how='left')
             df_total = df_total.merge(rec_total, on=['Game_Key', 'Market', 'Outcome'], how='left')
+            df_total = df_total.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+
             df_total['Move_From_Open_Sharp'] = df_total['Value'] - df_total['Sharp_Book_Consensus']
             df_total['Move_From_Open_Rec'] = df_total['Value'] - df_total['Rec_Book_Consensus']
             df_final_parts.append(df_total)
@@ -1604,14 +1608,25 @@ def render_scanner_tab(label, sport_key, container):
         summary_df = df_moves_raw[
             [col for col in summary_cols if col in df_moves_raw.columns] + ['Game_Key']
         ].copy()
-
-        summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         
+        summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
         summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
         summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
+        
+        # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome rows
+        dupes = summary_df.groupby(['Game_Key', 'Market', 'Outcome']).size()
+        dupes = dupes[dupes > 1]
+        
+        if not dupes.empty:
+            st.warning(f"🚨 Found {len(dupes)} duplicated Game_Key-Market-Outcome combinations")
+            st.dataframe(
+                summary_df[summary_df.set_index(['Game_Key', 'Market', 'Outcome']).index.isin(dupes.index)]
+            )
+
+        
         required_cols = [
             'Rec_Book_Consensus', 'Sharp_Book_Consensus',
             'Move_From_Open_Rec', 'Move_From_Open_Sharp'
@@ -1659,7 +1674,9 @@ def render_scanner_tab(label, sport_key, container):
         
         # Re-insert Date + Time (EST) after groupby
        
-       
+        summary_df = summary_df.drop_duplicates(
+            subset=['Game_Key', 'Market', 'Outcome'], keep='last'
+        )
         # === Group numeric + categorical fields ONLY
         summary_grouped = (
             filtered_df
