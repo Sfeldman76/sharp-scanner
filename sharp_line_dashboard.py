@@ -576,10 +576,7 @@ def read_market_weights_from_bigquery():
         return {}
 
 def compute_diagnostics_vectorized(df):
-
-
-    TIER_ORDER = {'⚠️ Low': 1, '✅ Medium': 2, '⭐ High': 3, '🔥 Steam': 4}
-    TIER_ORDER_MODEL_CONFIDENCE = {
+    TIER_ORDER = {
         '⚠️ Weak Indication': 1,
         '✅ Coinflip': 2,
         '⭐ Lean': 3,
@@ -587,51 +584,30 @@ def compute_diagnostics_vectorized(df):
     }
 
     try:
-        # === Clean tier columns
-        for col in ['Confidence_Tier', 'First_Tier']:
-            if col not in df.columns:
-                st.warning(f"⚠️ Column `{col}` missing — filling with blank.")
-                df[col] = ""
-            else:
-                def safe_strip(x):
-                    try:
-                        return str(x).strip()
-                    except:
-                        return ""
-                df[col] = df[col].apply(safe_strip)
+        # === Step 1: Strip Tier Columns
+        for col in ['Confidence Tier', 'First_Tier']:
+            df[col] = df[col].astype(str).str.strip()
 
-        if isinstance(df['Confidence_Tier'], pd.DataFrame):
-            st.error("❌ 'Confidence_Tier' is a DataFrame, not a Series.")
-            st.stop()
+        # === Step 2: Tier Change
+        tier_current = df['Confidence Tier'].map(TIER_ORDER_MODEL_CONFIDENCE).fillna(0).astype(int)
+        tier_open = df['First_Tier'].map(TIER_ORDER_MODEL_CONFIDENCE).fillna(0).astype(int)
 
-        #st.write("🧪 Unique values in Model_Confidence_Tier:", df['Model_Confidence_Tier'].unique().tolist())
-        #st.write("🧪 Unique values in First_Tier:", df['First_Tier'].unique().tolist())
-
-        # === Tier Mapping
-        tier_current = df['Confidence_Tier'].map(TIER_ORDER_MODEL_CONFIDENCE)
-        tier_current = pd.to_numeric(tier_current, errors='coerce').fillna(0).astype(int)
-
-        tier_open = df['First_Tier'].map(TIER_ORDER)
-        tier_open = pd.to_numeric(tier_open, errors='coerce').fillna(0).astype(int)
-
-        # === Tier Change
         tier_change = np.where(
             df['First_Tier'] != "",
             np.where(
                 tier_current > tier_open,
-                "↑ " + df['First_Tier'].astype(str) + " → " + df['Confidence_Tier'].astype(str),
+                "↑ " + df['First_Tier'] + " → " + df['Confidence Tier'],
                 np.where(
                     tier_current < tier_open,
-                    "↓ " + df['First_Tier'].astype(str) + " → " + df['Confidence_Tier'].astype(str),
+                    "↓ " + df['First_Tier'] + " → " + df['Confidence Tier'],
                     "↔ No Change"
                 )
             ),
             "⚠️ Missing"
         )
-        
         df['Tier_Change'] = tier_change
 
-        # === Probabilities & Confidence Trend
+        # === Step 3: Confidence Trend
         if 'Model Prob' in df.columns and 'First_Model_Prob' in df.columns:
             prob_now = pd.to_numeric(df['Model Prob'], errors='coerce')
             prob_start = pd.to_numeric(df['First_Model_Prob'], errors='coerce')
@@ -651,6 +627,7 @@ def compute_diagnostics_vectorized(df):
                 )
             )
 
+            # === Step 4: Line/Model Direction
             line_delta = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
             direction = np.where(
                 (delta > 0.04) & (line_delta < 0), "🟢 Model ↑ / Line ↓",
@@ -666,19 +643,16 @@ def compute_diagnostics_vectorized(df):
                 )
             )
         else:
-            delta = pd.Series([0] * len(df))
-            confidence_trend = "⚠️ Missing"
-            direction = "⚠️ Missing"
+            confidence_trend = ["⚠️ Missing"] * len(df)
+            direction = ["⚠️ Missing"] * len(df)
             st.warning("⚠️ Missing probability columns for trend/direction.")
 
-        # === Model Reasoning
-        if 'Model_Sharp_Win_Prob' in df.columns:
-            prob = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce').fillna(0)
-        elif 'Model Prob' in df.columns:
-            prob = pd.to_numeric(df['Model Prob'], errors='coerce').fillna(0)
-        else:
-            st.warning("⚠️ Model probability missing — assigning zero fallback.")
-            prob = pd.Series([0] * len(df))
+        # === Step 5: Why Model Likes It
+        prob = (
+            pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
+            if 'Model_Sharp_Win_Prob' in df.columns
+            else pd.to_numeric(df.get('Model Prob'), errors='coerce').fillna(0)
+        )
 
         model_reason = np.select(
             [
@@ -710,38 +684,32 @@ def compute_diagnostics_vectorized(df):
         append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
 
         try:
-            #st.write("🧪 reasoning_parts lengths:", [len(part) for part in reasoning_parts])
-            #st.write("🧪 df index length:", len(df.index))
-        
             model_reasoning = pd.Series([
-                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # removes duplicates, preserves order
+                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # Dedup and preserve order
                 for parts in zip(*reasoning_parts)
             ], index=df.index)
         except Exception as e:
-            st.warning("⚠️ Failed to compute model_reasoning — using default")
+            st.warning("⚠️ Failed to compute model_reasoning — using fallback.")
             st.exception(e)
             model_reasoning = pd.Series(["🪙 Unavailable"] * len(df), index=df.index)
 
+        # === Final Output
         diagnostics_df = pd.DataFrame({
             'Game_Key': df['Game_Key'],
             'Market': df['Market'],
             'Outcome': df['Outcome'],
             'Bookmaker': df['Bookmaker'],
-            'Tier Δ': tier_change,
+            'Tier Δ': df['Tier_Change'],
             'Confidence Trend': confidence_trend,
             'Line/Model Direction': direction,
             'Why Model Likes It': model_reasoning
         })
 
-
         st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
-       
-
         return diagnostics_df
 
-
     except Exception as e:
-        st.error("❌ Error computing ")
+        st.error("❌ Error computing diagnostics")
         st.exception(e)
         return None
 
@@ -1573,7 +1541,7 @@ def render_scanner_tab(label, sport_key, container):
         #summary_df.sort_values(by=['Game_Start', 'Matchup', 'Market'], inplace=True)
         
                                  
-        
+         filtered_df = df_moves_raw[df_moves_raw['Scored_By_Model'] == True]
         # === Build Market + Date Filters
         market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
         selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
@@ -1586,8 +1554,8 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
-            
-        filtered_df = filtered_df[filtered_df['Scored_By_Model'] == True]
+      
+
         # ✅ Normalize keys
         for col in ['Game_Key', 'Market', 'Outcome']:
             filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
