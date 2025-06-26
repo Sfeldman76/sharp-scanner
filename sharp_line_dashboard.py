@@ -1254,7 +1254,7 @@ def render_scanner_tab(label, sport_key, container):
         if trained_models:
             try:
                 df_pre_game_picks = df_moves_raw.copy()
-                merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+                merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Pre_Game']
         
                 # ✅ Score everything
                 df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
@@ -1277,7 +1277,7 @@ def render_scanner_tab(label, sport_key, container):
                 df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
         
                 # ✅ Ensure all necessary columns exist
-                required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
+                required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model', 'Pre_Game']
                 for col in required_score_cols:
                     if col not in df_scored.columns:
                         df_scored[col] = np.nan
@@ -1287,7 +1287,11 @@ def render_scanner_tab(label, sport_key, container):
                     st.error("❌ Model_Sharp_Win_Prob missing from df_scored before merge!")
                     st.dataframe(df_scored.head())
                     raise ValueError("Model_Sharp_Win_Prob missing — merge will fail.")
-        
+                if 'Pre_Game' in df_moves_raw.columns:
+                    pre_game_map = df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Pre_Game']]
+                else:
+                    st.warning("⚠️ Pre_Game missing in df_moves_raw before merge — won't be preserved.")
+                    pre_game_map = pd.DataFrame()
                 # ✅ Finalize for merge
                 merge_columns = merge_keys + required_score_cols + ['Snapshot_Timestamp']
                 df_scored = df_scored[merge_columns].copy()
@@ -1303,7 +1307,17 @@ def render_scanner_tab(label, sport_key, container):
                     how='left',
                     validate='many_to_one'
                 )
-        
+                 # Now restore Pre_Game if it was saved
+                if not pre_game_map.empty:
+                    df_merged = df_merged.merge(
+                        pre_game_map,
+                        on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
+                        how='left'
+                    )
+                    st.success("✅ Re-attached Pre_Game to df_moves_raw after scoring merge")
+                
+                
+   
                 # ✅ Final cleanup
                 df_merged.columns = df_merged.columns.str.replace(r'_x$|_y$', '', regex=True)
                 df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
@@ -1633,8 +1647,8 @@ def render_scanner_tab(label, sport_key, container):
         #for col in ['Game_Key', 'Market', 'Outcome']:
             #filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
         
-        
-        # === Group by Matchup + Side + Timestamp
+        # Re-insert Date + Time (EST) after groupby
+       
        
         # === Group numeric + categorical fields ONLY
         summary_grouped = (
@@ -1648,6 +1662,11 @@ def render_scanner_tab(label, sport_key, container):
                 'Model Prob': 'first',
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
             })
+        )
+        summary_grouped = summary_grouped.merge(
+            summary_df[['Game_Key', 'Date + Time (EST)']].drop_duplicates(),
+            on='Game_Key',
+            how='left'
         )
         
       
