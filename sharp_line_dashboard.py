@@ -732,7 +732,7 @@ def compute_diagnostics_vectorized(df):
         st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
        
 
-        return _df
+        return_df
 
     except Exception as e:
         st.error("❌ Error computing ")
