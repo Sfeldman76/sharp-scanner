@@ -891,66 +891,51 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
             elif market_type == "spreads":
-                # ✅ Start from canonical
                 df_inverse = df_canon.copy(deep=True)
                 df_inverse['Was_Canonical'] = False
                 df_inverse['Scored_By_Model'] = True
             
-                # ✅ Normalize teams
-                df_inverse['Outcome'] = df_inverse['Outcome'].str.strip().str.lower()
-                df_inverse['Home_Team_Norm'] = df_inverse['Home_Team_Norm'].str.strip().str.lower()
-                df_inverse['Away_Team_Norm'] = df_inverse['Away_Team_Norm'].str.strip().str.lower()
-                df_full_market['Outcome'] = df_full_market['Outcome'].str.strip().str.lower()
-            
-                # ✅ Flip Outcome to opposing team
+                # Step 1 — Get opponent team (don't overwrite Outcome yet)
                 df_inverse['Opponent_Team'] = np.where(
                     df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
                     df_inverse['Home_Team_Norm']
                 )
-                df_inverse['Outcome'] = df_inverse['Opponent_Team']
-                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-                # ✅ Rebuild keys with flipped Outcome
+                # Step 2 — Build Team_Key using Opponent_Team
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-                df_inverse['Game_Key'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market'] + "_" +
-                    df_inverse['Outcome']
-                )
                 df_inverse['Game_Key_Base'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
                     df_inverse['Away_Team_Norm'] + "_" +
                     df_inverse['Commence_Hour'].astype(str) + "_" +
                     df_inverse['Market']
                 )
-            
-                # ✅ Build Team_Key and merge Value from canonical side
-                df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
+                df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Opponent_Team']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-                st.dataframe(df_inverse[['Team_Key', 'Outcome']].drop_duplicates().head())
-                st.dataframe(df_full_market[['Team_Key', 'Outcome']].drop_duplicates().head())
+            
+                # Step 3 — Merge in value for the original team (who is now the opponent)
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_canonical')
                 )
-                if 'Value_canonical' not in df_inverse.columns:
-                    st.error("❌ 'Value_canonical' not created — merge failed!")
-                    st.dataframe(df_inverse[['Team_Key', 'Outcome']].head())
-                # ✅ Flip value exactly once
+                st.dataframe(df_inverse[['Opponent_Team', 'Team_Key', 'Value']].head(5))
+                # Step 4 — Flip the value
                 df_inverse['Value'] = -1 * df_inverse['Value_canonical']
                 df_inverse.drop(columns=['Value_canonical'], inplace=True, errors='ignore')
             
-                # ✅ Now flip probabilities AFTER the team flip
+                # Step 5 — Now assign flipped team as Outcome
+                df_inverse['Outcome'] = df_inverse['Opponent_Team']
+                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            
+                # Step 6 — Flip probability (AFTER team flip)
                 df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
                 df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
-                st.dataframe(df_inverse[['Outcome', 'Value', 'Model_Sharp_Win_Prob']].head(10))
-                # ✅ Dedup
-                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+                st.dataframe(df_inverse[['Outcome', 'Value', 'Model_Sharp_Win_Prob']].head(5))
+                df_inverse = df_inverse.drop_duplicates(
+                    subset=['Game_Key_Base', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
+                )
                   
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
