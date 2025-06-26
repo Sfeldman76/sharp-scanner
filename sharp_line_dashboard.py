@@ -1477,8 +1477,9 @@ def render_scanner_tab(label, sport_key, container):
         if 'Model_Confidence_Tier' in df_summary_base.columns and 'Confidence Tier' not in df_summary_base.columns:
             df_summary_base['Confidence Tier'] = df_summary_base['Model_Confidence_Tier']
 
-        summary_df.drop(columns=[col for col in summary_df.columns if col.endswith('_x')], inplace=True)
-        summary_df.columns = [col.replace('_y', '') if col.endswith('_y') else col for col in summary_df.columns]
+        df_summary_base.drop(columns=[col for col in df_summary_base.columns if col.endswith('_x')], inplace=True)
+        df_summary_base.columns = [col.replace('_y', '') if col.endswith('_y') else col for col in df_summary_base.columns]
+
 
         st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         st.write(f"🔢 Rows: {len(df_summary_base)}")
