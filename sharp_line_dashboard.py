@@ -1489,7 +1489,12 @@ def render_scanner_tab(label, sport_key, container):
                 df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
         st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
 
+        if 'Model_Sharp_Win_Prob' in df_summary_base.columns and 'Model Prob' not in df_summary_base.columns:
+            df_summary_base['Model Prob'] = df_summary_base['Model_Sharp_Win_Prob']
         
+        if 'Model_Confidence_Tier' in df_summary_base.columns and 'Confidence Tier' not in df_summary_base.columns:
+            df_summary_base['Confidence Tier'] = df_summary_base['Model_Confidence_Tier']
+
         # === Compute diagnostics from df_pre (upcoming + scored)
         if df_summary_base.empty:
             st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
