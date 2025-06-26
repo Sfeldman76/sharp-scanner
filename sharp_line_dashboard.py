@@ -911,55 +911,69 @@ def apply_blended_sharp_score(df, trained_models):
                     st.warning("⚠️ Some inverse H2H rows failed to find Value from df_full_market")
                     st.dataframe(missing_values[['Game_Key_Base', 'Outcome']].head(10))
             
-            elif market_type == "spreads":
-                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
-                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
-            
-                df_inverse['Opponent_Team'] = np.where(
-                    df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
-                    df_inverse['Away_Team_Norm'],
-                    df_inverse['Home_Team_Norm']
-                )
-            
-                df_inverse['Outcome'] = df_inverse['Opponent_Team']
-                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            
-                # Merge opponent line from df_full_market
-                df_inverse = df_inverse.merge(
-                    df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
-                    on=['Game_Key_Base', 'Outcome'],
-                    how='left',
-                    suffixes=('', '_opponent')
-                )
-            
-                # Merge canonical value (for fallback)
-                df_inverse = df_inverse.merge(
-                    df_canon[['Game_Key', 'Value']],
-                    on='Game_Key',
-                    how='left',
-                    suffixes=('', '_canonical')
-                )
-            
-                # Calculate inverse line
-                df_inverse['Value'] = np.where(
-                    df_inverse['Value_opponent'].notna(),
-                    -1 * df_inverse['Value_opponent'],
-                    -1 * df_inverse['Value_canonical']  # ✅ safe fallback
-                )
-            
-                # Optional debug: how many rows used fallback
-                fallback_count = df_inverse['Value_opponent'].isna().sum()
-                if fallback_count > 0:
-                    st.info(f"ℹ️ Used fallback canonical value inversion for {fallback_count} SPREAD rows")
-            
-                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
-
-  
-                missing_values = df_inverse[df_inverse['Value'].isna()]
-                if not missing_values.empty:
-                    st.warning("⚠️ Some inverse SPREADS rows failed to find a Value from df_full_market")
-                    st.dataframe(missing_values[['Game_Key_Base', 'Outcome', 'Value_opponent']].head(10))
-            
+                elif market_type == "spreads":
+                    df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
+                    df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
+                
+                    df_inverse['Opponent_Team'] = np.where(
+                        df_inverse['Outcome'] == df_inverse['Home_Team_Norm'],
+                        df_inverse['Away_Team_Norm'],
+                        df_inverse['Home_Team_Norm']
+                    )
+                    df_inverse['Outcome'] = df_inverse['Opponent_Team']
+                    df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+                
+                    # Recalculate Game_Key based on updated Outcome
+                    df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+                    df_inverse['Game_Key'] = (
+                        df_inverse['Home_Team_Norm'] + "_" +
+                        df_inverse['Away_Team_Norm'] + "_" +
+                        df_inverse['Commence_Hour'].astype(str) + "_" +
+                        df_inverse['Market'] + "_" +
+                        df_inverse['Outcome']
+                    )
+                
+                    # Merge opponent line from df_full_market
+                    df_inverse = df_inverse.merge(
+                        df_full_market[['Game_Key_Base', 'Outcome', 'Value']],
+                        on=['Game_Key_Base', 'Outcome'],
+                        how='left',
+                        suffixes=('', '_opponent')
+                    )
+                
+                    # Deduplicate canonical values
+                    canon_value_map = df_canon[['Game_Key', 'Value']].drop_duplicates(subset=['Game_Key'], keep='first')
+                
+                    # Merge canonical value for fallback
+                    df_inverse = df_inverse.merge(
+                        canon_value_map,
+                        on='Game_Key',
+                        how='left',
+                        suffixes=('', '_canonical')
+                    )
+                
+                    # Invert line
+                    df_inverse['Value'] = np.where(
+                        df_inverse['Value_opponent'].notna(),
+                        -1 * df_inverse['Value_opponent'],
+                        -1 * df_inverse['Value_canonical']
+                    )
+                
+                    st.write("📊 df_inverse shape after both merges (spread):", df_inverse.shape)
+                
+                    fallback_count = df_inverse['Value_opponent'].isna().sum()
+                    if fallback_count > 0:
+                        st.info(f"ℹ️ Used fallback canonical value inversion for {fallback_count} SPREAD rows")
+                
+                    # Optional: warn if any row still has no value
+                    missing_value_rows = df_inverse[df_inverse['Value'].isna()]
+                    if not missing_value_rows.empty:
+                        st.warning(f"⚠️ {len(missing_value_rows)} SPREAD inverse rows have no Value at all.")
+                        st.dataframe(missing_value_rows[['Game_Key', 'Outcome', 'Bookmaker']].head(10))
+                
+                    df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+                
+                            
             
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
