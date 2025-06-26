@@ -1436,7 +1436,14 @@ def render_scanner_tab(label, sport_key, container):
         df_pre = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         df_pre['Bookmaker'] = df_pre['Bookmaker'].str.lower()
         df_pre['Outcome'] = df_pre['Outcome'].astype(str).str.strip().str.lower()
+        # Bring First_* columns back in from df_moves_raw
+        first_cols = ['First_Model_Prob', 'First_Line_Value', 'First_Tier']
+        df_first_cols = df_moves_raw[
+            ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] + first_cols
+        ].drop_duplicates()
         
+        df_pre = df_pre.merge(df_first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+
         # === Rename BEFORE using summary_cols
         df_pre.rename(columns={
             'Game': 'Matchup',
@@ -1494,6 +1501,10 @@ def render_scanner_tab(label, sport_key, container):
         
         if 'Model_Confidence_Tier' in df_summary_base.columns and 'Confidence Tier' not in df_summary_base.columns:
             df_summary_base['Confidence Tier'] = df_summary_base['Model_Confidence_Tier']
+        st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
+        st.write(f"🔢 Rows: {len(df_summary_base)}")
+        st.write("📋 Columns:", df_summary_base.columns.tolist())
+        st.dataframe(df_summary_base.head(10))
 
         # === Compute diagnostics from df_pre (upcoming + scored)
         if df_summary_base.empty:
