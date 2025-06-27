@@ -257,12 +257,10 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     df = df.copy()
     df = build_game_key(df)
-    
-    # ✅ Only keep rows from sharp and rec books
+
     allowed_books = SHARP_BOOKS + REC_BOOKS
     df = df[df['Book'].isin(allowed_books)]
-    
-    # Safety: Ensure Game_Key exists
+
     if 'Game_Key' not in df.columns or df['Game_Key'].isnull().all():
         logging.warning("❌ No valid Game_Key present — skipping upload.")
         logging.debug(df[['Game', 'Game_Start', 'Market', 'Outcome']].head().to_string())
@@ -282,7 +280,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].where(df[col].notna(), None)
-    # === Ensure model scoring fields are preserved
+
     model_cols = [
         'Model_Sharp_Win_Prob', 'Model_Confidence_Tier', 'SharpBetScore',
         'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
@@ -290,11 +288,30 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     ]
     for col in model_cols:
         if col not in df.columns:
-            df[col] = None  # Fill with nulls if missing
-        
+            df[col] = None
+
+    # 🔒 Explicit schema alignment
+    ALLOWED_COLS = [
+        'Commence_Hour', 'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
+        'Sharp_Time_Score', 'Sharp_Prob_Shift', 'Sharp_Limit_Total', 'SharpBetScore',
+        'Open_Value', 'Open_Book_Value', 'Opening_Limit', 'Limit_Jump', 'Sharp_Timing',
+        'Limit_NonZero', 'Limit_Min', 'Market_Leader', 'Is_Pinnacle', 'LimitUp_NoMove_Flag',
+        'SupportKey', 'CrossMarketSharpSupport', 'Is_Reinforced_MultiMarket',
+        'True_Sharp_Confidence_Score', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier',
+        'Snapshot_Timestamp', 'Market_Norm', 'Outcome_Norm', 'Merge_Key_Short',
+        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Pre_Game', 'Post_Game',
+        'Unique_Sharp_Books', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
+        'Final_Confidence_Score', 'Model_Confidence', 'Line_Hash',
+        'Sharp_Move_Magnitude_Score', 'Was_Canonical', 'Scored_By_Model', 'Scoring_Market'
+    ]
+
+    extra = set(df.columns) - set(ALLOWED_COLS)
+    if extra:
+        logging.warning(f"⚠️ Dropping unexpected columns before upload: {extra}")
+        df = df[[col for col in df.columns if col in ALLOWED_COLS]]
+
     logging.info("🧪 Preview of model columns being written:")
     logging.info(df[model_cols].dropna(how='all').head(5).to_string())
-
 
     try:
         logging.info(f"📤 Uploading to `{table}`...")
@@ -304,8 +321,8 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         logging.exception(f"❌ Upload to `{table}` failed.")
         logging.debug("Schema:\n" + df.dtypes.to_string())
         logging.debug("Preview:\n" + df.head(5).to_string())
-
-
+        
+        
 def read_market_weights_from_bigquery():
     try:
         query = f"SELECT * FROM `{MARKET_WEIGHTS_TABLE}`"
