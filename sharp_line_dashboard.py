@@ -787,10 +787,7 @@ def apply_blended_sharp_score(df, trained_models):
                 
                 # ✅ Pick canonical row with most negative value per Game_Key_Base
                 df_market = df_market[df_market['Value'].notna()]
-                df_canon = (
-                    df_market.loc[df_market.groupby(['Game_Key_Base'])['Value'].idxmin()]
-                    .copy()
-                )
+                df_canon = df_market[df_market['Value'] < 0].copy()
                 df_full_market = df_market.copy()
     
             elif market_type == "h2h":
@@ -936,6 +933,7 @@ def apply_blended_sharp_score(df, trained_models):
                 # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
+            
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
@@ -947,17 +945,23 @@ def apply_blended_sharp_score(df, trained_models):
                     .sort_values('Game_Key')
                     .head(20)
                 )
-
+            
+            # ✅ Combine canonical and inverse into one scored DataFrame
+            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+            
+            # ✅ Assign tier labels safely
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
                 bins=[0.0, 0.4, 0.5, 0.6, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
-
+            
             st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
-
+            
             scored_all.append(df_scored)
+
+            
 
         except Exception as e:
             st.error(f"❌ Failed scoring {market_type.upper()}")
