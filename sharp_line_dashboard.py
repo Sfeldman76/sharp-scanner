@@ -1234,6 +1234,13 @@ def render_scanner_tab(label, sport_key, container):
                         df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
                     if col in df_pre_game_picks.columns:
                         df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
+                st.write("🧪 Model_Sharp_Win_Prob summary:")
+                st.dataframe(df_scored[['Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']].head())
+                
+                # Count nulls
+                num_scored = df_scored['Model_Sharp_Win_Prob'].notna().sum()
+                st.write(f"✅ Non-null Model_Sharp_Win_Prob rows: {num_scored:,} / {len(df_scored):,}")
+
                 st.write("✅ Merge keys normalized.")
                 st.write("📋 df_scored head:", df_scored[merge_keys].head())
         
@@ -1279,7 +1286,9 @@ def render_scanner_tab(label, sport_key, container):
                 # ✅ Clean suffixes
                 df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
                 df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-                
+                st.write("🧪 Post-merge: Model_Sharp_Win_Prob notna:", df_moves_raw['Model_Sharp_Win_Prob'].notna().sum())
+                st.write("🧪 Sample Model Prob:", df_moves_raw[['Game_Key', 'Model_Sharp_Win_Prob']].head())
+
                 # ✅ Restore Pre_Game
                 if not pre_game_map.empty:
                     if 'Pre_Game' in df_moves_raw.columns:
