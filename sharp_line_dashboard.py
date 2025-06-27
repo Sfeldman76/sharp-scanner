@@ -1510,6 +1510,23 @@ def render_scanner_tab(label, sport_key, container):
                 df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
             if 'Rec Line' in df_summary_base.columns:
                 df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
+        st.write(df_summary_base[['Sharp Line', 'Rec Line', 'First_Line_Value']].head(10))
+        st.write(df_summary_base['First_Line_Value'].isnull().sum())
+        st.write("✅ Sharp Move preview:")
+        st.dataframe(df_summary_base[['Game_Key', 'Market', 'Outcome', 'Sharp Move', 'Rec Move']].head())
+        # 🧪 Force numeric types
+        for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
+            if col in df_summary_base.columns:
+                df_summary_base[col] = pd.to_numeric(df_summary_base[col], errors='coerce')
+        
+        # Recalculate Sharp/Rec Move just to be safe
+        df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
+        df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
+        
+        # Preview after calc
+        st.write("✅ Movement check:")
+        st.dataframe(df_summary_base[['Sharp Line', 'Rec Line', 'First_Line_Value', 'Sharp Move', 'Rec Move']].head())
+
         st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
 
         if 'Model_Sharp_Win_Prob' in df_summary_base.columns and 'Model Prob' not in df_summary_base.columns:
