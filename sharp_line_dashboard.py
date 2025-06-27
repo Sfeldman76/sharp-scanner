@@ -1325,15 +1325,7 @@ def render_scanner_tab(label, sport_key, container):
               
                 raw_keys = df_moves_raw[merge_keys].drop_duplicates()
                 
-                st.subheader("🔑 Merge Keys from `df_scored_clean`")
-                st.dataframe(merged_keys.head(20))  # show top 20 unique keys
-                st.subheader("🔑 Merge Keys from `df_moves_raw`")
-                st.dataframe(raw_keys.head(20))
-                st.subheader("🔑 Sorted Merge Keys from `df_scored_clean`")
-                st.dataframe(merged_keys.sort_values(by=merge_keys).reset_index(drop=True).head(20))
-                
-                st.subheader("🔑 Sorted Merge Keys from `df_moves_raw`")
-                st.dataframe(raw_keys.sort_values(by=merge_keys).reset_index(drop=True).head(20))
+               
                 merge_check = merged_keys.merge(
                     raw_keys,
                     on=merge_keys,
@@ -1345,11 +1337,6 @@ def render_scanner_tab(label, sport_key, container):
                 # ✅ Clean suffixes
                 df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
                 df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-                st.write("🧪 Post-merge: Model_Sharp_Win_Prob notna:", df_moves_raw['Model_Sharp_Win_Prob'].notna().sum())
-                st.write("🧪 Sample Model Prob:", df_moves_raw[['Game_Key', 'Model_Sharp_Win_Prob']].head())
-
-          
-                
                 
                 # ✅ Final check
                 if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
@@ -1471,7 +1458,9 @@ def render_scanner_tab(label, sport_key, container):
         
         df_pre = df_pre.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_pre = df_pre.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
-        
+        # Fill Sharp/Rec Line for missing rows (consensus lines)
+        df_summary_base['Sharp Line'] = df_summary_base['Sharp Line'].fillna(df_pre['Sharp Line'])
+        df_summary_base['Rec Line'] = df_summary_base['Rec Line'].fillna(df_pre['Rec Line'])
         # Define summary columns
         summary_cols = [
             'Matchup', 'Market', 'Game_Start', 'Outcome',
@@ -1507,7 +1496,9 @@ def render_scanner_tab(label, sport_key, container):
         # Recalculate Sharp/Rec Move just to be safe
         df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
         df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
-        
+        st.write("✅ Movement check — Nulls:")
+        st.write(df_summary_base[['Sharp Line', 'Rec Line', 'First_Line_Value']].isnull().sum())
+        st.dataframe(df_summary_base[['Game_Key', 'Bookmaker', 'First_Line_Value', 'Sharp Line', 'Rec Line', 'Sharp Move']].head(10))
         # Preview after calc
         st.write("✅ Movement check:")
         st.dataframe(df_summary_base[['Sharp Line', 'Rec Line', 'First_Line_Value', 'Sharp Move', 'Rec Move']].head())
