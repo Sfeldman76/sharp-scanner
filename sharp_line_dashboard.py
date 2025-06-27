@@ -1427,6 +1427,7 @@ def render_scanner_tab(label, sport_key, container):
                 how='left'
             )
             st.success("✅ Re-attached Pre_Game to df_moves_raw after model scoring merge")
+        st.write("🧪 df_moves_raw columns:", df_moves_raw.columns.tolist())
         st.write("✅ Pre_Game == True:", (df_moves_raw['Pre_Game'] == True).sum())
         st.write("✅ Pre_Game is null:", df_moves_raw['Pre_Game'].isna().sum())
 
