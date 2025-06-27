@@ -1257,14 +1257,11 @@ def render_scanner_tab(label, sport_key, container):
                     st.error("❌ Model_Sharp_Win_Prob missing from df_scored before merge!")
                     st.dataframe(df_scored.head())
                     raise ValueError("Model_Sharp_Win_Prob missing — merge will fail.")
-                
-                # ✅ Backup Pre_Game
-                if 'Pre_Game' in df_moves_raw.columns:
-                    pre_game_map = df_moves_raw[['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Pre_Game']]
-                else:
-                    st.warning("⚠️ Pre_Game missing in df_moves_raw before merge — won't be preserved.")
-                    pre_game_map = pd.DataFrame()
-                
+                # 🔒 Save Pre_Game for restoration
+                pre_game_map = df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Pre_Game']].drop_duplicates()
+                for col in merge_keys:
+                    pre_game_map[col] = pre_game_map[col].astype(str).str.strip().str.lower()
+                              
                 # ✅ Prepare scored data for merge
                 merge_columns = merge_keys + required_score_cols + ['Snapshot_Timestamp']
                 df_scored = df_scored[merge_columns].copy()
@@ -1299,6 +1296,23 @@ def render_scanner_tab(label, sport_key, container):
                 )
                 
                 # Step 3: Cleanup — now this is safe
+                # ✅ Restore Pre_Game from saved map
+                df_moves_raw = df_moves_raw.merge(
+                    pre_game_map,
+                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                    how='left',
+                    suffixes=('', '_pre_game')
+                )
+                
+                # Defensive cleanup in case of name collision
+                if 'Pre_Game_pre_game' in df_moves_raw.columns:
+                    df_moves_raw['Pre_Game'] = df_moves_raw['Pre_Game'].combine_first(df_moves_raw['Pre_Game_pre_game'])
+                    df_moves_raw.drop(columns=['Pre_Game_pre_game'], inplace=True)
+                restored = df_moves_raw['Pre_Game'].notna().sum()
+                total = len(df_moves_raw)
+                st.info(f"🧠 Pre_Game restored: {restored:,} / {total:,} rows have non-null values")
+
+                
                 df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
                 df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
 
@@ -1330,7 +1344,7 @@ def render_scanner_tab(label, sport_key, container):
                 st.write("🧪 Post-merge: Model_Sharp_Win_Prob notna:", df_moves_raw['Model_Sharp_Win_Prob'].notna().sum())
                 st.write("🧪 Sample Model Prob:", df_moves_raw[['Game_Key', 'Model_Sharp_Win_Prob']].head())
 
-                # ✅ Restore Pre_Game
+          
                 
                 
                 # ✅ Final check
@@ -1354,8 +1368,7 @@ def render_scanner_tab(label, sport_key, container):
                 
 
         # === Final cleanup
-        df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$', '', regex=True)
-
+       
         # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
         start = time.time()
