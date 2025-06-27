@@ -292,17 +292,27 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     # 🔒 Explicit schema alignment
     ALLOWED_COLS = [
-        'Commence_Hour', 'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
-        'Sharp_Time_Score', 'Sharp_Prob_Shift', 'Sharp_Limit_Total', 'SharpBetScore',
-        'Open_Value', 'Open_Book_Value', 'Opening_Limit', 'Limit_Jump', 'Sharp_Timing',
-        'Limit_NonZero', 'Limit_Min', 'Market_Leader', 'Is_Pinnacle', 'LimitUp_NoMove_Flag',
-        'SupportKey', 'CrossMarketSharpSupport', 'Is_Reinforced_MultiMarket',
-        'True_Sharp_Confidence_Score', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier',
-        'Snapshot_Timestamp', 'Market_Norm', 'Outcome_Norm', 'Merge_Key_Short',
+        # Metadata
+        'Game_Key', 'Game', 'Game_Start', 'Sport', 'Market', 'Outcome',
+        'Bookmaker', 'Book', 'Value', 'Limit', 'Delta', 'Event_Date',
+        'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
+    
+        # Sharp logic fields
+        'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
+        'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total', 'SharpBetScore',
+        'Open_Value', 'Open_Book_Value', 'Opening_Limit', 'Limit_Jump',
+        'Sharp_Timing', 'Limit_NonZero', 'Limit_Min', 'Market_Leader',
+        'Is_Pinnacle', 'LimitUp_NoMove_Flag', 'SupportKey', 'CrossMarketSharpSupport',
+        'Is_Reinforced_MultiMarket',
+    
+        # Scoring / diagnostics
+        'True_Sharp_Confidence_Score', 'Enhanced_Sharp_Confidence_Score',
+        'Sharp_Confidence_Tier', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
+        'Final_Confidence_Score', 'Model_Confidence', 'Snapshot_Timestamp',
+        'Market_Norm', 'Outcome_Norm', 'Merge_Key_Short', 'Line_Hash',
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Pre_Game', 'Post_Game',
-        'Unique_Sharp_Books', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
-        'Final_Confidence_Score', 'Model_Confidence', 'Line_Hash',
-        'Sharp_Move_Magnitude_Score', 'Was_Canonical', 'Scored_By_Model', 'Scoring_Market'
+        'Unique_Sharp_Books', 'Sharp_Move_Magnitude_Score', 'Was_Canonical',
+        'Scored_By_Model', 'Scoring_Market'
     ]
 
     extra = set(df.columns) - set(ALLOWED_COLS)
