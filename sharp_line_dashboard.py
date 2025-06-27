@@ -1377,6 +1377,12 @@ def render_scanner_tab(label, sport_key, container):
         if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
             df_moves_raw['First_Model_Prob'] = df_moves_raw['First_Sharp_Prob']
         
+                # === Deduplicate before filtering and diagnostics
+        before = len(df_moves_raw)
+        df_moves_raw = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'], keep='last')
+        after = len(df_moves_raw)
+        st.info(f"🧹 Deduplicated df_moves_raw: {before:,} → {after:,}")
+        
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
         st.subheader("🧪 Pre-Filter Debug")
@@ -1388,16 +1394,18 @@ def render_scanner_tab(label, sport_key, container):
         st.write("✅ Model_Sharp_Win_Prob notna:", df_moves_raw['Model_Sharp_Win_Prob'].notna().sum())
         
         # 3. How many have Game_Start > now?
-        st.write("✅ Game_Start > now:", (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > pd.Timestamp.utcnow()).sum())
+        st.write("✅ Game_Start > now:", (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now).sum())
         
         # 4. Print total rows
         st.write("📊 Total df_moves_raw rows:", len(df_moves_raw))
-
+        
+        # === Now apply actual filter
         df_pre = df_moves_raw[
             (df_moves_raw['Pre_Game'] == True) &
             (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
             (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
         ].copy()
+
         
         # Normalize + deduplicate
         df_pre = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
