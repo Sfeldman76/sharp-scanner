@@ -164,6 +164,13 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
         gid = game.get('id')
         if not gid:
             continue
+
+        # ✅ Define the required fields here
+        home = game.get("home_team", "").strip().lower()
+        away = game.get("away_team", "").strip().lower()
+        game_name = f"{home.title()} vs {away.title()}"
+        event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
+
         for book in game.get('bookmakers', []):
             book_key = book.get('key')
             for market in book.get('markets', []):
@@ -171,8 +178,8 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                 for outcome in market.get('outcomes', []):
                     rows.append({
                         'Game_ID': gid,
-                        'Game': game_name,  # ✅ Add this
-                        'Game_Start': event_time,  # ✅ Add this
+                        'Game': game_name,
+                        'Game_Start': event_time,
                         'Bookmaker': book_key,
                         'Market': market_key,
                         'Outcome': outcome.get('name'),
