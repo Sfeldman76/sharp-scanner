@@ -1328,15 +1328,7 @@ def render_scanner_tab(label, sport_key, container):
                 st.write("🧪 Sample Model Prob:", df_moves_raw[['Game_Key', 'Model_Sharp_Win_Prob']].head())
 
                 # ✅ Restore Pre_Game
-                if not pre_game_map.empty:
-                    if 'Pre_Game' in df_moves_raw.columns:
-                        df_moves_raw = df_moves_raw.drop(columns='Pre_Game')  # Avoid duplication
-                    df_moves_raw = df_moves_raw.merge(
-                        pre_game_map,
-                        on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
-                        how='left'
-                    )
-                    st.success("✅ Re-attached Pre_Game to df_moves_raw after scoring merge")
+                
                 
                 # ✅ Final check
                 if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
@@ -1407,7 +1399,19 @@ def render_scanner_tab(label, sport_key, container):
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
         st.subheader("🧪 Pre-Filter Debug")
-        
+        if not pre_game_map.empty:
+                    if 'Pre_Game' in df_moves_raw.columns:
+                        df_moves_raw = df_moves_raw.drop(columns='Pre_Game')  # Avoid duplication
+                    df_moves_raw = df_moves_raw.merge(
+                        pre_game_map,
+                        on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
+                        how='left'
+                    )
+                    st.success("✅ Re-attached Pre_Game to df_moves_raw after scoring merge")
+
+        st.write("🧪 Pre_Game column preview:")
+        st.dataframe(df_moves_raw[['Game_Key', 'Pre_Game']].head())
+
         # 1. How many have Pre_Game == True?
         st.write("✅ Pre_Game == True:", (df_moves_raw['Pre_Game'] == True).sum())
         
