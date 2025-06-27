@@ -940,11 +940,11 @@ def apply_blended_sharp_score(df, trained_models):
             if df_inverse.empty:
                 st.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
             else:
-                st.dataframe(
-                    df_inverse[['Game_Key', 'Bookmaker', 'Outcome', 'Value', 'Model_Sharp_Win_Prob', 'Was_Canonical']]
-                    .sort_values('Game_Key')
-                    .head(20)
-                )
+               pass #st.dataframe(
+               pass  #   df_inverse[['Game_Key', 'Bookmaker', 'Outcome', 'Value', 'Model_Sharp_Win_Prob', 'Was_Canonical']]
+                pass  #  .sort_values('Game_Key')
+                 pass  # .head(20)
+               pass # )
             
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
@@ -1399,15 +1399,19 @@ def render_scanner_tab(label, sport_key, container):
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
         st.subheader("🧪 Pre-Filter Debug")
-        if not pre_game_map.empty:
-                    if 'Pre_Game' in df_moves_raw.columns:
-                        df_moves_raw = df_moves_raw.drop(columns='Pre_Game')  # Avoid duplication
-                    df_moves_raw = df_moves_raw.merge(
-                        pre_game_map,
-                        on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
-                        how='left'
-                    )
-                    st.success("✅ Re-attached Pre_Game to df_moves_raw after scoring merge")
+       # ✅ Normalize keys in pre_game_map before merging
+        for col in ['Game_Key', 'Market', 'Bookmaker', 'Outcome']:
+            pre_game_map[col] = pre_game_map[col].astype(str).str.strip().str.lower()
+            df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+        
+        # ✅ Re-attach Pre_Game safely
+        df_moves_raw = df_moves_raw.merge(
+            pre_game_map,
+            on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
+            how='left'
+        )
+        st.success("✅ Re-attached Pre_Game to df_moves_raw after merge")
+
 
         st.write("🧪 Pre_Game column preview:")
         st.dataframe(df_moves_raw[['Game_Key', 'Pre_Game']].head())
