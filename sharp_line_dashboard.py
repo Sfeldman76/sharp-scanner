@@ -1305,9 +1305,13 @@ def render_scanner_tab(label, sport_key, container):
                 )
                 
                 # Defensive cleanup in case of name collision
-                if 'Pre_Game_pre_game' in df_moves_raw.columns:
-                    df_moves_raw['Pre_Game'] = df_moves_raw['Pre_Game'].combine_first(df_moves_raw['Pre_Game_pre_game'])
-                    df_moves_raw.drop(columns=['Pre_Game_pre_game'], inplace=True)
+                if 'Pre_Game_x' in df_moves_raw.columns and 'Pre_Game_y' in df_moves_raw.columns:
+                    df_moves_raw['Pre_Game'] = df_moves_raw['Pre_Game_x'].combine_first(df_moves_raw['Pre_Game_y'])
+                    df_moves_raw.drop(columns=['Pre_Game_x', 'Pre_Game_y'], inplace=True)
+                elif 'Pre_Game_x' in df_moves_raw.columns:
+                    df_moves_raw.rename(columns={'Pre_Game_x': 'Pre_Game'}, inplace=True)
+                elif 'Pre_Game_y' in df_moves_raw.columns:
+                    df_moves_raw.rename(columns={'Pre_Game_y': 'Pre_Game'}, inplace=True)
                 restored = df_moves_raw['Pre_Game'].notna().sum()
                 total = len(df_moves_raw)
                 st.info(f"🧠 Pre_Game restored: {restored:,} / {total:,} rows have non-null values")
@@ -1414,19 +1418,7 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
-        st.subheader("🧪 Pre-Filter Debug")
-       # ✅ Re-attach Pre_Game (after merge cleanup)
-        if not pre_game_map.empty:
-            for col in ['Game_Key', 'Market', 'Bookmaker', 'Outcome']:
-                pre_game_map[col] = pre_game_map[col].astype(str).str.strip().str.lower()
-                df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-            
-            df_moves_raw = df_moves_raw.merge(
-                pre_game_map,
-                on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
-                how='left'
-            )
-            st.success("✅ Re-attached Pre_Game to df_moves_raw after model scoring merge")
+              
         st.write("🧪 df_moves_raw columns:", df_moves_raw.columns.tolist())
         st.write("✅ Pre_Game == True:", (df_moves_raw['Pre_Game'] == True).sum())
         st.write("✅ Pre_Game is null:", df_moves_raw['Pre_Game'].isna().sum())
