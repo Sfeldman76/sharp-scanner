@@ -1482,10 +1482,17 @@ def render_scanner_tab(label, sport_key, container):
             df_pre[col] = df_pre[col].astype(str).str.strip().str.lower()
             df_first_cols[col] = df_first_cols[col].astype(str).str.strip().str.lower()
         
-        # === Step 5: Merge First_Line_Value columns
+        # Step 5: Prepare to avoid column loss
+        for col in ['First_Model_Prob', 'First_Line_Value', 'First_Tier']:
+            if col not in df_pre.columns:
+                df_pre[col] = None  # ensures column exists even if merge fails
+        
+        # Step 5+1: Merge
         df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left', indicator=True)
         st.write("🧪 Merge indicator counts:", df_pre['_merge'].value_counts())
         df_pre.drop(columns=['_merge'], inplace=True)
+   
+    
         
         # === Step 6: Confirm merge success
         if 'First_Line_Value' in df_pre.columns:
