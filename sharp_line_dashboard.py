@@ -1378,6 +1378,9 @@ def render_scanner_tab(label, sport_key, container):
         start = time.time()
         df_history = get_recent_history()
         st.info(f"⏱️ Loaded historical trend data in {time.time() - start:.2f}s")
+        st.write("🧪 Step 1: df_history Value preview")
+        st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
+        st.write("Non-null Value rows in df_history:", df_history['Value'].notna().sum())
                 
         hist_start = time.time()
 
@@ -1397,6 +1400,9 @@ def render_scanner_tab(label, sport_key, container):
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
         )
+        st.write("🧪 Step 2: df_first preview after renaming")
+        st.dataframe(df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
+        st.write("Non-null First_Line_Value rows in df_first:", df_first['First_Line_Value'].notna().sum())
 
                 # === Normalize and merge first snapshot into df_moves_raw
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
@@ -1405,7 +1411,10 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(
             df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left'
         )
-        
+        st.write("🧪 Step 3: First_Line_Value after merging into df_moves_raw")
+        st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
+        st.write("Non-null First_Line_Value rows in df_moves_raw:", df_moves_raw['First_Line_Value'].notna().sum())
+
         # Alias for clarity in trend logic
         if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
             df_moves_raw['First_Model_Prob'] = df_moves_raw['First_Sharp_Prob']
@@ -1418,26 +1427,6 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
-              
-        st.write("🧪 df_moves_raw columns:", df_moves_raw.columns.tolist())
-        st.write("✅ Pre_Game == True:", (df_moves_raw['Pre_Game'] == True).sum())
-        st.write("✅ Pre_Game is null:", df_moves_raw['Pre_Game'].isna().sum())
-
-
-        st.write("🧪 Pre_Game column preview:")
-        st.dataframe(df_moves_raw[['Game_Key', 'Pre_Game']].head())
-
-        # 1. How many have Pre_Game == True?
-        st.write("✅ Pre_Game == True:", (df_moves_raw['Pre_Game'] == True).sum())
-        
-        # 2. How many have non-null model prob?
-        st.write("✅ Model_Sharp_Win_Prob notna:", df_moves_raw['Model_Sharp_Win_Prob'].notna().sum())
-        
-        # 3. How many have Game_Start > now?
-        st.write("✅ Game_Start > now:", (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now).sum())
-        
-        # 4. Print total rows
-        st.write("📊 Total df_moves_raw rows:", len(df_moves_raw))
         
         # === Now apply actual filter
         df_pre = df_moves_raw[
@@ -1456,7 +1445,9 @@ def render_scanner_tab(label, sport_key, container):
         df_first_cols = df_moves_raw[
             ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] + first_cols
         ].drop_duplicates()
-        
+        st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
+        st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
+
         df_pre = df_pre.merge(df_first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
 
         # === Rename BEFORE using summary_cols
@@ -1510,10 +1501,7 @@ def render_scanner_tab(label, sport_key, container):
                 df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
             if 'Rec Line' in df_summary_base.columns:
                 df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
-        st.write(df_summary_base[['Sharp Line', 'Rec Line', 'First_Line_Value']].head(10))
-        st.write(df_summary_base['First_Line_Value'].isnull().sum())
-        st.write("✅ Sharp Move preview:")
-        st.dataframe(df_summary_base[['Game_Key', 'Market', 'Outcome', 'Sharp Move', 'Rec Move']].head())
+        
         # 🧪 Force numeric types
         for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
             if col in df_summary_base.columns:
