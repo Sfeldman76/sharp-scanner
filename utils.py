@@ -165,7 +165,6 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
         if not gid:
             continue
 
-        # ✅ Define the required fields here
         home = game.get("home_team", "").strip().lower()
         away = game.get("away_team", "").strip().lower()
         game_name = f"{home.title()} vs {away.title()}"
@@ -178,7 +177,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                 for outcome in market.get('outcomes', []):
                     rows.append({
                         'Game_ID': gid,
-                        'Game': game_name,
+                        'Game': game_name,  # ✅ This line will now work
                         'Game_Start': event_time,
                         'Bookmaker': book_key,
                         'Market': market_key,
@@ -187,7 +186,6 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                         'Limit': outcome.get('bet_limit'),
                         'Snapshot_Timestamp': snapshot_time
                     })
-
  
 
     # Build Game_Key in df_snap using the same function as df_moves_raw
