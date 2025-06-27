@@ -464,7 +464,9 @@ def apply_blended_sharp_score(df, trained_models):
 
     total_start = time.time()
     scored_all = []
-
+    if 'Snapshot_Timestamp' not in df.columns:
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+        logger.info("✅ 'Snapshot_Timestamp' column added.")
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
@@ -605,7 +607,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
             
                 # Final deduplication
-                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
 
 
             elif market_type == "spreads":
@@ -651,7 +653,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
             
                 # Final deduplication
-                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
 
 
                 if df_inverse['Value'].isna().any():
