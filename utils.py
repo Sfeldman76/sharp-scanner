@@ -281,23 +281,14 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         if df[col].dtype == 'object':
             df[col] = df[col].where(df[col].notna(), None)
 
-    model_cols = [
-        'Model_Sharp_Win_Prob', 'Model_Confidence_Tier', 'SharpBetScore',
-        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-        'Final_Confidence_Score', 'Model_Confidence'
-    ]
-    for col in model_cols:
-        if col not in df.columns:
-            df[col] = None
-
-    # 🔒 Explicit schema alignment
+    # Define the full expected schema
     ALLOWED_COLS = [
         # Metadata
-        'Game_Key', 'Game', 'Game_Start', 'Sport', 'Market', 'Outcome',
+        'Game_Key', 'Time', 'Game', 'Game_Start', 'Sport', 'Market', 'Outcome',
         'Bookmaker', 'Book', 'Value', 'Limit', 'Delta', 'Old_Value',
         'Event_Date', 'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
-        'Time', 'Limit_Max', 'Delta_vs_Sharp',
-    
+        'Limit_Max', 'Delta_vs_Sharp',
+
         # Sharp logic fields
         'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
         'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total', 'SharpBetScore',
@@ -305,7 +296,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Sharp_Timing', 'Limit_NonZero', 'Limit_Min', 'Market_Leader',
         'Is_Pinnacle', 'LimitUp_NoMove_Flag', 'SupportKey', 'CrossMarketSharpSupport',
         'Is_Reinforced_MultiMarket',
-    
+
         # Scoring / diagnostics
         'True_Sharp_Confidence_Score', 'Enhanced_Sharp_Confidence_Score',
         'Sharp_Confidence_Tier', 'Model_Sharp_Win_Prob', 'Model_Confidence_Tier',
@@ -316,14 +307,28 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Scored_By_Model', 'Scoring_Market'
     ]
 
-    extra = set(df.columns) - set(ALLOWED_COLS)
-    if extra:
-        logging.warning(f"⚠️ Dropping unexpected columns before upload: {extra}")
-        df = df[[col for col in df.columns if col in ALLOWED_COLS]]
+    # Ensure all required columns exist
+    df = ensure_columns(df, ALLOWED_COLS, fill_value=None)
 
+    # Log any remaining mismatches
+    missing_cols = [col for col in ALLOWED_COLS if col not in df.columns]
+    if missing_cols:
+        logging.error(f"❌ Missing required columns for BigQuery upload: {missing_cols}")
+        return
+
+    # Filter to allowed schema
+    df = df[ALLOWED_COLS]
+
+    # Preview model columns
+    model_cols = [
+        'Model_Sharp_Win_Prob', 'Model_Confidence_Tier', 'SharpBetScore',
+        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+        'Final_Confidence_Score', 'Model_Confidence'
+    ]
     logging.info("🧪 Preview of model columns being written:")
     logging.info(df[model_cols].dropna(how='all').head(5).to_string())
 
+    # Write to BigQuery
     try:
         logging.info(f"📤 Uploading to `{table}`...")
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
@@ -332,7 +337,6 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         logging.exception(f"❌ Upload to `{table}` failed.")
         logging.debug("Schema:\n" + df.dtypes.to_string())
         logging.debug("Preview:\n" + df.head(5).to_string())
-        
         
 def read_market_weights_from_bigquery():
     try:
