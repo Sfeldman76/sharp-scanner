@@ -1223,7 +1223,7 @@ def render_scanner_tab(label, sport_key, container):
         
                 # ✅ Score everything
                 df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-                st.write("📋 df_scored.columns BEFORE normalization:", df_scored.columns.tolist())
+                #st.write("📋 df_scored.columns BEFORE normalization:", df_scored.columns.tolist())
         
                 if df_scored.empty:
                     st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
@@ -1234,8 +1234,8 @@ def render_scanner_tab(label, sport_key, container):
                         df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
                     if col in df_pre_game_picks.columns:
                         df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
-                st.write("🧪 Model_Sharp_Win_Prob summary:")
-                st.dataframe(df_scored[['Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']].head())
+                #st.write("🧪 Model_Sharp_Win_Prob summary:")
+                #st.dataframe(df_scored[['Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']].head())
                 
                 # Count nulls
                 num_scored = df_scored['Model_Sharp_Win_Prob'].notna().sum()
@@ -1288,17 +1288,25 @@ def render_scanner_tab(label, sport_key, container):
                 )
                 # Sample mismatch debugging
                 merged_keys = df_scored_clean[merge_keys].drop_duplicates()
+              
                 raw_keys = df_moves_raw[merge_keys].drop_duplicates()
                 
+                st.subheader("🔑 Merge Keys from `df_scored_clean`")
+                st.dataframe(merged_keys.head(20))  # show top 20 unique keys
+                st.subheader("🔑 Merge Keys from `df_moves_raw`")
+                st.dataframe(raw_keys.head(20))
+                st.subheader("🔑 Sorted Merge Keys from `df_scored_clean`")
+                st.dataframe(merged_keys.sort_values(by=merge_keys).reset_index(drop=True).head(20))
+                
+                st.subheader("🔑 Sorted Merge Keys from `df_moves_raw`")
+                st.dataframe(raw_keys.sort_values(by=merge_keys).reset_index(drop=True).head(20))
                 merge_check = merged_keys.merge(
                     raw_keys,
                     on=merge_keys,
                     how='outer',
                     indicator=True
                 )
-                
-                st.write("🔍 Merge key diff (not matched):")
-                st.dataframe(merge_check[merge_check['_merge'] != 'both'].head(10))
+              
 
                 # ✅ Clean suffixes
                 df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
