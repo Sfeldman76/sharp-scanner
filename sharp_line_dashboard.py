@@ -1279,13 +1279,21 @@ def render_scanner_tab(label, sport_key, container):
                     df_scored_clean[col] = df_scored_clean[col].astype(str).str.strip().str.lower()
                     df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
 
-                # ✅ Merge model scores into df_moves_raw
+               # Step 1: Drop old conflicting columns BEFORE merge
+                df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col in df_scored_clean.columns], errors='ignore')
+                
+                # Step 2: Now do the merge safely
                 df_moves_raw = df_moves_raw.merge(
                     df_scored_clean,
                     on=merge_keys,
                     how='left',
                     validate='many_to_one'
                 )
+                
+                # Step 3: Cleanup — now this is safe
+                df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
+                df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
+
                 # Sample mismatch debugging
                 merged_keys = df_scored_clean[merge_keys].drop_duplicates()
               
