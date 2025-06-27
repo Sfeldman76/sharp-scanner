@@ -294,8 +294,9 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     ALLOWED_COLS = [
         # Metadata
         'Game_Key', 'Game', 'Game_Start', 'Sport', 'Market', 'Outcome',
-        'Bookmaker', 'Book', 'Value', 'Limit', 'Delta', 'Event_Date',
-        'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
+        'Bookmaker', 'Book', 'Value', 'Limit', 'Delta', 'Old_Value',
+        'Event_Date', 'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
+        'Time', 'Limit_Max', 'Delta_vs_Sharp',
     
         # Sharp logic fields
         'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
