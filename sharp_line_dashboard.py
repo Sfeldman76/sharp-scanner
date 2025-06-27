@@ -937,15 +937,12 @@ def apply_blended_sharp_score(df, trained_models):
             #st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             #st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
+            # After generating df_inverse
             if df_inverse.empty:
                 st.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
-            else:
-               pass #st.dataframe(
-               pass  #   df_inverse[['Game_Key', 'Bookmaker', 'Outcome', 'Value', 'Model_Sharp_Win_Prob', 'Was_Canonical']]
-                pass  #  .sort_values('Game_Key')
-                 pass  # .head(20)
-               pass # )
-            
+                continue  # optional: skip this scoring loop if inverse fails
+
+           
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             
