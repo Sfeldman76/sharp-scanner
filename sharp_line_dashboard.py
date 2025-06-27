@@ -1457,41 +1457,65 @@ def render_scanner_tab(label, sport_key, container):
             (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
         ].copy()
 
-        # ✅ Define first_cols BEFORE use
+        # === Step 0: Define keys and snapshot time
+        merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+        now = pd.Timestamp.utcnow()
         first_cols = ['First_Model_Prob', 'First_Line_Value', 'First_Tier']
-        # Normalize + deduplicate
-        # Normalize first
-        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        
+        # === Step 1: Normalize df_moves_raw BEFORE filtering or extracting
+        for col in merge_keys:
             df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-            df_first[col] = df_first[col].astype(str).str.strip().str.lower()
         
-        # Build first-cols from full df_moves_raw
-        df_first_cols = df_moves_raw[
-            ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] + first_cols
-        ].drop_duplicates()
+        # === Step 2: Build df_first_cols BEFORE slicing
+        df_first_cols = df_moves_raw[merge_keys + first_cols].drop_duplicates()
         st.write("📋 Columns in df_first_cols:", df_first_cols.columns.tolist())
-        # Merge before deduplication
-        df_pre = df_pre.merge(df_first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-        st.write("✅ After merge: First_Line_Value")
-        st.write(df_pre['First_Line_Value'].notna().sum())
-        st.dataframe(df_pre[['Game_Key', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
-        # THEN deduplicate after merge
-        df_pre = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         
-        # Normalize target fields if needed
+        # === Step 3: Filter pre-game picks AFTER normalization
+        df_pre = df_moves_raw[
+            (df_moves_raw['Pre_Game'] == True) &
+            (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
+            (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
+        ].copy()
+        
+        # === Step 4: Normalize df_pre again (redundant but safe)
+        for col in merge_keys:
+            df_pre[col] = df_pre[col].astype(str).str.strip().str.lower()
+            df_first_cols[col] = df_first_cols[col].astype(str).str.strip().str.lower()
+        
+        # === Step 5: Merge First_Line_Value columns
+        df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left', indicator=True)
+        st.write("🧪 Merge indicator counts:", df_pre['_merge'].value_counts())
+        df_pre.drop(columns=['_merge'], inplace=True)
+        
+        # === Step 6: Confirm merge success
+        if 'First_Line_Value' in df_pre.columns:
+            st.write("✅ First_Line_Value notna after merge:", df_pre['First_Line_Value'].notna().sum())
+            st.dataframe(df_pre[['Game_Key', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
+        else:
+            st.warning("⚠️ 'First_Line_Value' column is missing after merge!")
+        
+        # === Step 7: Deduplicate post-merge
+        df_pre = df_pre.drop_duplicates(subset=merge_keys, keep='last')
+        
+        # === Optional: Normalize again (safety for downstream groupby)
         df_pre['Bookmaker'] = df_pre['Bookmaker'].str.lower()
         df_pre['Outcome'] = df_pre['Outcome'].astype(str).str.strip().str.lower()
+        
+        # === Debug/Preview Other Tables
         st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
         st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
-
-       
-        # === Rename BEFORE using summary_cols
+        
+        # === Step 8: Rename columns for display
         df_pre.rename(columns={
             'Game': 'Matchup',
             'Model_Sharp_Win_Prob': 'Model Prob',
             'Model_Confidence_Tier': 'Confidence Tier'
         }, inplace=True)
+                st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
+                st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
         
+       
+
         # === Compute consensus lines
         sharp_consensus = (
             df_pre[df_pre['Bookmaker'].isin(SHARP_BOOKS)]
