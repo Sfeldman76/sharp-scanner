@@ -1239,10 +1239,10 @@ def render_scanner_tab(label, sport_key, container):
                 
                 # Count nulls
                 num_scored = df_scored['Model_Sharp_Win_Prob'].notna().sum()
-                st.write(f"✅ Non-null Model_Sharp_Win_Prob rows: {num_scored:,} / {len(df_scored):,}")
+                #st.write(f"✅ Non-null Model_Sharp_Win_Prob rows: {num_scored:,} / {len(df_scored):,}")
 
-                st.write("✅ Merge keys normalized.")
-                st.write("📋 df_scored head:", df_scored[merge_keys].head())
+                #st.write("✅ Merge keys normalized.")
+                #st.write("📋 df_scored head:", df_scored[merge_keys].head())
         
                 # ✅ Deduplicate and finalize scored output
                 df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
@@ -1278,9 +1278,14 @@ def render_scanner_tab(label, sport_key, container):
                 for col in merge_keys:
                     df_scored_clean[col] = df_scored_clean[col].astype(str).str.strip().str.lower()
                     df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+                # Only drop conflicting columns NOT used in merge
+                cols_to_drop = [
+                    col for col in df_scored_clean.columns
+                    if col in df_moves_raw.columns and col not in merge_keys
+                ]
+                df_moves_raw = df_moves_raw.drop(columns=cols_to_drop, errors='ignore')
 
-               # Step 1: Drop old conflicting columns BEFORE merge
-                df_moves_raw = df_moves_raw.drop(columns=[col for col in df_moves_raw.columns if col in df_scored_clean.columns], errors='ignore')
+                st.info(f"🧹 Dropped {len(cols_to_drop)} conflicting non-key columns before merge.")
                 
                 # Step 2: Now do the merge safely
                 df_moves_raw = df_moves_raw.merge(
