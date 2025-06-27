@@ -156,6 +156,7 @@ def write_parquet_to_gcs(df, filename, bucket_name=GCS_BUCKET, folder="snapshots
     print(f"✅ Uploaded Parquet to gs://{bucket_name}/{blob_path}")
 
 
+
 def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", folder="snapshots/"):
     rows = []
     snapshot_time = pd.Timestamp.utcnow()
@@ -177,7 +178,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                 for outcome in market.get('outcomes', []):
                     rows.append({
                         'Game_ID': gid,
-                        'Game': game_name,  # ✅ This line will now work
+                        'Game': game_name,
                         'Game_Start': event_time,
                         'Bookmaker': book_key,
                         'Market': market_key,
@@ -186,6 +187,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                         'Limit': outcome.get('bet_limit'),
                         'Snapshot_Timestamp': snapshot_time
                     })
+
  
 
     # Build Game_Key in df_snap using the same function as df_moves_raw
