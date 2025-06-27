@@ -1479,20 +1479,37 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Step 4: Normalize df_pre again (redundant but safe)
         merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
+        # === Normalize both sides (ensure string equality)
         for col in merge_keys:
             df_pre[col] = df_pre[col].astype(str).str.strip().str.lower()
             df_first_cols[col] = df_first_cols[col].astype(str).str.strip().str.lower()
         
-        # Ensure expected columns exist before merge to prevent KeyError
+        # === Ensure expected columns exist before merge
         for col in ['First_Model_Prob', 'First_Line_Value', 'First_Tier']:
             if col not in df_pre.columns:
                 df_pre[col] = None
         
-        # Optional: check merge overlap before merge
+        # === Check pre-merge matches vs misses
+        merge_debug = df_pre[merge_keys].drop_duplicates().merge(
+            df_first_cols[merge_keys].drop_duplicates(),
+            on=merge_keys,
+            how='left',
+            indicator=True
+        )
         
-        match_check = df_pre[merge_keys].merge(df_first_cols[merge_keys], on=merge_keys, how='inner')
-        st.write(f"🔍 Matching rows before merge: {len(match_check)}")
+        # === Show unmatched keys
+        unmatched_keys = merge_debug[merge_debug['_merge'] == 'left_only']
+        matched_keys = merge_debug[merge_debug['_merge'] == 'both']
+        st.warning(f"⚠️ Unmatched merge keys: {len(unmatched_keys)} / {len(merge_debug)}")
+        st.dataframe(unmatched_keys.head(10))
         
+        # === Optional: show matching rows as well
+        st.success(f"✅ Matching rows before merge: {len(matched_keys)}")
+        st.dataframe(matched_keys.head(10))
+        missing = pre_keys.merge(first_keys, on=merge_keys, how='left', indicator=True)
+        st.write("⚠️ Keys with no match in df_first_cols:")
+        st.dataframe(missing[missing['_merge'] == 'left_only'].head(10))
         # Safe merge
         df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left', indicator=True)
         st.write("🧪 Merge indicator counts:", df_pre['_merge'].value_counts())
