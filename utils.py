@@ -467,6 +467,8 @@ def apply_blended_sharp_score(df, trained_models):
     if 'Snapshot_Timestamp' not in df.columns:
         df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
         logger.info("✅ 'Snapshot_Timestamp' column added.")
+
+   
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
@@ -695,18 +697,33 @@ def apply_blended_sharp_score(df, trained_models):
             logger.error(traceback.format_exc())
 
     try:
+        # Initialize df_final as an empty DataFrame before any processing
+        df_final = pd.DataFrame()
+    
         if scored_all:
+            # Drop 'Game_Key_Base' column if it exists
             if 'Game_Key_Base' in df_final.columns:
                 df_final = df_final.drop(columns=['Game_Key_Base'])
                 logger.debug("🧹 Dropped 'Game_Key_Base' column before returning final scored DataFrame.")
+            
+            # Concatenate all DataFrames in scored_all
             df_final = pd.concat(scored_all, ignore_index=True)
+            
+            # Keep only rows with valid 'Model_Sharp_Win_Prob'
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
+            
+            # Log the duration of the scoring process
             logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
+            
+            # Return the final DataFrame
             return df_final
         else:
+            # If no rows were scored, log a warning and return an empty DataFrame
             logger.warning("⚠️ No market types scored — returning empty DataFrame.")
             return pd.DataFrame()
+    
     except Exception as e:
+        # If any error occurs, log the error and return an empty DataFrame
         logger.error("❌ Exception during final aggregation")
         logger.error(traceback.format_exc())
         return pd.DataFrame()
