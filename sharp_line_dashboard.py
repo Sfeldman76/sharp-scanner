@@ -815,7 +815,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon = df_canon.drop_duplicates(subset=dedup_keys)
             post_dedup_canon = len(df_canon)
             
-            st.success(f"✅ Canonical rows deduplicated: {pre_dedup_canon:,} → {post_dedup_canon:,}")
+            #st.success(f"✅ Canonical rows deduplicated: {pre_dedup_canon:,} → {post_dedup_canon:,}")
 
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
@@ -934,8 +934,8 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
             
-            st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
-            st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
+            #st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
+            #st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
             if df_inverse.empty:
                 st.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
@@ -956,8 +956,8 @@ def apply_blended_sharp_score(df, trained_models):
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
             
-            st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
-            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+            #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
             
             scored_all.append(df_scored)
 
@@ -1274,7 +1274,11 @@ def render_scanner_tab(label, sport_key, container):
                 df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
                 
                 df_scored_clean = df_scored[merge_keys + required_score_cols].copy()
-                
+                # Normalize keys on both sides
+                for col in merge_keys:
+                    df_scored_clean[col] = df_scored_clean[col].astype(str).str.strip().str.lower()
+                    df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+
                 # ✅ Merge model scores into df_moves_raw
                 df_moves_raw = df_moves_raw.merge(
                     df_scored_clean,
@@ -1282,7 +1286,20 @@ def render_scanner_tab(label, sport_key, container):
                     how='left',
                     validate='many_to_one'
                 )
+                # Sample mismatch debugging
+                merged_keys = df_scored_clean[merge_keys].drop_duplicates()
+                raw_keys = df_moves_raw[merge_keys].drop_duplicates()
                 
+                merge_check = merged_keys.merge(
+                    raw_keys,
+                    on=merge_keys,
+                    how='outer',
+                    indicator=True
+                )
+                
+                st.write("🔍 Merge key diff (not matched):")
+                st.dataframe(merge_check[merge_check['_merge'] != 'both'].head(10))
+
                 # ✅ Clean suffixes
                 df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
                 df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
