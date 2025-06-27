@@ -838,9 +838,40 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Scored_By_Model'] = True
             
             if market_type == "totals":
-                df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
-                df_inverse['Outcome'] = 'under'
-                df_inverse['Outcome_Norm'] = 'under'
+                # ✅ Invert outcome cleanly: over → under, under → over
+                df_inverse['Outcome'] = df_inverse['Outcome'].map(lambda x: 'under' if x == 'over' else 'over')
+                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
+            
+                # Rebuild Game_Key and Game_Key_Base for the flipped side
+                df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+                df_inverse['Game_Key'] = (
+                    df_inverse['Home_Team_Norm'] + "_" +
+                    df_inverse['Away_Team_Norm'] + "_" +
+                    df_inverse['Commence_Hour'].astype(str) + "_" +
+                    df_inverse['Market'] + "_" +
+                    df_inverse['Outcome']
+                )
+                df_inverse['Game_Key_Base'] = (
+                    df_inverse['Home_Team_Norm'] + "_" +
+                    df_inverse['Away_Team_Norm'] + "_" +
+                    df_inverse['Commence_Hour'].astype(str) + "_" +
+                    df_inverse['Market']
+                )
+            
+                # Safe merge to get the opposing line
+                df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
+                df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
+                df_inverse = df_inverse.merge(
+                    df_full_market[['Team_Key', 'Value']],
+                    on='Team_Key',
+                    how='left',
+                    suffixes=('', '_opponent')
+                )
+                df_inverse['Value'] = df_inverse['Value_opponent']
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+            
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+                        
             elif market_type == "h2h":
                 # Flip outcome to opposing team
                 df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
@@ -1459,8 +1490,7 @@ def render_scanner_tab(label, sport_key, container):
         df_pre = df_pre.merge(sharp_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         df_pre = df_pre.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         # Fill Sharp/Rec Line for missing rows (consensus lines)
-        df_summary_base['Sharp Line'] = df_summary_base['Sharp Line'].fillna(df_pre['Sharp Line'])
-        df_summary_base['Rec Line'] = df_summary_base['Rec Line'].fillna(df_pre['Rec Line'])
+        
         # Define summary columns
         summary_cols = [
             'Matchup', 'Market', 'Game_Start', 'Outcome',
@@ -1473,7 +1503,8 @@ def render_scanner_tab(label, sport_key, container):
         
         # Create df_summary_base
         df_summary_base = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
-        
+        df_summary_base['Sharp Line'] = df_summary_base['Sharp Line'].fillna(df_pre['Sharp Line'])
+        df_summary_base['Rec Line'] = df_summary_base['Rec Line'].fillna(df_pre['Rec Line'])
         # Ensure required columns exist
         for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
             if col not in df_summary_base.columns:
