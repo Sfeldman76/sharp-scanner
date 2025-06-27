@@ -1503,7 +1503,9 @@ def render_scanner_tab(label, sport_key, container):
         matched_keys = merge_debug[merge_debug['_merge'] == 'both']
         st.warning(f"⚠️ Unmatched merge keys: {len(unmatched_keys)} / {len(merge_debug)}")
         st.dataframe(unmatched_keys.head(10))
-        
+        # Drop duplicate keys to compare unique combinations
+        pre_keys = df_pre[merge_keys].drop_duplicates()
+        first_keys = df_first_cols[merge_keys].drop_duplicates()
         # === Optional: show matching rows as well
         st.success(f"✅ Matching rows before merge: {len(matched_keys)}")
         st.dataframe(matched_keys.head(10))
