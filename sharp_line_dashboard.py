@@ -1507,12 +1507,12 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Step 8: Rename columns for display
         df_pre.rename(columns={
-            'Game': 'Matchup',
-            'Model_Sharp_Win_Prob': 'Model Prob',
-            'Model_Confidence_Tier': 'Confidence Tier'
+                'Game': 'Matchup',
+                'Model_Sharp_Win_Prob': 'Model Prob',
+                'Model_Confidence_Tier': 'Confidence Tier'
         }, inplace=True)
-                st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
-                st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
+        st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
+        st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
         
        
 
