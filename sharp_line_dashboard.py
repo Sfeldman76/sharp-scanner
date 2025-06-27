@@ -1353,6 +1353,20 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
+        st.subheader("🧪 Pre-Filter Debug")
+        
+        # 1. How many have Pre_Game == True?
+        st.write("✅ Pre_Game == True:", (df_moves_raw['Pre_Game'] == True).sum())
+        
+        # 2. How many have non-null model prob?
+        st.write("✅ Model_Sharp_Win_Prob notna:", df_moves_raw['Model_Sharp_Win_Prob'].notna().sum())
+        
+        # 3. How many have Game_Start > now?
+        st.write("✅ Game_Start > now:", (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > pd.Timestamp.utcnow()).sum())
+        
+        # 4. Print total rows
+        st.write("📊 Total df_moves_raw rows:", len(df_moves_raw))
+
         df_pre = df_moves_raw[
             (df_moves_raw['Pre_Game'] == True) &
             (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
