@@ -1425,6 +1425,8 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(
             df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left'
         )
+        st.write("🧪 Post-merge: is First_Line_Value in df_moves_raw?")
+        st.write('First_Line_Value' in df_moves_raw.columns)
         st.write("✅ Step 3: Post-merge — First_Line_Value null count:", df_moves_raw['First_Line_Value'].isnull().sum())
         st.dataframe(
             df_moves_raw[df_moves_raw['First_Line_Value'].isnull()][
@@ -1467,7 +1469,7 @@ def render_scanner_tab(label, sport_key, container):
         df_first_cols = df_moves_raw[
             ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] + first_cols
         ].drop_duplicates()
-        
+        st.write("📋 Columns in df_first_cols:", df_first_cols.columns.tolist())
         # Merge before deduplication
         df_pre = df_pre.merge(df_first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
         st.write("✅ After merge: First_Line_Value")
