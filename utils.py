@@ -280,7 +280,12 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].where(df[col].notna(), None)
-
+    # Preview model columns
+    model_cols = [
+        'Model_Sharp_Win_Prob', 'Model_Confidence_Tier', 'SharpBetScore',
+        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
+        'Final_Confidence_Score', 'Model_Confidence'
+    ]
     # Define the full expected schema
     ALLOWED_COLS = [
         # Metadata
@@ -306,7 +311,8 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Unique_Sharp_Books', 'Sharp_Move_Magnitude_Score', 'Was_Canonical',
         'Scored_By_Model', 'Scoring_Market'
     ]
-
+    # 🧩 Add schema-consistent consensus fields from summarize_consensus()
+    
     # Ensure all required columns exist
     df = ensure_columns(df, ALLOWED_COLS, fill_value=None)
 
@@ -319,12 +325,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     # Filter to allowed schema
     df = df[ALLOWED_COLS]
 
-    # Preview model columns
-    model_cols = [
-        'Model_Sharp_Win_Prob', 'Model_Confidence_Tier', 'SharpBetScore',
-        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-        'Final_Confidence_Score', 'Model_Confidence'
-    ]
+    
     logging.info("🧪 Preview of model columns being written:")
     logging.info(df[model_cols].dropna(how='all').head(5).to_string())
 
