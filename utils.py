@@ -171,6 +171,8 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                 for outcome in market.get('outcomes', []):
                     rows.append({
                         'Game_ID': gid,
+                        'Game': game_name,  # ✅ Add this
+                        'Game_Start': event_time,  # ✅ Add this
                         'Bookmaker': book_key,
                         'Market': market_key,
                         'Outcome': outcome.get('name'),
