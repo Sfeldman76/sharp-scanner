@@ -1455,7 +1455,8 @@ def render_scanner_tab(label, sport_key, container):
             (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
         ].copy()
 
-        
+        # ✅ Define first_cols BEFORE use
+        first_cols = ['First_Model_Prob', 'First_Line_Value', 'First_Tier']
         # Normalize + deduplicate
         # Normalize first
         for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
