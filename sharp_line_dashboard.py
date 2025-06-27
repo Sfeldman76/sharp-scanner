@@ -965,8 +965,8 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
             
-            st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
-            st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
+            #st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
+            #st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
             # After generating df_inverse
             if df_inverse.empty:
@@ -984,8 +984,8 @@ def apply_blended_sharp_score(df, trained_models):
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
             
-            st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
-            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+            #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
             
             scored_all.append(df_scored)
 
@@ -1395,17 +1395,13 @@ def render_scanner_tab(label, sport_key, container):
         # === Load broader trend history for open line / tier comparison
         start = time.time()
         df_history = get_recent_history()
-        st.info(f"⏱️ Loaded historical trend data in {time.time() - start:.2f}s")
-        st.write("🧪 Step 1: df_history Value preview")
-        st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
-        st.write("Non-null Value rows in df_history:", df_history['Value'].notna().sum())
+        
                 
         hist_start = time.time()
 
         # === Filter to only current live games
         df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
         df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
-        st.info(f"⏱️ Filtered history to {len(df_history)} rows in {time.time() - hist_start:.2f}s")
         
         # === Build First Snapshot
         # Build First Snapshot (from historical values)
