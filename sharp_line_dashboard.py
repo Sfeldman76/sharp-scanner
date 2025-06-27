@@ -1483,10 +1483,7 @@ def render_scanner_tab(label, sport_key, container):
         ]
         
         # Create df_summary_base
-        df_summary_base = (
-            df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
-            .copy()
-        )
+        df_summary_base = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         
         # Ensure required columns exist
         for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
