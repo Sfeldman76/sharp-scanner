@@ -934,8 +934,8 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
             
-            #st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
-            #st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
+            st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
+            st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
             # After generating df_inverse
             if df_inverse.empty:
@@ -953,8 +953,8 @@ def apply_blended_sharp_score(df, trained_models):
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
             
-            #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
-            #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
+            st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
+            st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
             
             scored_all.append(df_scored)
 
