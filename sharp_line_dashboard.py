@@ -893,7 +893,7 @@ def apply_blended_sharp_score(df, trained_models):
             elif market_type == "spreads":
                 df_inverse = df_canon.copy(deep=True)
                 df_inverse['Was_Canonical'] = False
-                df_inverse['Scored_By_Model'] = True
+                
             
                 # Step 1 — Get opponent team (don't overwrite Outcome yet)
                 df_inverse['Opponent_Team'] = np.where(
