@@ -1276,13 +1276,19 @@ def render_scanner_tab(label, sport_key, container):
                     df_scored_clean[col] = df_scored_clean[col].astype(str).str.strip().str.lower()
                     df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
                 # Only drop conflicting columns NOT used in merge
+                # 🛡️ Merge-safe columns we want to preserve
+                protected_cols = merge_keys + ['Pre_Game', 'Post_Game']
+                
+                # ✅ Only drop non-protected, conflicting columns
                 cols_to_drop = [
                     col for col in df_scored_clean.columns
-                    if col in df_moves_raw.columns and col not in merge_keys
+                    if col in df_moves_raw.columns and col not in protected_cols
                 ]
+                
                 df_moves_raw = df_moves_raw.drop(columns=cols_to_drop, errors='ignore')
+                st.info(f"🧹 Dropped {len(cols_to_drop)} conflicting non-key, non-protected columns before merge.")
 
-                st.info(f"🧹 Dropped {len(cols_to_drop)} conflicting non-key columns before merge.")
+           
                 
                 # Step 2: Now do the merge safely
                 df_moves_raw = df_moves_raw.merge(
@@ -1396,18 +1402,20 @@ def render_scanner_tab(label, sport_key, container):
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
         st.subheader("🧪 Pre-Filter Debug")
-       # ✅ Normalize keys in pre_game_map before merging
-        for col in ['Game_Key', 'Market', 'Bookmaker', 'Outcome']:
-            pre_game_map[col] = pre_game_map[col].astype(str).str.strip().str.lower()
-            df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-        
-        # ✅ Re-attach Pre_Game safely
-        df_moves_raw = df_moves_raw.merge(
-            pre_game_map,
-            on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
-            how='left'
-        )
-        st.success("✅ Re-attached Pre_Game to df_moves_raw after merge")
+       # ✅ Re-attach Pre_Game (after merge cleanup)
+        if not pre_game_map.empty:
+            for col in ['Game_Key', 'Market', 'Bookmaker', 'Outcome']:
+                pre_game_map[col] = pre_game_map[col].astype(str).str.strip().str.lower()
+                df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+            
+            df_moves_raw = df_moves_raw.merge(
+                pre_game_map,
+                on=['Game_Key', 'Market', 'Bookmaker', 'Outcome'],
+                how='left'
+            )
+            st.success("✅ Re-attached Pre_Game to df_moves_raw after model scoring merge")
+        st.write("✅ Pre_Game == True:", (df_moves_raw['Pre_Game'] == True).sum())
+        st.write("✅ Pre_Game is null:", df_moves_raw['Pre_Game'].isna().sum())
 
 
         st.write("🧪 Pre_Game column preview:")
