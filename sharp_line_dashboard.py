@@ -1470,7 +1470,9 @@ def render_scanner_tab(label, sport_key, container):
         
         # Merge before deduplication
         df_pre = df_pre.merge(df_first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-        
+        st.write("✅ After merge: First_Line_Value")
+        st.write(df_pre['First_Line_Value'].notna().sum())
+        st.dataframe(df_pre[['Game_Key', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
         # THEN deduplicate after merge
         df_pre = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         
@@ -1513,7 +1515,8 @@ def render_scanner_tab(label, sport_key, container):
             'Game_Key',  # ✅ already there
             'Snapshot_Timestamp'  # ✅ add this line
         ]
-        
+        st.write("🔍 Before df_summary_base dedup: First_Line_Value count")
+        st.write(df_pre['First_Line_Value'].notna().sum())
         # Create df_summary_base
         df_summary_base = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         df_summary_base['Sharp Line'] = df_summary_base['Sharp Line'].fillna(df_pre['Sharp Line'])
@@ -1522,7 +1525,8 @@ def render_scanner_tab(label, sport_key, container):
         for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
             if col not in df_summary_base.columns:
                 df_summary_base[col] = np.nan
-                      
+        st.write("🚨 In df_summary_base: First_Line_Value")
+        st.write(df_summary_base['First_Line_Value'].notna().sum())              
         # Line movement calculations
         # === Calculate line movement on df_summary_base
         move_start = time.time()
@@ -1561,10 +1565,10 @@ def render_scanner_tab(label, sport_key, container):
         df_summary_base = df_summary_base.loc[:, ~df_summary_base.columns.duplicated()]
 
 
-        st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
-        st.write(f"🔢 Rows: {len(df_summary_base)}")
-        st.write("📋 Columns:", df_summary_base.columns.tolist())
-        st.dataframe(df_summary_base.head(10))
+        #st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
+        #.write(f"🔢 Rows: {len(df_summary_base)}")
+        #st.write("📋 Columns:", df_summary_base.columns.tolist())
+        #st.dataframe(df_summary_base.head(10))
 
         # === Compute diagnostics from df_pre (upcoming + scored)
         if df_summary_base.empty:
