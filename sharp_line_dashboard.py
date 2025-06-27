@@ -1425,6 +1425,12 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(
             df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left'
         )
+        st.write("✅ Step 3: Post-merge — First_Line_Value null count:", df_moves_raw['First_Line_Value'].isnull().sum())
+        st.dataframe(
+            df_moves_raw[df_moves_raw['First_Line_Value'].isnull()][
+                ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+            ].head(10)
+        )
         st.write("🧪 Step 3: First_Line_Value after merging into df_moves_raw")
         st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
         st.write("Non-null First_Line_Value rows in df_moves_raw:", df_moves_raw['First_Line_Value'].notna().sum())
@@ -1451,19 +1457,29 @@ def render_scanner_tab(label, sport_key, container):
 
         
         # Normalize + deduplicate
-        df_pre = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
-        df_pre['Bookmaker'] = df_pre['Bookmaker'].str.lower()
-        df_pre['Outcome'] = df_pre['Outcome'].astype(str).str.strip().str.lower()
-        # Bring First_* columns back in from df_moves_raw
-        first_cols = ['First_Model_Prob', 'First_Line_Value', 'First_Tier']
+        # Normalize first
+        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+            df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
+            df_first[col] = df_first[col].astype(str).str.strip().str.lower()
+        
+        # Build first-cols from full df_moves_raw
         df_first_cols = df_moves_raw[
             ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] + first_cols
         ].drop_duplicates()
+        
+        # Merge before deduplication
+        df_pre = df_pre.merge(df_first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+        
+        # THEN deduplicate after merge
+        df_pre = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+        
+        # Normalize target fields if needed
+        df_pre['Bookmaker'] = df_pre['Bookmaker'].str.lower()
+        df_pre['Outcome'] = df_pre['Outcome'].astype(str).str.strip().str.lower()
         st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
         st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
 
-        df_pre = df_pre.merge(df_first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-
+       
         # === Rename BEFORE using summary_cols
         df_pre.rename(columns={
             'Game': 'Matchup',
