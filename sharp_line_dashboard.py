@@ -786,7 +786,7 @@ def apply_blended_sharp_score(df, trained_models):
             if market_type == "spreads":
                 
                 # ✅ Pick canonical row with most negative value per Game_Key_Base
-                df_market = df_market[df_market['Value'].notna()].copy()
+                df_market = df_market[df_market['Value'].notna()]
                 df_canon = (
                     df_market.loc[df_market.groupby(['Game_Key_Base'])['Value'].idxmin()]
                     .copy()
@@ -892,8 +892,6 @@ def apply_blended_sharp_score(df, trained_models):
 
             elif market_type == "spreads":
                 
-            
-                # ✅ Flip outcome to opposing team
                 df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
             
@@ -905,7 +903,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-                # ✅ Rebuild Game_Key and Game_Key_Base using flipped outcome
+                # Rebuild Game_Key and Game_Key_Base using flipped outcome
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
@@ -921,29 +919,23 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Market']
                 )
             
-                # ✅ Build Team_Key and merge value
+                # ✅ Build Team_Key for safe merge
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
             
+                # ✅ Merge opponent Value cleanly
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value']],
                     on='Team_Key',
                     how='left',
-                    suffixes=('', '_canonical')
+                    suffixes=('', '_opponent')
                 )
+                df_inverse['Value'] = df_inverse['Value_opponent']
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
             
-                # ✅ Flip the value
-                df_inverse['Value'] = -1 * df_inverse['Value_canonical']
-                df_inverse.drop(columns=['Value_canonical'], inplace=True, errors='ignore')
-            
-                # ✅ Flip probability AFTER outcome and value flip
-                df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
-                df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
-            
-                # ✅ Final deduplication (same as h2h)
-                df_inverse = df_inverse.drop_duplicates(
-                    subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp']
-                )
+                # Final deduplication
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
+
             st.subheader(f"🧪 {market_type.upper()} — Inverse Preview (Before Dedup)")
             st.info(f"🔄 Inverse rows generated pre-dedup: {len(df_inverse)}")
             
@@ -955,22 +947,6 @@ def apply_blended_sharp_score(df, trained_models):
                     .sort_values('Game_Key')
                     .head(20)
                 )
-            canon_keys = df_canon[['Bookmaker', 'Game_Key']].drop_duplicates()
-            df_inverse = df_inverse.merge(
-                canon_keys,
-                on=['Bookmaker', 'Game_Key'],
-                how='left',
-                indicator=True
-            )
-            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
-
-
-            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-            df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
-            # 🧪 Show both sides of each matchup with Value and Probability
-            st.subheader(f"🧪 {market_type.upper()} — Side-by-Side Debug")
-            
-           
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
