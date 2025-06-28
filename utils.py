@@ -2,7 +2,6 @@ import pandas as pd
 from datetime import datetime
 from collections import defaultdict
 from google.cloud import bigquery, storage
-from pandas_gbq import to_gbq
 import pyarrow as pa
 import pyarrow.parquet as pq
 from io import BytesIO
@@ -13,7 +12,7 @@ import hashlib
 import time
 
 
-
+from pandas_gbq import to_gbq
 import traceback
 import pickle  # ✅ Add this at the top of your script
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
