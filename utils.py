@@ -11,7 +11,7 @@ import numpy as np
 import logging
 import hashlib
 import time
-from pandas_gbq import to_gbq
+
 
 
 import traceback
@@ -1186,8 +1186,7 @@ def read_recent_sharp_moves(hours=140, table=BQ_FULL_TABLE):
        
 
 def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
-    from pandas_gbq import to_gbq
-
+   
     if df.empty:
         logging.info("ℹ️ No data to write to BigQuery.")
         return
@@ -1267,14 +1266,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         """).to_dataframe()
         existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
         new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
-       
- 
-
-        to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-        logging.info(f"✅ Uploaded {len(new_scores)} new game scores")
+    
+        if new_scores.empty:
+            logging.info("ℹ️ No new scores to upload to game_scores_final")
+        else:
+            to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+            logging.info(f"✅ Uploaded {len(new_scores)} new game scores")
+    
     except Exception as e:
-        logging.error(f"❌ Failed to upload game scores: {e}")
-        logging.error(new_scores.dtypes.to_string())
+        logging.exception("❌ Failed to upload game scores")
 
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
@@ -1373,6 +1373,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
+    
+    try:
+        df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
+        # Optionally upload:
+        # to_gbq(df_weights, 'sharp_data.market_weights', project_id=GCP_PROJECT_ID, if_exists='replace')
+        logging.info(f"✅ Computed updated market weights for {sport_label.upper()}")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to compute market weights: {e}")
+
     df_scores_out['Sport'] = sport_label.upper()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
     # === Coerce and clean all fields BEFORE dedup and upload
