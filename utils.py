@@ -1113,7 +1113,7 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
 
     return first_moves
 
-def detect_cross_market_sharp_support(df_moves, score_threshold=25):
+def detect_cross_market_sharp_support(df_moves, score_threshold=15):
     df = df_moves.copy()
     df['SupportKey'] = df['Game'].astype(str) + " | " + df['Outcome'].astype(str)
 
@@ -1166,7 +1166,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
         return None
 
-def read_recent_sharp_moves(hours=500, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves(hours=140, table=BQ_FULL_TABLE):
     try:
         client = bq_client
         query = f"""
