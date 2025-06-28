@@ -1268,11 +1268,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
        
  
 
-        pass#to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-        pass#logging.info(f"✅ Uploaded {len(new_scores)} new game scores")
+        to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
+        logging.info(f"✅ Uploaded {len(new_scores)} new game scores")
     except Exception as e:
-        pass#logging.error(f"❌ Failed to upload game scores: {e}")
-        pass#logging.error(new_scores.dtypes.to_string())
+        logging.error(f"❌ Failed to upload game scores: {e}")
+        logging.error(new_scores.dtypes.to_string())
 
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
