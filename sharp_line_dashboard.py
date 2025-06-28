@@ -1696,11 +1696,11 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df
             .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome'], as_index=False)
             .agg({
-                'Rec Line': 'first',
-                'Sharp Line': 'first',
-                'Rec Move': 'first',
-                'Sharp Move': 'first',
-                'Model Prob': 'first',
+                'Rec Line': 'mean',
+                'Sharp Line': 'mean',
+                'Rec Move': 'mean',
+                'Sharp Move': 'mean',
+                'Model Prob': 'mean',
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
             })
         )
