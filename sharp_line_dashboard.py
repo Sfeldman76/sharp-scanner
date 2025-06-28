@@ -1314,7 +1314,7 @@ def render_scanner_tab(label, sport_key, container):
                 ]
                 
                 df_moves_raw = df_moves_raw.drop(columns=cols_to_drop, errors='ignore')
-                st.info(f"🧹 Dropped {len(cols_to_drop)} conflicting non-key, non-protected columns before merge.")
+                #st.info(f"🧹 Dropped {len(cols_to_drop)} conflicting non-key, non-protected columns before merge.")
 
            
                 
@@ -1345,7 +1345,7 @@ def render_scanner_tab(label, sport_key, container):
                     df_moves_raw.rename(columns={'Pre_Game_y': 'Pre_Game'}, inplace=True)
                 restored = df_moves_raw['Pre_Game'].notna().sum()
                 total = len(df_moves_raw)
-                st.info(f"🧠 Pre_Game restored: {restored:,} / {total:,} rows have non-null values")
+                #st.info(f"🧠 Pre_Game restored: {restored:,} / {total:,} rows have non-null values")
 
                 
                 df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
@@ -1425,18 +1425,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw.merge(
             df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left'
         )
-        st.write("🧪 Post-merge: is First_Line_Value in df_moves_raw?")
-        st.write('First_Line_Value' in df_moves_raw.columns)
-        st.write("✅ Step 3: Post-merge — First_Line_Value null count:", df_moves_raw['First_Line_Value'].isnull().sum())
-        st.dataframe(
-            df_moves_raw[df_moves_raw['First_Line_Value'].isnull()][
-                ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-            ].head(10)
-        )
-        st.write("🧪 Step 3: First_Line_Value after merging into df_moves_raw")
-        st.dataframe(df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
-        st.write("Non-null First_Line_Value rows in df_moves_raw:", df_moves_raw['First_Line_Value'].notna().sum())
-
+       
         # Alias for clarity in trend logic
         if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
             df_moves_raw['First_Model_Prob'] = df_moves_raw['First_Sharp_Prob']
@@ -1445,7 +1434,7 @@ def render_scanner_tab(label, sport_key, container):
         before = len(df_moves_raw)
         df_moves_raw = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'], keep='last')
         after = len(df_moves_raw)
-        st.info(f"🧹 Deduplicated df_moves_raw: {before:,} → {after:,}")
+        #st.info(f"🧹 Deduplicated df_moves_raw: {before:,} → {after:,}")
         
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
@@ -1468,7 +1457,6 @@ def render_scanner_tab(label, sport_key, container):
         
         # === Step 2: Build df_first_cols BEFORE slicing
         df_first_cols = df_moves_raw[merge_keys + first_cols].drop_duplicates()
-        st.write("📋 Columns in df_first_cols:", df_first_cols.columns.tolist())
         
         # === Step 3: Filter pre-game picks AFTER normalization
         df_pre = df_moves_raw[
@@ -1499,19 +1487,11 @@ def render_scanner_tab(label, sport_key, container):
         )
         
         # === Show unmatched keys
-        unmatched_keys = merge_debug[merge_debug['_merge'] == 'left_only']
-        matched_keys = merge_debug[merge_debug['_merge'] == 'both']
-        st.warning(f"⚠️ Unmatched merge keys: {len(unmatched_keys)} / {len(merge_debug)}")
-        st.dataframe(unmatched_keys.head(10))
-        # Drop duplicate keys to compare unique combinations
+        
         pre_keys = df_pre[merge_keys].drop_duplicates()
         first_keys = df_first_cols[merge_keys].drop_duplicates()
         # === Optional: show matching rows as well
-        st.success(f"✅ Matching rows before merge: {len(matched_keys)}")
-        st.dataframe(matched_keys.head(10))
-        missing = pre_keys.merge(first_keys, on=merge_keys, how='left', indicator=True)
-        st.write("⚠️ Keys with no match in df_first_cols:")
-        st.dataframe(missing[missing['_merge'] == 'left_only'].head(10))
+        
         # Safe merge
         df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left', indicator=True)
         
@@ -1525,21 +1505,13 @@ def render_scanner_tab(label, sport_key, container):
         
             if x_col in df_pre.columns:
                 df_pre.drop(columns=[x_col], inplace=True)
-        st.write("🧪 Columns in df_pre after merge:", df_pre.columns.tolist())
-        st.write("🧪 Merge indicator counts:", df_pre['_merge'].value_counts())
-        # Show all columns that ended with _x or _y (typical pandas suffixes)
-        conflicted_cols = [col for col in df_pre.columns if col.endswith('_x') or col.endswith('_y')]
-        st.warning(f"⚠️ Columns with pandas merge suffixes: {conflicted_cols}")
+        
         df_pre.drop(columns=['_merge'], inplace=True)
            
     
         
         # === Step 6: Confirm merge success
-        if 'First_Line_Value' in df_pre.columns:
-            st.write("✅ First_Line_Value notna after merge:", df_pre['First_Line_Value'].notna().sum())
-            st.dataframe(df_pre[['Game_Key', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
-        else:
-            st.warning("⚠️ 'First_Line_Value' column is missing after merge!")
+        
         
         # === Step 7: Deduplicate post-merge
         df_pre = df_pre.drop_duplicates(subset=merge_keys, keep='last')
@@ -1549,8 +1521,7 @@ def render_scanner_tab(label, sport_key, container):
         df_pre['Outcome'] = df_pre['Outcome'].astype(str).str.strip().str.lower()
         
         # === Debug/Preview Other Tables
-        st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
-        st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
+        
         
         # === Step 8: Rename columns for display
         df_pre.rename(columns={
@@ -1558,8 +1529,6 @@ def render_scanner_tab(label, sport_key, container):
                 'Model_Sharp_Win_Prob': 'Model Prob',
                 'Model_Confidence_Tier': 'Confidence Tier'
         }, inplace=True)
-        st.dataframe(df_history[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']].head(10))
-        st.dataframe(df_first[['Game_Key', 'First_Line_Value']].head(10))
         
        
 
@@ -1588,8 +1557,7 @@ def render_scanner_tab(label, sport_key, container):
             'Game_Key',  # ✅ already there
             'Snapshot_Timestamp'  # ✅ add this line
         ]
-        st.write("🔍 Before df_summary_base dedup: First_Line_Value count")
-        st.write(df_pre['First_Line_Value'].notna().sum())
+        
         # Create df_summary_base
         df_summary_base = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         df_summary_base['Sharp Line'] = df_summary_base['Sharp Line'].fillna(df_pre['Sharp Line'])
@@ -1598,8 +1566,7 @@ def render_scanner_tab(label, sport_key, container):
         for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
             if col not in df_summary_base.columns:
                 df_summary_base[col] = np.nan
-        st.write("🚨 In df_summary_base: First_Line_Value")
-        st.write(df_summary_base['First_Line_Value'].notna().sum())              
+                     
         # Line movement calculations
         # === Calculate line movement on df_summary_base
         move_start = time.time()
@@ -1617,13 +1584,7 @@ def render_scanner_tab(label, sport_key, container):
         # Recalculate Sharp/Rec Move just to be safe
         df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
         df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
-        st.write("✅ Movement check — Nulls:")
-        st.write(df_summary_base[['Sharp Line', 'Rec Line', 'First_Line_Value']].isnull().sum())
-        st.dataframe(df_summary_base[['Game_Key', 'Bookmaker', 'First_Line_Value', 'Sharp Line', 'Rec Line', 'Sharp Move']].head(10))
-        # Preview after calc
-        st.write("✅ Movement check:")
-        st.dataframe(df_summary_base[['Sharp Line', 'Rec Line', 'First_Line_Value', 'Sharp Move', 'Rec Move']].head())
-
+        
         st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
 
         if 'Model_Sharp_Win_Prob' in df_summary_base.columns and 'Model Prob' not in df_summary_base.columns:
@@ -1776,11 +1737,7 @@ def render_scanner_tab(label, sport_key, container):
         else:
             st.warning("⚠️ 'Date + Time (EST)' not found in summary_df — timestamp merge skipped.")
         
-        st.subheader("📊 Debug — Grouped DF Columns")
-        st.write(summary_grouped.columns.tolist())
-        st.write(f"✅ Filtered rows: {len(filtered_df)}")
-        st.dataframe(filtered_df[['Game_Key', 'Market', 'Outcome', 'Model Prob']].head(10))
-
+        
         
         required_cols = ['Model Prob', 'Confidence Tier']
         for col in required_cols:
