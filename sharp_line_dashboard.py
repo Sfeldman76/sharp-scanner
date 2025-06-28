@@ -525,7 +525,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
 
         model = XGBClassifier(n_estimators=50, max_depth=4, learning_rate=0.1, eval_metric='logloss')
         model.fit(X, y)
-
+        # === Feature Importance Readout ===
+        importances = model.feature_importances_
+        importance_df = pd.DataFrame({
+            'Feature': features,
+            'Importance': importances
+        }).sort_values(by='Importance', ascending=False)
+        
+        st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
+        st.dataframe(importance_df, use_container_width=True)
         iso = IsotonicRegression(out_of_bounds='clip')
         raw_probs = model.predict_proba(X)[:, 1]
         iso.fit(raw_probs, y)
@@ -1048,7 +1056,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         
         
 
-def fetch_scored_picks_from_bigquery(limit=50000):
+def fetch_scored_picks_from_bigquery(limit=1000000):
     query = f"""
         SELECT *
         FROM `sharp_data.sharp_scores_full`
