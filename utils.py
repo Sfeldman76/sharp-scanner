@@ -1380,7 +1380,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
         'Unique_Sharp_Books',
         'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport'
+        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport','Value',
     ]
 
     
@@ -1397,13 +1397,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     
-    try:
-        df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
-        # Optionally upload:
-        # to_gbq(df_weights, 'sharp_data.market_weights', project_id=GCP_PROJECT_ID, if_exists='replace')
-        logging.info(f"✅ Computed updated market weights for {sport_label.upper()}")
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to compute market weights: {e}")
+    
 
     df_scores_out['Sport'] = sport_label.upper()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
@@ -1413,6 +1407,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
     df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce')
+    df_scores_out['Value'] = pd.to_numeric(df_scores_out['Value'], errors='coerce')
     df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
     df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
     df_scores_out['LimitUp_NoMove_Flag'] = df_scores_out['LimitUp_NoMove_Flag'].fillna(False).astype(bool)
@@ -1424,7 +1419,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
     df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
     df_scores_out['Unique_Sharp_Books'] = pd.to_numeric(df_scores_out['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
-
+    
+    try:
+        df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
+        # Optionally upload:
+        # to_gbq(df_weights, 'sharp_data.market_weights', project_id=GCP_PROJECT_ID, if_exists='replace')
+        logging.info(f"✅ Computed updated market weights for {sport_label.upper()}")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to compute market weights: {e}")
   
  
         # Debug: ensure schema matches
