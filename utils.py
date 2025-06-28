@@ -11,6 +11,8 @@ import numpy as np
 import logging
 import hashlib
 import time
+from pandas_gbq import to_gbq
+
 
 import traceback
 import pickle  # ✅ Add this at the top of your script
