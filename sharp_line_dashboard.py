@@ -1514,6 +1514,17 @@ def render_scanner_tab(label, sport_key, container):
         st.dataframe(missing[missing['_merge'] == 'left_only'].head(10))
         # Safe merge
         df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left', indicator=True)
+        
+        for col in ['First_Model_Prob', 'First_Line_Value', 'First_Tier']:
+            y_col = f"{col}_y"
+            x_col = f"{col}_x"
+        
+            if y_col in df_pre.columns:
+                df_pre[col] = df_pre[y_col]  # take the good values
+                df_pre.drop(columns=[y_col], inplace=True)
+        
+            if x_col in df_pre.columns:
+                df_pre.drop(columns=[x_col], inplace=True)
         st.write("🧪 Columns in df_pre after merge:", df_pre.columns.tolist())
         st.write("🧪 Merge indicator counts:", df_pre['_merge'].value_counts())
         # Show all columns that ended with _x or _y (typical pandas suffixes)
