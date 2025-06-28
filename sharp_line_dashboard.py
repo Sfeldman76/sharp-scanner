@@ -1414,9 +1414,7 @@ def render_scanner_tab(label, sport_key, container):
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
         )
-        st.write("🧪 Step 2: df_first preview after renaming")
-        st.dataframe(df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10))
-        st.write("Non-null First_Line_Value rows in df_first:", df_first['First_Line_Value'].notna().sum())
+        
 
                 # === Normalize and merge first snapshot into df_moves_raw
         df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
@@ -1655,29 +1653,7 @@ def render_scanner_tab(label, sport_key, container):
         # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
         # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
         # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
-        dupes = (
-            summary_df.groupby(['Game_Key', 'Market', 'Outcome'])
-            .size()
-            .reset_index(name='count')
-            .query("count > 1")
-        )
         
-        if not dupes.empty:
-            st.warning(f"🚨 Found {len(dupes)} duplicated Game_Key-Market-Outcome combinations")
-        
-            # Merge back to see actual duplicated rows
-            duped_rows = summary_df.merge(
-                dupes[['Game_Key', 'Market', 'Outcome']],
-                on=['Game_Key', 'Market', 'Outcome'],
-                how='inner'
-            ).sort_values(['Game_Key', 'Market', 'Outcome'])
-        
-            st.dataframe(duped_rows.head(10))
-        
-            # 🧪 Inspect what’s actually varying across the duplicates
-            diff_cols = summary_df.columns.difference(['Game_Key', 'Market', 'Outcome'])
-            st.write("🧪 Sample differences across duplicate rows:")
-            st.dataframe(duped_rows[diff_cols].drop_duplicates())
 
 
         # === Preview & column check
@@ -1745,8 +1721,7 @@ def render_scanner_tab(label, sport_key, container):
                 summary_grouped[col] = np.nan if 'Prob' in col else ""
         if 'Model_Sharp_Win_Prob' in filtered_df.columns:
             filtered_df['Model Prob'] = filtered_df['Model_Sharp_Win_Prob']
-        else:
-            st.warning("⚠️ Model_Sharp_Win_Prob missing — assigning Model Prob = 0")
+        else:          
             filtered_df['Model Prob'] = 0
         if 'Model_Confidence_Tier' in filtered_df.columns:
             filtered_df['Confidence Tier'] = filtered_df['Model_Confidence_Tier']
