@@ -1274,7 +1274,31 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     except Exception as e:
         logging.exception("❌ Failed to upload game scores")
-
+    
+        # Dump a preview of the DataFrame
+        try:
+            logging.error("📋 Sample of new_scores DataFrame:")
+            logging.error(new_scores.head(5).to_string(index=False))
+        except Exception as preview_error:
+            logging.error(f"❌ Failed to log DataFrame preview: {preview_error}")
+    
+        # Dump column dtypes
+        try:
+            logging.error("🧪 DataFrame dtypes:")
+            logging.error(new_scores.dtypes.to_string())
+        except Exception as dtypes_error:
+            logging.error(f"❌ Failed to log dtypes: {dtypes_error}")
+    
+        # Check for suspicious column content
+        for col in new_scores.columns:
+            try:
+                if new_scores[col].apply(lambda x: isinstance(x, dict)).any():
+                    logging.error(f"⚠️ Column {col} contains dicts")
+                elif new_scores[col].apply(lambda x: isinstance(x, list)).any():
+                    logging.error(f"⚠️ Column {col} contains lists")
+            except Exception as content_error:
+                logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
+    
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
     df_master = build_game_key(df_master)
@@ -1410,8 +1434,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     except Exception as e:
         logging.error("❌ Parquet validation failed before upload")
         logging.error(str(e))
-        logging.write(df_scores_out.dtypes)
-        logging.stop()
+        logging.error("DataFrame dtypes:\n" + df_scores_out.dtypes.to_string())
+        
     # ✅ Define full deduplication fingerprint (ignore timestamp)
     dedup_fingerprint_cols = score_cols.copy()  # includes all except timestamp
     
@@ -1438,7 +1462,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
 
-    from pandas_gbq import to_gbq
+    
     to_gbq(
         df_scores_out,
         destination_table='sharp_data.sharp_scores_full',
