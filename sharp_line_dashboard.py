@@ -528,7 +528,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         grid.fit(X, y)
         best_model = grid.best_estimator_
 
-        calibrated_model = CalibratedClassifierCV(base_estimator=best_model, method='isotonic', cv=5)
+        calibrated_model = CalibratedClassifierCV(estimator=best_model, method='isotonic', cv=5)
         calibrated_model.fit(X, y)
 
         importances = best_model.feature_importances_
