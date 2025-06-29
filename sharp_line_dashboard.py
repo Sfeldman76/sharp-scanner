@@ -443,7 +443,6 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
 
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
 
-
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
@@ -461,16 +460,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         'Sharp_Time_Score', 'Sharp_Limit_Total',
         'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag'
     ]
-    
+
     before = len(df_bt)
     df_bt = df_bt.drop_duplicates(subset=dedup_cols, keep='last')
     after = len(df_bt)
     st.info(f"🧹 Deduplicated exact signal rows: {before} → {after}")
-    trained_models = {}
 
-    for market in ['spreads', 'totals', 'h2h']:
+    trained_models = {}
+    progress = st.progress(0)
+    status = st.status("🔄 Training in progress...", expanded=True)
+
+    for idx, market in enumerate(['spreads', 'totals', 'h2h'], start=1):
+        status.write(f"🚧 Training model for `{market.upper()}`...")
         df_market = df_bt[df_bt['Market'] == market].copy()
+
         if df_market.empty:
+            status.warning(f"⚠️ No data for {market.upper()} — skipping.")
+            progress.progress(idx / 3)
             continue
 
         df_market['Outcome_Norm'] = df_market['Outcome'].astype(str).str.lower().str.strip()
@@ -478,12 +484,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         # === Canonical side filtering ===
         if market == "totals":
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
-        
+
         elif market == "spreads":
             df_market = df_market[df_market['Value'].notna()]
             df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
             df_market = df_market[df_market['Side_Label'] == 'favorite']
-        
+
         elif market == "h2h":
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market = df_market[df_market['Value'].notna()]
@@ -491,7 +497,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             df_market = df_market[df_market['Side_Label'] == 'favorite']
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
-            st.warning(f"⚠️ Not enough data to train {market.upper()} model.")
+            status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
+            progress.progress(idx / 3)
             continue
 
         features = [
@@ -524,7 +531,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         calibrated_model = CalibratedClassifierCV(base_estimator=best_model, method='isotonic', cv=5)
         calibrated_model.fit(X, y)
 
-        # === Feature Importance Readout ===
         importances = best_model.feature_importances_
         importance_df = pd.DataFrame({
             'Feature': features,
@@ -534,7 +540,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
         st.dataframe(importance_df, use_container_width=True)
 
-        # === Evaluation Metrics ===
         raw_probs = calibrated_model.predict_proba(X)[:, 1]
         y_pred = (raw_probs >= 0.5).astype(int)
 
@@ -552,12 +557,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
 - Log Loss: {logloss:.4f}
 - Brier Score: {brier:.4f}
 """)
+        progress.progress(idx / 3)
 
-    # ✅ Outside loop
+    status.update(label="✅ All models trained", state="complete", expanded=False)
+
     if not trained_models:
-        st.error("❌ No models trained.")
+        st.error("❌ No models were trained.")
         
-
 def read_market_weights_from_bigquery():
     try:
         client = bq_client
