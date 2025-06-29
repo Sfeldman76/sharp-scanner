@@ -545,24 +545,28 @@ def apply_blended_sharp_score(df, trained_models):
             pre_dedup_canon = len(df_canon)
             df_canon = df_canon.drop_duplicates(subset=dedup_keys)
             post_dedup_canon = len(df_canon)
+            
+            
 
-            logger.info(f"✅ Canonical rows deduplicated: {pre_dedup_canon:,} → {post_dedup_canon:,}")
-
+            
+            # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
             df_canon[missing_cols] = 0
-            df_canon['Commence_Hour'] = pd.to_datetime(df_canon['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-            df_canon['Merge_Key_Short'] = (
-                df_canon['Home_Team_Norm'] + "_" +
-                df_canon['Away_Team_Norm'] + "_" +
-                df_canon['Commence_Hour'].astype(str)
-            )
-            X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
-            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
-            df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
+            
+            # === Align features exactly to model input ===
+            X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+            
+            # === Raw model output (optional)
+            df_canon['Model_Sharp_Win_Prob'] = trained_models[market_type]['model'].predict_proba(X_canon)[:, 1]
+            
+            df_canon['Model_Confidence'] = trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1]
+            
+            # === Tag for downstream usage
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
+            
 
             df_inverse = df_canon.copy(deep=True)
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
