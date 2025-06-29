@@ -511,26 +511,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         y = df_market['SHARP_HIT_BOOL'].astype(int)
 
         param_grid = {
-            'n_estimators': [50, 100, 200],
+            'n_estimators': [100],
             'max_depth': [3, 4, 5, 6],
-            'learning_rate': [0.01, 0.05, 0.1, 0.2],
-            'subsample': [0.7, 0.9, 1.0],
-            'colsample_bytree': [0.7, 0.9, 1.0]
+            'learning_rate': [0.01, 0.05, 0.1],
+            'subsample': [0.9],
+            'colsample_bytree': [0.9]
         }
-
-        grid = GridSearchCV(
-            estimator=XGBClassifier(eval_metric='logloss'),
-            param_grid=param_grid,
+        
+        grid = RandomizedSearchCV(
+            estimator=XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
+            param_distributions=param_grid,
             scoring='neg_log_loss',
-            cv=5,
-            verbose=1
+            cv=3,           # ✅ Reasonable speed/robustness tradeoff
+            n_iter=10,      # ✅ Will sample 10 combos from 12 total
+            verbose=1,
+            random_state=42
         )
+        
         grid.fit(X, y)
         best_model = grid.best_estimator_
 
-        calibrated_model = CalibratedClassifierCV(estimator=best_model, method='isotonic', cv=5)
-        calibrated_model.fit(X, y)
+        from sklearn.calibration import CalibratedClassifierCV
 
+        calibrated_model = CalibratedClassifierCV(
+            estimator=best_model,
+            method='sigmoid',  # ⚡ Faster than isotonic
+            cv=3               # ⬇️ Reduce folds
+        )
+        calibrated_model.fit(X, y)
+        
         importances = best_model.feature_importances_
         importance_df = pd.DataFrame({
             'Feature': features,
