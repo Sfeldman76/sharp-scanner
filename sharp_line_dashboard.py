@@ -519,7 +519,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         }
 
         grid = GridSearchCV(
-            estimator=XGBClassifier(eval_metric='logloss', use_label_encoder=False),
+            estimator=XGBClassifier(eval_metric='logloss'),
             param_grid=param_grid,
             scoring='neg_log_loss',
             cv=5,
