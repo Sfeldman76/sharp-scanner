@@ -95,6 +95,8 @@ from io import BytesIO
 from sklearn.model_selection import GridSearchCV
 from xgboost import XGBClassifier
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.calibration import CalibratedClassifierCV
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -531,8 +533,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         grid.fit(X, y)
         best_model = grid.best_estimator_
 
-        from sklearn.calibration import CalibratedClassifierCV
-
+  
         calibrated_model = CalibratedClassifierCV(
             estimator=best_model,
             method='sigmoid',  # ⚡ Faster than isotonic
