@@ -92,7 +92,9 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 import requests
 import traceback
 from io import BytesIO
-
+from sklearn.model_selection import GridSearchCV
+from xgboost import XGBClassifier
+from sklearn.calibration import CalibratedClassifierCV
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -452,8 +454,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
 
     df_bt = df_bt.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
-    # Smart deduplication before training
-    # Smart deduplication: Keep unique signals (not just by Game/Market/Bookmaker)
+
     dedup_cols = [
         'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
@@ -477,38 +478,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         # === Canonical side filtering ===
         if market == "totals":
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
-            st.info(f"🧪 {sport.upper()} TOTALS rows after 'over' filter: {df_market.shape[0]}")
-            st.info(f"🧪 Class distribution: {df_market['SHARP_HIT_BOOL'].value_counts().to_dict()}")
         
         elif market == "spreads":
             df_market = df_market[df_market['Value'].notna()]
             df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
             df_market = df_market[df_market['Side_Label'] == 'favorite']
-            st.info(f"🧪 {sport.upper()} SPREADS favorite-side rows: {df_market.shape[0]}")
-            st.info(f"🧪 Class distribution: {df_market['SHARP_HIT_BOOL'].value_counts().to_dict()}")
         
         elif market == "h2h":
-            # Ensure Value is numeric and not null
-            df_market = df_market.copy()
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
-            df_market = df_market[df_market['Value'].notna()]  # drop rows with missing odds
-        
-            # Canonical H2H: favorite = team with more negative moneyline
+            df_market = df_market[df_market['Value'].notna()]
             df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
             df_market = df_market[df_market['Side_Label'] == 'favorite']
-        
-            # Make SHARP_HIT_BOOL safe for counting
-            if 'SHARP_HIT_BOOL' in df_market.columns:
-                df_market['SHARP_HIT_BOOL'] = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce')
-        
-            st.info(f"🧪 {sport.upper()} H2H favorite-side rows: {df_market.shape[0]}")
-            class_dist = df_market['SHARP_HIT_BOOL'].value_counts(dropna=True).to_dict()
-            st.info(f"🧪 Class distribution: {class_dist}")
-                
-            
 
-            
-            
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             st.warning(f"⚠️ Not enough data to train {market.upper()} model.")
             continue
@@ -519,29 +500,42 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag'
         ]
         df_market = ensure_columns(df_market, features, 0)
-
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         y = df_market['SHARP_HIT_BOOL'].astype(int)
 
-        model = XGBClassifier(n_estimators=50, max_depth=4, learning_rate=0.1, eval_metric='logloss')
-        model.fit(X, y)
+        param_grid = {
+            'n_estimators': [50, 100, 200],
+            'max_depth': [3, 4, 5, 6],
+            'learning_rate': [0.01, 0.05, 0.1, 0.2],
+            'subsample': [0.7, 0.9, 1.0],
+            'colsample_bytree': [0.7, 0.9, 1.0]
+        }
+
+        grid = GridSearchCV(
+            estimator=XGBClassifier(eval_metric='logloss', use_label_encoder=False),
+            param_grid=param_grid,
+            scoring='neg_log_loss',
+            cv=5,
+            verbose=1
+        )
+        grid.fit(X, y)
+        best_model = grid.best_estimator_
+
+        calibrated_model = CalibratedClassifierCV(base_estimator=best_model, method='isotonic', cv=5)
+        calibrated_model.fit(X, y)
+
         # === Feature Importance Readout ===
-        importances = model.feature_importances_
+        importances = best_model.feature_importances_
         importance_df = pd.DataFrame({
             'Feature': features,
             'Importance': importances
         }).sort_values(by='Importance', ascending=False)
-        
+
         st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
         st.dataframe(importance_df, use_container_width=True)
-        iso = IsotonicRegression(out_of_bounds='clip')
-        raw_probs = model.predict_proba(X)[:, 1]
-        iso.fit(raw_probs, y)
 
         # === Evaluation Metrics ===
-        from sklearn.metrics import (
-            roc_auc_score, accuracy_score, log_loss, brier_score_loss
-        )
+        raw_probs = calibrated_model.predict_proba(X)[:, 1]
         y_pred = (raw_probs >= 0.5).astype(int)
 
         auc = roc_auc_score(y, raw_probs)
@@ -549,9 +543,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         logloss = log_loss(y, raw_probs)
         brier = brier_score_loss(y, raw_probs)
 
-        # === Save model ===
-        save_model_to_gcs(model, iso, sport, market, bucket_name=GCS_BUCKET)
-        trained_models[market] = {"model": model, "calibrator": iso}
+        save_model_to_gcs(best_model, calibrated_model, sport, market, bucket_name=GCS_BUCKET)
+        trained_models[market] = {"model": best_model, "calibrator": calibrated_model}
 
         st.success(f"""✅ Trained + saved model for {market.upper()}
 - AUC: {auc:.4f}
@@ -560,10 +553,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
 - Brier Score: {brier:.4f}
 """)
 
+    # ✅ Outside loop
     if not trained_models:
         st.error("❌ No models trained.")
-
-
+        
 
 def read_market_weights_from_bigquery():
     try:
