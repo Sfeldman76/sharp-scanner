@@ -1329,49 +1329,49 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         return pd.DataFrame()
 
     def calc_cover(row):
-    try:
-        h = float(row['Score_Home_Score'])
-        a = float(row['Score_Away_Score'])
-        val = float(row['Value'])  # ✅ Direct use of Value
-        market = str(row.get('Market', '')).lower()
-        outcome = str(row.get('Outcome', '')).lower()
-        home_team = row.get('Home_Team_Norm', '').lower()
-        away_team = row.get('Away_Team_Norm', '').lower()
-
-        if market == 'totals':
-            total = h + a
-            if 'under' in outcome and total < val:
-                return ['Win', 1]
-            elif 'over' in outcome and total > val:
-                return ['Win', 1]
-            else:
-                return ['Loss', 0]
-
-        elif market == 'spreads':
-            team_bet_on = outcome
-            if team_bet_on == home_team:
-                team_score = h
-                opp_score = a
-            elif team_bet_on == away_team:
-                team_score = a
-                opp_score = h
-            else:
-                return [None, 0]
-            covered = (team_score + val) > opp_score
-            return ['Win', 1] if covered else ['Loss', 0]
-
-        elif market == 'h2h':
-            if outcome == home_team:
-                return ['Win', 1] if h > a else ['Loss', 0]
-            elif outcome == away_team:
-                return ['Win', 1] if a > h else ['Loss', 0]
-            else:
-                return ['Loss', 0]
-
-        return [None, 0]
-
-    except Exception:
-        return [None, 0]
+        try:
+            h = float(row['Score_Home_Score'])
+            a = float(row['Score_Away_Score'])
+            val = float(row['Value'])  # ✅ Direct use of Value
+            market = str(row.get('Market', '')).lower()
+            outcome = str(row.get('Outcome', '')).lower()
+            home_team = row.get('Home_Team_Norm', '').lower()
+            away_team = row.get('Away_Team_Norm', '').lower()
+    
+            if market == 'totals':
+                total = h + a
+                if 'under' in outcome and total < val:
+                    return ['Win', 1]
+                elif 'over' in outcome and total > val:
+                    return ['Win', 1]
+                else:
+                    return ['Loss', 0]
+    
+            elif market == 'spreads':
+                team_bet_on = outcome
+                if team_bet_on == home_team:
+                    team_score = h
+                    opp_score = a
+                elif team_bet_on == away_team:
+                    team_score = a
+                    opp_score = h
+                else:
+                    return [None, 0]
+                covered = (team_score + val) > opp_score
+                return ['Win', 1] if covered else ['Loss', 0]
+    
+            elif market == 'h2h':
+                if outcome == home_team:
+                    return ['Win', 1] if h > a else ['Loss', 0]
+                elif outcome == away_team:
+                    return ['Win', 1] if a > h else ['Loss', 0]
+                else:
+                    return ['Loss', 0]
+    
+            return [None, 0]
+    
+        except Exception:
+            return [None, 0]
     
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
