@@ -834,17 +834,26 @@ def apply_blended_sharp_score(df, trained_models):
             
             #st.success(f"✅ Canonical rows deduplicated: {pre_dedup_canon:,} → {post_dedup_canon:,}")
 
+            
+            # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
             df_canon[missing_cols] = 0
-
-            X = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0)
-            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X)[:, 1]
-            df_canon['Model_Confidence'] = iso.predict(df_canon['Model_Sharp_Win_Prob'])
+            
+            # === Align features exactly to model input ===
+            X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+            
+            # === Raw model output (optional)
+            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X_canon)[:, 1]
+            
+            # === Calibrated probability
+            df_canon['Model_Confidence'] = calibrated_model.predict_proba(X_canon)[:, 1]
+            
+            # === Tag for downstream usage
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
-
+            
            
             # === Build Inverse from already-scored df_canon
            # === Build inverse from scored canonical
