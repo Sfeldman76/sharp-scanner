@@ -1411,7 +1411,7 @@ def render_scanner_tab(label, sport_key, container):
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
             .rename(columns={
                 'Value': 'First_Line_Value',
-                'Sharp_Confidence_Tier': 'First_Tier',
+                'Model_Confidence_Tier': 'First_Tier',
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
         )
