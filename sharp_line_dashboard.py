@@ -1824,6 +1824,7 @@ def render_scanner_tab(label, sport_key, container):
             'Model Prob', 'Confidence Tier',
             'Why Model Likes It', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
+        summary_grouped = summary_grouped.sort_values(by='Date + Time (EST)', ascending=True)
         summary_grouped = summary_grouped[view_cols]
 
         
