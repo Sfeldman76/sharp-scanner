@@ -1506,8 +1506,10 @@ def render_scanner_tab(label, sport_key, container):
                 df_pre.drop(columns=[x_col], inplace=True)
         
         df_pre.drop(columns=['_merge'], inplace=True)
-           
-    
+        # === Defensive patch for missing First_Tier ===
+        if 'First_Tier' not in df_pre.columns or df_pre['First_Tier'].isnull().all():
+            st.warning("⚠️ First_Tier is missing or null — filling with fallback to prevent Tier Δ defaulting to Steam.")
+            df_pre['First_Tier'] = "✅ Coinflip"  # or your true baseline tier
         
         # === Step 6: Confirm merge success
         
