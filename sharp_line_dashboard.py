@@ -511,21 +511,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market = ensure_columns(df_market, features, 0)
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         y = df_market['SHARP_HIT_BOOL'].astype(int)
-
         param_grid = {
-            'n_estimators': [100],
+            'n_estimators': [100, 200],
             'max_depth': [3, 4, 5, 6],
             'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.9],
-            'colsample_bytree': [0.9]
+            'subsample': [0.8, 0.9, 1.0],
+            'colsample_bytree': [0.8, 0.9, 1.0],
+            'gamma': [0, 1, 5],  # ⛔ Prune weak splits
+            'reg_alpha': [0, 0.1, 1],  # L1
+            'reg_lambda': [1, 5, 10]   # L2
         }
-        
+                
         grid = RandomizedSearchCV(
             estimator=XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
             param_distributions=param_grid,
             scoring='neg_log_loss',
-            cv=3,           # ✅ Reasonable speed/robustness tradeoff
-            n_iter=10,      # ✅ Will sample 10 combos from 12 total
+            cv=3,
+            n_iter=20,  # ⬆️ Try more combos
             verbose=1,
             random_state=42
         )
@@ -537,7 +539,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         calibrated_model = CalibratedClassifierCV(
             estimator=best_model,
             method='sigmoid',  # ⚡ Faster than isotonic
-            cv=3               # ⬇️ Reduce folds
+            cv=5               # ⬇️ Reduce folds
         )
         calibrated_model.fit(X, y)
         
@@ -844,10 +846,9 @@ def apply_blended_sharp_score(df, trained_models):
             X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             
             # === Raw model output (optional)
-            df_canon['Model_Sharp_Win_Prob'] = model.predict_proba(X_canon)[:, 1]
+            df_canon['Model_Sharp_Win_Prob'] = trained_models[market_type]['model'].predict_proba(X_canon)[:, 1]
             
-            # === Calibrated probability
-            df_canon['Model_Confidence'] = calibrated_model.predict_proba(X_canon)[:, 1]
+            df_canon['Model_Confidence'] = trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1]
             
             # === Tag for downstream usage
             df_canon['Was_Canonical'] = True
