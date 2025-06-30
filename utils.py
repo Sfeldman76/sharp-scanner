@@ -708,15 +708,29 @@ def apply_blended_sharp_score(df, trained_models):
             logger.error(f"❌ Failed scoring {market_type.upper()}")
             logger.error(traceback.format_exc())
 
-   
+       
   
     try:
         df_final = pd.DataFrame()
     
         if scored_all:
+       
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
-    
+        
+            # === 🔍 Diagnostic for unscored rows
+            try:
+                unscored_df = df[df['Game_Key'].isin(set(df['Game_Key']) - set(df_final['Game_Key']))]
+                if not unscored_df.empty:
+                    logger.warning(f"⚠️ {len(unscored_df)} rows were not scored.")
+                    logger.warning("🔍 Breakdown by market type:")
+                    logger.warning(unscored_df['Market'].value_counts().to_string())
+        
+                    logger.warning("🧪 Sample of unscored rows:")
+                    logger.warning(unscored_df[['Game', 'Bookmaker', 'Market', 'Outcome', 'Value']].head(5).to_string(index=False))
+            except Exception as e:
+                logger.error(f"❌ Failed to log unscored rows by market: {e}")
+
             df_final['Team_Key'] = (
                 df_final['Home_Team_Norm'] + "_" +
                 df_final['Away_Team_Norm'] + "_" +
