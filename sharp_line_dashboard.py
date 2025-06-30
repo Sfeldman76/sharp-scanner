@@ -2072,20 +2072,36 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             [['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL']]
             .drop_duplicates(subset=merge_keys)
         )
+       # Drop SHARP_HIT_BOOL from master to avoid suffixes
+        df_master = df_master.drop(columns=['SHARP_HIT_BOOL'], errors='ignore')
+        
+        # === Filter to valid scored rows
+        df_scores_filtered = (
+            df_scores[df_scores['SHARP_HIT_BOOL'].notna()]
+            [['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL']]
+            .drop_duplicates(subset=merge_keys)
+        )
         df_master = df_master.drop_duplicates(subset=merge_keys)
-
+        
         # === Merge
         df = df_master.merge(df_scores_filtered, on=merge_keys, how='inner')
+        
+        # Defensive check
+        if 'SHARP_HIT_BOOL' not in df.columns:
+            st.error("❌ SHARP_HIT_BOOL missing in merged data.")
+            return
+        
         if df.empty:
             st.error("❌ No matched rows between sharp moves and scores.")
             return
-
+        
         # === Required columns
         required_cols = ['Model_Confidence', 'SHARP_HIT_BOOL']
         for col in required_cols:
             if col not in df.columns:
                 st.error(f"❌ Missing required column: {col}")
                 return
+
 
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
