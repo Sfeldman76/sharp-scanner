@@ -533,7 +533,10 @@ def apply_blended_sharp_score(df, trained_models):
                 df_market = df_market[df_market['Value'].notna()]
                 df_canon = df_market[df_market['Value'] < 0].copy()
                 df_full_market = df_market.copy()
-    
+                missing_over_books = set(df_market['Bookmaker'].unique()) - set(df_canon['Bookmaker'].unique())
+                if missing_over_books:
+                    logger.warning(f"⚠️ These books had NO over rows and were skipped from canonical totals scoring: {missing_over_books}")
+
             elif market_type == "h2h":
                 
                 df_market = df_market[df_market['Value'].notna()]
