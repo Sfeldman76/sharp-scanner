@@ -2031,13 +2031,12 @@ def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.Dat
         return pd.DataFrame()
 
 
-
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     from google.cloud import bigquery
     client = bigquery.Client(project="sharplogger", location="us")
 
     with tab:
-        st.subheader(f"📈 Model Calibration – {sport_label}")
+        st.subheader(f"📈 Model Confidence Calibration – {sport_label}")
         sport_label_upper = sport_label.upper()
 
         # === Load data
@@ -2055,147 +2054,67 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             st.error(f"❌ Failed to load BigQuery data: {e}")
             return
 
-        # === Empty check
         if df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp picks found for {sport_label}")
-            available_sports = client.query("""
-                SELECT DISTINCT Sport FROM `sharplogger.sharp_data.sharp_scores_full`
-            """).to_dataframe()
-            st.info("📦 Available sports in sharp_scores_full:")
-            st.dataframe(available_sports)
             return
 
         merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
 
-        # === Normalize text columns
+        # === Normalize keys
         for df_ in [df_master, df_scores]:
             for col in merge_keys:
                 if df_[col].dtype == "object":
                     df_[col] = df_[col].str.strip().str.lower()
 
-        # === Filter scores to rows that have valid SHARP_HIT_BOOL
+        # === Filter to valid scored rows
         df_scores_filtered = (
             df_scores[df_scores['SHARP_HIT_BOOL'].notna()]
             [['Game_Key', 'Bookmaker', 'Market', 'Outcome', 'SHARP_HIT_BOOL']]
-            .drop_duplicates(subset=['Game_Key', 'Bookmaker', 'Market', 'Outcome'])
-            .copy()
+            .drop_duplicates(subset=merge_keys)
         )
-        df_master = df_master.drop_duplicates(subset=['Game_Key', 'Bookmaker', 'Market', 'Outcome'])
-        # === Early diagnostics
-        st.markdown("🔍 Market breakdown in df_scores with SHARP_HIT_BOOL:")
-        st.dataframe(
-            df_scores_filtered
-            .groupby(['Market', 'Outcome'])
-            .size()
-            .reset_index(name='Rows with SHARP_HIT_BOOL')
-            .sort_values('Rows with SHARP_HIT_BOOL', ascending=False)
-        )
+        df_master = df_master.drop_duplicates(subset=merge_keys)
 
-        # === Show pre-merge sample matches
-        preview_merge = df_master.merge(df_scores_filtered, on=merge_keys, how='inner')
-        st.success(f"✅ Pre-merge matches with SHARP_HIT_BOOL: {len(preview_merge)}")
-
-        # ✅ Confirm columns in merged result
-        st.write("✅ preview_merge columns:", preview_merge.columns.tolist())
-        
-        # Prefer the SHARP_HIT_BOOL from scores (likely '_y' after merge)
-        score_col = None
-        if 'SHARP_HIT_BOOL_y' in preview_merge.columns:
-            score_col = 'SHARP_HIT_BOOL_y'
-        elif 'SHARP_HIT_BOOL' in preview_merge.columns:
-            score_col = 'SHARP_HIT_BOOL'
-        
-        # Build display columns
-        cols_to_display = merge_keys + ([score_col] if score_col else [])
-        
-        if score_col:
-            st.success(f"✅ Using '{score_col}' as SHARP_HIT_BOOL column")
-            st.dataframe(preview_merge[cols_to_display].head(10))
-        else:
-            st.error("❌ SHARP_HIT_BOOL not found in preview_merge after merge.")
-            st.dataframe(preview_merge.head(10))
-
-        # === Required columns check
-        required_master_cols = merge_keys + ['Model_Sharp_Win_Prob', 'Model_Confidence']
-        missing_in_master = [col for col in required_master_cols if col not in df_master.columns]
-        if missing_in_master:
-            st.error(f"❌ Missing columns in df_master: {missing_in_master}")
-            return
-
-        # === Final merge for analysis
+        # === Merge
         df = df_master.merge(df_scores_filtered, on=merge_keys, how='inner')
-        st.info(f"🔗 Rows after merge: {len(df)}")
-        # Normalize SHARP_HIT_BOOL column
-        if 'SHARP_HIT_BOOL_y' in df.columns:
-            df['SHARP_HIT_BOOL'] = df['SHARP_HIT_BOOL_y']
-        elif 'SHARP_HIT_BOOL' not in df.columns:
-            st.error("❌ SHARP_HIT_BOOL missing in merged dataframe.")
-            st.dataframe(df.head())
-            return
         if df.empty:
-            st.error("❌ Merge returned 0 rows — likely due to mismatched keys.")
-            st.markdown("🧩 **Mismatch diagnostics:**")
-            mismatch_debug = df_master[merge_keys].merge(
-                df_scores_filtered[merge_keys],
-                on=merge_keys,
-                how='outer',
-                indicator=True
-            )
-            st.dataframe(mismatch_debug[mismatch_debug['_merge'] != 'both'].head(100))
+            st.error("❌ No matched rows between sharp moves and scores.")
             return
 
-        # === Defensive column check
-        if 'SHARP_HIT_BOOL' not in df.columns:
-            st.error("❌ 'SHARP_HIT_BOOL' missing after merge — cannot continue.")
-            st.dataframe(df.head())
-            return
+        # === Required columns
+        required_cols = ['Model_Confidence', 'SHARP_HIT_BOOL']
+        for col in required_cols:
+            if col not in df.columns:
+                st.error(f"❌ Missing required column: {col}")
+                return
 
-        # === Clean and bin
-        df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
         df['Model_Confidence'] = pd.to_numeric(df['Model_Confidence'], errors='coerce')
         df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce')
-        df = df[df['SHARP_HIT_BOOL'].notna()]
+        df = df[df['SHARP_HIT_BOOL'].notna() & df['Model_Confidence'].notna()]
 
+        # === Bin confidence
         prob_bins = np.linspace(0, 1, 11)
         bin_labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
-        df['Prob_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
-        df['Conf_Bin'] = pd.cut(df['Model_Confidence'], bins=prob_bins, labels=bin_labels)
+        df['Confidence_Bin'] = pd.cut(df['Model_Confidence'], bins=prob_bins, labels=bin_labels)
 
-        # === Summary tables
-        prob_summary = (
-            df.groupby(['Market', 'Prob_Bin'])['SHARP_HIT_BOOL']
-            .agg(['count', 'mean'])
-            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
-            .reset_index()
-        )
-
+        # === Summary by Market + Bin
         conf_summary = (
-            df.groupby(['Market', 'Conf_Bin'])['SHARP_HIT_BOOL']
+            df.groupby(['Market', 'Confidence_Bin'])['SHARP_HIT_BOOL']
             .agg(['count', 'mean'])
             .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
             .reset_index()
         )
 
-        # === Output tables
-        st.subheader("📊 Overall Model Win Rate by Probability Bin")
-        bin_summary = (
-            df.groupby('Prob_Bin')['SHARP_HIT_BOOL']
+        # === Overall summary
+        st.subheader("📊 Model Win Rate by Confidence Bin (Overall)")
+        overall = (
+            df.groupby('Confidence_Bin')['SHARP_HIT_BOOL']
             .agg(['count', 'mean'])
             .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
             .reset_index()
         )
-        st.dataframe(bin_summary.style.format({'Win_Rate': '{:.1%}'}))
+        st.dataframe(overall.style.format({'Win_Rate': '{:.1%}'}))
 
-        st.markdown("#### 📉 Probability Calibration by Market")
-        for market in prob_summary['Market'].dropna().unique():
-            st.markdown(f"**📊 {market.upper()}**")
-            st.dataframe(
-                prob_summary[prob_summary['Market'] == market]
-                .drop(columns='Market')
-                .style.format({'Win_Rate': '{:.1%}'})
-            )
-
-        st.markdown("#### 🎯 Confidence Score Calibration by Market")
+        st.markdown("#### 📉 Confidence Calibration by Market")
         for market in conf_summary['Market'].dropna().unique():
             st.markdown(f"**📊 {market.upper()}**")
             st.dataframe(
@@ -2203,6 +2122,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
+
+
             
 # --- Set up tab selection state
 if "active_sport_tab" not in st.session_state:
