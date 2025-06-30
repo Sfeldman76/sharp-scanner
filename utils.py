@@ -1415,19 +1415,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
     df['Model_Prob_Diff'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
     
-    df['Direction_Aligned'] = np.select(
-        [
-            df['Market'] == 'totals',
-            df['Market'].isin(['spreads', 'h2h'])
-        ],
-        [
-            np.sign(df['Line_Delta']) == np.sign(df['Model_Prob_Diff']),  # aligned for totals
-            np.sign(df['Line_Delta']) != np.sign(df['Model_Prob_Diff'])   # inverted for spreads/h2h
-        ],
-        default=False
-    ).astype(int)
-    logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts().to_string())
+   # Match Python indicator logic — same direction = aligned
+    df['Direction_Aligned'] = np.where(
+        ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] > 0)) |
+        ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] < 0)),
+        1,  # aligned
+        np.where(
+            ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] < 0)) |
+            ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] > 0)),
+            0,  # conflict
+            np.nan  # stable or mixed
+        )
+    ).astype('Int64')  # nullable integer
 
+    logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
+
+    
     # === 6. Calculate result
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
     if df_valid.empty:
