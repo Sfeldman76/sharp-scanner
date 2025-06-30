@@ -502,12 +502,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             progress.progress(idx / 3)
             continue
+        # === Directional agreement (for spreads/h2h invert line logic)
+        df_market['Line_Delta'] = pd.to_numeric(df_market['Value'], errors='coerce') - pd.to_numeric(df_market['First_Line_Value'], errors='coerce')
+        df_market['Model_Prob_Diff'] = pd.to_numeric(df_market['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df_market['First_Sharp_Prob'], errors='coerce')
+        
+        df_market['Direction_Aligned'] = np.where(
+            df_market['Market'] == 'totals',
+            np.sign(df_market['Line_Delta']) == np.sign(df_market['Model_Prob_Diff']),
+            np.sign(df_market['Line_Delta']) != np.sign(df_market['Model_Prob_Diff'])  # inverted for spreads/h2h
+        ).astype(int)  # 1 = aligned, 0 = conflict
 
         features = [
             'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
             'Sharp_Time_Score', 'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag'
+            'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
+            'Direction_Aligned'  # 🔥 new
         ]
+
         df_market = ensure_columns(df_market, features, 0)
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         y = df_market['SHARP_HIT_BOOL'].astype(int)
@@ -660,6 +671,7 @@ def compute_diagnostics_vectorized(df):
                     )
                 )
             )
+
         else:
             confidence_trend = ["⚠️ Missing"] * len(df)
             direction = ["⚠️ Missing"] * len(df)
