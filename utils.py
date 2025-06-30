@@ -760,10 +760,9 @@ def apply_blended_sharp_score(df, trained_models):
                 df_final['Outcome_Norm']
             )
     
-            if 'Model_Sharp_Win_Prob' in df_final.columns and 'Team_Key' in df_final.columns:
-                df_final = compute_sharp_prob_shift(df_final)
-            else:
-                df_final['Sharp_Prob_Shift'] = 0.0
+            # Leave Sharp_Prob_Shift to be computed with historical context later
+            df_final['Sharp_Prob_Shift'] = 0.0
+
     
             # === 🔍 Debug unscored rows
             try:
