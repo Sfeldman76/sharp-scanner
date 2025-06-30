@@ -466,7 +466,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
     before = len(df_bt)
     df_bt = df_bt.drop_duplicates(subset=dedup_cols, keep='last')
     after = len(df_bt)
-    st.info(f"🧹 Deduplicated exact signal rows: {before} → {after}")
+   
 
     trained_models = {}
     progress = st.progress(0)
@@ -723,7 +723,7 @@ def compute_diagnostics_vectorized(df):
             'Why Model Likes It': model_reasoning
         })
 
-        st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
+        #st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
         return diagnostics_df
 
     except Exception as e:
@@ -1215,7 +1215,7 @@ def render_scanner_tab(label, sport_key, container):
             before = len(df_moves_raw)
             df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == bq_sport]
             after = len(df_moves_raw)
-            st.info(f"🏷️ Filtered to sport = {bq_sport}: {before} → {after} rows")
+            #st.info(f"🏷️ Filtered to sport = {bq_sport}: {before} → {after} rows")
         else:
             st.warning("⚠️ Could not filter by Sport — missing column or mapping.")
         # ✅ Snapshot log
@@ -1247,7 +1247,7 @@ def render_scanner_tab(label, sport_key, container):
         # === Build game keys (for merging)
         df_moves_raw = build_game_key(df_moves_raw)
         # === Keep only sharp picks for upcoming games (filter by Game_Start, not Pre_Game)
-        st.info("🕒 Filtering to truly live (upcoming) picks based on Game_Start...")
+        #st.info("🕒 Filtering to truly live (upcoming) picks based on Game_Start...")
         
         now = pd.Timestamp.utcnow()
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
@@ -1256,7 +1256,7 @@ def render_scanner_tab(label, sport_key, container):
         df_moves_raw = df_moves_raw[df_moves_raw['Game_Start'] > now]
         after = len(df_moves_raw)
         
-        st.info(f"✅ Game_Start > now: filtered {before} → {after} rows")
+        #st.info(f"✅ Game_Start > now: filtered {before} → {after} rows")
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
         trained_models = st.session_state.get(model_key)
