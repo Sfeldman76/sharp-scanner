@@ -275,6 +275,11 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         logging.warning("❌ No valid Game_Key present — skipping upload.")
         logging.debug(df[['Game', 'Game_Start', 'Market', 'Outcome']].head().to_string())
         return
+    # ❌ Don't write any rows that are already past game start
+    if 'Post_Game' in df.columns:
+        pre_filter = len(df)
+        df = df[df['Post_Game'] == False]
+        logging.info(f"🧹 Removed {pre_filter - len(df)} post-game rows before writing to sharp_moves_master")
 
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     logging.info(f"🧪 Sharp moves ready to write: {len(df)}")
