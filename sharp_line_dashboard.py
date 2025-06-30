@@ -2016,36 +2016,29 @@ def fetch_scores_and_backtest(*args, **kwargs):
     return pd.DataFrame()
 
     
-
-
-from google.cloud import bigquery
-import pandas as pd
-
 def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.DataFrame:
-    client = bigquery.Client(location="us")  # Correct location
+    client = bigquery.Client(location="us")
     query = f"""
-      
         SELECT 
             Game_Key, Bookmaker, Market, Outcome,
-            Value,  -- ✅ Needed for spreads/totals canonical side filtering
+            Value,
             Sharp_Move_Signal, Sharp_Limit_Jump, Sharp_Prob_Shift,
             Sharp_Time_Score, Sharp_Limit_Total,
             Is_Reinforced_MultiMarket, Market_Leader, LimitUp_NoMove_Flag,
             SharpBetScore, Enhanced_Sharp_Confidence_Score, True_Sharp_Confidence_Score,
-            SHARP_HIT_BOOL, SHARP_COVER_RESULT, Scored, Snapshot_Timestamp, Sport
+            SHARP_HIT_BOOL, SHARP_COVER_RESULT, Scored, Snapshot_Timestamp, Sport,
+            First_Line_Value, First_Sharp_Prob, Line_Delta, Model_Prob_Diff, Direction_Aligned
+
         FROM `sharplogger.sharp_data.sharp_scores_full`
         WHERE 
             Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
             AND SHARP_HIT_BOOL IS NOT NULL
             AND Sport = '{sport_label}'
     """
-
-  
     try:
         df = client.query(query).to_dataframe()
         return df
     except Exception as e:
-        import streamlit as st
         st.error(f"❌ Failed to load predictions: {e}")
         return pd.DataFrame()
 
