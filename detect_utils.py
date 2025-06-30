@@ -84,6 +84,18 @@ def detect_and_save_all_sports():
                         logging.info(f"✅ Scored {len(df_moves)} rows, now writing to master.")
                     else:
                         logging.info("ℹ️ No scored rows — model returned empty.")
+                    # 🔁 Recompute Sharp_Prob_Shift with historical context
+                    recent_history = read_recent_sharp_moves(hours=48)
+                    recent_history = recent_history[[
+                        'Team_Key', 'Bookmaker', 'Snapshot_Timestamp', 'Model_Sharp_Win_Prob'
+                    ]].dropna()
+        
+                    combined = pd.concat([recent_history, df_moves], ignore_index=True)
+                    combined = compute_sharp_prob_shift(combined)
+        
+                    # ✅ Only keep current snapshot's rows
+                    current_ts = df_moves['Snapshot_Timestamp'].max()
+                    df_moves = combined[combined['Snapshot_Timestamp'] == current_ts].copy()                
                 except Exception as e:
                     logging.error(f"❌ Model scoring failed for {sport_label}: {e}", exc_info=True)
             else:
