@@ -1426,7 +1426,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             0,  # conflict
             np.nan  # stable or mixed
         )
-    ).astype('Int64')  # nullable integer
+    ).astype('int')  # ✅ standard int is safe  # nullable integer
 
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
 
