@@ -778,7 +778,16 @@ def apply_blended_sharp_score(df, trained_models):
                     logger.warning(unscored_df[['Game', 'Bookmaker', 'Market', 'Outcome', 'Value']].head(5).to_string(index=False))
             except Exception as debug_error:
                 logger.error(f"❌ Failed to log unscored rows: {debug_error}")
-    
+            # === Remove unscored "under" rows that were never created from "over"
+            pre_filter = len(df_final)
+            df_final = df_final[~(
+                (df_final['Market'] == 'totals') &
+                (df_final['Outcome_Norm'] == 'under') &
+                (df_final['Was_Canonical'] == False) &
+                (df_final['Model_Sharp_Win_Prob'].isna())
+            )]
+            logger.info(f"🧹 Removed {pre_filter - len(df_final)} unscored UNDER rows (no OVER available)")
+
             logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
             return df_final
     
