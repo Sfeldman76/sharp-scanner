@@ -735,7 +735,7 @@ def compute_diagnostics_vectorized(df):
 def apply_blended_sharp_score(df, trained_models):
 
 
-    st.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
+    #st.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
 
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
@@ -1400,7 +1400,7 @@ def render_scanner_tab(label, sport_key, container):
                 if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
                     st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
                 else:
-                    st.success("✅ All rows successfully scored.")
+                    pass#st.success("✅ All rows successfully scored.")
 
         
             except Exception as e:
