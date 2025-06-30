@@ -507,10 +507,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market['Model_Prob_Diff'] = pd.to_numeric(df_market['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df_market['First_Sharp_Prob'], errors='coerce')
         
         df_market['Direction_Aligned'] = np.where(
-            df_market['Market'] == 'totals',
-            np.sign(df_market['Line_Delta']) == np.sign(df_market['Model_Prob_Diff']),
-            np.sign(df_market['Line_Delta']) != np.sign(df_market['Model_Prob_Diff'])  # inverted for spreads/h2h
-        ).astype(int)  # 1 = aligned, 0 = conflict
+            ((df_market['Model_Prob_Diff'] > 0.04) & (df_market['Line_Delta'] > 0)) |
+            ((df_market['Model_Prob_Diff'] < -0.04) & (df_market['Line_Delta'] < 0)),
+            1,  # aligned
+            np.where(
+                ((df_market['Model_Prob_Diff'] > 0.04) & (df_market['Line_Delta'] < 0)) |
+                ((df_market['Model_Prob_Diff'] < -0.04) & (df_market['Line_Delta'] > 0)),
+                0,  # conflict
+                np.nan  # stable or mixed
+            )
+        ).fillna(0).astype(int)  # fallback to 0 for model
+
 
         features = [
             'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
