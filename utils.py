@@ -1371,11 +1371,38 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master = build_game_key(df_master)
     df_master = ensure_columns(df_master, ['Game_Start'])
     df_master = df_master[df_master['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
+    # === Pull all recent snapshots for those games
+    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
+    df_all_snapshots = df_all_snapshots[df_all_snapshots['Game_Key'].isin(df_master['Game_Key'])]
+    
+    # === Normalize for merge
+    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
+        df_master[col] = df_master[col].astype(str).str.strip().str.lower()
+    
+    # === Build FIRST snapshot by pick
+    df_first = (
+        df_all_snapshots
+        .sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+        .rename(columns={
+            'Value': 'First_Line_Value',
+            'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+        })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
+    )
 
     if df_master.empty:
         logging.warning("⚠️ No sharp picks to backtest")
         return pd.DataFrame()
 
+    # === 5. Merge scores and filter
+    # === Merge first snapshot into master before scoring
+    df_master = df_master.merge(
+        df_first,
+        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+        how='left'
+    )
+    
     # === 5. Merge scores and filter
     df = df_master.merge(
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
@@ -1383,11 +1410,23 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     )
     df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
     df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
-
-    if 'Ref_Sharp_Value' not in df.columns:
-        df['Ref_Sharp_Value'] = df.get('Value')
-    else:
-        df['Ref_Sharp_Value'] = df['Ref_Sharp_Value'].combine_first(df.get('Value'))
+    
+    # ✅ Now the first values are present → safe to compute delta features
+    df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
+    df['Model_Prob_Diff'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
+    
+    df['Direction_Aligned'] = np.select(
+        [
+            df['Market'] == 'totals',
+            df['Market'].isin(['spreads', 'h2h'])
+        ],
+        [
+            np.sign(df['Line_Delta']) == np.sign(df['Model_Prob_Diff']),  # aligned for totals
+            np.sign(df['Line_Delta']) != np.sign(df['Model_Prob_Diff'])   # inverted for spreads/h2h
+        ],
+        default=False
+    ).astype(int)
+    logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts().to_string())
 
     # === 6. Calculate result
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
@@ -1454,14 +1493,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     
    # === 8. Final output DataFrame ===
+    
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
         'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
-        'Unique_Sharp_Books',
-        'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-        'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Sport','Value',
+        'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
+        'Scored', 'Sport', 'Value',
+        'First_Line_Value', 'First_Sharp_Prob',         # ✅ new
+        'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned'  # ✅ new
     ]
 
     
@@ -1500,7 +1542,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
     df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
     df_scores_out['Unique_Sharp_Books'] = pd.to_numeric(df_scores_out['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
-    
+    df_scores_out['First_Line_Value'] = pd.to_numeric(df_scores_out['First_Line_Value'], errors='coerce')
+    df_scores_out['First_Sharp_Prob'] = pd.to_numeric(df_scores_out['First_Sharp_Prob'], errors='coerce')
+    df_scores_out['Line_Delta'] = pd.to_numeric(df_scores_out['Line_Delta'], errors='coerce')
+    df_scores_out['Model_Prob_Diff'] = pd.to_numeric(df_scores_out['Model_Prob_Diff'], errors='coerce')
+    df_scores_out['Direction_Aligned'] = pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce').fillna(0).astype(int)
+
     try:
         df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
         # Optionally upload:
