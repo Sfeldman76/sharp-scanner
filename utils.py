@@ -319,7 +319,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Market_Norm', 'Outcome_Norm', 'Merge_Key_Short', 'Line_Hash',
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Pre_Game', 'Post_Game',
         'Unique_Sharp_Books', 'Sharp_Move_Magnitude_Score', 'Was_Canonical',
-        'Scored_By_Model', 'Scoring_Market'
+        'Scored_By_Model', 'Scoring_Market', 
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
     
@@ -399,8 +399,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
                 elif mtype == 'spreads' and abs(curr) > abs(open_val): move_signal += 1
                 elif mtype == 'h2h':
                     imp_now, imp_open = implied_prob(curr), implied_prob(open_val)
-                    if imp_now and imp_open and imp_now > imp_open:
-                        prob_shift += 1
+                    
             except:
                 continue
 
@@ -419,7 +418,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
     return {
         'Sharp_Move_Signal': move_signal,
         'Sharp_Limit_Jump': limit_jump,
-        'Sharp_Prob_Shift': prob_shift,
+        
         'Sharp_Time_Score': time_score,
         'Sharp_Limit_Total': total_limit,
         'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2),
@@ -427,7 +426,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
             2 * move_signal +
             2 * limit_jump +
             1.5 * time_score +
-            1.0 * prob_shift +
+            
             0.001 * total_limit +
             3.0 * move_magnitude_score, 2
         )
@@ -711,33 +710,32 @@ def apply_blended_sharp_score(df, trained_models):
             logger.error(traceback.format_exc())
 
     try:
-        # Initialize df_final as an empty DataFrame before any processing
         df_final = pd.DataFrame()
     
         if scored_all:
-            # Drop 'Game_Key_Base' column if it exists
+            # Drop Game_Key_Base if it exists
             if 'Game_Key_Base' in df_final.columns:
                 df_final = df_final.drop(columns=['Game_Key_Base'])
                 logger.debug("🧹 Dropped 'Game_Key_Base' column before returning final scored DataFrame.")
-            
-            # Concatenate all DataFrames in scored_all
+    
+            # Concat and clean
             df_final = pd.concat(scored_all, ignore_index=True)
-            
-            # Keep only rows with valid 'Model_Sharp_Win_Prob'
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
-            
-            # Log the duration of the scoring process
+    
+            # ✅ Compute Sharp_Prob_Shift *before* returning
+            if 'Model_Sharp_Win_Prob' in df_final.columns and 'Team_Key' in df_final.columns:
+                df_final = compute_sharp_prob_shift(df_final)
+            else:
+                df_final['Sharp_Prob_Shift'] = 0
+    
             logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
-            
-            # Return the final DataFrame
             return df_final
+    
         else:
-            # If no rows were scored, log a warning and return an empty DataFrame
             logger.warning("⚠️ No market types scored — returning empty DataFrame.")
             return pd.DataFrame()
     
     except Exception as e:
-        # If any error occurs, log the error and return an empty DataFrame
         logger.error("❌ Exception during final aggregation")
         logger.error(traceback.format_exc())
         return pd.DataFrame()
@@ -941,7 +939,7 @@ def compute_weighted_signal(row, market_weights):
         'Sharp_Move_Signal': 2.0,
         'Sharp_Limit_Jump': 2.0,
         'Sharp_Time_Score': 1.5,
-        'Sharp_Prob_Shift': 1.0,
+        
         'Sharp_Limit_Total': 0.001
     }
 
@@ -1143,6 +1141,7 @@ def detect_cross_market_sharp_support(df_moves, score_threshold=15):
 
     df = df.merge(market_counts, on='SupportKey', how='left')
     df = df.merge(sharp_book_counts, on='SupportKey', how='left')
+    
 
     df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
@@ -1535,4 +1534,26 @@ def compute_and_write_market_weights(df):
     # Optional: return df_weights for upload or inspection
     return df_weights
 
+def compute_sharp_prob_shift(df):
+    """
+    Computes the change in Model_Sharp_Win_Prob per Team_Key across snapshots.
+    Adds column: Sharp_Prob_Shift
+    """
+    df = df.copy()
 
+    required_cols = {'Team_Key', 'Snapshot_Timestamp', 'Model_Sharp_Win_Prob'}
+    if not required_cols.issubset(df.columns):
+        missing = required_cols - set(df.columns)
+        logging.warning(f"⚠️ Skipping Sharp_Prob_Shift — missing columns: {missing}")
+        df['Sharp_Prob_Shift'] = 0
+        return df
+
+    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
+    df = df.sort_values(['Team_Key', 'Snapshot_Timestamp'])
+
+    df['Sharp_Prob_Shift'] = (
+        df.groupby('Team_Key')['Model_Sharp_Win_Prob']
+        .transform(lambda x: x.diff().fillna(0))
+    )
+
+    return df
