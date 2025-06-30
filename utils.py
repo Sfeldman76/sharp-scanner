@@ -591,7 +591,25 @@ def apply_blended_sharp_score(df, trained_models):
                 missing_books = original_books - inverse_books
                 if missing_books:
                     logger.warning(f"⚠️ These books had 'under' rows but no inverse created: {missing_books}")
-
+            
+                # ✅ Merge opponent Value (as usual)
+                df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
+                df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
+            
+                df_inverse = df_inverse.merge(
+                    df_full_market[['Team_Key', 'Value']],
+                    on='Team_Key',
+                    how='left',
+                    suffixes=('', '_opponent')
+                )
+            
+                df_inverse['Value'] = df_inverse['Value_opponent']
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+            
+                # ✅ Now check for merge failures
+                missing_value_count = df_inverse['Value'].isna().sum()
+                total_inverse = len(df_inverse)
+                logger.warning(f"⚠️ {missing_value_count}/{total_inverse} totals inverse rows failed to match 'under' Value (likely missing from df_full_market)")
 
             elif market_type == "h2h":
                 # Flip outcome to opposing team
@@ -957,7 +975,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     # === Summary consensus metrics
     summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
-    
+    allowed_books = SHARP_BOOKS + REC_BOOKS
+    pre_filter = len(df)
+    df = df[df['Book'].isin(allowed_books)]
+    logger.info(f"🧹 Removed {pre_filter - len(df)} rows from unsupported books before scoring (kept {len(df)}).")
+
     # ✅ Final return (no field names changed)
     return df, df_history, summary_df
 
