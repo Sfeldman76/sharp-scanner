@@ -503,8 +503,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             progress.progress(idx / 3)
             continue
         # === Directional agreement (for spreads/h2h invert line logic)
-        df_market['Line_Delta'] = pd.to_numeric(df_market['Value'], errors='coerce') - pd.to_numeric(df_market['First_Line_Value'], errors='coerce')
-        df_market['Model_Prob_Diff'] = pd.to_numeric(df_market['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df_market['First_Sharp_Prob'], errors='coerce')
+        df_market['Line_Delta'] = pd.to_numeric(df_market['Line_Delta'], errors='coerce')
+        df_market['Model_Prob_Diff'] = pd.to_numeric(df_market['Model_Prob_Diff'], errors='coerce')
         
         df_market['Direction_Aligned'] = np.where(
             ((df_market['Model_Prob_Diff'] > 0.04) & (df_market['Line_Delta'] > 0)) |
@@ -663,22 +663,24 @@ def compute_diagnostics_vectorized(df):
                 )
             )
 
-            # === Step 4: Line/Model Direction
-            line_delta = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
+            # === Step 3a: Compute model probability shift
+            df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model Prob'), errors='coerce') - pd.to_numeric(df.get('First_Model_Prob'), errors='coerce')
+            df['Line_Delta'] = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
+            
+            # === Step 4: Line/Model Direction (string label version)
             direction = np.where(
-                (delta > 0.04) & (line_delta < 0), "🟢 Model ↑ / Line ↓",
+                (df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] < 0), "🟢 Model ↑ / Line ↓",
                 np.where(
-                    (delta < -0.04) & (line_delta > 0), "🔴 Model ↓ / Line ↑",
+                    (df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] > 0), "🔴 Model ↓ / Line ↑",
                     np.where(
-                        (delta > 0.04) & (line_delta > 0), "🟢 Aligned ↑",
+                        (df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] > 0), "🟢 Aligned ↑",
                         np.where(
-                            (delta < -0.04) & (line_delta < 0), "🔻 Aligned ↓",
+                            (df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] < 0), "🔻 Aligned ↓",
                             "⚪ Mixed"
                         )
                     )
                 )
             )
-
         else:
             confidence_trend = ["⚠️ Missing"] * len(df)
             direction = ["⚠️ Missing"] * len(df)
