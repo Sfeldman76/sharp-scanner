@@ -302,7 +302,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Game_Key', 'Time', 'Game', 'Game_Start', 'Sport', 'Market', 'Outcome',
         'Bookmaker', 'Book', 'Value', 'Limit', 'Delta', 'Old_Value',
         'Event_Date', 'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
-        'Limit_Max', 'Delta_vs_Sharp',
+        'Limit_Max', 'Delta_vs_Sharp','Team_Key',
 
         # Sharp logic fields
         'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
@@ -319,7 +319,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Market_Norm', 'Outcome_Norm', 'Merge_Key_Short', 'Line_Hash',
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Pre_Game', 'Post_Game',
         'Unique_Sharp_Books', 'Sharp_Move_Magnitude_Score', 'Was_Canonical',
-        'Scored_By_Model', 'Scoring_Market', 
+        'Scored_By_Model', 'Scoring_Market'
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
     
@@ -693,24 +693,41 @@ def apply_blended_sharp_score(df, trained_models):
             logger.error(f"❌ Failed scoring {market_type.upper()}")
             logger.error(traceback.format_exc())
 
+   
+  
     try:
         df_final = pd.DataFrame()
     
         if scored_all:
-            # Drop Game_Key_Base if it exists
-            if 'Game_Key_Base' in df_final.columns:
-                df_final = df_final.drop(columns=['Game_Key_Base'])
-                logger.debug("🧹 Dropped 'Game_Key_Base' column before returning final scored DataFrame.")
-    
-            # Concat and clean
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
     
-            # ✅ Compute Sharp_Prob_Shift *before* returning
+            df_final['Team_Key'] = (
+                df_final['Home_Team_Norm'] + "_" +
+                df_final['Away_Team_Norm'] + "_" +
+                df_final['Commence_Hour'].astype(str) + "_" +
+                df_final['Market'] + "_" +
+                df_final['Outcome_Norm']
+            )
+    
             if 'Model_Sharp_Win_Prob' in df_final.columns and 'Team_Key' in df_final.columns:
                 df_final = compute_sharp_prob_shift(df_final)
             else:
-                df_final['Sharp_Prob_Shift'] = 0
+                df_final['Sharp_Prob_Shift'] = 0.0
+    
+            # === 🔍 Debug unscored rows
+            try:
+                original_keys = set(df['Game_Key'])
+                scored_keys = set(df_final['Game_Key'])
+                unscored_keys = original_keys - scored_keys
+    
+                if unscored_keys:
+                    logger.warning(f"⚠️ {len(unscored_keys)} Game_Keys were not scored by model")
+                    unscored_df = df[df['Game_Key'].isin(unscored_keys)]
+                    logger.warning("🧪 Sample unscored rows:")
+                    logger.warning(unscored_df[['Game', 'Bookmaker', 'Market', 'Outcome', 'Value']].head(5).to_string(index=False))
+            except Exception as debug_error:
+                logger.error(f"❌ Failed to log unscored rows: {debug_error}")
     
             logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
             return df_final
@@ -723,6 +740,7 @@ def apply_blended_sharp_score(df, trained_models):
         logger.error("❌ Exception during final aggregation")
         logger.error(traceback.format_exc())
         return pd.DataFrame()
+
 
         
 
@@ -1520,24 +1538,23 @@ def compute_and_write_market_weights(df):
 
 def compute_sharp_prob_shift(df):
     """
-    Computes the change in Model_Sharp_Win_Prob per Team_Key across snapshots.
+    Computes the change in Model_Sharp_Win_Prob per Team_Key + Bookmaker across snapshots.
     Adds column: Sharp_Prob_Shift
     """
     df = df.copy()
 
-    required_cols = {'Team_Key', 'Snapshot_Timestamp', 'Model_Sharp_Win_Prob'}
-    if not required_cols.issubset(df.columns):
-        missing = required_cols - set(df.columns)
-        logging.warning(f"⚠️ Skipping Sharp_Prob_Shift — missing columns: {missing}")
-        df['Sharp_Prob_Shift'] = 0
+    required = ['Team_Key', 'Bookmaker', 'Snapshot_Timestamp', 'Model_Sharp_Win_Prob']
+    if not all(col in df.columns for col in required):
+        df['Sharp_Prob_Shift'] = 0.0
         return df
 
     df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
-    df = df.sort_values(['Team_Key', 'Snapshot_Timestamp'])
+    df = df.sort_values(['Team_Key', 'Bookmaker', 'Snapshot_Timestamp'])
 
     df['Sharp_Prob_Shift'] = (
-        df.groupby('Team_Key')['Model_Sharp_Win_Prob']
+        df.groupby(['Team_Key', 'Bookmaker'])['Model_Sharp_Win_Prob']
         .transform(lambda x: x.diff().fillna(0))
     )
 
     return df
+
