@@ -519,7 +519,7 @@ def apply_blended_sharp_score(df, trained_models):
 
             valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
             df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
-
+    
             df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
             # ✅ NOW apply canonical filtering based on market_type
             if market_type == "spreads":
@@ -670,32 +670,16 @@ def apply_blended_sharp_score(df, trained_models):
                 # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
 
-
-                if df_inverse['Value'].isna().any():
-                    logger.warning("⚠️ Some inverse SPREADS rows failed to find valid values")
-
             if df_inverse.empty:
-                logger.warning(f"⚠️ No inverse rows generated for {market_type}")
-                continue
+                st.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
+                continue  # optional: skip this scoring loop if inverse fails
 
-            df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-            df_inverse['Merge_Key_Short'] = (
-                df_inverse['Home_Team_Norm'] + "_" +
-                df_inverse['Away_Team_Norm'] + "_" +
-                df_inverse['Commence_Hour'].astype(str)
-            )
-
-            canon_keys = df_canon[['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm']].drop_duplicates()
-            df_inverse = df_inverse.merge(
-                canon_keys,
-                on=['Bookmaker', 'Merge_Key_Short', 'Outcome_Norm'],
-                how='left',
-                indicator=True
-            )
-            df_inverse = df_inverse[df_inverse['_merge'] == 'left_only'].drop(columns=['_merge'])
-
+           
+            # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-            df_scored = df_scored[df_scored['Model_Sharp_Win_Prob'].notna()]
+            
+            
+            
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
