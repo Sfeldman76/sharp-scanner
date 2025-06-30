@@ -582,6 +582,16 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
+            
+                logger.info(f"🔁 Attempting to create {len(df_inverse)} inverse UNDER rows from OVER rows.")
+            
+                # Optional: log books missing after inverse
+                original_books = set(df_market['Bookmaker'].unique())
+                inverse_books = set(df_inverse['Bookmaker'].unique())
+                missing_books = original_books - inverse_books
+                if missing_books:
+                    logger.warning(f"⚠️ These books had 'under' rows but no inverse created: {missing_books}")
+
 
             elif market_type == "h2h":
                 # Flip outcome to opposing team
