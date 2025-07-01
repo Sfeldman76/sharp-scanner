@@ -1294,19 +1294,25 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
         response.raise_for_status()
+    
         games = response.json()
+    
+        if not games or not isinstance(games, list):
+            logging.error(f"❌ Unexpected API response format. Raw response: {response.text}")
+            return pd.DataFrame()
+    
         logging.info(f"📦 Total games returned by API: {len(games)}")
+    
         incomplete = [g for g in games if not g.get("completed")]
-                # Log all games for inspection
         for i, g in enumerate(games):
             logging.info(f"[{i+1}] {g.get('home_team')} vs {g.get('away_team')} | "
                          f"Start: {g.get('commence_time')} | Completed: {g.get('completed')}")
-        
-            # Optionally, dump scores too
             raw_scores = g.get('scores', [])
             score_str = ', '.join([f"{s.get('name')}={s.get('score')}" for s in raw_scores])
             logging.info(f"     Scores: {score_str}")
+    
         logging.info(f"🕒 Incomplete games (not marked complete): {len(incomplete)}")
+    
     except Exception as e:
         logging.error(f"❌ Failed to fetch scores: {e}")
         return pd.DataFrame()
@@ -1346,7 +1352,23 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`
         """).to_dataframe()
         existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
+    
         new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
+        blocked = df_scores[df_scores['Merge_Key_Short'].isin(existing_keys)]
+    
+        logging.info(f"⛔ Skipped (already in table): {len(blocked)}")
+        logging.info(f"🧪 Sample skipped keys:\n{blocked[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head().to_string(index=False)}")
+    
+        if not new_scores.empty:
+            logging.info(f"✅ Uploading {len(new_scores)} games to BigQuery")
+            logging.info(f"🆕 Sample uploaded:\n{new_scores[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head().to_string(index=False)}")
+    
+        # Detect keys that are neither new nor in existing table (missing entirely?)
+        all_found_keys = set(new_scores['Merge_Key_Short']) | existing_keys
+        missing_keys = set(df_scores['Merge_Key_Short']) - all_found_keys
+        if missing_keys:
+            logging.warning(f"⚠️ These keys were neither uploaded nor matched in BigQuery:")
+            logging.warning(list(missing_keys)[:5])
     
         if new_scores.empty:
             logging.info("ℹ️ No new scores to upload to game_scores_final")
@@ -1356,6 +1378,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     except Exception as e:
         logging.exception("❌ Failed to upload game scores")
+
+
     
         # Dump a preview of the DataFrame
         try:
