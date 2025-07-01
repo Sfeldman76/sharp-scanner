@@ -1606,15 +1606,20 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
     
-    # ✅ Upload
-    to_gbq(
-        df_scores_out,
-        destination_table='sharp_data.sharp_scores_full',
-        project_id=GCP_PROJECT_ID,
-        if_exists='append'
-    )
-    logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
-    
+    try:
+        to_gbq(
+            df_scores_out,
+            destination_table='sharp_data.sharp_scores_full',
+            project_id=GCP_PROJECT_ID,
+            if_exists='append'
+        )
+        logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
+    except Exception as e:
+        logging.exception("❌ Failed to upload to `sharp_data.sharp_scores_full`")
+        logging.error("🧪 Sample rows (head):\n" + df_scores_out.head(5).to_string(index=False))
+        logging.error("🧪 DataFrame dtypes:\n" + df_scores_out.dtypes.to_string())
+
+        
     return df
 def compute_and_write_market_weights(df):
     import pandas as pd
