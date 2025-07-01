@@ -1285,7 +1285,6 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
         logging.exception(f"❌ Failed to upload to {table}")
   
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
-
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
 
@@ -1294,7 +1293,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
         response.raise_for_status()
-    
+
         try:
             games = response.json()
             if not isinstance(games, list):
@@ -1302,23 +1301,33 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         except Exception as e:
             logging.error(f"❌ Failed to parse JSON response: {e}")
             return pd.DataFrame()
-    
+
     except Exception as e:
         logging.error(f"❌ Failed to fetch scores: {e}")
         return pd.DataFrame()
 
+    # === Normalize completion logic to include score-present games ===
+    def is_completed(game):
+        scores = game.get("scores", [])
+        return game.get("completed") or all(s.get("score") is not None for s in scores)
 
-    completed_games = [g for g in games if g.get("completed")]
+    completed_games = [g for g in games if is_completed(g)]
     logging.info(f"✅ Completed games: {len(completed_games)}")
 
     # === 2. Extract valid score rows ===
     score_rows = []
     for game in completed_games:
-        home = normalize_team(game.get("home_team", ""))
-        away = normalize_team(game.get("away_team", ""))
-        game_start = pd.to_datetime(game.get("commence_time"), utc=True)
+        raw_home = game.get("home_team", "")
+        raw_away = game.get("away_team", "")
+        home = normalize_team(raw_home)
+        away = normalize_team(raw_away)
+
+        game_start_raw = pd.to_datetime(game.get("commence_time"), utc=True)
+        game_start = game_start_raw.floor("h")  # ✅ Use rounded time consistently
         merge_key = build_merge_key(home, away, game_start)
-        scores = {s.get("name", "").strip().lower(): s.get("score") for s in game.get("scores", [])}
+
+        # ✅ Normalize score names too
+        scores = {normalize_team(s.get("name", "")): s.get("score") for s in game.get("scores", [])}
         if home in scores and away in scores:
             score_rows.append({
                 'Merge_Key_Short': merge_key,
@@ -1330,6 +1339,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Source': 'oddsapi',
                 'Inserted_Timestamp': pd.Timestamp.utcnow()
             })
+        else:
+            logging.warning(f"⚠️ Skipped due to missing scores: {raw_home} vs {raw_away} | "
+                            f"Home in scores: {home in scores}, Away in scores: {away in scores}")
+
 
     df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
     df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
