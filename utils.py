@@ -1562,7 +1562,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
   
  
         # Debug: ensure schema matches
-        try:
+    try:
         import pyarrow as pa
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
