@@ -1566,7 +1566,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
 
     def coerce_bool(col):
-        return col.astype(str).str.strip().str.lower().isin(['true', '1', '1.0', 'yes']).astype(bool)
+        col_cleaned = col.astype(str).str.strip().str.lower()
+        return col_cleaned.isin(['true', '1', '1.0', 'yes'])
 
     df_scores_out['Is_Reinforced_MultiMarket'] = coerce_bool(df_scores_out['Is_Reinforced_MultiMarket'])
     df_scores_out['Market_Leader'] = coerce_bool(df_scores_out['Market_Leader'])
@@ -1579,10 +1580,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').fillna(0.0).astype(float)
+    # === Debug unexpected boolean coercion errors before Parquet conversion
     for col in ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']:
-        bad_vals = df_scores_out[~df_scores_out[col].astype(str).str.strip().str.lower().isin(['true', '1', '1.0', 'false', '0', '0.0', ''])][col].unique()
-        if len(bad_vals) > 0:
-            logging.warning(f"⚠️ Unexpected values in column {col}: {bad_vals}")
+        if col in df_scores_out.columns:
+            unique_vals = df_scores_out[col].unique()
+            invalid = df_scores_out[~df_scores_out[col].isin([True, False])]
+            logging.info(f"🧪 {col} unique values: {unique_vals}")
+            if not invalid.empty:
+                logging.warning(f"⚠️ Invalid boolean values in {col}:\n{invalid[[col]].drop_duplicates().to_string(index=False)}")
+
 
   
 
@@ -1669,7 +1675,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if df_scores_out.empty:
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
-    
+    # ✅ Debug schema before upload
+    try:
+        pa.Table.from_pandas(df_scores_out)
+    except Exception as e:
+        logging.error("❌ Parquet conversion failure:")
+        logging.error(str(e))
+        for col in df_scores_out.columns:
+            logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].head(3).tolist()}")
+   
     try:
         to_gbq(
             df_scores_out,
