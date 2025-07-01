@@ -1447,7 +1447,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     
     # === 6. Calculate result
-    df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score', 'Ref_Sharp_Value'])
+    df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score')
     if df_valid.empty:
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
