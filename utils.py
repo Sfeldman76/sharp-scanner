@@ -1571,7 +1571,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['First_Sharp_Prob'] = pd.to_numeric(df_scores_out['First_Sharp_Prob'], errors='coerce')
     df_scores_out['Line_Delta'] = pd.to_numeric(df_scores_out['Line_Delta'], errors='coerce')
     df_scores_out['Model_Prob_Diff'] = pd.to_numeric(df_scores_out['Model_Prob_Diff'], errors='coerce')
-    df_scores_out['Direction_Aligned'] = pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce').fillna(0).astype(int)
+    df_scores_out['Direction_Aligned'] = (
+        pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce')
+        .fillna(0)
+        .round()
+        .astype('Int64')  # <- nullable integer dtype
+    )
+
 
     try:
         df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
