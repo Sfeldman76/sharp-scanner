@@ -1456,8 +1456,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if df_master.empty:
         logging.warning("⚠️ No sharp picks to backtest")
         return pd.DataFrame()
-    print("df_master cols:", df_master.columns.tolist())
-    print("df_scores cols:", df_scores.columns.tolist())
+    logging.info(f"🔍 df_master shape: {df_master.shape}")
+    logging.info(f"🔍 df_master columns: {df_master.columns.tolist()}")
+    
+    logging.info(f"🔍 df_scores shape: {df_scores.shape}")
+    logging.info(f"🔍 df_scores columns: {df_scores.columns.tolist()}")
     # === 5. Merge scores and filter
     # === Merge first snapshot into master before scoring
     df_master = df_master.merge(
@@ -1656,6 +1659,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"🧪 Sports in df_scores_out: {df_scores_out['Sport'].unique().tolist()}")
     logging.info(f"🧪 Snapshot_Timestamp range: {df_scores_out['Snapshot_Timestamp'].min()} to {df_scores_out['Snapshot_Timestamp'].max()}")
 
+    
     # ✅ Define deduplication fingerprint (exclude timestamp and nullable fields)
     dedup_fingerprint_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome',
@@ -1667,7 +1671,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # 🔍 Log dedup parameters
     logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
+    float_cols_to_round = [
+        'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
+        'First_Line_Value', 'First_Sharp_Prob', 'Line_Delta', 'Model_Prob_Diff'
+    ]
     
+    for col in float_cols_to_round:
+        if col in df_scores_out.columns:
+            df_scores_out[col] = pd.to_numeric(df_scores_out[col], errors='coerce').round(4)
     # ✅ Drop exact in-memory duplicates first
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
     logging.info(f"🧪 Local rows before dedup: {len(df_scores_out)}")
