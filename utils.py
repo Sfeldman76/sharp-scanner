@@ -1456,11 +1456,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if df_master.empty:
         logging.warning("⚠️ No sharp picks to backtest")
         return pd.DataFrame()
+    import json
+
     logging.info(f"🔍 df_master shape: {df_master.shape}")
-    logging.info(f"🔍 df_master columns: {df_master.columns.tolist()}")
+    logging.info("🔍 df_master columns: %s", json.dumps(df_master.columns.tolist()))
     
     logging.info(f"🔍 df_scores shape: {df_scores.shape}")
-    logging.info(f"🔍 df_scores columns: {df_scores.columns.tolist()}")
+    logging.info("🔍 df_scores columns: %s", json.dumps(df_scores.columns.tolist()))
     # === 5. Merge scores and filter
     # === Merge first snapshot into master before scoring
     df_master = df_master.merge(
