@@ -1565,7 +1565,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
 
+    def coerce_bool(col):
+        return col.astype(str).str.strip().str.lower().isin(['true', '1', '1.0']).astype(bool)
     
+    df_scores_out['Is_Reinforced_MultiMarket'] = coerce_bool(df_scores_out['Is_Reinforced_MultiMarket'])
+    df_scores_out['Market_Leader'] = coerce_bool(df_scores_out['Market_Leader'])
+    df_scores_out['LimitUp_NoMove_Flag'] = coerce_bool(df_scores_out['LimitUp_NoMove_Flag'])
+    df_scores_out['Scored'] = coerce_bool(df_scores_out['Scored'])
+
 
     df_scores_out['Sport'] = sport_label.upper()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
@@ -1575,10 +1582,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').fillna(0.0).astype(float)
 
 
-    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].astype(str).str.lower().isin(['true', '1']).astype(bool)
-    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].astype(str).str.lower().isin(['true', '1']).astype(bool)
-    df_scores_out['LimitUp_NoMove_Flag'] = df_scores_out['LimitUp_NoMove_Flag'].astype(str).str.lower().isin(['true', '1']).astype(bool)
-    df_scores_out['Scored'] = df_scores_out['Scored'].astype(str).str.lower().isin(['true', '1']).astype(bool)
+  
 
 
     df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
