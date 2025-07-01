@@ -72,6 +72,11 @@ def detect_and_save_all_sports():
                     api_key=API_KEY,
                     trained_models=trained_models
                 )
+                
+                # ✅ Prevent failure if function ever accidentally returns a tuple
+                if isinstance(df_backtest, tuple):
+                    df_backtest = df_backtest[0]
+                
                 if df_backtest is not None and not df_backtest.empty:
                     write_to_bigquery(df_backtest, table="sharp_data.sharp_scores_full")
                 else:
