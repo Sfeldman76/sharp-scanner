@@ -1251,7 +1251,6 @@ def force_bool(series):
        
 
 def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
-   
     if df.empty:
         logging.info("ℹ️ No data to write to BigQuery.")
         return
@@ -1259,7 +1258,6 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
     df = df.copy()
     df.columns = [col.replace(" ", "_") for col in df.columns]
 
-    # Drop unapproved fields (BigQuery strict schema match)
     allowed_cols = {
         'sharp_data.sharp_scores_full': [
             'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
@@ -1273,19 +1271,26 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Unique_Sharp_Books'
         ]
     }
-    
-    if table in allowed_cols and allowed_cols[table] is not None:
-        df = df[[col for col in df.columns if col in allowed_cols[table]]]
+
+    if table in allowed_cols:
+        # Fill missing expected columns with None
+        for col in allowed_cols[table]:
+            if col not in df.columns:
+                df[col] = None
+
+        df = df[[col for col in allowed_cols[table]]]
         logging.info(f"🧪 Final columns in df before upload: {df.columns.tolist()}")
-        missing_cols = [col for col in df.columns if col not in allowed_cols[table]]
+
+        missing_cols = [col for col in allowed_cols[table] if col not in df.columns]
         if missing_cols:
-            logging.warning(f"⚠️ Columns dropped due to schema mismatch: {missing_cols}")
+            logging.warning(f"⚠️ Missing expected columns in df: {missing_cols}")
 
     try:
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace' if force_replace else 'append')
         logging.info(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         logging.exception(f"❌ Failed to upload to {table}")
+
   
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
