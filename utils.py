@@ -1565,9 +1565,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
 
-    def coerce_bool(col):
-        col_cleaned = col.astype(str).str.strip().str.lower()
-        return col_cleaned.isin(['true', '1', '1.0', 'yes'])
+   # ✅ Safer boolean coercion function
+    def coerce_bool_series(series):
+        return series.map(lambda x: str(x).strip().lower() in ['true', '1', '1.0', 'yes']).astype(bool)
+    
+    # ✅ Coerce all BigQuery BOOL fields
+    bool_cols = ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']
+    for col in bool_cols:
+        if col in df_scores_out.columns:
+            # Log before coercion
+            logging.info(f"🔍 Coercing column '{col}' to bool — unique values before: {df_scores_out[col].dropna().unique()[:5]}")
+            df_scores_out[col] = coerce_bool_series(df_scores_out[col])
+    
+            # Post-coercion validation
+            if df_scores_out[col].isnull().any():
+                logging.warning(f"⚠️ Column '{col}' still contains nulls after coercion!")
 
     df_scores_out['Is_Reinforced_MultiMarket'] = coerce_bool(df_scores_out['Is_Reinforced_MultiMarket'])
     df_scores_out['Market_Leader'] = coerce_bool(df_scores_out['Market_Leader'])
@@ -1618,15 +1630,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info(f"✅ Computed updated market weights for {sport_label.upper()}")
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute market weights: {e}")
-  
- 
-        # Debug: ensure schema matches
-    try:
-        pa.Table.from_pandas(df_scores_out)
-    except Exception as e:
-        logging.error("❌ Parquet validation failed before upload")
-        logging.error(str(e))
-        logging.error("DataFrame dtypes:\n" + df_scores_out.dtypes.to_string())
+
     
     # ✅ Log BEFORE deduplication
     pre_dedup_count = len(df_scores_out)
@@ -1676,14 +1680,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
     # ✅ Debug schema before upload
+  
     try:
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
-        logging.error("❌ Parquet conversion failure:")
+        logging.error("❌ Parquet conversion failure before upload:")
         logging.error(str(e))
         for col in df_scores_out.columns:
-            logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].head(3).tolist()}")
-   
+            logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].dropna().unique()[:5].tolist()}")
+
     try:
         to_gbq(
             df_scores_out,
