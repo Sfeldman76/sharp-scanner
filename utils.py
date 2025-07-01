@@ -1269,12 +1269,12 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
             'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
             'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp',
-    
-            # ✅ Missing but required:
             'Sport', 'Value', 'First_Line_Value', 'First_Sharp_Prob',
             'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
             'Unique_Sharp_Books'
-        ],
+        ]
+    }
+    
     if table in allowed_cols and allowed_cols[table] is not None:
         df = df[[col for col in df.columns if col in allowed_cols[table]]]
         missing_cols = [col for col in df.columns if col not in allowed_cols[table]]
