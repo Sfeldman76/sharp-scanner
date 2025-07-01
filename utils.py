@@ -1268,12 +1268,18 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
             'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
             'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
-            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp'
+            'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp',
+    
+            # ✅ Missing but required:
+            'Sport', 'Value', 'First_Line_Value', 'First_Sharp_Prob',
+            'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
+            'Unique_Sharp_Books'
         ],
-        'sharp_data.sharp_moves_master': None  # Add allowed list here if needed
-    }
     if table in allowed_cols and allowed_cols[table] is not None:
         df = df[[col for col in df.columns if col in allowed_cols[table]]]
+        missing_cols = [col for col in df.columns if col not in allowed_cols[table]]
+        if missing_cols:
+            logging.warning(f"⚠️ Columns dropped due to schema mismatch: {missing_cols}")
 
     try:
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace' if force_replace else 'append')
@@ -1563,7 +1569,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
  
         # Debug: ensure schema matches
     try:
-        import pyarrow as pa
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
         logging.error("❌ Parquet validation failed before upload")
@@ -1615,12 +1620,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         )
         logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
     except Exception as e:
-        logging.exception("❌ Failed to upload to `sharp_data.sharp_scores_full`")
-        logging.error("🧪 Sample rows (head):\n" + df_scores_out.head(5).to_string(index=False))
-        logging.error("🧪 DataFrame dtypes:\n" + df_scores_out.dtypes.to_string())
-
-        
+        logging.exception("❌ Upload to `sharp_scores_full` failed.")
+        logging.error("🧪 DataFrame sample:\n" + df_scores_out.head(3).to_string(index=False))
+        logging.error("🧪 dtypes:\n" + df_scores_out.dtypes.to_string())
+            
     return df
+
+
+
 def compute_and_write_market_weights(df):
     import pandas as pd
 
