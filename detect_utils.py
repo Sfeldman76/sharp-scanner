@@ -63,16 +63,18 @@ def detect_and_save_all_sports():
             }
             trained_models = {k: v for k, v in trained_models.items() if v}
             logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys())}")
-
             try:
-                backtest_days = 3
-                fetch_scores_and_backtest(
+                df_backtest = fetch_scores_and_backtest(
                     sport_key=sport_key,
                     df_moves=df_moves,
                     days_back=backtest_days,
                     api_key=API_KEY,
                     trained_models=trained_models
                 )
+                if df_backtest is not None and not df_backtest.empty:
+                    write_to_bigquery(df_backtest, table="sharp_data.sharp_scores_full")
+                else:
+                    logging.warning(f"⚠️ No backtest rows returned for {sport_label} — skipping BigQuery write.")
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
