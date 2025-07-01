@@ -986,11 +986,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     # === Summary consensus metrics
     summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
-    allowed_books = SHARP_BOOKS + REC_BOOKS
-    pre_filter = len(df)
-    df = df[df['Book'].isin(allowed_books)]
-    logger.info(f"🧹 Removed {pre_filter - len(df)} rows from unsupported books before scoring (kept {len(df)}).")
-
+   
     # ✅ Final return (no field names changed)
     return df, df_history, summary_df
 
@@ -1520,16 +1516,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     ]
 
     
-    try:
-        df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
-        # Optionally upload:
-        # to_gbq(df_weights, 'sharp_data.market_weights', project_id=GCP_PROJECT_ID, if_exists='replace')
-        logging.info(f"✅ Computed updated market weights for {sport_label.upper()}")
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to compute market weights: {e}")
-
-
-    
+     
     # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
@@ -1584,12 +1571,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"🧪 Before dedup: {pre_dedup_count} rows in df_scores_out")
     logging.info(f"🧪 Sports in df_scores_out: {df_scores_out['Sport'].unique().tolist()}")
     logging.info(f"🧪 Snapshot_Timestamp range: {df_scores_out['Snapshot_Timestamp'].min()} to {df_scores_out['Snapshot_Timestamp'].max()}")
+
+    # ✅ Define deduplication fingerprint (exclude timestamp and nullable fields)
+    dedup_fingerprint_cols = [
+        'Game_Key', 'Bookmaker', 'Market', 'Outcome',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
+        'First_Line_Value', 'First_Sharp_Prob', 'Line_Delta',
+        'Model_Prob_Diff', 'Direction_Aligned'
+    ]
     
-    # ✅ Define deduplication fingerprint (exclude timestamp)
-    dedup_fingerprint_cols = score_cols.copy()
+    # 🔍 Log dedup parameters
+    logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
     
     # ✅ Drop exact in-memory duplicates first
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
+    logging.info(f"🧪 Local rows before dedup: {len(df_scores_out)}")
     
     # ✅ Query BigQuery for existing rows
     existing = bq_client.query(f"""
@@ -1597,6 +1594,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         FROM `sharp_data.sharp_scores_full`
         WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
     """).to_dataframe()
+    logging.info(f"🧪 Existing rows in BigQuery for dedup: {len(existing)}")
     
     # ✅ Dedup against BigQuery
     df_scores_out = df_scores_out.merge(
@@ -1607,9 +1605,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
     
-    # ✅ Log after dedup
-    logging.info(f"🧪 After dedup merge: {len(df_scores_out)} rows remain")
+    # ✅ Final logs
+    logging.info(f"🧪 Remaining new rows after dedup merge: {len(df_scores_out)}")
     
+        
     # ✅ If no new rows left, return
     if df_scores_out.empty:
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
