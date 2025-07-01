@@ -63,6 +63,7 @@ def detect_and_save_all_sports():
             }
             trained_models = {k: v for k, v in trained_models.items() if v}
             logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys())}")
+            backtest_days = 3
             try:
                 df_backtest = fetch_scores_and_backtest(
                     sport_key=sport_key,
