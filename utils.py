@@ -1573,7 +1573,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
    # ✅ Safer boolean coercion function
     def coerce_bool_series(series):
         return series.map(lambda x: str(x).strip().lower() in ['true', '1', '1.0', 'yes']).astype(bool)
-    
+    )
+
     # ✅ Coerce all BigQuery BOOL fields
     bool_cols = ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']
     for col in bool_cols:
@@ -1586,10 +1587,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             if df_scores_out[col].isnull().any():
                 logging.warning(f"⚠️ Column '{col}' still contains nulls after coercion!")
 
-    df_scores_out['Is_Reinforced_MultiMarket'] = coerce_bool(df_scores_out['Is_Reinforced_MultiMarket'])
-    df_scores_out['Market_Leader'] = coerce_bool(df_scores_out['Market_Leader'])
-    df_scores_out['LimitUp_NoMove_Flag'] = coerce_bool(df_scores_out['LimitUp_NoMove_Flag'])
-    df_scores_out['Scored'] = coerce_bool(df_scores_out['Scored'])
+ 
 
     df_scores_out['Sport'] = sport_label.upper()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
