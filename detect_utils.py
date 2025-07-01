@@ -13,7 +13,7 @@ from utils import (
     detect_market_leaders,
     apply_blended_sharp_score,
     load_model_from_gcs,
-    #write_to_bigquery,
+    write_to_bigquery,
     build_game_key,
     fetch_scores_and_backtest,
     read_recent_sharp_moves, 
