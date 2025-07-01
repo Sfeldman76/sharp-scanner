@@ -1607,7 +1607,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 logging.warning(f"⚠️ Invalid boolean values in {col}:\n{invalid[[col]].drop_duplicates().to_string(index=False)}")
 
 
-  
+    try:
+        pa.Table.from_pandas(df_scores_out)
+    except Exception as e:
+        logging.error("❌ Parquet conversion failure before upload:")
+        logging.error(str(e))
+        for col in df_scores_out.columns:
+            logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].dropna().unique()[:5].tolist()}")
+
 
 
     df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
@@ -1689,7 +1696,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     try:
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
-        logging.error("❌ Parquet conversion failure before upload:")
+        logging.error("❌ Parquet conversion failure immediataly before upload:")
         logging.error(str(e))
         for col in df_scores_out.columns:
             logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].dropna().unique()[:5].tolist()}")
