@@ -1295,27 +1295,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
         response.raise_for_status()
     
-        games = response.json()
-    
-        if not games or not isinstance(games, list):
-            logging.error(f"❌ Unexpected API response format. Raw response: {response.text}")
+        try:
+            games = response.json()
+            if not isinstance(games, list):
+                raise ValueError("Unexpected API response: not a list of games")
+        except Exception as e:
+            logging.error(f"❌ Failed to parse JSON response: {e}")
             return pd.DataFrame()
-    
-        logging.info(f"📦 Total games returned by API: {len(games)}")
-    
-        incomplete = [g for g in games if not g.get("completed")]
-        for i, g in enumerate(games):
-            logging.info(f"[{i+1}] {g.get('home_team')} vs {g.get('away_team')} | "
-                         f"Start: {g.get('commence_time')} | Completed: {g.get('completed')}")
-            raw_scores = g.get('scores', [])
-            score_str = ', '.join([f"{s.get('name')}={s.get('score')}" for s in raw_scores])
-            logging.info(f"     Scores: {score_str}")
-    
-        logging.info(f"🕒 Incomplete games (not marked complete): {len(incomplete)}")
     
     except Exception as e:
         logging.error(f"❌ Failed to fetch scores: {e}")
         return pd.DataFrame()
+
 
     completed_games = [g for g in games if g.get("completed")]
     logging.info(f"✅ Completed games: {len(completed_games)}")
