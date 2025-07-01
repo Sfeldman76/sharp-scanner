@@ -1565,7 +1565,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
-    df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').astype('Int64')
+    df_scores_out['Sharp_Prob_Shift'] = (
+        pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce')
+        .fillna(0.0)
+        .astype(float)
+    )
     df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
     df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce')
     df_scores_out['Value'] = pd.to_numeric(df_scores_out['Value'], errors='coerce')
