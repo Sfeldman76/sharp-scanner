@@ -1422,14 +1422,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
     
     # === 4. Load recent sharp picks
+    # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
-    df_master = build_game_key(df_master)
+    
+    # ✅ Ensure Merge_Key_Short exists AFTER loading
+    if 'Merge_Key_Short' not in df_master.columns:
+        df_master = build_game_key(df_master)
+    if 'Merge_Key_Short' not in df_scores.columns:
+        df_scores = build_game_key(df_scores)
+    
     df_master = ensure_columns(df_master, ['Game_Start'])
     df_master = df_master[df_master['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
+    
     # === Pull all recent snapshots for those games
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
     df_all_snapshots = df_all_snapshots[df_all_snapshots['Game_Key'].isin(df_master['Game_Key'])]
-    
     # === Normalize for merge
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
