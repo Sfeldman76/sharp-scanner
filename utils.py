@@ -1277,6 +1277,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
     
     if table in allowed_cols and allowed_cols[table] is not None:
         df = df[[col for col in df.columns if col in allowed_cols[table]]]
+        logging.info(f"🧪 Final columns in df before upload: {df.columns.tolist()}")
         missing_cols = [col for col in df.columns if col not in allowed_cols[table]]
         if missing_cols:
             logging.warning(f"⚠️ Columns dropped due to schema mismatch: {missing_cols}")
@@ -1298,6 +1299,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         response = requests.get(url, params={'apiKey': api_key, 'daysFrom': int(days_back)}, timeout=10)
         response.raise_for_status()
         games = response.json()
+        logging.info(f"📦 Total games returned by API: {len(games)}")
+        incomplete = [g for g in games if not g.get("completed")]
+        logging.info(f"🕒 Incomplete games (not marked complete): {len(incomplete)}")
     except Exception as e:
         logging.error(f"❌ Failed to fetch scores: {e}")
         return pd.DataFrame()
@@ -1623,7 +1627,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.exception("❌ Upload to `sharp_scores_full` failed.")
         logging.error("🧪 DataFrame sample:\n" + df_scores_out.head(3).to_string(index=False))
         logging.error("🧪 dtypes:\n" + df_scores_out.dtypes.to_string())
-            
+    # After dedup filtering and before return
+    logging.info(f"🧪 df_scores_out ready for return: {len(df_scores_out)} rows")
+    logging.info(f"🧪 Final sample:\n{df_scores_out[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']].head(3).to_string(index=False)}")
+        
     return df
 
 
