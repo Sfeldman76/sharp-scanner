@@ -1566,13 +1566,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
 
     def coerce_bool(col):
-        return col.astype(str).str.strip().str.lower().isin(['true', '1', '1.0']).astype(bool)
-    
+        return col.astype(str).str.strip().str.lower().isin(['true', '1', '1.0', 'yes']).astype(bool)
+
     df_scores_out['Is_Reinforced_MultiMarket'] = coerce_bool(df_scores_out['Is_Reinforced_MultiMarket'])
     df_scores_out['Market_Leader'] = coerce_bool(df_scores_out['Market_Leader'])
     df_scores_out['LimitUp_NoMove_Flag'] = coerce_bool(df_scores_out['LimitUp_NoMove_Flag'])
     df_scores_out['Scored'] = coerce_bool(df_scores_out['Scored'])
-
 
     df_scores_out['Sport'] = sport_label.upper()
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
@@ -1580,7 +1579,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').fillna(0.0).astype(float)
-
+    for col in ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']:
+        bad_vals = df_scores_out[~df_scores_out[col].astype(str).str.strip().str.lower().isin(['true', '1', '1.0', 'false', '0', '0.0', ''])][col].unique()
+        if len(bad_vals) > 0:
+            logging.warning(f"⚠️ Unexpected values in column {col}: {bad_vals}")
 
   
 
