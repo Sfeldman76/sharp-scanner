@@ -1573,7 +1573,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
    # ✅ Safer boolean coercion function
     def coerce_bool_series(series):
         return series.map(lambda x: str(x).strip().lower() in ['true', '1', '1.0', 'yes']).astype(bool)
-    )
+  
 
     # ✅ Coerce all BigQuery BOOL fields
     bool_cols = ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']
