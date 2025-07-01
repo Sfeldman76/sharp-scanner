@@ -1297,6 +1297,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         games = response.json()
         logging.info(f"📦 Total games returned by API: {len(games)}")
         incomplete = [g for g in games if not g.get("completed")]
+                # Log all games for inspection
+        for i, g in enumerate(games):
+            logging.info(f"[{i+1}] {g.get('home_team')} vs {g.get('away_team')} | "
+                         f"Start: {g.get('commence_time')} | Completed: {g.get('completed')}")
+        
+            # Optionally, dump scores too
+            raw_scores = g.get('scores', [])
+            score_str = ', '.join([f"{s.get('name')}={s.get('score')}" for s in raw_scores])
+            logging.info(f"     Scores: {score_str}")
         logging.info(f"🕒 Incomplete games (not marked complete): {len(incomplete)}")
     except Exception as e:
         logging.error(f"❌ Failed to fetch scores: {e}")
