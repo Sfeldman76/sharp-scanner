@@ -1245,6 +1245,9 @@ def read_recent_sharp_moves(hours=140, table=BQ_FULL_TABLE):
     except Exception as e:
         print(f"❌ Failed to read from BigQuery: {e}")
         return pd.DataFrame()
+
+def force_bool(series):
+    return series.map(lambda x: bool(int(x)) if str(x).strip() in ['0', '1'] else bool(x)).fillna(False).astype(bool)
        
 
 def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=False):
@@ -1569,36 +1572,32 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
-    df_scores_out['Sharp_Prob_Shift'] = (
-        pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce')
-        .fillna(0.0)
-        .astype(float)
-    )
+    df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').fillna(0.0).astype(float)
+
+
+    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].astype(str).str.lower().isin(['true', '1']).astype(bool)
+    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].astype(str).str.lower().isin(['true', '1']).astype(bool)
+    df_scores_out['LimitUp_NoMove_Flag'] = df_scores_out['LimitUp_NoMove_Flag'].astype(str).str.lower().isin(['true', '1']).astype(bool)
+    df_scores_out['Scored'] = df_scores_out['Scored'].astype(str).str.lower().isin(['true', '1']).astype(bool)
+
+
     df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
     df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce')
     df_scores_out['Value'] = pd.to_numeric(df_scores_out['Value'], errors='coerce')
-    df_scores_out['Is_Reinforced_MultiMarket'] = df_scores_out['Is_Reinforced_MultiMarket'].fillna(False).astype(bool)
-    df_scores_out['Market_Leader'] = df_scores_out['Market_Leader'].fillna(False).astype(bool)
-    df_scores_out['LimitUp_NoMove_Flag'] = df_scores_out['LimitUp_NoMove_Flag'].fillna(False).astype(bool)
+   
     df_scores_out['SharpBetScore'] = pd.to_numeric(df_scores_out['SharpBetScore'], errors='coerce')
     df_scores_out['Enhanced_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['Enhanced_Sharp_Confidence_Score'], errors='coerce')
     df_scores_out['True_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['True_Sharp_Confidence_Score'], errors='coerce')
     df_scores_out['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_out['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
     df_scores_out['SHARP_COVER_RESULT'] = df_scores_out['SHARP_COVER_RESULT'].fillna('').astype(str)
-    df_scores_out['Scored'] = df_scores_out['Scored'].fillna(False).astype(bool)
+    
     df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
     df_scores_out['Unique_Sharp_Books'] = pd.to_numeric(df_scores_out['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
     df_scores_out['First_Line_Value'] = pd.to_numeric(df_scores_out['First_Line_Value'], errors='coerce')
     df_scores_out['First_Sharp_Prob'] = pd.to_numeric(df_scores_out['First_Sharp_Prob'], errors='coerce')
     df_scores_out['Line_Delta'] = pd.to_numeric(df_scores_out['Line_Delta'], errors='coerce')
     df_scores_out['Model_Prob_Diff'] = pd.to_numeric(df_scores_out['Model_Prob_Diff'], errors='coerce')
-    df_scores_out['Direction_Aligned'] = (
-        pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce')
-        .fillna(0)
-        .round()
-        .astype('Int64')  # <- nullable integer dtype
-    )
-
+    df_scores_out['Direction_Aligned'] = pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce').fillna(0).round().astype('Int64')
 
     try:
         df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
