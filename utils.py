@@ -1522,7 +1522,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
-    
+    logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
+
     
 
     df_scores_out['Sport'] = sport_label.upper()
@@ -1561,28 +1562,34 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
   
  
         # Debug: ensure schema matches
-    try:
+        try:
         import pyarrow as pa
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
         logging.error("❌ Parquet validation failed before upload")
         logging.error(str(e))
         logging.error("DataFrame dtypes:\n" + df_scores_out.dtypes.to_string())
-        
-    # ✅ Define full deduplication fingerprint (ignore timestamp)
-    dedup_fingerprint_cols = score_cols.copy()  # includes all except timestamp
     
-    # ✅ Remove local exact duplicates before querying BigQuery
+    # ✅ Log BEFORE deduplication
+    pre_dedup_count = len(df_scores_out)
+    logging.info(f"🧪 Before dedup: {pre_dedup_count} rows in df_scores_out")
+    logging.info(f"🧪 Sports in df_scores_out: {df_scores_out['Sport'].unique().tolist()}")
+    logging.info(f"🧪 Snapshot_Timestamp range: {df_scores_out['Snapshot_Timestamp'].min()} to {df_scores_out['Snapshot_Timestamp'].max()}")
+    
+    # ✅ Define deduplication fingerprint (exclude timestamp)
+    dedup_fingerprint_cols = score_cols.copy()
+    
+    # ✅ Drop exact in-memory duplicates first
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
     
-    # ✅ Query BigQuery for existing fingerprints (same line state, any time)
+    # ✅ Query BigQuery for existing rows
     existing = bq_client.query(f"""
         SELECT DISTINCT {', '.join(dedup_fingerprint_cols)}
         FROM `sharp_data.sharp_scores_full`
         WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
     """).to_dataframe()
     
-    # ✅ Remove already-existing line states (not new even if timestamp is different)
+    # ✅ Dedup against BigQuery
     df_scores_out = df_scores_out.merge(
         existing,
         on=dedup_fingerprint_cols,
@@ -1591,11 +1598,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
     
+    # ✅ Log after dedup
+    logging.info(f"🧪 After dedup merge: {len(df_scores_out)} rows remain")
+    
+    # ✅ If no new rows left, return
     if df_scores_out.empty:
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
         return df, pd.DataFrame()
-
     
+    # ✅ Upload
     to_gbq(
         df_scores_out,
         destination_table='sharp_data.sharp_scores_full',
@@ -1603,7 +1614,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         if_exists='append'
     )
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
-
+    
     return df
 def compute_and_write_market_weights(df):
     import pandas as pd
