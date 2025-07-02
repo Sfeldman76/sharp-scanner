@@ -1519,6 +1519,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         on='Merge_Key_Short', how='inner'
     )
     df['Sport'] = sport_label.upper()
+    # 🛠️ Reassign Merge_Key_Short if missing
+    if 'Merge_Key_Short' not in df.columns or df['Merge_Key_Short'].isnull().any():
+        logging.warning("⚠️ Merge_Key_Short missing or null — rebuilding from home/away/start")
+        df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
+        df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
+        df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+        df['Merge_Key_Short'] = df.apply(lambda row: build_merge_key(row['Home_Team_Norm'], row['Away_Team_Norm'], row['Commence_Hour']), axis=1)
+
     df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
     df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
     
