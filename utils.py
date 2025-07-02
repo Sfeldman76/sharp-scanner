@@ -1447,8 +1447,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master = df_master[df_master['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
     
     # === Pull all recent snapshots for those games
+    # ✅ Use all Game_Keys from newly uploaded scores to build df_first
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
-    df_all_snapshots = df_all_snapshots[df_all_snapshots['Game_Key'].isin(df_master['Game_Key'])]
+    df_all_snapshots = df_all_snapshots[df_all_snapshots['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
     # === Normalize for merge
     # === Normalize for merge safety
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
