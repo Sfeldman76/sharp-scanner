@@ -1660,6 +1660,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
  
 
     df_scores_out['Sport'] = sport_label.upper()
+    # === Normalize and unify sport labels
+    df_scores_out['Sport'] = df_scores_out['Sport'].replace({
+        'BASEBALL_MLB': 'MLB',
+        'BASKETBALL_NBA': 'NBA',
+        'BASKETBALL_WNBA': 'WNBA',
+        'FOOTBALL_CFL': 'CFL',
+        'MLB': 'MLB',  # handles redundancy safely
+        'NBA': 'NBA',
+        'WNBA': 'WNBA',
+        'CFL': 'CFL'
+   
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
