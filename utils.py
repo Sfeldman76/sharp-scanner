@@ -10,7 +10,7 @@ import numpy as np
 import logging
 import hashlib
 import time
-
+import json
 
 from pandas_gbq import to_gbq
 import traceback
