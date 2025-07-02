@@ -1163,6 +1163,7 @@ def render_scanner_tab(label, sport_key, container):
     #if not market_weights:
         #st.error("❌ No market weights found. Cannot compute confidence scores.")
         #return
+    st_autorefresh(interval=180 * 1000, key=f"{label}_scanner_refresh")
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
 
@@ -1965,7 +1966,7 @@ def render_scanner_tab(label, sport_key, container):
         st.subheader(f"📊 Live Odds Snapshot – {label} (Odds + Limit)")
     
         # ✅ Only this block will autorefresh
-        st_autorefresh(interval=180 * 1000, key=f"{label}_odds_refresh")  # every 3 minutes
+        #st_autorefresh(interval=180 * 1000, key=f"{label}_odds_refresh")  # every 3 minutes
     
         # === Live odds fetch + display logic
         live = fetch_live_odds(sport_key)
