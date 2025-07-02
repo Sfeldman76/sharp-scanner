@@ -1278,9 +1278,11 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp',
             'Sport', 'Value', 'First_Line_Value', 'First_Sharp_Prob',
             'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
-            'Unique_Sharp_Books'
+            'Unique_Sharp_Books', 'Merge_Key_Short'  # ✅ Add this line
         ]
     }
+
+
 
     if table in allowed_cols:
         # Fill missing expected columns with None
