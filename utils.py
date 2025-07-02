@@ -1516,21 +1516,30 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
     
     # ✅ Now the first values are present → safe to compute delta features
+    # Coerce numeric inputs safely
     df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
     df['Model_Prob_Diff'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
     
-   # Match Python indicator logic — same direction = aligned
-    df['Direction_Aligned'] = np.where(
-        ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] > 0)) |
-        ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] < 0)),
-        1,
-        np.where(
-            ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] < 0)) |
-            ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] > 0)),
-            0,
-            pd.NA
-        )
-    ).astype('Int64')  # ✅ Use nullable integer type
+    # Log dtypes for debugging
+    logging.info(df[['Line_Delta', 'Model_Prob_Diff']].dtypes)
+    
+    # --- Create Boolean masks for alignment logic
+    mask_aligned = ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] > 0)) | \
+                   ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] < 0))
+    
+    mask_conflict = ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] < 0)) | \
+                    ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] > 0))
+    
+    # Initialize column with pd.NA
+    df['Direction_Aligned'] = pd.NA
+    
+    # Assign values using masks
+    df.loc[mask_aligned, 'Direction_Aligned'] = 1
+    df.loc[mask_conflict, 'Direction_Aligned'] = 0
+    
+    # Cast to nullable Int64 for safety with pd.NA
+    df['Direction_Aligned'] = df['Direction_Aligned'].astype('Int64')
+
     
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
 
