@@ -1518,14 +1518,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
         on='Merge_Key_Short', how='inner'
     )
+    # ✅ Reassign Merge_Key_Short from df_master using Game_Key
+    if 'Merge_Key_Short' in df_master.columns:
+        logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
+        df = df.drop(columns=['Merge_Key_Short'], errors='ignore')
+        df = df.merge(df_master[['Game_Key', 'Merge_Key_Short']], on='Game_Key', how='left')
+    null_count = df['Merge_Key_Short'].isnull().sum()
+    logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
     df['Sport'] = sport_label.upper()
     # 🛠️ Reassign Merge_Key_Short if missing
-    if 'Merge_Key_Short' not in df.columns or df['Merge_Key_Short'].isnull().any():
-        logging.warning("⚠️ Merge_Key_Short missing or null — rebuilding from home/away/start")
-        df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-        df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-        df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-        df['Merge_Key_Short'] = df.apply(lambda row: build_merge_key(row['Home_Team_Norm'], row['Away_Team_Norm'], row['Commence_Hour']), axis=1)
+   
 
     df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
     df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
