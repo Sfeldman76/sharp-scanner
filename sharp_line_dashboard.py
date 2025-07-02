@@ -2068,7 +2068,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     from google.cloud import bigquery
     client = bigquery.Client(project="sharplogger", location="us")
 
-    # ✅ Only this line sets the normalized label
+    # Map for sharp_moves_master only
     sport_label_upper = {
         "MLB": "BASEBALL_MLB",
         "NBA": "BASKETBALL_NBA",
@@ -2078,21 +2078,24 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
 
     with tab:
         st.subheader(f"📈 Model Confidence Calibration – {sport_label}")
-     
-        # === Load data
+
         try:
+            # ✅ sharp_moves_master uses verbose sport label
             df_master = client.query(f"""
                 SELECT * FROM `sharplogger.sharp_data.sharp_moves_master`
                 WHERE Sport = '{sport_label_upper}'
             """).to_dataframe()
 
+            # ✅ sharp_scores_full uses short sport label like 'MLB'
             df_scores = client.query(f"""
                 SELECT * FROM `sharplogger.sharp_data.sharp_scores_full`
-                WHERE Sport = '{sport_label_upper}'
+                WHERE Sport = '{sport_label.upper()}'
             """).to_dataframe()
+
         except Exception as e:
             st.error(f"❌ Failed to load BigQuery data: {e}")
             return
+
         st.info(f"✅ Loaded Sport Filter: sport_label = '{sport_label}', sport_label_upper = '{sport_label_upper}'")
         st.info(f"📦 df_master rows: {len(df_master)}")
         st.info(f"📦 df_scores rows: {len(df_scores)}")
