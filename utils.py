@@ -1440,6 +1440,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
     df_all_snapshots = df_all_snapshots[df_all_snapshots['Game_Key'].isin(df_master['Game_Key'])]
     # === Normalize for merge
+    # === Normalize for merge safety
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
         df_master[col] = df_master[col].astype(str).str.strip().str.lower()
@@ -1454,11 +1455,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
         })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
     )
-
+    
+    # 🔍 Debug: validate uniqueness
+    num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
+    logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
+    
+    # 🚨 Warn if duplicates still slipped through
+    if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
+        logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
     if df_master.empty:
         logging.warning("⚠️ No sharp picks to backtest")
         return pd.DataFrame()
-    import json
+    
 
     logging.info(f"🔍 df_master shape: {df_master.shape}")
     logging.info("🔍 df_master columns: %s", json.dumps(df_master.columns.tolist()))
@@ -1472,7 +1480,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
         how='left'
     )
-    
+    # === Diagnostic: Check for inconsistent first line values per group
+    duplicates = (
+        df_master.groupby(['Game_Key', 'Bookmaker'])['First_Line_Value']
+        .nunique()
+        .reset_index(name='unique_first_lines')
+        .query('unique_first_lines > 1')
+    )
+
+    if not duplicates.empty:
+        logging.warning("⚠️ Detected multiple First_Line_Values per Game_Key + Bookmaker:")
+    logging.warning(duplicates.to_string(index=False))
     # === 5. Merge scores and filter
     df = df_master.merge(
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
