@@ -2122,7 +2122,35 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
             .drop_duplicates(subset=merge_keys)
         )
         df_master = df_master.drop_duplicates(subset=merge_keys)
+
+        merge_keys = ['Game_Key', 'Bookmaker', 'Market', 'Outcome']
+
+        st.info(f"🔍 df_master shape: {df_master.shape}")
+        st.info(f"🔍 df_scores shape: {df_scores.shape}")
         
+        st.info("🔍 Checking unique keys in each DataFrame...")
+        st.write("df_master keys:", df_master[merge_keys].drop_duplicates().head())
+        st.write("df_scores keys:", df_scores[merge_keys].drop_duplicates().head())
+        df_master_keys = df_master[merge_keys].drop_duplicates()
+        df_scores_keys = df_scores_filtered[merge_keys].drop_duplicates()
+        
+        merge_check = df_master_keys.merge(
+            df_scores_keys,
+            on=merge_keys,
+            how='outer',
+            indicator=True
+        )
+        
+        only_in_master = merge_check[merge_check['_merge'] == 'left_only']
+        only_in_scores = merge_check[merge_check['_merge'] == 'right_only']
+        
+        st.warning(f"🔍 Unmatched keys — only in sharp_moves_master: {len(only_in_master)}")
+        st.warning(f"🔍 Unmatched keys — only in sharp_scores_full: {len(only_in_scores)}")
+        
+        if not only_in_master.empty:
+            st.dataframe(only_in_master.head(5))
+        if not only_in_scores.empty:
+            st.dataframe(only_in_scores.head(5))
         # === Merge
         df = df_master.merge(df_scores_filtered, on=merge_keys, how='inner')
         
