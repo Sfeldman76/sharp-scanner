@@ -1450,8 +1450,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_master = build_game_key(df_master)
     if 'Merge_Key_Short' not in df_scores.columns:
         df_scores = build_game_key(df_scores)
-    df_master['Sport'] = sport_label.upper()
-    df['Sport'] = sport_label.upper()
+ 
     df_master = ensure_columns(df_master, ['Game_Start'])
     df_master = df_master[df_master['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
     
@@ -1500,6 +1499,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
         how='left'
     )
+    df_master['Sport'] = sport_label.upper()
+    df['Sport'] = sport_label.upper()
     # === Diagnostic: Check for inconsistent first line values per group
     duplicates = (
         df_master.groupby(['Game_Key', 'Bookmaker'])['First_Line_Value']
@@ -1776,42 +1777,29 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         indicator=True
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
-    
+
     # ✅ Final logs
     logging.info(f"🧪 Remaining new rows after dedup merge: {len(df_scores_out)}")
     
-        
     # ✅ If no new rows left, return
     if df_scores_out.empty:
         logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
-        return df, pd.DataFrame()
-    # ✅ Debug schema before upload
-  
+        return pd.DataFrame()
+    
+    # ✅ Debug schema before return
     try:
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
-        logging.error("❌ Parquet conversion failure immediataly before upload:")
+        logging.error("❌ Parquet conversion failure immediataly before return:")
         logging.error(str(e))
         for col in df_scores_out.columns:
             logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].dropna().unique()[:5].tolist()}")
-
-    try:
-        to_gbq(
-            df_scores_out,
-            destination_table='sharp_data.sharp_scores_full',
-            project_id=GCP_PROJECT_ID,
-            if_exists='append'
-        )
-        logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to `sharp_data.sharp_scores_full`")
-    except Exception as e:
-        logging.exception("❌ Upload to `sharp_scores_full` failed.")
-        logging.error("🧪 DataFrame sample:\n" + df_scores_out.head(3).to_string(index=False))
-        logging.error("🧪 dtypes:\n" + df_scores_out.dtypes.to_string())
-    # After dedup filtering and before return
+    
     logging.info(f"🧪 df_scores_out ready for return: {len(df_scores_out)} rows")
     logging.info(f"🧪 Final sample:\n{df_scores_out[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']].head(3).to_string(index=False)}")
-        
-    return df
+    
+    return df_scores_out
+
 
 
 
