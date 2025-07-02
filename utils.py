@@ -848,6 +848,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         for book in game.get('bookmakers', []):
             book_key_raw = book.get('key', '').lower()
             book_key = normalize_book_key(book_key_raw, SHARP_BOOKS, REC_BOOKS)
+
+            # 🚫 Skip if book is not allowed
+            if book_key not in SHARP_BOOKS + REC_BOOKS:
+                continue
+            
             book_title = book.get('title', book_key)
 
             for market in book.get('markets', []):
