@@ -2064,15 +2064,21 @@ def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.Dat
         st.error(f"❌ Failed to load predictions: {e}")
         return pd.DataFrame()
 
-
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
     from google.cloud import bigquery
     client = bigquery.Client(project="sharplogger", location="us")
 
+    # ✅ Only this line sets the normalized label
+    sport_label_upper = {
+        "MLB": "BASEBALL_MLB",
+        "NBA": "BASKETBALL_NBA",
+        "WNBA": "BASKETBALL_WNBA",
+        "CFL": "AMERICANFOOTBALL_CFL"
+    }.get(sport_label.upper(), sport_label.upper())
+
     with tab:
         st.subheader(f"📈 Model Confidence Calibration – {sport_label}")
-        sport_label_upper = sport_label.upper()
-
+     
         # === Load data
         try:
             df_master = client.query(f"""
