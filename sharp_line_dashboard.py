@@ -669,13 +669,13 @@ def compute_diagnostics_vectorized(df):
             
             # === Step 4: Line/Model Direction (string label version)
             direction = np.where(
-                (df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] < 0), "🟢 Model ↑ / Line ↓",
+                (df['Model_Prob_Diff'] > 0.0) & (df['Line_Delta'] < 0), "🟢 Model ↑ / Line ↓",
                 np.where(
-                    (df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] > 0), "🔴 Model ↓ / Line ↑",
+                    (df['Model_Prob_Diff'] < 0.0) & (df['Line_Delta'] > 0), "🔴 Model ↓ / Line ↑",
                     np.where(
-                        (df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] > 0), "🟢 Aligned ↑",
+                        (df['Model_Prob_Diff'] > 0.0) & (df['Line_Delta'] > 0), "🟢 Aligned ↑",
                         np.where(
-                            (df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] < 0), "🔻 Aligned ↓",
+                            (df['Model_Prob_Diff'] < 0.0) & (df['Line_Delta'] < 0), "🔻 Aligned ↓",
                             "⚪ Mixed"
                         )
                     )
