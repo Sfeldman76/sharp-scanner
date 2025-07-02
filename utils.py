@@ -991,13 +991,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Post_Game'] = ~df['Pre_Game']
     # === Confidence scores and tiers
     df = assign_confidence_scores(df, weights)
-    # === Normalize Sport column to unify labels
-    df['Sport'] = df['Sport'].replace({
-        'BASEBALL_MLB': 'MLB',
-        'BASKETBALL_NBA': 'NBA',
-        'BASKETBALL_WNBA': 'WNBA',
-        'FOOTBALL_CFL': 'CFL'
-    }).str.upper()
+  
 
     
     # === Summary consensus metrics
