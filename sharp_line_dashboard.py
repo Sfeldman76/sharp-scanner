@@ -681,27 +681,29 @@ def compute_diagnostics_vectorized(df):
             except:
                 return 1  # Fallback: neutral sign
         
-        df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
-        df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
-        
-        # === Step 4: Line/Model Direction (string label version)
-        direction = np.where(
-            (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] > 0), "🟢 Aligned ↑",
-            np.where(
-                (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] < 0), "🔻 Aligned ↓",
-                np.where(
-                    (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] < 0), "🔴 Model ↑ / Line ↓",
-                    np.where(
-                        (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] > 0), "🔴 Model ↓ / Line ↑",
-                        "⚪ Mixed"
-                    )
-                )
-            )
-        )
-
+        if 'Model_Prob_Diff' not in df.columns or 'Line_Delta' not in df.columns:
             confidence_trend = ["⚠️ Missing"] * len(df)
             direction = ["⚠️ Missing"] * len(df)
             st.warning("⚠️ Missing probability columns for trend/direction.")
+        else:
+            # === Step 3b
+            df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
+            df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
+        
+            # === Step 4: Label
+            direction = np.where(
+                (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] > 0), "🟢 Aligned ↑",
+                np.where(
+                    (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] < 0), "🔻 Aligned ↓",
+                    np.where(
+                        (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] < 0), "🔴 Model ↑ / Line ↓",
+                        np.where(
+                            (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] > 0), "🔴 Model ↓ / Line ↑",
+                            "⚪ Mixed"
+                        )
+                    )
+                )
+            )
 
         # === Step 5: Why Model Likes It
         prob = (
