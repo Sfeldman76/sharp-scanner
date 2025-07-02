@@ -1516,29 +1516,41 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
     
     # ✅ Now the first values are present → safe to compute delta features
-    # Coerce numeric inputs safely
-    df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
-    df['Model_Prob_Diff'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
+    # === Step 3a: Compute model probability shift
+    df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce') - pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+    df['Line_Delta'] = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
     
-     # Log dtypes for debugging
-    logging.info(df[['Line_Delta', 'Model_Prob_Diff']].dtypes)
+    # === Step 3b: Compute adjusted support direction (temporary)
+    def get_line_support_sign(row):
+        try:
+            market = str(row.get('Market', '')).lower()
+            outcome = str(row.get('Outcome', '')).lower()
+            first_line = pd.to_numeric(row.get('First_Line_Value'), errors='coerce')
     
-    # --- Create Boolean masks for alignment logic
-    mask_aligned = ((df['Model_Prob_Diff'] > 0) & (df['Line_Delta'] > 0)) | \
-                   ((df['Model_Prob_Diff'] < 0) & (df['Line_Delta'] < 0))
+            if market == 'totals':
+                return -1 if outcome == 'under' else 1
+            else:
+                return -1 if first_line < 0 else 1
+        except:
+            return 1
     
-    mask_conflict = ((df['Model_Prob_Diff'] > 0) & (df['Line_Delta'] < 0)) | \
-                    ((df['Model_Prob_Diff'] < 0) & (df['Line_Delta'] > 0))
+    df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
+    df['Adjusted_Line_Delta'] = df['Line_Delta'] * df['Line_Support_Sign']
     
-    # Initialize column with pd.NA
+    # === Step 4: Direction_Aligned (boolean)
+    mask_aligned = ((df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] > 0)) | \
+                   ((df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] < 0))
+    
+    mask_conflict = ((df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] < 0)) | \
+                    ((df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] > 0))
+    
     df['Direction_Aligned'] = pd.NA
-    
-    # Assign 1 to aligned, 0 to conflict
     df.loc[mask_aligned, 'Direction_Aligned'] = 1
     df.loc[mask_conflict, 'Direction_Aligned'] = 0
-    
-    # Cast to nullable Int64
     df['Direction_Aligned'] = df['Direction_Aligned'].astype('Int64')
+    
+    # === Step 5: Clean up temp columns (optional before upload)
+    df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
 
     
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
