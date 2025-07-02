@@ -663,25 +663,42 @@ def compute_diagnostics_vectorized(df):
                 )
             )
 
-            # === Step 3a: Compute model probability shift
-            df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model Prob'), errors='coerce') - pd.to_numeric(df.get('First_Model_Prob'), errors='coerce')
-            df['Line_Delta'] = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
-            
-            # === Step 4: Line/Model Direction (string label version)
-            direction = np.where(
-                (df['Model_Prob_Diff'] > 0.0) & (df['Line_Delta'] < 0), "🟢 Model ↑ / Line ↓",
+        # === Step 3a: Compute model probability shift
+        df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model Prob'), errors='coerce') - pd.to_numeric(df.get('First_Model_Prob'), errors='coerce')
+        df['Line_Delta'] = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
+        
+        # === Step 3b: Compute adjusted support direction (for all market types)
+        def get_line_support_sign(row):
+            try:
+                market = str(row.get('Market', '')).lower()
+                outcome = str(row.get('Outcome', '')).lower()
+                first_line = pd.to_numeric(row.get('First_Line_Value'), errors='coerce')
+        
+                if market == 'totals':
+                    return -1 if outcome == 'under' else 1
+                else:
+                    return -1 if first_line < 0 else 1
+            except:
+                return 1  # Fallback: neutral sign
+        
+        df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
+        df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
+        
+        # === Step 4: Line/Model Direction (string label version)
+        direction = np.where(
+            (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] > 0), "🟢 Aligned ↑",
+            np.where(
+                (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] < 0), "🔻 Aligned ↓",
                 np.where(
-                    (df['Model_Prob_Diff'] < 0.0) & (df['Line_Delta'] > 0), "🔴 Model ↓ / Line ↑",
+                    (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] < 0), "🔴 Model ↑ / Line ↓",
                     np.where(
-                        (df['Model_Prob_Diff'] > 0.0) & (df['Line_Delta'] > 0), "🟢 Aligned ↑",
-                        np.where(
-                            (df['Model_Prob_Diff'] < 0.0) & (df['Line_Delta'] < 0), "🔻 Aligned ↓",
-                            "⚪ Mixed"
-                        )
+                        (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] > 0), "🔴 Model ↓ / Line ↑",
+                        "⚪ Mixed"
                     )
                 )
             )
-        else:
+        )
+
             confidence_trend = ["⚠️ Missing"] * len(df)
             direction = ["⚠️ Missing"] * len(df)
             st.warning("⚠️ Missing probability columns for trend/direction.")
