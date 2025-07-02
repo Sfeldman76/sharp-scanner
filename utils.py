@@ -1434,6 +1434,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 4. Load recent sharp picks
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
+    df_master = build_game_key(df_master)
     # === Filter out games already scored in sharp_scores_full
     scored_keys = bq_client.query("""
         SELECT DISTINCT Merge_Key_Short
@@ -1635,12 +1636,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
         'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
-        'Scored', 'Sport', 'Value',
+        'Scored', 'Sport', 'Value','Merge_Key_Short',
         'First_Line_Value', 'First_Sharp_Prob',         # ✅ new
-        'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned'  # ✅ new
-    ]
+        'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',  'Home_Team_Norm',
+        'Away_Team_Norm',
+        'Commence_Hour',   # ✅ new
+        ]
 
     
+    df = build_game_key(df)
+
      
     # Build full output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
