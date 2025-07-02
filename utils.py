@@ -1645,13 +1645,19 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     
     
-     
-    # Build full output
-    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
-
-    logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
+    logging.info("🧪 Checking fields for merge key build")
+    logging.info(df[['Game', 'Game_Start', 'Market', 'Outcome']].dropna().head().to_string(index=False))
+    
+    # ✅ Must build keys BEFORE slicing or upload
     df = build_game_key(df)
-   # ✅ Safer boolean coercion function
+    
+    logging.info("🧪 Post-build key columns:")
+    logging.info(df[['Game_Key', 'Merge_Key_Short', 'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour']].head().to_string(index=False))
+    
+    # === Final output
+    df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
+    logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
+
     def coerce_bool_series(series):
         return series.map(lambda x: str(x).strip().lower() in ['true', '1', '1.0', 'yes']).astype(bool)
   
