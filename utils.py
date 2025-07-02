@@ -1670,8 +1670,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'NBA': 'NBA',
         'WNBA': 'WNBA',
         'CFL': 'CFL'
-   
+    }).str.upper()
+    
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
+
+
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
