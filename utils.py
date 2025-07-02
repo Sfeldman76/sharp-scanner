@@ -1426,7 +1426,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 4. Load recent sharp picks
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
+    # === Filter out games already scored in sharp_scores_full
+    scored_keys = bq_client.query("""
+        SELECT DISTINCT Merge_Key_Short
+        FROM `sharplogger.sharp_data.sharp_scores_full`
+        WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+    """).to_dataframe()
     
+    already_scored = set(scored_keys['Merge_Key_Short'].dropna())
+    
+    df_scores = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
+    logging.info(f"✅ Remaining unscored completed games: {len(df_scores)}")
     # ✅ Ensure Merge_Key_Short exists AFTER loading
     if 'Merge_Key_Short' not in df_master.columns:
         df_master = build_game_key(df_master)
