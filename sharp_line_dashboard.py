@@ -2093,6 +2093,14 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api):
         except Exception as e:
             st.error(f"❌ Failed to load BigQuery data: {e}")
             return
+        st.info(f"✅ Loaded Sport Filter: sport_label = '{sport_label}', sport_label_upper = '{sport_label_upper}'")
+        st.info(f"📦 df_master rows: {len(df_master)}")
+        st.info(f"📦 df_scores rows: {len(df_scores)}")
+        
+        if df_master.empty:
+            st.error("❌ df_master is EMPTY!")
+        if df_scores.empty:
+            st.error("❌ df_scores is EMPTY!")
 
         if df_master.empty or df_scores.empty:
             st.warning(f"⚠️ No sharp picks found for {sport_label}")
