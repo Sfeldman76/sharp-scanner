@@ -1490,15 +1490,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Direction_Aligned'] = np.where(
         ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] > 0)) |
         ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] < 0)),
-        1,  # aligned
+        1,
         np.where(
             ((df['Model_Prob_Diff'] > 0.04) & (df['Line_Delta'] < 0)) |
             ((df['Model_Prob_Diff'] < -0.04) & (df['Line_Delta'] > 0)),
-            0,  # conflict
-            np.nan  # stable or mixed
+            0,
+            pd.NA
         )
-    ).astype('int')  # ✅ standard int is safe  # nullable integer
-
+    ).astype('Int64')  # ✅ Use nullable integer type
+    
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
 
     
