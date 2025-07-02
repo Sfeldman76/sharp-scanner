@@ -1305,7 +1305,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
-    df['Sport'] = sport_label.upper()
+  
 
     # === 1. Fetch completed games ===
     try:
@@ -1500,7 +1500,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         how='left'
     )
     df_master['Sport'] = sport_label.upper()
-    df['Sport'] = sport_label.upper()
+
     # === Diagnostic: Check for inconsistent first line values per group
     duplicates = (
         df_master.groupby(['Game_Key', 'Bookmaker'])['First_Line_Value']
@@ -1517,6 +1517,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
         on='Merge_Key_Short', how='inner'
     )
+    df['Sport'] = sport_label.upper()
     df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
     df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
     
