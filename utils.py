@@ -1322,9 +1322,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         scores = game.get("scores")
         if not isinstance(scores, list):
             logging.warning(f"⚠️ Game missing or invalid 'scores': {game}")
-            return game.get("completed", False)
-        return game.get("completed", False) or all(s.get("score") is not None for s in scores)
-
+            return False  # definitely incomplete
+        return game.get("completed", False) and all(s.get("score") is not None for s in scores)
 
     completed_games = [g for g in games if is_completed(g)]
     logging.info(f"✅ Completed games: {len(completed_games)}")
