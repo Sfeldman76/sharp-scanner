@@ -1668,10 +1668,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Process Data
     # Apply the batch processing function to your data
     df_master = process_in_batches(df_master, df_first, df_scores_needed, batch_size=3000)
-    
+    logging.info(f"✅ After merge: df_master columns: {df_master.columns.tolist()}")
+    logging.info(f"🧪 Sample First_Sharp_Prob:\n{df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False)}")
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-    
+    # 🧹 If multiple First_Sharp_Prob_* columns exist, deduplicate them
+    if 'First_Sharp_Prob_x' in df_master.columns and 'First_Sharp_Prob_y' in df_master.columns:
+        df_master['First_Sharp_Prob'] = df_master['First_Sharp_Prob_x'].combine_first(df_master['First_Sharp_Prob_y'])
+        df_master['First_Line_Value'] = df_master['First_Line_Value_x'].combine_first(df_master['First_Line_Value_y'])
+        df_master.drop(columns=[c for c in df_master.columns if c.endswith('_x') or c.endswith('_y')], inplace=True)
     # === Continue with further operations (e.g., reassigning Merge_Key_Short, computing model probabilities, etc.)
     
     # Ensure 'Merge_Key_Short' is present in df_all_snapshots
@@ -1694,7 +1699,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master['Bookmaker'] = df_master['Bookmaker'].astype('category')
     
     # === Merge first snapshot into master before scoring
-    df_master = df_master.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+    #df_master = df_master.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
     
     # Free memory after merge
     del df_first
