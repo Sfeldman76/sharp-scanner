@@ -1475,9 +1475,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"After join: df shape = {df.shape}")
     
     # === Pull all recent snapshots for those games
-    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
+    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
     df_all_snapshots = build_game_key(df_all_snapshots)  # Ensure Merge_Key_Short is built
+    logging.info(f"After build_game_key - df_all_snapshots columns: {df_all_snapshots.columns.tolist()}")
+    logging.info(f"After build_game_key - df_scores_needed columns: {df_scores_needed.columns.tolist()}")
+    
+    # Filter df_all_snapshots based on Merge_Key_Short
     df_all_snapshots = df_all_snapshots[df_all_snapshots['Merge_Key_Short'].isin(df_scores_needed['Merge_Key_Short'])]
+    
+    # Optionally log the shape of df_all_snapshots after filtering
+    logging.info(f"After filtering, df_all_snapshots shape: {df_all_snapshots.shape}")
+
 
     # === Normalize for merge
     # === Normalize for merge safety
