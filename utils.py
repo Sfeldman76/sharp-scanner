@@ -107,7 +107,10 @@ def compute_line_hash(row):
         return hashlib.md5(key.encode()).hexdigest()
     except Exception as e:
         return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
-
+def log_memory(msg=""):
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info()
+    logging.info(f"🔍 Memory {msg}: RSS={mem.rss / 1024 / 1024:.2f} MB, VMS={mem.vms / 1024 / 1024:.2f} MB")
 
 def build_game_key(df):
     required = ['Game', 'Game_Start', 'Market', 'Outcome']
