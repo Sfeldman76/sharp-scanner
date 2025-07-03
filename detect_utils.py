@@ -31,7 +31,8 @@ from utils import (
     normalize_book_key, 
     apply_sharp_scoring,
     compute_sharp_metrics,
-    compute_sharp_prob_shift
+    compute_sharp_prob_shift,
+    log_memory
 )
 
 def detect_and_save_all_sports():
