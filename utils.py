@@ -1693,12 +1693,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_needed.loc[:, 'Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
     
     # Deduplicate to avoid row explosion
-    df_scores_needed = (
-        df_scores_needed
-        .sort_values('Inserted_Timestamp', ascending=True, errors='ignore')  # optional if available
-        .drop_duplicates(subset='Merge_Key_Short', keep='last')
-    )
-    
+    # Deduplicate to avoid row explosion (optional sort if timestamp is available)
+    if 'Inserted_Timestamp' in df_scores_needed.columns:
+        df_scores_needed = (
+            df_scores_needed
+            .sort_values('Inserted_Timestamp', ascending=True)
+            .drop_duplicates(subset='Merge_Key_Short', keep='last')
+        )
+    else:
+        df_scores_needed = df_scores_needed.drop_duplicates(subset='Merge_Key_Short', keep='last')
+        
     # Log shape before merge
     log_memory("BEFORE merge with df_scores_needed")
     logging.info(f"df_master shape: {df_master.shape}, df_scores_needed shape: {df_scores_needed.shape}")
