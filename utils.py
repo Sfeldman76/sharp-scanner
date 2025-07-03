@@ -1566,9 +1566,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-    
+
+
     # === Build FIRST snapshot by pick (only once)
     if 'df_first' not in locals():
+        # Reduce df_first to only necessary columns before the merge to save memory
         df_first = (
             df_all_snapshots_filtered
             .sort_values('Snapshot_Timestamp')
@@ -1579,6 +1581,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
         )
     
+        # Convert relevant columns to category type before merging to save memory
+        df_first['Game_Key'] = df_first['Game_Key'].astype('category')
+        df_first['Market'] = df_first['Market'].astype('category')
+        df_first['Outcome'] = df_first['Outcome'].astype('category')
+        df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
+    
         # Debug: validate uniqueness
         num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
         logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
@@ -1587,32 +1595,33 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
             logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
     
-    # Convert relevant columns to category type before merging to save memory
+    # === Convert df_master columns to category type to reduce memory usage before merge
     df_master['Game_Key'] = df_master['Game_Key'].astype('category')
     df_master['Market'] = df_master['Market'].astype('category')
     df_master['Outcome'] = df_master['Outcome'].astype('category')
     df_master['Bookmaker'] = df_master['Bookmaker'].astype('category')
     
-    df_first['Game_Key'] = df_first['Game_Key'].astype('category')
-    df_first['Market'] = df_first['Market'].astype('category')
-    df_first['Outcome'] = df_first['Outcome'].astype('category')
-    df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
-    
-    # Merge first snapshot into master before scoring
+    # === Merge first snapshot into master before scoring
     df_master = df_master.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
     
     # Free memory after merge
     del df_first
     gc.collect()
     
-    # Merge scores and filter
-    df = df_master.merge(df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']], on='Merge_Key_Short', how='inner')
+    # === Merge scores and filter (merge in batches if needed to reduce memory overhead)
+    df_scores_needed = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
+    
+    # Convert Merge_Key_Short to category in df_scores_needed to save memory
+    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
+    
+    # Perform the merge operation (this can be done in batches if df_scores is large)
+    df = df_master.merge(df_scores_needed, on='Merge_Key_Short', how='inner')
     
     # Free memory after merge
-    del df_scores
+    del df_scores_needed
     gc.collect()
     
-    # Reassign Merge_Key_Short from df_master using Game_Key
+    # === Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
         logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
         df = df.drop(columns=['Merge_Key_Short'], errors='ignore')
@@ -1623,7 +1632,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
     df['Sport'] = sport_label.upper()
     
-    # Clean up temp columns
+    # === Clean up temp columns (optional before upload)
     # Step 3a: Compute model probability shift and line delta in a vectorized way
     df['Model_Prob_Diff'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
     df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
@@ -1653,13 +1662,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Final logging
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
-
+    
     # === 6. Calculate result
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
     if df_valid.empty:
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
-
+    
 
     
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
