@@ -1587,11 +1587,30 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
             logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
     
-    # === Merge first snapshot into master before scoring
+    # Convert relevant columns to category type before merging to save memory
+    df_master['Game_Key'] = df_master['Game_Key'].astype('category')
+    df_master['Market'] = df_master['Market'].astype('category')
+    df_master['Outcome'] = df_master['Outcome'].astype('category')
+    df_master['Bookmaker'] = df_master['Bookmaker'].astype('category')
+    
+    df_first['Game_Key'] = df_first['Game_Key'].astype('category')
+    df_first['Market'] = df_first['Market'].astype('category')
+    df_first['Outcome'] = df_first['Outcome'].astype('category')
+    df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
+    
+    # Merge first snapshot into master before scoring
     df_master = df_master.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
     
-    # === Merge scores and filter
+    # Free memory after merge
+    del df_first
+    gc.collect()
+    
+    # Merge scores and filter
     df = df_master.merge(df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']], on='Merge_Key_Short', how='inner')
+    
+    # Free memory after merge
+    del df_scores
+    gc.collect()
     
     # Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
@@ -1628,13 +1647,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Assign Direction_Aligned
     df['Direction_Aligned'] = np.where(mask_aligned, 1, np.where(mask_conflict, 0, pd.NA))
     df['Direction_Aligned'] = df['Direction_Aligned'].astype('Int64')  # Using Int64 to handle missing values properly
-
     
-    # === Step 5: Clean up temp columns (optional before upload)
+    # Clean up temp columns after computation
     df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
     
+    # Final logging
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
-    
+
     # === 6. Calculate result
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
     if df_valid.empty:
