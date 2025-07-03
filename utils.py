@@ -1441,6 +1441,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
 
     # Function to optimize and process in chunks
+
+
+    # Function to process chunks of data (sorting and deduplication)
     def process_chunk(df_chunk):
         # Convert string columns to categorical for memory efficiency
         for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
@@ -1514,8 +1517,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 10000])
-        for start in range(0, len(df_all_snapshots), 10000)
+        process_chunk(df_all_snapshots.iloc[start:start + 5000])
+        for start in range(0, len(df_all_snapshots), 5000)
     ], ignore_index=True)
     
     # Optionally log the shape of df_all_snapshots after filtering
@@ -1565,7 +1568,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Log final result
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
-
+    
     # ✅ Now the first values are present → safe to compute delta features
     # === Step 3a: Compute model probability shift
     df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce') - pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
@@ -1602,16 +1605,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Step 5: Clean up temp columns (optional before upload)
     df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
-
     
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
-
     
     # === 6. Calculate result
     df_valid = df.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
     if df_valid.empty:
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
+    
 
     def calc_cover(row):
         try:
