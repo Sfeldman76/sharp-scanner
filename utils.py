@@ -1499,6 +1499,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
 
     
+ 
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
@@ -1535,7 +1536,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Check if 'df_first' exists, otherwise create it
     if 'df_first' not in locals():
         df_first = (
-            df_all_snapshots_filtered
+            df_all_snapshots_filtered  # Ensure df_all_snapshots_filtered is defined first
             .sort_values('Snapshot_Timestamp')
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
             .rename(columns={
@@ -1543,7 +1544,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
         )
-        
+    
         # Convert relevant columns to category type before merging to save memory
         df_first['Game_Key'] = df_first['Game_Key'].astype('category')
         df_first['Market'] = df_first['Market'].astype('category')
@@ -1666,31 +1667,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Continue with further operations (e.g., computing model probabilities, etc.)
     
-    # === Build FIRST snapshot by pick (only once)
-    if 'df_first' not in locals():
-        df_first = (
-            df_all_snapshots_filtered
-            .sort_values('Snapshot_Timestamp')
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-            .rename(columns={
-                'Value': 'First_Line_Value',
-                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
-        )
-    
-        # Convert relevant columns to category type before merging to save memory
-        df_first['Game_Key'] = df_first['Game_Key'].astype('category')
-        df_first['Market'] = df_first['Market'].astype('category')
-        df_first['Outcome'] = df_first['Outcome'].astype('category')
-        df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
-    
-        # Debug: validate uniqueness
-        num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
-        logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
-    
-        # 🚨 Warn if duplicates still slipped through
-        if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
-            logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
     
     # === Convert df_master columns to category type to reduce memory usage before merge
     df_master['Game_Key'] = df_master['Game_Key'].astype('category')
