@@ -11,6 +11,8 @@ import logging
 import hashlib
 import time
 import json
+import psutil
+import os
 
 from pandas_gbq import to_gbq
 import traceback
@@ -1432,11 +1434,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                     logging.error(f"⚠️ Column {col} contains lists")
             except Exception as content_error:
                 logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
-    
     # === 4. Load recent sharp picks
-    # === 4. Load recent sharp picks
-    df_master = read_recent_sharp_moves(hours=days_back * 72)
+    df_master = read_recent_sharp_moves(hours=days_back * 24)
     df_master = build_game_key(df_master)
+    
     # === Filter out games already scored in sharp_scores_full
     scored_keys = bq_client.query("""
         SELECT DISTINCT Merge_Key_Short
@@ -1446,22 +1447,37 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     already_scored = set(scored_keys['Merge_Key_Short'].dropna())
     
-    df_scores = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
-    logging.info(f"✅ Remaining unscored completed games: {len(df_scores)}")
-    # ✅ Ensure Merge_Key_Short exists AFTER loading
+    # Filter out already scored keys in df_scores
+    df_scores_needed = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
+    logging.info(f"✅ Remaining unscored completed games: {len(df_scores_needed)}")
+    
+    # Ensure Merge_Key_Short exists AFTER loading (if not already present)
     if 'Merge_Key_Short' not in df_master.columns:
         df_master = build_game_key(df_master)
-    if 'Merge_Key_Short' not in df_scores.columns:
-        df_scores = build_game_key(df_scores)
- 
-    df_master = ensure_columns(df_master, ['Game_Start'])
-    df_master = df_master[df_master['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
+    if 'Merge_Key_Short' not in df_scores_needed.columns:
+        df_scores_needed = build_game_key(df_scores_needed)
+    
+    # Track memory usage before the join operation
+    process = psutil.Process(os.getpid())
+    logging.info(f"Memory before merge: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    
+    # Set the index on 'Merge_Key_Short' for both DataFrames to optimize the join
+    df_master.set_index('Merge_Key_Short', inplace=True)
+    df_scores_needed.set_index('Merge_Key_Short', inplace=True)
+    
+    # Perform the join operation (left join)
+    df = df_master.join(df_scores_needed[['Score_Home_Score', 'Score_Away_Score']], how='left')
+    
+    # Track memory usage after the join
+    logging.info(f"Memory after merge: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    
+    # Log the result shape after joining
+    logging.info(f"After join: df shape = {df.shape}")
     
     # === Pull all recent snapshots for those games
-    # ✅ Use all Game_Keys from newly uploaded scores to build df_first
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
-    df_all_snapshots = build_game_key(df_all_snapshots)  # 🧩 Ensure Merge_Key_Short is built
-    df_all_snapshots = df_all_snapshots[df_all_snapshots['Merge_Key_Short'].isin(df_scores['Merge_Key_Short'])]
+    df_all_snapshots = build_game_key(df_all_snapshots)  # Ensure Merge_Key_Short is built
+    df_all_snapshots = df_all_snapshots[df_all_snapshots['Merge_Key_Short'].isin(df_scores_needed['Merge_Key_Short'])]
 
     # === Normalize for merge
     # === Normalize for merge safety
