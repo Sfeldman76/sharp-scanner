@@ -1436,13 +1436,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                     logging.error(f"⚠️ Column {col} contains lists")
             except Exception as content_error:
                 logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
- 
-    hots.")
+
         return pd.DataFrame()  # Return empty DataFrame if missing
-    
-    # Standardize the 'Merge_Key_Short' column by stripping whitespace and cchunk_size = 10000  # Adjust this based on your available memory
-    
-   # Function to process chunks of data (sorting and deduplication)
 
 
     # Function to optimize and process in chunks
