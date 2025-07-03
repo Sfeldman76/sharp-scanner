@@ -1537,7 +1537,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Pull all recent snapshots for those games
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
     df_all_snapshots = build_game_key(df_all_snapshots)  # Ensure Merge_Key_Short is built
+    # Process df_all_snapshots in chunks to avoid memory overload
+    df_all_snapshots_filtered = pd.concat([
+        process_chunk(df_all_snapshots.iloc[start:start + 1000])  # Reduced chunk size to 5000 for memory optimization
+        for start in range(0, len(df_all_snapshots), 1000)
+    ], ignore_index=True)
     
+    # Free memory explicitly after processing the chunk
+    del df_all_snapshots_filtered
+    gc.collect()
+
     # Debugging: Log the columns of df_all_snapshots after build_game_key
     logging.info(f"After build_game_key - df_all_snapshots columns: {df_all_snapshots.columns.tolist()}")
     
@@ -1596,40 +1605,30 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Sport'] = sport_label.upper()
     
     # Clean up temp columns
-  
-    # ✅ Now the first values are present → safe to compute delta features
-    # === Step 3a: Compute model probability shift
-    df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce') - pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
-    df['Line_Delta'] = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
+    # Step 3a: Compute model probability shift and line delta in a vectorized way
+    df['Model_Prob_Diff'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
+    df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
     
-    # === Step 3b: Compute adjusted support direction (temporary)
-    def get_line_support_sign(row):
-        try:
-            market = str(row.get('Market', '')).lower()
-            outcome = str(row.get('Outcome', '')).lower()
-            first_line = pd.to_numeric(row.get('First_Line_Value'), errors='coerce')
+    # Step 3b: Compute adjusted support direction (vectorized version)
+    market_totals = df['Market'].str.lower() == 'totals'
+    outcome_under = df['Outcome'].str.lower() == 'under'
+    first_line_negative = df['First_Line_Value'] < 0
     
-            if market == 'totals':
-                return -1 if outcome == 'under' else 1
-            else:
-                return -1 if first_line < 0 else 1
-        except:
-            return 1
+    # Compute Line_Support_Sign: -1 for 'under' in 'totals' and negative first line, 1 otherwise
+    df['Line_Support_Sign'] = np.where(market_totals & outcome_under, -1, 1)
+    df['Line_Support_Sign'] = np.where(~market_totals & first_line_negative, -1, df['Line_Support_Sign'])
     
-    df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
+    # Step 3c: Compute Adjusted_Line_Delta
     df['Adjusted_Line_Delta'] = df['Line_Delta'] * df['Line_Support_Sign']
     
-    # === Step 4: Direction_Aligned (boolean)
-    mask_aligned = ((df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] > 0)) | \
-                   ((df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] < 0))
+    # Step 4: Direction_Aligned (boolean)
+    mask_aligned = (df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] > 0) | (df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] < 0)
+    mask_conflict = (df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] < 0) | (df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] > 0)
     
-    mask_conflict = ((df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] < 0)) | \
-                    ((df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] > 0))
-    
-    df['Direction_Aligned'] = pd.NA
-    df.loc[mask_aligned, 'Direction_Aligned'] = 1
-    df.loc[mask_conflict, 'Direction_Aligned'] = 0
-    df['Direction_Aligned'] = df['Direction_Aligned'].astype('Int64')
+    # Assign Direction_Aligned
+    df['Direction_Aligned'] = np.where(mask_aligned, 1, np.where(mask_conflict, 0, pd.NA))
+    df['Direction_Aligned'] = df['Direction_Aligned'].astype('Int64')  # Using Int64 to handle missing values properly
+
     
     # === Step 5: Clean up temp columns (optional before upload)
     df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
