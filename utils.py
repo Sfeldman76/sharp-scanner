@@ -1596,11 +1596,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Sport'] = sport_label.upper()
     
     # Clean up temp columns
-    df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
-    
-    # Log final result
-    logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
-    
+  
     # ✅ Now the first values are present → safe to compute delta features
     # === Step 3a: Compute model probability shift
     df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce') - pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
