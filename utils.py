@@ -1436,7 +1436,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
-    df_master = build_game_key(df_master)
+    df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
     scored_keys = bq_client.query("""
@@ -1461,40 +1461,40 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"After build_game_key - df_scores_needed columns: {df_scores_needed.columns.tolist()}")
     logging.info(f"After build_game_key - df_master columns: {df_master.columns.tolist()}")
     
-    # Track memory usage before the join operation
+    # Track memory usage before the merge operation
     process = psutil.Process(os.getpid())
-    logging.info(f"Memory before merge: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # Set the index on 'Merge_Key_Short' for both DataFrames to optimize the join
-    df_master.set_index('Merge_Key_Short', inplace=True)
-    df_scores_needed.set_index('Merge_Key_Short', inplace=True)
+    # === Perform the merge operation (merge instead of join)
+    df = df_master.merge(df_scores_needed[['Score_Home_Score', 'Score_Away_Score', 'Merge_Key_Short']], on='Merge_Key_Short', how='left')
     
-    # Perform the join operation (left join)
-    df = df_master.join(df_scores_needed[['Score_Home_Score', 'Score_Away_Score']], how='left')
-    
-    # Track memory usage after the join
+    # Track memory usage after the merge
     logging.info(f"Memory after merge: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # Log the result shape after joining
-    logging.info(f"After join: df shape = {df.shape}")
+    # Log the result shape after merging
+    logging.info(f"After merge: df shape = {df.shape}")
     
     # === Pull all recent snapshots for those games
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
     df_all_snapshots = build_game_key(df_all_snapshots)  # Ensure Merge_Key_Short is built
+    
+    # Debugging: Log the columns of df_all_snapshots after build_game_key
     logging.info(f"After build_game_key - df_all_snapshots columns: {df_all_snapshots.columns.tolist()}")
     
-    # Ensure 'Merge_Key_Short' is present in both DataFrames
+    # Ensure 'Merge_Key_Short' is present in df_all_snapshots
     if 'Merge_Key_Short' not in df_all_snapshots.columns:
         logging.error("❌ 'Merge_Key_Short' is missing in df_all_snapshots.")
-        return pd.DataFrame()
+        return pd.DataFrame()  # Return empty DataFrame if missing
     
     # Filter df_all_snapshots based on Merge_Key_Short
     df_all_snapshots = df_all_snapshots[df_all_snapshots['Merge_Key_Short'].isin(df_scores_needed['Merge_Key_Short'])]
     
     # Optionally log the shape of df_all_snapshots after filtering
     logging.info(f"After filtering, df_all_snapshots shape: {df_all_snapshots.shape}")
-
-
+    
+    # Track memory usage after the operation
+    logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    
 
     # === Normalize for merge
     # === Normalize for merge safety
