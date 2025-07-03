@@ -1517,8 +1517,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 5000])
-        for start in range(0, len(df_all_snapshots), 5000)
+        process_chunk(df_all_snapshots.iloc[start:start + 1000])
+        for start in range(0, len(df_all_snapshots), 1000)
     ], ignore_index=True)
     
     # Optionally log the shape of df_all_snapshots after filtering
@@ -1527,7 +1527,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # === Build FIRST snapshot by pick
+   # === Build FIRST snapshot by pick
     df_first = (
         df_all_snapshots_filtered
         .sort_values('Snapshot_Timestamp')
@@ -1613,7 +1613,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if df_valid.empty:
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
-    
 
     def calc_cover(row):
         try:
