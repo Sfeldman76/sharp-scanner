@@ -1548,8 +1548,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 5000])  # Reduced chunk size to 5000 for memory optimization
-        for start in range(0, len(df_all_snapshots), 5000)
+        process_chunk(df_all_snapshots.iloc[start:start + 1000])  # Reduced chunk size to 5000 for memory optimization
+        for start in range(0, len(df_all_snapshots), 1000)
     ], ignore_index=True)
     
     # Optionally log the shape of df_all_snapshots after filtering
