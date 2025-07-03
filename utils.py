@@ -1461,7 +1461,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"After build_game_key - df_scores_needed columns: {df_scores_needed.columns.tolist()}")
     logging.info(f"After build_game_key - df_master columns: {df_master.columns.tolist()}")
     
-    # Track memory usage before the merge operation
+    # Track memory usage before the operation
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
@@ -1480,6 +1480,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Debugging: Log the columns of df_all_snapshots after build_game_key
     logging.info(f"After build_game_key - df_all_snapshots columns: {df_all_snapshots.columns.tolist()}")
+    
+    # Standardize the 'Merge_Key_Short' column by stripping whitespace and converting to lowercase
+    df_all_snapshots['Merge_Key_Short'] = df_all_snapshots['Merge_Key_Short'].str.strip().str.lower()
+    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].str.strip().str.lower()
     
     # Ensure 'Merge_Key_Short' is present in df_all_snapshots
     if 'Merge_Key_Short' not in df_all_snapshots.columns:
