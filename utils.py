@@ -1707,33 +1707,74 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
     df['Sport'] = sport_label.upper()
     
-    # === Clean up temp columns (optional before upload)
-    # Step 3a: Compute model probability shift and line delta in a vectorized way
-    df['Model_Prob_Diff'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
-    df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
+ 
+    # === Track memory usage before the operation
+    process = psutil.Process(os.getpid())
+    logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # Step 3b: Compute adjusted support direction (vectorized version)
-    market_totals = df['Market'].str.lower() == 'totals'
-    outcome_under = df['Outcome'].str.lower() == 'under'
-    first_line_negative = df['First_Line_Value'] < 0
+    # Function to process DataFrame in smaller chunks
+    def process_in_chunks(df, chunk_size=1000):
+        # Iterate through the DataFrame in chunks
+        for start in range(0, len(df), chunk_size):
+            df_chunk = df.iloc[start:start + chunk_size]
     
-    # Compute Line_Support_Sign: -1 for 'under' in 'totals' and negative first line, 1 otherwise
-    df['Line_Support_Sign'] = np.where(market_totals & outcome_under, -1, 1)
-    df['Line_Support_Sign'] = np.where(~market_totals & first_line_negative, -1, df['Line_Support_Sign'])
+            # Compute Model_Prob_Diff and Line_Delta in a vectorized way
+            df_chunk['Model_Prob_Diff'] = pd.to_numeric(df_chunk['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df_chunk['First_Sharp_Prob'], errors='coerce')
+            df_chunk['Line_Delta'] = pd.to_numeric(df_chunk['Value'], errors='coerce') - pd.to_numeric(df_chunk['First_Line_Value'], errors='coerce')
     
-    # Step 3c: Compute Adjusted_Line_Delta
-    df['Adjusted_Line_Delta'] = df['Line_Delta'] * df['Line_Support_Sign']
+            # Compute adjusted support direction (vectorized version)
+            market_totals = df_chunk['Market'].str.lower() == 'totals'
+            outcome_under = df_chunk['Outcome'].str.lower() == 'under'
+            first_line_negative = df_chunk['First_Line_Value'] < 0
     
-    # Step 4: Direction_Aligned (boolean)
-    mask_aligned = (df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] > 0) | (df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] < 0)
-    mask_conflict = (df['Model_Prob_Diff'] > 0) & (df['Adjusted_Line_Delta'] < 0) | (df['Model_Prob_Diff'] < 0) & (df['Adjusted_Line_Delta'] > 0)
+            df_chunk['Line_Support_Sign'] = np.where(market_totals & outcome_under, -1, 1)
+            df_chunk['Line_Support_Sign'] = np.where(~market_totals & first_line_negative, -1, df_chunk['Line_Support_Sign'])
     
-    # Assign Direction_Aligned
-    df['Direction_Aligned'] = np.where(mask_aligned, 1, np.where(mask_conflict, 0, pd.NA))
-    df['Direction_Aligned'] = df['Direction_Aligned'].astype('Int64')  # Using Int64 to handle missing values properly
+            # Compute Adjusted_Line_Delta
+            df_chunk['Adjusted_Line_Delta'] = df_chunk['Line_Delta'] * df_chunk['Line_Support_Sign']
     
-    # Clean up temp columns after computation
-    df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
+            # Assign Direction_Aligned (boolean)
+            mask_aligned = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] > 0) | (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] < 0)
+            mask_conflict = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] < 0) | (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] > 0)
+    
+            df_chunk['Direction_Aligned'] = np.where(mask_aligned, 1, np.where(mask_conflict, 0, pd.NA))
+            df_chunk['Direction_Aligned'] = df_chunk['Direction_Aligned'].astype('Int64')  # Using Int64 to handle missing values properly
+    
+            # Clean up temp columns after computation
+            df_chunk.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
+    
+            # Free memory explicitly after processing each chunk
+            del df_chunk
+            gc.collect()
+    
+            # Yield the processed chunk back to the caller
+            yield df_chunk
+    
+    # === Apply the chunk processing
+    df_chunks = process_in_chunks(df)
+    
+    # Rebuild the full DataFrame from chunks after processing
+    df = pd.concat(df_chunks, ignore_index=True)
+    
+    # === Track memory usage after the operation
+    logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    
+    # === Clean up temporary columns and other resources if necessary
+    gc.collect()
+    
+    # === Reassign Merge_Key_Short from df_master using Game_Key
+    if 'Merge_Key_Short' in df_master.columns:
+        logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
+        df = df.drop(columns=['Merge_Key_Short'], errors='ignore')
+        df = df.merge(df_master[['Game_Key', 'Merge_Key_Short']], on='Game_Key', how='left')
+    
+    # Final logging for Merge_Key_Short null counts
+    null_count = df['Merge_Key_Short'].isnull().sum()
+    logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
+    df['Sport'] = sport_label.upper()
+    
+    # === Final Cleanup of Temporary Columns and Memory Management
+    gc.collect()
     
     # Final logging
     logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
@@ -1744,6 +1785,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
     
+    # Calculate result using `calc_cover` function
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
     df['SHARP_COVER_RESULT'] = None
@@ -1751,14 +1793,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df['Scored'] = False
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
+    
     # Ensure 'Unique_Sharp_Books' is present and numeric
     if 'Unique_Sharp_Books' not in df.columns:
         df['Unique_Sharp_Books'] = 0
     df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
-
     
-   # === 8. Final output DataFrame ===
-    
+    # === Final Output DataFrame ===
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
@@ -1771,18 +1812,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',  'Home_Team_Norm',
         'Away_Team_Norm',
         'Commence_Hour',   # ✅ new
-        ]
-
-       
-   
+    ]
+    
     # === Final output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
     logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
-
+    
+    # Function to coerce boolean columns to proper format
     def coerce_bool_series(series):
         return series.map(lambda x: str(x).strip().lower() in ['true', '1', '1.0', 'yes']).astype(bool)
-  
-
+    
     # ✅ Coerce all BigQuery BOOL fields
     bool_cols = ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']
     for col in bool_cols:
@@ -1794,10 +1833,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             # Post-coercion validation
             if df_scores_out[col].isnull().any():
                 logging.warning(f"⚠️ Column '{col}' still contains nulls after coercion!")
-
- 
-
+    
     df_scores_out['Sport'] = sport_label.upper()
+    
     # === Normalize and unify sport labels
     df_scores_out['Sport'] = df_scores_out['Sport'].replace({
         'BASEBALL_MLB': 'MLB',
@@ -1811,12 +1849,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     }).str.upper()
     
     df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
-
-
+    
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').fillna(0.0).astype(float)
+    
     # === Debug unexpected boolean coercion errors before Parquet conversion
     for col in ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']:
         if col in df_scores_out.columns:
@@ -1825,8 +1863,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             logging.info(f"🧪 {col} unique values: {unique_vals}")
             if not invalid.empty:
                 logging.warning(f"⚠️ Invalid boolean values in {col}:\n{invalid[[col]].drop_duplicates().to_string(index=False)}")
-
-
+    
+    # === Final upload to BigQuery
     try:
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
@@ -1834,13 +1872,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.error(str(e))
         for col in df_scores_out.columns:
             logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].dropna().unique()[:5].tolist()}")
-
-
-
+    
+    # === Final logging and clean up before upload
     df_scores_out['Sharp_Time_Score'] = pd.to_numeric(df_scores_out['Sharp_Time_Score'], errors='coerce')
     df_scores_out['Sharp_Limit_Total'] = pd.to_numeric(df_scores_out['Sharp_Limit_Total'], errors='coerce')
     df_scores_out['Value'] = pd.to_numeric(df_scores_out['Value'], errors='coerce')
-   
+    
     df_scores_out['SharpBetScore'] = pd.to_numeric(df_scores_out['SharpBetScore'], errors='coerce')
     df_scores_out['Enhanced_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['Enhanced_Sharp_Confidence_Score'], errors='coerce')
     df_scores_out['True_Sharp_Confidence_Score'] = pd.to_numeric(df_scores_out['True_Sharp_Confidence_Score'], errors='coerce')
@@ -1854,24 +1891,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Line_Delta'] = pd.to_numeric(df_scores_out['Line_Delta'], errors='coerce')
     df_scores_out['Model_Prob_Diff'] = pd.to_numeric(df_scores_out['Model_Prob_Diff'], errors='coerce')
     df_scores_out['Direction_Aligned'] = pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce').fillna(0).round().astype('Int64')
-
+    
+    # === Final upload
     try:
         df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
-        # Optionally upload:
-        # to_gbq(df_weights, 'sharp_data.market_weights', project_id=GCP_PROJECT_ID, if_exists='replace')
         logging.info(f"✅ Computed updated market weights for {sport_label.upper()}")
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute market weights: {e}")
-
     
-    # ✅ Log BEFORE deduplication
+    # Final deduplication and uploading to BigQuery
     pre_dedup_count = len(df_scores_out)
     logging.info(f"🧪 Before dedup: {pre_dedup_count} rows in df_scores_out")
     logging.info(f"🧪 Sports in df_scores_out: {df_scores_out['Sport'].unique().tolist()}")
     logging.info(f"🧪 Snapshot_Timestamp range: {df_scores_out['Snapshot_Timestamp'].min()} to {df_scores_out['Snapshot_Timestamp'].max()}")
-
     
-    # ✅ Define deduplication fingerprint (exclude timestamp and nullable fields)
+    # Deduplication fingerprint columns
     dedup_fingerprint_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
@@ -1880,7 +1914,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Model_Prob_Diff', 'Direction_Aligned'
     ]
     
-    # 🔍 Log dedup parameters
     logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
     float_cols_to_round = [
         'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
@@ -1890,11 +1923,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     for col in float_cols_to_round:
         if col in df_scores_out.columns:
             df_scores_out[col] = pd.to_numeric(df_scores_out[col], errors='coerce').round(4)
-    # ✅ Drop exact in-memory duplicates first
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
     logging.info(f"🧪 Local rows before dedup: {len(df_scores_out)}")
     
-    # ✅ Query BigQuery for existing rows
+    # Query BigQuery for existing rows
     existing = bq_client.query(f"""
         SELECT DISTINCT {', '.join(dedup_fingerprint_cols)}
         FROM `sharp_data.sharp_scores_full`
@@ -1902,7 +1934,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     """).to_dataframe()
     logging.info(f"🧪 Existing rows in BigQuery for dedup: {len(existing)}")
     
-    # ✅ Dedup against BigQuery
+    # Dedup against BigQuery
     df_scores_out = df_scores_out.merge(
         existing,
         on=dedup_fingerprint_cols,
@@ -1910,20 +1942,20 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         indicator=True
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
-
-    # ✅ Final logs
+    
+    # Final logs before upload
     logging.info(f"🧪 Remaining new rows after dedup merge: {len(df_scores_out)}")
     
-    # ✅ If no new rows left, return
+    # If no new rows left, return
     if df_scores_out.empty:
-        logging.info("ℹ️ No new scored picks to upload — all identical line states already in BigQuery.")
+        logging.info("ℹ️ No new scores to upload — all identical line states already in BigQuery.")
         return pd.DataFrame()
     
-    # ✅ Debug schema before return
+    # Convert to Parquet format
     try:
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
-        logging.error("❌ Parquet conversion failure immediataly before return:")
+        logging.error("❌ Parquet conversion failure before upload:")
         logging.error(str(e))
         for col in df_scores_out.columns:
             logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].dropna().unique()[:5].tolist()}")
@@ -1932,7 +1964,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"🧪 Final sample:\n{df_scores_out[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']].head(3).to_string(index=False)}")
     
     return df_scores_out
-
 
 
 
