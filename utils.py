@@ -15,7 +15,10 @@ import psutil
 import os
 import gc
 import psutil
-    
+
+import logging
+
+ 
 from pandas_gbq import to_gbq
 import traceback
 import pickle  # ✅ Add this at the top of your script
@@ -1494,6 +1497,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         
         return df
     
+    
+    
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
@@ -1511,7 +1516,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_needed = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
     logging.info(f"✅ Remaining unscored completed games: {len(df_scores_needed)}")
     
-    # Ensure Merge_Key_Short exists AFTER loading (if not already present)
+    # Ensure Merge_Key_Short exists AFTER loading
     if 'Merge_Key_Short' not in df_master.columns:
         df_master = build_game_key(df_master)
     if 'Merge_Key_Short' not in df_scores_needed.columns:
@@ -1525,30 +1530,93 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # === Perform the merge operation (merge instead of join)
-    df = df_master.merge(df_scores_needed[['Score_Home_Score', 'Score_Away_Score', 'Merge_Key_Short']], on='Merge_Key_Short', how='left')
     
-    # Track memory usage after the merge
-    logging.info(f"Memory after merge: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    # Function to process DataFrames in smaller batches
+    def batch_merge(df_master, df_first, batch_size=1000):
+        num_chunks = len(df_first) // batch_size + 1
+        merged_df_list = []
     
-    # Log the result shape after merging
-    logging.info(f"After merge: df shape = {df.shape}")
+        for i in range(num_chunks):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, len(df_first))
+            df_first_batch = df_first.iloc[start_idx:end_idx]
     
-    # === Pull all recent snapshots for those games
-    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
-    df_all_snapshots = build_game_key(df_all_snapshots)  # Ensure Merge_Key_Short is built
-    # Process df_all_snapshots in chunks to avoid memory overload
-    df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 1000])  # Reduced chunk size to 5000 for memory optimization
-        for start in range(0, len(df_all_snapshots), 1000)
-    ], ignore_index=True)
+            # Merge the batch with df_master
+            df_batch = df_master.merge(df_first_batch, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+            merged_df_list.append(df_batch)
     
-    # Free memory explicitly after processing the chunk
-    del df_all_snapshots_filtered
-    gc.collect()
-
-    # Debugging: Log the columns of df_all_snapshots after build_game_key
-    logging.info(f"After build_game_key - df_all_snapshots columns: {df_all_snapshots.columns.tolist()}")
+            # Free memory after processing each batch
+            del df_first_batch
+            gc.collect()
+    
+        # Concatenate all merged DataFrames into one
+        df_master = pd.concat(merged_df_list, ignore_index=True)
+        del merged_df_list
+        gc.collect()
+    
+        return df_master
+    
+    # Function to batch merge df_scores
+    def batch_merge_scores(df_master, df_scores, batch_size=1000):
+        num_chunks = len(df_scores) // batch_size + 1
+        merged_df_list = []
+    
+        for i in range(num_chunks):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, len(df_scores))
+            df_scores_batch = df_scores.iloc[start_idx:end_idx]
+    
+            # Merge the batch with df_master
+            df_batch = df_master.merge(df_scores_batch[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']], on='Merge_Key_Short', how='inner')
+            merged_df_list.append(df_batch)
+    
+            # Free memory after processing each batch
+            del df_scores_batch
+            gc.collect()
+    
+        # Concatenate all merged DataFrames into one
+        df_master = pd.concat(merged_df_list, ignore_index=True)
+        del merged_df_list
+        gc.collect()
+    
+        return df_master
+    
+    
+    # Main function to apply batch processing
+    def process_in_batches(df_master, df_first, df_scores, batch_size=1000):
+        # Reduce df_first to only necessary columns before the merge to save memory
+        df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
+    
+        # Convert relevant columns to category type before merging to save memory
+        df_first['Game_Key'] = df_first['Game_Key'].astype('category')
+        df_first['Market'] = df_first['Market'].astype('category')
+        df_first['Outcome'] = df_first['Outcome'].astype('category')
+        df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
+    
+        # Reduce df_scores to only necessary columns before the merge to save memory
+        df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
+    
+        # Convert Merge_Key_Short to category in df_scores to save memory
+        df_scores['Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
+    
+        # Process df_first in smaller batches
+        df_master = batch_merge(df_master, df_first, batch_size)
+    
+        # Process df_scores in smaller batches
+        df_master = batch_merge_scores(df_master, df_scores, batch_size)
+    
+        # Return final processed DataFrame
+        return df_master
+    
+    
+    # === Process Data
+    # Apply the batch processing function to your data
+    df_master = process_in_batches(df_master, df_first, df_scores_needed, batch_size=1000)
+    
+    # Track memory usage after the operation
+    logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    
+    # === Continue with further operations (e.g., reassigning Merge_Key_Short, computing model probabilities, etc.)
     
     # Ensure 'Merge_Key_Short' is present in df_all_snapshots
     if 'Merge_Key_Short' not in df_all_snapshots.columns:
@@ -1557,7 +1625,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 1000])  # Reduced chunk size to 5000 for memory optimization
+        process_chunk(df_all_snapshots.iloc[start:start + 1000])  # Reduced chunk size to 1000 for memory optimization
         for start in range(0, len(df_all_snapshots), 1000)
     ], ignore_index=True)
     
@@ -1566,11 +1634,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-
-
+    
+    # Continue with further operations (e.g., computing model probabilities, etc.)
+    
     # === Build FIRST snapshot by pick (only once)
     if 'df_first' not in locals():
-        # Reduce df_first to only necessary columns before the merge to save memory
         df_first = (
             df_all_snapshots_filtered
             .sort_values('Snapshot_Timestamp')
@@ -1669,7 +1737,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
     
-
     
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
