@@ -1535,8 +1535,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 500])  # Reduced chunk size to 1000 for memory optimization
-        for start in range(0, len(df_all_snapshots), 500)
+        process_chunk(df_all_snapshots.iloc[start:start + 200])  # Reduced chunk size to 1000 for memory optimization
+        for start in range(0, len(df_all_snapshots), 200)
     ], ignore_index=True)
      # Optionally log the shape of df_all_snapshots after filtering
     logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
@@ -1570,7 +1570,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Function to process DataFrames in smaller batches
-    def batch_merge(df_master, df_first, batch_size=500):
+    def batch_merge(df_master, df_first, batch_size=200):
         num_chunks = len(df_first) // batch_size + 1
         merged_df_list = []
     
@@ -1596,7 +1596,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Function to batch merge df_scores
-    def batch_merge_scores(df_master, df_scores, batch_size=500):
+    def batch_merge_scores(df_master, df_scores, batch_size=200):
         num_chunks = len(df_scores) // batch_size + 1
         merged_df_list = []
     
@@ -1636,7 +1636,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
     
         # Convert Merge_Key_Short to category in df_scores to save memory
-        df_scores['Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
+       
+        
+        # Use .loc[] to ensure you're modifying the original DataFrame:
+        df_scores.loc[:, 'Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
     
         # Process df_first in smaller batches
         df_master = batch_merge(df_master, df_first, batch_size)
@@ -1650,7 +1653,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Process Data
     # Apply the batch processing function to your data
-    df_master = process_in_batches(df_master, df_first, df_scores_needed, batch_size=500)
+    df_master = process_in_batches(df_master, df_first, df_scores_needed, batch_size=200)
     
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
@@ -1687,7 +1690,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_needed = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
     
     # Convert Merge_Key_Short to category in df_scores_needed to save memory
-    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
+    df_scores_needed.loc[:, 'Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
     
     # Perform the merge operation (this can be done in batches if df_scores is large)
     df = df_master.merge(df_scores_needed, on='Merge_Key_Short', how='inner')
@@ -1713,7 +1716,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
     # Function to process DataFrame in smaller chunks
-    def process_in_chunks(df, chunk_size=500):
+    def process_in_chunks(df, chunk_size=100):
         # Iterate through the DataFrame in chunks
         for start in range(0, len(df), chunk_size):
             df_chunk = df.iloc[start:start + chunk_size]
