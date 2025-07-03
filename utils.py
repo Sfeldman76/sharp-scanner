@@ -1584,7 +1584,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Function to process DataFrames in smaller batches
-    def batch_merge(df_master, df_first, batch_size=200):
+    def batch_merge(df_master, df_first, batch_size=2000):
         num_chunks = len(df_first) // batch_size + 1
         merged_df_list = []
     
@@ -1610,7 +1610,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Function to batch merge df_scores
-    def batch_merge_scores(df_master, df_scores, batch_size=200):
+    def batch_merge_scores(df_master, df_scores, batch_size=2000):
         num_chunks = len(df_scores) // batch_size + 1
         merged_df_list = []
     
@@ -1636,7 +1636,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Main function to apply batch processing
-    def process_in_batches(df_master, df_first, df_scores, batch_size=500):
+    def process_in_batches(df_master, df_first, df_scores, batch_size=2000):
         # Reduce df_first to only necessary columns before the merge to save memory
         df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
     
@@ -1803,7 +1803,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         return df_chunk
     
     
-    def process_in_chunks(df, chunk_size=200):
+    def process_in_chunks(df, chunk_size=2000):
         chunks = []
         for start in range(0, len(df), chunk_size):
             df_chunk = df.iloc[start:start + chunk_size]
@@ -1815,7 +1815,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # === ✅ Apply the chunk processing
-    df = process_in_chunks(df, chunk_size=200)
+    df = process_in_chunks(df, chunk_size=1000)
     
     # === Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
