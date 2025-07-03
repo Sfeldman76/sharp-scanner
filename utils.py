@@ -1444,16 +1444,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
 
     # Function to process chunks of data (sorting and deduplication)
+    # Function to process chunks of data (sorting, deduplication, and memory management)
     def process_chunk(df_chunk):
         # Convert string columns to categorical for memory efficiency
         for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-            df_chunk[col] = df_chunk[col].astype('category')
+            df_chunk.loc[:, col] = df_chunk[col].astype('category')  # Use .loc for correct assignment
     
         # Normalize the string columns (strip whitespace and lowercase)
-        df_chunk['Game_Key'] = df_chunk['Game_Key'].str.strip().str.lower()
-        df_chunk['Market'] = df_chunk['Market'].str.strip().str.lower()
-        df_chunk['Outcome'] = df_chunk['Outcome'].str.strip().str.lower()
-        df_chunk['Bookmaker'] = df_chunk['Bookmaker'].str.strip().str.lower()
+        df_chunk.loc[:, 'Game_Key'] = df_chunk['Game_Key'].str.strip().str.lower()  # Use .loc
+        df_chunk.loc[:, 'Market'] = df_chunk['Market'].str.strip().str.lower()      # Use .loc
+        df_chunk.loc[:, 'Outcome'] = df_chunk['Outcome'].str.strip().str.lower()    # Use .loc
+        df_chunk.loc[:, 'Bookmaker'] = df_chunk['Bookmaker'].str.strip().str.lower()  # Use .loc
     
         # Deduplicate based on necessary columns
         df_chunk = df_chunk.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
@@ -1462,6 +1463,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         gc.collect()
     
         return df_chunk
+
     
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
