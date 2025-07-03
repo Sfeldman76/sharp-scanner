@@ -1464,6 +1464,35 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
         return df_chunk
 
+
+
+    # === Vectorized version of calc_cover ===
+    def calc_cover(df):
+        # Calculate total score (only needed for 'totals' market)
+        df['Total_Score'] = df['Score_Home_Score'] + df['Score_Away_Score']
+        
+        # Create a mask for 'totals' market
+        df['Is_Totals'] = df['Market'] == 'totals'
+    
+        # Vectorized computation for 'totals' market
+        df['Tot_Outcome'] = np.where(df['Outcome'] == 'under', -1, 1)
+        
+        # Vectorized computation for 'spreads' and 'h2h' markets
+        df['Spread_Outcome'] = np.where(df['Outcome'] == df['Home_Team_Norm'], df['Score_Home_Score'], df['Score_Away_Score'])
+        
+        # Calculate the covered bet based on market type
+        df['Covered'] = np.where(
+            df['Is_Totals'],  # For 'totals' market
+            np.where(df['Outcome'] == 'under', df['Total_Score'] < df['Value'], df['Total_Score'] > df['Value']),
+            (df['Spread_Outcome'] + df['Value']) > df['Score_Away_Score']  # For other markets
+        )
+
+        
+        # Assign the final results based on conditions
+        df['SHARP_COVER_RESULT'] = np.where(df['Covered'], 'Win', 'Loss')
+        df['SHARP_HIT_BOOL'] = np.where(df['Covered'], 1, 0)
+        
+        return df
     
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
@@ -1519,8 +1548,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 1000])
-        for start in range(0, len(df_all_snapshots), 1000)
+        process_chunk(df_all_snapshots.iloc[start:start + 5000])  # Reduced chunk size to 5000 for memory optimization
+        for start in range(0, len(df_all_snapshots), 5000)
     ], ignore_index=True)
     
     # Optionally log the shape of df_all_snapshots after filtering
@@ -1529,24 +1558,25 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-   # === Build FIRST snapshot by pick
-    df_first = (
-        df_all_snapshots_filtered
-        .sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-        .rename(columns={
-            'Value': 'First_Line_Value',
-            'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-        })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
-    )
+    # === Build FIRST snapshot by pick (only once)
+    if 'df_first' not in locals():
+        df_first = (
+            df_all_snapshots_filtered
+            .sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+            .rename(columns={
+                'Value': 'First_Line_Value',
+                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
+        )
     
-    # Debug: validate uniqueness
-    num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
-    logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
+        # Debug: validate uniqueness
+        num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
+        logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
     
-    # 🚨 Warn if duplicates still slipped through
-    if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
-        logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
+        # 🚨 Warn if duplicates still slipped through
+        if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
+            logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
     
     # === Merge first snapshot into master before scoring
     df_master = df_master.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
@@ -1564,7 +1594,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     null_count = df['Merge_Key_Short'].isnull().sum()
     logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
     df['Sport'] = sport_label.upper()
-   
+    
+    # Clean up temp columns
+    df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
+    
+    # Log final result
+    logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
+    
     # ✅ Now the first values are present → safe to compute delta features
     # === Step 3a: Compute model probability shift
     df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce') - pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
@@ -1610,50 +1646,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
 
-    def calc_cover(row):
-        try:
-            h = float(row['Score_Home_Score'])
-            a = float(row['Score_Away_Score'])
-            val = float(row['Value'])  # ✅ Direct use of Value
-            market = str(row.get('Market', '')).lower()
-            outcome = str(row.get('Outcome', '')).lower()
-            home_team = row.get('Home_Team_Norm', '').lower()
-            away_team = row.get('Away_Team_Norm', '').lower()
-    
-            if market == 'totals':
-                total = h + a
-                if 'under' in outcome and total < val:
-                    return ['Win', 1]
-                elif 'over' in outcome and total > val:
-                    return ['Win', 1]
-                else:
-                    return ['Loss', 0]
-    
-            elif market == 'spreads':
-                team_bet_on = outcome
-                if team_bet_on == home_team:
-                    team_score = h
-                    opp_score = a
-                elif team_bet_on == away_team:
-                    team_score = a
-                    opp_score = h
-                else:
-                    return [None, 0]
-                covered = (team_score + val) > opp_score
-                return ['Win', 1] if covered else ['Loss', 0]
-    
-            elif market == 'h2h':
-                if outcome == home_team:
-                    return ['Win', 1] if h > a else ['Loss', 0]
-                elif outcome == away_team:
-                    return ['Win', 1] if a > h else ['Loss', 0]
-                else:
-                    return ['Loss', 0]
-    
-            return [None, 0]
-    
-        except Exception:
-            return [None, 0]
+
     
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
