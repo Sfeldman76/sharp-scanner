@@ -1531,6 +1531,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
+    # Process df_all_snapshots in chunks to avoid memory overload
+    df_all_snapshots_filtered = pd.concat([
+        process_chunk(df_all_snapshots.iloc[start:start + 1000])  # Reduced chunk size to 1000 for memory optimization
+        for start in range(0, len(df_all_snapshots), 1000)
+    ], ignore_index=True)
+     # Optionally log the shape of df_all_snapshots after filtering
+    logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
     
     # === Ensure 'df_first' is created correctly
     # Check if 'df_first' exists, otherwise create it
@@ -1652,15 +1659,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if 'Merge_Key_Short' not in df_all_snapshots.columns:
         logging.error("❌ 'Merge_Key_Short' is missing in df_all_snapshots.")
         return pd.DataFrame()  # Return empty DataFrame if missing
-    
-    # Process df_all_snapshots in chunks to avoid memory overload
-    df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 1000])  # Reduced chunk size to 1000 for memory optimization
-        for start in range(0, len(df_all_snapshots), 1000)
-    ], ignore_index=True)
-    
-    # Optionally log the shape of df_all_snapshots after filtering
-    logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
+
+   
     
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
