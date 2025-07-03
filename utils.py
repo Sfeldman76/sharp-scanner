@@ -1725,9 +1725,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
-        logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
-        df = df.drop(columns=['Merge_Key_Short'], errors='ignore')
-        df = df.merge(df_master[['Game_Key', 'Merge_Key_Short']], on='Game_Key', how='left')
+        logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key (optimized)")
+        # Build mapping dictionary (Game_Key → Merge_Key_Short)
+        key_map = df_master.drop_duplicates(subset=['Game_Key'])[['Game_Key', 'Merge_Key_Short']].set_index('Game_Key')['Merge_Key_Short'].to_dict()
+        # Reassign inplace without merge
+        df['Merge_Key_Short'] = df['Game_Key'].map(key_map)
     del df_master
     del df_scores_needed
     gc.collect()
