@@ -1538,8 +1538,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 200])  # Reduced chunk size to 1000 for memory optimization
-        for start in range(0, len(df_all_snapshots), 200)
+        process_chunk(df_all_snapshots.iloc[start:start + 3000])  # Reduced chunk size to 1000 for memory optimization
+        for start in range(0, len(df_all_snapshots), 3000)
     ], ignore_index=True)
      # Optionally log the shape of df_all_snapshots after filtering
     logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
@@ -1584,7 +1584,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Function to process DataFrames in smaller batches
-    def batch_merge(df_master, df_first, batch_size=2000):
+    def batch_merge(df_master, df_first, batch_size=3000):
         num_chunks = len(df_first) // batch_size + 1
         merged_df_list = []
     
@@ -1636,7 +1636,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Main function to apply batch processing
-    def process_in_batches(df_master, df_first, df_scores, batch_size=2000):
+    def process_in_batches(df_master, df_first, df_scores, batch_size=3000):
         # Reduce df_first to only necessary columns before the merge to save memory
         df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
     
@@ -1667,7 +1667,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Process Data
     # Apply the batch processing function to your data
-    df_master = process_in_batches(df_master, df_first, df_scores_needed, batch_size=200)
+    df_master = process_in_batches(df_master, df_first, df_scores_needed, batch_size=3000)
     
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
@@ -1815,7 +1815,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # === ✅ Apply the chunk processing
-    df = process_in_chunks(df, chunk_size=1000)
+    df = process_in_chunks(df, chunk_size=2000)
     
     # === Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
