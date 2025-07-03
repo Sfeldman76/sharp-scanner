@@ -1686,19 +1686,38 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     del df_first
     gc.collect()
     
-    # === Merge scores and filter (merge in batches if needed to reduce memory overhead)
-    df_scores_needed = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
+   # === Merge scores and filter (with deduplication and memory safety)
+    df_scores_needed = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
     
-    # Convert Merge_Key_Short to category in df_scores_needed to save memory
+    # Convert to category to reduce memory
     df_scores_needed.loc[:, 'Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
     
-    # Perform the merge operation (this can be done in batches if df_scores is large)
-    df = df_master.merge(df_scores_needed, on='Merge_Key_Short', how='inner')
+    # Deduplicate to avoid row explosion
+    df_scores_needed = (
+        df_scores_needed
+        .sort_values('Inserted_Timestamp', ascending=True, errors='ignore')  # optional if available
+        .drop_duplicates(subset='Merge_Key_Short', keep='last')
+    )
     
-    # Free memory after merge
+    # Log shape before merge
+    log_memory("BEFORE merge with df_scores_needed")
+    logging.info(f"df_master shape: {df_master.shape}, df_scores_needed shape: {df_scores_needed.shape}")
+    
+    # Merge only required columns
+    df = df_master.merge(
+        df_scores_needed[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
+        on='Merge_Key_Short',
+        how='inner'
+    )
+    
+    # Log shape after merge
+    log_memory("AFTER merge with df_scores_needed")
+    logging.info(f"df shape after merge: {df.shape}")
+    
+    # Free memory
+    del df_master
     del df_scores_needed
     gc.collect()
-    
     # === Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
         logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
