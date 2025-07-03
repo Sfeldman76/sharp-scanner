@@ -1803,7 +1803,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         return df_chunk
     
     
-    def process_in_chunks(df, chunk_size=2000):
+    def process_in_chunks(df, chunk_size=3000):
         chunks = []
         for start in range(0, len(df), chunk_size):
             df_chunk = df.iloc[start:start + chunk_size]
