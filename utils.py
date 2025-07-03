@@ -1722,14 +1722,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"df shape after merge: {df.shape}")
     
     # Free memory
-    del df_master
-    del df_scores_needed
-    gc.collect()
+    
     # === Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
         logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
         df = df.drop(columns=['Merge_Key_Short'], errors='ignore')
         df = df.merge(df_master[['Game_Key', 'Merge_Key_Short']], on='Game_Key', how='left')
+    del df_master
+    del df_scores_needed
+    gc.collect()
+    
     
     # Final logging
     null_count = df['Merge_Key_Short'].isnull().sum()
@@ -1742,67 +1744,57 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
     # Function to process DataFrame in smaller chunks
-    def process_in_chunks(df, chunk_size=100):
-        # Iterate through the DataFrame in chunks
+    def process_chunk_logic(df_chunk):
+        df_chunk = df_chunk.copy()
+    
+        # Compute Model_Prob_Diff and Line_Delta
+        df_chunk['Model_Prob_Diff'] = pd.to_numeric(df_chunk['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df_chunk['First_Sharp_Prob'], errors='coerce')
+        df_chunk['Line_Delta'] = pd.to_numeric(df_chunk['Value'], errors='coerce') - pd.to_numeric(df_chunk['First_Line_Value'], errors='coerce')
+    
+        # Compute adjusted support direction
+        market_totals = df_chunk['Market'].str.lower() == 'totals'
+        outcome_under = df_chunk['Outcome'].str.lower() == 'under'
+        first_line_negative = df_chunk['First_Line_Value'] < 0
+    
+        df_chunk['Line_Support_Sign'] = np.where(market_totals & outcome_under, -1, 1)
+        df_chunk['Line_Support_Sign'] = np.where(~market_totals & first_line_negative, -1, df_chunk['Line_Support_Sign'])
+    
+        # Compute Adjusted_Line_Delta
+        df_chunk['Adjusted_Line_Delta'] = df_chunk['Line_Delta'] * df_chunk['Line_Support_Sign']
+    
+        # Assign Direction_Aligned
+        mask_aligned = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] > 0) | \
+                       (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] < 0)
+        mask_conflict = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] < 0) | \
+                        (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] > 0)
+    
+        df_chunk['Direction_Aligned'] = np.where(mask_aligned, 1, np.where(mask_conflict, 0, pd.NA))
+        df_chunk['Direction_Aligned'] = df_chunk['Direction_Aligned'].astype('Int64')
+    
+        # Clean up temp columns
+        df_chunk.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
+    
+        return df_chunk
+    
+    
+    def process_in_chunks(df, chunk_size=200):
+        chunks = []
         for start in range(0, len(df), chunk_size):
             df_chunk = df.iloc[start:start + chunk_size]
-    
-            # Compute Model_Prob_Diff and Line_Delta in a vectorized way
-            df_chunk['Model_Prob_Diff'] = pd.to_numeric(df_chunk['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df_chunk['First_Sharp_Prob'], errors='coerce')
-            df_chunk['Line_Delta'] = pd.to_numeric(df_chunk['Value'], errors='coerce') - pd.to_numeric(df_chunk['First_Line_Value'], errors='coerce')
-    
-            # Compute adjusted support direction (vectorized version)
-            market_totals = df_chunk['Market'].str.lower() == 'totals'
-            outcome_under = df_chunk['Outcome'].str.lower() == 'under'
-            first_line_negative = df_chunk['First_Line_Value'] < 0
-    
-            df_chunk['Line_Support_Sign'] = np.where(market_totals & outcome_under, -1, 1)
-            df_chunk['Line_Support_Sign'] = np.where(~market_totals & first_line_negative, -1, df_chunk['Line_Support_Sign'])
-    
-            # Compute Adjusted_Line_Delta
-            df_chunk['Adjusted_Line_Delta'] = df_chunk['Line_Delta'] * df_chunk['Line_Support_Sign']
-    
-            # Assign Direction_Aligned (boolean)
-            mask_aligned = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] > 0) | (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] < 0)
-            mask_conflict = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] < 0) | (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] > 0)
-    
-            df_chunk['Direction_Aligned'] = np.where(mask_aligned, 1, np.where(mask_conflict, 0, pd.NA))
-            df_chunk['Direction_Aligned'] = df_chunk['Direction_Aligned'].astype('Int64')  # Using Int64 to handle missing values properly
-    
-            # Clean up temp columns after computation
-            df_chunk.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
-    
-            # Free memory explicitly after processing each chunk
-            del df_chunk
+            processed_chunk = process_chunk_logic(df_chunk)
+            chunks.append(processed_chunk)
+            del df_chunk, processed_chunk
             gc.collect()
+        return pd.concat(chunks, ignore_index=True)
     
-            # Yield the processed chunk back to the caller
-            yield df_chunk
     
-    # === Apply the chunk processing
-    df_chunks = process_in_chunks(df)
-    
-    # Rebuild the full DataFrame from chunks after processing
-    df = pd.concat(df_chunks, ignore_index=True)
+    # === ✅ Apply the chunk processing
+    df = process_in_chunks(df, chunk_size=200)
     
     # === Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
     # === Clean up temporary columns and other resources if necessary
-    gc.collect()
-    
-    # === Reassign Merge_Key_Short from df_master using Game_Key
-    if 'Merge_Key_Short' in df_master.columns:
-        logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
-        df = df.drop(columns=['Merge_Key_Short'], errors='ignore')
-        df = df.merge(df_master[['Game_Key', 'Merge_Key_Short']], on='Game_Key', how='left')
-    
-    # Final logging for Merge_Key_Short null counts
-    null_count = df['Merge_Key_Short'].isnull().sum()
-    logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
-    df['Sport'] = sport_label.upper()
-    
-    # === Final Cleanup of Temporary Columns and Memory Management
     gc.collect()
     
     # Final logging
