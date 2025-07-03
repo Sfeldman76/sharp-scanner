@@ -1437,11 +1437,37 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             except Exception as content_error:
                 logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
  
-    chunk_size = 10000  # Adjust this based on your available memory
+    hots.")
+        return pd.DataFrame()  # Return empty DataFrame if missing
+    
+    # Standardize the 'Merge_Key_Short' column by stripping whitespace and cchunk_size = 10000  # Adjust this based on your available memory
+    
+   # Function to process chunks of data (sorting and deduplication)
+
+
+    # Function to optimize and process in chunks
+    def process_chunk(df_chunk):
+        # Convert string columns to categorical for memory efficiency
+        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+            df_chunk[col] = df_chunk[col].astype('category')
+    
+        # Normalize the string columns (strip whitespace and lowercase)
+        df_chunk['Game_Key'] = df_chunk['Game_Key'].str.strip().str.lower()
+        df_chunk['Market'] = df_chunk['Market'].str.strip().str.lower()
+        df_chunk['Outcome'] = df_chunk['Outcome'].str.strip().str.lower()
+        df_chunk['Bookmaker'] = df_chunk['Bookmaker'].str.strip().str.lower()
+    
+        # Deduplicate based on necessary columns
+        df_chunk = df_chunk.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+    
+        # Free memory after processing chunk
+        gc.collect()
+    
+        return df_chunk
     
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
-    df_master = build_game_key(df_master)
+    df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
     scored_keys = bq_client.query("""
@@ -1491,37 +1517,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.error("❌ 'Merge_Key_Short' is missing in df_all_snapshots.")
         return pd.DataFrame()  # Return empty DataFrame if missing
     
-    # Standardize the 'Merge_Key_Short' column by stripping whitespace and converting to lowercase
-    df_all_snapshots['Merge_Key_Short'] = df_all_snapshots['Merge_Key_Short'].str.strip().str.lower()
-    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].str.strip().str.lower()
-    
-    # Process in chunks
-    chunks = []
-    for start in range(0, len(df_all_snapshots), chunk_size):
-        chunk = df_all_snapshots.iloc[start:start + chunk_size]
-        # Filter the chunk based on Merge_Key_Short
-        chunk = chunk[chunk['Merge_Key_Short'].isin(df_scores_needed['Merge_Key_Short'])]
-        chunks.append(chunk)
-        gc.collect()  # Manually free up memory after processing each chunk
-    
-    # Concatenate the filtered chunks after processing
-    df_all_snapshots_filtered = pd.concat(chunks, ignore_index=True)
+    # Process df_all_snapshots in chunks to avoid memory overload
+    df_all_snapshots_filtered = pd.concat([
+        process_chunk(df_all_snapshots.iloc[start:start + 10000])
+        for start in range(0, len(df_all_snapshots), 10000)
+    ], ignore_index=True)
     
     # Optionally log the shape of df_all_snapshots after filtering
     logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
     
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-
-    # === Normalize for merge
-    # === Normalize for merge safety
-    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-        df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
-        df_master[col] = df_master[col].astype(str).str.strip().str.lower()
     
     # === Build FIRST snapshot by pick
     df_first = (
-        df_all_snapshots
+        df_all_snapshots_filtered
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
         .rename(columns={
@@ -1530,62 +1540,37 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
     )
     
-    # 🔍 Debug: validate uniqueness
+    # Debug: validate uniqueness
     num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
     logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
     
     # 🚨 Warn if duplicates still slipped through
     if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
         logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
-    if df_master.empty:
-        logging.warning("⚠️ No sharp picks to backtest")
-        return pd.DataFrame()
     
-
-    logging.info(f"🔍 df_master shape: {df_master.shape}")
-    logging.info("🔍 df_master columns: %s", json.dumps(df_master.columns.tolist()))
-    
-    logging.info(f"🔍 df_scores shape: {df_scores.shape}")
-    logging.info("🔍 df_scores columns: %s", json.dumps(df_scores.columns.tolist()))
-    # === 5. Merge scores and filter
     # === Merge first snapshot into master before scoring
-    df_master = df_master.merge(
-        df_first,
-        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-        how='left'
-    )
-    df_master['Sport'] = sport_label.upper()
-
-    # === Diagnostic: Check for inconsistent first line values per group
-    duplicates = (
-        df_master.groupby(['Game_Key', 'Bookmaker'])['First_Line_Value']
-        .nunique()
-        .reset_index(name='unique_first_lines')
-        .query('unique_first_lines > 1')
-    )
-
-    if not duplicates.empty:
-        logging.warning("⚠️ Detected multiple First_Line_Values per Game_Key + Bookmaker:")
-    logging.warning(duplicates.to_string(index=False))
-    # === 5. Merge scores and filter
-    df = df_master.merge(
-        df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
-        on='Merge_Key_Short', how='inner'
-    )
-    # ✅ Reassign Merge_Key_Short from df_master using Game_Key
+    df_master = df_master.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+    
+    # === Merge scores and filter
+    df = df_master.merge(df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']], on='Merge_Key_Short', how='inner')
+    
+    # Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
         logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key")
         df = df.drop(columns=['Merge_Key_Short'], errors='ignore')
         df = df.merge(df_master[['Game_Key', 'Merge_Key_Short']], on='Game_Key', how='left')
+    
+    # Final logging
     null_count = df['Merge_Key_Short'].isnull().sum()
     logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
     df['Sport'] = sport_label.upper()
-    # 🛠️ Reassign Merge_Key_Short if missing
-   
-
-    df = df[df['Book'].isin(SHARP_BOOKS + REC_BOOKS)]
-    df = df[pd.to_datetime(df['Game_Start'], utc=True, errors='coerce') < pd.Timestamp.utcnow()]
     
+    # Clean up temp columns
+    df.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
+    
+    # Log final result
+    logging.info("🧭 Direction_Aligned counts:\n" + df['Direction_Aligned'].value_counts(dropna=False).to_string())
+
     # ✅ Now the first values are present → safe to compute delta features
     # === Step 3a: Compute model probability shift
     df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce') - pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
