@@ -1497,7 +1497,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         
         return df
     
-    
+
     
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
@@ -1531,6 +1531,34 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
     
+    # === Ensure 'df_first' is created correctly
+    # Check if 'df_first' exists, otherwise create it
+    if 'df_first' not in locals():
+        df_first = (
+            df_all_snapshots_filtered
+            .sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+            .rename(columns={
+                'Value': 'First_Line_Value',
+                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
+        )
+        
+        # Convert relevant columns to category type before merging to save memory
+        df_first['Game_Key'] = df_first['Game_Key'].astype('category')
+        df_first['Market'] = df_first['Market'].astype('category')
+        df_first['Outcome'] = df_first['Outcome'].astype('category')
+        df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
+    
+        # Debug: validate uniqueness
+        num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
+        logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
+    
+        # 🚨 Warn if duplicates still slipped through
+        if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
+            logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
+    
+    
     # Function to process DataFrames in smaller batches
     def batch_merge(df_master, df_first, batch_size=1000):
         num_chunks = len(df_first) // batch_size + 1
@@ -1555,6 +1583,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         gc.collect()
     
         return df_master
+    
     
     # Function to batch merge df_scores
     def batch_merge_scores(df_master, df_scores, batch_size=1000):
@@ -1736,7 +1765,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if df_valid.empty:
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
-    
     
     result = df_valid.apply(calc_cover, axis=1, result_type='expand')
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
