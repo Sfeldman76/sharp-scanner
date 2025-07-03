@@ -1543,25 +1543,36 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     ], ignore_index=True)
      # Optionally log the shape of df_all_snapshots after filtering
     logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
+    # === Ensure 'df_first' is created correctly
+    # Check if 'Model_Sharp_Win_Prob' is available before renaming it
     
     # === Ensure 'df_first' is created correctly
     # Check if 'df_first' exists, otherwise create it
     if 'df_first' not in locals():
+        # === Ensure 'df_first' is created correctly
+        # Check if 'Model_Sharp_Win_Prob' is available before renaming it
+        snapshot_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']
+        if 'Model_Sharp_Win_Prob' in df_all_snapshots_filtered.columns:
+            snapshot_cols.append('Model_Sharp_Win_Prob')
+        
         df_first = (
-            df_all_snapshots_filtered  # Ensure df_all_snapshots_filtered is defined first
+            df_all_snapshots_filtered
             .sort_values('Snapshot_Timestamp')
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+            .loc[:, snapshot_cols]
             .rename(columns={
                 'Value': 'First_Line_Value',
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
+            })
         )
-    
+        
+        # Ensure First_Sharp_Prob is created even if it was missing
+        if 'First_Sharp_Prob' not in df_first.columns:
+            df_first['First_Sharp_Prob'] = np.nan
+        
         # Convert relevant columns to category type before merging to save memory
-        df_first['Game_Key'] = df_first['Game_Key'].astype('category')
-        df_first['Market'] = df_first['Market'].astype('category')
-        df_first['Outcome'] = df_first['Outcome'].astype('category')
-        df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
+        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+            df_first[col] = df_first[col].astype('category')
     
         # Debug: validate uniqueness
         num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
