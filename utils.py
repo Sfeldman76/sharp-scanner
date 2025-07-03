@@ -1721,13 +1721,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     log_memory("BEFORE merge with df_scores_needed")
     logging.info(f"df_master shape: {df_master.shape}, df_scores_needed shape: {df_scores_needed.shape}")
     
+    logging.info(f"✅ Before final score merge: df_master columns: {df_master.columns.tolist()}")
     # Merge only required columns
     df = df_master.merge(
         df_scores_needed[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
         on='Merge_Key_Short',
         how='inner'
     )
-    
+    logging.info(f"✅ After merge: df columns: {df.columns.tolist()}")
     # Log shape after merge
     log_memory("AFTER merge with df_scores_needed")
     logging.info(f"df shape after merge: {df.shape}")
