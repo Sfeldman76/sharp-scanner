@@ -13,7 +13,9 @@ import time
 import json
 import psutil
 import os
-
+import gc
+import psutil
+    
 from pandas_gbq import to_gbq
 import traceback
 import pickle  # ✅ Add this at the top of your script
@@ -1434,9 +1436,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                     logging.error(f"⚠️ Column {col} contains lists")
             except Exception as content_error:
                 logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
+ 
+    chunk_size = 10000  # Adjust this based on your available memory
+    
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 24)
-    df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
+    df_master = build_game_key(df_master)
     
     # === Filter out games already scored in sharp_scores_full
     scored_keys = bq_client.query("""
@@ -1481,24 +1486,32 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Debugging: Log the columns of df_all_snapshots after build_game_key
     logging.info(f"After build_game_key - df_all_snapshots columns: {df_all_snapshots.columns.tolist()}")
     
-    # Standardize the 'Merge_Key_Short' column by stripping whitespace and converting to lowercase
-    df_all_snapshots['Merge_Key_Short'] = df_all_snapshots['Merge_Key_Short'].str.strip().str.lower()
-    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].str.strip().str.lower()
-    
     # Ensure 'Merge_Key_Short' is present in df_all_snapshots
     if 'Merge_Key_Short' not in df_all_snapshots.columns:
         logging.error("❌ 'Merge_Key_Short' is missing in df_all_snapshots.")
         return pd.DataFrame()  # Return empty DataFrame if missing
     
-    # Filter df_all_snapshots based on Merge_Key_Short
-    df_all_snapshots = df_all_snapshots[df_all_snapshots['Merge_Key_Short'].isin(df_scores_needed['Merge_Key_Short'])]
+    # Standardize the 'Merge_Key_Short' column by stripping whitespace and converting to lowercase
+    df_all_snapshots['Merge_Key_Short'] = df_all_snapshots['Merge_Key_Short'].str.strip().str.lower()
+    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].str.strip().str.lower()
+    
+    # Process in chunks
+    chunks = []
+    for start in range(0, len(df_all_snapshots), chunk_size):
+        chunk = df_all_snapshots.iloc[start:start + chunk_size]
+        # Filter the chunk based on Merge_Key_Short
+        chunk = chunk[chunk['Merge_Key_Short'].isin(df_scores_needed['Merge_Key_Short'])]
+        chunks.append(chunk)
+        gc.collect()  # Manually free up memory after processing each chunk
+    
+    # Concatenate the filtered chunks after processing
+    df_all_snapshots_filtered = pd.concat(chunks, ignore_index=True)
     
     # Optionally log the shape of df_all_snapshots after filtering
-    logging.info(f"After filtering, df_all_snapshots shape: {df_all_snapshots.shape}")
+    logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
     
     # Track memory usage after the operation
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-    
 
     # === Normalize for merge
     # === Normalize for merge safety
