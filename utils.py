@@ -1578,9 +1578,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
                 df_first[col] = df_first[col].astype('category')
         
-            logging.info(f"🧪 df_first created with {len(df_first)} rows and columns: {df_first.columns.tolist()}")
-            logging.info(f"📉 Null rates:\n{df_first[['First_Line_Value', 'First_Sharp_Prob']].isnull().mean().to_string()}")
-            
+        
             
             # Logging
             num_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
@@ -1677,22 +1675,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         # Return final processed DataFrame
         return df_master
     
-    
-    # === Process Data
-    # Apply the batch processing function to your data
-    # 1. Apply df_first merge (left join only)
-    
-    log_memory("AFTER batch_merge with df_first")
-    logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    
-    # 2. Only then merge scores
     # === 1. Merge df_first snapshot fields into df_master
     df_master = batch_merge(df_master, df_first, batch_size=4000)
     log_memory("AFTER batch_merge with df_first")
     logging.info("🧪 Columns in df_master after batch_merge:\n" + str(df_master.columns.tolist()))
     
-    # === 2. Extract First_* columns for safekeeping
+    # === 2. Extract First_* fields
     first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
+    
     
     # === 3. Merge in game scores (drop scores from master first to avoid conflict)
     df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore', inplace=True)
