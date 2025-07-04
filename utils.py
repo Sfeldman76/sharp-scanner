@@ -340,9 +340,16 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Scored_By_Model', 'Scoring_Market'
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
-    
+     
     # Ensure all required columns exist
     df = ensure_columns(df, ALLOWED_COLS, fill_value=None)
+
+    # 🔍 Add required column check before filtering
+    required_cols = ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        logging.error(f"❌ Missing required columns before upload: {missing}")
+        return
 
     # Log any remaining mismatches
     missing_cols = [col for col in ALLOWED_COLS if col not in df.columns]
@@ -352,7 +359,6 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     # Filter to allowed schema
     df = df[ALLOWED_COLS]
-
     
     logging.info("🧪 Preview of model columns being written:")
     logging.info(df[model_cols].dropna(how='all').head(5).to_string())
