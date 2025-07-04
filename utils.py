@@ -1686,121 +1686,72 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     
     # 2. Only then merge scores
-    # === 1. Merge df_first into df_master
+    # === 1. Merge df_first snapshot fields into df_master
     df_master = batch_merge(df_master, df_first, batch_size=4000)
     log_memory("AFTER batch_merge with df_first")
-    logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master.get('First_Sharp_Prob', pd.Series(dtype=float)).dropna().head().to_string(index=False))
+    logging.info("🧪 Columns in df_master after batch_merge:\n" + str(df_master.columns.tolist()))
     
-    # 🛡️ Preserve First_* fields before any score merge that might overwrite them
+    # === 2. Extract First_* columns for safekeeping
     first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
     
-    # === 2. Merge scores
+    # === 3. Merge in game scores (drop scores from master first to avoid conflict)
+    df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore', inplace=True)
     df_master = batch_merge_scores(df_master, df_scores_needed, batch_size=4000)
     
-    # 🛠️ Restore First_* columns after merge
-    df_master = df_master.merge(
-        first_cols,
-        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-        how='left'
-    )
+    # === 4. Re-merge First_* if they were dropped by the inner merge
+    if 'First_Sharp_Prob' not in df_master.columns or 'First_Line_Value' not in df_master.columns:
+        df_master = df_master.merge(first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
     
-    # 🧼 Remove duplicates (if suffixes appear)
-    for col in ['First_Line_Value', 'First_Sharp_Prob']:
-        if f"{col}_x" in df_master.columns and f"{col}_y" in df_master.columns:
-            df_master[col] = df_master[f"{col}_x"].combine_first(df_master[f"{col}_y"])
+    # === 5. Clean up any suffixes if they slipped through
+    for col in ['First_Sharp_Prob', 'First_Line_Value']:
+        x_col, y_col = f"{col}_x", f"{col}_y"
+        if x_col in df_master.columns or y_col in df_master.columns:
+            df_master[col] = df_master.get(x_col).combine_first(df_master.get(y_col))
     df_master.drop(columns=[col for col in df_master.columns if col.endswith('_x') or col.endswith('_y')], inplace=True)
     
+    # === 6. Logging + diagnostics
+    logging.info("✅ Sample non-null First_Sharp_Prob values:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
+    logging.info(f"✅ Final df_master columns: {df_master.columns.tolist()}")
+    log_memory("AFTER merge with df_scores_needed")
+    logging.info(f"df_master shape after merge: {df_master.shape}")
     
-    # Ensure 'Merge_Key_Short' is present in df_all_snapshots
-    if 'Merge_Key_Short' not in df_all_snapshots.columns:
-        logging.error("❌ 'Merge_Key_Short' is missing in df_all_snapshots.")
-        return pd.DataFrame()  # Return empty DataFrame if missing
-
-   
+    # === Final result ready
+    df = df_master
     
-    # Track memory usage after the operation
-    logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    # === Convert key columns to category before scoring
+    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        df_master[col] = df_master[col].astype('category')
     
-    # Continue with further operations (e.g., computing model probabilities, etc.)
+    # === Final clean merge with scores (already merged earlier, so skip remerging First_*)
+    # Drop old Score_* just to be safe
+    df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore', inplace=True)
     
-    
-    # === Convert df_master columns to category type to reduce memory usage before merge
-    df_master['Game_Key'] = df_master['Game_Key'].astype('category')
-    df_master['Market'] = df_master['Market'].astype('category')
-    df_master['Outcome'] = df_master['Outcome'].astype('category')
-    df_master['Bookmaker'] = df_master['Bookmaker'].astype('category')
-    
-    # === Merge first snapshot into master before scoring
-    #df_master = df_master.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-    
-    # Free memory after merge
-    del df_first
-    gc.collect()
-    
-   # === Merge scores and filter (with deduplication and memory safety)
+    # Deduplicate scores
     df_scores_needed = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
+    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
     
-    # Convert to category to reduce memory
-    df_scores_needed.loc[:, 'Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
-    
-    # Deduplicate to avoid row explosion
-    # Deduplicate to avoid row explosion (optional sort if timestamp is available)
     if 'Inserted_Timestamp' in df_scores_needed.columns:
         df_scores_needed = (
             df_scores_needed
-            .sort_values('Inserted_Timestamp', ascending=True)
+            .sort_values('Inserted_Timestamp')
             .drop_duplicates(subset='Merge_Key_Short', keep='last')
         )
     else:
         df_scores_needed = df_scores_needed.drop_duplicates(subset='Merge_Key_Short', keep='last')
-        
-    # Log shape before merge
-    log_memory("BEFORE merge with df_scores_needed")
-    logging.info(f"df_master shape: {df_master.shape}, df_scores_needed shape: {df_scores_needed.shape}")
     
-    logging.info(f"✅ Before final score merge: df_master columns: {df_master.columns.tolist()}")
-    # Drop old First_* and Score_* columns from df_master BEFORE merge
-    # Preserve First_Sharp_Prob and First_Line_Value before score merge
-    # === Preserve First_* columns before score merge
-    first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Sharp_Prob', 'First_Line_Value']].copy()
+    # === Merge clean scores into df_master
+    df = df_master.merge(df_scores_needed, on='Merge_Key_Short', how='inner')
     
-    # Drop only Score_* columns (not First_*)
-    drop_cols = ['Score_Home_Score', 'Score_Away_Score']
-    df_master = df_master.drop(columns=drop_cols, errors='ignore')
+    # === Final safety: check First_Sharp_Prob is present
+    if 'First_Sharp_Prob' not in df.columns:
+        logging.error("❌ First_Sharp_Prob missing after final merges.")
+    else:
+        logging.info("✅ First_Sharp_Prob successfully preserved:")
+        logging.info(df[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     
-    # === Merge scores
-    # Step 1: Merge scores
-    df = df_master.merge(
-        df_scores_needed[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
-        on='Merge_Key_Short',
-        how='inner'
-    )
-    
-    # Step 2: Re-merge with original df_first to preserve first line values
-    df = df.merge(
-        df_first,
-        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-        how='left'
-    )
-    # === Restore clean First_* columns from _x/_y if needed
-    if 'First_Sharp_Prob_x' in df.columns or 'First_Sharp_Prob_y' in df.columns:
-        df['First_Sharp_Prob'] = df.get('First_Sharp_Prob_x').combine_first(df.get('First_Sharp_Prob_y'))
-    
-    if 'First_Line_Value_x' in df.columns or 'First_Line_Value_y' in df.columns:
-        df['First_Line_Value'] = df.get('First_Line_Value_x').combine_first(df.get('First_Line_Value_y'))
-    
-    # 🧹 Clean up _x/_y columns
-    df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], inplace=True, errors='ignore')
-    
-    # 🧪 Debug check
-    logging.info("✅ Sample non-null First_Sharp_Prob values:\n" + df[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    # === Log to confirm presence and values
-    logging.info(f"✅ After final merge, df columns: {df.columns.tolist()}")
-   
-    # === Clean up any accidental _x/_y just in case
-    df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], inplace=True, errors='ignore')
-        
-    # Clean up
+    # === Final logging
+    logging.info(f"✅ Final df columns before scoring: {df.columns.tolist()}")
+    log_memory("AFTER merge with df_scores_needed")
    
     # Log shape after merge
     log_memory("AFTER merge with df_scores_needed")
