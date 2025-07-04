@@ -1477,36 +1477,37 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         return df_chunk
 
 
-
-    # === Vectorized version of calc_cover ===
+    
     def calc_cover(df):
-        # Calculate total score (only needed for 'totals' market)
-        df['Total_Score'] = df['Score_Home_Score'] + df['Score_Away_Score']
-        
-        # Create a mask for 'totals' market
-        df['Is_Totals'] = df['Market'] == 'totals'
+        """
+        Vectorized cover calculator for sharp bets.
+        Returns only SHARP_COVER_RESULT and SHARP_HIT_BOOL as a new DataFrame.
+        """
+        df = df.copy()
     
-        # Vectorized computation for 'totals' market
-        df['Tot_Outcome'] = np.where(df['Outcome'] == 'under', -1, 1)
-        
-        # Vectorized computation for 'spreads' and 'h2h' markets
-        df['Spread_Outcome'] = np.where(df['Outcome'] == df['Home_Team_Norm'], df['Score_Home_Score'], df['Score_Away_Score'])
-        
-        # Calculate the covered bet based on market type
-        df['Covered'] = np.where(
-            df['Is_Totals'],  # For 'totals' market
-            np.where(df['Outcome'] == 'under', df['Total_Score'] < df['Value'], df['Total_Score'] > df['Value']),
-            (df['Spread_Outcome'] + df['Value']) > df['Score_Away_Score']  # For other markets
+        # Total score only relevant for 'totals' market
+        total_score = df['Score_Home_Score'] + df['Score_Away_Score']
+        is_totals = df['Market'].str.lower() == 'totals'
+    
+        # Determine outcome side
+        is_under = df['Outcome'].str.lower() == 'under'
+        is_home_side = df['Outcome'] == df['Home_Team_Norm']
+    
+        # Compute covered boolean
+        covered = np.where(
+            is_totals,
+            np.where(is_under, total_score < df['Value'], total_score > df['Value']),
+            np.where(is_home_side, df['Score_Home_Score'] + df['Value'] > df['Score_Away_Score'],
+                     df['Score_Away_Score'] + df['Value'] > df['Score_Home_Score'])
         )
-
-        
-        # Assign the final results based on conditions
-        df['SHARP_COVER_RESULT'] = np.where(df['Covered'], 'Win', 'Loss')
-        df['SHARP_HIT_BOOL'] = np.where(df['Covered'], 1, 0)
-        
-        return df
     
-
+        # Construct result DataFrame
+        result = pd.DataFrame({
+            'SHARP_COVER_RESULT': np.where(covered, 'Win', 'Loss'),
+            'SHARP_HIT_BOOL': covered.astype(int)
+        })
+    
+        return result
     
  
     # === 4. Load recent sharp picks
