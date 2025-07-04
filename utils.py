@@ -1624,34 +1624,34 @@ def batch_merge(df_master, df_first, batch_size=10000):
     return df_master
     
     
-# Function to batch merge df_scores using chunks of df_master
-def batch_merge_scores(df_master, df_scores, batch_size=10000):
-    num_chunks = len(df_master) // batch_size + 1
-    merged_df_list = []
-
-    for i in range(num_chunks):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, len(df_master))
-        df_master_chunk = df_master.iloc[start_idx:end_idx]
-
-        # Merge the df_master chunk with full df_scores (scores are small)
-        df_batch = df_master_chunk.merge(
-            df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
-            on='Merge_Key_Short',
-            how='left'  # Use left join to keep all rows from df_master
-        )
-        merged_df_list.append(df_batch)
-
-        # Free memory
-        del df_master_chunk, df_batch
-        gc.collect()
-
-    df_master = pd.concat(merged_df_list, ignore_index=True)
-    del merged_df_list
-    gc.collect()
-
-    return df_master
+    # Function to batch merge df_scores using chunks of df_master
+    def batch_merge_scores(df_master, df_scores, batch_size=10000):
+        num_chunks = len(df_master) // batch_size + 1
+        merged_df_list = []
     
+        for i in range(num_chunks):
+            start_idx = i * batch_size
+            end_idx = min((i + 1) * batch_size, len(df_master))
+            df_master_chunk = df_master.iloc[start_idx:end_idx]
+    
+            # Merge the df_master chunk with full df_scores (scores are small)
+            df_batch = df_master_chunk.merge(
+                df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
+                on='Merge_Key_Short',
+                how='left'  # Use left join to keep all rows from df_master
+            )
+            merged_df_list.append(df_batch)
+    
+            # Free memory
+            del df_master_chunk, df_batch
+            gc.collect()
+    
+        df_master = pd.concat(merged_df_list, ignore_index=True)
+        del merged_df_list
+        gc.collect()
+    
+        return df_master
+        
     # Main function to apply batch processing
     def process_in_batches(df_master, df_first, df_scores, batch_size=10000):
         # Reduce df_first to only necessary columns before the merge to save memory
