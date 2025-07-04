@@ -1511,7 +1511,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
  
     # === 4. Load recent sharp picks
-    df_master = read_recent_sharp_moves(hours=days_back * 24)
+    df_master = read_recent_sharp_moves(hours=days_back * 72)
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
@@ -1543,7 +1543,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
     # === 1. Load and process snapshots
-    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
+    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
     df_all_snapshots_filtered = pd.concat([
         process_chunk(df_all_snapshots.iloc[start:start + 10000])
         for start in range(0, len(df_all_snapshots), 10000)
