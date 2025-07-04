@@ -1686,20 +1686,30 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     
     # 2. Only then merge scores
-    df_master = batch_merge_scores(df_master, df_scores_needed, batch_size=4000)
+    # === 1. Merge df_first into df_master
+    df_master = batch_merge(df_master, df_first, batch_size=4000)
     log_memory("AFTER batch_merge with df_first")
-    logging.info(f"🧪 Columns in df_master after batch_merge:\n{df_master.columns.tolist()}")
-    logging.info("🧪 Sample First_Sharp_Prob:\n" + df_master.get('First_Sharp_Prob', pd.Series(dtype=float)).dropna().head().to_string(index=False))
-    logging.info(f"✅ After merge: df_master columns: {df_master.columns.tolist()}")
-    logging.info(f"🧪 Sample First_Sharp_Prob:\n{df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False)}")
-    # Track memory usage after the operation
-    logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-    # 🧹 If multiple First_Sharp_Prob_* columns exist, deduplicate them
-    if 'First_Sharp_Prob_x' in df_master.columns and 'First_Sharp_Prob_y' in df_master.columns:
-        df_master['First_Sharp_Prob'] = df_master['First_Sharp_Prob_x'].combine_first(df_master['First_Sharp_Prob_y'])
-        df_master['First_Line_Value'] = df_master['First_Line_Value_x'].combine_first(df_master['First_Line_Value_y'])
-        df_master.drop(columns=[c for c in df_master.columns if c.endswith('_x') or c.endswith('_y')], inplace=True)
-    # === Continue with further operations (e.g., reassigning Merge_Key_Short, computing model probabilities, etc.)
+    logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master.get('First_Sharp_Prob', pd.Series(dtype=float)).dropna().head().to_string(index=False))
+    
+    # 🛡️ Preserve First_* fields before any score merge that might overwrite them
+    first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
+    
+    # === 2. Merge scores
+    df_master = batch_merge_scores(df_master, df_scores_needed, batch_size=4000)
+    
+    # 🛠️ Restore First_* columns after merge
+    df_master = df_master.merge(
+        first_cols,
+        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+        how='left'
+    )
+    
+    # 🧼 Remove duplicates (if suffixes appear)
+    for col in ['First_Line_Value', 'First_Sharp_Prob']:
+        if f"{col}_x" in df_master.columns and f"{col}_y" in df_master.columns:
+            df_master[col] = df_master[f"{col}_x"].combine_first(df_master[f"{col}_y"])
+    df_master.drop(columns=[col for col in df_master.columns if col.endswith('_x') or col.endswith('_y')], inplace=True)
+    
     
     # Ensure 'Merge_Key_Short' is present in df_all_snapshots
     if 'Merge_Key_Short' not in df_all_snapshots.columns:
