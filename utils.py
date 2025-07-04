@@ -1586,44 +1586,44 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             raise RuntimeError("❌ df_first is empty — stopping early to avoid downstream issues.")
             
     # Function to process DataFrames in smaller batches
-def batch_merge(df_master, df_first, batch_size=10000):
-    """
-    Performs batch-wise left joins from df_master to df_first to preserve all rows
-    in df_master while limiting memory usage.
-    """
-    num_chunks = len(df_master) // batch_size + 1
-    merged_chunks = []
-
-    for i in range(num_chunks):
-        start = i * batch_size
-        end = min((i + 1) * batch_size, len(df_master))
-        df_chunk = df_master.iloc[start:end]
-
-        # Left join from df_master chunk to df_first
-        merged = df_chunk.merge(
-            df_first,
-            on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-            how='left'
-        )
-
-        logging.info(f"🧪 Merged batch {i + 1}/{num_chunks}: {merged.shape}")
-        merged_chunks.append(merged)
-
-        # Free memory
-        del df_chunk, merged
-        gc.collect()
-
-    df_master = pd.concat(merged_chunks, ignore_index=True)
-    logging.info(f"✅ Full merged df_master shape: {df_master.shape}")
-    logging.info(f"✅ Columns after batch merge: {df_master.columns.tolist()}")
-
-    if 'First_Sharp_Prob' not in df_master.columns:
-        logging.error("❌ 'First_Sharp_Prob' missing after batch_merge — aborting")
-        raise ValueError("Missing First_Sharp_Prob after batch_merge")
-
-    return df_master
+    def batch_merge(df_master, df_first, batch_size=10000):
+        """
+        Performs batch-wise left joins from df_master to df_first to preserve all rows
+        in df_master while limiting memory usage.
+        """
+        num_chunks = len(df_master) // batch_size + 1
+        merged_chunks = []
     
+        for i in range(num_chunks):
+            start = i * batch_size
+            end = min((i + 1) * batch_size, len(df_master))
+            df_chunk = df_master.iloc[start:end]
     
+            # Left join from df_master chunk to df_first
+            merged = df_chunk.merge(
+                df_first,
+                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                how='left'
+            )
+    
+            logging.info(f"🧪 Merged batch {i + 1}/{num_chunks}: {merged.shape}")
+            merged_chunks.append(merged)
+    
+            # Free memory
+            del df_chunk, merged
+            gc.collect()
+    
+        df_master = pd.concat(merged_chunks, ignore_index=True)
+        logging.info(f"✅ Full merged df_master shape: {df_master.shape}")
+        logging.info(f"✅ Columns after batch merge: {df_master.columns.tolist()}")
+    
+        if 'First_Sharp_Prob' not in df_master.columns:
+            logging.error("❌ 'First_Sharp_Prob' missing after batch_merge — aborting")
+            raise ValueError("Missing First_Sharp_Prob after batch_merge")
+    
+        return df_master
+        
+        
     # Function to batch merge df_scores using chunks of df_master
     def batch_merge_scores(df_master, df_scores, batch_size=10000):
         num_chunks = len(df_master) // batch_size + 1
