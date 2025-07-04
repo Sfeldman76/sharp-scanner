@@ -1664,7 +1664,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Process Data
     # Apply the batch processing function to your data
-    df_master = process_in_batches(df_master, df_first, df_scores_needed, batch_size=4000)
+    # 1. Apply df_first merge (left join only)
+    
+    log_memory("AFTER batch_merge with df_first")
+    logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
+    
+    # 2. Only then merge scores
+    df_master = batch_merge_scores(df_master, df_scores_needed, batch_size=4000)
     logging.info(f"✅ After merge: df_master columns: {df_master.columns.tolist()}")
     logging.info(f"🧪 Sample First_Sharp_Prob:\n{df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False)}")
     # Track memory usage after the operation
@@ -1734,15 +1740,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master = df_master.drop(columns=drop_cols, errors='ignore')
     
     # === Merge scores
+    # Step 1: Merge scores
     df = df_master.merge(
         df_scores_needed[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
         on='Merge_Key_Short',
         how='inner'
     )
     
-    # === Restore First_* columns without triggering suffixes
+    # Step 2: Re-merge with original df_first to preserve first line values
     df = df.merge(
-        first_cols,
+        df_first,
         on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
         how='left'
     )
