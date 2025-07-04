@@ -1594,18 +1594,24 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             end_idx = min((i + 1) * batch_size, len(df_first))
             df_first_batch = df_first.iloc[start_idx:end_idx]
     
-            # Merge the batch with df_master
-            df_batch = df_master.merge(df_first_batch, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+            df_batch = df_master.merge(
+                df_first_batch,
+                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                how='left'
+            )
             merged_df_list.append(df_batch)
     
-            # Free memory after processing each batch
-            del df_first_batch
+            logging.info(f"🧪 Merged batch {i+1}/{num_chunks}: {df_batch.shape}, columns: {df_batch.columns.tolist()}")
+            del df_first_batch, df_batch
             gc.collect()
     
-        # Concatenate all merged DataFrames into one
         df_master = pd.concat(merged_df_list, ignore_index=True)
-        del merged_df_list
-        gc.collect()
+        logging.info(f"✅ Full merged df_master shape: {df_master.shape}")
+        logging.info(f"✅ Columns after merge: {df_master.columns.tolist()}")
+    
+        if 'First_Sharp_Prob' not in df_master.columns:
+            logging.error("❌ 'First_Sharp_Prob' missing after merge — aborting")
+            raise ValueError("Missing First_Sharp_Prob after batch_merge")
     
         return df_master
     
