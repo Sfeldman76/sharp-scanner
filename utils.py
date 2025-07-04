@@ -1541,53 +1541,50 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # === Load and process snapshots
+    # === 1. Load and process snapshots
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
     df_all_snapshots_filtered = pd.concat([
         process_chunk(df_all_snapshots.iloc[start:start + 5000])
         for start in range(0, len(df_all_snapshots), 5000)
     ], ignore_index=True)
-    
     logging.info(f"✅ After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
+        
+   
     
-    # === Construct df_first from snapshots
-    if 'df_first' not in locals():
-        
-        # === Build df_first cleanly from df_all_snapshots_filtered
-        required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']
-        missing = [col for col in required_cols if col not in df_all_snapshots_filtered.columns]
-        
-        if missing:
-            logging.warning(f"⚠️ Cannot compute df_first — missing columns: {missing}")
-            df_first = pd.DataFrame(columns=[
-                'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-                'First_Line_Value', 'First_Sharp_Prob'
-            ])
-        else:
-            df_first = (
-                df_all_snapshots_filtered
-                .sort_values('Snapshot_Timestamp')
-                .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-                .loc[:, required_cols]
-                .rename(columns={
-                    'Value': 'First_Line_Value',
-                    'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-                })
-            )
-        
-            for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-                df_first[col] = df_first[col].astype('category')
-        
-        
+    # === 2. Build df_first snapshot baseline — NO DEFERRED EXECUTION
+    required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']
+    missing = [col for col in required_cols if col not in df_all_snapshots_filtered.columns]
+    
+    if missing:
+        logging.warning(f"⚠️ Cannot compute df_first — missing columns: {missing}")
+        df_first = pd.DataFrame(columns=[
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob'
+        ])
+    else:
+        df_first = (
+            df_all_snapshots_filtered
+            .sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+            .loc[:, required_cols]
+            .rename(columns={
+                'Value': 'First_Line_Value',
+                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+            })
+        )
+    
+        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+            df_first[col] = df_first[col].astype('category')
+    
+        # 🔍 Ensure full evaluation before merge
+        df_first = df_first.reset_index(drop=True).copy()
+    
+        # ✅ Logging + hard check
+        logging.info(f"🧪 df_first created with {len(df_first)} rows and columns: {df_first.columns.tolist()}")
+        logging.info(f"🧪 Unique Game_Key+Market+Outcome+Bookmaker combos: {df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]}")
+        logging.info(f"📉 Null rates in df_first:\n{df_first[['First_Line_Value', 'First_Sharp_Prob']].isnull().mean().to_string()}")
+        if df_first.empty:
+            raise RuntimeError("❌ df_first is empty — stopping early to avoid downstream issues.")
             
-            # Logging
-            num_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
-            logging.info(f"🧪 df_first created with {len(df_first)} rows across {num_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
-            nulls = df_first[['First_Sharp_Prob', 'First_Line_Value']].isnull().mean()
-            logging.info(f"📉 Null rates in df_first:\n{nulls.to_string()}")
-            if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
-                logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
-        
     # Function to process DataFrames in smaller batches
     def batch_merge(df_master, df_first, batch_size=5000):
         num_chunks = len(df_first) // batch_size + 1
