@@ -1585,11 +1585,20 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         if df_first.empty:
             raise RuntimeError("❌ df_first is empty — stopping early to avoid downstream issues.")
             
-        # Function to process DataFrames in smaller batches
-      # === Prepare df_first: reduce + convert
-    df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
-    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        
+    # === Prepare df_first: reduce + convert
+    df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
+    
+    # Normalize key columns in both df_first and df_master
+    key_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    for df in [df_master, df_first]:
+        for col in key_cols:
+            df[col] = df[col].astype(str).str.strip().str.lower()
+    
+    # Optional: convert to category for memory savings
+    for col in key_cols:
         df_first[col] = df_first[col].astype('category')
+        df_master[col] = df_master[col].astype('category')
     
     # === Prepare df_scores: reduce + deduplicate
     df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
@@ -1604,15 +1613,20 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     else:
         df_scores = df_scores.drop_duplicates(subset='Merge_Key_Short', keep='last')
     
-    # === 1. Direct merge df_first into df_master
+    # === Check join key overlap BEFORE merge
+    common_keys = df_master[key_cols].drop_duplicates()
+    first_keys = df_first[key_cols].drop_duplicates()
+    overlap = common_keys.merge(first_keys, on=key_cols, how='inner')
+    logging.info(f"🧪 Join key overlap: {len(overlap)} / {len(common_keys)} df_master rows match df_first")
+    
+    # === 1. Merge df_first into df_master
     df_master = df_master.merge(
         df_first,
-        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+        on=key_cols,
         how='left'
     )
     log_memory("AFTER merge with df_first")
     logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    
     # === 2. Save First_* columns
     first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
     
