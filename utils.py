@@ -1749,11 +1749,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
         how='left'
     )
+    # === Restore clean First_* columns from _x/_y if needed
+    if 'First_Sharp_Prob_x' in df.columns or 'First_Sharp_Prob_y' in df.columns:
+        df['First_Sharp_Prob'] = df.get('First_Sharp_Prob_x').combine_first(df.get('First_Sharp_Prob_y'))
     
+    if 'First_Line_Value_x' in df.columns or 'First_Line_Value_y' in df.columns:
+        df['First_Line_Value'] = df.get('First_Line_Value_x').combine_first(df.get('First_Line_Value_y'))
+    
+    # 🧹 Clean up _x/_y columns
+    df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], inplace=True, errors='ignore')
+    
+    # 🧪 Debug check
+    logging.info("✅ Sample non-null First_Sharp_Prob values:\n" + df[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     # === Log to confirm presence and values
     logging.info(f"✅ After final merge, df columns: {df.columns.tolist()}")
-    logging.info("✅ Sample non-null First_Sharp_Prob values:\n" + df[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    
+   
     # === Clean up any accidental _x/_y just in case
     df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], inplace=True, errors='ignore')
         
