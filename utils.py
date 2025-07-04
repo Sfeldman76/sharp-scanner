@@ -1527,63 +1527,59 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_scores_needed = build_game_key(df_scores_needed)
     
     # Debugging: Log the columns of the DataFrames after build_game_key
+    # === Log schemas for debug
     logging.info(f"After build_game_key - df_scores_needed columns: {df_scores_needed.columns.tolist()}")
     logging.info(f"After build_game_key - df_master columns: {df_master.columns.tolist()}")
     
-    # Track memory usage before the operation
+    # === Track memory usage
     process = psutil.Process(os.getpid())
-    logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # === Ensure df_all_snapshots is loaded and processed correctly
+    # === Load and process snapshots
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
-    # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 5000])  # Reduced chunk size to 1000 for memory optimization
+        process_chunk(df_all_snapshots.iloc[start:start + 5000])
         for start in range(0, len(df_all_snapshots), 5000)
     ], ignore_index=True)
-     # Optionally log the shape of df_all_snapshots after filtering
-    logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
-    # === Ensure 'df_first' is created correctly
-    # Check if 'Model_Sharp_Win_Prob' is available before renaming it
     
-    # === Ensure 'df_first' is created correctly
-    # Check if 'df_first' exists, otherwise create it
+    logging.info(f"✅ After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
+    
+    # === Construct df_first from snapshots
     if 'df_first' not in locals():
-        # === Ensure 'df_first' is created correctly
-        # Check if 'Model_Sharp_Win_Prob' is available before renaming it
-        snapshot_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value']
-        if 'Model_Sharp_Win_Prob' in df_all_snapshots_filtered.columns:
-            snapshot_cols.append('Model_Sharp_Win_Prob')
+        required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']
+        missing = [col for col in required_cols if col not in df_all_snapshots_filtered.columns]
+    
+        if missing:
+            logging.warning(f"⚠️ Cannot compute df_first — missing columns: {missing}")
+            df_first = pd.DataFrame(columns=['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob'])
+        else:
+            df_first = (
+                df_all_snapshots_filtered
+                .sort_values('Snapshot_Timestamp')
+                .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+                .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']]
+                .rename(columns={
+                    'Value': 'First_Line_Value',
+                    'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+                })
+            )
+    
+            # Fill if missing
+            if 'First_Sharp_Prob' not in df_first.columns:
+                df_first['First_Sharp_Prob'] = np.nan
+    
+            # Optimize memory
+            for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+                df_first[col] = df_first[col].astype('category')
+    
+            # Logging
+            num_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
+            logging.info(f"🧪 df_first created with {len(df_first)} rows across {num_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
+            nulls = df_first[['First_Sharp_Prob', 'First_Line_Value']].isnull().mean()
+            logging.info(f"📉 Null rates in df_first:\n{nulls.to_string()}")
+            if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
+                logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
         
-        df_first = (
-            df_all_snapshots_filtered
-            .sort_values('Snapshot_Timestamp')
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-            .loc[:, snapshot_cols]
-            .rename(columns={
-                'Value': 'First_Line_Value',
-                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-            })
-        )
-        logging.info(f"🧪 Non-null First_Sharp_Prob rows in df_first: {df_first['First_Sharp_Prob'].notna().sum()}")
-        logging.info(f"🧪 Sample non-null values:\n{df_first[['Game_Key', 'First_Sharp_Prob']].dropna().head().to_string(index=False)}")
-        # Ensure First_Sharp_Prob is created even if it was missing
-        if 'First_Sharp_Prob' not in df_first.columns:
-            df_first['First_Sharp_Prob'] = np.nan
-        
-        # Convert relevant columns to category type before merging to save memory
-        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-            df_first[col] = df_first[col].astype('category')
-    
-        # Debug: validate uniqueness
-        num_unique_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
-        logging.info(f"🧪 df_first keys: {num_unique_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
-    
-        # 🚨 Warn if duplicates still slipped through
-        if df_first.duplicated(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']).any():
-            logging.warning("⚠️ df_first has duplicates — this will corrupt snapshot merge")
-    
-    
     # Function to process DataFrames in smaller batches
     def batch_merge(df_master, df_first, batch_size=5000):
         num_chunks = len(df_first) // batch_size + 1
