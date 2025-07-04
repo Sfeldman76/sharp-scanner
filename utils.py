@@ -1546,32 +1546,36 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Construct df_first from snapshots
     if 'df_first' not in locals():
+        
+        # === Build df_first cleanly from df_all_snapshots_filtered
         required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']
         missing = [col for col in required_cols if col not in df_all_snapshots_filtered.columns]
-    
+        
         if missing:
             logging.warning(f"⚠️ Cannot compute df_first — missing columns: {missing}")
-            df_first = pd.DataFrame(columns=['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob'])
+            df_first = pd.DataFrame(columns=[
+                'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+                'First_Line_Value', 'First_Sharp_Prob'
+            ])
         else:
             df_first = (
                 df_all_snapshots_filtered
                 .sort_values('Snapshot_Timestamp')
                 .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-                .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']]
+                .loc[:, required_cols]
                 .rename(columns={
                     'Value': 'First_Line_Value',
                     'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
                 })
             )
-    
-            # Fill if missing
-            if 'First_Sharp_Prob' not in df_first.columns:
-                df_first['First_Sharp_Prob'] = np.nan
-    
-            # Optimize memory
+        
             for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
                 df_first[col] = df_first[col].astype('category')
-    
+        
+            logging.info(f"🧪 df_first created with {len(df_first)} rows and columns: {df_first.columns.tolist()}")
+            logging.info(f"📉 Null rates:\n{df_first[['First_Line_Value', 'First_Sharp_Prob']].isnull().mean().to_string()}")
+            
+            
             # Logging
             num_keys = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]
             logging.info(f"🧪 df_first created with {len(df_first)} rows across {num_keys} unique Game_Key + Market + Outcome + Bookmaker combos")
@@ -1671,6 +1675,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # 2. Only then merge scores
     df_master = batch_merge_scores(df_master, df_scores_needed, batch_size=4000)
+    log_memory("AFTER batch_merge with df_first")
+    logging.info(f"🧪 Columns in df_master after batch_merge:\n{df_master.columns.tolist()}")
+    logging.info("🧪 Sample First_Sharp_Prob:\n" + df_master.get('First_Sharp_Prob', pd.Series(dtype=float)).dropna().head().to_string(index=False))
     logging.info(f"✅ After merge: df_master columns: {df_master.columns.tolist()}")
     logging.info(f"🧪 Sample First_Sharp_Prob:\n{df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False)}")
     # Track memory usage after the operation
