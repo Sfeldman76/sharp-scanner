@@ -1746,12 +1746,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
     
-    # Calculate result using `calc_cover` function
-    result = df_valid.apply(calc_cover, axis=1, result_type='expand')
+    # ✅ Vectorized calculation
+    result = calc_cover(df_valid)  # must return a DataFrame with 2 columns
+    
+    if result.shape[1] != 2:
+        logging.error("❌ calc_cover output shape mismatch — expected 2 columns.")
+        return pd.DataFrame()
+    
     result.columns = ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']
     df['SHARP_COVER_RESULT'] = None
     df['SHARP_HIT_BOOL'] = None
     df['Scored'] = False
+    
     df.loc[df_valid.index, ['SHARP_COVER_RESULT', 'SHARP_HIT_BOOL']] = result
     df.loc[df_valid.index, 'Scored'] = result['SHARP_COVER_RESULT'].notna()
     
@@ -1759,7 +1765,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if 'Unique_Sharp_Books' not in df.columns:
         df['Unique_Sharp_Books'] = 0
     df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
-    
+       
+        
     # === Final Output DataFrame ===
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
