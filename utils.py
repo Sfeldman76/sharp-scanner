@@ -1538,8 +1538,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 24)
     # Process df_all_snapshots in chunks to avoid memory overload
     df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 4000])  # Reduced chunk size to 1000 for memory optimization
-        for start in range(0, len(df_all_snapshots), 4000)
+        process_chunk(df_all_snapshots.iloc[start:start + 5000])  # Reduced chunk size to 1000 for memory optimization
+        for start in range(0, len(df_all_snapshots), 5000)
     ], ignore_index=True)
      # Optionally log the shape of df_all_snapshots after filtering
     logging.info(f"After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
@@ -1584,7 +1584,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Function to process DataFrames in smaller batches
-    def batch_merge(df_master, df_first, batch_size=4000):
+    def batch_merge(df_master, df_first, batch_size=5000):
         num_chunks = len(df_first) // batch_size + 1
         merged_df_list = []
     
@@ -1610,7 +1610,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Function to batch merge df_scores
-    def batch_merge_scores(df_master, df_scores, batch_size=4000):
+    def batch_merge_scores(df_master, df_scores, batch_size=5000):
         num_chunks = len(df_scores) // batch_size + 1
         merged_df_list = []
     
@@ -1636,7 +1636,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     
     # Main function to apply batch processing
-    def process_in_batches(df_master, df_first, df_scores, batch_size=4000):
+    def process_in_batches(df_master, df_first, df_scores, batch_size=6000):
         # Reduce df_first to only necessary columns before the merge to save memory
         df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
     
@@ -1728,25 +1728,37 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     logging.info(f"✅ Before final score merge: df_master columns: {df_master.columns.tolist()}")
     # Drop old First_* and Score_* columns from df_master BEFORE merge
-    drop_cols = [col for col in df_master.columns if col in ['Score_Home_Score', 'Score_Away_Score']]
+    # Preserve First_Sharp_Prob and First_Line_Value before score merge
+    # === Preserve First_* columns before score merge
+    first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Sharp_Prob', 'First_Line_Value']].copy()
+    
+    # Drop only Score_* columns (not First_*)
+    drop_cols = ['Score_Home_Score', 'Score_Away_Score']
     df_master = df_master.drop(columns=drop_cols, errors='ignore')
-    # Merge only required columns
+    
+    # === Merge scores
     df = df_master.merge(
         df_scores_needed[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
         on='Merge_Key_Short',
         how='inner'
     )
-    logging.info(f"✅ After final merge, df columns: {df.columns.tolist()}")
-    logging.info(df[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    logging.info(f"✅ After merge: df columns: {df.columns.tolist()}")
-    # Restore clean First_* columns (keep _x if available)
-    if 'First_Sharp_Prob_x' in df.columns:
-        df['First_Sharp_Prob'] = df['First_Sharp_Prob_x']
-    if 'First_Line_Value_x' in df.columns:
-        df['First_Line_Value'] = df['First_Line_Value_x']
     
-    # Clean up
+    # === Restore First_* columns without triggering suffixes
+    df = df.merge(
+        first_cols,
+        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+        how='left'
+    )
+    
+    # === Log to confirm presence and values
+    logging.info(f"✅ After final merge, df columns: {df.columns.tolist()}")
+    logging.info("✅ Sample non-null First_Sharp_Prob values:\n" + df[['First_Sharp_Prob']].dropna().head().to_string(index=False))
+    
+    # === Clean up any accidental _x/_y just in case
     df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], inplace=True, errors='ignore')
+        
+    # Clean up
+   
     # Log shape after merge
     log_memory("AFTER merge with df_scores_needed")
     logging.info(f"df shape after merge: {df.shape}")
