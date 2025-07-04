@@ -1585,176 +1585,70 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         if df_first.empty:
             raise RuntimeError("❌ df_first is empty — stopping early to avoid downstream issues.")
             
-    # Function to process DataFrames in smaller batches
-    def batch_merge(df_master, df_first, batch_size=10000):
-        """
-        Performs batch-wise left joins from df_master to df_first to preserve all rows
-        in df_master while limiting memory usage.
-        """
-        num_chunks = len(df_master) // batch_size + 1
-        merged_chunks = []
+        # Function to process DataFrames in smaller batches
+      # === Prepare df_first: reduce + convert
+    df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
+    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        df_first[col] = df_first[col].astype('category')
     
-        for i in range(num_chunks):
-            start = i * batch_size
-            end = min((i + 1) * batch_size, len(df_master))
-            df_chunk = df_master.iloc[start:end]
+    # === Prepare df_scores: reduce + deduplicate
+    df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
+    df_scores['Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
     
-            # Left join from df_master chunk to df_first
-            merged = df_chunk.merge(
-                df_first,
-                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                how='left'
-            )
+    if 'Inserted_Timestamp' in df_scores.columns:
+        df_scores = (
+            df_scores
+            .sort_values('Inserted_Timestamp')
+            .drop_duplicates(subset='Merge_Key_Short', keep='last')
+        )
+    else:
+        df_scores = df_scores.drop_duplicates(subset='Merge_Key_Short', keep='last')
     
-            logging.info(f"🧪 Merged batch {i + 1}/{num_chunks}: {merged.shape}")
-            merged_chunks.append(merged)
+    # === 1. Direct merge df_first into df_master
+    df_master = df_master.merge(
+        df_first,
+        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+        how='left'
+    )
+    log_memory("AFTER merge with df_first")
+    logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     
-            # Free memory
-            del df_chunk, merged
-            gc.collect()
-    
-        df_master = pd.concat(merged_chunks, ignore_index=True)
-        logging.info(f"✅ Full merged df_master shape: {df_master.shape}")
-        logging.info(f"✅ Columns after batch merge: {df_master.columns.tolist()}")
-    
-        if 'First_Sharp_Prob' not in df_master.columns:
-            logging.error("❌ 'First_Sharp_Prob' missing after batch_merge — aborting")
-            raise ValueError("Missing First_Sharp_Prob after batch_merge")
-    
-        return df_master
-        
-        
-    # Function to batch merge df_scores using chunks of df_master
-    def batch_merge_scores(df_master, df_scores, batch_size=10000):
-        num_chunks = len(df_master) // batch_size + 1
-        merged_df_list = []
-    
-        for i in range(num_chunks):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, len(df_master))
-            df_master_chunk = df_master.iloc[start_idx:end_idx]
-    
-            # Merge the df_master chunk with full df_scores (scores are small)
-            df_batch = df_master_chunk.merge(
-                df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']],
-                on='Merge_Key_Short',
-                how='left'  # Use left join to keep all rows from df_master
-            )
-            merged_df_list.append(df_batch)
-    
-            # Free memory
-            del df_master_chunk, df_batch
-            gc.collect()
-    
-        df_master = pd.concat(merged_df_list, ignore_index=True)
-        del merged_df_list
-        gc.collect()
-    
-        return df_master
-        
-    # Main function to apply batch processing
-    def process_in_batches(df_master, df_first, df_scores, batch_size=10000):
-        # Reduce df_first to only necessary columns before the merge to save memory
-        df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']]
-    
-        # Convert relevant columns to category type before merging to save memory
-        df_first['Game_Key'] = df_first['Game_Key'].astype('category')
-        df_first['Market'] = df_first['Market'].astype('category')
-        df_first['Outcome'] = df_first['Outcome'].astype('category')
-        df_first['Bookmaker'] = df_first['Bookmaker'].astype('category')
-    
-        # Reduce df_scores to only necessary columns before the merge to save memory
-        df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']]
-    
-        # Convert Merge_Key_Short to category in df_scores to save memory
-       
-        
-        # Use .loc[] to ensure you're modifying the original DataFrame:
-        df_scores.loc[:, 'Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
-    
-        # Process df_first in smaller batches
-        df_master = batch_merge(df_master, df_first, batch_size)
-    
-        # Process df_scores in smaller batches
-        df_master = batch_merge_scores(df_master, df_scores, batch_size)
-    
-        # Return final processed DataFrame
-        return df_master
-    
-    # === 1. Merge df_first snapshot fields into df_master
-    df_master = batch_merge(df_master, df_first, batch_size=10000)
-    log_memory("AFTER batch_merge with df_first")
-    logging.info("🧪 Columns in df_master after batch_merge:\n" + str(df_master.columns.tolist()))
-    
-    # === 2. Extract First_* fields
+    # === 2. Save First_* columns
     first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
     
-    
-    # === 3. Merge in game scores (drop scores from master first to avoid conflict)
+    # === 3. Drop Score_* to prevent conflict
     df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore', inplace=True)
-    df_master = batch_merge_scores(df_master, df_scores_needed, batch_size=4000)
     
-    # === 4. Re-merge First_* if they were dropped by the inner merge
+    # === 4. Merge in game scores
+    df_master = df_master.merge(
+        df_scores,
+        on='Merge_Key_Short',
+        how='inner'
+    )
+    
+    # === 5. Restore First_* if dropped during merge
     if 'First_Sharp_Prob' not in df_master.columns or 'First_Line_Value' not in df_master.columns:
         df_master = df_master.merge(first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
     
-    # === 5. Clean up any suffixes if they slipped through
+    # === 6. Clean up suffixes
     for col in ['First_Sharp_Prob', 'First_Line_Value']:
         x_col, y_col = f"{col}_x", f"{col}_y"
         if x_col in df_master.columns or y_col in df_master.columns:
             df_master[col] = df_master.get(x_col).combine_first(df_master.get(y_col))
     df_master.drop(columns=[col for col in df_master.columns if col.endswith('_x') or col.endswith('_y')], inplace=True)
     
-    # === 6. Logging + diagnostics
-    logging.info("✅ Sample non-null First_Sharp_Prob values:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    logging.info(f"✅ Final df_master columns: {df_master.columns.tolist()}")
-    log_memory("AFTER merge with df_scores_needed")
-    logging.info(f"df_master shape after merge: {df_master.shape}")
-    
-    # === Final result ready
-    df = df_master
-    
-    # === Convert key columns to category before scoring
-    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-        df_master[col] = df_master[col].astype('category')
-    
-    # === Final clean merge with scores (already merged earlier, so skip remerging First_*)
-    # Drop old Score_* just to be safe
-    df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore', inplace=True)
-    
-    # Deduplicate scores
-    df_scores_needed = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
-    df_scores_needed['Merge_Key_Short'] = df_scores_needed['Merge_Key_Short'].astype('category')
-    
-    if 'Inserted_Timestamp' in df_scores_needed.columns:
-        df_scores_needed = (
-            df_scores_needed
-            .sort_values('Inserted_Timestamp')
-            .drop_duplicates(subset='Merge_Key_Short', keep='last')
-        )
-    else:
-        df_scores_needed = df_scores_needed.drop_duplicates(subset='Merge_Key_Short', keep='last')
-    
-    # === Merge clean scores into df_master
-    df = df_master.merge(df_scores_needed, on='Merge_Key_Short', how='inner')
-    
-    # === Final safety: check First_Sharp_Prob is present
-    if 'First_Sharp_Prob' not in df.columns:
+    # === 7. Final safety + diagnostics
+    if 'First_Sharp_Prob' not in df_master.columns:
         logging.error("❌ First_Sharp_Prob missing after final merges.")
     else:
         logging.info("✅ First_Sharp_Prob successfully preserved:")
-        logging.info(df[['First_Sharp_Prob']].dropna().head().to_string(index=False))
+        logging.info(df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     
-    # === Final logging
+    # === 8. Final cleanup and return
+    df = df_master
     logging.info(f"✅ Final df columns before scoring: {df.columns.tolist()}")
     log_memory("AFTER merge with df_scores_needed")
-   
-    # Log shape after merge
-    log_memory("AFTER merge with df_scores_needed")
     logging.info(f"df shape after merge: {df.shape}")
-    
-    # Free memory
-    
     # === Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
         logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key (optimized)")
@@ -1762,9 +1656,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         key_map = df_master.drop_duplicates(subset=['Game_Key'])[['Game_Key', 'Merge_Key_Short']].set_index('Game_Key')['Merge_Key_Short'].to_dict()
         # Reassign inplace without merge
         df['Merge_Key_Short'] = df['Game_Key'].map(key_map)
-    del df_master
-    del df_scores_needed
-    gc.collect()
     
     
     # Final logging
