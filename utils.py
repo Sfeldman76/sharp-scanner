@@ -1565,7 +1565,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
             })
         )
-        
+        logging.info(f"🧪 Non-null First_Sharp_Prob rows in df_first: {df_first['First_Sharp_Prob'].notna().sum()}")
+        logging.info(f"🧪 Sample non-null values:\n{df_first[['Game_Key', 'First_Sharp_Prob']].dropna().head().to_string(index=False)}")
         # Ensure First_Sharp_Prob is created even if it was missing
         if 'First_Sharp_Prob' not in df_first.columns:
             df_first['First_Sharp_Prob'] = np.nan
