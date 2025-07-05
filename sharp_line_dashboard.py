@@ -555,6 +555,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         ]
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         y = df_market['SHARP_HIT_BOOL'].astype(int)
+
+        
+        # Avoid XGBoost crash on single-class target
+        if y.nunique() < 2:
+            st.warning(f"⚠️ Skipping {market.upper()} — target has only one class.")
+            progress.progress(idx / 3)
+            continue
+        logging.info(f"🧪 Label balance in {market.upper()}:\n{y.value_counts()}")
         param_grid = {
             'n_estimators': [100, 200],
             'max_depth': [3, 4, 5, 6],
