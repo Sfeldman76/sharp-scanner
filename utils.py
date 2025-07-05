@@ -1479,29 +1479,40 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     
     def calc_cover(df):
+        """
+        Calculate SHARP_HIT_BOOL and SHARP_COVER_RESULT for each pick.
+    
+        SHARP_HIT_BOOL: 1 if the bet covered, 0 if not.
+        SHARP_COVER_RESULT: 'Win' or 'Loss'
+        """
         df = df.copy()
+    
+        # Total points (for totals market)
         total_score = df['Score_Home_Score'] + df['Score_Away_Score']
+    
+        # Identify totals market
         is_totals = df['Market'].str.lower() == 'totals'
         is_under = df['Outcome'].str.lower() == 'under'
-        is_home_side = df['Outcome'] == df['Home_Team_Norm']
     
+        # Outcome side: home or away?
+        is_home_side = df['Outcome'] == df['Home_Team']
+        is_away_side = df['Outcome'] == df['Away_Team']
+    
+        # Calculate cover:
         covered = np.where(
             is_totals,
             np.where(is_under, total_score < df['Value'], total_score > df['Value']),
             np.where(
                 is_home_side,
-                (df['Score_Home_Score'] - df['Score_Away_Score']) > -df['Value'],
+                (df['Score_Home_Score'] - df['Score_Away_Score']) > -df['Value'],  # favorite must win by more than |spread|
                 (df['Score_Away_Score'] - df['Score_Home_Score']) > -df['Value']
             )
         )
     
-        result = pd.DataFrame({
+        return pd.DataFrame({
             'SHARP_COVER_RESULT': np.where(covered, 'Win', 'Loss'),
             'SHARP_HIT_BOOL': covered.astype(int)
         })
-    
-        return result
-    
  
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
