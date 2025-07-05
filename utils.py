@@ -1479,29 +1479,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     
     def calc_cover(df):
-        """
-        Vectorized cover calculator for sharp bets.
-        Returns only SHARP_COVER_RESULT and SHARP_HIT_BOOL as a new DataFrame.
-        """
         df = df.copy()
-    
-        # Total score only relevant for 'totals' market
         total_score = df['Score_Home_Score'] + df['Score_Away_Score']
         is_totals = df['Market'].str.lower() == 'totals'
-    
-        # Determine outcome side
         is_under = df['Outcome'].str.lower() == 'under'
         is_home_side = df['Outcome'] == df['Home_Team_Norm']
     
-        # Compute covered boolean
         covered = np.where(
             is_totals,
             np.where(is_under, total_score < df['Value'], total_score > df['Value']),
-            np.where(is_home_side, df['Score_Home_Score'] + df['Value'] > df['Score_Away_Score'],
-                     df['Score_Away_Score'] + df['Value'] > df['Score_Home_Score'])
+            np.where(
+                is_home_side,
+                (df['Score_Home_Score'] - df['Score_Away_Score']) > -df['Value'],
+                (df['Score_Away_Score'] - df['Score_Home_Score']) > -df['Value']
+            )
         )
     
-        # Construct result DataFrame
         result = pd.DataFrame({
             'SHARP_COVER_RESULT': np.where(covered, 'Win', 'Loss'),
             'SHARP_HIT_BOOL': covered.astype(int)
