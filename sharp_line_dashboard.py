@@ -470,7 +470,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
 
     dedup_cols = [
         'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump',
         'Sharp_Time_Score', 'Sharp_Limit_Total',
         'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag'
     ]
@@ -772,27 +772,25 @@ def compute_diagnostics_vectorized(df):
         )
 
         # === Step 3: Model Confidence Trend
-        prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
-        prob_start = pd.to_numeric(df.get('First_Model_Prob'), errors='coerce')
-
+        prob_now = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
+        prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
         delta = prob_now - prob_start
+
         df['Confidence Trend'] = np.where(
             prob_start.isna() | prob_now.isna(),
             "⚠️ Missing",
-            np.where(
-                delta >= 0.04,
-                ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
-                np.where(
-                    delta <= -0.04,
+            np.select(
+                [delta >= 0.04, delta <= -0.04],
+                [
+                    ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
                     ["📉 Trending Down: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
-                    ["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
-                )
+                ],
+                default=["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
             )
         )
 
         # === Step 4: Line/Model Direction Alignment
-        df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Prob_Diff'), errors='coerce').fillna(0)
-        df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce').fillna(0)
+        df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
 
         def get_line_support_sign(row):
             try:
@@ -805,22 +803,28 @@ def compute_diagnostics_vectorized(df):
                     return -1 if first_line < 0 else 1
             except:
                 return 1  # fallback
-
         df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
         df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
 
-        df['Line/Model Direction'] = np.where(
-            (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] > 0), "🟢 Aligned ↑",
-            np.where(
-                (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] < 0), "🔻 Aligned ↓",
-                np.where(
-                    (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] < 0), "🔴 Model ↑ / Line ↓",
-                    np.where(
-                        (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] > 0), "🔴 Model ↓ / Line ↑",
-                        "⚪ Mixed"
-                    )
-                )
-            )
+        # Use Model_Prob_Trend instead of deprecated Model_Prob_Diff
+        model_prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
+        first_prob = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+        prob_trend = model_prob - first_prob
+
+        df['Line/Model Direction'] = np.select(
+            [
+                (prob_trend > 0) & (df['Line_Support_Direction'] > 0),
+                (prob_trend < 0) & (df['Line_Support_Direction'] < 0),
+                (prob_trend > 0) & (df['Line_Support_Direction'] < 0),
+                (prob_trend < 0) & (df['Line_Support_Direction'] > 0),
+            ],
+            [
+                "🟢 Aligned ↑",
+                "🔻 Aligned ↓",
+                "🔴 Model ↑ / Line ↓",
+                "🔴 Model ↓ / Line ↑"
+            ],
+            default="⚪ Mixed"
         )
 
         # === Step 5: Why Model Likes It
@@ -857,7 +861,7 @@ def compute_diagnostics_vectorized(df):
 
         try:
             df['Why Model Likes It'] = [
-                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # dedupe and keep order
+                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # dedupe and preserve order
                 for parts in zip(*reasoning_parts)
             ]
         except Exception:
