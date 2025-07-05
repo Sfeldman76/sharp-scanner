@@ -578,12 +578,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             estimator=XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
             param_distributions=param_grid,
             scoring='neg_log_loss',
-            cv=3,
+            cv=cv,
             n_iter=20,  # ⬆️ Try more combos
             verbose=1,
             random_state=42
         )
-        
+        # Before grid.fit:
+        for i, (_, val_idx) in enumerate(cv.split(X, y)):
+            val_labels = y.iloc[val_idx]
+            logging.info(f"🧪 Fold {i+1} label distribution:\n{val_labels.value_counts()}")
         grid.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
         best_model = grid.best_estimator_
 
