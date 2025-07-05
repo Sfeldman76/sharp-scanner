@@ -1691,35 +1691,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     def process_chunk_logic(df_chunk):
         df_chunk = df_chunk.copy()
     
-        # Compute Model_Prob_Diff and Line_Delta
-        df_chunk['Model_Prob_Diff'] = pd.to_numeric(df_chunk['Model_Sharp_Win_Prob'], errors='coerce') - pd.to_numeric(df_chunk['First_Sharp_Prob'], errors='coerce')
+        # === Clean Line_Delta
         df_chunk['Line_Delta'] = pd.to_numeric(df_chunk['Value'], errors='coerce') - pd.to_numeric(df_chunk['First_Line_Value'], errors='coerce')
     
-        # Compute adjusted support direction
-        market_totals = df_chunk['Market'].str.lower() == 'totals'
-        outcome_under = df_chunk['Outcome'].str.lower() == 'under'
-        first_line_negative = df_chunk['First_Line_Value'] < 0
-    
-        df_chunk['Line_Support_Sign'] = np.where(market_totals & outcome_under, -1, 1)
-        df_chunk['Line_Support_Sign'] = np.where(~market_totals & first_line_negative, -1, df_chunk['Line_Support_Sign'])
-    
-        # Compute Adjusted_Line_Delta
-        df_chunk['Adjusted_Line_Delta'] = df_chunk['Line_Delta'] * df_chunk['Line_Support_Sign']
-    
-        # Assign Direction_Aligned
-        mask_aligned = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] > 0) | \
-                       (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] < 0)
-        mask_conflict = (df_chunk['Model_Prob_Diff'] > 0) & (df_chunk['Adjusted_Line_Delta'] < 0) | \
-                        (df_chunk['Model_Prob_Diff'] < 0) & (df_chunk['Adjusted_Line_Delta'] > 0)
-    
-        df_chunk['Direction_Aligned'] = np.where(mask_aligned, 1, np.where(mask_conflict, 0, pd.NA))
-        df_chunk['Direction_Aligned'] = df_chunk['Direction_Aligned'].astype('Int64')
-    
-        # Clean up temp columns
-        df_chunk.drop(columns=['Line_Support_Sign', 'Adjusted_Line_Delta'], inplace=True, errors='ignore')
+        # === Direction_Aligned: purely market-based logic
+        df_chunk['Direction_Aligned'] = np.where(
+            df_chunk['Line_Delta'] > 0, 1,
+            np.where(df_chunk['Line_Delta'] < 0, 0, pd.NA)
+        ).astype('Int64')
     
         return df_chunk
-    
+        
     
     def process_in_chunks(df, chunk_size=10000):
         chunks = []
