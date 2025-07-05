@@ -554,8 +554,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         ]
         
         df_market = ensure_columns(df_market, features, 0)
+        # === Derived features
         
+        df_market['Line_Move_Magnitude'] = df_market['Line_Delta'].abs()
+        df_market['Is_Home_Team_Bet'] = (df_market['Outcome'] == df_market['Home_Team_Norm']).astype(int)
+        df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
+        df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] > 5000).astype(int)
         
+        features += [
+    
+            'Line_Move_Magnitude',
+            'Is_Home_Team_Bet',
+            'Is_Favorite_Bet',
+            'High_Limit_Flag'
+        ]
+                
         
         
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
@@ -977,7 +990,11 @@ def apply_blended_sharp_score(df, trained_models):
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
             df_canon[missing_cols] = 0
-            
+            # === Feature engineering to match training
+            df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
+            df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
+            df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
+            df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] > 10000).astype(int)
             # === Align features exactly to model input ===
             X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             
@@ -1123,7 +1140,11 @@ def apply_blended_sharp_score(df, trained_models):
                 )
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
-            
+                # === Feature engineering to match training
+                df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
+                df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'] == df_inverse['Home_Team_Norm']).astype(int)
+                df_inverse['Is_Favorite_Bet'] = (df_inverse['Value'] < 0).astype(int)
+                df_inverse['High_Limit_Flag'] = (df_inverse['Sharp_Limit_Total'] > 10000).astype(int)
                 # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
 
