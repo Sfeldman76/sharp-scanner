@@ -1901,7 +1901,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
     """).to_dataframe()
     logging.info(f"🧪 Existing rows in BigQuery for dedup: {len(existing)}")
+    # ✅ New: Fetch all games already scored
+    scored_keys_df = bq_client.query("""
+        SELECT DISTINCT Merge_Key_Short
+        FROM `sharplogger.sharp_data.sharp_scores_full`
+        WHERE Scored = TRUE
+    """).to_dataframe()
+    already_scored_keys = set(scored_keys_df['Merge_Key_Short'].dropna())
     
+    # 🧹 Remove any rows from df_scores_out that have already been scored
+    pre_score_filter = len(df_scores_out)
+    df_scores_out = df_scores_out[~df_scores_out['Merge_Key_Short'].isin(already_scored_keys)]
+    logging.info(f"🧹 Removed {pre_score_filter - len(df_scores_out)} rows from already-scored games")
     # Dedup against BigQuery
     df_scores_out = df_scores_out.merge(
         existing,
