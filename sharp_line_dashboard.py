@@ -491,27 +491,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
 
         elif market == 'spreads':
-        # === 🔍 Debug label correctness for spreads
-        if {'Score_Home_Score', 'Score_Away_Score', 'Home_Team'}.issubset(df_market.columns):
-            df_market['home_margin'] = df_market['Score_Home_Score'] - df_market['Score_Away_Score']
-            df_market['side'] = np.where(df_market['Outcome'] == df_market['Home_Team'], 'home', 'away')
+            # === 🔍 Debug label correctness for spreads
+            if {'Score_Home_Score', 'Score_Away_Score', 'Home_Team'}.issubset(df_market.columns):
+                df_market['home_margin'] = df_market['Score_Home_Score'] - df_market['Score_Away_Score']
+                df_market['side'] = np.where(df_market['Outcome'] == df_market['Home_Team'], 'home', 'away')
+        
+                df_market['should_cover'] = np.where(
+                    df_market['side'] == 'home',
+                    df_market['home_margin'] > -df_market['Value'],
+                    -df_market['home_margin'] > -df_market['Value']
+                )
+        
+                df_market['mismatch'] = df_market['SHARP_HIT_BOOL'] != df_market['should_cover'].astype(int)
+                num_wrong = df_market['mismatch'].sum()
+        
+                if num_wrong > 0:
+                    st.warning(f"❗ {num_wrong} spread rows have incorrect SHARP_HIT_BOOL values")
+                    logging.warning(f"❌ Label mismatch in {num_wrong} SPREAD rows — check spread cover logic")
+                    logging.info(df_market[df_market['mismatch']][
+                        ['Game_Key', 'Outcome', 'Value', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'should_cover']
+                    ].head(5).to_string(index=False))
     
-            df_market['should_cover'] = np.where(
-                df_market['side'] == 'home',
-                df_market['home_margin'] > -df_market['Value'],
-                -df_market['home_margin'] > -df_market['Value']
-            )
-    
-            df_market['mismatch'] = df_market['SHARP_HIT_BOOL'] != df_market['should_cover'].astype(int)
-            num_wrong = df_market['mismatch'].sum()
-    
-            if num_wrong > 0:
-                st.warning(f"❗ {num_wrong} spread rows have incorrect SHARP_HIT_BOOL values")
-                logging.warning(f"❌ Label mismatch in {num_wrong} SPREAD rows — check spread cover logic")
-                logging.info(df_market[df_market['mismatch']][
-                    ['Game_Key', 'Outcome', 'Value', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'should_cover']
-                ].head(5).to_string(index=False))
-
         elif market == "h2h":
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market = df_market[df_market['Value'].notna()]
@@ -699,9 +699,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
        
 
     status.update(label="✅ All models trained", state="complete", expanded=False)
-
     if not trained_models:
         st.error("❌ No models were trained.")
+    return trained_models
         
 def read_market_weights_from_bigquery():
     try:
@@ -720,8 +720,10 @@ def read_market_weights_from_bigquery():
     except Exception as e:
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
-
 def compute_diagnostics_vectorized(df):
+    import numpy as np
+    import pandas as pd
+
     TIER_ORDER = {
         '⚠️ Weak Indication': 1,
         '✅ Coinflip': 2,
@@ -730,14 +732,19 @@ def compute_diagnostics_vectorized(df):
     }
 
     try:
-        # === Step 1: Strip Tier Columns
+        df = df.copy()
+
+        # === Step 1: Normalize Tier Columns
         for col in ['Confidence Tier', 'First_Tier']:
+            if col not in df.columns:
+                df[col] = ""
             df[col] = df[col].astype(str).str.strip()
 
         # === Step 2: Tier Change
         tier_current = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
         tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
-        tier_change = np.where(
+
+        df['Tier_Change'] = np.where(
             df['First_Tier'] != "",
             np.where(
                 tier_current > tier_open,
@@ -750,76 +757,61 @@ def compute_diagnostics_vectorized(df):
             ),
             "⚠️ Missing"
         )
-        df['Tier_Change'] = tier_change
 
-        # === Step 3: Confidence Trend
-        if 'Model Prob' in df.columns and 'First_Model_Prob' in df.columns:
-            prob_now = pd.to_numeric(df['Model Prob'], errors='coerce')
-            prob_start = pd.to_numeric(df['First_Model_Prob'], errors='coerce')
-            delta = prob_now - prob_start
+        # === Step 3: Model Confidence Trend
+        prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
+        prob_start = pd.to_numeric(df.get('First_Model_Prob'), errors='coerce')
 
-            confidence_trend = np.where(
-                prob_start.isna() | prob_now.isna(),
-                "⚠️ Missing",
+        delta = prob_now - prob_start
+        df['Confidence Trend'] = np.where(
+            prob_start.isna() | prob_now.isna(),
+            "⚠️ Missing",
+            np.where(
+                delta >= 0.04,
+                ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
                 np.where(
-                    delta >= 0.04,
-                    ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
-                    np.where(
-                        delta <= -0.04,
-                        ["📉 Trending Down: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
-                        ["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
-                    )
+                    delta <= -0.04,
+                    ["📉 Trending Down: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
+                    ["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
                 )
             )
+        )
 
-        # === Step 3a: Compute model probability shift
-        df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model Prob'), errors='coerce') - pd.to_numeric(df.get('First_Model_Prob'), errors='coerce')
-        df['Line_Delta'] = pd.to_numeric(df.get('Value'), errors='coerce') - pd.to_numeric(df.get('First_Line_Value'), errors='coerce')
-        
-        # === Step 3b: Compute adjusted support direction (for all market types)
+        # === Step 4: Line/Model Direction Alignment
+        df['Model_Prob_Diff'] = pd.to_numeric(df.get('Model_Prob_Diff'), errors='coerce').fillna(0)
+        df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce').fillna(0)
+
         def get_line_support_sign(row):
             try:
                 market = str(row.get('Market', '')).lower()
                 outcome = str(row.get('Outcome', '')).lower()
                 first_line = pd.to_numeric(row.get('First_Line_Value'), errors='coerce')
-        
                 if market == 'totals':
                     return -1 if outcome == 'under' else 1
                 else:
                     return -1 if first_line < 0 else 1
             except:
-                return 1  # Fallback: neutral sign
-        
-        if 'Model_Prob_Diff' not in df.columns or 'Line_Delta' not in df.columns:
-            confidence_trend = ["⚠️ Missing"] * len(df)
-            direction = ["⚠️ Missing"] * len(df)
-            st.warning("⚠️ Missing probability columns for trend/direction.")
-        else:
-            # === Step 3b
-            df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
-            df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
-        
-            # === Step 4: Label
-            direction = np.where(
-                (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] > 0), "🟢 Aligned ↑",
+                return 1  # fallback
+
+        df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
+        df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
+
+        df['Line/Model Direction'] = np.where(
+            (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] > 0), "🟢 Aligned ↑",
+            np.where(
+                (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] < 0), "🔻 Aligned ↓",
                 np.where(
-                    (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] < 0), "🔻 Aligned ↓",
+                    (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] < 0), "🔴 Model ↑ / Line ↓",
                     np.where(
-                        (df['Model_Prob_Diff'] > 0.0) & (df['Line_Support_Direction'] < 0), "🔴 Model ↑ / Line ↓",
-                        np.where(
-                            (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] > 0), "🔴 Model ↓ / Line ↑",
-                            "⚪ Mixed"
-                        )
+                        (df['Model_Prob_Diff'] < 0.0) & (df['Line_Support_Direction'] > 0), "🔴 Model ↓ / Line ↑",
+                        "⚪ Mixed"
                     )
                 )
             )
+        )
 
         # === Step 5: Why Model Likes It
-        prob = (
-            pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
-            if 'Model_Sharp_Win_Prob' in df.columns
-            else pd.to_numeric(df.get('Model Prob'), errors='coerce').fillna(0)
-        )
+        prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce').fillna(0)
 
         model_reason = np.select(
             [
@@ -851,36 +843,31 @@ def compute_diagnostics_vectorized(df):
         append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
 
         try:
-            model_reasoning = pd.Series([
-                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # Dedup and preserve order
+            df['Why Model Likes It'] = [
+                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # dedupe and keep order
                 for parts in zip(*reasoning_parts)
-            ], index=df.index)
-        except Exception as e:
-            st.warning("⚠️ Failed to compute model_reasoning — using fallback.")
-            st.exception(e)
-            model_reasoning = pd.Series(["🪙 Unavailable"] * len(df), index=df.index)
+            ]
+        except Exception:
+            df['Why Model Likes It'] = "🪙 Unavailable"
 
-        # === Final Output
-        diagnostics_df = pd.DataFrame({
-            'Game_Key': df['Game_Key'],
-            'Market': df['Market'],
-            'Outcome': df['Outcome'],
-            'Bookmaker': df['Bookmaker'],
-            'Tier Δ': df['Tier_Change'],
-            'Confidence Trend': confidence_trend,
-            'Line/Model Direction': direction,
-            'Why Model Likes It': model_reasoning
-        })
+        # === Final output table
+        diagnostics_df = df[[
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
+        ]].rename(columns={'Tier_Change': 'Tier Δ'})
 
-        #st.info(f"✅ Diagnostics computed for {len(diagnostics_df)} rows.")
         return diagnostics_df
 
     except Exception as e:
+        import streamlit as st
         st.error("❌ Error computing diagnostics")
         st.exception(e)
-        return None
-
-
+        return pd.DataFrame(columns=[
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+            'Tier Δ', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
+        ])
+        
+        
 def apply_blended_sharp_score(df, trained_models):
 
 
