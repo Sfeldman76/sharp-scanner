@@ -767,25 +767,27 @@ def compute_diagnostics_vectorized(df):
             ),
             "⚠️ Missing"
         )
-
-        # === Step 3: Model Confidence Trend
-        trending_up = (delta >= 0.04)
-        trending_down = (delta <= -0.04)
         
-        trend_strs = np.where(
-            pd.isna(prob_start) | pd.isna(prob_now),
-            "⚠️ Missing",
-            np.where(
-                trending_up,
+        # Safe formatting of trend strings
+        prob_now = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
+        prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+        delta = prob_now - prob_start
+        # Safe formatting of trend strings
+        df['Confidence Trend'] = np.select(
+            [
+                pd.isna(prob_start) | pd.isna(prob_now),
+                delta >= 0.04,
+                delta <= -0.04
+            ],
+            [
+                "⚠️ Missing",
                 [f"📈 Trending Up: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)],
-                np.where(
-                    trending_down,
-                    [f"📉 Trending Down: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)],
-                    [f"↔ Stable: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)],
-                )
-            )
+                [f"📉 Trending Down: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)],
+            ],
+            default=[f"↔ Stable: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)]
         )
         df['Confidence Trend'] = trend_strs
+        # === Step 4: Line/Model Direction Alignment
         # === Step 4: Line/Model Direction Alignment
         df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
 
@@ -1028,11 +1030,14 @@ def apply_blended_sharp_score(df, trained_models):
             
             elif market_type in ["h2h", "spreads"]:
                 df_inverse['Canonical_Team'] = df_inverse['Outcome']  # Already normalized
-                df_inverse['Outcome'] = np.where(
-                    df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
-                    df_inverse['Away_Team_Norm'],
-                    df_inverse['Home_Team_Norm']
-                ).astype(str).str.lower().str.strip()
+                df_inverse['Outcome'] = (
+                    pd.Series(np.where(
+                        df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
+                        df_inverse['Away_Team_Norm'],
+                        df_inverse['Home_Team_Norm']
+                    ), index=df_inverse.index)
+                    .astype(str).str.lower().str.strip()
+                )
             
             # Update Outcome_Norm after flipping
             df_inverse['Outcome_Norm'] = df_inverse['Outcome']
