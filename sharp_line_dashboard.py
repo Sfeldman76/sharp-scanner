@@ -586,16 +586,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             cv=5               # ⬇️ Reduce folds
         )
         calibrated_model.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
+        try:
+            importances = best_model.feature_importances_
+            importance_df = pd.DataFrame({
+                'Feature': features,
+                'Importance': importances
+            })
         
-        importances = best_model.feature_importances_
-        importance_df = pd.DataFrame({
-            'Feature': features,
-            'Importance': importances
-        }).sort_values(by='Importance', ascending=False)
-
-        st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
-        st.dataframe(importance_df, use_container_width=True)
-
+            # ✅ Assert length match before rendering
+            if len(importance_df) != len(features):
+                st.warning("⚠️ Feature importance length mismatch — skipping display.")
+                logging.warning(f"Feature list: {features}")
+                logging.warning(f"Importances shape: {importances.shape}")
+            else:
+                importance_df = importance_df.sort_values(by='Importance', ascending=False)
+                st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
+                st.dataframe(importance_df, use_container_width=True)
+        
+        except Exception as e:
+            st.error(f"❌ Failed to display feature importances: {e}")
+            logging.exception("Feature importance rendering failed.")
+        
         raw_probs = calibrated_model.predict_proba(X)[:, 1]
         y_pred = (raw_probs >= 0.5).astype(int)
 
