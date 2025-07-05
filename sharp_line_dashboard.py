@@ -109,7 +109,7 @@ GCS_BUCKET = "sharp-models"
 import os, json
 from sklearn.model_selection import StratifiedKFold
 import xgboost as xgb
-
+from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
