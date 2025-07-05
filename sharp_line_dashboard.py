@@ -507,12 +507,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market['Model_Prob_Diff'] = pd.to_numeric(df_market['Model_Prob_Diff'], errors='coerce')
         
         df_market['Direction_Aligned'] = pd.Series(np.where(
-            ((df_market['Model_Prob_Diff'] > 0.04) & (df_market['Line_Delta'] > 0)) |
-            ((df_market['Model_Prob_Diff'] < -0.04) & (df_market['Line_Delta'] < 0)),
+            ((df_market['Model_Prob_Diff'] > 0.0) & (df_market['Line_Delta'] > 0)) |
+            ((df_market['Model_Prob_Diff'] < 0.0) & (df_market['Line_Delta'] < 0)),
             1,
             np.where(
-                ((df_market['Model_Prob_Diff'] > 0.04) & (df_market['Line_Delta'] < 0)) |
-                ((df_market['Model_Prob_Diff'] < -0.04) & (df_market['Line_Delta'] > 0)),
+                ((df_market['Model_Prob_Diff'] > 0.0) & (df_market['Line_Delta'] < 0)) |
+                ((df_market['Model_Prob_Diff'] < 0.0) & (df_market['Line_Delta'] > 0)),
                 0,
                 np.nan
             )
@@ -527,6 +527,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         ]
 
         df_market = ensure_columns(df_market, features, 0)
+        # === 🔁 Normalize directional features based on bet side (favorite only is kept)
+        df_market['Line_Value_Abs'] = df_market['Value'].abs()
+        df_market['Prob_Shift_Signed'] = df_market['Sharp_Prob_Shift'] * np.sign(df_market['Value'])
+        df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(df_market['Value'])
+        
+        # === 📊 Optional: Book sharpness indicator
+        sharp_books = ["pinnacle", "betfair", "circa", "bookmaker"]  # Modify as needed
+        df_market['Book_Norm'] = df_market['Bookmaker'].str.lower().str.strip()
+        df_market['Is_Sharp_Book'] = df_market['Book_Norm'].isin(sharp_books).astype(int)
+        
+        # === ⚖️ Bias diagnostic — line bias by label
+        bias_check = (
+            df_market
+            .groupby('SHARP_HIT_BOOL')['Value']
+            .mean()
+        )
+        logging.info(f"⚖️ Avg Line Value by SHARP_HIT_BOOL for {market.upper()}:\n{bias_check.to_string()}")
+        
+        # === 🧪 Weighting (Optional): emphasize bigger moves
+        df_market['Sample_Weight'] = df_market['Sharp_Prob_Shift'].abs().clip(0, 0.1)
+        
+        # === 🧠 Add new features to training
+        features += [
+            'Line_Value_Abs', 'Prob_Shift_Signed', 'Line_Delta_Signed',
+            'Is_Sharp_Book'
+        ]
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         y = df_market['SHARP_HIT_BOOL'].astype(int)
         param_grid = {
@@ -550,7 +576,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             random_state=42
         )
         
-        grid.fit(X, y)
+        grid.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
         best_model = grid.best_estimator_
 
   
@@ -559,7 +585,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             method='sigmoid',  # ⚡ Faster than isotonic
             cv=5               # ⬇️ Reduce folds
         )
-        calibrated_model.fit(X, y)
+        calibrated_model.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
         
         importances = best_model.feature_importances_
         importance_df = pd.DataFrame({
@@ -580,7 +606,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
 
         save_model_to_gcs(best_model, calibrated_model, sport, market, bucket_name=GCS_BUCKET)
         trained_models[market] = {"model": best_model, "calibrator": calibrated_model}
-
+        from sklearn.metrics import confusion_matrix
+        
+        conf = confusion_matrix(y, y_pred)
+        st.markdown("#### 📊 Confusion Matrix")
+        st.write(conf)
+        
+        st.markdown("#### ✅ Class Distribution")
+        st.write(y.value_counts())
+        
+        from sklearn.calibration import calibration_curve
+        from sklearn.metrics import confusion_matrix
+        conf_labels = pd.DataFrame(
+            conf,
+            index=["Actual 0 (Miss)", "Actual 1 (Hit)"],
+            columns=["Predicted 0", "Predicted 1"]
+        )
+        st.markdown("#### 📊 Confusion Matrix (Labeled)")
+        st.dataframe(conf_labels)
+       
+        
+        prob_true, prob_pred = calibration_curve(y, raw_probs, n_bins=10)
+        calib_df = pd.DataFrame({
+            "Predicted Bin Center": prob_pred,
+            "Actual Hit Rate": prob_true
+        })
+        st.markdown(f"#### 🎯 Calibration Bins – {market.upper()}")
+        st.dataframe(calib_df, use_container_width=True)
         st.success(f"""✅ Trained + saved model for {market.upper()}
 - AUC: {auc:.4f}
 - Accuracy: {acc:.4f}
