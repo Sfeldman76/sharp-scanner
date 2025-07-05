@@ -1710,15 +1710,25 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_chunk = df_chunk.copy()
     
         # === Clean Line_Delta
-        df_chunk['Line_Delta'] = pd.to_numeric(df_chunk['Value'], errors='coerce') - pd.to_numeric(df_chunk['First_Line_Value'], errors='coerce')
-        df_chunk['Line_Magnitude_Abs'] = df_chunk['Line_Delta'].abs()
+        # === Calculate Line_Delta safely
+        df_chunk['Line_Delta'] = (
+            pd.to_numeric(df_chunk['Value'], errors='coerce') -
+            pd.to_numeric(df_chunk['First_Line_Value'], errors='coerce')
+        )
+        
+        # === Direction alignment (nullable-safe)
+        df_chunk['Direction_Aligned'] = np.select(
+            [df_chunk['Line_Delta'] > 0, df_chunk['Line_Delta'] < 0],
+            [1, 0],
+            default=np.nan
+        ).astype(float)
         df_chunk['High_Limit_Flag'] = (df_chunk['Sharp_Limit_Total'] >= 10000).astype('Int64')
         # === Direction_Aligned: purely market-based logic
         df_chunk['Direction_Aligned'] = np.where(
             df_chunk['Line_Delta'] > 0, 1,
-            np.where(df_chunk['Line_Delta'] < 0, 0, pd.NA)
-        ).astype('Int64')
-    
+            np.where(df_chunk['Line_Delta'] < 0, 0, np.nan)
+        ).astype('float')  # or 'float64' if you want to be explicit
+            
         return df_chunk
         
     
