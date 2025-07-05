@@ -107,6 +107,7 @@ LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
 import os, json
+from sklearn.model_selection import StratifiedKFold
 
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
