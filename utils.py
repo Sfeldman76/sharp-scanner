@@ -580,11 +580,19 @@ def apply_blended_sharp_score(df, trained_models):
 
             
             # === Ensure required features exist ===
+           # === Feature engineering BEFORE checking model features
+            df_canon['Line_Magnitude_Abs'] = df_canon['Line_Delta'].abs()
+            df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] >= 10000).astype(int)
+            df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
+            df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
+            df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
+            
+            # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
             df_canon[missing_cols] = 0
             
-            # === Align features exactly to model input ===
+            # === Align features to model input
             X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             
             # === Raw model output (optional)
@@ -596,11 +604,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
-            df_canon['Line_Magnitude_Abs'] = df_canon['Line_Delta'].abs()
-            df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] >= 10000).astype(int)
-            df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
-            df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
-            df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
+            
             
 
             df_inverse = df_canon.copy(deep=True)
