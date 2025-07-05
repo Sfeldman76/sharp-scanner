@@ -518,155 +518,127 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             )
         ), index=df_market.index).fillna(0).astype(int)
         
-
+        
+        # === 🧠 Add new features to training
         features = [
             'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
             'Sharp_Time_Score', 'Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
-            'Direction_Aligned'  # 🔥 new
+            'Direction_Aligned'
         ]
-
+        
         df_market = ensure_columns(df_market, features, 0)
-        # === 🔁 Normalize directional features based on bet side (favorite only is kept)
+        
         df_market['Line_Value_Abs'] = df_market['Value'].abs()
         df_market['Prob_Shift_Signed'] = df_market['Sharp_Prob_Shift'] * np.sign(df_market['Value'])
         df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(df_market['Value'])
         
-        # === 📊 Optional: Book sharpness indicator
-        sharp_books = ["pinnacle", "betfair", "circa", "bookmaker"]  # Modify as needed
+        sharp_books = ["pinnacle", "betfair", "circa", "bookmaker"]
         df_market['Book_Norm'] = df_market['Bookmaker'].str.lower().str.strip()
         df_market['Is_Sharp_Book'] = df_market['Book_Norm'].isin(sharp_books).astype(int)
         
-        # === ⚖️ Bias diagnostic — line bias by label
-        bias_check = (
-            df_market
-            .groupby('SHARP_HIT_BOOL')['Value']
-            .mean()
-        )
-        logging.info(f"⚖️ Avg Line Value by SHARP_HIT_BOOL for {market.upper()}:\n{bias_check.to_string()}")
+        features += ['Line_Value_Abs', 'Prob_Shift_Signed', 'Line_Delta_Signed', 'Is_Sharp_Book']
         
-        # === 🧪 Weighting (Optional): emphasize bigger moves
-        df_market['Sample_Weight'] = df_market['Sharp_Prob_Shift'].abs().clip(0, 0.1)
-        
-        # === 🧠 Add new features to training
-        features += [
-            'Line_Value_Abs', 'Prob_Shift_Signed', 'Line_Delta_Signed',
-            'Is_Sharp_Book'
-        ]
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         y = df_market['SHARP_HIT_BOOL'].astype(int)
-
         
-        # Avoid XGBoost crash on single-class target
+        # === Abort early if label has only one class
         if y.nunique() < 2:
-            st.warning(f"⚠️ Skipping {market.upper()} — target has only one class.")
+            st.warning(f"⚠️ Skipping {market.upper()} — only one label class.")
             progress.progress(idx / 3)
             continue
-        logging.info(f"🧪 Label balance in {market.upper()}:\n{y.value_counts()}")
-        param_grid = {
-            'n_estimators': [100, 200],
-            'max_depth': [3, 4, 5, 6],
-            'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.8, 0.9, 1.0],
-            'colsample_bytree': [0.8, 0.9, 1.0],
-            'gamma': [0, 1, 5],  # ⛔ Prune weak splits
-            'reg_alpha': [0, 0.1, 1],  # L1
-            'reg_lambda': [1, 5, 10]   # L2
-        }
-        from sklearn.model_selection import StratifiedKFold
-
-        # Create stratified folds
+        
+        # === Stratified K-Fold setup
         cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
         
-        # (Optional) Diagnostic — log label distribution in each fold
+        # === Check each fold for label balance
+        bad_folds = []
         for i, (_, val_idx) in enumerate(cv.split(X, y)):
-            val_labels = y.iloc[val_idx]
-            counts = val_labels.value_counts().to_dict()
-            logging.info(f"🧪 Fold {i+1} label distribution: {counts}")
-            if len(counts) < 2:
-                logging.warning(f"⚠️ Fold {i+1} has only one class — this may cause training to fail.")     
+            val_counts = y.iloc[val_idx].value_counts()
+            logging.info(f"🧪 Fold {i+1} label distribution: {val_counts.to_dict()}")
+            if len(val_counts) < 2:
+                bad_folds.append(i+1)
+        
+        if bad_folds:
+            st.warning(f"⚠️ Skipping {market.upper()} — folds with only one class: {bad_folds}")
+            logging.warning(f"❌ Cannot train model for {market.upper()} — CV folds are imbalanced.")
+            progress.progress(idx / 3)
+            continue
+        
+        # === Param grid (simplified to avoid over-regularization)
+        param_grid = {
+            'n_estimators': [100, 200],
+            'max_depth': [3, 4, 5],
+            'learning_rate': [0.01, 0.05, 0.1],
+            'subsample': [0.8, 0.9],
+            'colsample_bytree': [0.8, 0.9],
+            'gamma': [0],  # reduced to prevent pruning
+            'reg_alpha': [0, 0.01],  # minimal regularization
+            'reg_lambda': [1]
+        }
+        
         grid = RandomizedSearchCV(
-            estimator=XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
+            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', use_label_encoder=False, n_jobs=-1),
             param_distributions=param_grid,
             scoring='neg_log_loss',
             cv=cv,
-            n_iter=20,  # ⬆️ Try more combos
+            n_iter=20,
             verbose=1,
             random_state=42
         )
         
-        grid.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
+        # === Train WITHOUT weights (simplified)
+        grid.fit(X, y)
         best_model = grid.best_estimator_
-
-  
-        calibrated_model = CalibratedClassifierCV(
-            estimator=best_model,
-            method='sigmoid',  # ⚡ Faster than isotonic
-            cv=5               # ⬇️ Reduce folds
-        )
-        calibrated_model.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
+        
+        # === Calibrate
+        calibrated_model = CalibratedClassifierCV(best_model, method='sigmoid', cv=5)
+        calibrated_model.fit(X, y)
+        
+        # === Feature importances
         try:
             importances = best_model.feature_importances_
-        
-            # 🧪 Check for feature length mismatch
             if len(importances) != len(features):
-                st.warning(f"⚠️ Feature importance mismatch: {len(importances)} importances vs {len(features)} features")
-                logging.warning(f"features = {features}")
-                logging.warning(f"importances = {importances.tolist()}")
-        
-            # ✅ Drop detection for missing features
+                st.warning(f"⚠️ Feature mismatch: {len(importances)} vs {len(features)}")
             if len(importances) < len(features):
                 dropped = features[len(importances):]
-                logging.info(f"⚠️ Model did not use the following features: {dropped}")
-        
-            # ✅ Align safely to prevent crash
+                logging.info(f"⚠️ Dropped features: {dropped}")
             n = min(len(importances), len(features))
             importance_df = pd.DataFrame({
                 'Feature': features[:n],
                 'Importance': importances[:n]
             }).sort_values(by='Importance', ascending=False)
-        
-            if importance_df.isnull().any().any():
-                st.warning("⚠️ Null values detected in feature importance — skipping display")
-                logging.warning(f"Null importance rows:\n{importance_df[importance_df.isnull().any(axis=1)]}")
-            else:
-                st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
-                st.dataframe(importance_df, use_container_width=True)
-        
+            st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
+            st.table(importance_df.head(10))  # safer display
         except Exception as e:
-            st.error("❌ Failed to render feature importance block.")
-            logging.exception("Feature importance rendering failed.")
-            
-            
+            st.error("❌ Feature importance failed")
+            logging.exception(e)
+        
+        # === Predictions and metrics
         raw_probs = calibrated_model.predict_proba(X)[:, 1]
         y_pred = (raw_probs >= 0.5).astype(int)
-
+        
         auc = roc_auc_score(y, raw_probs)
+        flipped_auc = roc_auc_score(y, 1 - raw_probs)
+        if flipped_auc > auc:
+            st.warning(f"⚠️ Flipped AUC is better: {flipped_auc:.4f} vs AUC: {auc:.4f}")
+        
         acc = accuracy_score(y, y_pred)
         logloss = log_loss(y, raw_probs)
         brier = brier_score_loss(y, raw_probs)
-
+        
+        # === Save and display
         save_model_to_gcs(best_model, calibrated_model, sport, market, bucket_name=GCS_BUCKET)
         trained_models[market] = {"model": best_model, "calibrator": calibrated_model}
-        from sklearn.metrics import confusion_matrix
         
         conf = confusion_matrix(y, y_pred)
-        st.markdown("#### 📊 Confusion Matrix")
-        st.write(conf)
+        conf_labels = pd.DataFrame(conf, index=["Actual 0", "Actual 1"], columns=["Predicted 0", "Predicted 1"])
+        
+        st.markdown("#### 📊 Confusion Matrix (Labeled)")
+        st.dataframe(conf_labels)
         
         st.markdown("#### ✅ Class Distribution")
         st.write(y.value_counts())
-        
-        from sklearn.calibration import calibration_curve
-        from sklearn.metrics import confusion_matrix
-        conf_labels = pd.DataFrame(
-            conf,
-            index=["Actual 0 (Miss)", "Actual 1 (Hit)"],
-            columns=["Predicted 0", "Predicted 1"]
-        )
-        st.markdown("#### 📊 Confusion Matrix (Labeled)")
-        st.dataframe(conf_labels)
-       
         
         prob_true, prob_pred = calibration_curve(y, raw_probs, n_bins=10)
         calib_df = pd.DataFrame({
@@ -674,14 +646,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             "Actual Hit Rate": prob_true
         })
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()}")
-        st.dataframe(calib_df, use_container_width=True)
+        st.dataframe(calib_df)
+        
         st.success(f"""✅ Trained + saved model for {market.upper()}
-- AUC: {auc:.4f}
-- Accuracy: {acc:.4f}
-- Log Loss: {logloss:.4f}
-- Brier Score: {brier:.4f}
-""")
+        - AUC: {auc:.4f}
+        - Accuracy: {acc:.4f}
+        - Log Loss: {logloss:.4f}
+        - Brier Score: {brier:.4f}
+        """)
         progress.progress(idx / 3)
+        
+       
 
     status.update(label="✅ All models trained", state="complete", expanded=False)
 
