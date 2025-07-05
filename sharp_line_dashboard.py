@@ -588,25 +588,39 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         calibrated_model.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
         try:
             importances = best_model.feature_importances_
-            importance_df = pd.DataFrame({
-                'Feature': features,
-                'Importance': importances
-            })
         
-            # ✅ Assert length match before rendering
-            if len(importance_df) != len(features):
-                st.warning("⚠️ Feature importance length mismatch — skipping display.")
-                logging.warning(f"Feature list: {features}")
-                logging.warning(f"Importances shape: {importances.shape}")
+            # 🧪 Length mismatch check
+            if len(importances) != len(features):
+                st.warning(f"⚠️ Feature importance mismatch: {len(importances)} importances vs {len(features)} features")
+                logging.warning(f"features = {features}")
+                logging.warning(f"importances = {importances.tolist()}")
+        
+                # 🚑 Fallback: truncate features list if needed
+                n = min(len(importances), len(features))
+                importance_df = pd.DataFrame({
+                    'Feature': features[:n],
+                    'Importance': importances[:n]
+                }).sort_values(by='Importance', ascending=False)
             else:
-                importance_df = importance_df.sort_values(by='Importance', ascending=False)
+                importance_df = pd.DataFrame({
+                    'Feature': features,
+                    'Importance': importances
+                }).sort_values(by='Importance', ascending=False)
+        
+            # 🧪 Log preview and diagnostics
+            st.write("🧪 Features (first 5):", features[:5])
+            st.write("🧪 Importances (first 5):", importances[:5])
+        
+            if importance_df.isnull().any().any():
+                st.warning("⚠️ Null values detected in feature importance — skipping display")
+                logging.warning(f"Null importance rows:\n{importance_df[importance_df.isnull().any(axis=1)]}")
+            else:
                 st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
                 st.dataframe(importance_df, use_container_width=True)
         
         except Exception as e:
-            st.error(f"❌ Failed to display feature importances: {e}")
+            st.error("❌ Failed to render feature importance block.")
             logging.exception("Feature importance rendering failed.")
-        
         raw_probs = calibrated_model.predict_proba(X)[:, 1]
         y_pred = (raw_probs >= 0.5).astype(int)
 
