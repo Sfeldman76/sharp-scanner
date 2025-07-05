@@ -1790,7 +1790,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     if df_valid.empty:
         logging.warning("ℹ️ No valid sharp picks with scores to evaluate")
         return pd.DataFrame()
-    
+    # === Ensure Home_Team and Away_Team are attached before cover calc
+    if 'Home_Team' not in df_valid.columns or 'Away_Team' not in df_valid.columns:
+        logging.info("🔗 Attaching Home_Team and Away_Team to df_valid from df_master")
+        team_cols = df_master[['Game_Key', 'Home_Team', 'Away_Team']].drop_duplicates()
+        df_valid = df_valid.merge(team_cols, on='Game_Key', how='left')
     # ✅ Vectorized calculation
     result = calc_cover(df_valid)  # must return a DataFrame with 2 columns
     
