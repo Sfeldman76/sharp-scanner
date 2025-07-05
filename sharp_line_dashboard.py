@@ -490,10 +490,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         if market == "totals":
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
 
-        elif market == "spreads":
-            df_market = df_market[df_market['Value'].notna()]
-            df_market['Side_Label'] = np.where(df_market['Value'] < 0, 'favorite', 'underdog')
-            df_market = df_market[df_market['Side_Label'] == 'favorite']
+        elif market == 'spreads':
+        # === 🔍 Debug label correctness for spreads
+        if {'Score_Home_Score', 'Score_Away_Score', 'Home_Team'}.issubset(df_market.columns):
+            df_market['home_margin'] = df_market['Score_Home_Score'] - df_market['Score_Away_Score']
+            df_market['side'] = np.where(df_market['Outcome'] == df_market['Home_Team'], 'home', 'away')
+    
+            df_market['should_cover'] = np.where(
+                df_market['side'] == 'home',
+                df_market['home_margin'] > -df_market['Value'],
+                -df_market['home_margin'] > -df_market['Value']
+            )
+    
+            df_market['mismatch'] = df_market['SHARP_HIT_BOOL'] != df_market['should_cover'].astype(int)
+            num_wrong = df_market['mismatch'].sum()
+    
+            if num_wrong > 0:
+                st.warning(f"❗ {num_wrong} spread rows have incorrect SHARP_HIT_BOOL values")
+                logging.warning(f"❌ Label mismatch in {num_wrong} SPREAD rows — check spread cover logic")
+                logging.info(df_market[df_market['mismatch']][
+                    ['Game_Key', 'Outcome', 'Value', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'should_cover']
+                ].head(5).to_string(index=False))
 
         elif market == "h2h":
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
@@ -507,40 +524,39 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             continue
         # === Directional agreement (for spreads/h2h invert line logic)
         df_market['Line_Delta'] = pd.to_numeric(df_market['Line_Delta'], errors='coerce')
-        df_market['Model_Prob_Diff'] = pd.to_numeric(df_market['Model_Prob_Diff'], errors='coerce')
+       
         
-        df_market['Direction_Aligned'] = pd.Series(np.where(
-            ((df_market['Model_Prob_Diff'] > 0.0) & (df_market['Line_Delta'] > 0)) |
-            ((df_market['Model_Prob_Diff'] < 0.0) & (df_market['Line_Delta'] < 0)),
-            1,
-            np.where(
-                ((df_market['Model_Prob_Diff'] > 0.0) & (df_market['Line_Delta'] < 0)) |
-                ((df_market['Model_Prob_Diff'] < 0.0) & (df_market['Line_Delta'] > 0)),
-                0,
-                np.nan
-            )
-        ), index=df_market.index).fillna(0).astype(int)
-        
-        
-        # === 🧠 Add new features to training
-        features = [
-            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
-            'Sharp_Time_Score', 'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
-            'Direction_Aligned'
-        ]
-        
-        df_market = ensure_columns(df_market, features, 0)
-        
+        df_market['Direction_Aligned'] = np.where(
+            (df_market['Line_Delta'] > 0) & (df_market['Sharp_Limit_Jump'] == 1), 1,
+            np.where((df_market['Line_Delta'] < 0) & (df_market['Sharp_Limit_Jump'] == 1), 0, np.nan)
+        )
+        df_market['Direction_Aligned'] = df_market['Direction_Aligned'].fillna(0).astype(int)
         df_market['Line_Value_Abs'] = df_market['Value'].abs()
         df_market['Prob_Shift_Signed'] = df_market['Sharp_Prob_Shift'] * np.sign(df_market['Value'])
         df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(df_market['Value'])
         
         sharp_books = ["pinnacle", "betfair", "circa", "bookmaker"]
         df_market['Book_Norm'] = df_market['Bookmaker'].str.lower().str.strip()
-        df_market['Is_Sharp_Book'] = df_market['Book_Norm'].isin(sharp_books).astype(int)
+        df_market['Is_Sharp_Book'] = df_market['Book_Norm'].isin(sharp_books).astype(int)        
+        # === 🧠 Add new features to training
+        features = [
+            'Sharp_Move_Signal',
+            'Sharp_Limit_Jump',
+            'Sharp_Time_Score',
+            'Sharp_Limit_Total',
+            'Is_Reinforced_MultiMarket',
+            'Market_Leader',
+            'LimitUp_NoMove_Flag',
+            'Is_Sharp_Book',
+            'Line_Value_Abs',
+            'Line_Delta',
+            'Direction_Aligned'
+        ]
         
-        features += ['Line_Value_Abs', 'Prob_Shift_Signed', 'Line_Delta_Signed', 'Is_Sharp_Book']
+        df_market = ensure_columns(df_market, features, 0)
+        
+        
+        
         
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         y = df_market['SHARP_HIT_BOOL'].astype(int)
