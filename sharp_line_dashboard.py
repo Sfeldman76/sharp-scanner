@@ -108,7 +108,8 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
 import os, json
 from sklearn.model_selection import StratifiedKFold
-import xgboost as xgb
+import xgboost as 
+from sklearn.metrics import confusion_matrix
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
@@ -616,9 +617,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             logging.exception(e)
         
         # === Predictions and metrics
-        raw_probs = calibrated_model.predict_proba(X)[:, 1]
+        raw_probs = calibrated_model.predict_proba(X)[:, 1]       
+        # Flip predictions because model is inverted
         y_pred = (raw_probs >= 0.5).astype(int)
-        
         auc = roc_auc_score(y, raw_probs)
         flipped_auc = roc_auc_score(y, 1 - raw_probs)
         if flipped_auc > auc:
