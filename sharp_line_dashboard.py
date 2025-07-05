@@ -108,7 +108,7 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
 import os, json
 from sklearn.model_selection import StratifiedKFold
-
+import xgboost as xgb
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
