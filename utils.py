@@ -1784,7 +1784,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Final output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
-    logging.info(f"✅ Uploaded {len(df_scores_out)} new scored picks to sharp_scores_full")
+  
     
     # Function to coerce boolean columns to proper format
     def coerce_bool_series(series):
