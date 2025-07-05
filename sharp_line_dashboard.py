@@ -777,18 +777,18 @@ def compute_diagnostics_vectorized(df):
         delta = prob_now - prob_start
 
         df['Confidence Trend'] = np.where(
-            prob_start.isna() | prob_now.isna(),
+            pd.isna(prob_start) | pd.isna(prob_now),
             "⚠️ Missing",
-            np.select(
-                [delta >= 0.04, delta <= -0.04],
-                [
-                    ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
+            np.where(
+                delta >= 0.04,
+                ["📈 Trending Up: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
+                np.where(
+                    delta <= -0.04,
                     ["📉 Trending Down: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)],
-                ],
-                default=["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
+                    ["↔ Stable: {:.2%} → {:.2%}".format(s, n) for s, n in zip(prob_start, prob_now)]
+                )
             )
         )
-
         # === Step 4: Line/Model Direction Alignment
         df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
 
