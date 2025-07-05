@@ -589,27 +589,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         try:
             importances = best_model.feature_importances_
         
-            # 🧪 Length mismatch check
+            # 🧪 Check for feature length mismatch
             if len(importances) != len(features):
                 st.warning(f"⚠️ Feature importance mismatch: {len(importances)} importances vs {len(features)} features")
                 logging.warning(f"features = {features}")
                 logging.warning(f"importances = {importances.tolist()}")
         
-                # 🚑 Fallback: truncate features list if needed
-                n = min(len(importances), len(features))
-                importance_df = pd.DataFrame({
-                    'Feature': features[:n],
-                    'Importance': importances[:n]
-                }).sort_values(by='Importance', ascending=False)
-            else:
-                importance_df = pd.DataFrame({
-                    'Feature': features,
-                    'Importance': importances
-                }).sort_values(by='Importance', ascending=False)
+            # ✅ Drop detection for missing features
+            if len(importances) < len(features):
+                dropped = features[len(importances):]
+                logging.info(f"⚠️ Model did not use the following features: {dropped}")
         
-            # 🧪 Log preview and diagnostics
-            st.write("🧪 Features (first 5):", features[:5])
-            st.write("🧪 Importances (first 5):", importances[:5])
+            # ✅ Align safely to prevent crash
+            n = min(len(importances), len(features))
+            importance_df = pd.DataFrame({
+                'Feature': features[:n],
+                'Importance': importances[:n]
+            }).sort_values(by='Importance', ascending=False)
         
             if importance_df.isnull().any().any():
                 st.warning("⚠️ Null values detected in feature importance — skipping display")
@@ -621,6 +617,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         except Exception as e:
             st.error("❌ Failed to render feature importance block.")
             logging.exception("Feature importance rendering failed.")
+            
+            
         raw_probs = calibrated_model.predict_proba(X)[:, 1]
         y_pred = (raw_probs >= 0.5).astype(int)
 
