@@ -1894,26 +1894,29 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
     logging.info(f"🧪 Local rows before dedup: {len(df_scores_out)}")
     
-    # Query BigQuery for existing rows
+    # === Query BigQuery for existing line-level deduplication
     existing = bq_client.query(f"""
         SELECT DISTINCT {', '.join(dedup_fingerprint_cols)}
-        FROM `sharp_data.sharp_scores_full`
+        FROM `sharplogger.sharp_data.sharp_scores_full`
         WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
     """).to_dataframe()
-    logging.info(f"🧪 Existing rows in BigQuery for dedup: {len(existing)}")
-    # ✅ New: Fetch all games already scored
+    logging.info(f"🧪 Existing fingerprinted rows in BigQuery: {len(existing)}")
+    
+    # === Fetch all games already scored (to block re-inserts)
     scored_keys_df = bq_client.query("""
         SELECT DISTINCT Merge_Key_Short
         FROM `sharplogger.sharp_data.sharp_scores_full`
-        WHERE Scored = TRUE
+        WHERE LOWER(CAST(Scored AS STRING)) = 'true'
     """).to_dataframe()
     already_scored_keys = set(scored_keys_df['Merge_Key_Short'].dropna())
     
-    # 🧹 Remove any rows from df_scores_out that have already been scored
+    # === Filter out already-scored games
     pre_score_filter = len(df_scores_out)
     df_scores_out = df_scores_out[~df_scores_out['Merge_Key_Short'].isin(already_scored_keys)]
     logging.info(f"🧹 Removed {pre_score_filter - len(df_scores_out)} rows from already-scored games")
-    # Dedup against BigQuery
+    
+    # === Deduplicate against BigQuery fingerprinted rows
+    pre_dedup = len(df_scores_out)
     df_scores_out = df_scores_out.merge(
         existing,
         on=dedup_fingerprint_cols,
@@ -1921,16 +1924,19 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         indicator=True
     )
     df_scores_out = df_scores_out[df_scores_out['_merge'] == 'left_only'].drop(columns=['_merge'])
+    logging.info(f"🧹 Removed {pre_dedup - len(df_scores_out)} duplicate line-level rows based on fingerprint keys")
     
-    # Final logs before upload
-    logging.info(f"🧪 Remaining new rows after dedup merge: {len(df_scores_out)}")
-    
-    # If no new rows left, return
+    # === Final logs and early exit
     if df_scores_out.empty:
-        logging.info("ℹ️ No new scores to upload — all identical line states already in BigQuery.")
+        logging.info("ℹ️ No new scores to upload — all rows were already scored or duplicate line states.")
         return pd.DataFrame()
     
-    # Convert to Parquet format
+    # === Log preview before upload
+    logging.info(f"✅ Final rows to upload: {len(df_scores_out)}")
+    logging.info("🧪 Sample rows to upload:\n" +
+                 df_scores_out[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']].head(5).to_string(index=False))
+    
+    # === Parquet validation (debug aid)
     try:
         pa.Table.from_pandas(df_scores_out)
     except Exception as e:
@@ -1939,11 +1945,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         for col in df_scores_out.columns:
             logging.info(f"🔍 {col} → {df_scores_out[col].dtype}, sample: {df_scores_out[col].dropna().unique()[:5].tolist()}")
     
-    logging.info(f"🧪 df_scores_out ready for return: {len(df_scores_out)} rows")
-    logging.info(f"🧪 Final sample:\n{df_scores_out[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']].head(3).to_string(index=False)}")
-    
+    # === Return final deduplicated and filtered DataFrame
     return df_scores_out
-
 
 
 def compute_and_write_market_weights(df):
