@@ -337,11 +337,14 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Market_Norm', 'Outcome_Norm', 'Merge_Key_Short', 'Line_Hash',
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Pre_Game', 'Post_Game',
         'Unique_Sharp_Books', 'Sharp_Move_Magnitude_Score', 'Was_Canonical',
-        'Scored_By_Model', 'Scoring_Market', 'Line_Magnitude_Abs',
+        'Scored_By_Model', 'Scoring_Market',
         'Line_Move_Magnitude',
         'Is_Home_Team_Bet',
         'Is_Favorite_Bet',
-        'High_Limit_Flag'
+        'High_Limit_Flag',
+        'Line_Delta',               # ✅ Add this
+        'Line_Magnitude_Abs',       # Already present
+        'Direction_Aligned',        # ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -1020,8 +1023,35 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Post_Game'] = ~df['Pre_Game']
     # === Confidence scores and tiers
     df = assign_confidence_scores(df, weights)
-  
-
+    # === Patch derived fields before BigQuery write ===
+    try:
+        # Line_Delta: Value - Open_Value
+        df['Line_Delta'] = (
+            pd.to_numeric(df['Value'], errors='coerce') -
+            pd.to_numeric(df['Open_Value'], errors='coerce')
+        )
+    
+        # Line magnitudes
+        df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
+        df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
+    
+        # High Limit flag
+        df['High_Limit_Flag'] = (pd.to_numeric(df['Sharp_Limit_Total'], errors='coerce') >= 10000).astype('Int64')
+    
+        # Home team indicator
+        df['Is_Home_Team_Bet'] = (df['Outcome'].str.lower() == df['Home_Team_Norm'].str.lower()).astype('Int64')
+    
+        # Favorite indicator
+        df['Is_Favorite_Bet'] = (pd.to_numeric(df['Value'], errors='coerce') < 0).astype('Int64')
+    
+        # Direction alignment: market-based only
+        df['Direction_Aligned'] = np.where(
+            df['Line_Delta'] > 0, 1,
+            np.where(df['Line_Delta'] < 0, 0, np.nan)
+        ).astype('Int64')
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
+    
     
     # === Summary consensus metrics
     summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
