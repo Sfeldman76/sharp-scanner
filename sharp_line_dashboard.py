@@ -769,24 +769,26 @@ def compute_diagnostics_vectorized(df):
         )
         
         # Safe formatting of trend strings
+        
+        # Safe formatting of trend strings
         prob_now = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
         prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
         delta = prob_now - prob_start
-        # Safe formatting of trend strings
-        df['Confidence Trend'] = np.select(
-            [
-                pd.isna(prob_start) | pd.isna(prob_now),
-                delta >= 0.04,
-                delta <= -0.04
-            ],
-            [
-                "⚠️ Missing",
-                [f"📈 Trending Up: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)],
-                [f"📉 Trending Down: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)],
-            ],
-            default=[f"↔ Stable: {s:.2%} → {n:.2%}" for s, n in zip(prob_start, prob_now)]
-        )
+        
+        # Build the trend strings using a vectorized loop
+        trend_strs = []
+        for s, n in zip(prob_start, prob_now):
+            if pd.isna(s) or pd.isna(n):
+                trend_strs.append("⚠️ Missing")
+            elif n - s >= 0.04:
+                trend_strs.append(f"📈 Trending Up: {s:.2%} → {n:.2%}")
+            elif n - s <= -0.04:
+                trend_strs.append(f"📉 Trending Down: {s:.2%} → {n:.2%}")
+            else:
+                trend_strs.append(f"↔ Stable: {s:.2%} → {n:.2%}")
+        
         df['Confidence Trend'] = trend_strs
+        
         # === Step 4: Line/Model Direction Alignment
         # === Step 4: Line/Model Direction Alignment
         df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
