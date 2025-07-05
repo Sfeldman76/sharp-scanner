@@ -617,31 +617,39 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             logging.exception(e)
         
         # === Predictions and metrics
-        raw_probs = calibrated_model.predict_proba(X)[:, 1]       
-        # Flip predictions because model is inverted
+        # === Predict raw probabilities
+        # === Predict raw probabilities
+        raw_probs = calibrated_model.predict_proba(X)[:, 1]
         y_pred = (raw_probs >= 0.5).astype(int)
+        
+        # === Compute both normal and flipped AUC
         auc = roc_auc_score(y, raw_probs)
         flipped_auc = roc_auc_score(y, 1 - raw_probs)
-        if flipped_auc > auc:
-            st.warning(f"⚠️ Flipped AUC is better: {flipped_auc:.4f} vs AUC: {auc:.4f}")
         
+        # === Alert if this market appears inverted
+        if flipped_auc > auc + 0.05:
+            st.warning(f"⚠️ Model for `{market.upper()}` may be learning inverted signal\nAUC: {auc:.4f} vs Flipped AUC: {flipped_auc:.4f}")
+            logging.warning(f"🛑 Flipped AUC alert for {market.upper()}: AUC = {auc:.4f}, Flipped = {flipped_auc:.4f}")
+        else:
+            st.info(f"✅ AUC for `{market.upper()}`: {auc:.4f}")
+        
+        # === Continue using original probabilities
         acc = accuracy_score(y, y_pred)
         logloss = log_loss(y, raw_probs)
         brier = brier_score_loss(y, raw_probs)
         
-        # === Save and display
+        # === Save model
         save_model_to_gcs(best_model, calibrated_model, sport, market, bucket_name=GCS_BUCKET)
         trained_models[market] = {"model": best_model, "calibrator": calibrated_model}
         
+        # === Confusion matrix
         conf = confusion_matrix(y, y_pred)
         conf_labels = pd.DataFrame(conf, index=["Actual 0", "Actual 1"], columns=["Predicted 0", "Predicted 1"])
-        
-        st.markdown("#### 📊 Confusion Matrix (Labeled)")
+        st.markdown(f"#### 📊 Confusion Matrix — `{market.upper()}`")
         st.dataframe(conf_labels)
         
-        st.markdown("#### ✅ Class Distribution")
+        st.markdown(f"#### ✅ Class Distribution — `{market.upper()}`")
         st.write(y.value_counts())
-        
         prob_true, prob_pred = calibration_curve(y, raw_probs, n_bins=10)
         calib_df = pd.DataFrame({
             "Predicted Bin Center": prob_pred,
