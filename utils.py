@@ -1771,7 +1771,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df['Unique_Sharp_Books'] = 0
     df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
        
-        
+    # === Merge Home_Team_Norm and Away_Team_Norm from df_scores (which has them)
+    if 'Home_Team' in df_scores_needed.columns and 'Away_Team' in df_scores_needed.columns:
+        df_scores_needed = df_scores_needed.rename(columns={
+            'Home_Team': 'Home_Team_Norm',
+            'Away_Team': 'Away_Team_Norm'
+        })
+    
+        df_master = df_master.merge(
+            df_scores_needed[['Merge_Key_Short', 'Home_Team_Norm', 'Away_Team_Norm']],
+            on='Merge_Key_Short',
+            how='left'
+        ) 
     # === Final Output DataFrame ===
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
