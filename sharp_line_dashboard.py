@@ -573,7 +573,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'reg_alpha': [0, 0.1, 1],  # L1
             'reg_lambda': [1, 5, 10]   # L2
         }
-                
+        from sklearn.model_selection import StratifiedKFold
+
+        # Create stratified folds
+        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+        
+        # (Optional) Diagnostic — log label distribution in each fold
+        for i, (_, val_idx) in enumerate(cv.split(X, y)):
+            val_labels = y.iloc[val_idx]
+            counts = val_labels.value_counts().to_dict()
+            logging.info(f"🧪 Fold {i+1} label distribution: {counts}")
+            if len(counts) < 2:
+                logging.warning(f"⚠️ Fold {i+1} has only one class — this may cause training to fail.")     
         grid = RandomizedSearchCV(
             estimator=XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
             param_distributions=param_grid,
@@ -583,10 +594,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             verbose=1,
             random_state=42
         )
-        # Before grid.fit:
-        for i, (_, val_idx) in enumerate(cv.split(X, y)):
-            val_labels = y.iloc[val_idx]
-            logging.info(f"🧪 Fold {i+1} label distribution:\n{val_labels.value_counts()}")
+        
         grid.fit(X, y, sample_weight=df_market.loc[X.index, 'Sample_Weight'])
         best_model = grid.best_estimator_
 
