@@ -337,7 +337,11 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Market_Norm', 'Outcome_Norm', 'Merge_Key_Short', 'Line_Hash',
         'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Pre_Game', 'Post_Game',
         'Unique_Sharp_Books', 'Sharp_Move_Magnitude_Score', 'Was_Canonical',
-        'Scored_By_Model', 'Scoring_Market'
+        'Scored_By_Model', 'Scoring_Market', 'Line_Magnitude_Abs',
+        'Line_Move_Magnitude',
+        'Is_Home_Team_Bet',
+        'Is_Favorite_Bet',
+        'High_Limit_Flag'
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -592,6 +596,11 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
+            df_canon['Line_Magnitude_Abs'] = df_canon['Line_Delta'].abs()
+            df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] >= 10000).astype(int)
+            df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
+            df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
+            df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
             
 
             df_inverse = df_canon.copy(deep=True)
@@ -1294,7 +1303,12 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp',
             'Sport', 'Value', 'First_Line_Value', 'First_Sharp_Prob',
             'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
-            'Unique_Sharp_Books', 'Merge_Key_Short'  # ✅ Add this line
+            'Unique_Sharp_Books', 'Merge_Key_Short',
+            'Line_Magnitude_Abs',
+            'Line_Move_Magnitude',
+            'Is_Home_Team_Bet',
+            'Is_Favorite_Bet',
+            'High_Limit_Flag'  # ✅ Add this line
         ]
     }
 
@@ -1693,7 +1707,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
         # === Clean Line_Delta
         df_chunk['Line_Delta'] = pd.to_numeric(df_chunk['Value'], errors='coerce') - pd.to_numeric(df_chunk['First_Line_Value'], errors='coerce')
-    
+        df_chunk['Line_Magnitude_Abs'] = df_chunk['Line_Delta'].abs()
+        df_chunk['High_Limit_Flag'] = (df_chunk['Sharp_Limit_Total'] >= 10000).astype('Int64')
         # === Direction_Aligned: purely market-based logic
         df_chunk['Direction_Aligned'] = np.where(
             df_chunk['Line_Delta'] > 0, 1,
@@ -1765,7 +1780,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'First_Line_Value', 'First_Sharp_Prob',         # ✅ new
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',  'Home_Team_Norm',
         'Away_Team_Norm',
-        'Commence_Hour',   # ✅ new
+        'Commence_Hour', 'Line_Magnitude_Abs', High_Limit_Flag', # ✅ new
     ]
     
     # === Final output
