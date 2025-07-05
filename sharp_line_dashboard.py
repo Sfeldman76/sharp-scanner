@@ -447,10 +447,20 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
 
 
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
+
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
-    df_bt = load_backtested_predictions(sport, days_back)
+    # ✅ Load from sharp_scores_full with all necessary columns up front
+    query = f"""
+        SELECT *
+        FROM `sharplogger.sharp_data.sharp_scores_full`
+        WHERE Sport = '{sport.upper()}'
+          AND Scored = TRUE
+          AND SHARP_HIT_BOOL IS NOT NULL
+    """
+    df_bt = bq_client.query(query).to_dataframe()
+
     if df_bt.empty:
         st.warning("⚠️ No historical sharp picks available to train model.")
         return
@@ -477,31 +487,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         status.write(f"🚧 Training model for `{market.upper()}`...")
         df_market = df_bt[df_bt['Market'] == market].copy()
 
-        # 🛠️ Patch in missing home/away team norms if needed
-        if 'Home_Team_Norm' not in df_market.columns or 'Away_Team_Norm' not in df_market.columns:
-            status.warning("⚠️ Home_Team_Norm missing — attempting to merge from sharp_moves_master")
-            df_patch = bq_client.query("""
-                SELECT Game_Key, Home_Team_Norm, Away_Team_Norm
-                FROM `sharplogger.sharp_data.sharp_moves_master`
-                WHERE Home_Team_Norm IS NOT NULL AND Away_Team_Norm IS NOT NULL
-            """).to_dataframe().drop_duplicates(subset='Game_Key')
-
-            df_market = df_market.merge(df_patch, on='Game_Key', how='left')
-
-            if 'Home_Team_Norm' in df_market.columns:
-                logging.info("🧪 Sample merged Home/Away teams:")
-                logging.info(df_market[['Game_Key', 'Home_Team_Norm', 'Away_Team_Norm']].dropna().head().to_string(index=False))
-            else:
-                status.error("❌ Still missing Home_Team_Norm after patch — model may fail.")
-
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
             progress.progress(idx / 3)
             continue
 
-        df_market['Outcome_Norm'] = df_market['Outcome'].astype(str).str.lower().str.strip()
+        # ✅ You now safely have Home_Team_Norm and Away_Team_Norm here
+        # You can continue with canonical filtering, label validation, feature engineering, etc.
 
-        # ...continue with training logic
+        df_market['Outcome_Norm'] = df_market['Outcome'].astype(str).str.lower().str.strip()
+        
+       
+     
         # === Canonical side filtering ===
         if market == "totals":
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
