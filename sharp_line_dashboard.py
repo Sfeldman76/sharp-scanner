@@ -771,30 +771,22 @@ def compute_diagnostics_vectorized(df):
         # Safe formatting of trend strings
         
         # Safe formatting of trend strings
-        prob_now = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
-        prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
-        delta = prob_now - prob_start
-        import logging
-        import streamlit as st
-        import pandas as pd
+        # Safe fallback with .get in case 'Model Prob' is missing
+        # === Step 3: Confidence Trend
+        prob_now = df.get('Model Prob')
+        prob_start = df.get('First_Sharp_Prob')
         
-        # Debug types
-        st.text(f"🔍 prob_start type: {type(prob_start)}")
-        st.text(f"🔍 prob_now type: {type(prob_now)}")
+        # === Defensive fallback
+        if isinstance(prob_now, (float, int, np.floating)) or prob_now is None:
+            prob_now = pd.Series([np.nan] * len(df))
+        if isinstance(prob_start, (float, int, np.floating)) or prob_start is None:
+            prob_start = pd.Series([np.nan] * len(df))
         
-        # If scalar, show value; if iterable, show shape and sample
-        if isinstance(prob_start, pd.Series):
-            st.text(f"prob_start shape: {prob_start.shape}")
-            st.write("🔢 prob_start sample:", prob_start.head())
-        else:
-            st.text(f"prob_start scalar: {prob_start}")
+        # Coerce numeric
+        prob_now = pd.to_numeric(prob_now, errors='coerce')
+        prob_start = pd.to_numeric(prob_start, errors='coerce')
         
-        if isinstance(prob_now, pd.Series):
-            st.text(f"prob_now shape: {prob_now.shape}")
-            st.write("🔢 prob_now sample:", prob_now.head())
-        else:
-            st.text(f"prob_now scalar: {prob_now}")
-        # Build the trend strings using a vectorized loop
+        # Safe vectorized loop
         trend_strs = []
         for s, n in zip(prob_start, prob_now):
             if pd.isna(s) or pd.isna(n):
@@ -807,6 +799,8 @@ def compute_diagnostics_vectorized(df):
                 trend_strs.append(f"↔ Stable: {s:.2%} → {n:.2%}")
         
         df['Confidence Trend'] = trend_strs
+                
+       
         
         # === Step 4: Line/Model Direction Alignment
         # === Step 4: Line/Model Direction Alignment
@@ -827,7 +821,7 @@ def compute_diagnostics_vectorized(df):
         df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
 
         # Use Model_Prob_Trend instead of deprecated Model_Prob_Diff
-        model_prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
+        model_prob = pd.to_numeric(df.get('Model Prob'), errors='coerce')
         first_prob = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
         prob_trend = model_prob - first_prob
 
@@ -848,7 +842,7 @@ def compute_diagnostics_vectorized(df):
         )
 
         # === Step 5: Why Model Likes It
-        prob = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce').fillna(0)
+        prob = pd.to_numeric(df.get('Model Prob'), errors='coerce')
 
         model_reason = np.select(
             [
