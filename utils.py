@@ -1526,6 +1526,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     def calc_cover(df):
         """
         Calculate SHARP_HIT_BOOL and SHARP_COVER_RESULT for spreads, totals, and h2h.
+        Pushes are excluded from scoring.
     
         Returns:
             DataFrame with columns:
@@ -1538,61 +1539,59 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df['Market_Lower'] = df['Market'].str.lower().fillna('')
         df['Outcome_Lower'] = df['Outcome'].str.lower().fillna('')
     
-        # Score columns
-        home_score = pd.to_numeric(df['Score_Home_Score'], errors='coerce')
-        away_score = pd.to_numeric(df['Score_Away_Score'], errors='coerce')
-        total_score = home_score + away_score
-        spread_value = pd.to_numeric(df['Value'], errors='coerce')
+        # Scores and line
+        home = pd.to_numeric(df['Score_Home_Score'], errors='coerce')
+        away = pd.to_numeric(df['Score_Away_Score'], errors='coerce')
+        value = pd.to_numeric(df['Value'], errors='coerce')
     
-        # Masks
+        # Booleans
         is_totals = df['Market_Lower'] == 'totals'
         is_spreads = df['Market_Lower'] == 'spreads'
         is_h2h = df['Market_Lower'] == 'h2h'
         is_under = df['Outcome_Lower'] == 'under'
         is_over = df['Outcome_Lower'] == 'over'
-    
-        # Totals logic
-        totals_hit = np.where(
-            is_under,
-            total_score < spread_value,
-            total_score > spread_value  # for "over"
-        )
-    
-        # Spreads logic
         is_home_side = df['Outcome'] == df['Home_Team']
         is_away_side = df['Outcome'] == df['Away_Team']
     
-        spread_hit = np.where(
-            is_home_side,
-            (home_score - away_score) > -spread_value,
-            np.where(
-                is_away_side,
-                (away_score - home_score) > -spread_value,
-                False
-            )
+        # Totals logic
+        total_score = home + away
+        totals_hit = np.where(
+            is_under, total_score < value,
+            np.where(is_over, total_score > value, False)
         )
+        push_totals = total_score == value
+    
+        # Spreads logic
+        spread_margin = np.where(is_home_side, home - away, away - home)
+        spread_hit = spread_margin > -value
+        push_spreads = spread_margin == -value
     
         # H2H logic
-        winner = np.where(
-            home_score > away_score, df['Home_Team'],
-            np.where(away_score > home_score, df['Away_Team'], 'tie')
-        )
+        winner = np.where(home > away, df['Home_Team'],
+                 np.where(away > home, df['Away_Team'], 'tie'))
         h2h_hit = df['Outcome'] == winner
     
-        # Final selector
-        covered = np.where(
+        # Push filter
+        is_push = (is_totals & push_totals) | (is_spreads & push_spreads)
+    
+        # Final coverage logic
+        hit = np.where(
             is_totals, totals_hit,
             np.where(is_spreads, spread_hit,
                      np.where(is_h2h, h2h_hit, False))
         )
     
+        # Assign final result (excluding pushes)
         result_df = pd.DataFrame({
-            'SHARP_COVER_RESULT': np.where(covered, 'Win', 'Loss'),
-            'SHARP_HIT_BOOL': covered.astype(int)
+            'SHARP_COVER_RESULT': np.where(hit, 'Win', 'Loss'),
+            'SHARP_HIT_BOOL': hit.astype(int)
         })
     
-        return result_df
+        # Remove push rows
+        result_df.loc[is_push, 'SHARP_COVER_RESULT'] = None
+        result_df.loc[is_push, 'SHARP_HIT_BOOL'] = None
     
+        return result_df
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
