@@ -539,11 +539,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market['Line_Delta'] = pd.to_numeric(df_market['Line_Delta'], errors='coerce')
        
         
-        df_market['Direction_Aligned'] = np.where(
-            (df_market['Line_Delta'] > 0) & (df_market['Sharp_Limit_Jump'] == 1), 1,
-            np.where((df_market['Line_Delta'] < 0) & (df_market['Sharp_Limit_Jump'] == 1), 0, np.nan)
-        )
-        df_market['Direction_Aligned'] = df_market['Direction_Aligned'].fillna(0).astype(int)
+       df_market['Direction_Aligned'] = np.where(
+            df_market['Line_Delta'] > 0, 1,
+            np.where(df_market['Line_Delta'] < 0, 0, -1)
+        ).astype(int)
         df_market['Line_Value_Abs'] = df_market['Value'].abs()
         df_market['Prob_Shift_Signed'] = df_market['Sharp_Prob_Shift'] * np.sign(df_market['Value'])
         df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(df_market['Value'])
@@ -599,9 +598,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'learning_rate': [0.01, 0.05, 0.1],
             'subsample': [0.8, 0.9],
             'colsample_bytree': [0.8, 0.9],
-            'gamma': [0],  # reduced to prevent pruning
-            'reg_alpha': [0, 0.01],  # minimal regularization
-            'reg_lambda': [1]
+            'gamma': [0, 0.1, 0.3],           # encourage pruning to reduce noise
+            'reg_alpha': [0, 0.1, 0.3, 0.5],  # L1 for sparse weights
+            'reg_lambda': [1, 2, 5]           # stronger L2 for smoother generalization
         }
         
         grid = RandomizedSearchCV(
@@ -615,12 +614,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         )
         
         # === Train WITHOUT weights (simplified)
-        grid.fit(X, y)
+        from sklearn.base import clone
+        model_base = xgb.XGBClassifier(
+            eval_metric='logloss',
+            tree_method='hist',
+            use_label_encoder=False,
+            n_jobs=-1,
+            random_state=42
+        )
+        model_base.fit(X, y)
+        probs = model_base.predict_proba(X)[:, 1]
+        weights = np.abs(y - probs).clip(0.01)
+        weights /= weights.mean()
+        # === Sample weights based on sharp signal strength
+       
+        
+        # === Train grid search with sample weights
+        # === Train grid search with gradient-derived sample weights
+        grid.fit(X, y, sample_weight=weights)
         best_model = grid.best_estimator_
         
-        # === Calibrate
+        # === Calibrate model using same weights
         calibrated_model = CalibratedClassifierCV(best_model, method='sigmoid', cv=5)
-        calibrated_model.fit(X, y)
+        calibrated_model.fit(X, y, sample_weight=weights)
+        # === Calibrate
+    
         
         # === Feature importances
         try:
