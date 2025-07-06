@@ -548,7 +548,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'LimitUp_NoMove_Flag',
             'Is_Sharp_Book',
             'Line_Value_Abs',
-            'Line_Delta',
+            #'Line_Delta',
             'Direction_Aligned',
             #'Line_Move_Magnitude',
             'Is_Home_Team_Bet',
@@ -567,7 +567,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         corr_matrix = X.corr().abs()
         
         # Threshold for flagging redundancy
-        threshold = 0.85
+        threshold = 0.70
         
         # Collect highly correlated feature pairs (excluding self-pairs)
         high_corr_pairs = []
