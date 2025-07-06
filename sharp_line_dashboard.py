@@ -621,7 +621,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         
         # === LogLoss model
         grid_logloss = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', use_label_encoder=False, n_jobs=-1),
+            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
             param_distributions=param_grid,
             scoring='neg_log_loss',
             cv=cv,
@@ -634,7 +634,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         
         # === AUC model
         grid_auc = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', use_label_encoder=False, n_jobs=-1),
+            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
             param_distributions=param_grid,
             scoring='roc_auc',
             cv=cv,
