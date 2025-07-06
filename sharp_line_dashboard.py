@@ -530,9 +530,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market['Prob_Shift_Signed'] = df_market['Sharp_Prob_Shift'] * np.sign(df_market['Value'])
         df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(df_market['Value'])
         
-        sharp_books = ["pinnacle", "betfair", "circa", "bookmaker"]
+        
         df_market['Book_Norm'] = df_market['Bookmaker'].str.lower().str.strip()
-        df_market['Is_Sharp_Book'] = df_market['Book_Norm'].isin(sharp_books).astype(int) 
+        df_market['Is_Sharp_Book'] = df_market['Book_Norm'].isin(SHARP_BOOKS).astype(int)
         df_market['Line_Move_Magnitude'] = df_market['Line_Delta'].abs()
         df_market['Is_Home_Team_Bet'] = (df_market['Outcome'] == df_market['Home_Team_Norm']).astype(int)
         df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
@@ -546,7 +546,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'Is_Reinforced_MultiMarket',
             'Market_Leader',
             'LimitUp_NoMove_Flag',
-            #'Is_Sharp_Book',
+            'Is_Sharp_Book',
             #'Line_Value_Abs',
             'Line_Delta',
             #'Direction_Aligned',
