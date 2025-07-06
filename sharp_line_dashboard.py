@@ -775,11 +775,25 @@ def compute_diagnostics_vectorized(df):
         prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
         delta = prob_now - prob_start
         import logging
-        logging.info(f"🔍 prob_start type: {type(prob_start)}, value: {prob_start}")
-        logging.info(f"🔍 prob_now type: {type(prob_now)}, value: {prob_now}")
-        logging.info(f"🔎 type(prob_start): {type(prob_start)}, shape: {getattr(prob_start, 'shape', 'scalar')}")
-        logging.info(f"🔎 type(prob_now): {type(prob_now)}, shape: {getattr(prob_now, 'shape', 'scalar')}")
-        logging.info(f"🔎 Sample values: prob_start={prob_start[:5] if hasattr(prob_start, '__getitem__') else prob_start}, prob_now={prob_now[:5] if hasattr(prob_now, '__getitem__') else prob_now}")
+        import streamlit as st
+        import pandas as pd
+        
+        # Debug types
+        st.text(f"🔍 prob_start type: {type(prob_start)}")
+        st.text(f"🔍 prob_now type: {type(prob_now)}")
+        
+        # If scalar, show value; if iterable, show shape and sample
+        if isinstance(prob_start, pd.Series):
+            st.text(f"prob_start shape: {prob_start.shape}")
+            st.write("🔢 prob_start sample:", prob_start.head())
+        else:
+            st.text(f"prob_start scalar: {prob_start}")
+        
+        if isinstance(prob_now, pd.Series):
+            st.text(f"prob_now shape: {prob_now.shape}")
+            st.write("🔢 prob_now sample:", prob_now.head())
+        else:
+            st.text(f"prob_now scalar: {prob_now}")
         # Build the trend strings using a vectorized loop
         trend_strs = []
         for s, n in zip(prob_start, prob_now):
