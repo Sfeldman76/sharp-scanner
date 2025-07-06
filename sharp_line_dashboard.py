@@ -539,7 +539,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market['Line_Delta'] = pd.to_numeric(df_market['Line_Delta'], errors='coerce')
        
         
-       df_market['Direction_Aligned'] = np.where(
+        df_market['Direction_Aligned'] = np.where(
             df_market['Line_Delta'] > 0, 1,
             np.where(df_market['Line_Delta'] < 0, 0, -1)
         ).astype(int)
