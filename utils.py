@@ -1864,15 +1864,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info("✅ Performed team merge via Merge_Key_Short")
     
     # === Check fallback
-    if 'Home_Team_Norm' not in df_master.columns or 'Away_Team_Norm' not in df_master.columns:
+    # Fallback: merge Home_Team and Away_Team via Game_Key from df_scores
+    if (
+        'Game_Key' in df_scores.columns and
+        'Home_Team' in df_scores.columns and
+        'Away_Team' in df_scores.columns
+    ):
         logging.info("🧩 Fallback: merging teams via Game_Key from df_scores")
         team_cols = df_scores[['Game_Key', 'Home_Team', 'Away_Team']].drop_duplicates()
         team_cols['Home_Team_Norm'] = team_cols['Home_Team'].astype(str).str.lower().str.strip()
         team_cols['Away_Team_Norm'] = team_cols['Away_Team'].astype(str).str.lower().str.strip()
-        
         df_master = df_master.merge(team_cols, on='Game_Key', how='left')
         logging.info("✅ Fallback team merge complete")
-    
+    else:
+        logging.warning("⚠️ df_scores is missing Game_Key or team columns — skipping fallback merge")
+    df_master = df_master.loc[:, ~df_master.columns.duplicated()]   
     # === 🔍 Inspect columns AFTER merge
     logging.info("📦 df_master columns AFTER team merge: %s", df_master.columns.tolist())
     
