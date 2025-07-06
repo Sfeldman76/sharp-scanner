@@ -1339,7 +1339,10 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Line_Move_Magnitude',
             'Is_Home_Team_Bet',
             'Is_Favorite_Bet',
-            'High_Limit_Flag'  # ✅ Add this line
+            'High_Limit_Flag',
+            'Home_Team_Norm',
+            'Away_Team_Norm',
+            'Commence_Hour'  # ✅ Add this line
         ]
     }
 
