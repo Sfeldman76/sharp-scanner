@@ -97,6 +97,7 @@ from xgboost import XGBClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 import logging
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -663,8 +664,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         
         # Weighted ensemble
         ensemble_prob = w_logloss * prob_logloss + w_auc * prob_auc
-        y_pred = (ensemble_prob >= 0.5).astype(int)
+        from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+
+        # === Threshold sweep
+        thresholds = np.arange(0.1, 0.96, 0.05)
+        threshold_metrics = []
         
+        for thresh in thresholds:
+            preds = (ensemble_prob >= thresh).astype(int)
+            threshold_metrics.append({
+                'Threshold': round(thresh, 2),
+                'Accuracy': accuracy_score(y, preds),
+                'Precision': precision_score(y, preds, zero_division=0),
+                'Recall': recall_score(y, preds, zero_division=0),
+                'F1': f1_score(y, preds, zero_division=0)
+            })
+        
+        # Create DataFrame for display
+        df_thresh = pd.DataFrame(threshold_metrics)
+        df_thresh = df_thresh[['Threshold', 'Accuracy', 'Precision', 'Recall', 'F1']]
+        
+        # Display in Streamlit
+        st.markdown(f"#### 📈 Performance by Threshold – `{market.upper()}`")
+        st.dataframe(df_thresh.style.format({c: "{:.3f}" for c in df_thresh.columns if c != 'Threshold'}))
+        
+        y_pred = (ensemble_prob >= 0.6).astype(int)
+        # === Log weight contributions
+        dominant_model = "AUC" if w_auc > w_logloss else "LogLoss"
+        st.markdown(f"🧠 **Ensemble Weighting:**")
+        st.write(f"- AUC Model Weight: `{w_auc:.2f}`")
+        st.write(f"- LogLoss Model Weight: `{w_logloss:.2f}`")
+        st.success(f"📌 Dominant Model in Ensemble: **{dominant_model} Model**")
+       
         # === Metrics
         auc = roc_auc_score(y, ensemble_prob)
         acc = accuracy_score(y, y_pred)
