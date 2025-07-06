@@ -1224,8 +1224,9 @@ def render_scanner_tab(label, sport_key, container):
     #     return
 
     # 🔄 Auto-refresh only if not paused
-    if not st.session_state.get("pause_refresh", False):
-        st_autorefresh(interval=180 * 1000, key=f"{sport_key}_scanner_refresh")
+    if st.session_state.get("pause_refresh", False):
+        st.info("⏸️ Auto-refresh paused")
+        return  # ❌ exit early — no fetching, no rendering
     
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
@@ -2317,11 +2318,14 @@ else:
         k for k, v in scanner_flags.items()
         if k != sport and st.session_state.get(v, False)
     ]
+    
     if conflicting:
         st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
     elif run_scanner:
         scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
+    
         with scan_tab:
             df_live = render_scanner_tab(sport, SPORTS[sport], scan_tab)
+    
         with analysis_tab:
             render_sharp_signal_analysis_tab(analysis_tab, sport, SPORTS[sport])
