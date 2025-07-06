@@ -499,50 +499,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market['Outcome_Norm'] = df_market['Outcome'].astype(str).str.lower().str.strip()
         df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
+        # Only train on labeled rows
         
-        # === Canonical side filtering & label calculation ===
+        # === Canonical side filtering ONLY ===
         if market == "totals":
-            # Keep only 'over' bets as canonical
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
-            
-            total_score = df_market['Score_Home_Score'] + df_market['Score_Away_Score']
-            push_mask = total_score == df_market['Value']
-            df_market = df_market[~push_mask]
-            
-            df_market['SHARP_HIT_BOOL'] = (total_score > df_market['Value']).astype(int)
         
         elif market == "spreads":
-            # Canonical side: FAVORITE
-            df_market = df_market[df_market['Value'] < 0].copy()
-        
-            is_home = df_market['Outcome_Norm'] == df_market['Home_Team_Norm']
-            is_away = df_market['Outcome_Norm'] == df_market['Away_Team_Norm']
-        
-            spread_margin = np.where(
-                is_home,
-                df_market['Score_Home_Score'] - df_market['Score_Away_Score'],
-                df_market['Score_Away_Score'] - df_market['Score_Home_Score']
-            )
-        
-            push_mask = spread_margin == -df_market['Value']
-            df_market = df_market[~push_mask]
-        
-            df_market['SHARP_HIT_BOOL'] = (spread_margin > -df_market['Value']).astype(int)
+            df_market = df_market[df_market['Value'] < 0]  # Favorite only
         
         elif market == "h2h":
-            df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
-            df_market = df_market[df_market['Value'].notna()]
-            df_market = df_market[df_market['Value'] < 0].copy()  # keep only favorite bets
+            df_market = df_market[df_market['Value'] < 0]  # Favorite only
         
-            winner = np.where(
-                df_market['Score_Home_Score'] > df_market['Score_Away_Score'], df_market['Home_Team_Norm'],
-                np.where(df_market['Score_Away_Score'] > df_market['Score_Home_Score'], df_market['Away_Team_Norm'], 'tie')
-            )
-        
-            df_market['winner_norm'] = pd.Series(winner).str.lower().str.strip()
-            df_market = df_market[df_market['winner_norm'] != 'tie']  # exclude ties
-            df_market['SHARP_HIT_BOOL'] = (df_market['Outcome_Norm'] == df_market['winner_norm']).astype(int)
-        
+        # ✅ Use existing SHARP_HIT_BOOL as-is (already precomputed)
+        df_market = df_market[df_market['SHARP_HIT_BOOL'].isin([0, 1])]
         
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
