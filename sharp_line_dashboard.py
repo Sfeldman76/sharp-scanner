@@ -504,27 +504,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
 
         elif market == 'spreads':
-            # === 🔍 Debug label correctness for spreads
-            if {'Score_Home_Score', 'Score_Away_Score', 'Home_Team'}.issubset(df_market.columns):
-                df_market['home_margin'] = df_market['Score_Home_Score'] - df_market['Score_Away_Score']
-                df_market['side'] = np.where(df_market['Outcome'] == df_market['Home_Team'], 'home', 'away')
-        
-                df_market['should_cover'] = np.where(
-                    df_market['side'] == 'home',
-                    df_market['home_margin'] > -df_market['Value'],
-                    -df_market['home_margin'] > -df_market['Value']
-                )
-        
-                df_market['mismatch'] = df_market['SHARP_HIT_BOOL'] != df_market['should_cover'].astype(int)
-                num_wrong = df_market['mismatch'].sum()
-        
-                if num_wrong > 0:
-                    st.warning(f"❗ {num_wrong} spread rows have incorrect SHARP_HIT_BOOL values")
-                    logging.warning(f"❌ Label mismatch in {num_wrong} SPREAD rows — check spread cover logic")
-                    logging.info(df_market[df_market['mismatch']][
-                        ['Game_Key', 'Outcome', 'Value', 'Score_Home_Score', 'Score_Away_Score', 'SHARP_HIT_BOOL', 'should_cover']
-                    ].head(5).to_string(index=False))
-    
+            df_market['side'] = np.where(df_market['Outcome'] == df_market['Home_Team'], 'home', 'away')
+
+            spread_margin = np.where(
+                df_market['side'] == 'home',
+                df_market['Score_Home_Score'] - df_market['Score_Away_Score'],
+                df_market['Score_Away_Score'] - df_market['Score_Home_Score']
+            )
+            
+            df_market['should_cover'] = spread_margin > -df_market['Value']
+            push_mask = spread_margin == -df_market['Value']
+            
         elif market == "h2h":
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market = df_market[df_market['Value'].notna()]
