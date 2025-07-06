@@ -1829,6 +1829,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             on='Merge_Key_Short',
             how='left'
         )
+    # === Compute engineered features
+    df_master['Line_Magnitude_Abs'] = df_master['Value'].abs()
+    df_master['Is_Home_Team_Bet'] = (df_master['Outcome'].str.lower() == df_master['Home_Team_Norm'].str.lower())
+    df_master['Is_Favorite_Bet'] = df_master['Value'] < 0
+    
+    # Optional: also calculate if not already done
+    if 'Line_Move_Magnitude' not in df_master.columns:
+        df_master['Line_Move_Magnitude'] = (df_master['Value'] - df_master['First_Line_Value']).abs()
     # === Final Output DataFrame ===
     score_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
@@ -1838,11 +1846,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
         'Scored', 'Sport', 'Value', 'Merge_Key_Short',
-        'First_Line_Value', 'First_Sharp_Prob',  # ✅ new
+        'First_Line_Value', 'First_Sharp_Prob',
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
-        'Home_Team_Norm', 'Away_Team_Norm',
-        'Commence_Hour', 'Line_Magnitude_Abs', 'High_Limit_Flag'  # ✅ new
+        'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
+        'Line_Magnitude_Abs', 'High_Limit_Flag',
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet'  # ✅ ADD THESE
     ]
+    
     
     # === Final output
     df_scores_out = ensure_columns(df, score_cols)[score_cols].copy()
