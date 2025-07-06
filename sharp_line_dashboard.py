@@ -1214,12 +1214,19 @@ def ensure_opposite_side_rows(df, scored_df):
     return df
 
 
+
+
 def render_scanner_tab(label, sport_key, container):
-    #market_weights = read_market_weights_from_bigquery()
-    #if not market_weights:
-        #st.error("❌ No market weights found. Cannot compute confidence scores.")
-        #return
-    st_autorefresh(interval=180 * 1000, key=f"{label}_scanner_refresh")
+    # Optional: Load market weights, skip if not found
+    # market_weights = read_market_weights_from_bigquery()
+    # if not market_weights:
+    #     st.error("❌ No market weights found. Cannot compute confidence scores.")
+    #     return
+
+    # 🔄 Auto-refresh only if not paused
+    if not st.session_state.get("pause_refresh", False):
+        st_autorefresh(interval=180 * 1000, key=f"{sport_key}_scanner_refresh")
+    
     timestamp = pd.Timestamp.utcnow()
     sport_key_lower = sport_key.lower()
 
@@ -2280,7 +2287,8 @@ import streamlit as st
 
 # --- Sidebar navigation
 sport = st.sidebar.radio("🏈 Select a League", ["General", "NBA", "MLB", "CFL", "WNBA"])
-
+st.sidebar.markdown("### ⚙️ Controls")
+st.sidebar.checkbox("⏸️ Pause Auto Refresh", key="pause_refresh")
 # --- Optional: Track scanner checkboxes by sport
 scanner_flags = {
     "NBA": "run_nba_scanner",
