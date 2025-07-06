@@ -583,7 +583,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         if high_corr_pairs:
             df_corr = pd.DataFrame(high_corr_pairs, columns=['Feature_1', 'Feature_2', 'Correlation'])
             df_corr = df_corr.sort_values(by='Correlation', ascending=False)
-            import streamlit as st
+            
             st.subheader(f"🔁 Highly Correlated Features — {market.upper()}")
             st.dataframe(df_corr)
         else:
