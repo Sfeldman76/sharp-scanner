@@ -774,7 +774,12 @@ def compute_diagnostics_vectorized(df):
         prob_now = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
         prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
         delta = prob_now - prob_start
-        
+        import logging
+        logging.info(f"🔍 prob_start type: {type(prob_start)}, value: {prob_start}")
+        logging.info(f"🔍 prob_now type: {type(prob_now)}, value: {prob_now}")
+        logging.info(f"🔎 type(prob_start): {type(prob_start)}, shape: {getattr(prob_start, 'shape', 'scalar')}")
+        logging.info(f"🔎 type(prob_now): {type(prob_now)}, shape: {getattr(prob_now, 'shape', 'scalar')}")
+        logging.info(f"🔎 Sample values: prob_start={prob_start[:5] if hasattr(prob_start, '__getitem__') else prob_start}, prob_now={prob_now[:5] if hasattr(prob_now, '__getitem__') else prob_now}")
         # Build the trend strings using a vectorized loop
         trend_strs = []
         for s, n in zip(prob_start, prob_now):
