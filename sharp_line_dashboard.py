@@ -539,7 +539,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] > 10000).astype(int)       
         # === 🧠 Add new features to training
         features = [
-            #'Sharp_Move_Signal',
+            'Sharp_Move_Signal',
             'Sharp_Limit_Jump',
             'Sharp_Time_Score',
             'Sharp_Limit_Total',
