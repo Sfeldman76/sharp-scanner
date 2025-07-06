@@ -652,7 +652,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         # === Predict + Ensemble
         prob_logloss = cal_logloss.predict_proba(X)[:, 1]
         prob_auc = cal_auc.predict_proba(X)[:, 1]
-        ensemble_prob = 0.5 * prob_logloss + 0.5 * prob_auc
+        # Example scores
+        auc_logloss = grid_logloss.best_score_  # From RandomizedSearchCV (scoring='roc_auc')
+        auc_auc = grid_auc.best_score_
+        
+        # Normalize to sum to 1
+        total = auc_logloss + auc_auc
+        w_logloss = auc_logloss / total
+        w_auc = auc_auc / total
+        
+        # Weighted ensemble
+        ensemble_prob = w_logloss * prob_logloss + w_auc * prob_auc
         y_pred = (ensemble_prob >= 0.5).astype(int)
         
         # === Metrics
