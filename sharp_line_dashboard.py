@@ -575,7 +575,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         ]
         
        
-       
+
         
     
                 
@@ -589,23 +589,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             st.warning(f"⚠️ Skipping {market.upper()} — only one label class.")
             progress.progress(idx / 3)
             continue
-        
-        # === Stratified K-Fold setup
-        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-        
+      
         # === Check each fold for label balance
-        bad_folds = []
-        for i, (_, val_idx) in enumerate(cv.split(X, y)):
-            val_counts = y.iloc[val_idx].value_counts()
-            logging.info(f"🧪 Fold {i+1} label distribution: {val_counts.to_dict()}")
-            if len(val_counts) < 2:
-                bad_folds.append(i+1)
         
-        if bad_folds:
-            st.warning(f"⚠️ Skipping {market.upper()} — folds with only one class: {bad_folds}")
-            logging.warning(f"❌ Cannot train model for {market.upper()} — CV folds are imbalanced.")
-            progress.progress(idx / 3)
-            continue
         
         # === Param grid (simplified to avoid over-regularization)
         param_grid = {
@@ -623,7 +609,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', use_label_encoder=False, n_jobs=-1),
             param_distributions=param_grid,
             scoring='neg_log_loss',
-            cv=cv,
+            cv=3,
             n_iter=20,
             verbose=1,
             random_state=42
@@ -664,14 +650,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         
         # === Compute both normal and flipped AUC
         auc = roc_auc_score(y, raw_probs)
-        flipped_auc = roc_auc_score(y, 1 - raw_probs)
+       
         
-        # === Alert if this market appears inverted
-        if flipped_auc > auc + 0.05:
-            st.warning(f"⚠️ Model for `{market.upper()}` may be learning inverted signal\nAUC: {auc:.4f} vs Flipped AUC: {flipped_auc:.4f}")
-            logging.warning(f"🛑 Flipped AUC alert for {market.upper()}: AUC = {auc:.4f}, Flipped = {flipped_auc:.4f}")
-        else:
-            st.info(f"✅ AUC for `{market.upper()}`: {auc:.4f}")
         
         # === Continue using original probabilities
         acc = accuracy_score(y, y_pred)
