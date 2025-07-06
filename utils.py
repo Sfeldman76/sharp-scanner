@@ -1847,6 +1847,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
        
     # === Merge Home_Team_Norm and Away_Team_Norm from df_scores (which has them)
    
+    # === 🔍 Inspect columns BEFORE merge
+    logging.info("📦 df_master columns BEFORE team merge: %s", df_master.columns.tolist())
+    
+    # === Merge from df_scores_needed (if available)
     if 'Home_Team' in df_scores_needed.columns and 'Away_Team' in df_scores_needed.columns:
         df_scores_needed['Home_Team_Norm'] = df_scores_needed['Home_Team'].astype(str).str.lower().str.strip()
         df_scores_needed['Away_Team_Norm'] = df_scores_needed['Away_Team'].astype(str).str.lower().str.strip()
@@ -1856,6 +1860,26 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             on='Merge_Key_Short',
             how='left'
         )
+    
+        logging.info("✅ Performed team merge via Merge_Key_Short")
+    
+    # === Check fallback
+    if 'Home_Team_Norm' not in df_master.columns or 'Away_Team_Norm' not in df_master.columns:
+        logging.info("🧩 Fallback: merging teams via Game_Key from df_scores")
+        team_cols = df_scores[['Game_Key', 'Home_Team', 'Away_Team']].drop_duplicates()
+        team_cols['Home_Team_Norm'] = team_cols['Home_Team'].astype(str).str.lower().str.strip()
+        team_cols['Away_Team_Norm'] = team_cols['Away_Team'].astype(str).str.lower().str.strip()
+        
+        df_master = df_master.merge(team_cols, on='Game_Key', how='left')
+        logging.info("✅ Fallback team merge complete")
+    
+    # === 🔍 Inspect columns AFTER merge
+    logging.info("📦 df_master columns AFTER team merge: %s", df_master.columns.tolist())
+    
+    # === 🔬 Optional: count missing normalized names
+    missing_home_norm = df_master['Home_Team_Norm'].isna().sum()
+    missing_away_norm = df_master['Away_Team_Norm'].isna().sum()
+    logging.info(f"🔎 Missing Home_Team_Norm: {missing_home_norm}, Away_Team_Norm: {missing_away_norm}")
     # === Compute engineered features
     df_master['Line_Magnitude_Abs'] = df_master['Value'].abs()
     df_master['Is_Home_Team_Bet'] = (df_master['Outcome'].str.lower() == df_master['Home_Team_Norm'].str.lower())
