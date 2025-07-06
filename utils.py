@@ -1026,11 +1026,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # === Patch derived fields before BigQuery write ===
     try:
         # Line_Delta: Value - Open_Value
-        df['Line_Delta'] = (
-            pd.to_numeric(df['Value'], errors='coerce') -
-            pd.to_numeric(df['Open_Value'], errors='coerce')
-        )
-    
+        # ✅ corrected (aligned with directional logic)
+        df['Line_Delta'] = pd.to_numeric(df['Open_Value'], errors='coerce') - pd.to_numeric(df['Value'], errors='coerce')
         # Line magnitudes
         df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
         df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
@@ -1528,40 +1525,74 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     def calc_cover(df):
         """
-        Calculate SHARP_HIT_BOOL and SHARP_COVER_RESULT for each pick.
+        Calculate SHARP_HIT_BOOL and SHARP_COVER_RESULT for spreads, totals, and h2h.
     
-        SHARP_HIT_BOOL: 1 if the bet covered, 0 if not.
-        SHARP_COVER_RESULT: 'Win' or 'Loss'
+        Returns:
+            DataFrame with columns:
+                - SHARP_COVER_RESULT: 'Win' or 'Loss'
+                - SHARP_HIT_BOOL: 1 or 0
         """
         df = df.copy()
     
-        # Total points (for totals market)
-        total_score = df['Score_Home_Score'] + df['Score_Away_Score']
+        # Defensive normalization
+        df['Market_Lower'] = df['Market'].str.lower().fillna('')
+        df['Outcome_Lower'] = df['Outcome'].str.lower().fillna('')
     
-        # Identify totals market
-        is_totals = df['Market'].str.lower() == 'totals'
-        is_under = df['Outcome'].str.lower() == 'under'
+        # Score columns
+        home_score = pd.to_numeric(df['Score_Home_Score'], errors='coerce')
+        away_score = pd.to_numeric(df['Score_Away_Score'], errors='coerce')
+        total_score = home_score + away_score
+        spread_value = pd.to_numeric(df['Value'], errors='coerce')
     
-        # Outcome side: home or away?
+        # Masks
+        is_totals = df['Market_Lower'] == 'totals'
+        is_spreads = df['Market_Lower'] == 'spreads'
+        is_h2h = df['Market_Lower'] == 'h2h'
+        is_under = df['Outcome_Lower'] == 'under'
+        is_over = df['Outcome_Lower'] == 'over'
+    
+        # Totals logic
+        totals_hit = np.where(
+            is_under,
+            total_score < spread_value,
+            total_score > spread_value  # for "over"
+        )
+    
+        # Spreads logic
         is_home_side = df['Outcome'] == df['Home_Team']
         is_away_side = df['Outcome'] == df['Away_Team']
     
-        # Calculate cover:
-        covered = np.where(
-            is_totals,
-            np.where(is_under, total_score < df['Value'], total_score > df['Value']),
+        spread_hit = np.where(
+            is_home_side,
+            (home_score - away_score) > -spread_value,
             np.where(
-                is_home_side,
-                (df['Score_Home_Score'] - df['Score_Away_Score']) > -df['Value'],  # favorite must win by more than |spread|
-                (df['Score_Away_Score'] - df['Score_Home_Score']) > -df['Value']
+                is_away_side,
+                (away_score - home_score) > -spread_value,
+                False
             )
         )
     
-        return pd.DataFrame({
+        # H2H logic
+        winner = np.where(
+            home_score > away_score, df['Home_Team'],
+            np.where(away_score > home_score, df['Away_Team'], 'tie')
+        )
+        h2h_hit = df['Outcome'] == winner
+    
+        # Final selector
+        covered = np.where(
+            is_totals, totals_hit,
+            np.where(is_spreads, spread_hit,
+                     np.where(is_h2h, h2h_hit, False))
+        )
+    
+        result_df = pd.DataFrame({
             'SHARP_COVER_RESULT': np.where(covered, 'Win', 'Loss'),
             'SHARP_HIT_BOOL': covered.astype(int)
         })
- 
+    
+        return result_df
+    
     # === 4. Load recent sharp picks
     df_master = read_recent_sharp_moves(hours=days_back * 72)
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
@@ -1747,18 +1778,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         )
         
         # === Direction alignment (nullable-safe)
-        df_chunk['Direction_Aligned'] = np.select(
-            [df_chunk['Line_Delta'] > 0, df_chunk['Line_Delta'] < 0],
-            [1, 0],
-            default=np.nan
-        ).astype(float)
-        df_chunk['High_Limit_Flag'] = (df_chunk['Sharp_Limit_Total'] >= 10000).astype('Int64')
-        # === Direction_Aligned: purely market-based logic
+        # Set Direction_Aligned based on Line_Delta only (market-only)
         df_chunk['Direction_Aligned'] = np.where(
             df_chunk['Line_Delta'] > 0, 1,
             np.where(df_chunk['Line_Delta'] < 0, 0, np.nan)
-        ).astype('float')  # or 'float64' if you want to be explicit
-            
+        ).astype(float)
+        df_chunk['High_Limit_Flag'] = (df_chunk['Sharp_Limit_Total'] >= 10000).astype('Int64')
+        # === Direction_Aligned: purely market-based logic
+        
         return df_chunk
         
     
