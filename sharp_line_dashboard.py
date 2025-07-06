@@ -613,33 +613,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             random_state=42
         )
         
-        # === Train WITHOUT weights (simplified)
-        from sklearn.base import clone
-        model_base = xgb.XGBClassifier(
-            eval_metric='logloss',
-            tree_method='hist',
-            use_label_encoder=False,
-            n_jobs=-1,
-            random_state=42
-        )
-        model_base.fit(X, y)
-        probs = model_base.predict_proba(X)[:, 1]
-        weights = np.abs(y - probs).clip(0.01)
-        weights /= weights.mean()
-        # === Sample weights based on sharp signal strength
-       
-        
-        # === Train grid search with sample weights
-        # === Train grid search with gradient-derived sample weights
-        grid.fit(X, y, sample_weight=weights)
+        # === Train grid search without weights
+        grid.fit(X, y)
         best_model = grid.best_estimator_
         
-        # === Calibrate model using same weights
+        # === Calibrate without weights
         calibrated_model = CalibratedClassifierCV(best_model, method='sigmoid', cv=5)
-        calibrated_model.fit(X, y, sample_weight=weights)
-        # === Calibrate
-    
-        
+        calibrated_model.fit(X, y)
+        # === Sample weights based on sharp signal strength
+       
         # === Feature importances
         try:
             importances = best_model.feature_importances_
