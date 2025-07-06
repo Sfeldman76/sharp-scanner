@@ -563,6 +563,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         df_market = ensure_columns(df_market, features, 0)
         
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+        # Step: Check for multicollinearity in features
+        corr_matrix = X.corr().abs()
+        
+        # Threshold for flagging redundancy
+        threshold = 0.85
+        
+        # Collect highly correlated feature pairs (excluding self-pairs)
+        high_corr_pairs = []
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i + 1, len(corr_matrix.columns)):
+                f1 = corr_matrix.columns[i]
+                f2 = corr_matrix.columns[j]
+                corr = corr_matrix.iloc[i, j]
+                if corr > threshold:
+                    high_corr_pairs.append((f1, f2, corr))
+        
+        # Display as DataFrame
+        if high_corr_pairs:
+            df_corr = pd.DataFrame(high_corr_pairs, columns=['Feature_1', 'Feature_2', 'Correlation'])
+            df_corr = df_corr.sort_values(by='Correlation', ascending=False)
+            import streamlit as st
+            st.subheader(f"🔁 Highly Correlated Features — {market.upper()}")
+            st.dataframe(df_corr)
+        else:
+            st.success("✅ No highly correlated feature pairs found")
         y = df_market['SHARP_HIT_BOOL'].astype(int)
         
         # === Abort early if label has only one class
