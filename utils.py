@@ -1845,56 +1845,31 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df['Unique_Sharp_Books'] = 0
     df['Unique_Sharp_Books'] = pd.to_numeric(df['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
        
-    # === Merge Home_Team_Norm and Away_Team_Norm from df_scores (which has them)
-   
-    # === 🔍 Inspect columns BEFORE merge
-    logging.info("📦 df_master columns BEFORE team merge: %s", df_master.columns.tolist())
+        # === Merge Home_Team_Norm and Away_Team_Norm from df_scores (which has them)
+    # Skip fallback if the first merge created normalized team columns
+    has_team_norm_clean = 'Home_Team_Norm' in df_master.columns and 'Away_Team_Norm' in df_master.columns
+    has_team_norm_merge_x = 'Home_Team_Norm_x' in df_master.columns and 'Away_Team_Norm_x' in df_master.columns
+    has_team_norm_merge_y = 'Home_Team_Norm_y' in df_master.columns and 'Away_Team_Norm_y' in df_master.columns
     
-    # === Merge from df_scores_needed (if available)
-    if 'Home_Team' in df_scores_needed.columns and 'Away_Team' in df_scores_needed.columns:
-        df_scores_needed['Home_Team_Norm'] = df_scores_needed['Home_Team'].astype(str).str.lower().str.strip()
-        df_scores_needed['Away_Team_Norm'] = df_scores_needed['Away_Team'].astype(str).str.lower().str.strip()
+    if not (has_team_norm_clean or has_team_norm_merge_x or has_team_norm_merge_y):
+        
     
-        df_master = df_master.merge(
-            df_scores_needed[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Home_Team_Norm', 'Away_Team_Norm']],
-            on='Merge_Key_Short',
-            how='left'
-        )
-    
-        logging.info("✅ Performed team merge via Merge_Key_Short")
-    
-    # === Check fallback
-    # Fallback: merge Home_Team and Away_Team via Game_Key from df_scores
-    if (
-        'Game_Key' in df_scores.columns and
-        'Home_Team' in df_scores.columns and
-        'Away_Team' in df_scores.columns
-    ):
-        logging.info("🧩 Fallback: merging teams via Game_Key from df_scores")
-        team_cols = df_scores[['Game_Key', 'Home_Team', 'Away_Team']].drop_duplicates()
-        team_cols['Home_Team_Norm'] = team_cols['Home_Team'].astype(str).str.lower().str.strip()
-        team_cols['Away_Team_Norm'] = team_cols['Away_Team'].astype(str).str.lower().str.strip()
-        df_master = df_master.merge(team_cols, on='Game_Key', how='left')
-        logging.info("✅ Fallback team merge complete")
+        if (
+            'Game_Key' in df_scores.columns and
+            'Home_Team' in df_scores.columns and
+            'Away_Team' in df_scores.columns
+        ):
+            logging.info("🧩 Fallback: merging teams via Game_Key from df_scores")
+            team_cols = df_scores[['Game_Key', 'Home_Team', 'Away_Team']].drop_duplicates()
+            team_cols['Home_Team_Norm'] = team_cols['Home_Team'].astype(str).str.lower().str.strip()
+            team_cols['Away_Team_Norm'] = team_cols['Away_Team'].astype(str).str.lower().str.strip()
+            df_master = df_master.merge(team_cols, on='Game_Key', how='left')
+            logging.info("✅ Fallback team merge complete")
+        else:
+            logging.warning("⚠️ df_scores is missing Game_Key or team columns — skipping fallback merge")
     else:
-        logging.warning("⚠️ df_scores is missing Game_Key or team columns — skipping fallback merge")
-    df_master = df_master.loc[:, ~df_master.columns.duplicated()]   
-    # === 🔧 Consolidate Home_Team_Norm and Away_Team_Norm from _x/_y merges
-    for col in ['Home_Team_Norm', 'Away_Team_Norm']:
-        col_x = f"{col}_x"
-        col_y = f"{col}_y"
+        logging.info("⏭️ Skipping fallback — team normalization columns already exist from Merge_Key_Short merge")
     
-        if col_x in df_master.columns and col_y in df_master.columns:
-            # Prefer _x if not null, else fallback to _y
-            df_master[col] = df_master[col_x].combine_first(df_master[col_y])
-            df_master.drop(columns=[col_x, col_y], inplace=True)
-    
-        elif col_x in df_master.columns:
-            df_master.rename(columns={col_x: col}, inplace=True)
-    
-        elif col_y in df_master.columns:
-            df_master.rename(columns={col_y: col}, inplace=True)
-    # === 🔍 Inspect columns AFTER merge
     logging.info("📦 df_master columns AFTER team merge: %s", df_master.columns.tolist())
     
     # === 🔬 Optional: count missing normalized names
