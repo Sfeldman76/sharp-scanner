@@ -107,10 +107,14 @@ LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
 import os, json
-from sklearn.model_selection import StratifiedKFold
+
 import xgboost as xgb
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
+from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
+
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
@@ -599,85 +603,76 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         # === Check each fold for label balance
         
         
-        # === Param grid (simplified to avoid over-regularization)
+        
+        # === Param grid (expanded)
         param_grid = {
-            'n_estimators': [100, 200],
-            'max_depth': [3, 4, 5],
+            'n_estimators': [100, 200, 300],
+            'max_depth': [3, 5, 7],
             'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.8, 0.9],
-            'colsample_bytree': [0.8, 0.9],
-            'gamma': [0, 0.1, 0.3],           # encourage pruning to reduce noise
-            'reg_alpha': [0, 0.1, 0.3, 0.5],  # L1 for sparse weights
-            'reg_lambda': [1, 2, 5]           # stronger L2 for smoother generalization
+            'subsample': [0.8, 0.9, 1.0],
+            'colsample_bytree': [0.7, 0.85, 1.0],
+            'min_child_weight': [1, 3, 5],
+            'gamma': [0, 0.1, 0.3],
+            'reg_alpha': [0, 0.1, 0.3],
+            'reg_lambda': [1, 2, 5]
         }
         
-        grid = RandomizedSearchCV(
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        
+        # === LogLoss model
+        grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', use_label_encoder=False, n_jobs=-1),
             param_distributions=param_grid,
             scoring='neg_log_loss',
-            cv=3,
-            n_iter=20,
+            cv=cv,
+            n_iter=50,
             verbose=1,
             random_state=42
         )
+        grid_logloss.fit(X, y)
+        model_logloss = grid_logloss.best_estimator_
         
-        # === Train grid search without weights
-        grid.fit(X, y)
-        best_model = grid.best_estimator_
+        # === AUC model
+        grid_auc = RandomizedSearchCV(
+            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', use_label_encoder=False, n_jobs=-1),
+            param_distributions=param_grid,
+            scoring='roc_auc',
+            cv=cv,
+            n_iter=50,
+            verbose=1,
+            random_state=42
+        )
+        grid_auc.fit(X, y)
+        model_auc = grid_auc.best_estimator_
         
-        # === Calibrate without weights
-        calibrated_model = CalibratedClassifierCV(best_model, method='sigmoid', cv=5)
-        calibrated_model.fit(X, y)
-        # === Sample weights based on sharp signal strength
-       
-        # === Feature importances
-        try:
-            importances = best_model.feature_importances_
-            if len(importances) != len(features):
-                st.warning(f"⚠️ Feature mismatch: {len(importances)} vs {len(features)}")
-            if len(importances) < len(features):
-                dropped = features[len(importances):]
-                logging.info(f"⚠️ Dropped features: {dropped}")
-            n = min(len(importances), len(features))
-            importance_df = pd.DataFrame({
-                'Feature': features[:n],
-                'Importance': importances[:n]
-            }).sort_values(by='Importance', ascending=False)
-            st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
-            st.table(importance_df.head(10))  # safer display
-        except Exception as e:
-            st.error("❌ Feature importance failed")
-            logging.exception(e)
+        # === Calibrate both
+        cal_logloss = CalibratedClassifierCV(model_logloss, method='sigmoid', cv=cv).fit(X, y)
+        cal_auc = CalibratedClassifierCV(model_auc, method='sigmoid', cv=cv).fit(X, y)
         
-        # === Predictions and metrics
-        # === Predict raw probabilities
-        # === Predict raw probabilities
-        raw_probs = calibrated_model.predict_proba(X)[:, 1]
-        y_pred = (raw_probs >= 0.5).astype(int)
+        # === Predict + Ensemble
+        prob_logloss = cal_logloss.predict_proba(X)[:, 1]
+        prob_auc = cal_auc.predict_proba(X)[:, 1]
+        ensemble_prob = 0.5 * prob_logloss + 0.5 * prob_auc
+        y_pred = (ensemble_prob >= 0.5).astype(int)
         
-        # === Compute both normal and flipped AUC
-        auc = roc_auc_score(y, raw_probs)
-       
-        
-        
-        # === Continue using original probabilities
+        # === Metrics
+        auc = roc_auc_score(y, ensemble_prob)
         acc = accuracy_score(y, y_pred)
-        logloss = log_loss(y, raw_probs)
-        brier = brier_score_loss(y, raw_probs)
+        logloss = log_loss(y, ensemble_prob)
+        brier = brier_score_loss(y, ensemble_prob)
         
-        # === Save model
-        save_model_to_gcs(best_model, calibrated_model, sport, market, bucket_name=GCS_BUCKET)
-        trained_models[market] = {"model": best_model, "calibrator": calibrated_model}
+        # === Feature Importance (from AUC model as example)
+        importances = model_auc.feature_importances_
+        importance_df = pd.DataFrame({
+            'Feature': features[:len(importances)],
+            'Importance': importances
+        }).sort_values(by='Importance', ascending=False)
         
-        # === Confusion matrix
-        conf = confusion_matrix(y, y_pred)
-        conf_labels = pd.DataFrame(conf, index=["Actual 0", "Actual 1"], columns=["Predicted 0", "Predicted 1"])
-        st.markdown(f"#### 📊 Confusion Matrix — `{market.upper()}`")
-        st.dataframe(conf_labels)
+        st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
+        st.table(importance_df.head(10))
         
-        st.markdown(f"#### ✅ Class Distribution — `{market.upper()}`")
-        st.write(y.value_counts())
-        prob_true, prob_pred = calibration_curve(y, raw_probs, n_bins=10)
+        # === Calibration
+        prob_true, prob_pred = calibration_curve(y, ensemble_prob, n_bins=10)
         calib_df = pd.DataFrame({
             "Predicted Bin Center": prob_pred,
             "Actual Hit Rate": prob_true
@@ -685,15 +680,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()}")
         st.dataframe(calib_df)
         
-        st.success(f"""✅ Trained + saved model for {market.upper()}
+        # === Save ensemble (choose one or both)
+        trained_models[market] = {
+            "model": model_auc,  # or model_logloss
+            "calibrator": cal_auc  # or cal_logloss
+        }
+        save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET)
+        
+        st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
         - AUC: {auc:.4f}
         - Accuracy: {acc:.4f}
         - Log Loss: {logloss:.4f}
         - Brier Score: {brier:.4f}
         """)
         progress.progress(idx / 3)
-        
-       
 
     status.update(label="✅ All models trained", state="complete", expanded=False)
     if not trained_models:
