@@ -67,7 +67,8 @@ import time
 import requests
 import pandas as pd
 from io import StringIO, BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime
+from datetime import date, timedelta
 from collections import defaultdict, OrderedDict
 from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
@@ -2190,9 +2191,9 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
         # === Date Filters UI ===
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=14))
+            start_date = st.date_input("Start Date", value=date.today() - timedelta(days=14))
         with col2:
-            end_date = st.date_input("End Date", value=datetime.date.today())
+            end_date = st.date_input("End Date", value=date.today())
     
         # === Build WHERE clause
         date_filter = ""
