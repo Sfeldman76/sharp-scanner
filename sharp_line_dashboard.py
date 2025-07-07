@@ -2186,11 +2186,19 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
     with tab:
         st.subheader(f"📈 Model Confidence Calibration – {sport_label}")
-
-        # Build WHERE clause for date range
+    
+        # === Date Filters UI ===
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("Start Date", value=datetime.date.today() - datetime.timedelta(days=14))
+        with col2:
+            end_date = st.date_input("End Date", value=datetime.date.today())
+    
+        # === Build WHERE clause
         date_filter = ""
         if start_date and end_date:
-            date_filter = f"AND Snapshot_Timestamp BETWEEN '{start_date}' AND '{end_date}'"
+            date_filter = f"AND DATE(Snapshot_Timestamp) BETWEEN '{start_date}' AND '{end_date}'"
+
 
         try:
             df = client.query(f"""
