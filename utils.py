@@ -1371,7 +1371,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
-    track_feature_evolution = True
+    track_feature_evolution = False
 
     # === 1. Fetch completed games ===
     try:
@@ -1600,7 +1600,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
-    track_feature_evolution = True  # or False depending on your mode
+   
 
     if not track_feature_evolution:
         scored_keys = bq_client.query("""
