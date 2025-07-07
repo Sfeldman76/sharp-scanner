@@ -1134,14 +1134,31 @@ def apply_blended_sharp_score(df, trained_models):
            
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-            
-            # ✅ Assign tier labels safely
-            df_scored['Model_Confidence_Tier'] = pd.cut(
-                df_scored['Model_Sharp_Win_Prob'],
-                bins=[0.0, 0.4, 0.5, 0.8, 1.0],
-                labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
+            df_scored['Active_Signal_Count'] = (
+                (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
+                (df_scored['Sharp_Limit_Total'] >= 1).astype(int) +
+                (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
+                (df_scored['Market_Leader'] == 1).astype(int) +
+                (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
+                (df_scored['Is_Sharp_Book'] == 1).astype(int) +
+                (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
+                (df_scored['High_Limit_Flag'] == 1).astype(int)
             )
             
+            df_scored['Passes_Gate'] = (
+                df_scored['Model_Sharp_Win_Prob'] >= 0.60
+            ) & (df_scored['Active_Signal_Count'] >= 2)
+            
+            df_scored['Model_Confidence_Tier'] = np.where(
+                df_scored['Passes_Gate'],
+                pd.cut(
+                    df_scored['Model_Sharp_Win_Prob'],
+                    bins=[0, 0.4, 0.6, 0.8, 1],
+                    labels=["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
+                ).astype(str),
+                "🕓 Still Gathering Data"
+            )
+
             #st.info(f"✅ Canonical: {df_canon.shape[0]} | Inverse: {df_inverse.shape[0]} | Combined: {df_scored.shape[0]}")
             #st.dataframe(df_scored[['Game_Key', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier']].head())
             
