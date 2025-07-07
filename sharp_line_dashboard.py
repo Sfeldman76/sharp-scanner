@@ -893,7 +893,7 @@ def compute_diagnostics_vectorized(df):
             default="🪙 Coinflip"
         )
 
-        reasoning_parts = [pd.Series(model_reason, index=df.index)] if 'model_reason' in locals() else []
+        reasoning_parts = []
         
         def append_reason(condition, label):
             mask = pd.Series(condition).fillna(False)
@@ -917,8 +917,9 @@ def compute_diagnostics_vectorized(df):
             df['Why Model Likes It'] = pd.Series([
                 " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
             ])
-        except Exception:
-            df['Why_Model_Likes_It'] = "🪙 Unavailable"
+        except Exception as e:
+            logging.error(f"❌ Failed to compute 'Why Model Likes It': {e}")
+            df['Why Model Likes It'] = pd.Series(["🪙 Unavailable"] * len(df), index=df.index)
         # === Final output table
         # === Final output table
         diagnostics_df = df[[
