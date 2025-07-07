@@ -109,6 +109,8 @@ SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
 GCS_BUCKET = "sharp-models"
 import os, json
 
+
+
 import xgboost as xgb
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
@@ -619,7 +621,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         }
         
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        
+
         # === LogLoss model
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
@@ -650,20 +652,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         cal_logloss = CalibratedClassifierCV(model_logloss, method='sigmoid', cv=cv).fit(X, y)
         cal_auc = CalibratedClassifierCV(model_auc, method='sigmoid', cv=cv).fit(X, y)
         
-        # === Predict + Ensemble
+        # === Predict calibrated probabilities
         prob_logloss = cal_logloss.predict_proba(X)[:, 1]
         prob_auc = cal_auc.predict_proba(X)[:, 1]
-        # Example scores
-        auc_logloss = grid_logloss.best_score_  # From RandomizedSearchCV (scoring='roc_auc')
-        auc_auc = grid_auc.best_score_
         
-        # Normalize to sum to 1
-        total = auc_logloss + auc_auc
-        w_logloss = auc_logloss / total
-        w_auc = auc_auc / total
+        # === Compute AUCs for weighting
+        auc_logloss = roc_auc_score(y, prob_logloss)
+        auc_auc = roc_auc_score(y, prob_auc)
         
-        # Weighted ensemble
+        # === Normalize AUCs to get ensemble weights
+        total_auc = auc_logloss + auc_auc
+        w_logloss = auc_logloss / total_auc
+        w_auc = auc_auc / total_auc
+        
+        # === Weighted ensemble
         ensemble_prob = w_logloss * prob_logloss + w_auc * prob_auc
+
         from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 
         # === Threshold sweep
