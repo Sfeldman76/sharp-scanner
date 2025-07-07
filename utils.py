@@ -495,7 +495,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
-
+    df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
