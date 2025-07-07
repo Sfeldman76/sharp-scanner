@@ -920,10 +920,14 @@ def compute_diagnostics_vectorized(df):
         except Exception:
             df['Why_Model_Likes_It'] = "🪙 Unavailable"
         # === Final output table
+        # === Final output table
         diagnostics_df = df[[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
-        ]].rename(columns={'Tier_Change': 'Tier Δ'})
+            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why_Model_Likes_It'
+        ]].rename(columns={
+            'Tier_Change': 'Tier Δ',
+            'Why_Model_Likes_It': 'Why Model Likes It'
+        })
 
         return diagnostics_df
 
