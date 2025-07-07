@@ -893,6 +893,21 @@ def compute_diagnostics_vectorized(df):
             default="🪙 Coinflip"
         )
 
+
+       
+        
+        # === Validate required columns
+        required_cols = [
+            'Sharp_Prob_Shift', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
+            'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+            'Market_Leader', 'LimitUp_NoMove_Flag', 'Is_Sharp_Book',
+            'Line_Delta', 'Is_Home_Team_Bet', 'High_Limit_Flag'
+        ]
+        
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            st.error(f"❌ Missing required columns: {missing_cols}")
+            st.stop()  # Abort cleanly
         # === Initialize reasoning_parts aligned with df
         reasoning_parts = []
         
