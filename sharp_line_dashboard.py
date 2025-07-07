@@ -2216,21 +2216,30 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
             .drop_duplicates(subset=merge_keys)
         )
 
-        # === Required columns
-        required_cols = ['Model_Confidence', 'SHARP_HIT_BOOL']
-        for col in required_cols:
-            if col not in df_scores_filtered.columns:
-                st.error(f"❌ Missing required column: {col}")
-                return
+        # === Fetch Model_Sharp_Win_Prob from sharp_moves_master ===
+        try:
+            # Query sharp_moves_master to get the Model_Sharp_Win_Prob for the relevant games
+            df_master = client.query(f"""
+                SELECT Merge_Key_Short, Model_Sharp_Win_Prob
+                FROM `sharplogger.sharp_data.sharp_moves_master`
+                WHERE Sport = '{sport_label.upper()}' {date_filter}
+            """).to_dataframe()
 
-        df_scores_filtered['Model_Confidence'] = pd.to_numeric(df_scores_filtered['Model_Confidence'], errors='coerce')
-        df_scores_filtered['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_filtered['SHARP_HIT_BOOL'], errors='coerce')
-        df_scores_filtered = df_scores_filtered[df_scores_filtered['SHARP_HIT_BOOL'].notna() & df_scores_filtered['Model_Confidence'].notna()]
+            # Merge Model_Sharp_Win_Prob with df_scores
+            df_scores_filtered = df_scores_filtered.merge(df_master[['Merge_Key_Short', 'Model_Sharp_Win_Prob']], 
+                                                          on='Merge_Key_Short', how='left')
+
+        except Exception as e:
+            st.error(f"❌ Failed to fetch Model_Sharp_Win_Prob from sharp_moves_master: {e}")
+            return
+
+        # === Ensure Model_Sharp_Win_Prob is numeric and handle missing values
+        df_scores_filtered['Model_Sharp_Win_Prob'] = pd.to_numeric(df_scores_filtered['Model_Sharp_Win_Prob'], errors='coerce').fillna(0.0)
 
         # === Bin confidence
         prob_bins = np.linspace(0, 1, 11)
         bin_labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
-        df_scores_filtered['Confidence_Bin'] = pd.cut(df_scores_filtered['Model_Confidence'], bins=prob_bins, labels=bin_labels)
+        df_scores_filtered['Confidence_Bin'] = pd.cut(df_scores_filtered['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
 
         # === Summary by Market + Bin
         conf_summary = (
@@ -2258,6 +2267,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
                 .drop(columns='Market')
                 .style.format({'Win_Rate': '{:.1%}'})
             )
+
 
 
 # --- Sidebar navigation
