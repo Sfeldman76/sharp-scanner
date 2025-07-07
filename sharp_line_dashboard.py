@@ -989,7 +989,14 @@ def apply_blended_sharp_score(df, trained_models):
             if df_market.empty:
                 st.warning(f"⚠️ No rows to score for {market_type.upper()}")
                 continue
-    
+            
+
+            # ✅ Safely forward Is_Sharp_Book column with aligned index
+            df_market['Is_Sharp_Book'] = (
+                df[df['Market'] == market_type].get('Is_Sharp_Book', 0)
+                .fillna(0).astype(int).values
+            )
+                
             # Normalize fields
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
             df_market['Outcome_Norm'] = df_market['Outcome']
@@ -1016,7 +1023,8 @@ def apply_blended_sharp_score(df, trained_models):
                 df_market['Commence_Hour'].astype(str) + "_" +
                 df_market['Market']
             )
-
+            # Ensure Is_Sharp_Book is carried forward into df_market
+            
             # ✅ Two-sided check block (REQUIRED for valid_games to exist)
             sided_games_check = (
                 df_market.groupby(['Game_Key_Base'])['Outcome']
