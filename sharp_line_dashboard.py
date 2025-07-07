@@ -879,7 +879,7 @@ def compute_diagnostics_vectorized(df):
 
         model_reason = np.select(
             [
-                prob >= 0.70,
+                prob >= 0.75,
                 prob >= 0.52,
                 prob <= 0.48,
                 prob <= 0.42
@@ -893,27 +893,32 @@ def compute_diagnostics_vectorized(df):
             default="🪙 Coinflip"
         )
 
-        reasoning_parts = [pd.Series(model_reason, index=df.index)]
-
+        reasoning_parts = [pd.Series(model_reason, index=df.index)] if 'model_reason' in locals() else []
+        
         def append_reason(condition, label):
             mask = pd.Series(condition).fillna(False)
             reasoning_parts.append(mask.map(lambda x: label if x else ""))
-
-        append_reason(df.get('Sharp_Prob_Shift', 0) > 0, "Confidence ↑")
-        append_reason(df.get('Sharp_Prob_Shift', 0) < 0, "Confidence ↓")
-        append_reason(df.get('Sharp_Limit_Jump', 0), "Limit Jump")
-        append_reason(df.get('Market_Leader', 0), "Led Market Move")
-        append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
-        append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
-
+        
         try:
-            df['Why Model Likes It'] = [
-                " | ".join(dict.fromkeys([tag for tag in parts if tag]))  # dedupe and preserve order
-                for parts in zip(*reasoning_parts)
-            ]
+            append_reason(df.get('Sharp_Prob_Shift', 0) > 0, "Confidence ↑")
+            append_reason(df.get('Sharp_Prob_Shift', 0) < 0, "Confidence ↓")
+            append_reason(df.get('Sharp_Move_Signal', 0), "Detected Sharp Move")
+            append_reason(df.get('Sharp_Limit_Jump', 0), "Limit Jump")
+            append_reason(df.get('Sharp_Time_Score', 0) > 0.5, "Timed Entry")
+            append_reason(df.get('Sharp_Limit_Total', 0) > 10000, "High Limit")
+            append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
+            append_reason(df.get('Market_Leader', 0), "Led Market Move")
+            append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
+            append_reason(df.get('Is_Sharp_Book', 0), "Sharp Bookmaker")
+            append_reason(df.get('Line_Delta', 0).abs() > 0.5, "Line Moved")
+            append_reason(df.get('Is_Home_Team_Bet', 0), "Home Side")
+            append_reason(df.get('High_Limit_Flag', 0), "High Limit Flag")
+        
+            df['Why_Model_Likes_It'] = pd.Series([
+                " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
+            ])
         except Exception:
-            df['Why Model Likes It'] = "🪙 Unavailable"
-
+            df['Why_Model_Likes_It'] = "🪙 Unavailable"
         # === Final output table
         diagnostics_df = df[[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
