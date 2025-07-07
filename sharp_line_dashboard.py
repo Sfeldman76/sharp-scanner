@@ -874,7 +874,7 @@ def compute_diagnostics_vectorized(df):
 
         model_reason = np.select(
             [
-                prob >= 0.58,
+                prob >= 0.70,
                 prob >= 0.52,
                 prob <= 0.48,
                 prob <= 0.42
@@ -1134,7 +1134,7 @@ def apply_blended_sharp_score(df, trained_models):
             # ✅ Assign tier labels safely
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
-                bins=[0.0, 0.4, 0.5, 0.6, 1.0],
+                bins=[0.0, 0.4, 0.5, 0.8, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
             
