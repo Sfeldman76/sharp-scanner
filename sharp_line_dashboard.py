@@ -1097,6 +1097,8 @@ def apply_blended_sharp_score(df, trained_models):
            
            # === Build Inverse from already-scored canonical rows
             df_inverse = df_canon.copy(deep=True)
+            if 'Is_Sharp_Book' not in df_inverse.columns:
+                df_inverse['Is_Sharp_Book'] = df_canon.get('Is_Sharp_Book', 0).fillna(0).astype(int).values
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
