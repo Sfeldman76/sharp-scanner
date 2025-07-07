@@ -991,11 +991,11 @@ def apply_blended_sharp_score(df, trained_models):
                 continue
             
 
-            # ✅ Safely forward Is_Sharp_Book column with aligned index
-            df_market['Is_Sharp_Book'] = (
-                df[df['Market'] == market_type].get('Is_Sharp_Book', 0)
-                .fillna(0).astype(int).values
-            )
+            # Forward Is_Sharp_Book only if the column exists
+            if 'Is_Sharp_Book' in df.columns:
+                df_market['Is_Sharp_Book'] = df[df['Market'] == market_type]['Is_Sharp_Book'].fillna(0).astype(int).values
+            else:
+                df_market['Is_Sharp_Book'] = 0
                 
             # Normalize fields
             df_market['Outcome'] = df_market['Outcome'].astype(str).str.lower().str.strip()
