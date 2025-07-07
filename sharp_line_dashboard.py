@@ -2225,6 +2225,9 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
                 WHERE Sport = '{sport_label.upper()}' {date_filter}
             """).to_dataframe()
 
+            # Debug: Check columns in df_master
+            st.info(f"✅ Columns in df_master: {df_master.columns.tolist()}")
+            
             # Merge Model_Sharp_Win_Prob with df_scores
             df_scores_filtered = df_scores_filtered.merge(df_master[['Merge_Key_Short', 'Model_Sharp_Win_Prob']], 
                                                           on='Merge_Key_Short', how='left')
@@ -2235,6 +2238,9 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
         # === Ensure Model_Sharp_Win_Prob is numeric and handle missing values
         df_scores_filtered['Model_Sharp_Win_Prob'] = pd.to_numeric(df_scores_filtered['Model_Sharp_Win_Prob'], errors='coerce').fillna(0.0)
+
+        # === Ensure SHARP_HIT_BOOL is numeric (0 or 1)
+        df_scores_filtered['SHARP_HIT_BOOL'] = pd.to_numeric(df_scores_filtered['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(int)
 
         # === Bin confidence
         prob_bins = np.linspace(0, 1, 11)
