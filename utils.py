@@ -754,7 +754,7 @@ def apply_blended_sharp_score(df, trained_models):
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
-                bins=[0.0, 0.4, 0.5, 0.6, 1.0],
+                bins=[0.0, 0.4, 0.5, 0.8, 1.0],
                 labels=["⚠️ Weak Indication", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication"]
             )
 
