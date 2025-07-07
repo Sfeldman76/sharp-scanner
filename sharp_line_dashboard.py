@@ -966,7 +966,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
-
+    df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
         #st.success("🧹 Cleaned up duplicate suffix columns (_x, _y)")
@@ -1070,7 +1070,7 @@ def apply_blended_sharp_score(df, trained_models):
             post_dedup_canon = len(df_canon)
             
             #st.success(f"✅ Canonical rows deduplicated: {pre_dedup_canon:,} → {post_dedup_canon:,}")
-
+            
             
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
