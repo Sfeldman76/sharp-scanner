@@ -2,7 +2,6 @@ import streamlit as st
 import time
 from streamlit_autorefresh import st_autorefresh
 
-
 # === Page Config ===
 st.set_page_config(layout="wide")
 st.title("Betting Line Scanner")
@@ -99,6 +98,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+
+
 import logging
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -669,7 +670,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         # === Weighted ensemble
         ensemble_prob = w_logloss * prob_logloss + w_auc * prob_auc
 
-        from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+       
 
         # === Threshold sweep
         thresholds = np.arange(0.1, 0.96, 0.05)
@@ -909,6 +910,7 @@ def compute_diagnostics_vectorized(df):
             st.error(f"❌ Missing required columns: {missing_cols}")
             st.stop()  # Abort cleanly
         # === Initialize reasoning_parts aligned with df
+        
         reasoning_parts = []
         
         # === Append labeled reasoning Series
@@ -949,7 +951,7 @@ def compute_diagnostics_vectorized(df):
         return diagnostics_df
 
     except Exception as e:
-        import streamlit as st
+
         st.error("❌ Error computing diagnostics")
         st.exception(e)
         return pd.DataFrame(columns=[
