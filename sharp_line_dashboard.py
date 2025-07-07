@@ -893,10 +893,13 @@ def compute_diagnostics_vectorized(df):
             default="🪙 Coinflip"
         )
 
+        # === Initialize reasoning_parts aligned with df
         reasoning_parts = []
         
+        # === Append labeled reasoning Series
         def append_reason(condition, label):
-            mask = pd.Series(condition).fillna(False)
+            # Always create Series with the same index as df to ensure alignment
+            mask = pd.Series(condition, index=df.index).fillna(False)
             reasoning_parts.append(mask.map(lambda x: label if x else ""))
         
         
@@ -915,9 +918,9 @@ def compute_diagnostics_vectorized(df):
         append_reason(df.get('High_Limit_Flag', 0), "High Limit Flag")
         
         df['Why Model Likes It'] = pd.Series([
-           " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
-        ])
-        
+            " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
+        ], index=df.index)
+                
         # === Final output table
         # === Final output table
         diagnostics_df = df[[
