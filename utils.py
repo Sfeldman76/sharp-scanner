@@ -1342,7 +1342,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'High_Limit_Flag',
             'Home_Team_Norm',
             'Away_Team_Norm',
-            'Commence_Hour'  # ✅ Add this line
+            'Commence_Hour','Model_Sharp_Win_Prob'  # ✅ Add this line
         ]
     }
 
@@ -1689,7 +1689,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Prepare df_scores: reduce + deduplicate
     df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
     df_scores['Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
-    
+    df_scores['Model_Sharp_Win_Prob'] = pd.to_numeric(df_scores['Model_Sharp_Win_Prob'], errors='coerce').fillna(0.0)
     if 'Inserted_Timestamp' in df_scores.columns:
         df_scores = (
             df_scores
@@ -1899,7 +1899,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
-        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet'  # ✅ ADD THESE
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob'  # ✅ ADD THESE
     ]
     
     
