@@ -914,7 +914,7 @@ def compute_diagnostics_vectorized(df):
             append_reason(df.get('Is_Home_Team_Bet', 0), "Home Side")
             append_reason(df.get('High_Limit_Flag', 0), "High Limit Flag")
         
-            df['Why_Model_Likes_It'] = pd.Series([
+            df['Why Model Likes It'] = pd.Series([
                 " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
             ])
         except Exception:
@@ -923,10 +923,10 @@ def compute_diagnostics_vectorized(df):
         # === Final output table
         diagnostics_df = df[[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why_Model_Likes_It'
+            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
         ]].rename(columns={
             'Tier_Change': 'Tier Δ',
-            'Why_Model_Likes_It': 'Why Model Likes It'
+           
         })
 
         return diagnostics_df
