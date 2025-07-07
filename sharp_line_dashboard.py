@@ -901,7 +901,7 @@ def compute_diagnostics_vectorized(df):
         required_cols = [
             'Sharp_Prob_Shift', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
             'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
-            'Market_Leader', 'LimitUp_NoMove_Flag', 'Is_Sharp_Book',
+            'Market_Leader', 'LimitUp_NoMove_Flag',
             'Line_Delta', 'Is_Home_Team_Bet', 'High_Limit_Flag'
         ]
         
