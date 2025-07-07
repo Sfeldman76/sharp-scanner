@@ -1693,7 +1693,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Prepare df_scores: reduce + deduplicate
     df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
     df_scores['Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
-    df_scores['Model_Sharp_Win_Prob'] = pd.to_numeric(df_scores['Model_Sharp_Win_Prob'], errors='coerce').fillna(0.0)
+  
     if 'Inserted_Timestamp' in df_scores.columns:
         df_scores = (
             df_scores
