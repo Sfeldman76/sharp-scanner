@@ -1371,7 +1371,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
-  
+    track_feature_evolution = True
 
     # === 1. Fetch completed games ===
     try:
@@ -1600,18 +1600,22 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
-    scored_keys = bq_client.query("""
-        SELECT DISTINCT Merge_Key_Short
-        FROM `sharplogger.sharp_data.sharp_scores_full`
-        WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
-    """).to_dataframe()
+    track_feature_evolution = True  # or False depending on your mode
+
+    if not track_feature_evolution:
+        scored_keys = bq_client.query("""
+            SELECT DISTINCT Merge_Key_Short
+            FROM `sharplogger.sharp_data.sharp_scores_full`
+            WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+        """).to_dataframe()
     
-    already_scored = set(scored_keys['Merge_Key_Short'].dropna())
-    
-    # Filter out already scored keys in df_scores
-    df_scores_needed = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
-    logging.info(f"✅ Remaining unscored completed games: {len(df_scores_needed)}")
-    
+        already_scored = set(scored_keys['Merge_Key_Short'].dropna())
+        df_scores_needed = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
+        logging.info(f"✅ Remaining unscored completed games: {len(df_scores_needed)}")
+    else:
+        df_scores_needed = df_scores.copy()
+        logging.info("📈 Time-series mode enabled: Skipping scored-key filter to allow resnapshots")
+        
     # Ensure Merge_Key_Short exists AFTER loading
     if 'Merge_Key_Short' not in df_master.columns:
         df_master = build_game_key(df_master)
@@ -1937,7 +1941,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'CFL': 'CFL'
     }).str.upper()
     
-    df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()  # ✅ Only do this once here
+    if 'Snapshot_Timestamp' in df.columns:
+        df_scores_out['Snapshot_Timestamp'] = df['Snapshot_Timestamp']
+    else:
+        df_scores_out['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
@@ -1996,11 +2003,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # Deduplication fingerprint columns
     dedup_fingerprint_cols = [
-        'Game_Key', 'Bookmaker', 'Market', 'Outcome',
+        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
-        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
-        'First_Line_Value', 'First_Sharp_Prob', 'Line_Delta',
-        'Model_Prob_Diff', 'Direction_Aligned'
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
+        'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
+        'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
+        'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
+        'Scored', 'Sport', 'Value', 'Merge_Key_Short',
+        'First_Line_Value', 'First_Sharp_Prob',
+        'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
+        'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
+        'Line_Magnitude_Abs', 'High_Limit_Flag',
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob'
     ]
     
     logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
@@ -2033,7 +2047,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Filter out already-scored games
     pre_score_filter = len(df_scores_out)
-    df_scores_out = df_scores_out[~df_scores_out['Merge_Key_Short'].isin(already_scored_keys)]
+    # Allow rescore for tracking time-based line evolution
+    if track_feature_evolution:
+        logging.info("⏱️ Allowing rescore for time-series tracking mode")
+    else:
+        df_scores_out = df_scores_out[~df_scores_out['Merge_Key_Short'].isin(already_scored_keys)]
+
     logging.info(f"🧹 Removed {pre_score_filter - len(df_scores_out)} rows from already-scored games")
     
     # === Deduplicate against BigQuery fingerprinted rows
