@@ -1226,7 +1226,7 @@ def write_line_history_to_bigquery(df):
     logging.debug("🧪 Line history dtypes:\n" + str(df.dtypes.to_dict()))
     logging.debug("Sample rows:\n" + df.head(2).to_string())
     df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
-df['Implied_Prob'] = pd.to_numeric(df.get('Implied_Prob'), errors='coerce')
+    df['Implied_Prob'] = pd.to_numeric(df.get('Implied_Prob'), errors='coerce')
     # Upload
     if not safe_to_gbq(df, LINE_HISTORY_TABLE):
         logging.error(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
