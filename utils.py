@@ -371,6 +371,12 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     
     logging.info("🧪 Preview of model columns being written:")
     logging.info(df[model_cols].dropna(how='all').head(5).to_string())
+    # 🔍 Preview Odds_Price and Implied_Prob distribution
+    if 'Odds_Price' in df.columns and 'Implied_Prob' in df.columns:
+        logging.info("🎯 Odds_Price sample:\n" + df['Odds_Price'].dropna().astype(str).head().to_string(index=False))
+        logging.info("🎯 Implied_Prob sample:\n" + df['Implied_Prob'].dropna().round(4).astype(str).head().to_string(index=False))
+    else:
+        logging.warning("⚠️ Odds_Price or Implied_Prob missing from DataFrame before upload")
 
     # Write to BigQuery
     try:
