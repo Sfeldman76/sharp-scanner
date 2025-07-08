@@ -788,10 +788,10 @@ def compute_diagnostics_vectorized(df):
     import pandas as pd
 
     TIER_ORDER = {
-        '⚠️ Weak Indication': 1,
-        '✅ Coinflip': 2,
-        '⭐ Lean': 3,
-        '🔥 Strong Indication': 4
+        '✅Coinflip': 1,
+        '✅ ⭐ Lean': 2,
+        '🔥 Strong Indication': 3,
+        '🔥 Steam': 4
     }
 
     try:
