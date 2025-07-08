@@ -1746,7 +1746,13 @@ def render_scanner_tab(label, sport_key, container):
             (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
             (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
         ].copy()
-        
+        # ✅ Ensure only latest snapshot per bookmaker/outcome is kept
+        df_pre = (
+            df_pre
+            .sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+        )
+
         # === Step 4: Normalize df_pre again (redundant but safe)
         merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
 
