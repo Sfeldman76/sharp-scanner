@@ -1545,7 +1545,7 @@ def render_scanner_tab(label, sport_key, container):
                 df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
         
                 # ✅ Ensure all necessary columns exist
-                required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model']
+                required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model','Sharp_Line_Delta','Rec_Line_Delta']
                 for col in required_score_cols:
                     if col not in df_scored.columns:
                         df_scored[col] = np.nan
