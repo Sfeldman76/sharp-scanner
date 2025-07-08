@@ -578,8 +578,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'Rec_Line_Delta',  
             #'Line_Delta',
             #'Direction_Aligned',
-            'Sharp_Line_Magnitude'
-            'Rec_Line_Magnitude'
+            'Sharp_Line_Magnitude',
+            'Rec_Line_Magnitude',
             'Is_Home_Team_Bet',
             'High_Limit_Flag'
         ]
