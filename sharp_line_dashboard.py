@@ -1870,6 +1870,12 @@ def render_scanner_tab(label, sport_key, container):
         #st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         #.write(f"🔢 Rows: {len(df_summary_base)}")
         #st.write("📋 Columns:", df_summary_base.columns.tolist())
+        st.subheader("🧪 df_scored Columns")
+        st.code(df_scored.columns.tolist())
+        
+        st.subheader("🧪 df_summary_base Columns")
+        st.code(df_summary_base.columns.tolist())
+
         #st.dataframe(df_summary_base.head(10))
         df_summary_base = df_summary_base.merge(
             df_scored[[
