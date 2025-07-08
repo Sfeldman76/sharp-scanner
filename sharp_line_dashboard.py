@@ -542,6 +542,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         
         df_market['Book_Norm'] = df_market['Bookmaker'].str.lower().str.strip()
         df_market['Is_Sharp_Book'] = df_market['Book_Norm'].isin(SHARP_BOOKS).astype(int)
+        # === Sharp vs. Recreational Line Movement
+        df_market['Sharp_Line_Delta'] = np.where(
+            df_market['Is_Sharp_Book'] == 1,
+            df_market['Line_Delta'],
+            0
+        )
+        
+        df_market['Rec_Line_Delta'] = np.where(
+            df_market['Is_Sharp_Book'] == 0,
+            df_market['Line_Delta'],
+            0
+        )
+        
+        # Optional: absolute versions if you're using magnitude
+        df_market['Sharp_Line_Magnitude'] = df_market['Sharp_Line_Delta'].abs()
+        df_market['Rec_Line_Magnitude'] = df_market['Rec_Line_Delta'].abs()
+
         df_market['Line_Move_Magnitude'] = df_market['Line_Delta'].abs()
         df_market['Is_Home_Team_Bet'] = (df_market['Outcome'] == df_market['Home_Team_Norm']).astype(int)
         df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
@@ -557,7 +574,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'LimitUp_NoMove_Flag',
             'Is_Sharp_Book',
             #'Line_Value_Abs',
-            'Line_Delta',
+            'Sharp_Line_Delta',         # NEW
+            'Rec_Line_Delta',  
+            #'Line_Delta',
             #'Direction_Aligned',
             #'Line_Move_Magnitude',
             'Is_Home_Team_Bet',
@@ -929,10 +948,11 @@ def compute_diagnostics_vectorized(df):
         append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
         append_reason(df.get('Market_Leader', 0), "Led Market Move")
         append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")       
-        append_reason(df.get('Line_Delta', 0).abs() > 0.5, "Line Moved")
+        #append_reason(df.get('Line_Delta', 0).abs() > 0.5, "Line Moved")
         append_reason(df.get('Is_Home_Team_Bet', 0), "Home Side")
         append_reason(df.get('High_Limit_Flag', 0), "High Limit Flag")
-        
+        append_reason(df.get('Sharp_Line_Delta', 0).abs() > 0.5, "Sharp Book Move")
+        append_reason(df.get('Rec_Line_Delta', 0).abs() > 0.5, "Rec Book Move")
         df['Why Model Likes It'] = pd.Series([
             " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
         ], index=df.index)
@@ -1078,6 +1098,19 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon[missing_cols] = 0
             # === Feature engineering to match training
             df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
+            # === Sharp vs. Rec Line Delta
+            df_canon['Sharp_Line_Delta'] = np.where(
+                df_canon['Is_Sharp_Book'] == 1,
+                df_canon['Line_Delta'],
+                0
+            )
+            
+            df_canon['Rec_Line_Delta'] = np.where(
+                df_canon['Is_Sharp_Book'] == 0,
+                df_canon['Line_Delta'],
+                0
+            )
+
             df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
             df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
             df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] > 10000).astype(int)
@@ -1158,6 +1191,18 @@ def apply_blended_sharp_score(df, trained_models):
             
             # === Shared feature engineering for all market types
             df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
+            df_inverse['Sharp_Line_Delta'] = np.where(
+                df_inverse['Is_Sharp_Book'] == 1,
+                df_inverse['Line_Delta'],
+                0
+            )
+            
+            df_inverse['Rec_Line_Delta'] = np.where(
+                df_inverse['Is_Sharp_Book'] == 0,
+                df_inverse['Line_Delta'],
+                0
+            )
+
             df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'] == df_inverse['Home_Team_Norm']).astype(int)
             df_inverse['Is_Favorite_Bet'] = (df_inverse['Value'] < 0).astype(int)
             df_inverse['High_Limit_Flag'] = (df_inverse['Sharp_Limit_Total'] > 10000).astype(int)
@@ -1180,7 +1225,8 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
                 (df_scored['Is_Sharp_Book'] == 1).astype(int) +
                 (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
-                (df_scored['High_Limit_Flag'] == 1).astype(int)
+                (df_scored['High_Limit_Flag'] == 1).astype(int) +
+                (df_scored['Sharp_Line_Delta'].abs() > 0.5).astype(int)  # ✅ NEW: sharp-driven move
             )
             
             df_scored['Passes_Gate'] = (
@@ -1212,7 +1258,18 @@ def apply_blended_sharp_score(df, trained_models):
         if scored_all:
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
+            df_final['Sharp_Line_Delta'] = np.where(
+            df_final['Is_Sharp_Book'] == 1,
+                df_final['Line_Delta'],
+                0
+            )
             
+            df_final['Rec_Line_Delta'] = np.where(
+                df_final['Is_Sharp_Book'] == 0,
+                df_final['Line_Delta'],
+                0
+            )
+
             return df_final
         else:
             st.warning("⚠️ No market types scored — returning empty DataFrame.")
