@@ -1196,12 +1196,21 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
             df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
             
+           # Before merge, deduplicate df_full_market so each Team_Key has only one value
+            df_full_market = (
+                df_full_market
+                .dropna(subset=['Value'])
+                .sort_values(['Snapshot_Timestamp', 'Bookmaker'])  # You can customize sorting if needed
+                .drop_duplicates(subset=['Team_Key'], keep='last')  # ⬅️ Keep only the most recent line
+            )
+            
             df_inverse = df_inverse.merge(
                 df_full_market[['Team_Key', 'Value']],
                 on='Team_Key',
                 how='left',
                 suffixes=('', '_opponent')
             )
+
             df_inverse['Value'] = df_inverse['Value_opponent']
             df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
             
