@@ -1051,19 +1051,19 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
     
         # High Limit flag
-        df['High_Limit_Flag'] = (pd.to_numeric(df['Sharp_Limit_Total'], errors='coerce') >= 10000).astype('Int64')
+        df['High_Limit_Flag'] = (pd.to_numeric(df['Sharp_Limit_Total'], errors='coerce') >= 10000).astype(float)
     
         # Home team indicator
-        df['Is_Home_Team_Bet'] = (df['Outcome'].str.lower() == df['Home_Team_Norm'].str.lower()).astype('Int64')
+        df['Is_Home_Team_Bet'] = (df['Outcome'].str.lower() == df['Home_Team_Norm'].str.lower()).astype(float)
     
         # Favorite indicator
-        df['Is_Favorite_Bet'] = (pd.to_numeric(df['Value'], errors='coerce') < 0).astype('Int64')
+        df['Is_Favorite_Bet'] = (pd.to_numeric(df['Value'], errors='coerce') < 0).astype(float)
     
         # Direction alignment: market-based only
         df['Direction_Aligned'] = np.where(
             df['Line_Delta'] > 0, 1,
             np.where(df['Line_Delta'] < 0, 0, np.nan)
-        ).astype('Int64')
+        ).astype(float)
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
     
