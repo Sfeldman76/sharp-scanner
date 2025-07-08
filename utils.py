@@ -670,7 +670,14 @@ def apply_blended_sharp_score(df, trained_models):
                 # ✅ Merge opponent Value (as usual)
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-            
+                # ✅ Deduplicate to ensure clean merge
+                df_full_market = (
+                    df_full_market
+                    .dropna(subset=['Value'])
+                    .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
+                    .drop_duplicates(subset=['Team_Key'], keep='last')
+                )
+
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value']],
                     on='Team_Key',
@@ -718,7 +725,15 @@ def apply_blended_sharp_score(df, trained_models):
                 # ✅ Build Team_Key for safe merge
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-            
+                
+                # ✅ Deduplicate to ensure clean merge
+                df_full_market = (
+                    df_full_market
+                    .dropna(subset=['Value'])
+                    .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
+                    .drop_duplicates(subset=['Team_Key'], keep='last')
+                )
+
                 # ✅ Merge opponent Value cleanly
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value']],
@@ -726,6 +741,7 @@ def apply_blended_sharp_score(df, trained_models):
                     how='left',
                     suffixes=('', '_opponent')
                 )
+                  
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
             
