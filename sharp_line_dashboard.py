@@ -1872,7 +1872,8 @@ def render_scanner_tab(label, sport_key, container):
         #st.write("📋 Columns:", df_summary_base.columns.tolist())
         #st.dataframe(df_summary_base.head(10))
         df_summary_base = df_summary_base.merge(
-        df_final[[
+        df_summary_base = df_summary_base.merge(
+        df_scored[[
                 'Game_Key', 'Market', 'Outcome', 'Bookmaker',
                 'Model_Sharp_Win_Prob', 'First_Sharp_Prob',
                 'Model_Confidence_Tier', 'Sharp_Prob_Shift',
