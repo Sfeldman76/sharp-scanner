@@ -523,10 +523,9 @@ def apply_blended_sharp_score(df, trained_models):
     # ✅ Drop older snapshots — keep only latest odds per Game + Market + Outcome + Bookmaker
     df = (
         df.sort_values('Snapshot_Timestamp')
-          .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+          .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value'], keep='last')
     )
-
-   
+       
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
@@ -1004,10 +1003,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     pre_dedup = len(rows)
     rows_df = pd.DataFrame(rows).drop_duplicates()
     rows_df = (
-        rows_df
-        .sort_values('Time')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+        rows_df.sort_values('Time')
+               .drop_duplicates(subset=['Game', 'Bookmaker', 'Market', 'Outcome', 'Value'], keep='last')
     )
+
+# 
     rows = rows_df.to_dict(orient='records')
     logger.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
         # 🔁 REFACTORED SHARP SCORING
