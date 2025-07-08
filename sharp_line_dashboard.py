@@ -1258,18 +1258,7 @@ def apply_blended_sharp_score(df, trained_models):
         if scored_all:
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
-            df_final['Sharp_Line_Delta'] = np.where(
-            df_final['Is_Sharp_Book'] == 1,
-                df_final['Line_Delta'],
-                0
-            )
             
-            df_final['Rec_Line_Delta'] = np.where(
-                df_final['Is_Sharp_Book'] == 0,
-                df_final['Line_Delta'],
-                0
-            )
-
             return df_final
         else:
             st.warning("⚠️ No market types scored — returning empty DataFrame.")
@@ -1882,7 +1871,21 @@ def render_scanner_tab(label, sport_key, container):
         #.write(f"🔢 Rows: {len(df_summary_base)}")
         #st.write("📋 Columns:", df_summary_base.columns.tolist())
         #st.dataframe(df_summary_base.head(10))
-
+        df_summary_base = df_summary_base.merge(
+        df_final[[
+                'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+                'Model_Sharp_Win_Prob', 'First_Sharp_Prob',
+                'Model_Confidence_Tier', 'Sharp_Prob_Shift',
+                'Sharp_Move_Signal', 'Sharp_Limit_Jump',
+                'Sharp_Time_Score', 'Sharp_Limit_Total',
+                'Is_Reinforced_MultiMarket', 'Market_Leader',
+                'LimitUp_NoMove_Flag', 'Line_Delta',
+                'Is_Home_Team_Bet', 'High_Limit_Flag',
+                'Sharp_Line_Delta', 'Rec_Line_Delta'
+            ]].drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']),
+            on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+            how='left'
+        )
         # === Compute diagnostics from df_pre (upcoming + scored)
         if df_summary_base.empty:
             st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
