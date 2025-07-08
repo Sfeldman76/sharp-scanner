@@ -615,6 +615,8 @@ def apply_blended_sharp_score(df, trained_models):
                 df_canon['Line_Delta'],
                 0
             )
+            df_canon['Sharp_Line_Magnitude'] = df_canon['Sharp_Line_Delta'].abs()
+            df_canon['Rec_Line_Magnitude'] = df_canon['Rec_Line_Delta'].abs()
 
             df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
             df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
