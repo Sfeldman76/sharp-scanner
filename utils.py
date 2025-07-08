@@ -506,11 +506,6 @@ def apply_blended_sharp_score(df, trained_models):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
     df = df.copy()
- # ✅ Drop older snapshots — keep only latest odds per Game + Market + Outcome + Bookmaker
-    df = (
-        df.sort_values('Snapshot_Timestamp')
-          .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
-    )
 
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
@@ -525,6 +520,11 @@ def apply_blended_sharp_score(df, trained_models):
     if 'Snapshot_Timestamp' not in df.columns:
         df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
         logger.info("✅ 'Snapshot_Timestamp' column added.")
+    # ✅ Drop older snapshots — keep only latest odds per Game + Market + Outcome + Bookmaker
+    df = (
+        df.sort_values('Snapshot_Timestamp')
+          .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+    )
 
    
     for market_type, bundle in trained_models.items():
@@ -985,8 +985,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                             line_open_map[(game_name, mtype, label)] = (line_value, snapshot_time)
 
 
-
-    # 🔁 REFACTORED SHARP SCORING
+    pre_dedup = len(rows)
+    rows_df = pd.DataFrame(rows).drop_duplicates()
+    rows_df = (
+        rows_df
+        .sort_values('Time')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+    )
+    rows = rows_df.to_dict(orient='records')
+    logger.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
+        # 🔁 REFACTORED SHARP SCORING
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
 
 
