@@ -945,8 +945,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Odds_Price': odds_price,
                         'Limit': limit,
                         'Old Value': old_val,
-                        'Delta': round(line_value - old_val, 2) if old_val is not None and line_value is not None else None  ✅
-
+                        # Compute delta only if both values exist
+                        'Delta': round(line_value - old_val, 2) if old_val is not None and line_value is not None else None,
                         'Home_Team_Norm': home_team,
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
