@@ -8,11 +8,11 @@ SPORTS = {
 }
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betfair_ex_eu','betfair_ex_uk', 'smarkets','betonlineag','lowvig']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['lowvig']
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
-    'fanatics', 'espnbet', 'hardrockbet','bovada','betus' ]
+    'fanatics', 'espnbet', 'hardrockbet' ]
 
 BOOKMAKER_REGIONS = {
     # 🔹 Sharp Books
