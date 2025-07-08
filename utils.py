@@ -198,6 +198,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
                         'Market': market_key,
                         'Outcome': outcome.get('name'),
                         'Value': outcome.get('point') if market_key != 'h2h' else outcome.get('price'),
+                        'Odds_Price': outcome.get('price'),  # ✅ This adds the odds for spread/total
                         'Limit': outcome.get('bet_limit'),
                         'Snapshot_Timestamp': snapshot_time
                     })
@@ -303,7 +304,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-
+    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
     # Convert object columns safely
     for col in df.columns:
         if df[col].dtype == 'object':
@@ -344,7 +345,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'High_Limit_Flag',
         'Line_Delta',               # ✅ Add this
         'Line_Magnitude_Abs',       # Already present
-        'Direction_Aligned',        # ✅ Add this
+        'Direction_Aligned','Odds_Price',        # ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -526,6 +527,7 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Outcome_Norm'] = df_market['Outcome']
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market['Commence_Hour'] = pd.to_datetime(df_market['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+            df_market['Odds_Price'] = pd.to_numeric(df_market.get('Odds_Price'), errors='coerce')
 
             df_market['Game_Key'] = (
                 df_market['Home_Team_Norm'] + "_" +
@@ -587,6 +589,9 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Line_Magnitude_Abs'] = df_canon['Line_Delta'].abs()
             df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] >= 10000).astype(int)
             df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
+            df_canon['Odds_Price'] = pd.to_numeric(df_canon.get('Odds_Price'), errors='coerce')
+            df_canon['Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+
             # === Sharp vs. Rec Line Delta
             df_canon['Sharp_Line_Delta'] = np.where(
                 df_canon['Is_Sharp_Book'] == 1,
@@ -1355,7 +1360,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'High_Limit_Flag',
             'Home_Team_Norm',
             'Away_Team_Norm',
-            'Commence_Hour','Model_Sharp_Win_Prob'  # ✅ Add this line
+            'Commence_Hour','Model_Sharp_Win_Prob','Odds_Price','Implied_Prob',  # ✅ Add this line
         ]
     }
 
@@ -1375,6 +1380,8 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             logging.warning(f"⚠️ Missing expected columns in df: {missing_cols}")
 
     try:
+        df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
+        df['Implied_Prob'] = pd.to_numeric(df['Implied_Prob'], errors='coerce')
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace' if force_replace else 'append')
         logging.info(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
@@ -1916,7 +1923,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
-        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob'  # ✅ ADD THESE
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob'  # ✅ ADD THESE
     ]
     
     
