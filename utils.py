@@ -305,7 +305,8 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+   
+   
     # Convert object columns safely
     for col in df.columns:
         if df[col].dtype == 'object':
@@ -346,12 +347,14 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'High_Limit_Flag',
         'Line_Delta',               # ✅ Add this
         'Line_Magnitude_Abs',       # Already present
-        'Direction_Aligned','Odds_Price',        # ✅ Add this
+        'Direction_Aligned','Odds_Price', 'Implied_Prob',       # ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
     # Ensure all required columns exist
     df = ensure_columns(df, ALLOWED_COLS, fill_value=None)
+    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+    df['Implied_Prob'] = pd.to_numeric(df.get('Implied_Prob'), errors='coerce')
 
     # 🔍 Add required column check before filtering
     required_cols = ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']
@@ -941,7 +944,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Odds_Price': odds_price,
                         'Limit': limit,
                         'Old Value': old_val,
-                        'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
+                        'Delta': round(line_value - old_val, 2) if old_val is not None and line_value is not None else None  ✅
+
                         'Home_Team_Norm': home_team,
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
