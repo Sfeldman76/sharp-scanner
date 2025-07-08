@@ -1867,31 +1867,12 @@ def render_scanner_tab(label, sport_key, container):
         df_summary_base = df_summary_base.loc[:, ~df_summary_base.columns.duplicated()]
 
 
-        #st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
-        #.write(f"🔢 Rows: {len(df_summary_base)}")
-        #st.write("📋 Columns:", df_summary_base.columns.tolist())
-        st.subheader("🧪 df_scored Columns")
-        st.code(df_scored.columns.tolist())
+        st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
+        #st.write(f"🔢 Rows: {len(df_summary_base)}")
+        st.write("📋 Columns:", df_summary_base.columns.tolist())
         
-        st.subheader("🧪 df_summary_base Columns")
-        st.code(df_summary_base.columns.tolist())
-
         #st.dataframe(df_summary_base.head(10))
-        df_summary_base = df_summary_base.merge(
-            df_scored[[
-                'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-                'Model_Sharp_Win_Prob', 'First_Sharp_Prob',
-                'Model_Confidence_Tier', 'Sharp_Prob_Shift',
-                'Sharp_Move_Signal', 'Sharp_Limit_Jump',
-                'Sharp_Time_Score', 'Sharp_Limit_Total',
-                'Is_Reinforced_MultiMarket', 'Market_Leader',
-                'LimitUp_NoMove_Flag', 'Line_Delta',
-                'Is_Home_Team_Bet', 'High_Limit_Flag',
-                'Sharp_Line_Delta', 'Rec_Line_Delta'
-            ]].drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker']),
-            on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-            how='left'
-        )
+       
         # === Compute diagnostics from df_pre (upcoming + scored)
         if df_summary_base.empty:
             st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
