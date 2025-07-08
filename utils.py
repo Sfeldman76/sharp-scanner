@@ -954,8 +954,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                             sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
                     
                         if (game_name, mtype, label) not in line_open_map:
-                            # ✅ Keep just line_value here — odds_price isn't needed downstream
-                            line_open_map[(game_name, mtype, la_]()
+                            line_open_map[(game_name, mtype, label)] = (line_value, snapshot_time)
+
 
 
     # 🔁 REFACTORED SHARP SCORING
