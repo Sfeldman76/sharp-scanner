@@ -587,6 +587,19 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Line_Magnitude_Abs'] = df_canon['Line_Delta'].abs()
             df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] >= 10000).astype(int)
             df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
+            # === Sharp vs. Rec Line Delta
+            df_canon['Sharp_Line_Delta'] = np.where(
+                df_canon['Is_Sharp_Book'] == 1,
+                df_canon['Line_Delta'],
+                0
+            )
+            
+            df_canon['Rec_Line_Delta'] = np.where(
+                df_canon['Is_Sharp_Book'] == 0,
+                df_canon['Line_Delta'],
+                0
+            )
+
             df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
             df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
             
