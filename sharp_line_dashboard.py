@@ -997,22 +997,32 @@ def compute_diagnostics_vectorized(df):
         
         
 def apply_blended_sharp_score(df, trained_models):
-
-
-    #st.markdown("### 🛠️ Running `apply_blended_sharp_score()`")
+    logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
+
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-        #st.success("🧹 Cleaned up duplicate suffix columns (_x, _y)")
     except Exception as e:
-        st.error(f"❌ Cleanup failed: {e}")
+        logger.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
-    total_start = time.time()
+
+    if 'Snapshot_Timestamp' not in df.columns:
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+        logger.info("✅ 'Snapshot_Timestamp' column added.")
+
+    # ✅ Keep only latest snapshot per Game + Bookmaker + Market + Outcome + Value
+    df = (
+        df.sort_values('Snapshot_Timestamp')
+          .drop_duplicates(subset=['Game', 'Bookmaker', 'Market', 'Outcome', 'Value'], keep='last')
+    )
+
     scored_all = []
-    
+    total_start = time.time()
+
+
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
