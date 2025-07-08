@@ -1249,19 +1249,22 @@ def apply_blended_sharp_score(df, trained_models):
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored['Active_Signal_Count'] = (
                 (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
-                (df_scored['Sharp_Limit_Total'] >= 1).astype(int) +
+                (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
+                (df_scored['Sharp_Time_Score'] > 0.5).astype(int) +
+                (df_scored['Sharp_Limit_Total'] > 10000).astype(int) +
                 (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
                 (df_scored['Market_Leader'] == 1).astype(int) +
                 (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
                 (df_scored['Is_Sharp_Book'] == 1).astype(int) +
+                (df_scored['Sharp_Line_Magnitude'].abs() > 0.5).astype(int) +   # Sharp line move magnitude
+                (df_scored['Rec_Line_Magnitude'].abs() > 0.5).astype(int) +     # Rec book confirmation
                 (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
-                (df_scored['High_Limit_Flag'] == 1).astype(int) +
-                (df_scored['Sharp_Line_Delta'].abs() > 0.5).astype(int)  # ✅ NEW: sharp-driven move
+                (df_scored['High_Limit_Flag'] == 1).astype(int)
             )
             
             df_scored['Passes_Gate'] = (
                 df_scored['Model_Sharp_Win_Prob'] >= 0.60
-            ) & (df_scored['Active_Signal_Count'] >= 3)
+            ) & (df_scored['Active_Signal_Count'] >= 2)
             
             df_scored['Model_Confidence_Tier'] = np.where(
                 df_scored['Passes_Gate'],
