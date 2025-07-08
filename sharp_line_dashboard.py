@@ -727,14 +727,30 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
         logloss = log_loss(y, ensemble_prob)
         brier = brier_score_loss(y, ensemble_prob)
         
-        # === Feature Importance (from AUC model as example)
         importances = model_auc.feature_importances_
+        feature_names = features[:len(importances)]
+        
+        # === Estimate directional impact via correlation with model output
+        # This assumes you have access to the original training data X and predictions
+        X_features = X[feature_names]  # original training feature matrix
+        preds = model_auc.predict_proba(X_features)[:, 1]  # class 1 probabilities
+        
+        # Estimate sign via correlation
+        correlations = np.array([
+            np.corrcoef(X_features[col], preds)[0, 1] if np.std(X_features[col]) > 0 else 0
+            for col in feature_names
+        ])
+        
+        impact_directions = np.where(correlations > 0, '↑ Increases', '↓ Decreases')
+        
+        # === Combine into one table
         importance_df = pd.DataFrame({
-            'Feature': features[:len(importances)],
-            'Importance': importances
+            'Feature': feature_names,
+            'Importance': importances,
+            'Impact': impact_directions
         }).sort_values(by='Importance', ascending=False)
         
-        st.markdown(f"#### 📊 Feature Importance for `{market.upper()}`")
+        st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
         st.table(importance_df.head(10))
         
         # === Calibration
