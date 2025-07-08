@@ -578,7 +578,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'Rec_Line_Delta',  
             #'Line_Delta',
             #'Direction_Aligned',
-            #'Line_Move_Magnitude',
+            'Sharp_Line_Magnitude'
+            'Rec_Line_Magnitude'
             'Is_Home_Team_Bet',
             'High_Limit_Flag'
         ]
@@ -1126,6 +1127,8 @@ def apply_blended_sharp_score(df, trained_models):
                 df_canon['Line_Delta'],
                 0
             )
+            df_canon['Sharp_Line_Magnitude'] = df_canon['Sharp_Line_Delta'].abs()
+            df_canon['Rec_Line_Magnitude'] = df_canon['Rec_Line_Delta'].abs()
 
             df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
             df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
@@ -1227,7 +1230,9 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Line_Delta'],
                 0
             )
-
+            df_inverse['Sharp_Line_Magnitude'] = df_inverse['Sharp_Line_Delta'].abs()
+            df_inverse['Rec_Line_Magnitude'] = df_inverse['Rec_Line_Delta'].abs()
+            df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
             df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'] == df_inverse['Home_Team_Norm']).astype(int)
             df_inverse['Is_Favorite_Bet'] = (df_inverse['Value'] < 0).astype(int)
             df_inverse['High_Limit_Flag'] = (df_inverse['Sharp_Limit_Total'] > 10000).astype(int)
@@ -1256,7 +1261,7 @@ def apply_blended_sharp_score(df, trained_models):
             
             df_scored['Passes_Gate'] = (
                 df_scored['Model_Sharp_Win_Prob'] >= 0.60
-            ) & (df_scored['Active_Signal_Count'] >= 2)
+            ) & (df_scored['Active_Signal_Count'] >= 3)
             
             df_scored['Model_Confidence_Tier'] = np.where(
                 df_scored['Passes_Gate'],
