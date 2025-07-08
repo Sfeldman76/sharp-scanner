@@ -574,8 +574,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 30):
             'LimitUp_NoMove_Flag',
             'Is_Sharp_Book',
             #'Line_Value_Abs',
-            'Sharp_Line_Delta',         # NEW
-            'Rec_Line_Delta',  
+            #'Sharp_Line_Delta',         # NEW
+            #'Rec_Line_Delta',  
             #'Line_Delta',
             #'Direction_Aligned',
             'Sharp_Line_Magnitude',
