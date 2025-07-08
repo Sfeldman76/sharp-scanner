@@ -260,13 +260,14 @@ def read_latest_snapshot_from_bigquery(hours=24):
             if not found_market:
                 found_market = {"key": row["Market"], "outcomes": []}
                 found_book["markets"].append(found_market)
+            price = row["Value"] if row["Market"].lower() == "h2h" else row.get("Odds_Price", None)
+
             found_market["outcomes"].append({
                 "name": row["Outcome"],
                 "point": row["Value"],
-                "price": row["Value"] if row["Market"] == "h2h" else None,
+                "price": price,
                 "bet_limit": row["Limit"]
             })
-
         return dict(grouped)
     except Exception as e:
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
@@ -912,7 +913,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
                 for o in market.get('outcomes', []):
                     label = normalize_label(o.get('name', ''))
-                    val = o.get('point') if mtype != 'h2h' else o.get('price')
+                    line_value = o.get('point') if mtype != 'h2h' else o.get('price')
+                    odds_price = o.get('price')  # ✅ always exists, even for spreads/totals
+
                     limit = o.get('bet_limit')
                     prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
@@ -928,7 +931,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Outcome': label,
                         'Bookmaker': book_title,
                         'Book': book_key,
-                        'Value': val,
+                        'Value': line_value,                # ← line (point or h2h price)
+                        'Odds_Price': odds_price,
                         'Limit': limit,
                         'Old Value': old_val,
                         'Delta': round(val - old_val, 2) if old_val is not None and val is not None else None,
@@ -940,13 +944,19 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     rows.append(entry)
                     line_history_log.setdefault(gid, []).append(entry.copy())
 
-                    if val is not None:
+                    if line_value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
-                        sharp_limit_map[(game_name, mtype)][label].append((limit, val, old_val))
+                    
+                        # ✅ Optionally store both value and odds
+                        sharp_limit_map[(game_name, mtype)][label].append((limit, line_value, old_val))
+                    
                         if book_key in SHARP_BOOKS:
                             sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
+                    
                         if (game_name, mtype, label) not in line_open_map:
-                            line_open_map[(game_name, mtype, label)] = (val, snapshot_time)
+                            # ✅ Keep just line_value here — odds_price isn't needed downstream
+                            line_open_map[(game_name, mtype, la_]()
+
 
     # 🔁 REFACTORED SHARP SCORING
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
@@ -1039,6 +1049,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     now = pd.Timestamp.utcnow()
     df['Pre_Game'] = df['Game_Start'] > now
     df['Post_Game'] = ~df['Pre_Game']
+    # === Calculate Implied Probability from Odds_Price
+    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+
     # === Confidence scores and tiers
     df = assign_confidence_scores(df, weights)
     # === Patch derived fields before BigQuery write ===
@@ -1197,7 +1211,7 @@ def write_line_history_to_bigquery(df):
         "Ref Sharp Value", "Ref Sharp Old Value", "Delta vs Sharp",
         "SHARP_SIDE_TO_BET", "Sharp_Move_Signal", "Sharp_Limit_Jump",
         "Sharp_Time_Score", "Sharp_Prob_Shift", "Sharp_Limit_Total",
-        "SharpBetScore", "Snapshot_Timestamp"
+        "SharpBetScore", "Snapshot_Timestamp", "Odds_Price", "Implied_Prob",
     ]
 
     # ✅ Remove any unexpected columns before upload
@@ -1211,7 +1225,8 @@ def write_line_history_to_bigquery(df):
     # Log preview
     logging.debug("🧪 Line history dtypes:\n" + str(df.dtypes.to_dict()))
     logging.debug("Sample rows:\n" + df.head(2).to_string())
-
+    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+df['Implied_Prob'] = pd.to_numeric(df.get('Implied_Prob'), errors='coerce')
     # Upload
     if not safe_to_gbq(df, LINE_HISTORY_TABLE):
         logging.error(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
@@ -1226,39 +1241,81 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history['Time'] = pd.to_datetime(df_history['Time'])
     df_history['Book'] = df_history['Book'].str.lower()
 
-    # Detect open value per Book
-    df_open = (
+    # === LINE MOVE DETECTION ===
+    df_open_line = (
         df_history
         .sort_values('Time')
         .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
         .first()
         .reset_index()
-        .rename(columns={'Value': 'Open_Value'})
+        .rename(columns={'Value': 'Open_Line_Value'})
     )
 
-    df_history = df_history.merge(df_open, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-    df_history['Has_Moved'] = (df_history['Value'] != df_history['Open_Value']) & df_history['Value'].notna()
+    df_history = df_history.merge(df_open_line, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+    df_history['Line_Has_Moved'] = (df_history['Value'] != df_history['Open_Line_Value']) & df_history['Value'].notna()
 
-    first_moves = (
-        df_history[df_history['Has_Moved']]
+    first_line_moves = (
+        df_history[df_history['Line_Has_Moved']]
         .groupby(['Game', 'Market', 'Outcome', 'Book'])['Time']
         .min()
         .reset_index()
-        .rename(columns={'Time': 'First_Move_Time'})
+        .rename(columns={'Time': 'First_Line_Move_Time'})
     )
 
+    # === ODDS MOVE DETECTION ===
+    if 'Odds_Price' in df_history.columns:
+        df_open_odds = (
+            df_history
+            .sort_values('Time')
+            .groupby(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
+            .first()
+            .reset_index()
+            .rename(columns={'Odds_Price': 'Open_Odds_Price'})
+        )
+        df_history = df_history.merge(df_open_odds, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+        df_history['Odds_Has_Moved'] = (df_history['Odds_Price'] != df_history['Open_Odds_Price']) & df_history['Odds_Price'].notna()
+
+        first_odds_moves = (
+            df_history[df_history['Odds_Has_Moved']]
+            .groupby(['Game', 'Market', 'Outcome', 'Book'])['Time']
+            .min()
+            .reset_index()
+            .rename(columns={'Time': 'First_Odds_Move_Time'})
+        )
+    else:
+        first_odds_moves = pd.DataFrame(columns=['Game', 'Market', 'Outcome', 'Book', 'First_Odds_Move_Time'])
+
+    # === Merge both move types ===
+    first_moves = pd.merge(first_line_moves, first_odds_moves, on=['Game', 'Market', 'Outcome', 'Book'], how='outer')
+
+    # Identify sharp vs. rec books
     first_moves['Book_Type'] = first_moves['Book'].map(
         lambda b: 'Sharp' if b in sharp_books else ('Rec' if b in rec_books else 'Other')
     )
-    first_moves['Move_Rank'] = first_moves.groupby(
-        ['Game', 'Market', 'Outcome']
-    )['First_Move_Time'].rank(method='first')
 
-    first_moves['Market_Leader'] = (
-        (first_moves['Book_Type'] == 'Sharp') & (first_moves['Move_Rank'] == 1)
+    # Rank order
+    first_moves['Line_Move_Rank'] = first_moves.groupby(
+        ['Game', 'Market', 'Outcome']
+    )['First_Line_Move_Time'].rank(method='first')
+
+    first_moves['Odds_Move_Rank'] = first_moves.groupby(
+        ['Game', 'Market', 'Outcome']
+    )['First_Odds_Move_Time'].rank(method='first')
+
+    # === Market Leader Flags ===
+    first_moves['Market_Leader_Line'] = (
+        (first_moves['Book_Type'] == 'Sharp') & (first_moves['Line_Move_Rank'] == 1)
     )
 
+    first_moves['Market_Leader_Odds'] = (
+        (first_moves['Book_Type'] == 'Sharp') & (first_moves['Odds_Move_Rank'] == 1)
+    )
+
+    # ✅ Final combined flag — fallback-compatible
+    first_moves['Market_Leader'] = first_moves['Market_Leader_Line']  # change logic here if you want a blend
+
     return first_moves
+
 
 def detect_cross_market_sharp_support(df_moves, score_threshold=15):
     df = df_moves.copy()
