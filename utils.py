@@ -81,6 +81,16 @@ def implied_prob(odds):
             return 100 / (odds + 100)
     except:
         return None
+        
+def calc_implied_prob(odds):
+    try:
+        odds = float(odds)
+        if odds > 0:
+            return 100 / (odds + 100)
+        else:
+            return abs(odds) / (abs(odds) + 100)
+    except Exception:
+        return None
 
 def ensure_columns(df, required_cols, fill_value=None):
     for col in required_cols:
