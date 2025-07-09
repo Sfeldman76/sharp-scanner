@@ -2412,9 +2412,12 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
 
         # === Bin probabilities
-        prob_bins = np.linspace(0, 1, 11)
-        bin_labels = [f"{int(p*100)}–{int(prob_bins[i+1]*100)}%" for i, p in enumerate(prob_bins[:-1])]
+        prob_bins = [0, 0.4, 0.6, 0.8, 1.0]
+        bin_labels = ["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
+
+        
         df['Confidence_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
+
 
         # === Overall Summary
         st.subheader("📊 Model Win Rate by Confidence Bin (Overall)")
