@@ -646,11 +646,12 @@ def apply_blended_sharp_score(df, trained_models):
             # === Align features to model input
             X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
             
-            # === Raw model output (optional)
-            df_canon['Model_Sharp_Win_Prob'] = trained_models[market_type]['model'].predict_proba(X_canon)[:, 1]
+            ## ✅ USE THE CALIBRATED PROBABILITIES FOR MAIN MODEL OUTPUT
+            df_canon['Model_Sharp_Win_Prob'] = trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1]
             
-            df_canon['Model_Confidence'] = trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1]
-            
+            # Optional: you can drop Model_Confidence entirely or alias it to the same
+            df_canon['Model_Confidence'] = df_canon['Model_Sharp_Win_Prob']
+
             # === Tag for downstream usage
             df_canon['Was_Canonical'] = True
             df_canon['Scoring_Market'] = market_type
