@@ -483,7 +483,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
         WHERE Sport = '{sport.upper()}'
           AND Scored = TRUE
           AND SHARP_HIT_BOOL IS NOT NULL
+          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
     """
+
     df_bt = bq_client.query(query).to_dataframe()
 
     if df_bt.empty:
