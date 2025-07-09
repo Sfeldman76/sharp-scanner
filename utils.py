@@ -2175,7 +2175,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'First_Line_Value', 'First_Sharp_Prob',
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
-        'Line_Magnitude_Abs', 'High_Limit_Flag',
+        'Line_Magnitude_Abs', 'High_Limit_Flag','Model_Sharp_Win_Prob',
         'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob','First_Odds', 'First_Imp_Prob','Odds_Shift','Implied_Prob_Shift'
     ]
     
@@ -2188,9 +2188,25 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     for col in float_cols_to_round:
         if col in df_scores_out.columns:
             df_scores_out[col] = pd.to_numeric(df_scores_out[col], errors='coerce').round(4)
-    df_scores_out = df_scores_out.drop_duplicates(subset=dedup_fingerprint_cols)
-    logging.info(f"🧪 Local rows before dedup: {len(df_scores_out)}")
+    # === 🧹 Canonical row filtering BEFORE fingerprint dedup
+    canonical_sort_order = [
+       'Scored',  # Prefer scored
+       'Snapshot_Timestamp',  # Most recent
+       'Model_Sharp_Win_Prob',  # Strongest signal
+    ]
     
+    df_scores_out = df_scores_out.sort_values(
+       by=[col for col in canonical_sort_order if col in df_scores_out.columns],
+       ascending=[False] * len(canonical_sort_order)
+    )
+    
+    # Keep best row per game/book/market/outcome
+    df_scores_out = df_scores_out.drop_duplicates(
+       subset=['Game_Key', 'Bookmaker', 'Market', 'Outcome'], keep='first'
+    )
+    
+    logging.info(f"🧪 Local rows before dedup: {len(df_scores_out)}")
+
     # === Query BigQuery for existing line-level deduplication
     existing = bq_client.query(f"""
         SELECT DISTINCT {', '.join(dedup_fingerprint_cols)}
