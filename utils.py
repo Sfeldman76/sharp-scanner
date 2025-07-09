@@ -1482,7 +1482,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'High_Limit_Flag',
             'Home_Team_Norm',
             'Away_Team_Norm',
-            'Commence_Hour','Model_Sharp_Win_Prob','Odds_Price','Implied_Prob',  # ✅ Add this line
+            'Commence_Hour','Model_Sharp_Win_Prob','Odds_Price','Implied_Prob', 'First_Odds', 'First_Imp_Prob', 'Odds_Shift','Implied_Prob_Shift' # ✅ Add this line
         ]
     }
 
@@ -1504,6 +1504,9 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
     try:
         df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
         df['Implied_Prob'] = pd.to_numeric(df['Implied_Prob'], errors='coerce')
+        df['Odds_Shift'] = pd.to_numeric(df.get('Odds_Shift'), errors='coerce')
+        df['Implied_Prob_Shift'] = pd.to_numeric(df.get('Implied_Prob_Shift'), errors='coerce')
+
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='replace' if force_replace else 'append')
         logging.info(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
@@ -1793,20 +1796,28 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob'
         ])
     else:
+        
         df_first = (
             df_all_snapshots_filtered
-            .sort_values('Snapshot_Timestamp')
+            .sort_values(by='Snapshot_Timestamp')  # earliest snapshots first
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-            .loc[:, required_cols]
+            .loc[:, required_cols + ['Odds_Price', 'Implied_Prob']]  # make sure these are included
             .rename(columns={
                 'Value': 'First_Line_Value',
-                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
+                'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
+                'Odds_Price': 'First_Odds',
+                'Implied_Prob': 'First_Imp_Prob',
             })
         )
-    
+
         for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
             df_first[col] = df_first[col].astype('category')
-    
+        logging.info("📋 Sample df_first values:\n" +
+        df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10).to_string(index=False))
+        logging.info("💰 Sample odds + implied:\n" +
+        df_first[['First_Odds', 'First_Imp_Prob']].dropna().head(5).to_string(index=False))
+
+
         # 🔍 Ensure full evaluation before merge
         df_first = df_first.reset_index(drop=True).copy()
     
@@ -1819,7 +1830,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             
         
     # === Prepare df_first: reduce + convert
-    df_first = df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
+    df_first = df_first[[
+        'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+        'First_Line_Value', 'First_Sharp_Prob',
+        'First_Odds', 'First_Imp_Prob'
+    ]].copy()
+
     
     # Normalize key columns in both df_first and df_master
     key_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
@@ -2045,7 +2061,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
-        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob'  # ✅ ADD THESE
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob','First_Odds', 'First_Imp_Prob',  # ✅ ADD THESE
     ]
     
     
@@ -2129,7 +2145,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Line_Delta'] = pd.to_numeric(df_scores_out['Line_Delta'], errors='coerce')
     df_scores_out['Model_Prob_Diff'] = pd.to_numeric(df_scores_out['Model_Prob_Diff'], errors='coerce')
     df_scores_out['Direction_Aligned'] = pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce').fillna(0).round().astype('Int64')
-    
+    df_scores_out['First_Odds'] = pd.to_numeric(df_scores_out['First_Odds'], errors='coerce')
+    df_scores_out['First_Imp_Prob'] = pd.to_numeric(df_scores_out['First_Imp_Prob'], errors='coerce')
+    df_scores_out['Odds_Shift'] = df_scores_out['Odds_Price'] - df_scores_out['First_Odds']
+    df_scores_out['Implied_Prob_Shift'] = df_scores_out['Implied_Prob'] - df_scores_out['First_Imp_Prob']
+
     # === Final upload
     try:
         df_weights = compute_and_write_market_weights(df_scores_out[df_scores_out['Scored']])
@@ -2156,7 +2176,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
-        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob'
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob','First_Odds', 'First_Imp_Prob','Odds_Shift','Implied_Prob_Shift'
     ]
     
     logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
