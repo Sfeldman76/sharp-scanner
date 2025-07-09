@@ -2196,7 +2196,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
         'First_Line_Value', 'First_Sharp_Prob', 'Line_Delta', 'Model_Prob_Diff'
     ]
-    
+
+  
     for col in float_cols_to_round:
         if col in df_scores_out.columns:
             df_scores_out[col] = pd.to_numeric(df_scores_out[col], errors='coerce').round(4)
