@@ -1087,27 +1087,32 @@ def apply_blended_sharp_score(df, trained_models):
             # Dynamically strip the outcome-specific suffix from Game_Key
             df_market = df_market[df_market['Game_Key_Base'].isin(valid_games)].copy()
             # ✅ NOW apply canonical filtering based on market_type
+            # === Canonical filtering based on market_type ===
             if market_type == "spreads":
-                
-                # ✅ Pick canonical row with most negative value per Game_Key_Base
                 df_market = df_market[df_market['Value'].notna()]
+                
+                # Keep all favorite sides (< 0), including multiple bookmakers
                 df_canon = df_market[df_market['Value'] < 0].copy()
                 df_full_market = df_market.copy()
-    
+            
             elif market_type == "h2h":
-                
                 df_market = df_market[df_market['Value'].notna()]
+                
+                # Keep all rows with negative price (favorite side), across all books
                 df_canon = df_market[df_market['Value'] < 0].copy()
                 df_full_market = df_market.copy()
-               
-    
+            
             elif market_type == "totals":
+                df_market = df_market.copy()
+                
+                # Keep all OVER rows (canonical for totals)
                 df_canon = df_market[df_market['Outcome_Norm'] == 'over'].copy()
                 df_full_market = df_market.copy()
-    
+            
             else:
                 df_canon = df_market.copy()
                 df_full_market = df_market.copy()
+           
     
             if df_canon.empty:
                 st.warning(f"⚠️ No canonical rows for {market_type.upper()}")
