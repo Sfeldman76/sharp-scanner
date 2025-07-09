@@ -606,7 +606,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
 
         
     
-                
+    
         df_market = ensure_columns(df_market, features, 0)
         
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
@@ -661,6 +661,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
         }
         
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        from sklearn.model_selection import train_test_split
+        
+        # === Holdout split for real-world generalization testing
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=0.25, stratify=y, random_state=42
+        )
 
         # === LogLoss model
         grid_logloss = RandomizedSearchCV(
@@ -672,7 +678,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
             verbose=1,
             random_state=42
         )
-        grid_logloss.fit(X, y)
+        grid_logloss.fit(X_train, y_train)
         model_logloss = grid_logloss.best_estimator_
         
         # === AUC model
@@ -685,17 +691,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
             verbose=1,
             random_state=42
         )
-        grid_auc.fit(X, y)
+        grid_auc.fit(X_train, y_train)
         model_auc = grid_auc.best_estimator_
+
         
         # === Calibrate both
-        cal_logloss = CalibratedClassifierCV(model_logloss, method='sigmoid', cv=cv).fit(X, y)
-        cal_auc = CalibratedClassifierCV(model_auc, method='sigmoid', cv=cv).fit(X, y)
+        cal_logloss = CalibratedClassifierCV(model_logloss, method='sigmoid', cv=cv).fit(X_train, y_train)
+        cal_auc = CalibratedClassifierCV(model_auc, method='sigmoid', cv=cv).fit(X_train, y_train)
+
         
         # === Predict calibrated probabilities
         prob_logloss = cal_logloss.predict_proba(X)[:, 1]
         prob_auc = cal_auc.predict_proba(X)[:, 1]
+        # === Predict calibrated probabilities on validation set
+        val_prob_logloss = cal_logloss.predict_proba(X_val)[:, 1]
+        val_prob_auc = cal_auc.predict_proba(X_val)[:, 1]
         
+        # === Evaluate on holdout
+        val_prob_auc = np.clip(val_prob_auc, 0.05, 0.95)
+        val_prob_logloss = np.clip(val_prob_logloss, 0.05, 0.95)
+
+        val_auc_logloss = roc_auc_score(y_val, val_prob_logloss)
+        val_auc_auc = roc_auc_score(y_val, val_prob_auc)
+        val_logloss = log_loss(y_val, val_prob_auc)
+        val_brier = brier_score_loss(y_val, val_prob_auc)
+        
+        # === Log holdout performance
+        st.markdown(f"### 🧪 Holdout Validation – `{market.upper()}`")
+        st.write(f"- LogLoss Model AUC: `{val_auc_logloss:.4f}`")
+        st.write(f"- AUC Model AUC: `{val_auc_auc:.4f}`")
+        st.write(f"- Holdout LogLoss: `{val_logloss:.4f}`")
+        st.write(f"- Holdout Brier Score: `{val_brier:.4f}`")
+
         # === Compute AUCs for weighting
         auc_logloss = roc_auc_score(y, prob_logloss)
         auc_auc = roc_auc_score(y, prob_auc)
@@ -745,7 +772,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
         acc = accuracy_score(y, y_pred)
         logloss = log_loss(y, ensemble_prob)
         brier = brier_score_loss(y, ensemble_prob)
-        
+        st.markdown("### 📉 Overfitting Check – Gap Analysis")
+        st.write(f"- AUC Gap (Train - Holdout): `{auc - val_auc_auc:.4f}`")
+        st.write(f"- LogLoss Gap (Train - Holdout): `{logloss - val_logloss:.4f}`")
+        st.write(f"- Brier Gap (Train - Holdout): `{brier - val_brier:.4f}`")
+
         importances = model_auc.feature_importances_
         feature_names = features[:len(importances)]
         
