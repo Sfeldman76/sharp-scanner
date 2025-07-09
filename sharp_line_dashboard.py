@@ -1011,7 +1011,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     if 'Snapshot_Timestamp' not in df.columns:
         df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-         st.info("✅ 'Snapshot_Timestamp' column added.")
+        st.info("✅ 'Snapshot_Timestamp' column added.")
 
     # ✅ Keep only latest snapshot per Game + Bookmaker + Market + Outcome + Value
     df = (
