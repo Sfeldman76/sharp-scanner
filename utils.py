@@ -544,7 +544,9 @@ def apply_blended_sharp_score(df, trained_models):
             df_market['Value'] = pd.to_numeric(df_market['Value'], errors='coerce')
             df_market['Commence_Hour'] = pd.to_datetime(df_market['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             df_market['Odds_Price'] = pd.to_numeric(df_market.get('Odds_Price'), errors='coerce')
-
+            # === Compute implied probabilities and shifts using global `calc_implied_prob`
+            df_market['Implied_Prob'] = df_market['Odds_Price'].apply(calc_implied_prob)
+           
             df_market['Game_Key'] = (
                 df_market['Home_Team_Norm'] + "_" +
                 df_market['Away_Team_Norm'] + "_" +
@@ -1876,7 +1878,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     log_memory("AFTER merge with df_first")
     logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     # === 2. Save First_* columns
-    first_cols = df_master[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob']].copy()
+   
     
     # === 3. Drop Score_* to prevent conflict
     df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore', inplace=True)
@@ -1887,7 +1889,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         on='Merge_Key_Short',
         how='inner'
     )
+    # === Log resulting columns after merging df_first into df_master
+    logging.info("🧩 Columns after merging df_first into df_master:")
+    logging.info("🧩 df_master columns:\n" + ", ".join(df_master.columns.tolist()))
     
+    # Optional: log sample of First_* fields for verification
+    first_fields = ['First_Line_Value', 'First_Sharp_Prob', 'First_Odds', 'First_Imp_Prob']
+    sample_first = df_master[first_fields].dropna().head(5)
+    if not sample_first.empty:
+        logging.info("🔍 Sample First_* fields after merge:\n" + sample_first.to_string(index=False))
+    else:
+        logging.warning("⚠️ No non-null First_* values found after merge — check join keys or source data.")
+
     # === 5. Restore First_* if dropped during merge
     if 'First_Sharp_Prob' not in df_master.columns or 'First_Line_Value' not in df_master.columns:
         df_master = df_master.merge(first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
@@ -2061,7 +2074,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
-        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob','First_Odds', 'First_Imp_Prob',  # ✅ ADD THESE
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob','First_Odds', 'First_Imp_Prob','Odds_Shift','Implied_Prob_Shift'  # ✅ ADD THESE
     ]
     
     
@@ -2176,8 +2189,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag','Model_Sharp_Win_Prob',
-        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob','First_Odds', 'First_Imp_Prob','Odds_Shift','Implied_Prob_Shift'
-    ]
+        'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob',
     
     logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
     float_cols_to_round = [
