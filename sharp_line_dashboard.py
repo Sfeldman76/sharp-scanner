@@ -591,16 +591,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
             'Market_Leader',
             'LimitUp_NoMove_Flag',
             'Is_Sharp_Book',
-            #'Line_Value_Abs',
-            #'Sharp_Line_Delta',         # NEW
-            #'Rec_Line_Delta',  
-            #'Line_Delta',
-            #'Direction_Aligned',
             'Sharp_Line_Magnitude',
             'Rec_Line_Magnitude',
             'Is_Home_Team_Bet',
             'High_Limit_Flag'
         ]
+        
+        # Optional features to add if available
+        optional_features = ['Odds_Shift', 'Implied_Prob_Shift']
+        
+        # Add only if present in DataFrame
+        features += [f for f in optional_features if f in df.columns]
         
        
 
