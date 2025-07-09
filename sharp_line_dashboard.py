@@ -219,39 +219,36 @@ def ensure_columns(df, required_cols, fill_value=None):
 
 
 
-def fetch_live_odds(sport_key):
-    
 
+def fetch_live_odds(sport_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
         'apiKey': API_KEY,
-        'regions': 'us,us2',
+        'regions': 'us,us2,uk,eu,au',
         'markets': ','.join(MARKETS),
         'oddsFormat': 'american',
         'includeBetLimits': 'true'
     }
+
     try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        return r.json()
+        st.info(f"📡 Fetching odds for `{sport_key}`...")
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        odds_data = response.json()
+        if not odds_data:
+            st.warning("⚠️ No odds returned from API.")
+        return odds_data
+
+    except requests.exceptions.HTTPError as http_err:
+        st.error(f"❌ HTTP error: {http_err}")
+    except requests.exceptions.RequestException as req_err:
+        st.error(f"❌ Request error: {req_err}")
     except Exception as e:
-        st.error(f"❌ Odds API Error: {e}")
-        return []
-
-# 👇 Usage
-sport_key = "basketball_nba"  # or any key like "baseball_mlb"
-raw_data = fetch_live_odds(sport_key)
-
-# 🕒 Filter to today's games only
-today_str = datetime.now(pytz.UTC).date().isoformat()
-todays_games = [g for g in raw_data if g.get('commence_time', '').startswith(today_str)]
-
-
-
-# 📦 Display collapsible raw data
-with st.expander(f"📦 Raw Odds API Response — {len(todays_games)} games for {today_str}"):
-    st.json(todays_games)
+        st.error(f"❌ Unexpected error: {e}")
     
+    return []  # Return empty list on failure
+
+
    
 def read_from_bigquery(table_name):
     from google.cloud import bigquery
