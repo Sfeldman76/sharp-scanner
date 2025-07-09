@@ -997,7 +997,7 @@ def compute_diagnostics_vectorized(df):
         
         
 def apply_blended_sharp_score(df, trained_models):
-    logger.info("🛠️ Running `apply_blended_sharp_score()`")
+    st.markdown("🛠️ Running `apply_blended_sharp_score()`")
 
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
@@ -1006,12 +1006,12 @@ def apply_blended_sharp_score(df, trained_models):
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
-        logger.error(f"❌ Cleanup failed: {e}")
+        st.error.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
     if 'Snapshot_Timestamp' not in df.columns:
         df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-        logger.info("✅ 'Snapshot_Timestamp' column added.")
+         st.info("✅ 'Snapshot_Timestamp' column added.")
 
     # ✅ Keep only latest snapshot per Game + Bookmaker + Market + Outcome + Value
     df = (
