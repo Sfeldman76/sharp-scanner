@@ -1006,7 +1006,7 @@ def apply_blended_sharp_score(df, trained_models):
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
-        st.error.error(f"❌ Cleanup failed: {e}")
+        st.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
     if 'Snapshot_Timestamp' not in df.columns:
@@ -1018,7 +1018,10 @@ def apply_blended_sharp_score(df, trained_models):
         df.sort_values('Snapshot_Timestamp')
           .drop_duplicates(subset=['Game', 'Bookmaker', 'Market', 'Outcome', 'Value'], keep='last')
     )
-
+    dedup_cols = ['Game', 'Market', 'Bookmaker', 'Outcome', 'Value']
+    pre_dedup = len(df)
+    df = df.drop_duplicates(subset=dedup_cols, keep='last')
+    st.info(f"🧹 Global deduplication: {pre_dedup:,} → {len(df):,}")
     scored_all = []
     total_start = time.time()
 
