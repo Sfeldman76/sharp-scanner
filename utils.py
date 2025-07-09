@@ -104,20 +104,26 @@ def normalize_team(t):
 def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
+
+
 def compute_line_hash(row):
     try:
-        key = "|".join([
-            str(row.get('Game_Key', '')),
-            str(row.get('Bookmaker', '')),
-            str(row.get('Market', '')),
-            str(row.get('Outcome', '')),
-            str(row.get('Value', '')),
-            str(row.get('Limit', '')),
-            str(row.get('Sharp_Move_Signal', ''))
-        ])
+        key_fields = [
+            str(row.get('Game_Key', '')).strip().lower(),
+            str(row.get('Bookmaker', '')).strip().lower(),
+            str(row.get('Market', '')).strip().lower(),
+            str(row.get('Outcome', '')).strip().lower(),
+            str(row.get('Value', '')).strip(),
+            str(row.get('Odds_Price', '')).strip(),
+            str(row.get('Sharp_Move_Signal', '')).strip(),
+            str(row.get('Sharp_Limit_Total', '')).strip(),
+            str(row.get('Open_Value', '')).strip(),
+        ]
+        key = "|".join(key_fields)
         return hashlib.md5(key.encode()).hexdigest()
     except Exception as e:
         return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
+
 def log_memory(msg=""):
     process = psutil.Process(os.getpid())
     mem = process.memory_info()
@@ -379,7 +385,27 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if missing_cols:
         logging.error(f"❌ Missing required columns for BigQuery upload: {missing_cols}")
         return
-
+    # === Deduplicate using Line_Hash from previous uploads ===
+    try:
+        client = bigquery.Client(project=GCP_PROJECT_ID, location="us")
+        df_prev = client.query("""
+            SELECT DISTINCT Line_Hash
+            FROM `sharplogger.sharp_data.sharp_moves_master`
+            WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
+        """).to_dataframe()
+    
+        if not df_prev.empty and 'Line_Hash' in df.columns:
+            before = len(df)
+            df = df[~df['Line_Hash'].isin(df_prev['Line_Hash'])]
+            logging.info(f"🧼 Line_Hash dedup: removed {before - len(df)} duplicate rows")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to deduplicate using Line_Hash: {e}")
+    
+    # ⛔ Exit early if nothing to write
+    if df.empty:
+        logging.info("🛑 No new rows after Line_Hash deduplication — exiting.")
+        return
+    logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
     # Filter to allowed schema
     df = df[ALLOWED_COLS]
     
@@ -391,7 +417,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         logging.info("🎯 Implied_Prob sample:\n" + df['Implied_Prob'].dropna().round(4).astype(str).head().to_string(index=False))
     else:
         logging.warning("⚠️ Odds_Price or Implied_Prob missing from DataFrame before upload")
-
+    logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
     # Write to BigQuery
     try:
         logging.info(f"📤 Uploading to `{table}`...")
@@ -1049,7 +1075,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df = pd.DataFrame(rows)
     df['Book'] = df['Book'].str.lower()
     df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
-    
+    # 🧠 Add this line here
+    df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
     # === Historical sorting for open-line extraction
     df_history = df.copy()
     df_history_sorted = df_history.sort_values('Time')
