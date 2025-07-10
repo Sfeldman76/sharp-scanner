@@ -641,10 +641,31 @@ def apply_blended_sharp_score(df, trained_models):
             # === Ensure required features exist ===
            # === Feature engineering BEFORE checking model features
             df_canon['Line_Magnitude_Abs'] = df_canon['Line_Delta'].abs()
-            df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] >= 10000).astype(int)
             df_canon['Line_Move_Magnitude'] = df_canon['Line_Delta'].abs()
             df_canon['Odds_Price'] = pd.to_numeric(df_canon.get('Odds_Price'), errors='coerce')
             df_canon['Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+            df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] >= 10000).astype(int)
+            # === Cross Features (only if inputs exist)
+            # === Cross Features (only if inputs exist)
+            if 'Odds_Shift' in df_canon.columns:
+                df_canon['SharpMove_OddsShift'] = df_canon['Sharp_Move_Signal'] * df_canon['Odds_Shift']
+            
+            if 'Implied_Prob_Shift' in df_canon.columns:
+                df_canon['MarketLeader_ImpProbShift'] = df_canon['Market_Leader'] * df_canon['Implied_Prob_Shift']
+            
+            df_canon['SharpLimit_SharpBook'] = df_canon['Is_Sharp_Book'] * df_canon['Sharp_Limit_Total']
+            df_canon['LimitProtect_SharpMag'] = df_canon['LimitUp_NoMove_Flag'] * df_canon['Sharp_Line_Magnitude']
+            df_canon['HomeRecLineMag'] = df_canon['Is_Home_Team_Bet'] * df_canon['Rec_Line_Magnitude']
+            
+            df_canon['Delta_Sharp_vs_Rec'] = df_canon['Sharp_Line_Delta'] - df_canon['Rec_Line_Delta']
+            df_canon['Sharp_Leads'] = (df_canon['Sharp_Line_Delta'].abs() > df_canon['Rec_Line_Delta'].abs()).astype('Int64')
+            df_canon['Same_Direction_Move'] = (np.sign(df_canon['Sharp_Line_Delta']) == np.sign(df_canon['Rec_Line_Delta'])).astype('Int64')
+            df_canon['Opposite_Direction_Move'] = (np.sign(df_canon['Sharp_Line_Delta']) != np.sign(df_canon['Rec_Line_Delta'])).astype('Int64')
+            df_canon['Sharp_Move_No_Rec'] = ((df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() == 0)).astype('Int64')
+            df_canon['Rec_Move_No_Sharp'] = ((df_canon['Rec_Line_Delta'].abs() > 0) & (df_canon['Sharp_Line_Delta'].abs() == 0)).astype('Int64')
+
+
+            
 
             # === Sharp vs. Rec Line Delta
             df_canon['Sharp_Line_Delta'] = np.where(
@@ -690,6 +711,27 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
+            df_inverse['High_Limit_Flag'] = (df_inverse['Sharp_Limit_Total'] >= 10000).astype(int)
+            df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Delta'].abs()
+            df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
+
+            # === Cross Features for inverse rows
+            if 'Odds_Shift' in df_inverse.columns:
+                df_inverse['SharpMove_OddsShift'] = df_inverse['Sharp_Move_Signal'] * df_inverse['Odds_Shift']
+            
+            if 'Implied_Prob_Shift' in df_inverse.columns:
+                df_inverse['MarketLeader_ImpProbShift'] = df_inverse['Market_Leader'] * df_inverse['Implied_Prob_Shift']
+            
+            df_inverse['SharpLimit_SharpBook'] = df_inverse['Is_Sharp_Book'] * df_inverse['Sharp_Limit_Total']
+            df_inverse['LimitProtect_SharpMag'] = df_inverse['LimitUp_NoMove_Flag'] * df_inverse['Sharp_Line_Magnitude']
+            df_inverse['HomeRecLineMag'] = df_inverse['Is_Home_Team_Bet'] * df_inverse['Rec_Line_Magnitude']
+            
+            df_inverse['Delta_Sharp_vs_Rec'] = df_inverse['Sharp_Line_Delta'] - df_inverse['Rec_Line_Delta']
+            df_inverse['Sharp_Leads'] = (df_inverse['Sharp_Line_Delta'].abs() > df_inverse['Rec_Line_Delta'].abs()).astype('Int64')
+            df_inverse['Same_Direction_Move'] = (np.sign(df_inverse['Sharp_Line_Delta']) == np.sign(df_inverse['Rec_Line_Delta'])).astype('Int64')
+            df_inverse['Opposite_Direction_Move'] = (np.sign(df_inverse['Sharp_Line_Delta']) != np.sign(df_inverse['Rec_Line_Delta'])).astype('Int64')
+            df_inverse['Sharp_Move_No_Rec'] = ((df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() == 0)).astype('Int64')
+            df_inverse['Rec_Move_No_Sharp'] = ((df_inverse['Rec_Line_Delta'].abs() > 0) & (df_inverse['Sharp_Line_Delta'].abs() == 0)).astype('Int64')
 
             if market_type == "totals":
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
