@@ -94,6 +94,7 @@ def ensure_columns(df, required_cols, fill_value=None):
             df[col] = fill_value
     return df
 
+
 def normalize_team(t):
     return str(t).strip().lower().replace('.', '').replace('&', 'and')
 
