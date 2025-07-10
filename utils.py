@@ -314,8 +314,8 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         pre_filter = len(df)
         df = df[df['Post_Game'] == False]
         logging.info(f"🧹 Removed {pre_filter - len(df)} post-game rows before writing to sharp_moves_master")
-    if 'Snapshot_Timestamp' not in df.columns:
-        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+
+      
 
     logging.info(f"🧪 Sharp moves ready to write: {len(df)}")
 
@@ -1174,6 +1174,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df = pd.DataFrame(rows)
     df['Book'] = df['Book'].str.lower()
     df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     # 🧠 Add this line here
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
     # === Historical sorting for open-line extraction
