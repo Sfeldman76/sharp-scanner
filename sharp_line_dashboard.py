@@ -574,14 +574,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
         )
         
         # Optional: absolute versions if you're using magnitude
+       # === Magnitude & Directional Features (retain only de-correlated ones)
         df_market['Sharp_Line_Magnitude'] = df_market['Sharp_Line_Delta'].abs()
-        df_market['Rec_Line_Magnitude'] = df_market['Rec_Line_Delta'].abs()
-   
-        df_market['Line_Move_Magnitude'] = df_market['Line_Delta'].abs()
+        df_market['Delta_Sharp_vs_Rec'] = df_market['Sharp_Line_Delta'] - df_market['Rec_Line_Delta']
+        df_market['Sharp_Leads'] = (df_market['Sharp_Line_Magnitude'] > df_market['Rec_Line_Delta'].abs()).astype('int')
+        
+        # Optional: Keep for diagnostics only, not training
+        # df_market['Line_Move_Magnitude'] = df_market['Line_Delta'].abs()
+        
+        # === Contextual Flags
         df_market['Is_Home_Team_Bet'] = (df_market['Outcome'] == df_market['Home_Team_Norm']).astype(int)
         df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
-        df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] > 10000).astype(int)    
-        # === Combo Interaction Features
+        # Optional: Keep as debug flag, not as model feature
+        # df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] > 10000).astype(int)
+        
+        # === Interaction Features (filtered for value)
         if 'Odds_Shift' in df_market.columns:
             df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market['Odds_Shift']
         
@@ -590,19 +597,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
         
         df_market['SharpLimit_SharpBook'] = df_market['Is_Sharp_Book'] * df_market['Sharp_Limit_Total']
         df_market['LimitProtect_SharpMag'] = df_market['LimitUp_NoMove_Flag'] * df_market['Sharp_Line_Magnitude']
-        df_market['HomeRecLineMag'] = df_market['Is_Home_Team_Bet'] * df_market['Rec_Line_Magnitude']
-        
-        # === Sharp vs Rec Comparative Features
-        df_market['Delta_Sharp_vs_Rec'] = df_market['Sharp_Line_Delta'] - df_market['Rec_Line_Delta']
-        df_market['Sharp_Leads'] = (df_market['Sharp_Line_Delta'].abs() > df_market['Rec_Line_Delta'].abs()).astype('Int64')
-        df_market['Same_Direction_Move'] = (np.sign(df_market['Sharp_Line_Delta']) == np.sign(df_market['Rec_Line_Delta'])).astype('Int64')
-        df_market['Opposite_Direction_Move'] = (np.sign(df_market['Sharp_Line_Delta']) != np.sign(df_market['Rec_Line_Delta'])).astype('Int64')
-        df_market['Sharp_Move_No_Rec'] = ((df_market['Sharp_Line_Delta'].abs() > 0) & (df_market['Rec_Line_Delta'].abs() == 0)).astype('Int64')
-        df_market['Rec_Move_No_Sharp'] = ((df_market['Rec_Line_Delta'].abs() > 0) & (df_market['Sharp_Line_Delta'].abs() == 0)).astype('Int64')
+
 
         
         # === 🧠 Add new features to training
         features = [
+            # 🔹 Core sharp signals
             'Sharp_Move_Signal',
             'Sharp_Limit_Jump',
             'Sharp_Time_Score',
@@ -610,32 +610,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
             'Is_Reinforced_MultiMarket',
             'Market_Leader',
             'LimitUp_NoMove_Flag',
-            #'Is_Sharp_Book',
+        
+            # 🔹 Market response
             'Sharp_Line_Magnitude',
-            #'Rec_Line_Magnitude',
             'Is_Home_Team_Bet',
-            #'High_Limit_Flag'
+        
+            # 🔹 Engineered interactions (de-correlated)
+            'SharpMove_OddsShift',             # Interaction: sharp signal with actual move
+            'MarketLeader_ImpProbShift',       # Market-leader impact on price shift
+            'LimitProtect_SharpMag',           # Limit-up signal with no move (market protection)
+            'Delta_Sharp_vs_Rec',              # Directional disagreement between sharp vs rec
+            'Sharp_Leads'                      # Binary: did sharp books move first?
         ]
-        
-          # Add engineered combos and deltas if present
-        engineered_features = [
-            'SharpMove_OddsShift',
-            'SharpLimit_SharpBook',
-            'MarketLeader_ImpProbShift',
-            'LimitProtect_SharpMag',
-            'HomeRecLineMag',
-            'Delta_Sharp_vs_Rec',
-            'Sharp_Leads',
-            'Same_Direction_Move',
-            #'Opposite_Direction_Move',
-            'Sharp_Move_No_Rec',
-            'Rec_Move_No_Sharp'
-        ]
-        
-        features += [f for f in engineered_features if f in df_market.columns]
-
-
-        
+    
+            
     
     
         df_market = ensure_columns(df_market, features, 0)
@@ -1038,18 +1026,25 @@ def compute_diagnostics_vectorized(df):
         
         append_reason(df.get('Sharp_Prob_Shift', 0) > 0, "Confidence ↑")
         append_reason(df.get('Sharp_Prob_Shift', 0) < 0, "Confidence ↓")
+        
+        # 🔹 Core Sharp Signals
         append_reason(df.get('Sharp_Move_Signal', 0), "Detected Sharp Move")
         append_reason(df.get('Sharp_Limit_Jump', 0), "Limit Jump")
         append_reason(df.get('Sharp_Time_Score', 0) > 0.5, "Timed Entry")
         append_reason(df.get('Sharp_Limit_Total', 0) > 10000, "High Limit")
+        append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")
         append_reason(df.get('Is_Reinforced_MultiMarket', 0), "Cross-Market Signal")
         append_reason(df.get('Market_Leader', 0), "Led Market Move")
-        append_reason(df.get('LimitUp_NoMove_Flag', 0), "Limit ↑ w/o Price Move")       
-        #append_reason(df.get('Line_Delta', 0).abs() > 0.5, "Line Moved")
+        
+        # 🔹 Market Movement Confirmation
+        append_reason(abs(df.get('Sharp_Line_Delta', 0)) > 0.5, "Sharp Book Move")
+        append_reason(abs(df.get('Rec_Line_Delta', 0)) > 0.5, "Rec Book Move")
+        # append_reason(abs(df.get('Line_Delta', 0)) > 0.5, "Line Moved")  # Optional: generic move
+        
+        # 🔹 Contextual Info
         append_reason(df.get('Is_Home_Team_Bet', 0), "Home Side")
-        append_reason(df.get('High_Limit_Flag', 0), "High Limit Flag")
-        append_reason(df.get('Sharp_Line_Delta', 0).abs() > 0.5, "Sharp Book Move")
-        append_reason(df.get('Rec_Line_Delta', 0).abs() > 0.5, "Rec Book Move")
+        # append_reason(df.get('High_Limit_Flag', 0), "High Limit Flag")  # Optional if redundant with Sharp_Limit_Total
+
         df['Why Model Likes It'] = pd.Series([
             " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
         ], index=df.index)
@@ -1226,13 +1221,16 @@ def apply_blended_sharp_score(df, trained_models):
                 df_canon['Line_Delta'],
                 0
             )
+            # === Core movement features
             df_canon['Sharp_Line_Magnitude'] = df_canon['Sharp_Line_Delta'].abs()
-            df_canon['Rec_Line_Magnitude'] = df_canon['Rec_Line_Delta'].abs()
-
+            df_canon['Delta_Sharp_vs_Rec'] = df_canon['Sharp_Line_Delta'] - df_canon['Rec_Line_Delta']
+            df_canon['Sharp_Leads'] = (df_canon['Sharp_Line_Magnitude'] > df_canon['Rec_Line_Delta'].abs()).astype(int)
+            
+            # === Contextual indicators
             df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == df_canon['Home_Team_Norm']).astype(int)
             df_canon['Is_Favorite_Bet'] = (df_canon['Value'] < 0).astype(int)
-            df_canon['High_Limit_Flag'] = (df_canon['Sharp_Limit_Total'] > 10000).astype(int)
-            # === Cross Features (only if inputs exist)
+            
+            # === Interaction features (conditionally built if source columns exist)
             if 'Odds_Shift' in df_canon.columns:
                 df_canon['SharpMove_OddsShift'] = df_canon['Sharp_Move_Signal'] * df_canon['Odds_Shift']
             
@@ -1241,10 +1239,10 @@ def apply_blended_sharp_score(df, trained_models):
             
             df_canon['SharpLimit_SharpBook'] = df_canon['Is_Sharp_Book'] * df_canon['Sharp_Limit_Total']
             df_canon['LimitProtect_SharpMag'] = df_canon['LimitUp_NoMove_Flag'] * df_canon['Sharp_Line_Magnitude']
-            df_canon['HomeRecLineMag'] = df_canon['Is_Home_Team_Bet'] * df_canon['Rec_Line_Magnitude']
             
-            df_canon['Delta_Sharp_vs_Rec'] = df_canon['Sharp_Line_Delta'] - df_canon['Rec_Line_Delta']
-            df_canon['Sharp_Leads'] = (df_canon['Sharp_Line_Delta'].abs() > df_canon['Rec_Line_Delta'].abs()).astype('Int64')
+            # === (Optional diagnostics – not used in model, but can be retained for display)
+            df_canon['Rec_Line_Magnitude'] = df_canon['Rec_Line_Delta'].abs()
+            df_canon['HomeRecLineMag'] = df_canon['Is_Home_Team_Bet'] * df_canon['Rec_Line_Magnitude']
             df_canon['Same_Direction_Move'] = (np.sign(df_canon['Sharp_Line_Delta']) == np.sign(df_canon['Rec_Line_Delta'])).astype('Int64')
             df_canon['Opposite_Direction_Move'] = (np.sign(df_canon['Sharp_Line_Delta']) != np.sign(df_canon['Rec_Line_Delta'])).astype('Int64')
             df_canon['Sharp_Move_No_Rec'] = ((df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() == 0)).astype('Int64')
@@ -1349,13 +1347,16 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Line_Delta'],
                 0
             )
+            # === Core movement features
             df_inverse['Sharp_Line_Magnitude'] = df_inverse['Sharp_Line_Delta'].abs()
-            df_inverse['Rec_Line_Magnitude'] = df_inverse['Rec_Line_Delta'].abs()
-            df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
+            df_inverse['Delta_Sharp_vs_Rec'] = df_inverse['Sharp_Line_Delta'] - df_inverse['Rec_Line_Delta']
+            df_inverse['Sharp_Leads'] = (df_inverse['Sharp_Line_Magnitude'] > df_inverse['Rec_Line_Delta'].abs()).astype(int)
+            
+            # === Contextual indicators
             df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'] == df_inverse['Home_Team_Norm']).astype(int)
             df_inverse['Is_Favorite_Bet'] = (df_inverse['Value'] < 0).astype(int)
-            df_inverse['High_Limit_Flag'] = (df_inverse['Sharp_Limit_Total'] > 10000).astype(int)
-            # === Cross Features (only if inputs exist)
+            
+            # === Interaction features (conditionally built if source columns exist)
             if 'Odds_Shift' in df_inverse.columns:
                 df_inverse['SharpMove_OddsShift'] = df_inverse['Sharp_Move_Signal'] * df_inverse['Odds_Shift']
             
@@ -1364,14 +1365,15 @@ def apply_blended_sharp_score(df, trained_models):
             
             df_inverse['SharpLimit_SharpBook'] = df_inverse['Is_Sharp_Book'] * df_inverse['Sharp_Limit_Total']
             df_inverse['LimitProtect_SharpMag'] = df_inverse['LimitUp_NoMove_Flag'] * df_inverse['Sharp_Line_Magnitude']
-            df_inverse['HomeRecLineMag'] = df_inverse['Is_Home_Team_Bet'] * df_inverse['Rec_Line_Magnitude']
             
-            df_inverse['Delta_Sharp_vs_Rec'] = df_inverse['Sharp_Line_Delta'] - df_inverse['Rec_Line_Delta']
-            df_inverse['Sharp_Leads'] = (df_inverse['Sharp_Line_Delta'].abs() > df_inverse['Rec_Line_Delta'].abs()).astype('Int64')
+            # === (Optional diagnostics – not used in model, but may be retained)
+            df_inverse['Rec_Line_Magnitude'] = df_inverse['Rec_Line_Delta'].abs()
+            df_inverse['HomeRecLineMag'] = df_inverse['Is_Home_Team_Bet'] * df_inverse['Rec_Line_Magnitude']
             df_inverse['Same_Direction_Move'] = (np.sign(df_inverse['Sharp_Line_Delta']) == np.sign(df_inverse['Rec_Line_Delta'])).astype('Int64')
             df_inverse['Opposite_Direction_Move'] = (np.sign(df_inverse['Sharp_Line_Delta']) != np.sign(df_inverse['Rec_Line_Delta'])).astype('Int64')
             df_inverse['Sharp_Move_No_Rec'] = ((df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() == 0)).astype('Int64')
             df_inverse['Rec_Move_No_Sharp'] = ((df_inverse['Rec_Line_Delta'].abs() > 0) & (df_inverse['Sharp_Line_Delta'].abs() == 0)).astype('Int64')
+
 
             
             # === Final deduplication
@@ -1385,19 +1387,27 @@ def apply_blended_sharp_score(df, trained_models):
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             df_scored['Active_Signal_Count'] = (
+                # 🔹 Core sharp detection signals
                 (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
                 (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
                 (df_scored['Sharp_Time_Score'] > 0.5).astype(int) +
                 (df_scored['Sharp_Limit_Total'] > 10000).astype(int) +
-                (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
-                (df_scored['Market_Leader'] == 1).astype(int) +
                 (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
+            
+                # 🔹 Market leadership + sharp context
+                (df_scored['Market_Leader'] == 1).astype(int) +
+                (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
                 (df_scored['Is_Sharp_Book'] == 1).astype(int) +
-                (df_scored['Sharp_Line_Magnitude'].abs() > 0.5).astype(int) +   # Sharp line move magnitude
-                (df_scored['Rec_Line_Magnitude'].abs() > 0.5).astype(int) +     # Rec book confirmation
-                (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
-                (df_scored['High_Limit_Flag'] == 1).astype(int)
+            
+                # 🔹 Line movement magnitude confirmation
+                (df_scored['Sharp_Line_Magnitude'] > 0.5).astype(int) +
+                (df_scored['Rec_Line_Magnitude'] > 0.5).astype(int) +
+            
+                # 🔹 Contextual team info
+                (df_scored['Is_Home_Team_Bet'] == 1).astype(int)
+                # + (df_scored['High_Limit_Flag'] == 1).astype(int)  # Optional: use if you're still tracking this
             )
+
             
             df_scored['Passes_Gate'] = (
                 df_scored['Model_Sharp_Win_Prob'] >= 0.60
