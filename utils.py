@@ -932,7 +932,7 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
 
             if df_inverse.empty:
-                st.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
+                logger.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
                 continue  # optional: skip this scoring loop if inverse fails
 
            
@@ -1160,9 +1160,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
  
-
-
-                   
+                 
 
 
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
