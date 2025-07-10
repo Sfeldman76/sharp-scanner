@@ -118,7 +118,7 @@ def compute_line_hash(row):
             str(row.get('Sharp_Move_Signal', '')).strip(),
             str(row.get('Sharp_Limit_Total', '')).strip(),
             str(row.get('Open_Value', '')).strip(),
-            str(row.get('Snapshot_Timestamp', '')).strip(),  # ✅ NEW LINE
+            #str(row.get('Snapshot_Timestamp', '')).strip(),  # ✅ NEW LINE
         ]
         key = "|".join(key_fields)
         return hashlib.md5(key.encode()).hexdigest()
@@ -1165,7 +1165,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                  
 
 
-    df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
 
 
