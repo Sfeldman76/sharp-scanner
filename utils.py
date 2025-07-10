@@ -1086,6 +1086,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     label = normalize_label(o.get('name', ''))
                     point = o.get('point')
                     price = o.get('price')
+                    logger.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
+
                     key = (label, point)
                     if key not in seen:
                         seen[key] = True
@@ -1093,7 +1095,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     odds_map[key] = price
 
                 for o in canonical_outcomes:
-                    label = normalize_label(o.get('name', ''))
+                    raw_label = o['name'].strip().lower()  # no normalization
+                    key = (raw_label, point)
+                    odds_map[key] = o.get('price')
+
                     point = o.get('point')
                     price = o.get('price')
 
