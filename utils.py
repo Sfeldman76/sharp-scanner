@@ -938,11 +938,9 @@ def apply_blended_sharp_score(df, trained_models):
         
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
-
     if not current:
         logger.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-  
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
@@ -975,52 +973,53 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
         game_hour = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
         gid = game.get('id')
-        prev_game = previous_map.get(gid, {})
 
         for book in game.get('bookmakers', []):
             book_key_raw = book.get('key', '').lower()
             book_key = normalize_book_key(book_key_raw, SHARP_BOOKS, REC_BOOKS)
 
-            # 🚫 Skip if book is not allowed
             if book_key not in SHARP_BOOKS + REC_BOOKS:
                 continue
-            
+
             book_title = book.get('title', book_key)
 
             for market in book.get('markets', []):
                 mtype = market.get('key', '').strip().lower()
                 if mtype not in ['spreads', 'totals', 'h2h']:
                     continue
-            
-                # === Canonical outcome filtering — drop alternate lines
-                # === Canonical outcome filtering — drop alternate lines
+
                 seen = {}
                 canonical_outcomes = []
                 odds_map = {}
-                
+
                 for o in market.get('outcomes', []):
                     label = normalize_label(o.get('name', ''))
-                    value = o.get('point') if mtype != 'h2h' else o.get('price')
-                    key = (label, value)
-                
+                    point = o.get('point')
+                    price = o.get('price')
+                    key = (label, point)
                     if key not in seen:
                         seen[key] = True
                         canonical_outcomes.append(o)
-                
-                    # ✅ Build odds_map for guaranteed (label, point) → price mapping
-                    odds_map[key] = o.get('price')
-                
-                # === Now loop through canonical outcomes only
+                    odds_map[key] = price
+
                 for o in canonical_outcomes:
                     label = normalize_label(o.get('name', ''))
-                    value = o.get('point') if mtype != 'h2h' else o.get('price')
-                    key = (label, value)
-                    odds_price = odds_map.get(key)  # ✅ This is now always accurate
-                
+                    point = o.get('point')
+                    price = o.get('price')
+
+                    if mtype == 'h2h':
+                        value = price
+                        odds_price = price
+                        key = (label, price)
+                    else:
+                        value = point
+                        odds_price = odds_map.get((label, point))
+                        key = (label, point)
+
                     limit = o.get('bet_limit')
                     prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
-                
+
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
                     entry = {
                         'Sport': sport_key.upper(),
@@ -1033,7 +1032,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Bookmaker': book_title,
                         'Book': book_key,
                         'Value': value,
-                        'Odds_Price': odds_price,  # ✅ Pulled from map
+                        'Odds_Price': odds_price,
                         'Limit': limit,
                         'Old Value': old_val,
                         'Delta': round(value - old_val, 2) if old_val is not None and value is not None else None,
@@ -1042,11 +1041,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Commence_Hour': game_hour
                     }
                     rows.append(entry)
-
-                   
                     line_history_log.setdefault(gid, []).append(entry.copy())
 
-                    # AFTER (fixed)
                     if value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, value, old_val))
@@ -1055,20 +1051,23 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         if (game_name, mtype, label) not in line_open_map:
                             line_open_map[(game_name, mtype, label)] = (value, snapshot_time)
 
-                    
-
     pre_dedup = len(rows)
     rows_df = pd.DataFrame(rows).drop_duplicates()
     rows_df = (
         rows_df.sort_values('Time')
                .drop_duplicates(subset=['Game', 'Bookmaker', 'Market', 'Outcome', 'Value'], keep='last')
     )
-
-# 
     rows = rows_df.to_dict(orient='records')
     logger.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
-        # 🔁 REFACTORED SHARP SCORING
+
+    # Apply sharp scoring
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
+    df_sharp_lines = pd.DataFrame(sharp_lines.values())
+
+ 
+
+
+                   
 
 
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
