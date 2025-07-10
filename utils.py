@@ -556,9 +556,9 @@ def apply_blended_sharp_score(df, trained_models):
 
     total_start = time.time()
     scored_all = []
-    if 'Snapshot_Timestamp' not in df.columns:
-        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-        logger.info("✅ 'Snapshot_Timestamp' column added.")
+    #if 'Snapshot_Timestamp' not in df.columns:
+        #df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+        #logger.info("✅ 'Snapshot_Timestamp' column added.")
     # ✅ Drop older snapshots — keep only latest odds per Game + Market + Outcome + Bookmaker
     df = (
         df.sort_values('Snapshot_Timestamp')
