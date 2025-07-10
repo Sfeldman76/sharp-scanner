@@ -113,7 +113,7 @@ def compute_line_hash(row):
             str(row.get('Sharp_Move_Signal', '')).strip(),
             str(row.get('Sharp_Limit_Total', '')).strip(),
             str(row.get('Open_Value', '')).strip(),
-            #str(row.get('Snapshot_Timestamp', '')).strip(),  # ✅ NEW LINE
+            str(row.get('Snapshot_Timestamp', '')).strip(),  # ✅ NEW LINE
         ]
         key = "|".join(key_fields)
         return hashlib.md5(key.encode()).hexdigest()
