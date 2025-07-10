@@ -314,8 +314,9 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         pre_filter = len(df)
         df = df[df['Post_Game'] == False]
         logging.info(f"🧹 Removed {pre_filter - len(df)} post-game rows before writing to sharp_moves_master")
+    if 'Snapshot_Timestamp' not in df.columns:
+        df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
 
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     logging.info(f"🧪 Sharp moves ready to write: {len(df)}")
 
     # Clean column names
@@ -1120,6 +1121,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Sport': sport_key.upper(),
                         'Game_Key': game_key,
                         'Time': snapshot_time,
+                        'Snapshot_Timestamp': pd.to_datetime(snapshot_time),
                         'Game': game_name,
                         'Game_Start': event_time,
                         'Market': mtype,
