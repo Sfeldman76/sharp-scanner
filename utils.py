@@ -1087,10 +1087,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     logger.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
                 
                     key = (label, point)
-                    if key not in seen:
-                        seen[key] = True
-                        canonical_outcomes.append(o)
-                    odds_map[key] = price
+                    # Keep all outcomes — no deduping
+                    canonical_outcomes.append(o)
+                    odds_map[(normalize_label(o['name']), o.get('point'))] = o.get('price')
+
                 
                 # === Second pass to build entries
                 for o in canonical_outcomes:
