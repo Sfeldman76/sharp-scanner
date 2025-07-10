@@ -1046,18 +1046,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                    
                     line_history_log.setdefault(gid, []).append(entry.copy())
 
-                    if line_value is not None:
+                    # AFTER (fixed)
+                    if value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
-                    
-                        # ✅ Optionally store both value and odds
-                        sharp_limit_map[(game_name, mtype)][label].append((limit, line_value, old_val))
-                    
+                        sharp_limit_map[(game_name, mtype)][label].append((limit, value, old_val))
                         if book_key in SHARP_BOOKS:
                             sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
-                    
                         if (game_name, mtype, label) not in line_open_map:
-                            line_open_map[(game_name, mtype, label)] = (line_value, snapshot_time)
+                            line_open_map[(game_name, mtype, label)] = (value, snapshot_time)
 
+                    
 
     pre_dedup = len(rows)
     rows_df = pd.DataFrame(rows).drop_duplicates()
