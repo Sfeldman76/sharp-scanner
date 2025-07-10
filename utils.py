@@ -1079,49 +1079,48 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 if mtype not in ['spreads', 'totals', 'h2h']:
                     continue
 
+                
                 seen = {}
                 canonical_outcomes = []
                 odds_map = {}
-
+                
+                # === First pass to deduplicate and store odds
                 for o in market.get('outcomes', []):
                     label = normalize_label(o.get('name', ''))
                     point = o.get('point')
                     price = o.get('price')
                     logger.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
-
+                
                     key = (label, point)
                     if key not in seen:
                         seen[key] = True
                         canonical_outcomes.append(o)
                     odds_map[key] = price
-
+                
+                # === Second pass to build entries
                 for o in canonical_outcomes:
-                    raw_label = o['name'].strip().lower()  # no normalization
-                    key = (raw_label, point)
-                    odds_map[key] = o.get('price')
-
+                    label = normalize_label(o.get('name', ''))  # ✅ FIXED: per-outcome label
+                    raw_label = o.get('name', '').strip().lower()
                     point = o.get('point')
                     price = o.get('price')
-
+                
                     if mtype == 'h2h':
                         value = price
                         odds_price = price
-                        key = (label, price)
                     else:
                         value = point
-                        odds_price = odds_map.get((label, point))
-                        key = (label, point)
-
+                        odds_price = price
+                
                     limit = o.get('bet_limit')
                     prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
                     old_val = previous_odds_map.get(prev_key)
-
+                
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
+                    
                     entry = {
                         'Sport': sport_key.upper(),
                         'Game_Key': game_key,
                         'Time': snapshot_time,
-                       
                         'Game': game_name,
                         'Game_Start': event_time,
                         'Market': mtype,
@@ -1137,9 +1136,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
                     }
+                
                     rows.append(entry)
                     line_history_log.setdefault(gid, []).append(entry.copy())
-
+                
                     if value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, value, old_val))
