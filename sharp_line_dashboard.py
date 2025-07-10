@@ -610,11 +610,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
             'Is_Reinforced_MultiMarket',
             'Market_Leader',
             'LimitUp_NoMove_Flag',
-            'Is_Sharp_Book',
+            #'Is_Sharp_Book',
             'Sharp_Line_Magnitude',
-            'Rec_Line_Magnitude',
+            #'Rec_Line_Magnitude',
             'Is_Home_Team_Bet',
-            'High_Limit_Flag'
+            #'High_Limit_Flag'
         ]
         
           # Add engineered combos and deltas if present
@@ -627,7 +627,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
             'Delta_Sharp_vs_Rec',
             'Sharp_Leads',
             'Same_Direction_Move',
-            'Opposite_Direction_Move',
+            #'Opposite_Direction_Move',
             'Sharp_Move_No_Rec',
             'Rec_Move_No_Sharp'
         ]
