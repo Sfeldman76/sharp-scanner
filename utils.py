@@ -1078,9 +1078,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 seen = {}
                 canonical_outcomes = []
                 odds_map = {}
-                
+                logger.debug(f"Game: {game['home_team']} vs {game['away_team']} | Market: {mtype}")
                 # === First pass to deduplicate and store odds
                 for o in market.get('outcomes', []):
+                    logger.debug(f"  Outcome: {o.get('name')} | Point: {o.get('point')} | Price: {o.get('price')}")
                     label = normalize_label(o.get('name', ''))
                     point = o.get('point')
                     price = o.get('price')
@@ -1104,7 +1105,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         odds_price = price
                     else:
                         value = point
-                        odds_price = price
+                        odds_price = odds_map.get((label, point))  # ✅ ensure odds match label+point
+                    logger.debug(f"{label} {point}: odds_price = {odds_price}")
+
                 
                     limit = o.get('bet_limit')
                     prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
