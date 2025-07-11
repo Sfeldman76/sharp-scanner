@@ -978,27 +978,15 @@ def compute_diagnostics_vectorized(df):
             ],
             default="⚪ Mixed"
         )
+        # === Step 5: Validate `"Why Model Likes It"` already exists
+        if 'Why Model Likes It' not in df.columns:
+            df['Why Model Likes It'] = "⚠️ Missing — run apply_blended_sharp_score() first"
+       
+    
 
-        # === Step 5: Why Model Likes It
-        prob = pd.to_numeric(df.get('Model Prob'), errors='coerce')
-
-        model_reason = np.select(
-            [
-                prob >= 0.75,
-                prob >= 0.52,
-                prob <= 0.48,
-                prob <= 0.42
-            ],
-            [
-                "🔼 Strong Model Edge",
-                "↗️ Slight Model Lean",
-                "↘️ Slight Model Fade",
-                "🔽 Strong Model Fade"
-            ],
-            default="🪙 Coinflip"
-        )
-
-
+        # === Step 5: Validate `"Why Model Likes It"` already exists
+        if 'Why Model Likes It' not in df.columns:
+            df['Why Model Likes It'] = "⚠️ Missing — run apply_blended_sharp_score() first"
        
         
         # === Validate required columns
@@ -1015,33 +1003,8 @@ def compute_diagnostics_vectorized(df):
             st.stop()  # Abort cleanly
         # === Initialize reasoning_parts aligned with df
         
-        reasoning_parts = []
         
-        # === Append labeled reasoning Series
-        def append_reason(condition, label):
-            # Always create Series with the same index as df to ensure alignment
-            mask = pd.Series(condition, index=df.index).fillna(False)
-            reasoning_parts.append(mask.map(lambda x: label if x else ""))
-        
-        
-       
-        append_reason(df.get('Sharp_Move_Signal', 0) == 1, "Detected Sharp Move")
-        append_reason(df.get('Sharp_Limit_Jump', 0) == 1, "Limit Jump")
-        append_reason(df.get('Sharp_Time_Score', 0) > 0.5, "Timed Entry")
-        append_reason(df.get('Sharp_Limit_Total', 0) > 10000, "High Limit")
-        append_reason(df.get('LimitUp_NoMove_Flag', 0) == 1, "Limit ↑ w/o Price Move")
-        append_reason(df.get('Market_Leader', 0) == 1, "Led Market Move")
-        append_reason(df.get('Is_Reinforced_MultiMarket', 0) == 1, "Cross-Market Signal")
-        append_reason(df.get('Is_Sharp_Book', 0) == 1, "From Sharp Book")
-        append_reason(df.get('Sharp_Line_Magnitude', 0) > 0.5, "Sharp Book Move")
-        append_reason(df.get('Rec_Line_Magnitude', 0) > 0.5, "Rec Book Move")
-        append_reason(df.get('Is_Home_Team_Bet', 0) == 1, "Home Side")
-
-
-        df['Why Model Likes It'] = pd.Series([
-            " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
-        ], index=df.index)
-                
+    
         # === Final output table
         # === Final output table
         diagnostics_df = df[[
@@ -1385,41 +1348,59 @@ def apply_blended_sharp_score(df, trained_models):
 
            
             # ✅ Combine canonical and inverse into one scored DataFrame
+            # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+            
+            # === Compute Active Signal Count
             df_scored['Active_Signal_Count'] = (
-                # 🔹 Core sharp detection signals
                 (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
                 (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
                 (df_scored['Sharp_Time_Score'] > 0.5).astype(int) +
                 (df_scored['Sharp_Limit_Total'] > 10000).astype(int) +
                 (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
-            
-                # 🔹 Market leadership + sharp context
                 (df_scored['Market_Leader'] == 1).astype(int) +
                 (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
                 (df_scored['Is_Sharp_Book'] == 1).astype(int) +
-            
-                # 🔹 Line movement magnitude confirmation
                 (df_scored['Sharp_Line_Magnitude'] > 0.5).astype(int) +
                 (df_scored['Rec_Line_Magnitude'] > 0.5).astype(int) +
-            
-                # 🔹 Contextual team info
                 (df_scored['Is_Home_Team_Bet'] == 1).astype(int)
-                # + (df_scored['High_Limit_Flag'] == 1).astype(int)  # Optional: use if you're still tracking this
             )
-
-            df['Reason_Label_Count'] = pd.Series([
-                len([part for part in parts if part]) for parts in zip(*reasoning_parts)
-            ], index=df.index)
             
-            # Optional: Assert that this matches Active_Signal_Count
-            if 'Active_Signal_Count' in df.columns:
-                mismatch = df[df['Active_Signal_Count'] != df['Reason_Label_Count']]
-                if not mismatch.empty:
-                    st.warning("⚠️ Mismatch between Active_Signal_Count and Why Model Likes It label count")
-                    st.dataframe(mismatch[[
-                        'Game_Key', 'Outcome', 'Active_Signal_Count', 'Reason_Label_Count', 'Why Model Likes It'
-                    ]])
+            # === Build reasoning from gates
+            reasoning_parts = []
+            
+            def append_reason(condition, label):
+                mask = pd.Series(condition, index=df_scored.index).fillna(False)
+                reasoning_parts.append(mask.map(lambda x: label if x else ""))
+             
+              
+            append_reason(df_scored['Sharp_Move_Signal'] == 1, "Detected Sharp Move")
+            append_reason(df_scored['Sharp_Limit_Jump'] == 1, "Limit Jump")
+            append_reason(df_scored['Sharp_Time_Score'] > 0.5, "Timed Entry")
+            append_reason(df_scored['Sharp_Limit_Total'] > 10000, "High Limit")
+            append_reason(df_scored['LimitUp_NoMove_Flag'] == 1, "Limit ↑ w/o Price Move")
+            append_reason(df_scored['Market_Leader'] == 1, "Led Market Move")
+            append_reason(df_scored['Is_Reinforced_MultiMarket'] == 1, "Cross-Market Signal")
+            append_reason(df_scored['Is_Sharp_Book'] == 1, "From Sharp Book")
+            append_reason(df_scored['Sharp_Line_Magnitude'] > 0.5, "Sharp Book Move")
+            append_reason(df_scored['Rec_Line_Magnitude'] > 0.5, "Rec Book Move")
+            append_reason(df_scored['Is_Home_Team_Bet'] == 1, "Home Side")
+            
+            df_scored['Why Model Likes It'] = pd.Series([
+                " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
+            ], index=df_scored.index)
+            
+            df_scored['Reason_Label_Count'] = pd.Series([
+                sum(1 for part in parts if part) for parts in zip(*reasoning_parts)
+            ], index=df_scored.index)
+            
+            # Optional mismatch check (can delete later)
+            mismatch = df_scored[df_scored['Active_Signal_Count'] != df_scored['Reason_Label_Count']]
+            if not mismatch.empty:
+                st.warning("⚠️ Mismatch between Active_Signal_Count and Reason_Label_Count")
+                st.dataframe(mismatch[[
+                    'Game_Key', 'Outcome', 'Active_Signal_Count', 'Reason_Label_Count', 'Why Model Likes It'
+                ]])
 
             df_scored['Passes_Gate'] = (
                 df_scored['Model_Sharp_Win_Prob'] >= 0.55
