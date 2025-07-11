@@ -1088,7 +1088,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     label = normalize_label(o.get('name', ''))
                     point = o.get('point')
                     price = o.get('price')
-                    logging.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
+                    #logging.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
                 
                     key = (label, point)
                     # Keep all outcomes — no deduping
@@ -1109,7 +1109,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     else:
                         value = point
                         odds_price = odds_map.get((label, point))  # ✅ ensure odds match label+point
-                    logging.debug(f"{label} {point}: odds_price = {odds_price}")
+                    #logging.debug(f"{label} {point}: odds_price = {odds_price}")
 
                 
                     limit = o.get('bet_limit')
