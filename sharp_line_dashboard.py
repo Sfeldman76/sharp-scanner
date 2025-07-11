@@ -1668,7 +1668,7 @@ def render_scanner_tab(label, sport_key, container):
         
                 # ✅ Score everything
                 df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-                #st.write("📋 df_scored.columns BEFORE normalization:", df_scored.columns.tolist())
+                st.write("📋 df_scored.columns BEFORE normalization:", df_scored.columns.tolist())
         
                 if df_scored.empty:
                     st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
