@@ -1140,7 +1140,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 
                     rows.append(entry)
                     line_history_log.setdefault(gid, []).append(entry.copy())
-                
+                    logging.debug(
+                        f"[{mtype.upper()}] {label} | Book: {book_key} | Value: {value} | Odds_Price: {odds_price} | "
+                        f"Limit: {limit} | Game: {game_name}"
+                    )
+
                     if value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
                         sharp_limit_map[(game_name, mtype)][label].append((limit, value, old_val))
