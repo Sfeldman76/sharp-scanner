@@ -635,7 +635,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         corr_matrix = X.corr().abs()
         
         # Threshold for flagging redundancy
-        threshold = 0.70
+        threshold = 0.85
         
         # Collect highly correlated feature pairs (excluding self-pairs)
         high_corr_pairs = []
@@ -867,7 +867,63 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             "calibrator": cal_auc  # or cal_logloss
         }
         save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET)
+        from scipy.stats import entropy
         
+        # === Base features already known to work well
+        base_features = [
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score',
+            'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket', 'Market_Leader',
+            'LimitUp_NoMove_Flag', 'Sharp_Line_Magnitude', 'Is_Home_Team_Bet'
+        ]
+        
+        # === Optional new features to test
+        optional_feature_sets = [
+            ['Rec_Line_Magnitude'],
+            ['SharpMove_OddsShift'],
+            ['MarketLeader_ImpProbShift'],
+            ['Delta_Sharp_vs_Rec'],
+            ['Sharp_Leads'],
+            ['SharpLimit_SharpBook'],
+            ['LimitProtect_SharpMag'],
+            ['High_Limit_Flag'],
+            ['Is_Favorite_Bet']
+        ]
+        
+        results = []
+        
+        for opt_feats in optional_feature_sets:
+            current_features = base_features + opt_feats
+            df_market = ensure_columns(df_market, current_features, 0)
+            
+            X = df_market[current_features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+            y = df_market['SHARP_HIT_BOOL'].astype(int)
+        
+            X_train, X_val, y_train, y_val = train_test_split(X, y, stratify=y, test_size=0.25, random_state=42)
+        
+            # === Simple model
+            model = xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1)
+            model.fit(X_train, y_train)
+            proba_val = model.predict_proba(X_val)[:, 1]
+        
+            # === Metrics
+            val_logloss = log_loss(y_val, proba_val)
+            val_brier = brier_score_loss(y_val, proba_val)
+            val_std = np.std(proba_val)
+            val_entropy = entropy(np.histogram(proba_val, bins=10, range=(0, 1), density=True)[0])
+        
+            results.append({
+                'Feature_Added': opt_feats[0],
+                'LogLoss': val_logloss,
+                'Brier': val_brier,
+                'Prob Std Dev': val_std,
+                'Prediction Entropy': val_entropy
+            })
+        
+        # Show results
+        results_df = pd.DataFrame(results).sort_values(by='LogLoss')
+        st.markdown("### 🧪 Optional Feature Comparison")
+        st.dataframe(results_df.style.format("{:.4f}", subset=['LogLoss', 'Brier', 'Prob Std Dev', 'Prediction Entropy']))
+
         st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
         - AUC: {auc:.4f}
         - Accuracy: {acc:.4f}
