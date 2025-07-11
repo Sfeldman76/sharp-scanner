@@ -98,7 +98,9 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import RandomizedSearchCV
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
-
+from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+from scipy.stats import entropy
+from sklearn.model_selection import train_test_split
 
 import logging
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
@@ -680,12 +682,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         }
         
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-        from sklearn.model_selection import train_test_split
         
-        # === Holdout split for real-world generalization testing
-        X_train, X_val, y_train, y_val = train_test_split(
-            X, y, test_size=0.25, stratify=y, random_state=42
-        )
+        
+   
+        # Split data
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
+        
+        # Evaluate base feature set
+        base_result = evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base Features")
+        
+        # Then add experimental features (e.g. Closing_Line_Margin)
+        X["Closing_Line_Margin"] = (df_market['Value'] - df_market['Closing_Value']).abs().fillna(0)
+        
+        # Re-split after feature change
+        X_exp = X[base_features + ["Closing_Line_Margin"]]
+        X_train_exp, X_val_exp, _, _ = train_test_split(X_exp, y, test_size=0.25, stratify=y, random_state=42)
+        
+        # Evaluate expanded feature set
+        exp_result = evaluate_model_confidence_and_performance(X_train_exp, y_train, X_val_exp, y_val, model_label="+ Margin Feature")
 
         # === LogLoss model
         grid_logloss = RandomizedSearchCV(
@@ -866,7 +880,50 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
     if not trained_models:
         st.error("❌ No models were trained.")
     return trained_models
-        
+
+from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+from scipy.stats import entropy
+import numpy as np
+
+def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base"):
+    model = xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1)
+    model.fit(X_train, y_train)
+
+    # Predict probabilities
+    prob_train = model.predict_proba(X_train)[:, 1]
+    prob_val = model.predict_proba(X_val)[:, 1]
+
+    # Confidence metrics
+    std_dev = np.std(prob_val)
+    prob_range = round(prob_val.max() - prob_val.min(), 4)
+    avg_entropy = np.mean([
+        entropy([p, 1 - p], base=2) if 0 < p < 1 else 0 for p in prob_val
+    ])
+
+    # Performance metrics
+    auc_val = roc_auc_score(y_val, prob_val)
+    brier_val = brier_score_loss(y_val, prob_val)
+    logloss_val = log_loss(y_val, prob_val)
+
+    st.markdown(f"### 🧪 Confidence & Performance – `{model_label}`")
+    st.write(f"- Std Dev of Predictions: `{std_dev:.4f}`")
+    st.write(f"- Probability Range: `{prob_range:.4f}`")
+    st.write(f"- Avg Prediction Entropy: `{avg_entropy:.4f}`")
+    st.write(f"- Holdout AUC: `{auc_val:.4f}`")
+    st.write(f"- Holdout Log Loss: `{logloss_val:.4f}`")
+    st.write(f"- Holdout Brier Score: `{brier_val:.4f}`")
+
+    return {
+        "model": model,
+        "std_dev": std_dev,
+        "prob_range": prob_range,
+        "entropy": avg_entropy,
+        "auc": auc_val,
+        "brier": brier_val,
+        "logloss": logloss_val
+    }
+
+
 def read_market_weights_from_bigquery():
     try:
         client = bq_client
