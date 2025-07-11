@@ -624,8 +624,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         ]
     
             
-    
-    
+        
+        st.markdown(f"### 📈 Features Used: `{len(features)}`")
         df_market = ensure_columns(df_market, features, 0)
         
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
@@ -754,7 +754,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         # === Weighted ensemble
         ensemble_prob = w_logloss * prob_logloss + w_auc * prob_auc
 
-       
+       # === Std deviation of ensemble probabilities (measures confidence tightness)
+        std_dev_pred = np.std(ensemble_prob)
+        
+        # === Spread of calibrated win probabilities
+        prob_range = np.max(ensemble_prob) - np.min(ensemble_prob)
+        
+        # === Sharpeness score (low entropy = sharper predictions)
+        entropy = -np.mean([
+            p * np.log(p + 1e-10) + (1 - p) * np.log(1 - p + 1e-10)
+            for p in ensemble_prob
+        ])
+        
+        st.markdown(f"### 🔍 Prediction Confidence Analysis – `{market.upper()}`")
+        st.write(f"- Std Dev of Predictions: `{std_dev_pred:.4f}`")
+        st.write(f"- Probability Range: `{prob_range:.4f}`")
+        st.write(f"- Avg Prediction Entropy: `{entropy:.4f}`")
+
 
         # === Threshold sweep
         thresholds = np.arange(0.1, 0.96, 0.05)
@@ -1356,6 +1372,12 @@ def apply_blended_sharp_score(df, trained_models):
             
                 if len(reasoning_parts) == 0:
                     return "🤷‍♂️ No clear reason yet"
+                    
+                if row.get("Sharp_Time_Score", 0) > 0.5:
+                    reasoning_parts.append("⏱️ Timing Edge")
+                
+                if row.get("Rec_Line_Magnitude", 0) > 0.5:
+                    reasoning_parts.append("📉 Rec Book Move")
             
                 return " + ".join(reasoning_parts)
             
