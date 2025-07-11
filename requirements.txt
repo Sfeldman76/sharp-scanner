@@ -15,6 +15,7 @@ psutil
 # === Machine Learning ===
 xgboost
 scikit-learn
+scipy
 # === Google Cloud SDKs ===
 google-auth
 google-auth-oauthlib
