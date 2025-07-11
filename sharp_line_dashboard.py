@@ -692,10 +692,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         base_result = evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base Features")
         
         # Then add experimental features (e.g. Closing_Line_Margin)
-        X["Closing_Line_Margin"] = (df_market['Value'] - df_market['Closing_Value']).abs().fillna(0)
+        X["Line_Move_Magnitude"] = (df_market['Value'] - df_market['Open_Value']).abs().fillna(0)
+
         
         # Re-split after feature change
-        X_exp = X[base_features + ["Closing_Line_Margin"]]
+        X_exp = X[base_features + ["Line_Move_Magnitude"]]
         X_train_exp, X_val_exp, _, _ = train_test_split(X_exp, y, test_size=0.25, stratify=y, random_state=42)
         
         # Evaluate expanded feature set
