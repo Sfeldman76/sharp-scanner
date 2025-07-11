@@ -1279,24 +1279,24 @@ def apply_blended_sharp_score(df, trained_models):
             df_full_market['Outcome'] = df_full_market['Outcome'].astype(str).str.lower().str.strip()
             
             # === Flip outcome depending on market
+        
+            
             if market_type == "totals":
-                df_inverse['Outcome'] = df_inverse['Outcome'].map(lambda x: 'under' if x == 'over' else 'over')
+                df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
+                df_inverse['Outcome'] = 'under'
+                df_inverse['Outcome_Norm'] = 'under'
             
             elif market_type in ["h2h", "spreads"]:
-                df_inverse['Canonical_Team'] = df_inverse['Outcome']  # Already normalized
-                df_inverse['Outcome'] = (
-                    pd.Series(np.where(
-                        df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
-                        df_inverse['Away_Team_Norm'],
-                        df_inverse['Home_Team_Norm']
-                    ), index=df_inverse.index)
-                    .astype(str).str.lower().str.strip()
+                df_inverse['Canonical_Team'] = df_inverse['Outcome']
+                df_inverse['Outcome'] = np.where(
+                    df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
+                    df_inverse['Away_Team_Norm'],
+                    df_inverse['Home_Team_Norm']
                 )
+                df_inverse['Outcome'] = df_inverse['Outcome'].astype(str).str.lower().str.strip()
+                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-            # Update Outcome_Norm after flipping
-            df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            
-            # Rebuild Game_Key and Game_Key_Base after flip
+            # === Rebuild keys
             df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
             df_inverse['Game_Key'] = (
                 df_inverse['Home_Team_Norm'] + "_" +
@@ -1312,27 +1312,34 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Market']
             )
             
-            # Merge in opponent value using Team_Key
+            # === Merge opponent values
             df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
             df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
             
-           # Before merge, deduplicate df_full_market so each Team_Key has only one value
             df_full_market = (
                 df_full_market
-                .dropna(subset=['Value'])
-                .sort_values(['Snapshot_Timestamp', 'Bookmaker'])  # You can customize sorting if needed
-                .drop_duplicates(subset=['Team_Key'], keep='last')  # ⬅️ Keep only the most recent line
+                .dropna(subset=['Value', 'Odds_Price'])
+                .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
+                .drop_duplicates(subset=['Team_Key'], keep='last')
             )
             
             df_inverse = df_inverse.merge(
-                df_full_market[['Team_Key', 'Value']],
+                df_full_market[['Team_Key', 'Value', 'Odds_Price']],
                 on='Team_Key',
                 how='left',
                 suffixes=('', '_opponent')
             )
-
+            
             df_inverse['Value'] = df_inverse['Value_opponent']
-            df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+            df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
+            df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
+            
+            # === Diagnostic
+            missing_val = df_inverse['Value'].isna().sum()
+            missing_odds = df_inverse['Odds_Price'].isna().sum()
+            if missing_val > 0 or missing_odds > 0:
+                st.warning(f"⚠️ UI Inverse Merge — {missing_val} missing Value, {missing_odds} missing Odds_Price")
+
             
             # === Shared feature engineering for all market types
             df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
