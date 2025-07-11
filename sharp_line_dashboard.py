@@ -957,20 +957,20 @@ def compute_diagnostics_vectorized(df):
             ],
             default="⚪ Mixed"
         )
-
-       
+    
+        if 'Why Model Likes It' not in df.columns:
+            df['Why Model Likes It'] = "⚠️ Missing from Compute vector — run apply_blended_sharp_score() first"
+    
         # === Final diagnostics output table
-  
         diagnostics_df = df[[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Tier_Change', 'Confidence Trend', 'Line/Model Direction'
+            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
         ]].rename(columns={
             'Tier_Change': 'Tier Δ'
         })
-        
+    
         return diagnostics_df
-
-
+    
     except Exception as e:
         st.error("❌ Error computing diagnostics")
         st.exception(e)
@@ -978,6 +978,7 @@ def compute_diagnostics_vectorized(df):
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
             'Tier Δ', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
         ])
+
 
 
         
