@@ -599,6 +599,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         
         df_market['SharpLimit_SharpBook'] = df_market['Is_Sharp_Book'] * df_market['Sharp_Limit_Total']
         df_market['LimitProtect_SharpMag'] = df_market['LimitUp_NoMove_Flag'] * df_market['Sharp_Line_Magnitude']
+        # Example for engineered features
+        df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market.get('Odds_Shift', 0)
+        df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 10000).astype(int)
+       
 
 
         
@@ -688,20 +692,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         # Split data
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
         
-        # Evaluate base feature set
-        base_result = evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base Features")
+    
         
-        # Then add experimental features (e.g. Closing_Line_Margin)
-        X["Line_Move_Magnitude"] = (df_market['Value'] - df_market['Open_Value']).abs().fillna(0)
-
         
-        # Re-split after feature change
-        X_exp = X[base_features + ["Line_Move_Magnitude"]]
-        X_train_exp, X_val_exp, _, _ = train_test_split(X_exp, y, test_size=0.25, stratify=y, random_state=42)
-        
-        # Evaluate expanded feature set
-        exp_result = evaluate_model_confidence_and_performance(X_train_exp, y_train, X_val_exp, y_val, model_label="+ Margin Feature")
-
         # === LogLoss model
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
