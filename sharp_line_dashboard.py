@@ -1361,9 +1361,7 @@ def apply_blended_sharp_score(df, trained_models):
                 if row.get("Is_Sharp_Book") == 1:
                     reasoning_parts.append("🎯 Sharp Book Signal")
             
-                if row.get("High_Limit_Flag") == 1:
-                    reasoning_parts.append("💼 High Limit")
-            
+                      
                 if row.get("Is_Home_Team_Bet") == 1:
                     reasoning_parts.append("🏠 Home Team Bet")
             
@@ -1378,6 +1376,9 @@ def apply_blended_sharp_score(df, trained_models):
                 
                 if row.get("Rec_Line_Magnitude", 0) > 0.5:
                     reasoning_parts.append("📉 Rec Book Move")
+                
+                if row.get("Sharp_Limit_Total", 0) > 10000:
+                    reasoning_parts.append("💼 Sharp High Limit")
             
                 return " + ".join(reasoning_parts)
             
@@ -1387,18 +1388,18 @@ def apply_blended_sharp_score(df, trained_models):
             df_scored['Why Model Likes It'] = df_scored.apply(build_why_model_likes_it, axis=1)
             
             # === Then count number of reasons matched (✅ use this)
-            df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].apply(
-                lambda x: len(str(x).split(" + ")) if pd.notnull(x) and ' + ' in x else (1 if pd.notnull(x) and x != "" else 0)
-            )
+            #df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].apply(
+                #lambda x: len(str(x).split(" + ")) if pd.notnull(x) and ' + ' in x else (1 if pd.notnull(x) and x != "" else 0)
+            #)
             
             # Optional mismatch check
-            mismatch = df_scored[df_scored['Active_Signal_Count'] != df_scored['Reason_Label_Count']]
+            #mismatch = df_scored[df_scored['Active_Signal_Count'] != df_scored['Reason_Label_Count']]
             
-            if not mismatch.empty:
-                st.warning("⚠️ Mismatch between Active_Signal_Count and Reason_Label_Count")
-                st.dataframe(mismatch[[
-                    'Game_Key', 'Outcome', 'Active_Signal_Count', 'Reason_Label_Count', 'Why Model Likes It'
-                ]])
+            #if not mismatch.empty:
+                #st.warning("⚠️ Mismatch between Active_Signal_Count and Reason_Label_Count")
+                #st.dataframe(mismatch[[
+                    #'Game_Key', 'Outcome', 'Active_Signal_Count', 'Reason_Label_Count', 'Why Model Likes It'
+                #]])
 
          
             df_scored['Passes_Gate'] = (
