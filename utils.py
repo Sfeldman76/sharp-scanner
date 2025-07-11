@@ -787,41 +787,39 @@ def apply_blended_sharp_score(df, trained_models):
             
                 logger.info(f"🔁 Attempting to create {len(df_inverse)} inverse UNDER rows from OVER rows.")
             
-                # Optional: log books missing after inverse
                 original_books = set(df_market['Bookmaker'].unique())
                 inverse_books = set(df_inverse['Bookmaker'].unique())
                 missing_books = original_books - inverse_books
                 if missing_books:
                     logger.warning(f"⚠️ These books had 'under' rows but no inverse created: {missing_books}")
             
-                # ✅ Merge opponent Value (as usual)
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-                # ✅ Deduplicate to ensure clean merge
+            
                 df_full_market = (
                     df_full_market
-                    .dropna(subset=['Value'])
+                    .dropna(subset=['Value', 'Odds_Price'])
                     .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
                     .drop_duplicates(subset=['Team_Key'], keep='last')
                 )
-
+            
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
             
                 df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
+                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
             
-                # ✅ Now check for merge failures
-                missing_value_count = df_inverse['Value'].isna().sum()
-                total_inverse = len(df_inverse)
-                logger.warning(f"⚠️ {missing_value_count}/{total_inverse} totals inverse rows failed to match 'under' Value (likely missing from df_full_market)")
+                # Diagnostic
+                missing_val = df_inverse['Value'].isna().sum()
+                missing_odds = df_inverse['Odds_Price'].isna().sum()
+                logger.warning(f"⚠️ totals inverse: {missing_val} missing Value, {missing_odds} missing Odds_Price")
 
             elif market_type == "h2h":
-                # Flip outcome to opposing team
                 df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
             
@@ -833,7 +831,6 @@ def apply_blended_sharp_score(df, trained_models):
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
             
-                # Rebuild Game_Key and Game_Key_Base using flipped outcome
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
@@ -849,31 +846,33 @@ def apply_blended_sharp_score(df, trained_models):
                     df_inverse['Market']
                 )
             
-                # ✅ Build Team_Key for safe merge
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-                
-                # ✅ Deduplicate to ensure clean merge
+            
                 df_full_market = (
                     df_full_market
                     .dropna(subset=['Value'])
                     .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
                     .drop_duplicates(subset=['Team_Key'], keep='last')
                 )
-
-                # ✅ Merge opponent Value cleanly
+            
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
-                  
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
             
-                # Final deduplication
+                df_inverse['Value'] = df_inverse['Value_opponent']
+                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
+                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
+            
+                missing_val = df_inverse['Value'].isna().sum()
+                missing_odds = df_inverse['Odds_Price'].isna().sum()
+                logger.warning(f"⚠️ {missing_val} h2h inverse rows missing Value, {missing_odds} missing Odds_Price after merge.")
+            
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
+
 
 
             elif market_type == "spreads":
@@ -918,14 +917,16 @@ def apply_blended_sharp_score(df, trained_models):
                 )
                 
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
-
+                
                 df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
+                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
+
             
                 # Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
