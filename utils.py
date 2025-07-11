@@ -1081,11 +1081,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 logger.debug(f"Game: {game['home_team']} vs {game['away_team']} | Market: {mtype}")
                 # === First pass to deduplicate and store odds
                 for o in market.get('outcomes', []):
-                    logger.debug(f"  Outcome: {o.get('name')} | Point: {o.get('point')} | Price: {o.get('price')}")
+                    logging.debug(f"  Outcome: {o.get('name')} | Point: {o.get('point')} | Price: {o.get('price')}")
                     label = normalize_label(o.get('name', ''))
                     point = o.get('point')
                     price = o.get('price')
-                    logger.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
+                    logging.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
                 
                     key = (label, point)
                     # Keep all outcomes — no deduping
@@ -1106,7 +1106,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     else:
                         value = point
                         odds_price = odds_map.get((label, point))  # ✅ ensure odds match label+point
-                    logger.debug(f"{label} {point}: odds_price = {odds_price}")
+                    logging.debug(f"{label} {point}: odds_price = {odds_price}")
 
                 
                     limit = o.get('bet_limit')
@@ -1149,24 +1149,17 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     pre_dedup = len(rows)
     rows_df = pd.DataFrame(rows).drop_duplicates()
     rows_df = (
-        rows_df.sort_values('Time')
-               .drop_duplicates(subset=['Game', 'Bookmaker', 'Market', 'Outcome', 'Value'], keep='last')
+        rows_df.sort_values('Time').drop_duplicates(subset=['Game', 'Bookmaker', 'Market', 'Outcome', 'Value', 'Odds_Price'], keep='last')
+
     )
     rows = rows_df.to_dict(orient='records')
-    logger.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
+    logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
 
     # Apply sharp scoring
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
     df_sharp_lines = pd.DataFrame(sharp_lines.values())
 
- 
-                 
-
-
-
-
-
-    
+  
        # === Build main DataFrame
     df = pd.DataFrame(rows)
     df['Book'] = df['Book'].str.lower()
