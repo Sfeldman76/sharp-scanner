@@ -25,7 +25,7 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import train_test_split
 from google.cloud import bigquery, storage
 import logging
-logging.basicConfig(level=logging.INFO)  # <- Must be INFO or DEBUG to show .info() logs
+logging.basicConfig(level=logging.DEBUG)  # <- Must be INFO or DEBUG to show .info() logs
 logger = logging.getLogger(__name__)
 # === Config ===
 GCP_PROJECT_ID = "sharplogger"
@@ -68,6 +68,13 @@ BOOKMAKER_REGIONS = {
 MARKETS = ['spreads', 'totals', 'h2h']
 
 # === Utility Functions ===
+
+
+
+logging.basicConfig(
+    level=logging.DEBUG,  # ⬅️ Set to DEBUG to enable all logs
+    format='%(asctime)s %(levelname)s %(message)s'
+)
 
 def implied_prob(odds):
     try:
@@ -1025,7 +1032,7 @@ def apply_blended_sharp_score(df, trained_models):
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, weights={}):
     if not current:
-        logger.warning("⚠️ No current odds data provided.")
+        logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
