@@ -1417,8 +1417,8 @@ def apply_blended_sharp_score(df, trained_models):
 
             
             df_scored['Passes_Gate'] = (
-                df_scored['Model_Sharp_Win_Prob'] >= 0.60
-            ) & (df_scored['Active_Signal_Count'] >= 2)
+                df_scored['Model_Sharp_Win_Prob'] >= 0.55
+            ) & (df_scored['Active_Signal_Count'] > 3)
             
             df_scored['Model_Confidence_Tier'] = np.where(
                 df_scored['Passes_Gate'],
