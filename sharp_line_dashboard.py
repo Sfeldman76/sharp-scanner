@@ -869,8 +869,7 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
 def compute_diagnostics_vectorized(df):
-    import numpy as np
-    import pandas as pd
+
 
     TIER_ORDER = {
         '✅Coinflip': 1,
@@ -905,26 +904,11 @@ def compute_diagnostics_vectorized(df):
             ),
             "⚠️ Missing"
         )
-        
-        # Safe formatting of trend strings
-        
-        # Safe formatting of trend strings
-        # Safe fallback with .get in case 'Model Prob' is missing
+
         # === Step 3: Confidence Trend
-        prob_now = df.get('Model Prob')
-        prob_start = df.get('First_Sharp_Prob')
-        
-        # === Defensive fallback
-        if isinstance(prob_now, (float, int, np.floating)) or prob_now is None:
-            prob_now = pd.Series([np.nan] * len(df))
-        if isinstance(prob_start, (float, int, np.floating)) or prob_start is None:
-            prob_start = pd.Series([np.nan] * len(df))
-        
-        # Coerce numeric
-        prob_now = pd.to_numeric(prob_now, errors='coerce')
-        prob_start = pd.to_numeric(prob_start, errors='coerce')
-        
-        # Safe vectorized loop
+        prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
+        prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+
         trend_strs = []
         for s, n in zip(prob_start, prob_now):
             if pd.isna(s) or pd.isna(n):
@@ -935,12 +919,9 @@ def compute_diagnostics_vectorized(df):
                 trend_strs.append(f"📉 Trending Down: {s:.2%} → {n:.2%}")
             else:
                 trend_strs.append(f"↔ Stable: {s:.2%} → {n:.2%}")
-        
+
         df['Confidence Trend'] = trend_strs
-                
-       
-        
-        # === Step 4: Line/Model Direction Alignment
+
         # === Step 4: Line/Model Direction Alignment
         df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
 
@@ -954,14 +935,12 @@ def compute_diagnostics_vectorized(df):
                 else:
                     return -1 if first_line < 0 else 1
             except:
-                return 1  # fallback
+                return 1
+
         df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
         df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
 
-        # Use Model_Prob_Trend instead of deprecated Model_Prob_Diff
-        model_prob = pd.to_numeric(df.get('Model Prob'), errors='coerce')
-        first_prob = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
-        prob_trend = model_prob - first_prob
+        prob_trend = prob_now - prob_start
 
         df['Line/Model Direction'] = np.select(
             [
@@ -978,54 +957,36 @@ def compute_diagnostics_vectorized(df):
             ],
             default="⚪ Mixed"
         )
-        # === Step 5: Validate `"Why Model Likes It"` already exists
-        if 'Why Model Likes It' not in df.columns:
-            df['Why Model Likes It'] = "⚠️ Missing — run apply_blended_sharp_score() first"
-       
-    
 
-        # === Step 5: Validate `"Why Model Likes It"` already exists
-        if 'Why Model Likes It' not in df.columns:
-            df['Why Model Likes It'] = "⚠️ Missing — run apply_blended_sharp_score() first"
-       
-        
-        # === Validate required columns
-        required_cols = [
-            'Sharp_Prob_Shift', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
-            'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
-            'Market_Leader', 'LimitUp_NoMove_Flag',
-            'Line_Delta', 'Is_Home_Team_Bet', 'High_Limit_Flag'
-        ]
-        
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            st.error(f"❌ Missing required columns: {missing_cols}")
-            st.stop()  # Abort cleanly
-        # === Initialize reasoning_parts aligned with df
-        
-        
-    
-        # === Final output table
-        # === Final output table
+        # === Step 5: Validate Why_Model_Likes_It was computed upstream
+        if 'Why_Model_Likes_It' in df.columns:
+            df['Reason_Label_Count'] = df['Why_Model_Likes_It'].str.count(
+                r'\+|📈|💰|🏆|📊|🛡️|🎯|💼|🏠|📏'
+            )
+        else:
+            df['Why_Model_Likes_It'] = "⚠️ Missing — run apply_blended_sharp_score() first"
+            df['Reason_Label_Count'] = 0
+
+        # === Final diagnostics output table
         diagnostics_df = df[[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
+            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why_Model_Likes_It'
         ]].rename(columns={
             'Tier_Change': 'Tier Δ',
-           
+            'Why_Model_Likes_It': 'Why Model Likes It'
         })
 
         return diagnostics_df
 
     except Exception as e:
-
         st.error("❌ Error computing diagnostics")
         st.exception(e)
         return pd.DataFrame(columns=[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
             'Tier Δ', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
         ])
-        
+
+
         
 def apply_blended_sharp_score(df, trained_models):
     st.markdown("🛠️ Running `apply_blended_sharp_score()`")
@@ -1366,42 +1327,61 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_scored['Is_Home_Team_Bet'] == 1).astype(int)
             )
             
-            # === Build reasoning from gates
-            reasoning_parts = []
+            def build_why_model_likes_it(row):
+                if pd.isna(row['Model_Sharp_Win_Prob']):
+                    return "⚠️ Missing — run apply_blended_sharp_score() first"
             
-            def append_reason(condition, label):
-                mask = pd.Series(condition, index=df_scored.index).fillna(False)
-                reasoning_parts.append(mask.map(lambda x: label if x else ""))
-             
-              
-            append_reason(df_scored['Sharp_Move_Signal'] == 1, "Detected Sharp Move")
-            append_reason(df_scored['Sharp_Limit_Jump'] == 1, "Limit Jump")
-            append_reason(df_scored['Sharp_Time_Score'] > 0.5, "Timed Entry")
-            append_reason(df_scored['Sharp_Limit_Total'] > 10000, "High Limit")
-            append_reason(df_scored['LimitUp_NoMove_Flag'] == 1, "Limit ↑ w/o Price Move")
-            append_reason(df_scored['Market_Leader'] == 1, "Led Market Move")
-            append_reason(df_scored['Is_Reinforced_MultiMarket'] == 1, "Cross-Market Signal")
-            append_reason(df_scored['Is_Sharp_Book'] == 1, "From Sharp Book")
-            append_reason(df_scored['Sharp_Line_Magnitude'] > 0.5, "Sharp Book Move")
-            append_reason(df_scored['Rec_Line_Magnitude'] > 0.5, "Rec Book Move")
-            append_reason(df_scored['Is_Home_Team_Bet'] == 1, "Home Side")
+                reasoning_parts = []
             
-            df_scored['Why Model Likes It'] = pd.Series([
-                " | ".join(filter(None, parts)) for parts in zip(*reasoning_parts)
-            ], index=df_scored.index)
+                if row.get("Sharp_Move_Signal") == 1:
+                    reasoning_parts.append("📈 Sharp Move Detected")
             
-            df_scored['Reason_Label_Count'] = pd.Series([
-                sum(1 for part in parts if part) for parts in zip(*reasoning_parts)
-            ], index=df_scored.index)
+                if row.get("Sharp_Limit_Jump", 0) > 0:
+                    reasoning_parts.append("💰 Limit Jumped")
             
+                if row.get("Market_Leader") == 1:
+                    reasoning_parts.append("🏆 Market Leader")
+            
+                if row.get("Is_Reinforced_MultiMarket") == 1:
+                    reasoning_parts.append("📊 Multi-Market Consensus")
+            
+                if row.get("LimitUp_NoMove_Flag") == 1:
+                    reasoning_parts.append("🛡️ Limit Up + No Line Move")
+            
+                if row.get("Is_Sharp_Book") == 1:
+                    reasoning_parts.append("🎯 Sharp Book Signal")
+            
+                if row.get("High_Limit_Flag") == 1:
+                    reasoning_parts.append("💼 High Limit")
+            
+                if row.get("Is_Home_Team_Bet") == 1:
+                    reasoning_parts.append("🏠 Home Team Bet")
+            
+                if row.get("Sharp_Line_Magnitude", 0) > 0.5:
+                    reasoning_parts.append("📏 Big Line Move")
+            
+                if len(reasoning_parts) == 0:
+                    return "🤷‍♂️ No clear reason yet"
+            
+                return " + ".join(reasoning_parts)
+
             # Optional mismatch check (can delete later)
+           # === Apply explanation string first
+            df_scored['Why Model Likes It'] = df_scored.apply(build_why_model_likes_it, axis=1)
+            
+            # === Then count number of reasons matched
+            df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].str.count(r'📈|💰|🏆|📊|🛡️|🎯|💼|🏠|📏')
+            
+            # Optional mismatch check
             mismatch = df_scored[df_scored['Active_Signal_Count'] != df_scored['Reason_Label_Count']]
+
             if not mismatch.empty:
                 st.warning("⚠️ Mismatch between Active_Signal_Count and Reason_Label_Count")
                 st.dataframe(mismatch[[
                     'Game_Key', 'Outcome', 'Active_Signal_Count', 'Reason_Label_Count', 'Why Model Likes It'
                 ]])
-
+            
+         
             df_scored['Passes_Gate'] = (
                 df_scored['Model_Sharp_Win_Prob'] >= 0.55
             ) & (df_scored['Active_Signal_Count'] > 3)
