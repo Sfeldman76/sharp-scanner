@@ -71,10 +71,6 @@ MARKETS = ['spreads', 'totals', 'h2h']
 
 
 
-logging.basicConfig(
-    level=logging.DEBUG,  # ⬅️ Set to DEBUG to enable all logs
-    format='%(asctime)s %(levelname)s %(message)s'
-)
 
 def implied_prob(odds):
     try:
