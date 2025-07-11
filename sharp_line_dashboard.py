@@ -1358,26 +1358,25 @@ def apply_blended_sharp_score(df, trained_models):
             
                 return " + ".join(reasoning_parts)
             
-            df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].str.count(" \+ ") + 1
+           
             # Optional mismatch check (can delete later)
            # === Apply explanation string first
             df_scored['Why Model Likes It'] = df_scored.apply(build_why_model_likes_it, axis=1)
             
-            # === Then count number of reasons matched
+            # === Then count number of reasons matched (✅ use this)
             df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].apply(
-                lambda x: len(str(x).split(" + ")) if pd.notnull(x) else 0
+                lambda x: len(str(x).split(" + ")) if pd.notnull(x) and ' + ' in x else (1 if pd.notnull(x) and x != "" else 0)
             )
-
             
             # Optional mismatch check
             mismatch = df_scored[df_scored['Active_Signal_Count'] != df_scored['Reason_Label_Count']]
-
+            
             if not mismatch.empty:
                 st.warning("⚠️ Mismatch between Active_Signal_Count and Reason_Label_Count")
                 st.dataframe(mismatch[[
                     'Game_Key', 'Outcome', 'Active_Signal_Count', 'Reason_Label_Count', 'Why Model Likes It'
                 ]])
-            
+
          
             df_scored['Passes_Gate'] = (
                 df_scored['Model_Sharp_Win_Prob'] >= 0.55
