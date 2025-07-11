@@ -958,25 +958,18 @@ def compute_diagnostics_vectorized(df):
             default="⚪ Mixed"
         )
 
-        # === Step 5: Validate Why_Model_Likes_It was computed upstream
-        if 'Why_Model_Likes_It' in df.columns:
-            df['Reason_Label_Count'] = df['Why_Model_Likes_It'].str.count(
-                r'\+|📈|💰|🏆|📊|🛡️|🎯|💼|🏠|📏'
-            )
-        else:
-            df['Why_Model_Likes_It'] = "⚠️ Missing — run apply_blended_sharp_score() first"
-            df['Reason_Label_Count'] = 0
-
+       
         # === Final diagnostics output table
+  
         diagnostics_df = df[[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why_Model_Likes_It'
+            'Tier_Change', 'Confidence Trend', 'Line/Model Direction'
         ]].rename(columns={
-            'Tier_Change': 'Tier Δ',
-            'Why_Model_Likes_It': 'Why Model Likes It'
+            'Tier_Change': 'Tier Δ'
         })
-
+        
         return diagnostics_df
+
 
     except Exception as e:
         st.error("❌ Error computing diagnostics")
@@ -1364,7 +1357,8 @@ def apply_blended_sharp_score(df, trained_models):
                     return "🤷‍♂️ No clear reason yet"
             
                 return " + ".join(reasoning_parts)
-
+            
+            df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].str.count(" \+ ") + 1
             # Optional mismatch check (can delete later)
            # === Apply explanation string first
             df_scored['Why Model Likes It'] = df_scored.apply(build_why_model_likes_it, axis=1)
