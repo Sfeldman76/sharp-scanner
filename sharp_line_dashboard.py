@@ -1370,7 +1370,10 @@ def apply_blended_sharp_score(df, trained_models):
             df_scored['Why Model Likes It'] = df_scored.apply(build_why_model_likes_it, axis=1)
             
             # === Then count number of reasons matched
-            df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].str.count(r'📈|💰|🏆|📊|🛡️|🎯|💼|🏠|📏')
+            df_scored['Reason_Label_Count'] = df_scored['Why Model Likes It'].apply(
+                lambda x: len(str(x).split(" + ")) if pd.notnull(x) else 0
+            )
+
             
             # Optional mismatch check
             mismatch = df_scored[df_scored['Active_Signal_Count'] != df_scored['Reason_Label_Count']]
