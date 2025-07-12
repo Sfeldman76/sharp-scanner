@@ -1300,6 +1300,10 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Opposite_Direction_Move'] = (np.sign(df_canon['Sharp_Line_Delta']) != np.sign(df_canon['Rec_Line_Delta'])).astype('Int64')
             df_canon['Sharp_Move_No_Rec'] = ((df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() == 0)).astype('Int64')
             df_canon['Rec_Move_No_Sharp'] = ((df_canon['Rec_Line_Delta'].abs() > 0) & (df_canon['Sharp_Line_Delta'].abs() == 0)).astype('Int64')
+            df_canon['SharpMove_Odds_Up'] = ((df_canon['Sharp_Move_Signal'] == 1) & (df_canon['Odds_Shift'] > 0)).astype(int)
+            df_canon['SharpMove_Odds_Down'] = ((df_canon['Sharp_Move_Signal'] == 1) & (df_canon['Odds_Shift'] < 0)).astype(int)
+            df_canon['SharpMove_Odds_Mag'] = df_canon['Odds_Shift'].abs() * df_canon['Sharp_Move_Signal']
+
 
             # === Align features exactly to model input ===
             X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
@@ -1433,7 +1437,9 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Opposite_Direction_Move'] = (np.sign(df_inverse['Sharp_Line_Delta']) != np.sign(df_inverse['Rec_Line_Delta'])).astype('Int64')
             df_inverse['Sharp_Move_No_Rec'] = ((df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() == 0)).astype('Int64')
             df_inverse['Rec_Move_No_Sharp'] = ((df_inverse['Rec_Line_Delta'].abs() > 0) & (df_inverse['Sharp_Line_Delta'].abs() == 0)).astype('Int64')
-
+            df_inverse['SharpMove_Odds_Up'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] > 0)).astype(int)
+            df_inverse['SharpMove_Odds_Down'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] < 0)).astype(int)
+            df_inverse['SharpMove_Odds_Mag'] = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
 
             
             # === Final deduplication
@@ -1449,20 +1455,23 @@ def apply_blended_sharp_score(df, trained_models):
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             
             # === Compute Active Signal Count
-            df_scored['Active_Signal_Count'] = (
-                (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
-                (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
-                (df_scored['Sharp_Time_Score'] > 0.5).astype(int) +
-                (df_scored['Sharp_Limit_Total'] > 10000).astype(int) +
-                (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
-                (df_scored['Market_Leader'] == 1).astype(int) +
-                (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
-                (df_scored['Is_Sharp_Book'] == 1).astype(int) +
-                (df_scored['Sharp_Line_Magnitude'] > 0.5).astype(int) +
-                (df_scored['Rec_Line_Magnitude'] > 0.5).astype(int) +
-                (df_scored['Is_Home_Team_Bet'] == 1).astype(int)
-            )
-            
+                df_scored['Active_Signal_Count'] = (
+                    (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
+                    (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
+                    (df_scored['Sharp_Time_Score'] > 0.5).astype(int) +
+                    (df_scored['Sharp_Limit_Total'] > 10000).astype(int) +
+                    (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
+                    (df_scored['Market_Leader'] == 1).astype(int) +
+                    (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
+                    (df_scored['Is_Sharp_Book'] == 1).astype(int) +
+                    (df_scored['Sharp_Line_Magnitude'] > 0.5).astype(int) +
+                    (df_scored['Rec_Line_Magnitude'] > 0.5).astype(int) +
+                    (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
+                    (df_scored['SharpMove_Odds_Up'] == 1).astype(int) +
+                    (df_scored['SharpMove_Odds_Down'] == 1).astype(int)
+                    (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)  # or any meaningful threshold
+                )
+                            
             def build_why_model_likes_it(row):
                 if pd.isna(row['Model_Sharp_Win_Prob']):
                     return "⚠️ Missing — run apply_blended_sharp_score() first"
@@ -1486,7 +1495,11 @@ def apply_blended_sharp_score(df, trained_models):
             
                 if row.get("Is_Sharp_Book") == 1:
                     reasoning_parts.append("🎯 Sharp Book Signal")
+                if row.get("SharpMove_Odds_Up") == 1:
+                    reasoning_parts.append("🟢 Odds Moved Up (Steam)")
             
+                if row.get("SharpMove_Odds_Down") == 1:
+                    reasoning_parts.append("🔻 Odds Moved Down (Buyback)")
                       
                 if row.get("Is_Home_Team_Bet") == 1:
                     reasoning_parts.append("🏠 Home Team Bet")
@@ -1505,6 +1518,8 @@ def apply_blended_sharp_score(df, trained_models):
                 
                 if row.get("Sharp_Limit_Total", 0) > 10000:
                     reasoning_parts.append("💼 Sharp High Limit")
+                if row.get("SharpMove_Odds_Mag", 0) > 5:
+                    reasoning_parts.append("💥 Sharp Odds Steam")
             
                 return " + ".join(reasoning_parts)
             
