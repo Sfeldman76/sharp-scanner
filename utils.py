@@ -1325,7 +1325,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     ).astype(int)
     
     # === Cross-market support (optional)
-    df = detect_cross_market_sharp_support(df)
+    df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
     df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
     df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
