@@ -1127,7 +1127,7 @@ def compute_diagnostics_vectorized(df):
 def apply_blended_sharp_score(df, trained_models):
     st.markdown("🛠️ Running `apply_blended_sharp_score()`")
     scored_all = []  # ✅ <-- Define it here
-    total_start = time.time(
+    total_start = time.time()
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
