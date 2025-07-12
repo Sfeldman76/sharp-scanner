@@ -1841,24 +1841,26 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Function to process chunks of data (sorting and deduplication)
     # Function to process chunks of data (sorting, deduplication, and memory management)
     def process_chunk(df_chunk):
-        # Convert string columns to categorical for memory efficiency
+        # ✅ Normalize string columns first
         for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-            df_chunk.loc[:, col] = df_chunk[col].astype('category')  # Use .loc for correct assignment
+            df_chunk.loc[:, col] = df_chunk[col].astype(str).str.strip().str.lower()
     
-        # Normalize the string columns (strip whitespace and lowercase)
-        df_chunk.loc[:, 'Game_Key'] = df_chunk['Game_Key'].str.strip().str.lower()  # Use .loc
-        df_chunk.loc[:, 'Market'] = df_chunk['Market'].str.strip().str.lower()      # Use .loc
-        df_chunk.loc[:, 'Outcome'] = df_chunk['Outcome'].str.strip().str.lower()    # Use .loc
-        df_chunk.loc[:, 'Bookmaker'] = df_chunk['Bookmaker'].str.strip().str.lower()  # Use .loc
+        # ✅ Convert to categorical for memory efficiency (after normalization)
+        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+            df_chunk.loc[:, col] = df_chunk[col].astype('category')
     
-        # Deduplicate based on necessary columns
-        df_chunk = df_chunk.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+        # ✅ Sort by latest snapshot to keep most recent
+        df_chunk = df_chunk.sort_values(by='Snapshot_Timestamp', ascending=False)
     
-        # Free memory after processing chunk
+        # ✅ Deduplicate per game/market/outcome/bookmaker
+        df_chunk = df_chunk.drop_duplicates(
+            subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+            keep='first'
+        )
+    
         gc.collect()
-    
         return df_chunk
-
+        
 
     
     def calc_cover(df):
@@ -1964,34 +1966,28 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Track memory usage
     process = psutil.Process(os.getpid())
-    logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-    
-    # === 1. Load and process snapshots
-    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
-    df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 10000])
-        for start in range(0, len(df_all_snapshots), 10000)
-    ], ignore_index=True)
-    logging.info(f"✅ After filtering, df_all_snapshots_filtered shape: {df_all_snapshots_filtered.shape}")
+        logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
         
-   
+    # === 1. Load full snapshots
+    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
     
-    # === 2. Build df_first snapshot baseline — NO DEFERRED EXECUTION
+    # === 2. Build df_first from raw history for opening lines
     required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']
-    missing = [col for col in required_cols if col not in df_all_snapshots_filtered.columns]
+    missing = [col for col in required_cols if col not in df_all_snapshots.columns]
     
     if missing:
         logging.warning(f"⚠️ Cannot compute df_first — missing columns: {missing}")
         df_first = pd.DataFrame(columns=[
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Sharp_Prob'
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+            'First_Line_Value', 'First_Sharp_Prob',
+            'First_Odds', 'First_Imp_Prob'
         ])
     else:
-        
         df_first = (
-            df_all_snapshots_filtered
-            .sort_values(by='Snapshot_Timestamp')  # earliest snapshots first
+            df_all_snapshots
+            .sort_values(by='Snapshot_Timestamp')
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-            .loc[:, required_cols + ['Odds_Price', 'Implied_Prob']]  # make sure these are included
+            .loc[:, required_cols + ['Odds_Price', 'Implied_Prob']]
             .rename(columns={
                 'Value': 'First_Line_Value',
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
@@ -1999,26 +1995,28 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Implied_Prob': 'First_Imp_Prob',
             })
         )
-
         for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
             df_first[col] = df_first[col].astype('category')
-        logging.info("📋 Sample df_first values:\n" +
-        df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10).to_string(index=False))
-        logging.info("💰 Sample odds + implied:\n" +
-        df_first[['First_Odds', 'First_Imp_Prob']].dropna().head(5).to_string(index=False))
-
-
-        # 🔍 Ensure full evaluation before merge
+    
         df_first = df_first.reset_index(drop=True).copy()
     
-        # ✅ Logging + hard check
+        logging.info("📋 Sample df_first values:\n" +
+            df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10).to_string(index=False))
+        logging.info("💰 Sample odds + implied:\n" +
+            df_first[['First_Odds', 'First_Imp_Prob']].dropna().head(5).to_string(index=False))
         logging.info(f"🧪 df_first created with {len(df_first)} rows and columns: {df_first.columns.tolist()}")
         logging.info(f"🧪 Unique Game_Key+Market+Outcome+Bookmaker combos: {df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]}")
         logging.info(f"📉 Null rates in df_first:\n{df_first[['First_Line_Value', 'First_Sharp_Prob']].isnull().mean().to_string()}")
+    
         if df_first.empty:
             raise RuntimeError("❌ df_first is empty — stopping early to avoid downstream issues.")
+    
+    # === 3. Build df_all_snapshots_filtered from process_chunk() → latest lines
+    df_all_snapshots_filtered = pd.concat([
+        process_chunk(df_all_snapshots.iloc[start:start + 10000])
+        for start in range(0, len(df_all_snapshots), 10000)
+    ], ignore_index=True)
             
-        
     # === Prepare df_first: reduce + convert
     df_first = df_first[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
