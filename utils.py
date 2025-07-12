@@ -25,7 +25,7 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import train_test_split
 from google.cloud import bigquery, storage
 import logging
-logging.basicConfig(level=logging.DEBUG)  # <- Must be INFO or DEBUG to show .info() logs
+logging.basicConfig(level=logging.INFO)  # <- Must be INFO or DEBUG to show .info() logs
 logger = logging.getLogger(__name__)
 # === Config ===
 GCP_PROJECT_ID = "sharplogger"
