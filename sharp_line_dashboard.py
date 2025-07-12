@@ -674,15 +674,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         
         # === Param grid (expanded)
         param_grid = {
-            'n_estimators': [100, 200, 300],
-            'max_depth': [3, 5, 7],
+            'n_estimators': [50, 100, 200],
+            'max_depth': [3, 4, 5],
             'learning_rate': [0.01, 0.05, 0.1],
             'subsample': [0.8, 0.9, 1.0],
             'colsample_bytree': [0.7, 0.85, 1.0],
-            'min_child_weight': [1, 3, 5],
+            'min_child_weight': [3, 5, 7, 10],
             'gamma': [0, 0.1, 0.3],
-            'reg_alpha': [0, 0.1, 0.3],
-            'reg_lambda': [1, 2, 5]
+            'reg_alpha': [0.1, 0.5, 1.0, 5.0],  # L1
+            'reg_lambda': [1.0, 5.0, 10.0],     # L2
         }
         
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
@@ -696,8 +696,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         
         
         # === LogLoss model
+        # ✅ Calculate scale_pos_weight for class imbalance
+        scale_pos_weight = (len(y) - y.sum()) / y.sum()
+        
+        # ✅ LogLoss Model Grid Search
         grid_logloss = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
+            estimator=xgb.XGBClassifier(
+                eval_metric='logloss',
+                tree_method='hist',
+                n_jobs=-1,
+                scale_pos_weight=scale_pos_weight  # ✅ Proper location
+            ),
             param_distributions=param_grid,
             scoring='neg_log_loss',
             cv=cv,
@@ -708,9 +717,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         grid_logloss.fit(X_train, y_train)
         model_logloss = grid_logloss.best_estimator_
         
-        # === AUC model
+        # ✅ AUC Model Grid Search
         grid_auc = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1),
+            estimator=xgb.XGBClassifier(
+                eval_metric='logloss',
+                tree_method='hist',
+                n_jobs=-1,
+                scale_pos_weight=scale_pos_weight  # ✅ Proper location
+            ),
             param_distributions=param_grid,
             scoring='roc_auc',
             cv=cv,
@@ -720,12 +734,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         )
         grid_auc.fit(X_train, y_train)
         model_auc = grid_auc.best_estimator_
-
         
-        # === Calibrate both
-        cal_logloss = CalibratedClassifierCV(model_logloss, method='sigmoid', cv=cv).fit(X_train, y_train)
-        cal_auc = CalibratedClassifierCV(model_auc, method='sigmoid', cv=cv).fit(X_train, y_train)
-
+        # ✅ Use isotonic calibration (more stable for reducing std dev)
+        cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=cv).fit(X_train, y_train)
+        cal_auc = CalibratedClassifierCV(model_auc, method='isotonic', cv=cv).fit(X_train, y_train)
         
         # === Predict calibrated probabilities
         prob_logloss = cal_logloss.predict_proba(X)[:, 1]
