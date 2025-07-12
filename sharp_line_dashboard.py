@@ -578,7 +578,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         # Optional: absolute versions if you're using magnitude
        # === Magnitude & Directional Features (retain only de-correlated ones)
         df_market['Sharp_Line_Magnitude'] = df_market['Sharp_Line_Delta'].abs()
-        df_market['Delta_Sharp_vs_Rec'] = df_market['Sharp_Line_Delta'] - df_market['Rec_Line_Delta']
+        df_market['Delta_Sharp_vs_Rec'] =  df_market['Rec_Line_Delta'] -d f_market['Sharp_Line_Delta']
         df_market['Sharp_Leads'] = (df_market['Sharp_Line_Magnitude'] > df_market['Rec_Line_Delta'].abs()).astype('int')
         
         # Optional: Keep for diagnostics only, not training
@@ -601,7 +601,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         df_market['LimitProtect_SharpMag'] = df_market['LimitUp_NoMove_Flag'] * df_market['Sharp_Line_Magnitude']
         # Example for engineered features
         df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market.get('Odds_Shift', 0)
-        df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 10000).astype(int)
+        df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
        
 
 
