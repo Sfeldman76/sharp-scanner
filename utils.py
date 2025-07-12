@@ -571,6 +571,8 @@ def apply_blended_sharp_score(df, trained_models):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
     df = df.copy()
+    df = df.copy()
+    scored_all = [] 
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
 
