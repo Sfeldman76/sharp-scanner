@@ -1966,7 +1966,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     # === Track memory usage
     process = psutil.Process(os.getpid())
-        logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+    logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
         
     # === 1. Load full snapshots
     df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
