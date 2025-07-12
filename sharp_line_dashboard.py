@@ -1455,22 +1455,22 @@ def apply_blended_sharp_score(df, trained_models):
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             
             # === Compute Active Signal Count
-                df_scored['Active_Signal_Count'] = (
-                    (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
-                    (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
-                    (df_scored['Sharp_Time_Score'] > 0.5).astype(int) +
-                    (df_scored['Sharp_Limit_Total'] > 10000).astype(int) +
-                    (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
-                    (df_scored['Market_Leader'] == 1).astype(int) +
-                    (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
-                    (df_scored['Is_Sharp_Book'] == 1).astype(int) +
-                    (df_scored['Sharp_Line_Magnitude'] > 0.5).astype(int) +
-                    (df_scored['Rec_Line_Magnitude'] > 0.5).astype(int) +
-                    (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
-                    (df_scored['SharpMove_Odds_Up'] == 1).astype(int) +
-                    (df_scored['SharpMove_Odds_Down'] == 1).astype(int)
-                    (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)  # or any meaningful threshold
-                )
+            df_scored['Active_Signal_Count'] = (
+                (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
+                (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
+                (df_scored['Sharp_Time_Score'] > 0.5).astype(int) +
+                (df_scored['Sharp_Limit_Total'] > 10000).astype(int) +
+                (df_scored['LimitUp_NoMove_Flag'] == 1).astype(int) +
+                (df_scored['Market_Leader'] == 1).astype(int) +
+                (df_scored['Is_Reinforced_MultiMarket'] == 1).astype(int) +
+                (df_scored['Is_Sharp_Book'] == 1).astype(int) +
+                (df_scored['Sharp_Line_Magnitude'] > 0.5).astype(int) +
+                (df_scored['Rec_Line_Magnitude'] > 0.5).astype(int) +
+                (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
+                (df_scored['SharpMove_Odds_Up'] == 1).astype(int) +
+                (df_scored['SharpMove_Odds_Down'] == 1).astype(int)+
+                (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)    # or any meaningful threshold
+            )
                             
             def build_why_model_likes_it(row):
                 if pd.isna(row['Model_Sharp_Win_Prob']):
