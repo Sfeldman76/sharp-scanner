@@ -419,6 +419,10 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     for col in float_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
+    # === Debug float→int issues before upload
+    bad_cols = [col for col in df.columns if df[col].dtype == 'float64' and (df[col] % 1 != 0).any()]
+    if bad_cols:
+        logging.warning(f"🔍 Float columns with decimals that might conflict with BigQuery INT64 schema: {bad_cols}")
     df = df[ALLOWED_COLS]
     
     logging.info("🧪 Preview of model columns being written:")
