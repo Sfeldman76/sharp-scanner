@@ -1130,7 +1130,43 @@ def apply_blended_sharp_score(df, trained_models):
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
+    # Step 1: Load snapshot history to build opening line baseline
+    df_all_snapshots = read_recent_sharp_moves(hours=72)
+    
+    # Step 2: Build opening line (df_first)
+    df_first = (
+        df_all_snapshots
+        .sort_values(by='Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob']]
+        .rename(columns={
+            'Value': 'First_Line_Value',
+            'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
+            'Odds_Price': 'First_Odds',
+            'Implied_Prob': 'First_Imp_Prob',
+        })
+    )
+    
+    # Step 3: Normalize and merge into df before scoring
+    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        df[col] = df[col].astype(str).str.strip().str.lower()
+        df_first[col] = df_first[col].astype(str).str.strip().str.lower()
+    
+    df = df.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
 
+    # === Add Odds_Shift and Implied_Prob_Shift BEFORE dropping source columns
+    if 'Odds_Shift' not in df.columns and 'Odds_Price' in df.columns and 'First_Odds' in df.columns:
+        df['Odds_Shift'] = pd.to_numeric(df['Odds_Price'], errors='coerce') - pd.to_numeric(df['First_Odds'], errors='coerce')
+    
+    if 'Implied_Prob_Shift' not in df.columns and 'Implied_Prob' in df.columns and 'First_Imp_Prob' in df.columns:
+        df['Implied_Prob_Shift'] = pd.to_numeric(df['Implied_Prob'], errors='coerce') - pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
+    
+    # === Now it's safe to drop First_* columns
+    cols_to_drop = [
+        'First_Line_Value', 'First_Sharp_Prob',
+        'First_Odds', 'First_Imp_Prob',
+    ]
+    df.drop(columns=[col for col in cols_to_drop if col in df.columns], inplace=True)
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
