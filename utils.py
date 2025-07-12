@@ -409,20 +409,28 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
     # Filter to allowed schema
     # === Force float type on columns that might fail if BigQuery expects INT64
-    float_cols = [
+    # === Cast known float columns safely
+    known_float_cols = [
         'SharpMove_Odds_Mag', 'HomeRecLineMag',
-        'Sharp_Limit_Total', 'Rec_Line_Delta', 'Sharp_Line_Delta',
+        'Rec_Line_Delta', 'Sharp_Line_Delta',
         'Odds_Shift', 'Implied_Prob_Shift', 'Line_Delta',
         'Sharp_Line_Magnitude', 'Rec_Line_Magnitude',
         'Delta_Sharp_vs_Rec'
     ]
-    for col in float_cols:
+    for col in known_float_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
-    # === Debug float→int issues before upload
-    bad_cols = [col for col in df.columns if df[col].dtype == 'float64' and (df[col] % 1 != 0).any()]
-    if bad_cols:
-        logging.warning(f"🔍 Float columns with decimals that might conflict with BigQuery INT64 schema: {bad_cols}")
+    
+    # === Cast known INT64 columns to nullable Int64
+    int_cols = [
+        'Sharp_Limit_Total', 'Limit_Jump', 'LimitUp_NoMove_Flag',
+        'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
+        'Scored', 'Scored_By_Model', 'Is_Home_Team_Bet',
+        'Is_Favorite_Bet', 'High_Limit_Flag', 'CrossMarketSharpSupport'
+    ]
+    for col in int_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
     df = df[ALLOWED_COLS]
     
     logging.info("🧪 Preview of model columns being written:")
