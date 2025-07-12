@@ -1126,7 +1126,8 @@ def compute_diagnostics_vectorized(df):
         
 def apply_blended_sharp_score(df, trained_models):
     st.markdown("🛠️ Running `apply_blended_sharp_score()`")
-
+    scored_all = []  # ✅ <-- Define it here
+    total_start = time.time(
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
@@ -1138,10 +1139,8 @@ def apply_blended_sharp_score(df, trained_models):
         df_all_snapshots
         .sort_values(by='Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob']]
+        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Odds_Price', 'Implied_Prob']]
         .rename(columns={
-            'Value': 'First_Line_Value',
-            'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
             'Odds_Price': 'First_Odds',
             'Implied_Prob': 'First_Imp_Prob',
         })
@@ -1163,7 +1162,6 @@ def apply_blended_sharp_score(df, trained_models):
     
     # === Now it's safe to drop First_* columns
     cols_to_drop = [
-        'First_Line_Value', 'First_Sharp_Prob',
         'First_Odds', 'First_Imp_Prob',
     ]
     df.drop(columns=[col for col in cols_to_drop if col in df.columns], inplace=True)
