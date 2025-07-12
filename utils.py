@@ -733,6 +733,10 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['Rec_Move_No_Sharp'] = (
                 (df_canon['Rec_Line_Delta'].abs() > 0) & (df_canon['Sharp_Line_Delta'].abs() == 0)
             ).astype(int)
+            df_canon['SharpMove_Odds_Up'] = ((df_canon['Sharp_Move_Signal'] == 1) & (df_canon['Odds_Shift'] > 0)).astype(int)
+            df_canon['SharpMove_Odds_Down'] = ((df_canon['Sharp_Move_Signal'] == 1) & (df_canon['Odds_Shift'] < 0)).astype(int)
+            df_canon['SharpMove_Odds_Mag'] = df_canon['Odds_Shift'].abs() * df_canon['Sharp_Move_Signal']
+
 
             
             # === Ensure required features exist ===
@@ -807,7 +811,11 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_inverse['Rec_Line_Delta'].abs() > 0) & (df_inverse['Sharp_Line_Delta'].abs() == 0)
             ).astype(int)
             
-
+           
+            df_inverse['SharpMove_Odds_Up'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] > 0)).astype(int)
+            df_inverse['SharpMove_Odds_Down'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] < 0)).astype(int)
+            df_inverse['SharpMove_Odds_Mag'] = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
+            
             if market_type == "totals":
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
