@@ -578,7 +578,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         # Optional: absolute versions if you're using magnitude
        # === Magnitude & Directional Features (retain only de-correlated ones)
         df_market['Sharp_Line_Magnitude'] = df_market['Sharp_Line_Delta'].abs()
-        df_market['Delta_Sharp_vs_Rec'] =  df_market['Rec_Line_Delta'] -d f_market['Sharp_Line_Delta']
+        df_market['Delta_Sharp_vs_Rec'] =  df_market['Rec_Line_Delta'] - df_market['Sharp_Line_Delta']
         df_market['Sharp_Leads'] = (df_market['Sharp_Line_Magnitude'] > df_market['Rec_Line_Delta'].abs()).astype('int')
         
         # Optional: Keep for diagnostics only, not training
