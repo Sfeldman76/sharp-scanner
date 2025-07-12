@@ -590,9 +590,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         # Optional: Keep as debug flag, not as model feature
         # df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] > 10000).astype(int)
         
+        df_market['SharpMove_Odds_Up'] = ((df_market['Sharp_Move_Signal'] == 1) & (df_market['Odds_Shift'] > 0)).astype(int)
+        df_market['SharpMove_Odds_Down'] = ((df_market['Sharp_Move_Signal'] == 1) & (df_market['Odds_Shift'] < 0)).astype(int)
+        df_market['SharpMove_Odds_Mag'] = df_market['Odds_Shift'].abs() * df_market['Sharp_Move_Signal']
         # === Interaction Features (filtered for value)
-        if 'Odds_Shift' in df_market.columns:
-            df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market['Odds_Shift']
+        #if 'Odds_Shift' in df_market.columns:
+            #df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market['Odds_Shift']
         
         if 'Implied_Prob_Shift' in df_market.columns:
             df_market['MarketLeader_ImpProbShift'] = df_market['Market_Leader'] * df_market['Implied_Prob_Shift']
@@ -600,7 +603,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         df_market['SharpLimit_SharpBook'] = df_market['Is_Sharp_Book'] * df_market['Sharp_Limit_Total']
         df_market['LimitProtect_SharpMag'] = df_market['LimitUp_NoMove_Flag'] * df_market['Sharp_Line_Magnitude']
         # Example for engineered features
-        df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market.get('Odds_Shift', 0)
+        #df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market.get('Odds_Shift', 0)
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
        
 
@@ -620,9 +623,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             # 🔹 Market response
             'Sharp_Line_Magnitude',
             'Is_Home_Team_Bet',
+             # 🔹 Engineered odds shift decomposition
+            'SharpMove_Odds_Up',          # ⬆️ Odds got worse after sharp signal
+            'SharpMove_Odds_Down',        # ⬇️ Odds improved after sharp signal
+            'SharpMove_Odds_Mag',         # 📊 Magnitude of odds change
         
             # 🔹 Engineered interactions (de-correlated)
-            'SharpMove_OddsShift',             # Interaction: sharp signal with actual move
+            #'SharpMove_OddsShift',             # Interaction: sharp signal with actual move
             'MarketLeader_ImpProbShift',       # Market-leader impact on price shift
             'LimitProtect_SharpMag',           # Limit-up signal with no move (market protection)
             'Delta_Sharp_vs_Rec',              # Directional disagreement between sharp vs rec
