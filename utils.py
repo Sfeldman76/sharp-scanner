@@ -593,9 +593,10 @@ logger = logging.getLogger(__name__)
 def apply_blended_sharp_score(df, trained_models):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
-    df = df.copy()
+ 
     df = df.copy()
     scored_all = [] 
+    total_start = time.time()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
 
@@ -612,10 +613,8 @@ def apply_blended_sharp_score(df, trained_models):
         df_all_snapshots
         .sort_values(by='Snapshot_Timestamp')  # opening lines = earliest
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob']]
-        .rename(columns={
-            'Value': 'First_Line_Value',
-            'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
+        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Odds_Price', 'Implied_Prob']]
+        .rename(columns={           
             'Odds_Price': 'First_Odds',
             'Implied_Prob': 'First_Imp_Prob',
         })
@@ -636,10 +635,9 @@ def apply_blended_sharp_score(df, trained_models):
     if 'Implied_Prob_Shift' not in df.columns:
         df['Implied_Prob_Shift'] = pd.to_numeric(df['Implied_Prob'], errors='coerce') - pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
 
-    df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['First_Line_Value'], errors='coerce')
-
+    
     # Drop temporary columns
-    cols_to_drop = ['First_Line_Value', 'First_Sharp_Prob', 'First_Odds', 'First_Imp_Prob']
+    cols_to_drop = ['First_Odds', 'First_Imp_Prob']
     df.drop(columns=[col for col in cols_to_drop if col in df.columns], inplace=True)
 
     # Keep only latest snapshot per Game + Market + Outcome + Bookmaker + Value
@@ -648,8 +646,9 @@ def apply_blended_sharp_score(df, trained_models):
           .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value'], keep='last')
     )
 
+   
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
-
+    logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
    
        
     for market_type, bundle in trained_models.items():
