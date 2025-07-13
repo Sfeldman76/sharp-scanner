@@ -652,6 +652,39 @@ def compute_line_resistance_flag(df, source='moves'):
     )
 
     return df
+    
+def add_minutes_to_game(df):
+    df = df.copy()
+
+    # Ensure datetime columns are parsed
+    df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
+    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
+
+    # Compute raw minutes
+    df['Minutes_To_Game'] = (
+        (df['Game_Start'] - df['Snapshot_Timestamp'])
+        .dt.total_seconds() / 60
+    ).clip(lower=0)
+
+    # Define timing tier buckets
+    df['Timing_Tier'] = pd.cut(
+        df['Minutes_To_Game'],
+        bins=[0, 60, 360, 1440, float('inf')],  # <1h, 1–6h, 6–24h, >24h
+        labels=[
+            '🔥 Late (<1h)',
+            '⚠️ Mid (1–6h)',
+            '⏳ Early (6–24h)',
+            '🧊 Very Early (>24h)',
+        ],
+        right=False
+    )
+
+    # Binary late-game steam flag
+    df['Late_Game_Steam_Flag'] = (df['Minutes_To_Game'] < 60).astype(int)
+
+    return df
+    
+
 def apply_blended_sharp_score(df, trained_models):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
@@ -672,6 +705,7 @@ def apply_blended_sharp_score(df, trained_models):
     # Load snapshot history to build opening line baseline
     df_all_snapshots = read_recent_sharp_moves(hours=72)
     df = compute_line_resistance_flag(df, source='moves')
+    df = add_minutes_to_game(df)
     df_first = (
         df_all_snapshots
         .sort_values(by='Snapshot_Timestamp')  # opening lines = earliest
@@ -863,7 +897,17 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['SharpMove_Resistance_Break'] = (
                 df_canon['Sharp_Move_Signal'] * df_canon['Was_Line_Resistance_Broken']
             )
-
+            df_canon['Minutes_To_Game'] = (
+                pd.to_datetime(df_canon['Game_Start'], utc=True) - pd.to_datetime(df_canon['Snapshot_Timestamp'], utc=True)
+            ).dt.total_seconds() / 60
+            
+            df_canon['Late_Game_Steam_Flag'] = (df_canon['Minutes_To_Game'] <= 60).astype(int)
+            
+            df_canon['Minutes_To_Game_Tier'] = pd.cut(
+                df_canon['Minutes_To_Game'],
+                bins=[-1, 30, 60, 180, 360, 720, np.inf],
+                labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
+            )
             
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
@@ -944,6 +988,21 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Was_Line_Resistance_Broken'] = df_inverse.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
             df_inverse['SharpMove_Resistance_Break'] = (
                 df_inverse['Sharp_Move_Signal'] * df_inverse['Was_Line_Resistance_Broken']
+            )
+            # Compute minutes until game start
+            df_inverse['Minutes_To_Game'] = (
+                pd.to_datetime(df_inverse['Game_Start'], utc=True) -
+                pd.to_datetime(df_inverse['Snapshot_Timestamp'], utc=True)
+            ).dt.total_seconds() / 60
+            
+            # Flag: Is this a late steam move?
+            df_inverse['Late_Game_Steam_Flag'] = (df_inverse['Minutes_To_Game'] <= 60).astype(int)
+            
+            # Bucketed tier for diagnostics or categorical modeling
+            df_inverse['Minutes_To_Game_Tier'] = pd.cut(
+                df_inverse['Minutes_To_Game'],
+                bins=[-1, 30, 60, 180, 360, 720, np.inf],
+                labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
             )
             if market_type == "totals":
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
