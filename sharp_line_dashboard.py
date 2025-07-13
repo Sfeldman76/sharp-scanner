@@ -709,7 +709,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
         )
 
-        
+            # === Resistance Flag Debug
+        with st.expander(f"📊 Resistance Flag Debug – {market.upper()}"):
+            st.write("Value Counts:")
+            st.write(df_market['Was_Line_Resistance_Broken'].value_counts(dropna=False))
+    
+            st.write("Sample Resistance Breaks:")
+            st.dataframe(
+                df_market[df_market['Was_Line_Resistance_Broken'] == 1][
+                    ['Game', 'Market', 'Outcome', 'Open_Value', 'Value', 'Was_Line_Resistance_Broken']
+                ].head(10)
+            )
+    
+            if df_market['Was_Line_Resistance_Broken'].sum() == 0:
+                st.warning("⚠️ No line resistance breaks detected.")
+            else:
+                st.success("✅ Resistance break logic is populating correctly.")
         # === 🧠 Add new features to training
         features = [
             # 🔹 Core sharp signals
