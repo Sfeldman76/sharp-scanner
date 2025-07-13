@@ -411,8 +411,65 @@ def write_market_weights_to_bigquery(weights_dict):
     except Exception as e:
         print(f"❌ Upload failed: {e}")
         print(df.dtypes)
-        
+SPORT_ALIAS = {
+    'AMERICANFOOTBALL_CFL': 'CFL',
+    'BASEBALL_MLB': 'MLB',
+    'BASKETBALL_WNBA': 'WNBA',
+    'AMERICANFOOTBALL_NFL': 'NFL',
+    'AMERICANFOOTBALL_NCAAF': 'NCAAF',
+    'BASKETBALL_NBA': 'NBA',
+    'BASKETBALL_NCAAB': 'NCAAB',
+}
 
+KEY_LINE_RESISTANCE = {
+    'NFL': {'spread': [3, 7, 10, 14], 'total': [41, 44, 47, 51]},
+    'NBA': {'spread': [2.5, 5, 7, 10], 'total': [210, 220, 225, 230]},
+    'WNBA': {'spread': [2, 4.5, 6.5], 'total': [155, 160, 165, 170]},
+    'CFL': {'spread': [3, 6.5, 9.5], 'total': [48, 52, 55, 58]},
+    'NCAAF': {'spread': [3, 7, 10, 14, 17], 'total': [45, 52, 59, 66]},
+    'NCAAB': {'spread': [2, 5, 7, 10], 'total': [125, 135, 145, 150]},
+    'MLB': {'spread': [], 'total': [7, 7.5, 8.5, 9]},
+    'NHL': {'spread': [], 'total': [5.5, 6, 6.5, 7]},
+}
+
+
+def was_line_resistance_broken(open_val, close_val, key_levels):
+    if open_val is None or close_val is None:
+        return 0
+    for key in key_levels:
+        if (open_val < key < close_val) or (close_val < key < open_val):
+            return 1
+    return 0
+
+
+def compute_line_resistance_flag(df, source='moves'):
+    # Normalize Sport
+    df['Sport'] = df['Sport'].str.upper().map(SPORT_ALIAS).fillna(df['Sport'].str.upper())
+
+    def get_key_levels(sport, market):
+        sport_key = sport.upper()
+        market_key = market.lower()
+        return KEY_LINE_RESISTANCE.get(sport_key, {}).get(market_key, [])
+
+    def get_opening_line(row):
+        if source == 'moves':
+            return row.get('Old_Value')
+        elif source == 'scores':
+            return row.get('First_Line_Value')
+        else:
+            return None
+
+    df['Was_Line_Resistance_Broken'] = df.apply(
+        lambda row: was_line_resistance_broken(
+            get_opening_line(row),
+            row.get('Value'),
+            get_key_levels(row.get('Sport', ''), row.get('Market', ''))
+        ),
+        axis=1
+    )
+
+    return df
+    
 def initialize_all_tables(df_snap, df_audit, market_weights_dict):
     from google.cloud import bigquery
 
@@ -496,7 +553,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
 
     df_bt = df_bt.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
-
+    # 🔧 Add Was_Line_Resistance_Broken feature from opening vs. final line
+    # 🔧 Add Was_Line_Resistance_Broken feature using First_Line_Value from sharp_scores_full
+    df_bt = compute_line_resistance_flag(df_bt, source='scores')
+    
     dedup_cols = [
         'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump',
@@ -605,7 +665,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         # Example for engineered features
         #df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market.get('Odds_Shift', 0)
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
-       
+        df_market['Was_Line_Resistance_Broken'] = df_market.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
+        df_market['SharpMove_Resistance_Break'] = (df_market['Sharp_Move_Signal'] * df_market['Was_Line_Resistance_Broken'])
 
 
         
@@ -633,7 +694,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             'MarketLeader_ImpProbShift',       # Market-leader impact on price shift
             'LimitProtect_SharpMag',           # Limit-up signal with no move (market protection)
             'Delta_Sharp_vs_Rec',              # Directional disagreement between sharp vs rec
-            'Sharp_Leads'                      # Binary: did sharp books move first?
+            'Sharp_Leads',
+            'SharpMove_Resistance_Break'                     # Binary: did sharp books move first?
         ]
     
             
@@ -1133,7 +1195,7 @@ def apply_blended_sharp_score(df, trained_models):
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     # Step 1: Load snapshot history to build opening line baseline
     df_all_snapshots = read_recent_sharp_moves(hours=72)
-    
+    df = compute_line_resistance_flag(df, source='moves')
     # Step 2: Build opening line (df_first)
     df_first = (
         df_all_snapshots
@@ -1337,6 +1399,12 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['SharpMove_Odds_Up'] = ((df_canon['Sharp_Move_Signal'] == 1) & (df_canon['Odds_Shift'] > 0)).astype(int)
             df_canon['SharpMove_Odds_Down'] = ((df_canon['Sharp_Move_Signal'] == 1) & (df_canon['Odds_Shift'] < 0)).astype(int)
             df_canon['SharpMove_Odds_Mag'] = df_canon['Odds_Shift'].abs() * df_canon['Sharp_Move_Signal']
+            df_canon['Was_Line_Resistance_Broken'] = df_canon.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
+            df_canon['SharpMove_Resistance_Break'] = (
+                df_canon['Sharp_Move_Signal'] * df_canon['Was_Line_Resistance_Broken']
+            )
+            
+
 
 
             # === Align features exactly to model input ===
@@ -1474,8 +1542,10 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['SharpMove_Odds_Up'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] > 0)).astype(int)
             df_inverse['SharpMove_Odds_Down'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] < 0)).astype(int)
             df_inverse['SharpMove_Odds_Mag'] = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
-
-            
+            df_inverse['Was_Line_Resistance_Broken'] = df_inverse.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
+            df_inverse['SharpMove_Resistance_Break'] = (
+                df_inverse['Sharp_Move_Signal'] * df_inverse['Was_Line_Resistance_Broken']
+            )
             # === Final deduplication
             df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
                         # After generating df_inverse
@@ -1503,7 +1573,8 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
                 (df_scored['SharpMove_Odds_Up'] == 1).astype(int) +
                 (df_scored['SharpMove_Odds_Down'] == 1).astype(int)+
-                (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)    # or any meaningful threshold
+                (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)+
+                (df_scored['SharpMove_Resistance_Break'] == 1).astype(int)    # or any meaningful threshold
             )
                             
             def build_why_model_likes_it(row):
@@ -1554,6 +1625,8 @@ def apply_blended_sharp_score(df, trained_models):
                     reasoning_parts.append("💼 Sharp High Limit")
                 if row.get("SharpMove_Odds_Mag", 0) > 5:
                     reasoning_parts.append("💥 Sharp Odds Steam")
+                if row.get("SharpMove_Resistance_Break", 0) == 1:
+                    reasoning_parts.append("🧱 Broke Key Resistance")
             
                 return " + ".join(reasoning_parts)
             
