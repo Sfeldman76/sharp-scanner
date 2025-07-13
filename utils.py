@@ -1441,6 +1441,30 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
     df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+    # === Compute Max/Min Value and Odds for Reversal Detection ===
+    df_extremes = (
+        df_history_sorted
+        .groupby(['Game', 'Market', 'Outcome', 'Book'])
+        .agg({
+            'Value': ['max', 'min'],
+            'Odds_Price': ['max', 'min']
+        })
+        .reset_index()
+    )
+    df_extremes.columns = ['Game', 'Market', 'Outcome', 'Book', 'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds']
+    
+    # === Merge extremes into main df
+    df = df.merge(df_extremes, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+    
+    df['Value_Reversal_Flag'] = (
+        ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
+        ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
+    ).astype(int)
+    
+    df['Odds_Reversal_Flag'] = (
+        ((df['Odds_Price'] < df['Open_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
+        ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
+    ).astype(int)
     
     # === Additional sharp flags
     df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
