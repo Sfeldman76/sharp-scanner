@@ -1403,50 +1403,63 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
   
        # === Build main DataFrame
+    
+    # 🧠 Add this line here
+  
+    # === Build main DataFrame
     df = pd.DataFrame(rows)
     df['Book'] = df['Book'].str.lower()
     df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    # 🧠 Add this line here
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
-    # === Historical sorting for open-line extraction
-    df_history = df.copy()
-    df_history_sorted = df_history.sort_values('Time')
     
-    # === Extract open lines globally and per book
+    # === Compute Openers BEFORE creating df_history_sorted
     line_open_df = (
-        df_history_sorted.dropna(subset=['Value'])
-        .groupby(['Game', 'Market', 'Outcome'])['Value']
-        .first()
-        .reset_index()
-        .rename(columns={'Value': 'Open_Value'})
+        df.dropna(subset=['Value'])
+          .groupby(['Game', 'Market', 'Outcome'])['Value']
+          .first()
+          .reset_index()
+          .rename(columns={'Value': 'Open_Value'})
     )
     
     line_open_per_book = (
-        df_history_sorted.dropna(subset=['Value'])
-        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
-        .first()
-        .reset_index()
-        .rename(columns={'Value': 'Open_Book_Value'})
+        df.dropna(subset=['Value'])
+          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
+          .first()
+          .reset_index()
+          .rename(columns={'Value': 'Open_Book_Value'})
     )
     
     open_limit_df = (
-        df_history_sorted
-        .dropna(subset=['Limit'])
-        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Limit']
-        .first()
-        .reset_index()
-        .rename(columns={'Limit': 'Opening_Limit'})
+        df.dropna(subset=['Limit'])
+          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Limit']
+          .first()
+          .reset_index()
+          .rename(columns={'Limit': 'Opening_Limit'})
     )
     
-    # === Merge open lines into df
-    df = df.merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
-    df = df.merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-    df = df.merge(open_limit_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-    df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
-    df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
-    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-    # === Compute Max/Min Value and Odds for Reversal Detection ===
+    open_odds_df = (
+        df.dropna(subset=['Odds_Price'])
+          .groupby(['Game', 'Market', 'Outcome', 'Bookmaker'])['Odds_Price']
+          .first()
+          .reset_index()
+          .rename(columns={'Odds_Price': 'Open_Odds'})
+    )
+    
+    # === Merge openers into df
+    df = (
+        df
+        .merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
+        .merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+        .merge(open_limit_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+        .merge(open_odds_df, on=['Game', 'Market', 'Outcome', 'Bookmaker'], how='left')
+    )
+    
+    # === Now create df_history_sorted from the enriched df
+    df_history = df.copy()
+    df_history_sorted = df_history.sort_values('Time')
+    
+    # === Now you can safely run the extremes and reversal logic
     df_extremes = (
         df_history_sorted
         .groupby(['Game', 'Market', 'Outcome', 'Book'])
@@ -1458,9 +1471,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     )
     df_extremes.columns = ['Game', 'Market', 'Outcome', 'Book', 'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds']
     
-    # === Merge extremes into main df
     df = df.merge(df_extremes, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
     
+    # === Reversal flags
     df['Value_Reversal_Flag'] = (
         ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
         ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
@@ -1470,6 +1483,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         ((df['Odds_Price'] < df['Open_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
         ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
     ).astype(int)
+    
+    df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
+    df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
+    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     
     # === Additional sharp flags
     df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
