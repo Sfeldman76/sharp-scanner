@@ -683,7 +683,6 @@ def add_minutes_to_game(df):
     )
 
     return df
-    
 
 def apply_blended_sharp_score(df, trained_models):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
