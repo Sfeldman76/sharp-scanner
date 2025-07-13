@@ -532,6 +532,39 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
 
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
 
+
+def add_minutes_to_game(df):
+    df = df.copy()
+
+    # Ensure datetime columns are parsed
+    df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
+    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
+
+    # Compute raw minutes
+    df['Minutes_To_Game'] = (
+        (df['Game_Start'] - df['Snapshot_Timestamp'])
+        .dt.total_seconds() / 60
+    ).clip(lower=0)
+
+    # Define timing tier buckets
+    df['Timing_Tier'] = pd.cut(
+        df['Minutes_To_Game'],
+        bins=[0, 60, 360, 1440, float('inf')],  # <1h, 1–6h, 6–24h, >24h
+        labels=[
+            '🔥 Late (<1h)',
+            '⚠️ Mid (1–6h)',
+            '⏳ Early (6–24h)',
+            '🧊 Very Early (>24h)',
+        ],
+        right=False
+    )
+
+    # Binary late-game steam flag
+    df['Late_Game_Steam_Flag'] = (df['Minutes_To_Game'] < 60).astype(int)
+
+    return df
+    
+    
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
@@ -556,7 +589,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
     # 🔧 Add Was_Line_Resistance_Broken feature from opening vs. final line
     # 🔧 Add Was_Line_Resistance_Broken feature using First_Line_Value from sharp_scores_full
     df_bt = compute_line_resistance_flag(df_bt, source='scores')
-    
+    df_bt = add_minutes_to_game(df_bt)
     dedup_cols = [
         'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump',
@@ -667,7 +700,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
         df_market['Was_Line_Resistance_Broken'] = df_market.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
         df_market['SharpMove_Resistance_Break'] = (df_market['Sharp_Move_Signal'] * df_market['Was_Line_Resistance_Broken'])
-
+        
+        
+        df_market['Minutes_To_Game_Tier'] = pd.cut(
+            df_market['Minutes_To_Game'],
+            bins=[-1, 30, 60, 180, 360, 720, np.inf],
+            labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
+        )
 
         
         # === 🧠 Add new features to training
@@ -695,7 +734,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             'LimitProtect_SharpMag',           # Limit-up signal with no move (market protection)
             'Delta_Sharp_vs_Rec',              # Directional disagreement between sharp vs rec
             'Sharp_Leads',
-            'SharpMove_Resistance_Break'                     # Binary: did sharp books move first?
+            'SharpMove_Resistance_Break',
+            'Late_Game_Steam_Flag'                      # Binary: did sharp books move first?
         ]
     
             
@@ -1403,8 +1443,18 @@ def apply_blended_sharp_score(df, trained_models):
             df_canon['SharpMove_Resistance_Break'] = (
                 df_canon['Sharp_Move_Signal'] * df_canon['Was_Line_Resistance_Broken']
             )
+            df_canon['Minutes_To_Game'] = (
+                pd.to_datetime(df_canon['Game_Start'], utc=True) - pd.to_datetime(df_canon['Snapshot_Timestamp'], utc=True)
+            ).dt.total_seconds() / 60
             
-
+            df_canon['Late_Game_Steam_Flag'] = (df_canon['Minutes_To_Game'] <= 60).astype(int)
+            
+            df_canon['Minutes_To_Game_Tier'] = pd.cut(
+                df_canon['Minutes_To_Game'],
+                bins=[-1, 30, 60, 180, 360, 720, np.inf],
+                labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
+            )
+            
 
 
             # === Align features exactly to model input ===
@@ -1546,6 +1596,21 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['SharpMove_Resistance_Break'] = (
                 df_inverse['Sharp_Move_Signal'] * df_inverse['Was_Line_Resistance_Broken']
             )
+            # Compute minutes until game start
+            df_inverse['Minutes_To_Game'] = (
+                pd.to_datetime(df_inverse['Game_Start'], utc=True) -
+                pd.to_datetime(df_inverse['Snapshot_Timestamp'], utc=True)
+            ).dt.total_seconds() / 60
+            
+            # Flag: Is this a late steam move?
+            df_inverse['Late_Game_Steam_Flag'] = (df_inverse['Minutes_To_Game'] <= 60).astype(int)
+            
+            # Bucketed tier for diagnostics or categorical modeling
+            df_inverse['Minutes_To_Game_Tier'] = pd.cut(
+                df_inverse['Minutes_To_Game'],
+                bins=[-1, 30, 60, 180, 360, 720, np.inf],
+                labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
+            )
             # === Final deduplication
             df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
                         # After generating df_inverse
@@ -1574,7 +1639,8 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_scored['SharpMove_Odds_Up'] == 1).astype(int) +
                 (df_scored['SharpMove_Odds_Down'] == 1).astype(int)+
                 (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)+
-                (df_scored['SharpMove_Resistance_Break'] == 1).astype(int)    # or any meaningful threshold
+                (df_scored['SharpMove_Resistance_Break'] == 1).astype(int)+
+                (df_scored['Late_Game_Steam_Flag'] == 1).astype(int)    # or any meaningful threshold
             )
                             
             def build_why_model_likes_it(row):
@@ -1627,6 +1693,8 @@ def apply_blended_sharp_score(df, trained_models):
                     reasoning_parts.append("💥 Sharp Odds Steam")
                 if row.get("SharpMove_Resistance_Break", 0) == 1:
                     reasoning_parts.append("🧱 Broke Key Resistance")
+                if row.get("Late_Game_Steam_Flag") == 1:
+                    reasoning_parts.append("⏰ Late Game Steam")
             
                 return " + ".join(reasoning_parts)
             
