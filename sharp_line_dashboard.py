@@ -536,17 +536,20 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 def add_minutes_to_game(df):
     df = df.copy()
 
-    # Ensure datetime columns are parsed
-    df['Game_Start'] = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
+    if 'Commence_Hour' not in df.columns or 'Snapshot_Timestamp' not in df.columns:
+        logger.warning("⏳ Skipping time-to-game calculation — missing 'Commence_Hour' or 'Snapshot_Timestamp'")
+        df['Minutes_To_Game'] = None
+        df['Timing_Tier'] = None
+        return df
+
+    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
     df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
 
-    # Compute raw minutes
     df['Minutes_To_Game'] = (
-        (df['Game_Start'] - df['Snapshot_Timestamp'])
+        (df['Commence_Hour'] - df['Snapshot_Timestamp'])
         .dt.total_seconds() / 60
     ).clip(lower=0)
 
-    # Define timing tier buckets
     df['Timing_Tier'] = pd.cut(
         df['Minutes_To_Game'],
         bins=[0, 60, 360, 1440, float('inf')],  # <1h, 1–6h, 6–24h, >24h
@@ -558,9 +561,6 @@ def add_minutes_to_game(df):
         ],
         right=False
     )
-
-    # Binary late-game steam flag
-    df['Late_Game_Steam_Flag'] = (df['Minutes_To_Game'] < 60).astype(int)
 
     return df
     
