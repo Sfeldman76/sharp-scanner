@@ -1480,8 +1480,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     ).astype(int)
     
     df['Odds_Reversal_Flag'] = (
-        ((df['Odds_Price'] < df['Open_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
-        ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
+        ((df['Odds_Price'] < df['First_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
+        ((df['Odds_Price'] > df['First_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
     ).astype(int)
     
     df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
