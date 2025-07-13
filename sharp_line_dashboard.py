@@ -700,7 +700,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
         df_market['Was_Line_Resistance_Broken'] = df_market.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
         df_market['SharpMove_Resistance_Break'] = (df_market['Sharp_Move_Signal'] * df_market['Was_Line_Resistance_Broken'])
-        
+        df_market['Value_Reversal_Flag'] = df_market.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
+        df_market['Odds_Reversal_Flag'] = df_market.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
         
         df_market['Minutes_To_Game_Tier'] = pd.cut(
             df_market['Minutes_To_Game'],
@@ -735,7 +736,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             'Delta_Sharp_vs_Rec',              # Directional disagreement between sharp vs rec
             'Sharp_Leads',
             'SharpMove_Resistance_Break',
-            'Late_Game_Steam_Flag'                      # Binary: did sharp books move first?
+            'Late_Game_Steam_Flag',
+               # 🔁 Reversal logic
+            'Value_Reversal_Flag',
+            'Odds_Reversal_Flag'                      # Binary: did sharp books move first?
         ]
     
             
@@ -1455,7 +1459,9 @@ def apply_blended_sharp_score(df, trained_models):
                 bins=[-1, 30, 60, 180, 360, 720, np.inf],
                 labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
             )
-            
+            df_canon['Value_Reversal_Flag'] = df_canon.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
+            df_canon['Odds_Reversal_Flag'] = df_canon.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
+
 
 
             # === Align features exactly to model input ===
@@ -1612,6 +1618,10 @@ def apply_blended_sharp_score(df, trained_models):
                 bins=[-1, 30, 60, 180, 360, 720, np.inf],
                 labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
             )
+           
+
+            df_inverse['Value_Reversal_Flag'] = df_inverse.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
+            df_inverse['Odds_Reversal_Flag'] = df_inverse.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
             # === Final deduplication
             df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
                         # After generating df_inverse
@@ -1641,7 +1651,9 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_scored['SharpMove_Odds_Down'] == 1).astype(int)+
                 (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)+
                 (df_scored['SharpMove_Resistance_Break'] == 1).astype(int)+
-                (df_scored['Late_Game_Steam_Flag'] == 1).astype(int)    # or any meaningful threshold
+                (df_scored['Late_Game_Steam_Flag'] == 1).astype(int)+
+                (df_scored['Value_Reversal_Flag'] == 1).astype(int) +
+                (df_scored['Odds_Reversal_Flag'] == 1).astype(int)   # or any meaningful threshold
             )
                             
             def build_why_model_likes_it(row):
@@ -1696,6 +1708,10 @@ def apply_blended_sharp_score(df, trained_models):
                     reasoning_parts.append("🧱 Broke Key Resistance")
                 if row.get("Late_Game_Steam_Flag") == 1:
                     reasoning_parts.append("⏰ Late Game Steam")
+                if row.get("Value_Reversal_Flag") == 1:
+                    reasoning_parts.append("🔄 Value Reversal")
+                if row.get("Odds_Reversal_Flag") == 1:
+                    reasoning_parts.append("📉 Odds Reversal")
             
                 return " + ".join(reasoning_parts)
             
