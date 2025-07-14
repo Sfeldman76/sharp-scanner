@@ -710,25 +710,31 @@ def add_minutes_to_game(df):
 
     return df
 
-def apply_blended_sharp_score(df, trained_models, df_history=None):
-    if df_history is None:
-        df_history = read_recent_sharp_moves(hours=72)
+def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
+    logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
     df = df.copy()
     scored_all = []
     total_start = time.time()
+
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
 
-    # Drop leftover merge artifacts
+    # Drop merge artifacts
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
         logger.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
+    # ✅ Use passed history or fallback
+    if df_all_snapshots is None:
+        df_all_snapshots = read_recent_sharp_moves(hours=72)
+    # Drop leftover merge artifacts
+    
+
     # === Load full sharp move history for enrichment
-    df_all_snapshots = read_recent_sharp_moves(hours=72)
+   
     df = compute_line_resistance_flag(df, source='moves')
     df = add_minutes_to_game(df)
 
@@ -1389,8 +1395,8 @@ def apply_blended_sharp_score(df, trained_models, df_history=None):
 
         
 
-def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models=None, weights={}):
-   
+
+def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models, weights=None):   
     
     if not current:
         logging.warning("⚠️ No current odds data provided.")
