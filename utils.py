@@ -2021,7 +2021,19 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
         new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
         blocked = df_scores[df_scores['Merge_Key_Short'].isin(existing_keys)]
-    
+        logging.info(f"🧪 df_scores_needed shape: {df_scores_needed.shape}")
+        logging.info(f"🧪 df_scores_needed head:\n{df_scores_needed.head().to_string(index=False)}")
+        
+        # Check for missing keys
+        if df_scores_needed['Merge_Key_Short'].isnull().any():
+            logging.warning("⚠️ At least one row in df_scores_needed has a NULL Merge_Key_Short")
+        if df_scores_needed[['Home_Team', 'Away_Team']].isnull().any().any():
+            logging.warning("⚠️ At least one row has missing team names")
+        
+        # Check if the row is entirely empty
+        empty_rows = df_scores_needed[df_scores_needed.isnull().all(axis=1)]
+        if not empty_rows.empty:
+            logging.warning(f"⚠️ Found completely empty rows in df_scores_needed:\n{empty_rows}")
         logging.info(f"⛔ Skipped (already in table): {len(blocked)}")
         logging.info(f"🧪 Sample skipped keys:\n{blocked[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head().to_string(index=False)}")
     
