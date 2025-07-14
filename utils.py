@@ -751,14 +751,17 @@ def apply_blended_sharp_score(df, trained_models):
     # === Compute shifts
     df['Odds_Shift'] = pd.to_numeric(df['Odds_Price'], errors='coerce') - pd.to_numeric(df['Open_Odds'], errors='coerce')
     df['Implied_Prob_Shift'] = pd.to_numeric(df['Implied_Prob'], errors='coerce') - pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
-
+    # Compute deltas
+    df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['Open_Value'], errors='coerce')
+    
+    
     # === Clean columns
     df.drop(columns=['First_Imp_Prob'], inplace=True, errors='ignore')
 
     # === Delta and reversal flags
     df['Delta'] = df['Value'] - df['Open_Value']
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-
+    
     df['Value_Reversal_Flag'] = (
         ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
         ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
