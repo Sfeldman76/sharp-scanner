@@ -1455,13 +1455,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
     df = pd.DataFrame(rows)
+    # === Compute Market Leader (if not already done)
     
     # ✅ Add required fields BEFORE scoring
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
     df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
     df['Book'] = df['Book'].str.lower()
-    
+    # === Compute Market Leader (if not already done)
+    df['Market_Leader'] = (
+        df.groupby(['Game_Key', 'Market', 'Outcome'])['SharpBetScore']
+        .transform(lambda x: (x == x.max()).astype(int))
+    )
     # Only now run model scoring
 
     # Apply sharp scoring
