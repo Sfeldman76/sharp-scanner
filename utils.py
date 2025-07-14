@@ -2010,8 +2010,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 3. Upload scores to `game_scores_final` ===
     # === 3. Upload scores to `game_scores_final` ===
     try:
-        # Safe fallback to avoid UnboundLocalError if upstream assignment fails
-        if 'df_scores_needed' not in locals():
+        # Safe fallback to avoid UnboundLocalError or bad structure
+        if 'df_scores_needed' not in locals() or not isinstance(df_scores_needed, pd.DataFrame):
             df_scores_needed = pd.DataFrame()
     
         existing_keys = bq_client.query("""
@@ -2021,24 +2021,33 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
         new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
         blocked = df_scores[df_scores['Merge_Key_Short'].isin(existing_keys)]
-        logging.info(f"🧪 df_scores_needed shape: {df_scores_needed.shape}")
-        logging.info(f"🧪 df_scores_needed head:\n{df_scores_needed.head().to_string(index=False)}")
-        
-        # Check for missing keys
-        if df_scores_needed['Merge_Key_Short'].isnull().any():
-            logging.warning("⚠️ At least one row in df_scores_needed has a NULL Merge_Key_Short")
-        if df_scores_needed[['Home_Team', 'Away_Team']].isnull().any().any():
-            logging.warning("⚠️ At least one row has missing team names")
-        
-        # Check if the row is entirely empty
-        empty_rows = df_scores_needed[df_scores_needed.isnull().all(axis=1)]
-        if not empty_rows.empty:
-            logging.warning(f"⚠️ Found completely empty rows in df_scores_needed:\n{empty_rows}")
+    
         logging.info(f"⛔ Skipped (already in table): {len(blocked)}")
         logging.info(f"🧪 Sample skipped keys:\n{blocked[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head().to_string(index=False)}")
     
-        if not df_scores_needed.empty:
-            logging.info(f"🧪 df_scores_needed columns: {list(df_scores_needed.columns)}")
+        # === Safe diagnostics for df_scores_needed
+        if df_scores_needed.empty or df_scores_needed.shape[1] == 0:
+            logging.warning("⚠️ df_scores_needed is empty or has no columns.")
+        else:
+            logging.info(f"🧪 df_scores_needed shape: {df_scores_needed.shape}")
+            logging.info(f"🧪 df_scores_needed head:\n{df_scores_needed.head().to_string(index=False)}")
+    
+            if 'Merge_Key_Short' in df_scores_needed.columns:
+                if df_scores_needed['Merge_Key_Short'].isnull().any():
+                    logging.warning("⚠️ At least one row in df_scores_needed has a NULL Merge_Key_Short")
+            else:
+                logging.warning("⚠️ 'Merge_Key_Short' column missing from df_scores_needed")
+    
+            if {'Home_Team', 'Away_Team'}.issubset(df_scores_needed.columns):
+                if df_scores_needed[['Home_Team', 'Away_Team']].isnull().any().any():
+                    logging.warning("⚠️ At least one row has missing team names")
+            else:
+                logging.warning("⚠️ Missing 'Home_Team' or 'Away_Team' columns in df_scores_needed")
+    
+            empty_rows = df_scores_needed[df_scores_needed.isnull().all(axis=1)]
+            if not empty_rows.empty:
+                logging.warning(f"⚠️ Found completely empty rows in df_scores_needed:\n{empty_rows}")
+    
             try:
                 sample = df_scores_needed[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head(5)
             except KeyError as e:
@@ -2046,13 +2055,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 sample = df_scores_needed.head(5)
             logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
     
-        # Detect keys that are neither new nor in existing table (missing entirely?)
+        # Detect keys that are neither new nor already in BigQuery
         all_found_keys = set(new_scores['Merge_Key_Short']) | existing_keys
         missing_keys = set(df_scores['Merge_Key_Short']) - all_found_keys
         if missing_keys:
             logging.warning(f"⚠️ These keys were neither uploaded nor matched in BigQuery:")
             logging.warning(list(missing_keys)[:5])
     
+        # === Upload if valid
         if new_scores.empty:
             logging.info("ℹ️ No new scores to upload to game_scores_final")
         else:
@@ -2061,7 +2071,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     except Exception as e:
         logging.exception("❌ Failed to upload game scores")
-    
     
         # Dump a preview of the DataFrame
         try:
