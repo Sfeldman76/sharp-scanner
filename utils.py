@@ -1544,18 +1544,19 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     # Only now run model scoring
 
-    # Apply sharp scoring
-
     if trained_models:
         try:
+            df_all_snapshots = read_recent_sharp_moves(hours=72)
             df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots)
             if not df_scored.empty:
                 df = df_scored.copy()
                 logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
             else:
-                logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
+                logging.warning("⚠️ apply_blended_sharp_score() returned no rows — aborting further processing.")
+                return df, pd.DataFrame(), pd.DataFrame()
         except Exception as e:
             logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
+            return df, pd.DataFrame(), pd.DataFrame()
 
  
     # === Build main DataFrame
