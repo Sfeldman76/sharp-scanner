@@ -1444,15 +1444,19 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     # Apply sharp scoring
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
-    df_sharp_lines = pd.DataFrame(sharp_lines.values())
-
-  
-       # === Build main DataFrame
-    
-    # 🧠 Add this line here
-  
+ 
     # === Build main DataFrame
     df = pd.DataFrame(rows)
+    logging.info(f"📊 Columns after sharp scoring: {df.columns.tolist()}")
+
+    # === Recompute Pre_Game / Post_Game before saving
+    df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
+    now = pd.Timestamp.utcnow()
+    df['Pre_Game'] = df['Game_Start'] > now
+    df['Post_Game'] = ~df['Pre_Game']
+    # === Calculate Implied Probability from Odds_Price
+    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
     df['Book'] = df['Book'].str.lower()
     df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
@@ -1499,14 +1503,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
     df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
     df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
-    # === Recompute Pre_Game / Post_Game before saving
-    df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
-    now = pd.Timestamp.utcnow()
-    df['Pre_Game'] = df['Game_Start'] > now
-    df['Post_Game'] = ~df['Pre_Game']
-    # === Calculate Implied Probability from Odds_Price
-    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
-    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+    
 
     # === Confidence scores and tiers
     df = assign_confidence_scores(df, weights)
