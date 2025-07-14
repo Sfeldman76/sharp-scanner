@@ -1373,12 +1373,23 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Commence_Hour': game_hour
                     }
                 
+                   
+                    # ✅ Defensive check before adding the entry
+                    required_fields = ['Game_Key', 'Game', 'Book', 'Market', 'Outcome', 'Value', 'Odds_Price']
+                    if any(entry.get(f) is None for f in required_fields):
+                        logging.warning(
+                            f"⚠️ Skipping incomplete row: "
+                            f"{game_name} | {mtype} | {label} | Book: {book_key} | Value: {value} | Odds: {odds_price}"
+                        )
+                        continue
+                    
                     rows.append(entry)
+
                     line_history_log.setdefault(gid, []).append(entry.copy())
-                    #logging.debug(
-                        #f"[{mtype.upper()}] {label} | Book: {book_key} | Value: {value} | Odds_Price: {odds_price} | "
-                        #f"Limit: {limit} | Game: {game_name}"
-                    #)
+                    logging.debug(
+                        f"[{mtype.upper()}] {label} | Book: {book_key} | Value: {value} | Odds_Price: {odds_price} | "
+                        f"Limit: {limit} | Game: {game_name}"
+                    )
 
                     if value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
@@ -1456,12 +1467,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     )
     
     # === Now create df_history_sorted from the enriched df
-    df_history = df.copy()
-    df_history_sorted = df_history.sort_values('Time')
+    # === Load enriched sharp move history (72h default)
+    df_history = read_recent_sharp_moves(hours=72)
     
-    # === Now you can safely run the extremes and reversal logic
+    # Drop rows with missing critical fields
+    df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value', 'Odds_Price'])
+    
+    # === Compute max/min for reversal detection from historical sharp moves
     df_extremes = (
-        df_history_sorted
+        df_history
         .groupby(['Game', 'Market', 'Outcome', 'Book'])
         .agg({
             'Value': ['max', 'min'],
@@ -1471,8 +1485,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     )
     df_extremes.columns = ['Game', 'Market', 'Outcome', 'Book', 'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds']
     
+    # Merge into the current snapshot DataFrame (df)
     df = df.merge(df_extremes, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-    
+
     # === Reversal flags
     df['Value_Reversal_Flag'] = (
         ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
