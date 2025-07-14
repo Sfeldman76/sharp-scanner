@@ -1451,9 +1451,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         r.update(sharp_scores)
 
     logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
+    df = pd.DataFrame(rows)
+    
+    # ✅ Add required fields BEFORE scoring
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+    df['Book'] = df['Book'].str.lower()
+    
+    # Only now run model scoring
 
     # Apply sharp scoring
-    df = pd.DataFrame(rows)
+
     if trained_models:
         try:
             df_scored = apply_blended_sharp_score(df.copy(), trained_models)
