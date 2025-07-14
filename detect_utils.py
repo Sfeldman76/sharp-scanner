@@ -51,23 +51,26 @@ def detect_and_save_all_sports():
 
             market_weights = read_market_weights_from_bigquery()
 
-            df_moves, df_snap_unused, df_audit = detect_sharp_moves(
-                current=current,
-                previous=previous,
-                sport_key=sport_key,
-                SHARP_BOOKS=SHARP_BOOKS,
-                REC_BOOKS=REC_BOOKS,
-                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-                weights=market_weights
-            )
-            logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
-
             trained_models = {
                 market: load_model_from_gcs(sport_label, market)
                 for market in ['spreads', 'totals', 'h2h']
             }
+            
             trained_models = {k: v for k, v in trained_models.items() if v}
             logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys())}")
+            
+            df_moves, df_snap_unused, df_audit = detect_sharp_moves(
+                current=current,
+                previous=previous,
+                sport_key=sport_label,
+                SHARP_BOOKS=SHARP_BOOKS,
+                REC_BOOKS=REC_BOOKS,
+                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
+                trained_models=trained_models  # ✅ Must be forwarded
+            )
+            logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
+
+           
             backtest_days = 3
             try:
                 df_backtest = fetch_scores_and_backtest(
