@@ -1262,14 +1262,24 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
-
+    df_history = read_recent_sharp_moves(hours=72)
+    df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
+    df_history = df_history.sort_values('Snapshot_Timestamp')
+    
+    # ✅ Build old value map using first recorded value per outcome
+    old_val_map = (
+        df_history
+        .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
+        .set_index(['Game', 'Market', 'Outcome', 'Book'])['Value']
+        .to_dict()
+    )
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
     sharp_lines = {}
     line_history_log = {}
     line_open_map = {}
-
+    
     previous_odds_map = {}
     for g in previous_map.values():
         for book in g.get('bookmakers', []):
@@ -1344,7 +1354,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     limit = o.get('bet_limit')
                     prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
                     # ⚠️ Read the open value *before* possibly writing it
-                    open_val = line_open_map.get((game_name, mtype, label), (None, None))[0]
+                    open_val = old_val_map.get((game_name, mtype, label, book_key))
                     
                     # ✅ Only set the open value if it's not already set
                     if (game_name, mtype, label) not in line_open_map and value is not None:
