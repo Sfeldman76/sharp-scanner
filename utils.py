@@ -1280,7 +1280,9 @@ def apply_blended_sharp_score(df, trained_models):
 
         
 
-def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models=trained_models, weights={}):
+def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models=None, weights={}):
+   
+    
     if not current:
         logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -1452,14 +1454,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     # Apply sharp scoring
     df = pd.DataFrame(rows)
-
-    # Run full scoring and enrichment
-    df_scored = apply_blended_sharp_score(df.copy(), trained_models)
-    if not df_scored.empty:
-        df = df_scored.copy()
-        logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
-    else:
-        logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
+    if trained_models:
+        try:
+            df_scored = apply_blended_sharp_score(df.copy(), trained_models)
+            if not df_scored.empty:
+                df = df_scored.copy()
+                logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
+            else:
+                logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
+        except Exception as e:
+            logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
 
  
     # === Build main DataFrame
