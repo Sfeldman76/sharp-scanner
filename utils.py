@@ -821,7 +821,13 @@ def apply_blended_sharp_score(df, trained_models, df_history=None):
     
 
     # === Confidence scores and tiers
-    df = assign_confidence_scores(df, weights)
+    try:
+        if 'weights' in globals():
+            df = assign_confidence_scores(df, weights)
+        else:
+            logging.warning("⚠️ Skipping confidence scoring — 'weights' not defined.")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to assign confidence scores: {e}")
     # === Patch derived fields before BigQuery write ===
     try:
         # Line_Delta: Value - Open_Value
