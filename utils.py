@@ -1442,7 +1442,6 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
           .rename(columns={'Value': 'Open_Book_Value'})
     )
     
-    
     line_open_per_book = (
         df[df['Book'].isin(SHARP_BOOKS)]  # Only sharp books
           .dropna(subset=['Value'])
@@ -1451,19 +1450,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
           .reset_index()
           .rename(columns={'Value': 'Sharp_Open_Value'})
     )
-
-df = df.merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
+    
     open_limit_df = (
         df.dropna(subset=['Limit'])
           .groupby(['Game', 'Market', 'Outcome', 'Book'])['Limit']
-          .first()
+          .first()    
           .reset_index()
           .rename(columns={'Limit': 'Opening_Limit'})
     )
     
     open_odds_df = (
         df.dropna(subset=['Odds_Price'])
-          .groupby(['Game', 'Market', 'Outcome', 'Bookmaker'])['Odds_Price']
+          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
           .first()
           .reset_index()
           .rename(columns={'Odds_Price': 'Open_Odds'})
@@ -1472,11 +1470,12 @@ df = df.merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how=
     # === Merge openers into df
     df = (
         df
-        .merge(line_open_df, on=['Game', 'Market', 'Outcome'], how='left')
+        .merge(line_open_df, on=['Game', 'Market', 'Outcome','Book'], how='left')
         .merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
         .merge(open_limit_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-        .merge(open_odds_df, on=['Game', 'Market', 'Outcome', 'Bookmaker'], how='left')
+        .merge(open_odds_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
     )
+
     
     # === Now create df_history_sorted from the enriched df
     # === Load enriched sharp move history (72h default)
