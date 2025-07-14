@@ -1277,8 +1277,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
     sharp_lines = {}
-    line_history_log = {}
-    line_open_map = {}
+   
     
     previous_odds_map = {}
     for g in previous_map.values():
@@ -1693,53 +1692,6 @@ def summarize_consensus(df, SHARP_BOOKS, REC_BOOKS):
 
     return summary_df
 
-
-def write_line_history_to_bigquery(df):
-    if df is None or df.empty:
-        logging.warning("⚠️ No line history data to upload.")
-        return
-
-    df = df.copy()
-
-    # Convert Time to UTC datetime
-    if 'Time' in df.columns:
-        df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-
-    # Clean merge artifacts
-    df = df.rename(columns=lambda x: x.rstrip('_x'))
-    df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
-
-    # Define the allowed schema columns
-    LINE_HISTORY_ALLOWED_COLS = [
-        "Sport", "Game_Key", "Time", "Game", "Game_Start", "Event_Date",
-        "Market", "Outcome", "Bookmaker", "Book", "Value", "Limit",
-        "Old Value", "Delta", "Home_Team_Norm", "Away_Team_Norm", "Commence_Hour",
-        "Ref Sharp Value", "Ref Sharp Old Value", "Delta vs Sharp",
-        "SHARP_SIDE_TO_BET", "Sharp_Move_Signal", "Sharp_Limit_Jump",
-        "Sharp_Time_Score", "Sharp_Prob_Shift", "Sharp_Limit_Total",
-        "SharpBetScore", "Snapshot_Timestamp", "Odds_Price", "Implied_Prob",
-    ]
-
-    # ✅ Remove any unexpected columns before upload
-    allowed = set(LINE_HISTORY_ALLOWED_COLS)
-    actual = set(df.columns)
-    extra = actual - allowed
-    if extra:
-        logging.warning(f"⚠️ Dropping unexpected columns before upload: {extra}")
-    df = df[[col for col in LINE_HISTORY_ALLOWED_COLS if col in df.columns]]
-
-    # Log preview
-    logging.debug("🧪 Line history dtypes:\n" + str(df.dtypes.to_dict()))
-    logging.debug("Sample rows:\n" + df.head(2).to_string())
-    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
-    df['Implied_Prob'] = pd.to_numeric(df.get('Implied_Prob'), errors='coerce')
-    # Upload
-    if not safe_to_gbq(df, LINE_HISTORY_TABLE):
-        logging.error(f"❌ Failed to upload line history to {LINE_HISTORY_TABLE}")
-    else:
-        logging.info(f"✅ Uploaded {len(df)} line history rows to {LINE_HISTORY_TABLE}.")
 
 
 
