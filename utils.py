@@ -822,7 +822,8 @@ def apply_blended_sharp_score(df, trained_models, df_history=None):
 
     # === Confidence scores and tiers
     try:
-        if 'weights' in globals():
+        # Only assign confidence scores if weights are provided
+        if weights:
             df = assign_confidence_scores(df, weights)
         else:
             logging.warning("⚠️ Skipping confidence scoring — 'weights' not defined.")
@@ -1553,17 +1554,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     if trained_models:
         try:
             df_all_snapshots = read_recent_sharp_moves(hours=72)
-            df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots)
+            market_weights = compute_and_write_market_weights(df_all_snapshots)
+            df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
             if not df_scored.empty:
                 df = df_scored.copy()
                 logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
             else:
-                logging.warning("⚠️ apply_blended_sharp_score() returned no rows — aborting further processing.")
-                return df, pd.DataFrame(), pd.DataFrame()
+                logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
         except Exception as e:
             logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
-            return df, pd.DataFrame(), pd.DataFrame()
-
+    
  
     # === Build main DataFrame
     logging.info(f"📊 Columns after sharp scoring: {df.columns.tolist()}")
@@ -1593,26 +1593,32 @@ def compute_weighted_signal(row, market_weights):
         'Sharp_Move_Signal': 2.0,
         'Sharp_Limit_Jump': 2.0,
         'Sharp_Time_Score': 1.5,
-        
-        'Sharp_Limit_Total': 0.001
+        'Sharp_Limit_Total': 0.001  # assumes large values (scale to 0/1 range implicitly)
     }
 
     for comp, importance in component_importance.items():
         val = row.get(comp)
-        if val is None:
+        if val is None or (isinstance(val, float) and pd.isna(val)):
             continue
 
         try:
-            val_key = str(int(val)) if isinstance(val, float) and val.is_integer() else str(val).lower()
+            if comp == 'Sharp_Limit_Total':
+                val_key = str(int(float(val) // 1000 * 1000))  # bucket to nearest 1000
+            elif isinstance(val, float) and val.is_integer():
+                val_key = str(int(val))
+            else:
+                val_key = str(val).strip().lower()
+            
             weight = market_weights.get(market, {}).get(comp, {}).get(val_key, 0.5)
-        except:
+        except Exception:
             weight = 0.5
 
         total_score += weight * importance
         max_possible += importance
 
-    return round((total_score / max_possible) * 100 if max_possible else 50, 2)
-
+    return round((total_score / max_possible) * 100, 2) if max_possible else 50.0
+    
+    
 def compute_confidence(row, market_weights):
     base_score = min(row.get('SharpBetScore', 0) / 50, 1.0) * 50
     weight_score = compute_weighted_signal(row, market_weights)
@@ -2704,8 +2710,6 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
 
 def compute_and_write_market_weights(df):
-    import pandas as pd
-
     component_cols = [
         'Sharp_Move_Signal',
         'Sharp_Limit_Jump',
@@ -2717,19 +2721,32 @@ def compute_and_write_market_weights(df):
     rows = []
 
     for comp in component_cols:
-        df_temp = df[['Market', comp, 'SHARP_HIT_BOOL']].copy()
-        df_temp = df_temp.rename(columns={comp: 'Value'})
-        df_temp['Component'] = comp
-        df_temp['Value'] = df_temp['Value'].astype(str).str.lower()
-        df_temp = df_temp.dropna()
+        if comp not in df.columns:
+            continue
 
-        # Group by Market, Component, Value
-        grouped = df_temp.groupby(['Market', 'Component', 'Value'])['SHARP_HIT_BOOL'].mean().reset_index()
-        grouped.rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'}, inplace=True)
+        temp = df[['Market', comp, 'SHARP_HIT_BOOL']].dropna().copy()
+        temp['Market'] = temp['Market'].astype(str).str.lower()
+        temp['Component'] = comp
+
+        # Convert values to bucketed strings
+        if comp == 'Sharp_Limit_Total':
+            temp['Value'] = temp[comp].astype(float).apply(lambda x: str(int(x // 1000 * 1000)))
+        else:
+            temp['Value'] = temp[comp].apply(
+                lambda x: str(int(x)) if isinstance(x, float) and x.is_integer() else str(x).strip().lower()
+            )
+
+        # Group and average win rates
+        grouped = (
+            temp.groupby(['Market', 'Component', 'Value'])['SHARP_HIT_BOOL']
+            .mean()
+            .reset_index()
+            .rename(columns={'SHARP_HIT_BOOL': 'Win_Rate'})
+        )
 
         for _, row in grouped.iterrows():
             rows.append({
-                'Market': str(row['Market']).lower(),
+                'Market': row['Market'],
                 'Component': row['Component'],
                 'Value': row['Value'],
                 'Win_Rate': round(row['Win_Rate'], 4)
@@ -2737,14 +2754,22 @@ def compute_and_write_market_weights(df):
 
     if not rows:
         print("⚠️ No valid market weights to upload.")
-        return
+        return {}
 
     df_weights = pd.DataFrame(rows)
     print(f"✅ Prepared {len(df_weights)} market weight rows. Sample:")
     print(df_weights.head(10).to_string(index=False))
 
-    # Optional: return df_weights for upload or inspection
-    return df_weights
+    # Return as nested dict for use in scoring
+    market_weights = {}
+    for _, row in df_weights.iterrows():
+        market = row['Market']
+        comp = row['Component']
+        val = row['Value']
+        rate = row['Win_Rate']
+        market_weights.setdefault(market, {}).setdefault(comp, {})[val] = rate
+
+    return market_weights
 
 def compute_sharp_prob_shift(df):
     """
