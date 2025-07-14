@@ -367,7 +367,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Line_Magnitude_Abs',       # Already present
         'Direction_Aligned','Odds_Price', 'Implied_Prob', 
         'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
-        'Value_Reversal_Flag', 'Odds_Reversal_Flag'      # ✅ Add this
+        'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds'      # ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -735,7 +735,7 @@ def apply_blended_sharp_score(df, trained_models):
 
     
     # Drop temporary columns
-    cols_to_drop = ['First_Imp_Prob']
+    cols_to_drop = ['First_Imp_Prob','First_Odds']
     df.drop(columns=[col for col in cols_to_drop if col in df.columns], inplace=True)
 
     # Keep only latest snapshot per Game + Market + Outcome + Bookmaker + Value
