@@ -11,7 +11,7 @@ from utils import (
     read_market_weights_from_bigquery,
     detect_sharp_moves,
     write_sharp_moves_to_master,
-    write_line_history_to_bigquery,
+    #write_line_history_to_bigquery,
     write_snapshot_to_gcs_parquet,
     detect_market_leaders,
     apply_blended_sharp_score,
@@ -98,7 +98,7 @@ def detect_and_save_all_sports():
                     else:
                         logging.info("ℹ️ No scored rows — model returned empty.")
                     # 🔁 Recompute Sharp_Prob_Shift with historical context
-                    recent_history = read_recent_sharp_moves(hours=48)
+                    recent_history = read_recent_sharp_moves(hours=72)
                     recent_history = recent_history[[
                         'Team_Key', 'Bookmaker', 'Snapshot_Timestamp', 'Model_Sharp_Win_Prob'
                     ]].dropna()
@@ -144,7 +144,7 @@ def detect_and_save_all_sports():
                     continue
                 df_moves = df_moves.drop_duplicates(subset=["Line_Hash"])
                 write_sharp_moves_to_master(df_moves)
-                write_line_history_to_bigquery(df_audit)
+               
                 write_snapshot_to_gcs_parquet(current)
 
             except Exception as e:
