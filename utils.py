@@ -1440,13 +1440,29 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     )
     rows = rows_df.to_dict(orient='records')
+
+    for r in rows:
+        game_key = (r['Game'], r['Market'], r['Outcome'])
+        entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome'], [])
+        open_val = line_open_map.get(game_key, (None,))[0]
+        sharp_scores = compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome'])
+        r.update(sharp_scores)
+
     logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
 
     # Apply sharp scoring
-    rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
+    df = pd.DataFrame(rows)
+
+    # Run full scoring and enrichment
+    df_scored = apply_blended_sharp_score(df.copy(), trained_models)
+    if not df_scored.empty:
+        df = df_scored.copy()
+        logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
+    else:
+        logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
+
  
     # === Build main DataFrame
-    df = pd.DataFrame(rows)
     logging.info(f"📊 Columns after sharp scoring: {df.columns.tolist()}")
 
     # === Recompute Pre_Game / Post_Game before saving
