@@ -2008,7 +2008,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores = df_scores.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
 
     # === 3. Upload scores to `game_scores_final` ===
+    # === 3. Upload scores to `game_scores_final` ===
     try:
+        # Safe fallback to avoid UnboundLocalError if upstream assignment fails
+        if 'df_scores_needed' not in locals():
+            df_scores_needed = pd.DataFrame()
+    
         existing_keys = bq_client.query("""
             SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`
         """).to_dataframe()
@@ -2028,6 +2033,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 logging.warning(f"⚠️ Could not extract sample unscored game(s): {e}")
                 sample = df_scores_needed.head(5)
             logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
+    
         # Detect keys that are neither new nor in existing table (missing entirely?)
         all_found_keys = set(new_scores['Merge_Key_Short']) | existing_keys
         missing_keys = set(df_scores['Merge_Key_Short']) - all_found_keys
@@ -2043,8 +2049,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     except Exception as e:
         logging.exception("❌ Failed to upload game scores")
-
-
+    
     
         # Dump a preview of the DataFrame
         try:
