@@ -1439,7 +1439,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
           .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
           .first()
           .reset_index()
-          .rename(columns={'Value': 'Open_Book_Value'})
+          .rename(columns={'Value': 'Open_Value'})
     )
     
     line_open_per_book = (
