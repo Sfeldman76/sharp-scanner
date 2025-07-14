@@ -686,8 +686,9 @@ def add_minutes_to_game(df):
 
     return df
 
-def apply_blended_sharp_score(df, trained_models):
-    logger.info("🛠️ Running `apply_blended_sharp_score()`")
+def apply_blended_sharp_score(df, trained_models, df_history=None):
+    if df_history is None:
+        df_history = read_recent_sharp_moves(hours=72)
 
     df = df.copy()
     scored_all = []
@@ -1547,7 +1548,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     if trained_models:
         try:
-            df_scored = apply_blended_sharp_score(df.copy(), trained_models)
+            df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots)
             if not df_scored.empty:
                 df = df_scored.copy()
                 logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
