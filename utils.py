@@ -1277,7 +1277,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
     sharp_lines = {}
-   
+    line_open_map = {}
     
     previous_odds_map = {}
     for g in previous_map.values():
