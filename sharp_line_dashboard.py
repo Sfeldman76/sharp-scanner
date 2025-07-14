@@ -717,7 +717,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             st.write("Sample Resistance Breaks:")
             st.dataframe(
                 df_market[df_market['Was_Line_Resistance_Broken'] == 1][
-                    ['Game', 'Market', 'Outcome', 'First_Line_Value', 'Value', 'Was_Line_Resistance_Broken']
+                    ['Game_Key', 'Market', 'Outcome', 'First_Line_Value', 'Value', 'Was_Line_Resistance_Broken']
                 ].head(10)
             )
     
