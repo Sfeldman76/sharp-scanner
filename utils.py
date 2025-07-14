@@ -761,7 +761,8 @@ def apply_blended_sharp_score(df, trained_models):
     # === Delta and reversal flags
     df['Delta'] = df['Value'] - df['Open_Value']
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-    
+    df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
+    df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
     df['Value_Reversal_Flag'] = (
         ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
         ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
@@ -771,7 +772,80 @@ def apply_blended_sharp_score(df, trained_models):
         ((df['Odds_Price'] < df['Open_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
         ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
     ).astype(int)
+    df['LimitUp_NoMove_Flag'] = (
+        (df['Sharp_Limit_Total'] > 5000) &
+        (df['Sharp_Move_Signal'] < 0.05) &
+        (df['Line_Delta'].abs() < 0.1)
+    ).astype(int)
+    
+        
+    # === Compute Openers BEFORE creating df_history_sorted
 
+    # === Additional sharp flags
+    df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
+    df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
+        lambda h: (
+            1.0 if 0 <= h <= 5 else
+            0.9 if 6 <= h <= 11 else
+            0.5 if 12 <= h <= 15 else
+            0.2
+        ) if pd.notnull(h) else 0.0
+    )
+    df['Limit_NonZero'] = df['Limit'].where(df['Limit'] > 0)
+    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('max')
+    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('min')
+  
+   # === Detect market leaders
+    market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
+    df = df.merge(
+        market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
+        on=['Game', 'Market', 'Outcome', 'Book'],
+        how='left'
+    )
+    
+    # === Flag Pinnacle no-move behavior
+    df['Is_Pinnacle'] = df['Book'] == 'pinnacle'
+    df['LimitUp_NoMove_Flag'] = (
+        (df['Is_Pinnacle']) &
+        (df['Limit'] >= 2500) &
+        (df['Value'] == df['Open_Value'])
+    ).astype(int)
+    
+    # === Cross-market support (optional)
+    df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
+    df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
+    df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
+    df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
+    df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
+    
+
+    # === Confidence scores and tiers
+    df = assign_confidence_scores(df, weights)
+    # === Patch derived fields before BigQuery write ===
+    try:
+        # Line_Delta: Value - Open_Value
+        # ✅ corrected (aligned with directional logic)
+        
+        # Line magnitudes
+        
+    
+        # High Limit flag
+        df['High_Limit_Flag'] = (pd.to_numeric(df['Sharp_Limit_Total'], errors='coerce') >= 10000).astype(float)
+    
+        # Home team indicator
+        df['Is_Home_Team_Bet'] = (df['Outcome'].str.lower() == df['Home_Team_Norm'].str.lower()).astype(float)
+    
+        # Favorite indicator
+        df['Is_Favorite_Bet'] = (pd.to_numeric(df['Value'], errors='coerce') < 0).astype(float)
+    
+        # Direction alignment: market-based only
+        df['Direction_Aligned'] = np.where(
+            df['Line_Delta'] > 0, 1,
+            np.where(df['Line_Delta'] < 0, 0, np.nan)
+        ).astype(float)
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
+    
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
     logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
 
@@ -1463,10 +1537,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
     df['Book'] = df['Book'].str.lower()
     # === Compute Market Leader (if not already done)
-    df['Market_Leader'] = (
-        df.groupby(['Game_Key', 'Market', 'Outcome'])['SharpBetScore']
-        .transform(lambda x: (x == x.max()).astype(int))
-    )
+    
+    # Protect against zero-move but high-limit situations
+    
+    
     # Only now run model scoring
 
     # Apply sharp scoring
@@ -1494,81 +1568,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # === Calculate Implied Probability from Odds_Price
     
     df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
-    
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
-    
-    # === Compute Openers BEFORE creating df_history_sorted
 
-    # === Additional sharp flags
-    df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
-    df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
-        lambda h: (
-            1.0 if 0 <= h <= 5 else
-            0.9 if 6 <= h <= 11 else
-            0.5 if 12 <= h <= 15 else
-            0.2
-        ) if pd.notnull(h) else 0.0
-    )
-    df['Limit_NonZero'] = df['Limit'].where(df['Limit'] > 0)
-    df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('max')
-    df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('min')
-
-  
-
-    
-   # === Detect market leaders
-    market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
-    df = df.merge(
-        market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
-        on=['Game', 'Market', 'Outcome', 'Book'],
-        how='left'
-    )
-    
-    # === Flag Pinnacle no-move behavior
-    df['Is_Pinnacle'] = df['Book'] == 'pinnacle'
-    df['LimitUp_NoMove_Flag'] = (
-        (df['Is_Pinnacle']) &
-        (df['Limit'] >= 2500) &
-        (df['Value'] == df['Open_Value'])
-    ).astype(int)
-    
-    # === Cross-market support (optional)
-    df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
-    df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
-    df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
-    df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
-    df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
-    
-
-    # === Confidence scores and tiers
-    df = assign_confidence_scores(df, weights)
-    # === Patch derived fields before BigQuery write ===
-    try:
-        # Line_Delta: Value - Open_Value
-        # ✅ corrected (aligned with directional logic)
-        df['Line_Delta'] = pd.to_numeric(df['Open_Value'], errors='coerce') - pd.to_numeric(df['Value'], errors='coerce')
-        # Line magnitudes
-        df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
-        df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
-    
-        # High Limit flag
-        df['High_Limit_Flag'] = (pd.to_numeric(df['Sharp_Limit_Total'], errors='coerce') >= 10000).astype(float)
-    
-        # Home team indicator
-        df['Is_Home_Team_Bet'] = (df['Outcome'].str.lower() == df['Home_Team_Norm'].str.lower()).astype(float)
-    
-        # Favorite indicator
-        df['Is_Favorite_Bet'] = (pd.to_numeric(df['Value'], errors='coerce') < 0).astype(float)
-    
-        # Direction alignment: market-based only
-        df['Direction_Aligned'] = np.where(
-            df['Line_Delta'] > 0, 1,
-            np.where(df['Line_Delta'] < 0, 0, np.nan)
-        ).astype(float)
-    except Exception as e:
-        logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
-    
-    
     # === Summary consensus metrics
     summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
    
