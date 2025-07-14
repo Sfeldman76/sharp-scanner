@@ -1484,11 +1484,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Pre_Game'] = df['Game_Start'] > now
     df['Post_Game'] = ~df['Pre_Game']
     # === Calculate Implied Probability from Odds_Price
-    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
-    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
-    df['Book'] = df['Book'].str.lower()
+    
     df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
     
     # === Compute Openers BEFORE creating df_history_sorted
