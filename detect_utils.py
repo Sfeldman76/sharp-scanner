@@ -66,7 +66,8 @@ def detect_and_save_all_sports():
                 SHARP_BOOKS=SHARP_BOOKS,
                 REC_BOOKS=REC_BOOKS,
                 BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-                trained_models=trained_models  # ✅ Must be forwarded
+                trained_models=trained_models,
+                weights=market_weights
             )
             logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
 
