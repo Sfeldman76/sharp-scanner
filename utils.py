@@ -486,7 +486,31 @@ def normalize_book_key(raw_key, sharp_books, rec_books):
             #return abs(odds) / (abs(odds) + 100)
     #except:
         #return None
+def load_market_weights_from_bq():
+    from google.cloud import bigquery
 
+    client = bigquery.Client(project="sharplogger", location="us")
+
+    query = """
+        SELECT *
+        FROM `sharplogger.sharp_data.sharp_scores_full`
+        WHERE SHARP_HIT_BOOL IS NOT NULL
+          AND Scored = TRUE
+    """
+    df = client.query(query).to_dataframe()
+
+    weights_df = compute_and_write_market_weights(df)
+
+    weights_dict = (
+        weights_df
+        .groupby(['Market', 'Component'])
+        .apply(lambda g: dict(zip(g['Value'], g['Win_Rate'])))
+        .unstack(fill_value={})
+        .to_dict(orient='index')
+    )
+
+    logging.info(f"✅ Loaded market weights for {len(weights_dict)} markets")
+    return weights_dict
 def compute_sharp_metrics(entries, open_val, mtype, label):
     move_signal = 0
     move_magnitude_score = 0.0
