@@ -1375,8 +1375,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Value': value,
                         'Odds_Price': odds_price,
                         'Limit': limit,
-                        'Old Value': open_val,
-                        'Delta': round(value - open_val, 2) if open_val is not None and value is not None else None,
+                        'Old Value': None,
+                        #'Delta': round(value - open_val, 2) if open_val is not None and value is not None else None,
                         'Home_Team_Norm': home_team,
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
@@ -1436,20 +1436,23 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # === Compute Openers BEFORE creating df_history_sorted
     line_open_df = (
         df.dropna(subset=['Value'])
-          .groupby(['Game', 'Market', 'Outcome'])['Value']
-          .first()
-          .reset_index()
-          .rename(columns={'Value': 'Open_Value'})
-    )
-    
-    line_open_per_book = (
-        df.dropna(subset=['Value'])
           .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
           .first()
           .reset_index()
           .rename(columns={'Value': 'Open_Book_Value'})
     )
     
+    
+    line_open_per_book = (
+        df[df['Book'].isin(SHARP_BOOKS)]  # Only sharp books
+          .dropna(subset=['Value'])
+          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
+          .first()
+          .reset_index()
+          .rename(columns={'Value': 'Sharp_Open_Value'})
+    )
+
+df = df.merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
     open_limit_df = (
         df.dropna(subset=['Limit'])
           .groupby(['Game', 'Market', 'Outcome', 'Book'])['Limit']
@@ -1508,8 +1511,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
     ).astype(int)
     
-    df['Delta vs Sharp'] = df['Value'] - df['Open_Value']
-    df['Delta'] = pd.to_numeric(df['Delta vs Sharp'], errors='coerce')
+    df['Delta vs Sharp'] = df['Value'] - df['Sharp_Open_Value']
+    df['Delta'] = df['Value'] - df['Open_Value']
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     
     # === Additional sharp flags
