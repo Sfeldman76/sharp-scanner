@@ -689,66 +689,91 @@ def add_minutes_to_game(df):
 def apply_blended_sharp_score(df, trained_models):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
- 
     df = df.copy()
-    scored_all = [] 
+    scored_all = []
     total_start = time.time()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
-    
-    # Drop any leftover merge artifacts
+
+    # Drop leftover merge artifacts
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
     except Exception as e:
         logger.error(f"❌ Cleanup failed: {e}")
         return pd.DataFrame()
 
-    # Load snapshot history to build opening line baseline
+    # === Load full sharp move history for enrichment
     df_all_snapshots = read_recent_sharp_moves(hours=72)
     df = compute_line_resistance_flag(df, source='moves')
     df = add_minutes_to_game(df)
-    df_first = (
-        df_all_snapshots
-        .sort_values(by='Snapshot_Timestamp')  # opening lines = earliest
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Odds_Price', 'Implied_Prob']]
-        .rename(columns={           
-            'Odds_Price': 'First_Odds',
-            'Implied_Prob': 'First_Imp_Prob',
-        })
-    )
 
     # Normalize merge keys
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
         df[col] = df[col].astype(str).str.strip().str.lower()
-        df_first[col] = df_first[col].astype(str).str.strip().str.lower()
+        df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
 
-    # Merge opening line values
-    df = df.merge(df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-
-    # Compute deltas
-    if 'Odds_Shift' not in df.columns:
-        df['Odds_Shift'] = pd.to_numeric(df['Odds_Price'], errors='coerce') - pd.to_numeric(df['First_Odds'], errors='coerce')
-
-    if 'Implied_Prob_Shift' not in df.columns:
-        df['Implied_Prob_Shift'] = pd.to_numeric(df['Implied_Prob'], errors='coerce') - pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
-
-    
-    # Drop temporary columns
-    cols_to_drop = ['First_Imp_Prob','First_Odds']
-    df.drop(columns=[col for col in cols_to_drop if col in df.columns], inplace=True)
-
-    # Keep only latest snapshot per Game + Market + Outcome + Bookmaker + Value
-    df = (
-        df.sort_values('Snapshot_Timestamp')
-          .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value'], keep='last')
+    # === Opening odds, value, implied prob
+    df_open = (
+        df_all_snapshots
+        .sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Implied_Prob', 'Limit']]
+        .rename(columns={
+            'Value': 'Open_Value',
+            'Odds_Price': 'Open_Odds',
+            'Implied_Prob': 'First_Imp_Prob',
+            'Limit': 'Opening_Limit'
+        })
     )
 
-   
+    # === Extremes from full history
+    df_extremes = (
+        df_all_snapshots
+        .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])[['Value', 'Odds_Price']]
+        .agg(
+            Max_Value=('Value', 'max'),
+            Min_Value=('Value', 'min'),
+            Max_Odds=('Odds_Price', 'max'),
+            Min_Odds=('Odds_Price', 'min')
+        )
+        .reset_index()
+    )
+
+    # === Merge all enrichment
+    line_enrichment = df_open.merge(
+        df_extremes,
+        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+        how='left'
+    )
+
+    df = df.merge(line_enrichment, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+
+    # === Compute shifts
+    df['Odds_Shift'] = pd.to_numeric(df['Odds_Price'], errors='coerce') - pd.to_numeric(df['Open_Odds'], errors='coerce')
+    df['Implied_Prob_Shift'] = pd.to_numeric(df['Implied_Prob'], errors='coerce') - pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
+
+    # === Clean columns
+    df.drop(columns=['First_Imp_Prob'], inplace=True, errors='ignore')
+
+    # === Delta and reversal flags
+    df['Delta'] = df['Value'] - df['Open_Value']
+    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+
+    df['Value_Reversal_Flag'] = (
+        ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
+        ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
+    ).astype(int)
+
+    df['Odds_Reversal_Flag'] = (
+        ((df['Odds_Price'] < df['Open_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
+        ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
+    ).astype(int)
+
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
     logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
+
    
-       
+
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
@@ -1434,86 +1459,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
     
     # === Compute Openers BEFORE creating df_history_sorted
-    line_open_df = (
-        df.dropna(subset=['Value'])
-          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
-          .first()
-          .reset_index()
-          .rename(columns={'Value': 'Open_Value'})
-    )
-    
-    line_open_per_book = (
-        df[df['Book'].isin(SHARP_BOOKS)]  # Only sharp books
-          .dropna(subset=['Value'])
-          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
-          .first()
-          .reset_index()
-          .rename(columns={'Value': 'Sharp_Open_Value'})
-    )
-    
-    open_limit_df = (
-        df.dropna(subset=['Limit'])
-          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Limit']
-          .first()    
-          .reset_index()
-          .rename(columns={'Limit': 'Opening_Limit'})
-    )
-    
-    open_odds_df = (
-        df.dropna(subset=['Odds_Price'])
-          .groupby(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
-          .first()
-          .reset_index()
-          .rename(columns={'Odds_Price': 'Open_Odds'})
-    )
-    
-    # === Merge openers into df
-    df = (
-        df
-        .merge(line_open_df, on=['Game', 'Market', 'Outcome','Book'], how='left')
-        .merge(line_open_per_book, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-        .merge(open_limit_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-        .merge(open_odds_df, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-    )
 
-    
-    # === Now create df_history_sorted from the enriched df
-    # === Load enriched sharp move history (72h default)
-    df_history = read_recent_sharp_moves(hours=72)
-    
-    # Drop rows with missing critical fields
-    df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value', 'Odds_Price'])
-    
-    # === Compute max/min for reversal detection from historical sharp moves
-    df_extremes = (
-        df_history
-        .groupby(['Game', 'Market', 'Outcome', 'Book'])
-        .agg({
-            'Value': ['max', 'min'],
-            'Odds_Price': ['max', 'min']
-        })
-        .reset_index()
-    )
-    df_extremes.columns = ['Game', 'Market', 'Outcome', 'Book', 'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds']
-    
-    # Merge into the current snapshot DataFrame (df)
-    df = df.merge(df_extremes, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-
-    # === Reversal flags
-    df['Value_Reversal_Flag'] = (
-        ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
-        ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
-    ).astype(int)
-    
-    df['Odds_Reversal_Flag'] = (
-        ((df['Odds_Price'] < df['Open_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
-        ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
-    ).astype(int)
-    
-    df['Delta vs Sharp'] = df['Value'] - df['Sharp_Open_Value']
-    df['Delta'] = df['Value'] - df['Open_Value']
-    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-    
     # === Additional sharp flags
     df['Limit_Jump'] = (df['Limit'] >= 2500).astype(int)
     df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
