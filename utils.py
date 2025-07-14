@@ -2020,10 +2020,14 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info(f"⛔ Skipped (already in table): {len(blocked)}")
         logging.info(f"🧪 Sample skipped keys:\n{blocked[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head().to_string(index=False)}")
     
-        if not new_scores.empty:
-            logging.info(f"✅ Uploading {len(new_scores)} games to BigQuery")
-            logging.info(f"🆕 Sample uploaded:\n{new_scores[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head().to_string(index=False)}")
-    
+        if not df_scores_needed.empty:
+            logging.info(f"🧪 df_scores_needed columns: {list(df_scores_needed.columns)}")
+            try:
+                sample = df_scores_needed[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head(5)
+            except KeyError as e:
+                logging.warning(f"⚠️ Could not extract sample unscored game(s): {e}")
+                sample = df_scores_needed.head(5)
+            logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
         # Detect keys that are neither new nor in existing table (missing entirely?)
         all_found_keys = set(new_scores['Merge_Key_Short']) | existing_keys
         missing_keys = set(df_scores['Merge_Key_Short']) - all_found_keys
