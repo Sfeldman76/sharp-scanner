@@ -1396,12 +1396,20 @@ def apply_blended_sharp_score(df, trained_models):
             )
             df_canon['Value_Reversal_Flag'] = df_canon.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
             df_canon['Odds_Reversal_Flag'] = df_canon.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
-
-
+            
+            # 🔧 Force all 'boolean' dtypes to float — this prevents the fillna(0) crash
+            for col in model_features:
+                if col in df_canon.columns and pd.api.types.is_bool_dtype(df_canon[col]):
+                    df_canon[col] = df_canon[col].astype(float)
 
             # === Align features exactly to model input ===
-            X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
-            
+            X_canon = (
+                df_canon[model_features]
+                .replace({'True': 1, 'False': 0})              
+                .apply(pd.to_numeric, errors='coerce')
+                .fillna(0)
+                .astype(float)
+            )
             # === Raw model output (optional)
             # ✅ USE THE CALIBRATED PROBABILITIES FOR MAIN MODEL OUTPUT
             df_canon['Model_Sharp_Win_Prob'] = trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1]
