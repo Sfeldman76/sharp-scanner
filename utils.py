@@ -1247,7 +1247,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['Odds_Reversal_Flag'] = df_inverse['Odds_Reversal_Flag'].fillna(0).astype(int)
 
             if market_type == "totals":
-                df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
             
