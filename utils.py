@@ -499,18 +499,13 @@ def load_market_weights_from_bq():
     """
     df = client.query(query).to_dataframe()
 
-    weights_df = compute_and_write_market_weights(df)
+    # ✅ This already returns a dict, so assign directly
+    market_weights = compute_and_write_market_weights(df)
 
-    weights_dict = (
-        weights_df
-        .groupby(['Market', 'Component'])
-        .apply(lambda g: dict(zip(g['Value'], g['Win_Rate'])))
-        .unstack(fill_value={})
-        .to_dict(orient='index')
-    )
-
-    logging.info(f"✅ Loaded market weights for {len(weights_dict)} markets")
-    return weights_dict
+    logging.info(f"✅ Loaded market weights for {len(market_weights)} markets")
+    return market_weights
+    
+    
 def compute_sharp_metrics(entries, open_val, mtype, label):
     move_signal = 0
     move_magnitude_score = 0.0
