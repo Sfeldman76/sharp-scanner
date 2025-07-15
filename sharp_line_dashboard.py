@@ -783,10 +783,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         )
         grid_auc.fit(X_train, y_train)
         model_auc = grid_auc.best_estimator_
+        from collections import Counter
+
+        # Count class distribution in training set
+        class_counts = Counter(y_train)
+        min_class_count = min(class_counts.values())
         
+        if min_class_count < 5:
+            st.warning(f"⚠️ Not enough samples per class for isotonic calibration in {market.upper()} — skipping calibration.")
+            cal_logloss = model_logloss
+            cal_auc = model_auc
+        else:
+            cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=cv).fit(X_train, y_train)
+            cal_auc = CalibratedClassifierCV(model_auc, method='isotonic', cv=cv).fit(X_train, y_train)
         # ✅ Use isotonic calibration (more stable for reducing std dev)
-        cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=cv).fit(X_train, y_train)
-        cal_auc = CalibratedClassifierCV(model_auc, method='isotonic', cv=cv).fit(X_train, y_train)
+        
         
         # === Predict calibrated probabilities
         prob_logloss = cal_logloss.predict_proba(X)[:, 1]
