@@ -1354,7 +1354,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Min_Value', 'Max_Value', 'Min_Odds', 'Max_Odds',
                     'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
                     'Value_Reversal_Flag', 'Odds_Reversal_Flag',
-                    'Is_Home_Team_Bet', 'Is_Favorite_Bet',
+                    'Is_Home_Team_Bet', 'Is_Favorite_Bet','Delta',
                     'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs'
                 ]
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
@@ -1376,7 +1376,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
                 df_inverse['Implied_Prob_Shift'] = df_inverse['Implied_Prob'] - pd.to_numeric(df_inverse['First_Imp_Prob'], errors='coerce')
                 df_inverse['Line_Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
-            
+                df_inverse['Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
+               
                 df_inverse['Value_Reversal_Flag'] = (
                     ((df_inverse['Value'] < df_inverse['Open_Value']) & (df_inverse['Value'] == df_inverse['Min_Value'])) |
                     ((df_inverse['Value'] > df_inverse['Open_Value']) & (df_inverse['Value'] == df_inverse['Max_Value']))
