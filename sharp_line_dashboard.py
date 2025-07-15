@@ -1164,8 +1164,7 @@ def apply_blended_sharp_score(df, trained_models):
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     # Step 1: Load snapshot history to build opening line baseline
     df_all_snapshots = read_recent_sharp_moves(hours=72)
-    df = compute_line_resistance_flag(df, source='moves')
-    df = add_minutes_to_game(df)
+   
     # Step 2: Build opening line (df_first)
     df_first = (
         df_all_snapshots
