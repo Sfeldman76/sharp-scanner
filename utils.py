@@ -1106,20 +1106,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
             
 
+            # 1. Copy and flip outcome for merge key
             df_inverse = df_canon.copy(deep=True)
-            # 🧩 Add snapshot-derived fields to inverse
-            open_fields = [
-                'Open_Value', 'Open_Odds', 'First_Imp_Prob',
-                'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
-                'Value_Reversal_Flag', 'Odds_Reversal_Flag'
-            ]
-            merge_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
             
-            df_inverse = df_inverse.merge(
-                df_full_market[merge_cols + [col for col in open_fields if col in df_full_market.columns]],
-                on=merge_cols,
-                how='left'
-            )
+                   
             logger.info(f"📋 Inverse1 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             logger.info(f"🧪 Inverse rows with Open_Value: {df_inverse['Open_Value'].notnull().sum()} / {len(df_inverse)}")
            
@@ -1355,8 +1345,24 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             if df_inverse.empty:
                 logger.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
                 continue  # optional: skip this scoring loop if inverse fails
+            # Merge opening values onto inverse rows using updated Outcome
+            cols_to_refresh = ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Min_Value', 'Max_Value', 'Min_Odds', 'Max_Odds']
+            df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
 
-           
+            df_inverse = df_inverse.merge(
+                df_open,  # the df_open created earlier with Open_Value, Open_Odds, etc.
+                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                how='left'
+            )
+            
+            # Merge extremes
+            df_inverse = df_inverse.merge(
+                df_extremes,  # created earlier with Min/Max
+                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                how='left'
+            )
+
+               
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             
