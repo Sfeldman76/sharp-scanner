@@ -367,7 +367,9 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Line_Magnitude_Abs',       # Already present
         'Direction_Aligned','Odds_Price', 'Implied_Prob', 
         'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
-        'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds'      # ✅ Add this
+        'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds', 'Was_Line_Resistance_Broken',
+        'Line_Resistance_Crossed_Levels',
+        'Line_Resistance_Crossed_Count',     # ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -623,19 +625,24 @@ KEY_LINE_RESISTANCE = {
 }
 
 
-def was_line_resistance_broken(open_val, close_val, key_levels):
+def was_line_resistance_broken(open_val, close_val, key_levels, market_type):
     if open_val is None or close_val is None:
-        return 0
+        return 0, []
+
+    # Flip key levels for spreads (e.g., -3, -7 for favorites)
+    if market_type == 'spread':
+        key_levels = [-abs(k) for k in key_levels]
+
+    crossed = []
     for key in key_levels:
         if (open_val < key < close_val) or (close_val < key < open_val):
-            return 1
-    return 0
+            crossed.append(key)
 
+    return int(bool(crossed)), crossed
 
 
 
 def compute_line_resistance_flag(df, source='moves'):
-    # Normalize Sport using alias map
     df['Sport'] = df['Sport'].str.upper().map(SPORT_ALIAS).fillna(df['Sport'].str.upper())
 
     def get_key_levels(sport, market):
@@ -649,19 +656,27 @@ def compute_line_resistance_flag(df, source='moves'):
         if source == 'moves':
             return row.get('Old_Value')
         elif source == 'scores':
-            return row.get('First_Line_Value') if 'First_Line_Value' in row else None
+            return row.get('First_Line_Value')
         return None
 
-    df['Was_Line_Resistance_Broken'] = df.apply(
-        lambda row: was_line_resistance_broken(
-            get_opening_line(row),
-            row.get('Value'),
-            get_key_levels(row.get('Sport', ''), row.get('Market', ''))
-        ),
-        axis=1
-    )
+    def apply_resistance_logic(row):
+        open_val = get_opening_line(row)
+        close_val = row.get('Value')
+        market_type = row.get('Market', '').lower()
+        key_levels = get_key_levels(row.get('Sport', ''), market_type)
+
+        flag, levels_crossed = was_line_resistance_broken(open_val, close_val, key_levels, market_type)
+        return pd.Series({
+            'Was_Line_Resistance_Broken': flag,
+            'Line_Resistance_Crossed_Levels': levels_crossed,
+            'Line_Resistance_Crossed_Count': len(levels_crossed)
+        })
+
+    resistance_flags = df.apply(apply_resistance_logic, axis=1)
+    df = pd.concat([df, resistance_flags], axis=1)
 
     return df
+
     
 def add_minutes_to_game(df):
     df = df.copy()
@@ -1087,6 +1102,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['SharpMove_Resistance_Break'] = (
                 df_canon['Sharp_Move_Signal'] * df_canon['Was_Line_Resistance_Broken']
             )
+            df_canon['Line_Resistance_Crossed_Levels'] = df_canon.get('Line_Resistance_Crossed_Levels', '[]')
+            df_canon['Line_Resistance_Crossed_Count'] = df_canon.get('Line_Resistance_Crossed_Count', 0)
+            df_canon['Line_Resistance_Crossed_Levels'] = df_canon['Line_Resistance_Crossed_Levels'].apply(
+                lambda x: json.dumps(x) if isinstance(x, list) else str(x) if x else "[]"
+            )
+
             df_canon['Minutes_To_Game'] = (
                 pd.to_datetime(df_canon['Game_Start'], utc=True) - pd.to_datetime(df_canon['Snapshot_Timestamp'], utc=True)
             ).dt.total_seconds() / 60
@@ -1183,10 +1204,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['SharpMove_Odds_Up'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] > 0)).astype(int)
             df_inverse['SharpMove_Odds_Down'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] < 0)).astype(int)
             df_inverse['SharpMove_Odds_Mag'] = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
+            
             df_inverse['Was_Line_Resistance_Broken'] = df_inverse.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
             df_inverse['SharpMove_Resistance_Break'] = (
                 df_inverse['Sharp_Move_Signal'] * df_inverse['Was_Line_Resistance_Broken']
             )
+            df_inverse['Line_Resistance_Crossed_Levels'] = df_inverse.get('Line_Resistance_Crossed_Levels', '[]')
+            df_inverse['Line_Resistance_Crossed_Count'] = df_inverse.get('Line_Resistance_Crossed_Count', 0)
+            df_inverse['Line_Resistance_Crossed_Levels'] = df_inverse['Line_Resistance_Crossed_Levels'].apply(
+                lambda x: json.dumps(x) if isinstance(x, list) else str(x) if x else "[]"
+            )
+
             # Compute minutes until game start
             df_inverse['Minutes_To_Game'] = (
                 pd.to_datetime(df_inverse['Game_Start'], utc=True) -
@@ -2004,15 +2032,18 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Sport', 'Value', 'First_Line_Value', 'First_Sharp_Prob',
             'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
             'Unique_Sharp_Books', 'Merge_Key_Short',
-            'Line_Magnitude_Abs',
-            'Line_Move_Magnitude',
-            'Is_Home_Team_Bet',
-            'Is_Favorite_Bet',
-            'High_Limit_Flag',
-            'Home_Team_Norm',
-            'Away_Team_Norm',
-            'Commence_Hour','Model_Sharp_Win_Prob','Odds_Price','Implied_Prob', 'First_Odds', 'First_Imp_Prob', 'Odds_Shift','Implied_Prob_Shift',
-            'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds' # ✅ Add this line
+            'Line_Magnitude_Abs', 'Line_Move_Magnitude',
+            'Is_Home_Team_Bet', 'Is_Favorite_Bet', 'High_Limit_Flag',
+            'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
+            'Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob',
+            'First_Odds', 'First_Imp_Prob', 'Odds_Shift', 'Implied_Prob_Shift',
+            'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
+    
+            # ✅ Resistance logic additions
+            'Was_Line_Resistance_Broken',
+            'SharpMove_Resistance_Break',
+            'Line_Resistance_Crossed_Levels',
+            'Line_Resistance_Crossed_Count'
         ]
     }
 
@@ -2635,7 +2666,11 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
         'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob','First_Odds', 'First_Imp_Prob','Odds_Shift','Implied_Prob_Shift',
-        'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds'  # ✅ ADD THESE
+        'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',       
+        'Was_Line_Resistance_Broken',
+        'SharpMove_Resistance_Break',
+        'Line_Resistance_Crossed_Levels',
+        'Line_Resistance_Crossed_Count'  # ✅ ADD THESE
     ]
     
     
