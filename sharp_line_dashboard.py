@@ -1959,8 +1959,8 @@ def render_scanner_tab(label, sport_key, container):
         
        
         # ✅ Snapshot log
-        st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
-        st.dataframe(df_moves_raw.head(3))
+        #st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
+        #st.dataframe(df_moves_raw.head(3))
         
         # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
