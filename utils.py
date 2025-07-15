@@ -715,8 +715,27 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     if df_all_snapshots is None:
         df_all_snapshots = read_recent_sharp_moves(hours=72)
     # Drop leftover merge artifacts
+    # ✅ Sanity check: Unique outcomes and books
+    logger.info(f"🧪 Unique outcomes in snapshot: {df_all_snapshots['Outcome'].nunique()} — {df_all_snapshots['Outcome'].unique().tolist()}")
+    logger.info(f"🧪 Unique books in snapshot: {df_all_snapshots['Bookmaker'].nunique()} — {df_all_snapshots['Bookmaker'].unique().tolist()}")
     
-
+    # ✅ Count outcomes per Game + Market + Bookmaker
+    outcome_counts = (
+        df_all_snapshots
+        .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
+        .nunique()
+        .reset_index()
+        .rename(columns={'Outcome': 'Num_Outcomes'})
+    )
+    
+    # ✅ Log any books missing one side of market
+    missing_outcomes = outcome_counts[outcome_counts['Num_Outcomes'] < 2]
+    if not missing_outcomes.empty:
+        logger.warning(f"⚠️ Some (Game, Market, Bookmaker) combos are missing one side — {len(missing_outcomes)} rows")
+        logger.debug(f"{missing_outcomes.head(10).to_string(index=False)}")
+    else:
+        logger.info("✅ All Game + Market + Bookmaker combinations have both outcomes present.")
+    
     # === Load full sharp move history for enrichment
    
     df = compute_line_resistance_flag(df, source='moves')
