@@ -136,11 +136,22 @@ REDIRECT_URI = "https://sharp-scanner-723770381669.us-east4.run.app/"  # no long
 
 SPORTS = {
     "NBA": "basketball_nba",
+    "WNBA": "basketball_wnba",
     "MLB": "baseball_mlb",
     "CFL": "americanfootball_cfl",
-    "WNBA": "basketball_wnba",
+    "NFL": "americanfootball_nfl",
+    "NCAAF": "americanfootball_ncaaf",
+    "NCAAB": "basketball_ncaab"
 }
-
+SPORT_ALIAS_MAP = {
+    "NBA": "basketball_nba",
+    "WNBA": "basketball_wnba",
+    "MLB": "baseball_mlb",
+    "CFL": "americanfootball_cfl",
+    "NFL": "americanfootball_nfl",
+    "NCAAF": "americanfootball_ncaaf",
+    "NCAAB": "basketball_ncaab",
+}
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
 SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','betfair_ex_eu','betfair_ex_uk','lowvig']
 
@@ -1903,25 +1914,16 @@ def render_scanner_tab(label, sport_key, container):
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
         # === Filter to current tab's sport
-        SPORT_BQ_MAP = {
-            "NBA": "BASKETBALL_NBA",
-            "WNBA": "BASKETBALL_WNBA",
-            "MLB": "BASEBALL_MLB",
-            "CFL": "AMERICANFOOTBALL_CFL"
-        }
+        # Normalize and match directly
+        df_moves_raw['Sport_Norm'] = df_moves_raw['Sport'].astype(str).str.upper().str.strip()
+        df_moves_raw = df_moves_raw[df_moves_raw['Sport_Norm'] == label.upper()]
         
-        bq_sport = SPORT_BQ_MAP.get(label.upper())
+       
         
-        if 'Sport' in df_moves_raw.columns and bq_sport:
-            before = len(df_moves_raw)
-            df_moves_raw = df_moves_raw[df_moves_raw['Sport'] == bq_sport]
-            after = len(df_moves_raw)
-            #st.info(f"🏷️ Filtered to sport = {bq_sport}: {before} → {after} rows")
-        else:
-            st.warning("⚠️ Could not filter by Sport — missing column or mapping.")
+       
         # ✅ Snapshot log
-        #st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
-        #st.dataframe(df_moves_raw.head(3))
+        st.write("📦 Total raw rows loaded from BigQuery:", len(df_moves_raw))
+        st.dataframe(df_moves_raw.head(3))
         
         # === Defensive check before build_game_key
         required_cols = ['Game', 'Game_Start', 'Market', 'Outcome']
@@ -2822,28 +2824,34 @@ if sport == "General":
     st.write("Use the sidebar to select a league and begin scanning or training models.")
 
 # === LEAGUE PAGES ===
+# === LEAGUE PAGES ===
 else:
     st.title(f"🏟️ {sport} Sharp Scanner")
 
     scanner_key = scanner_flags.get(sport)
     run_scanner = st.checkbox(f"Run {sport} Scanner", value=True, key=scanner_key)
 
+    label = sport  # e.g. "WNBA"
+    sport_key = SPORTS[sport]  # e.g. "basketball_wnba"
+
     if st.button(f"📈 Train {sport} Sharp Model"):
-        train_sharp_model_from_bq(sport=sport)
+        train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
 
     # Prevent multiple scanners from running
     conflicting = [
         k for k, v in scanner_flags.items()
         if k != sport and st.session_state.get(v, False)
     ]
-    
+
     if conflicting:
         st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
     elif run_scanner:
         scan_tab, analysis_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis"])
-    
+        
         with scan_tab:
-            df_live = render_scanner_tab(sport, SPORTS[sport], scan_tab)
-    
+            render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
+
         with analysis_tab:
-            render_sharp_signal_analysis_tab(analysis_tab, sport, SPORTS[sport])
+            render_sharp_signal_analysis_tab(container=analysis_tab, sport=label, sport_key=sport_key)
+        
+        
