@@ -806,8 +806,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     )
     
     # Merge
-    line_enrichment = df_open.merge(df_extremes, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-    df = df.merge(line_enrichment, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+    line_enrichment = df_extremes.copy()
+    df = df.merge(line_enrichment, on=merge_keys, how='left')
+
     
 
     # === Compute shifts
