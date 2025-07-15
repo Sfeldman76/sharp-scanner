@@ -826,20 +826,35 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
     df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
-    df['Value_Reversal_Flag'] = (
-        ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
-        ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
-    ).astype(int)
-
-    df['Odds_Reversal_Flag'] = (
-        ((df['Odds_Price'] < df['Open_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
-        ((df['Odds_Price'] > df['Open_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
-    ).astype(int)
-    df['LimitUp_NoMove_Flag'] = (
-        (df['Sharp_Limit_Total'] > 5000) &
-        (df['Sharp_Move_Signal'] < 0.05) &
-        (df['Line_Delta'].abs() < 0.1)
-    ).astype(int)
+    def compute_value_reversal(df, market_col='Market'):
+        is_spread = df[market_col].str.lower().str.contains('spread')
+    
+        df['Value_Reversal_Flag'] = np.where(
+            is_spread,
+            (
+                ((df['Open_Value'] < 0) & (df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value'])) |
+                ((df['Open_Value'] > 0) & (df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
+                ((df['Open_Value'] == 0) & (df['Value'] == df['Max_Value']))
+            ).astype(int),
+            (
+                ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
+                ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
+            ).astype(int)
+        )
+        return df
+    
+    
+    def compute_odds_reversal(df):
+        df['Odds_Reversal_Flag'] = (
+            ((df['Open_Odds'] > df['Min_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
+            ((df['Open_Odds'] < df['Max_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
+        ).astype(int)
+        return df
+        df['LimitUp_NoMove_Flag'] = (
+            (df['Sharp_Limit_Total'] > 5000) &
+            (df['Sharp_Move_Signal'] < 0.05) &
+            (df['Line_Delta'].abs() < 0.1)
+        ).astype(int)
     
         
     # === Compute Openers BEFORE creating df_history_sorted
@@ -1370,7 +1385,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
                     how='left'
                 )
-            
+                
                 # === 🔁 Recompute outcome-sensitive fields
                 df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
                 df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
@@ -1378,16 +1393,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Line_Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
                 df_inverse['Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
                
-                df_inverse['Value_Reversal_Flag'] = (
-                    ((df_inverse['Value'] < df_inverse['Open_Value']) & (df_inverse['Value'] == df_inverse['Min_Value'])) |
-                    ((df_inverse['Value'] > df_inverse['Open_Value']) & (df_inverse['Value'] == df_inverse['Max_Value']))
-                ).astype(int)
-            
-                df_inverse['Odds_Reversal_Flag'] = (
-                    ((df_inverse['Odds_Price'] < df_inverse['Open_Odds']) & (df_inverse['Odds_Price'] == df_inverse['Min_Odds'])) |
-                    ((df_inverse['Odds_Price'] > df_inverse['Open_Odds']) & (df_inverse['Odds_Price'] == df_inverse['Max_Odds']))
-                ).astype(int)
-            
+              
                 df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'].str.lower() == df_inverse['Home_Team_Norm'].str.lower()).astype(float)
                 df_inverse['Is_Favorite_Bet'] = (pd.to_numeric(df_inverse['Value'], errors='coerce') < 0).astype(float)
                 df_inverse['Direction_Aligned'] = np.where(
@@ -1397,7 +1403,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
                 df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
                 df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
-            
+                df_inverse = compute_value_reversal(df_inverse)
+                df_inverse = compute_odds_reversal(df_inverse)
                 logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
             
             except Exception as e:
