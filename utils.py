@@ -1122,11 +1122,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
             
             logger.info(f"🧪 Inverse rows with Open_Value: {df_inverse['Open_Value'].notnull().sum()} / {len(df_inverse)}")
-
+            logger.info(f"📋 Inverse1 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
+            logger.info(f"📋 Inverse2 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             # === Core deltas and magnitude features
             df_inverse['Line_Move_Magnitude'] = pd.to_numeric(df_inverse['Line_Delta'], errors='coerce').abs()
             df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']  # Alias
@@ -1196,7 +1197,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 bins=[-1, 30, 60, 180, 360, 720, np.inf],
                 labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
             )
-            logger.info(f"📋 Inverse row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
+            logger.info(f"📋 Inverse3 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
 
             df_inverse['Value_Reversal_Flag'] = df_canon['Value_Reversal_Flag'].values
             df_inverse['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].values
