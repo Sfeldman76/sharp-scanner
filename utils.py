@@ -727,7 +727,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df[col] = df[col].astype(str).str.strip().str.lower()
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
 
-    # === Opening odds, value, implied prob
+   # Opening values per outcome + book
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
@@ -740,8 +740,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             'Limit': 'Opening_Limit'
         })
     )
-
-    # === Extremes from full history
+    
+    # Extremes per outcome + book
     df_extremes = (
         df_all_snapshots
         .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])[['Value', 'Odds_Price']]
@@ -753,15 +753,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         )
         .reset_index()
     )
-
-    # === Merge all enrichment
-    line_enrichment = df_open.merge(
-        df_extremes,
-        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-        how='left'
-    )
-
+    
+    # Merge
+    line_enrichment = df_open.merge(df_extremes, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
     df = df.merge(line_enrichment, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+    
 
     # === Compute shifts
     df['Odds_Shift'] = pd.to_numeric(df['Odds_Price'], errors='coerce') - pd.to_numeric(df['Open_Odds'], errors='coerce')
