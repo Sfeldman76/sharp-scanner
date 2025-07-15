@@ -1564,7 +1564,26 @@ def apply_blended_sharp_score(df, trained_models):
             df_inverse['Value'] = df_inverse['Value_opponent']
             df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
             df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
+            # Drop stale reversal flags before refreshing
+          
             
+                      
+            # ✅ Compute updated reversal flags
+            if 'Value_Reversal_Flag' not in df_inverse.columns or df_inverse['Value_Reversal_Flag'].isnull().all():
+                df_inverse['Value_Reversal_Flag'] = (
+                    ((df_inverse['Open_Value'] > df_inverse['Min_Value']) & (df_inverse['Value'] == df_inverse['Min_Value'])) |
+                    ((df_inverse['Open_Value'] < df_inverse['Max_Value']) & (df_inverse['Value'] == df_inverse['Max_Value']))
+                ).astype(int)
+                st.info("🔁 Recomputed Value_Reversal_Flag for inverse rows")
+            
+            if 'Odds_Reversal_Flag' not in df_inverse.columns or df_inverse['Odds_Reversal_Flag'].isnull().all():
+                df_inverse['Odds_Reversal_Flag'] = (
+                    ((df_inverse['Open_Odds'] > df_inverse['Min_Odds']) & (df_inverse['Odds_Price'] == df_inverse['Min_Odds'])) |
+                    ((df_inverse['Open_Odds'] < df_inverse['Max_Odds']) & (df_inverse['Odds_Price'] == df_inverse['Max_Odds']))
+                ).astype(int)
+                st.info("🔁 Recomputed Odds_Reversal_Flag for inverse rows")
+
+
             # === Diagnostic
             missing_val = df_inverse['Value'].isna().sum()
             missing_odds = df_inverse['Odds_Price'].isna().sum()
@@ -1635,8 +1654,7 @@ def apply_blended_sharp_score(df, trained_models):
             )
            
 
-            df_inverse['Value_Reversal_Flag'] = df_inverse.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
-            df_inverse['Odds_Reversal_Flag'] = df_inverse.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
+         
             # === Final deduplication
             df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Snapshot_Timestamp'])
                         # After generating df_inverse
