@@ -2889,6 +2889,6 @@ else:
             render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
 
         with analysis_tab:
-            render_sharp_signal_analysis_tab(container=analysis_tab, sport=label, sport_key=sport_key)
+            render_sharp_signal_analysis_tab(tab=analysis_tab, sport_label=label, sport_key_api=sport_key)
         
         
