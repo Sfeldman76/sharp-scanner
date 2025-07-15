@@ -746,19 +746,37 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df[col] = df[col].astype(str).str.strip().str.lower()
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
 
-   # Opening values per outcome + book
+   merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
+    # Clean snapshot openers
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-        .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Implied_Prob', 'Limit']]
-        .rename(columns={
-            'Value': 'Open_Value',
-            'Odds_Price': 'Open_Odds',
-            'Implied_Prob': 'First_Imp_Prob',
-            'Limit': 'Opening_Limit'
-        })
+        .drop_duplicates(subset=merge_keys, keep='first')
+        .dropna(subset=['Value'])  # Drop after selecting earliest row
+        .loc[:, merge_keys + ['Value']]
+        .rename(columns={'Value': 'Open_Value'})
     )
+    
+    # Log key coverage before merging
+    df_keys = df[merge_keys].drop_duplicates()
+    df_open_keys = df_open[merge_keys].drop_duplicates()
+    
+    missing_keys = pd.merge(df_keys, df_open_keys, on=merge_keys, how='left', indicator=True)
+    missing = missing_keys[missing_keys['_merge'] == 'left_only']
+    
+    logger.info(f"🧪 Total unique (Game, Market, Outcome, Bookmaker) combos in df: {len(df_keys)}")
+    logger.info(f"❌ Missing Open_Value for {len(missing)} combos in df_open")
+    
+    # Optionally log a few samples
+    if not missing.empty:
+        sample = missing.drop(columns=['_merge']).head(5).to_dict(orient='records')
+        logger.warning(f"⚠️ Sample missing openers: {sample}")
+    df = df.merge(df_open, on=merge_keys, how='left')
+
+    matched = df['Open_Value'].notnull().sum()
+    logger.info(f"✅ Rows with Open_Value after merge: {matched:,} / {len(df):,}")
+
     
     # Extremes per outcome + book
     df_extremes = (
