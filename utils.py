@@ -826,8 +826,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Limit_Max'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('max')
     df['Limit_Min'] = df.groupby(['Game', 'Market'])['Limit_NonZero'].transform('min')
   
-   # === Detect market leaders
-    market_leader_flags = detect_market_leaders(df_history, SHARP_BOOKS, REC_BOOKS)
+    
+    # ✅ FIXED
+    market_leader_flags = detect_market_leaders(df_all_snapshots, SHARP_BOOKS, REC_BOOKS)
+  
     df = df.merge(
         market_leader_flags[['Game', 'Market', 'Outcome', 'Book', 'Market_Leader']],
         on=['Game', 'Market', 'Outcome', 'Book'],
