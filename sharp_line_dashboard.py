@@ -1576,7 +1576,18 @@ def apply_blended_sharp_score(df, trained_models):
             # ✅ Combine canonical and inverse into one scored DataFrame
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-            
+            # Fill if missing
+            df_scored['Is_Sharp_Book'] = df_scored['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
+            df_scored['Sharp_Line_Magnitude'] = df_scored['Line_Delta'].where(df_scored['Is_Sharp_Book'] == 1).abs().fillna(0)
+            df_scored['Rec_Line_Magnitude'] = df_scored['Line_Delta'].where(df_scored['Is_Sharp_Book'] == 0).abs().fillna(0)
+            df_scored['SharpMove_Odds_Up'] = ((df_scored['Sharp_Move_Signal'] == 1) & (df_scored['Odds_Shift'] > 0)).astype(int)
+            df_scored['SharpMove_Odds_Down'] = ((df_scored['Sharp_Move_Signal'] == 1) & (df_scored['Odds_Shift'] < 0)).astype(int)
+            df_scored['SharpMove_Odds_Mag'] = df_scored['Sharp_Move_Signal'] * df_scored['Odds_Shift'].abs()
+            df_scored['SharpMove_Resistance_Break'] = df_scored['Sharp_Move_Signal'] * df_scored.get('Was_Line_Resistance_Broken', 0)
+            df_scored['Late_Game_Steam_Flag'] = (df_scored['Minutes_To_Game'] <= 60).astype(int)
+            df_scored['Value_Reversal_Flag'] = df_scored.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
+            df_scored['Odds_Reversal_Flag'] = df_scored.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
+
             # === Compute Active Signal Count
             df_scored['Active_Signal_Count'] = (
                 (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
@@ -1591,13 +1602,14 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_scored['Rec_Line_Magnitude'] > 0.5).astype(int) +
                 (df_scored['Is_Home_Team_Bet'] == 1).astype(int) +
                 (df_scored['SharpMove_Odds_Up'] == 1).astype(int) +
-                (df_scored['SharpMove_Odds_Down'] == 1).astype(int)+
-                (df_scored['SharpMove_Odds_Mag'] > 5).astype(int)+
-                (df_scored['SharpMove_Resistance_Break'] == 1).astype(int)+
-                (df_scored['Late_Game_Steam_Flag'] == 1).astype(int)+
+                (df_scored['SharpMove_Odds_Down'] == 1).astype(int) +
+                (df_scored['SharpMove_Odds_Mag'] > 5).astype(int) +
+                (df_scored['SharpMove_Resistance_Break'] == 1).astype(int) +
+                (df_scored['Late_Game_Steam_Flag'] == 1).astype(int) +
                 (df_scored['Value_Reversal_Flag'] == 1).astype(int) +
-                (df_scored['Odds_Reversal_Flag'] == 1).astype(int)   # or any meaningful threshold
+                (df_scored['Odds_Reversal_Flag'] == 1).astype(int)
             )
+
                             
             def build_why_model_likes_it(row):
                 if pd.isna(row['Model_Sharp_Win_Prob']):
