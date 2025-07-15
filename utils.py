@@ -454,16 +454,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         logging.debug("Schema:\n" + df.dtypes.to_string())
         logging.debug("Preview:\n" + df.head(5).to_string())
         
-def read_market_weights_from_bigquery():
-    try:
-        query = f"SELECT * FROM `{MARKET_WEIGHTS_TABLE}`"
-        df = bq_client.query(query).to_dataframe()
-        weights = {row["Feature"]: row["Weight"] for _, row in df.iterrows()}
-        print(f"✅ Loaded {len(weights)} market weights from BigQuery")
-        return weights
-    except Exception as e:
-        print(f"❌ Failed to load market weights from BigQuery: {e}")
-        return {}
+
 
 def normalize_label(label):
      return str(label).strip().lower().replace('.0', '')
@@ -486,9 +477,9 @@ def normalize_book_key(raw_key, sharp_books, rec_books):
             #return abs(odds) / (abs(odds) + 100)
     #except:
         #return None
-def load_market_weights_from_bq():
-    from google.cloud import bigquery
 
+def load_market_weights_from_bq():
+    
     client = bigquery.Client(project="sharplogger", location="us")
 
     query = """
@@ -499,9 +490,7 @@ def load_market_weights_from_bq():
     """
     df = client.query(query).to_dataframe()
 
-    # ✅ This already returns a dict, so assign directly
-    market_weights = compute_and_write_market_weights(df)
-
+    market_weights = compute_and_write_market_weights(df)  # Returns a dict
     logging.info(f"✅ Loaded market weights for {len(market_weights)} markets")
     return market_weights
     
