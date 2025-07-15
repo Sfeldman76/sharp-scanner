@@ -411,64 +411,7 @@ def write_market_weights_to_bigquery(weights_dict):
     except Exception as e:
         print(f"❌ Upload failed: {e}")
         print(df.dtypes)
-SPORT_ALIAS = {
-    'AMERICANFOOTBALL_CFL': 'CFL',
-    'BASEBALL_MLB': 'MLB',
-    'BASKETBALL_WNBA': 'WNBA',
-    'AMERICANFOOTBALL_NFL': 'NFL',
-    'AMERICANFOOTBALL_NCAAF': 'NCAAF',
-    'BASKETBALL_NBA': 'NBA',
-    'BASKETBALL_NCAAB': 'NCAAB',
-}
 
-KEY_LINE_RESISTANCE = {
-    'NFL': {'spread': [3, 7, 10, 14], 'total': [41, 44, 47, 51]},
-    'NBA': {'spread': [2.5, 5, 7, 10], 'total': [210, 220, 225, 230]},
-    'WNBA': {'spread': [2, 4.5, 6.5], 'total': [155, 160, 165, 170]},
-    'CFL': {'spread': [3, 6.5, 9.5], 'total': [48, 52, 55, 58]},
-    'NCAAF': {'spread': [3, 7, 10, 14, 17], 'total': [45, 52, 59, 66]},
-    'NCAAB': {'spread': [2, 5, 7, 10], 'total': [125, 135, 145, 150]},
-    'MLB': {'spread': [], 'total': [7, 7.5, 8.5, 9]},
-    'NHL': {'spread': [], 'total': [5.5, 6, 6.5, 7]},
-}
-
-
-def was_line_resistance_broken(open_val, close_val, key_levels):
-    if open_val is None or close_val is None:
-        return 0
-    for key in key_levels:
-        if (open_val < key < close_val) or (close_val < key < open_val):
-            return 1
-    return 0
-
-
-def compute_line_resistance_flag(df, source='moves'):
-    # Normalize Sport
-    df['Sport'] = df['Sport'].str.upper().map(SPORT_ALIAS).fillna(df['Sport'].str.upper())
-
-    def get_key_levels(sport, market):
-        sport_key = sport.upper()
-        market_key = market.lower()
-        return KEY_LINE_RESISTANCE.get(sport_key, {}).get(market_key, [])
-
-    def get_opening_line(row):
-        if source == 'moves':
-            return row.get('Old_Value')
-        elif source == 'scores':
-            return row.get('First_Line_Value')
-        else:
-            return None
-
-    df['Was_Line_Resistance_Broken'] = df.apply(
-        lambda row: was_line_resistance_broken(
-            get_opening_line(row),
-            row.get('Value'),
-            get_key_levels(row.get('Sport', ''), row.get('Market', ''))
-        ),
-        axis=1
-    )
-
-    return df
     
 def initialize_all_tables(df_snap, df_audit, market_weights_dict):
     from google.cloud import bigquery
@@ -533,36 +476,7 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
 
 
-def add_minutes_to_game(df):
-    df = df.copy()
 
-    if 'Commence_Hour' not in df.columns or 'Snapshot_Timestamp' not in df.columns:
-        logger.warning("⏳ Skipping time-to-game calculation — missing 'Commence_Hour' or 'Snapshot_Timestamp'")
-        df['Minutes_To_Game'] = None
-        df['Timing_Tier'] = None
-        return df
-
-    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
-    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
-
-    df['Minutes_To_Game'] = (
-        (df['Commence_Hour'] - df['Snapshot_Timestamp'])
-        .dt.total_seconds() / 60
-    ).clip(lower=0)
-
-    df['Timing_Tier'] = pd.cut(
-        df['Minutes_To_Game'],
-        bins=[0, 60, 360, 1440, float('inf')],  # <1h, 1–6h, 6–24h, >24h
-        labels=[
-            '🔥 Late (<1h)',
-            '⚠️ Mid (1–6h)',
-            '⏳ Early (6–24h)',
-            '🧊 Very Early (>24h)',
-        ],
-        right=False
-    )
-
-    return df
     
     
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
@@ -586,10 +500,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
 
     df_bt = df_bt.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
-    # 🔧 Add Was_Line_Resistance_Broken feature from opening vs. final line
-    # 🔧 Add Was_Line_Resistance_Broken feature using First_Line_Value from sharp_scores_full
-    df_bt = compute_line_resistance_flag(df_bt, source='scores')
-    df_bt = add_minutes_to_game(df_bt)
+ 
     dedup_cols = [
         'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump',
@@ -700,15 +611,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
         df_market['Was_Line_Resistance_Broken'] = df_market.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
         df_market['SharpMove_Resistance_Break'] = (df_market['Sharp_Move_Signal'] * df_market['Was_Line_Resistance_Broken'])
+        # === Normalize Resistance Break Count
+        df_market['Line_Resistance_Crossed_Count'] = (
+            pd.to_numeric(df_market.get('Line_Resistance_Crossed_Count'), errors='coerce')
+            .fillna(0)
+            .astype(int)
+        )
+        
+        # === Optional: store decoded JSON for preview/debug only (not as model input)
+        df_market['Line_Resistance_Crossed_Levels'] = df_market.get('Line_Resistance_Crossed_Levels', '[]')
+
         df_market['Value_Reversal_Flag'] = df_market.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
         df_market['Odds_Reversal_Flag'] = df_market.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
         
-        df_market['Minutes_To_Game_Tier'] = pd.cut(
-            df_market['Minutes_To_Game'],
-            bins=[-1, 30, 60, 180, 360, 720, np.inf],
-            labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
-        )
-
+        
             # === Resistance Flag Debug
         with st.expander(f"📊 Resistance Flag Debug – {market.upper()}"):
             st.write("Value Counts:")
@@ -728,35 +644,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
         # === 🧠 Add new features to training
         features = [
             # 🔹 Core sharp signals
-            'Sharp_Move_Signal',
-            'Sharp_Limit_Jump',
-            'Sharp_Time_Score',
-            'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket',
-            'Market_Leader',
-            'LimitUp_NoMove_Flag',
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score', 'Sharp_Limit_Total',
+            'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            'Sharp_Line_Magnitude',
-            'Is_Home_Team_Bet',
-             # 🔹 Engineered odds shift decomposition
-            'SharpMove_Odds_Up',          # ⬆️ Odds got worse after sharp signal
-            'SharpMove_Odds_Down',        # ⬇️ Odds improved after sharp signal
-            'SharpMove_Odds_Mag',         # 📊 Magnitude of odds change
+            'Sharp_Line_Magnitude', 'Is_Home_Team_Bet',
         
-            # 🔹 Engineered interactions (de-correlated)
-            #'SharpMove_OddsShift',             # Interaction: sharp signal with actual move
-            'MarketLeader_ImpProbShift',       # Market-leader impact on price shift
-            'LimitProtect_SharpMag',           # Limit-up signal with no move (market protection)
-            'Delta_Sharp_vs_Rec',              # Directional disagreement between sharp vs rec
-            'Sharp_Leads',
-            'SharpMove_Resistance_Break',
-            'Late_Game_Steam_Flag',
-               # 🔁 Reversal logic
-            'Value_Reversal_Flag',
-            'Odds_Reversal_Flag'                      # Binary: did sharp books move first?
+            # 🔹 Engineered odds shift decomposition
+            'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'SharpMove_Odds_Mag',
+        
+            # 🔹 Engineered interactions
+            'MarketLeader_ImpProbShift', 'LimitProtect_SharpMag', 'Delta_Sharp_vs_Rec',
+            'Sharp_Leads', 'SharpMove_Resistance_Break',
+        
+            # 🔹 Resistance feature
+            'Line_Resistance_Crossed_Count',  # ✅ newly added here
+        
+            # 🔁 Reversal logic
+            'Value_Reversal_Flag', 'Odds_Reversal_Flag',
+        
+            # 🔥 Timing flags
+            'Late_Game_Steam_Flag'
         ]
-    
+            
             
         
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
