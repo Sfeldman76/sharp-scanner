@@ -1345,24 +1345,63 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             if df_inverse.empty:
                 logger.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
                 continue  # optional: skip this scoring loop if inverse fails
-            # Merge opening values onto inverse rows using updated Outcome
-            cols_to_refresh = ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Min_Value', 'Max_Value', 'Min_Odds', 'Max_Odds']
-            df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
-
-            df_inverse = df_inverse.merge(
-                df_open,  # the df_open created earlier with Open_Value, Open_Odds, etc.
-                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                how='left'
-            )
             
-            # Merge extremes
-            df_inverse = df_inverse.merge(
-                df_extremes,  # created earlier with Min/Max
-                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                how='left'
-            )
+            # === 🔁 Re-merge opening/extremes onto inverse rows
+            try:
+                # Drop existing versions to avoid _x/_y suffixes
+                cols_to_refresh = [
+                    'Open_Value', 'Open_Odds', 'First_Imp_Prob',
+                    'Min_Value', 'Max_Value', 'Min_Odds', 'Max_Odds',
+                    'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
+                    'Value_Reversal_Flag', 'Odds_Reversal_Flag',
+                    'Is_Home_Team_Bet', 'Is_Favorite_Bet',
+                    'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs'
+                ]
+                df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
+            
+                # Merge openers and extremes
+                df_inverse = df_inverse.merge(
+                    df_open,
+                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                    how='left'
+                )
+                df_inverse = df_inverse.merge(
+                    df_extremes,
+                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                    how='left'
+                )
+            
+                # === 🔁 Recompute outcome-sensitive fields
+                df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
+                df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
+                df_inverse['Implied_Prob_Shift'] = df_inverse['Implied_Prob'] - pd.to_numeric(df_inverse['First_Imp_Prob'], errors='coerce')
+                df_inverse['Line_Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
+            
+                df_inverse['Value_Reversal_Flag'] = (
+                    ((df_inverse['Value'] < df_inverse['Open_Value']) & (df_inverse['Value'] == df_inverse['Min_Value'])) |
+                    ((df_inverse['Value'] > df_inverse['Open_Value']) & (df_inverse['Value'] == df_inverse['Max_Value']))
+                ).astype(int)
+            
+                df_inverse['Odds_Reversal_Flag'] = (
+                    ((df_inverse['Odds_Price'] < df_inverse['Open_Odds']) & (df_inverse['Odds_Price'] == df_inverse['Min_Odds'])) |
+                    ((df_inverse['Odds_Price'] > df_inverse['Open_Odds']) & (df_inverse['Odds_Price'] == df_inverse['Max_Odds']))
+                ).astype(int)
+            
+                df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'].str.lower() == df_inverse['Home_Team_Norm'].str.lower()).astype(float)
+                df_inverse['Is_Favorite_Bet'] = (pd.to_numeric(df_inverse['Value'], errors='coerce') < 0).astype(float)
+                df_inverse['Direction_Aligned'] = np.where(
+                    df_inverse['Line_Delta'] > 0, 1,
+                    np.where(df_inverse['Line_Delta'] < 0, 0, np.nan)
+                ).astype(float)
+            
+                df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
+                df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
+            
+                logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
+            
+            except Exception as e:
+                logger.error(f"❌ Failed to refresh inverse rows after re-merge: {e}")
 
-               
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             
