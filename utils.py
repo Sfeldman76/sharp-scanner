@@ -750,14 +750,16 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df[col] = df[col].astype(str).str.strip().str.lower()
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
 
-    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
 
     # ✅ Proper openers block with all needed columns
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
+        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])  # Ensure all three are present
         .drop_duplicates(subset=merge_keys, keep='first')
-        .dropna(subset=['Value'])  # Still filter on valid value
         .loc[:, merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
         .rename(columns={
             'Value': 'Open_Value',
@@ -766,8 +768,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         })
     )
 
+    logger.info(f"🧪 df_open columns: {df_open.columns.tolist()}")
+    df = df.merge(df_open, on=merge_keys, how='left')
     logger.info(f"✅ Open fields present: {df[['Open_Value', 'Open_Odds', 'First_Imp_Prob']].notnull().sum().to_dict()}")
- 
+     
     # Log key coverage before merging
     df_keys = df[merge_keys].drop_duplicates()
     df_open_keys = df_open[merge_keys].drop_duplicates()
@@ -782,7 +786,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     if not missing.empty:
         sample = missing.drop(columns=['_merge']).head(5).to_dict(orient='records')
         logger.warning(f"⚠️ Sample missing openers: {sample}")
-    df = df.merge(df_open, on=merge_keys, how='left')
+ 
 
     matched = df['Open_Value'].notnull().sum()
     logger.info(f"✅ Rows with Open_Value after merge: {matched:,} / {len(df):,}")
