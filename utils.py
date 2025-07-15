@@ -1570,7 +1570,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     if trained_models:
         try:
             df_all_snapshots = read_recent_sharp_moves(hours=72)
-            market_weights = compute_and_write_market_weights(df_all_snapshots)
+            market_weights = load_market_weights_from_bq()
             df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
             if not df_scored.empty:
                 df = df_scored.copy()
@@ -1595,7 +1595,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
 
     # === Summary consensus metrics
-    summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
+    summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
    
     # ✅ Final return (no field names changed)
     return df, df_history, summary_df
