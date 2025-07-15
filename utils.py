@@ -700,10 +700,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = df.copy()
     scored_all = []
     total_start = time.time()
-
+    
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
-
+    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+    df['Book'] = df['Book'].str.lower()
     # Drop merge artifacts
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
@@ -742,11 +745,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = add_minutes_to_game(df)
 
     # Normalize merge keys
+    # Normalize merge keys
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
         df[col] = df[col].astype(str).str.strip().str.lower()
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
 
-   merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
 
     # Clean snapshot openers
     df_open = (
@@ -755,9 +760,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .drop_duplicates(subset=merge_keys, keep='first')
         .dropna(subset=['Value'])  # Drop after selecting earliest row
         .loc[:, merge_keys + ['Value']]
-        .rename(columns={'Value': 'Open_Value'})
+        .rename(columns={
+            'Value': 'Open_Value',
+            'Odds_Price': 'Open_Odds',
+            'Implied_Prob': 'First_Imp_Prob'
+        })
     )
-    
+        
     # Log key coverage before merging
     df_keys = df[merge_keys].drop_duplicates()
     df_open_keys = df_open[merge_keys].drop_duplicates()
@@ -1589,10 +1598,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # === Compute Market Leader (if not already done)
     
     # ✅ Add required fields BEFORE scoring
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
-    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
-    df['Book'] = df['Book'].str.lower()
+   
     # === Compute Market Leader (if not already done)
     
     # Protect against zero-move but high-limit situations
