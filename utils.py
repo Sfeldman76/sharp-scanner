@@ -842,23 +842,34 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
     df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
     def compute_value_reversal(df, market_col='Market'):
-        df = df.copy()
-        is_spread = df[market_col].str.lower().str.contains('spread', na=False)
+        is_spread = df[market_col].str.lower().str.contains('spread')
+        is_total = df[market_col].str.lower().str.contains('total')
+        is_h2h = df[market_col].str.lower().str.contains('h2h')
     
         df['Value_Reversal_Flag'] = np.where(
             is_spread,
             (
                 ((df['Open_Value'] < 0) & (df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value'])) |
-                ((df['Open_Value'] > 0) & (df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
-                ((df['Open_Value'] == 0) & (df['Value'] == df['Max_Value']))
-            ),
-            (
-                ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value'])) |
-                ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value']))
+                ((df['Open_Value'] > 0) & (df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value']))
+            ).astype(int),
+            np.where(
+                is_total,
+                (
+                    ((df['Outcome_Norm'] == 'over') & (df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value'])) |
+                    ((df['Outcome_Norm'] == 'under') & (df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value']))
+                ).astype(int),
+                np.where(
+                    is_h2h,
+                    (
+                        ((df['Value'] > df['Open_Value']) & (df['Value'] == df['Max_Value'])) |
+                        ((df['Value'] < df['Open_Value']) & (df['Value'] == df['Min_Value']))
+                    ).astype(int),
+                    0
+                )
             )
-        ).astype(int)
-    
+        )
         return df
+
 
     
     def compute_odds_reversal(df):
