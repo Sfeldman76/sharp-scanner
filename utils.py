@@ -1573,8 +1573,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             market_weights = load_market_weights_from_bq()
             df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
             if not df_scored.empty:
+                df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
+                now = pd.Timestamp.utcnow()
+                df_scored['Pre_Game'] = df_scored['Game_Start'] > now
+                df_scored['Post_Game'] = ~df_scored['Pre_Game']
+                df_scored['Event_Date'] = df_scored['Game_Start'].dt.strftime('%Y-%m-%d')
+                df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
+            
                 df = df_scored.copy()
                 logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
+                
             else:
                 logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
         except Exception as e:
@@ -1584,15 +1592,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     # === Build main DataFrame
     logging.info(f"📊 Columns after sharp scoring: {df.columns.tolist()}")
 
-    # === Recompute Pre_Game / Post_Game before saving
-    df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
-    now = pd.Timestamp.utcnow()
-    df['Pre_Game'] = df['Game_Start'] > now
-    df['Post_Game'] = ~df['Pre_Game']
-    # === Calculate Implied Probability from Odds_Price
+   
     
-    df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.strftime('%Y-%m-%d')
-    df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
 
     # === Summary consensus metrics
     summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
