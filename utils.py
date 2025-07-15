@@ -1119,8 +1119,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 bins=[-1, 30, 60, 180, 360, 720, np.inf],
                 labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
             )
-            df_canon['Value_Reversal_Flag'] = df_canon.get('Value_Reversal_Flag', 0).astype(int)
-            df_canon['Odds_Reversal_Flag'] = df_canon.get('Odds_Reversal_Flag', 0).astype(int)
+            if 'Value_Reversal_Flag' not in df_canon.columns:
+                df_canon['Value_Reversal_Flag'] = 0
+            df_canon['Value_Reversal_Flag'] = df_canon['Value_Reversal_Flag'].fillna(0).astype(int)
+            if 'Odds_Reversal_Flag' not in df_canon.columns:
+                df_canon['Odds_Reversal_Flag'] = 0
+            df_canon['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].fillna(0).astype(int)
+
+
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
@@ -1232,8 +1238,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
             logger.info(f"📋 Inverse3 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
 
-            df_inverse['Value_Reversal_Flag'] = df_canon['Value_Reversal_Flag'].values
-            df_inverse['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].values
+            if 'Value_Reversal_Flag' not in df_inverse.columns:
+                df_inverse['Value_Reversal_Flag'] = 0
+            df_inverse['Value_Reversal_Flag'] = df_inverse['Value_Reversal_Flag'].fillna(0).astype(int)
+            
+            if 'Odds_Reversal_Flag' not in df_inverse.columns:
+                df_inverse['Odds_Reversal_Flag'] = 0
+            df_inverse['Odds_Reversal_Flag'] = df_inverse['Odds_Reversal_Flag'].fillna(0).astype(int)
+
             if market_type == "totals":
                 df_inverse = df_inverse[df_inverse['Outcome'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
