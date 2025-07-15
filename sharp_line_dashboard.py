@@ -1606,7 +1606,36 @@ def apply_blended_sharp_score(df, trained_models):
             df_scored['Value_Reversal_Flag'] = df_scored.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
             df_scored['Odds_Reversal_Flag'] = df_scored.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
 
-            # === Compute Active Signal Count
+            # === Ensure all flag fields are numeric or boolean-safe
+            safe_flags = [
+                'Sharp_Move_Signal',
+                'Sharp_Limit_Jump',
+                'Sharp_Time_Score',
+                'Sharp_Limit_Total',
+                'LimitUp_NoMove_Flag',
+                'Market_Leader',
+                'Is_Reinforced_MultiMarket',
+                'Is_Sharp_Book',
+                'Sharp_Line_Magnitude',
+                'Rec_Line_Magnitude',
+                'Is_Home_Team_Bet',
+                'SharpMove_Odds_Up',
+                'SharpMove_Odds_Down',
+                'SharpMove_Odds_Mag',
+                'SharpMove_Resistance_Break',
+                'Late_Game_Steam_Flag',
+                'Value_Reversal_Flag',
+                'Odds_Reversal_Flag',
+            ]
+            
+            for col in safe_flags:
+                if col in df_scored.columns:
+                    if pd.api.types.is_bool_dtype(df_scored[col]):
+                        df_scored[col] = df_scored[col].astype(float).fillna(0).astype(int)
+                    else:
+                        df_scored[col] = pd.to_numeric(df_scored[col], errors='coerce').fillna(0)
+            
+            # === Active signal count with safely casted fields
             df_scored['Active_Signal_Count'] = (
                 (df_scored['Sharp_Move_Signal'] == 1).astype(int) +
                 (df_scored['Sharp_Limit_Jump'] == 1).astype(int) +
@@ -1627,7 +1656,7 @@ def apply_blended_sharp_score(df, trained_models):
                 (df_scored['Value_Reversal_Flag'] == 1).astype(int) +
                 (df_scored['Odds_Reversal_Flag'] == 1).astype(int)
             )
-
+            
                             
             def build_why_model_likes_it(row):
                 if pd.isna(row['Model_Sharp_Win_Prob']):
