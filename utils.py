@@ -1247,20 +1247,34 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['Odds_Reversal_Flag'] = df_inverse['Odds_Reversal_Flag'].fillna(0).astype(int)
 
             if market_type == "totals":
+                # ✅ Step 1: Filter to canonical 'over' rows only
+                df_inverse = df_inverse[df_inverse['Outcome_Norm'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
             
-                logger.info(f"🔁 Attempting to create {len(df_inverse)} inverse UNDER rows from OVER rows.")
             
-                original_books = set(df_market['Bookmaker'].unique())
-                inverse_books = set(df_inverse['Bookmaker'].unique())
-                missing_books = original_books - inverse_books
-                if missing_books:
-                    logger.warning(f"⚠️ These books had 'under' rows but no inverse created: {missing_books}")
             
+                # ✅ Step 2: Rebuild keys AFTER flipping
+                df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+                df_inverse['Game_Key'] = (
+                    df_inverse['Home_Team_Norm'] + "_" +
+                    df_inverse['Away_Team_Norm'] + "_" +
+                    df_inverse['Commence_Hour'].astype(str) + "_" +
+                    df_inverse['Market'] + "_" +
+                    df_inverse['Outcome']
+                )
+                df_inverse['Game_Key_Base'] = (
+                    df_inverse['Home_Team_Norm'] + "_" +
+                    df_inverse['Away_Team_Norm'] + "_" +
+                    df_inverse['Commence_Hour'].astype(str) + "_" +
+                    df_inverse['Market']
+                )
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
+            
+                # ✅ Step 3: Build df_full_market Team_Key from real snapshot
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
             
+                # ✅ Step 4: Deduplicate snapshot to keep latest valid lines
                 df_full_market = (
                     df_full_market
                     .dropna(subset=['Value', 'Odds_Price'])
@@ -1268,6 +1282,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     .drop_duplicates(subset=['Team_Key'], keep='last')
                 )
             
+                # ✅ Step 5: Merge inverse rows with real UNDER snapshot rows
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value', 'Odds_Price']],
                     on='Team_Key',
@@ -1279,10 +1294,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
             
-                # Diagnostic
+                # ✅ Step 6: Diagnostics
                 missing_val = df_inverse['Value'].isna().sum()
                 missing_odds = df_inverse['Odds_Price'].isna().sum()
                 logger.warning(f"⚠️ totals inverse: {missing_val} missing Value, {missing_odds} missing Odds_Price")
+            
 
             elif market_type == "h2h":
                 df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
