@@ -769,6 +769,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     # ✅ Proper openers block with all needed columns
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    df_open_book = (
+        df_all_snapshots
+        .sort_values('Snapshot_Timestamp')
+        .dropna(subset=['Value', 'Limit'])
+        .drop_duplicates(subset=merge_keys, keep='first')
+        .loc[:, merge_keys + ['Value', 'Limit']]
+        .rename(columns={
+            'Value': 'Open_Book_Value',
+            'Limit': 'Opening_Limit'
+        })
+    )
+    df = df.merge(df_open_book, on=merge_keys, how='left')
 
     df_open = (
         df_all_snapshots
@@ -875,10 +887,34 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     def compute_odds_reversal(df):
         df = df.copy()
     
-        df['Odds_Reversal_Flag'] = (
-            ((df['Open_Odds'] > df['Min_Odds']) & (df['Odds_Price'] == df['Min_Odds'])) |
-            ((df['Open_Odds'] < df['Max_Odds']) & (df['Odds_Price'] == df['Max_Odds']))
-        ).astype(int)
+        # Standardize market detection
+        is_spread = df['Market'].str.lower().str.contains('spread')
+        is_total = df['Market'].str.lower().str.contains('total')
+        is_h2h = df['Market'].str.lower().str.contains('h2h')
+    
+        # Safe parsing
+        open_odds = pd.to_numeric(df['Open_Odds'], errors='coerce')
+        current_odds = pd.to_numeric(df['Odds_Price'], errors='coerce')
+        min_odds = pd.to_numeric(df['Min_Odds'], errors='coerce')
+        max_odds = pd.to_numeric(df['Max_Odds'], errors='coerce')
+    
+        # H2H: both directions could be meaningful (just care about movement extremes)
+        h2h_flag = (
+            ((open_odds > min_odds) & (current_odds == min_odds)) |
+            ((open_odds < max_odds) & (current_odds == max_odds))
+        )
+    
+        # Spreads / Totals: reversal is usually when odds swing back **away from** sharp direction
+        spread_total_flag = (
+            ((open_odds < max_odds) & (current_odds == max_odds)) |  # Drifted back to long odds
+            ((open_odds > min_odds) & (current_odds == min_odds))    # Crashed to short odds
+        )
+    
+        df['Odds_Reversal_Flag'] = np.where(
+            is_h2h,
+            h2h_flag.astype(int),
+            np.where(is_spread | is_total, spread_total_flag.astype(int), 0)
+        )
     
         return df
 
@@ -1432,17 +1468,23 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 # Drop existing versions to avoid _x/_y suffixes
                 cols_to_refresh = [
                     'Open_Value', 'Open_Odds', 'First_Imp_Prob',
+                    'Open_Book_Value', 'Opening_Limit',  # ✅ ADD THESE
                     'Min_Value', 'Max_Value', 'Min_Odds', 'Max_Odds',
                     'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
                     'Value_Reversal_Flag', 'Odds_Reversal_Flag',
-                    'Is_Home_Team_Bet', 'Is_Favorite_Bet','Delta',
-                    'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs'
+                    'Is_Home_Team_Bet', 'Is_Favorite_Bet',
+                    'Delta', 'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs'
                 ]
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
             
                 # Merge openers and extremes
                 df_inverse = df_inverse.merge(
                     df_open,
+                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                    how='left'
+                )
+                df_inverse = df_inverse.merge(
+                    df_open_book,
                     on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
                     how='left'
                 )
