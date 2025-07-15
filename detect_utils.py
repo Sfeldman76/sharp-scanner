@@ -8,7 +8,7 @@ from config import SPORTS, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, API_KEY
 from utils import (
     fetch_live_odds,
     read_latest_snapshot_from_bigquery,
-    read_market_weights_from_bigquery,
+    #read_market_weights_from_bigquery,
     detect_sharp_moves,
     write_sharp_moves_to_master,
     #write_line_history_to_bigquery,
