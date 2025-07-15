@@ -33,7 +33,8 @@ from utils import (
     compute_sharp_metrics,
     compute_sharp_prob_shift,
     log_memory,
-    calc_implied_prob
+    calc_implied_prob,
+    load_market_weights_from_bq
 )
 
 def detect_and_save_all_sports():
@@ -49,7 +50,7 @@ def detect_and_save_all_sports():
             previous = read_latest_snapshot_from_bigquery()
             logging.info(f"📦 Previous snapshot loaded: {len(previous)} games")
 
-            market_weights = read_market_weights_from_bigquery()
+            market_weights = load_market_weights_from_bq()
 
             trained_models = {
                 market: load_model_from_gcs(sport_label, market)
@@ -67,10 +68,9 @@ def detect_and_save_all_sports():
                 REC_BOOKS=REC_BOOKS,
                 BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
                 trained_models=trained_models,
-                weights=market_weights
+                weights=market_weights  # ✅ this line is key
             )
-            logging.info(f"🔎 Detected sharp moves: {len(df_moves)} rows")
-
+            
            
             backtest_days = 3
             try:
