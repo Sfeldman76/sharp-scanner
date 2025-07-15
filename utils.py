@@ -752,21 +752,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
 
-
-    # Clean snapshot openers
+    # ✅ Proper openers block with all needed columns
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=merge_keys, keep='first')
-        .dropna(subset=['Value'])  # Drop after selecting earliest row
-        .loc[:, merge_keys + ['Value']]
+        .dropna(subset=['Value'])  # Still filter on valid value
+        .loc[:, merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
         .rename(columns={
             'Value': 'Open_Value',
             'Odds_Price': 'Open_Odds',
             'Implied_Prob': 'First_Imp_Prob'
         })
     )
-        
+
+    logger.info(f"✅ Open fields present: {df[['Open_Value', 'Open_Odds', 'First_Imp_Prob']].notnull().sum().to_dict()}")
+ 
     # Log key coverage before merging
     df_keys = df[merge_keys].drop_duplicates()
     df_open_keys = df_open[merge_keys].drop_duplicates()
