@@ -369,7 +369,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
         'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds', 'Was_Line_Resistance_Broken',
         'Line_Resistance_Crossed_Levels',
-        'Line_Resistance_Crossed_Count',     # ✅ Add this
+        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag'    # ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -2043,7 +2043,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Was_Line_Resistance_Broken',
             'SharpMove_Resistance_Break',
             'Line_Resistance_Crossed_Levels',
-            'Line_Resistance_Crossed_Count'
+            'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag' 
         ]
     }
 
@@ -2670,7 +2670,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Was_Line_Resistance_Broken',
         'SharpMove_Resistance_Break',
         'Line_Resistance_Crossed_Levels',
-        'Line_Resistance_Crossed_Count'  # ✅ ADD THESE
+        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag'   # ✅ ADD THESE
     ]
     
     
