@@ -1181,6 +1181,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_canon['Odds_Reversal_Flag'] = 0
             df_canon['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].fillna(0).astype(int)
 
+            # === Ensure timing-based sharp move magnitudes are numeric and present
+            for col in [
+                'SharpMove_Magnitude_Overnight',
+                'SharpMove_Magnitude_Early',
+                'SharpMove_Magnitude_Midday',
+                'SharpMove_Magnitude_Late'
+            ]:
+                df_canon[col] = pd.to_numeric(df_canon.get(col, 0), errors='coerce').fillna(0)
+                df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0), errors='coerce').fillna(0)
 
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
@@ -1481,7 +1490,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
                     'Value_Reversal_Flag', 'Odds_Reversal_Flag',
                     'Is_Home_Team_Bet', 'Is_Favorite_Bet',
-                    'Delta', 'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs'
+                    'Delta', 'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs', 'SharpMove_Magnitude_Overnight',
+                    'SharpMove_Magnitude_Early',
+                    'SharpMove_Magnitude_Midday',
+                    'SharpMove_Magnitude_Late'
                 ]
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
             
