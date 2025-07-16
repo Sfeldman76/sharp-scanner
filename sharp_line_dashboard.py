@@ -812,16 +812,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
 
         val_auc_logloss = roc_auc_score(y_val, val_prob_logloss)
         val_auc_auc = roc_auc_score(y_val, val_prob_auc)
-        val_logloss = log_loss(y_val, val_prob_auc)
-        val_brier = brier_score_loss(y_val, val_prob_auc)
-        
         # === Log holdout performance
         st.markdown(f"### 🧪 Holdout Validation – `{market.upper()}`")
         st.write(f"- LogLoss Model AUC: `{val_auc_logloss:.4f}`")
         st.write(f"- AUC Model AUC: `{val_auc_auc:.4f}`")
-        st.write(f"- Holdout LogLoss: `{val_logloss:.4f}`")
-        st.write(f"- Holdout Brier Score: `{val_brier:.4f}`")
-
+        
+        if y_val.nunique() < 2:
+            st.warning("⚠️ Cannot compute log loss or Brier score — only one label class in validation set.")
+            val_logloss = np.nan
+            val_brier = np.nan
+        else:
+            val_logloss = log_loss(y_val, val_prob_auc, labels=[0, 1])
+            val_brier = brier_score_loss(y_val, val_prob_auc)
+        
+            st.write(f"- Holdout LogLoss: `{val_logloss:.4f}`")
+            st.write(f"- Holdout Brier Score: `{val_brier:.4f}`")
+        
         # === Compute AUCs for weighting
         auc_logloss = roc_auc_score(y, prob_logloss)
         auc_auc = roc_auc_score(y, prob_auc)
