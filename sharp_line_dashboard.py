@@ -1070,100 +1070,142 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
 def compute_diagnostics_vectorized(df):
-
+    df = df.copy()
 
     TIER_ORDER = {
-        '✅Coinflip': 1,
+        '✅ Coinflip': 1,
         '✅ ⭐ Lean': 2,
         '🔥 Strong Indication': 3,
         '🔥 Steam': 4
     }
 
-    try:
-        df = df.copy()
+    # === Add model prob normalized
+    df['Model_Sharp_Win_Prob'] = pd.to_numeric(df.get('Model Prob'), errors='coerce')
 
-        # === Step 1: Normalize Tier Columns
-        for col in ['Confidence Tier', 'First_Tier']:
-            if col not in df.columns:
-                df[col] = ""
-            df[col] = df[col].astype(str).str.strip()
+    # === Normalize tier columns
+    for col in ['Confidence Tier', 'First_Tier']:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(str).str.strip()
 
-        # === Step 2: Tier Change
-        tier_current = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
-        tier_open = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
-
-        df['Tier_Change'] = np.where(
-            df['First_Tier'] != "",
+    # === Tier change
+    tier_now = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
+    tier_first = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
+    df['Tier_Change'] = np.where(
+        df['First_Tier'] != "",
+        np.where(
+            tier_now > tier_first,
+            "↑ " + df['First_Tier'] + " → " + df['Confidence Tier'],
             np.where(
-                tier_current > tier_open,
-                "↑ " + df['First_Tier'] + " → " + df['Confidence Tier'],
-                np.where(
-                    tier_current < tier_open,
-                    "↓ " + df['First_Tier'] + " → " + df['Confidence Tier'],
-                    "↔ No Change"
-                )
-            ),
-            "⚠️ Missing"
+                tier_now < tier_first,
+                "↓ " + df['First_Tier'] + " → " + df['Confidence Tier'],
+                "↔ No Change"
+            )
+        ),
+        "⚠️ Missing"
+    )
+
+    # === Confidence Trend
+    prob_now = df['Model_Sharp_Win_Prob']
+    prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+    df['Confidence Trend'] = np.where(
+        prob_now.isna() | prob_start.isna(),
+        "⚠️ Missing",
+        np.where(
+            prob_now - prob_start >= 0.04,
+            (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "% 📈",
+            np.where(
+                prob_now - prob_start <= -0.04,
+                (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "% 📉",
+                (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "% ↔"
+            )
         )
+    )
 
-        # === Step 3: Confidence Trend
-        prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
-        prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+    # === Line/Model Direction Alignment
+    df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
+    df['Line_Support_Sign'] = df.apply(lambda row: -1 if (row['Market'].lower() == 'totals' and row['Outcome'].lower() == 'under') else 1, axis=1)
+    df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
+    df['Line/Model Direction'] = np.select(
+        [
+            (prob_now - prob_start > 0) & (df['Line_Support_Direction'] > 0),
+            (prob_now - prob_start < 0) & (df['Line_Support_Direction'] < 0),
+            (prob_now - prob_start > 0) & (df['Line_Support_Direction'] < 0),
+            (prob_now - prob_start < 0) & (df['Line_Support_Direction'] > 0),
+        ],
+        [
+            "🟢 Aligned ↑",
+            "🔻 Aligned ↓",
+            "🔴 Model ↑ / Line ↓",
+            "🔴 Model ↓ / Line ↑"
+        ],
+        default="⚪ Mixed"
+    )
 
-        trend_strs = []
-        for s, n in zip(prob_start, prob_now):
-            if pd.isna(s) or pd.isna(n):
-                trend_strs.append("⚠️ Missing")
-            elif n - s >= 0.04:
-                trend_strs.append(f"📈 Trending Up: {s:.2%} → {n:.2%}")
-            elif n - s <= -0.04:
-                trend_strs.append(f"📉 Trending Down: {s:.2%} → {n:.2%}")
-            else:
-                trend_strs.append(f"↔ Stable: {s:.2%} → {n:.2%}")
+    # === Fill NaNs and coerce signal flags
+    safe_flags = [
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score',
+        'Sharp_Limit_Total', 'LimitUp_NoMove_Flag', 'Market_Leader',
+        'Is_Reinforced_MultiMarket', 'Is_Sharp_Book', 'Sharp_Line_Magnitude',
+        'Rec_Line_Magnitude', 'Is_Home_Team_Bet', 'SharpMove_Odds_Up',
+        'SharpMove_Odds_Down', 'SharpMove_Odds_Mag', 'SharpMove_Resistance_Break',
+        'Late_Game_Steam_Flag', 'Value_Reversal_Flag', 'Odds_Reversal_Flag'
+    ]
+    for col in safe_flags:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
 
-        df['Confidence Trend'] = trend_strs
+    # === Active signal count
+    df['Active_Signal_Count'] = (
+        (df['Sharp_Move_Signal'] == 1).astype(int) +
+        (df['Sharp_Limit_Jump'] == 1).astype(int) +
+        (df['Sharp_Time_Score'] > 0.5).astype(int) +
+        (df['Sharp_Limit_Total'] > 10000).astype(int) +
+        (df['LimitUp_NoMove_Flag'] == 1).astype(int) +
+        (df['Market_Leader'] == 1).astype(int) +
+        (df['Is_Reinforced_MultiMarket'] == 1).astype(int) +
+        (df['Is_Sharp_Book'] == 1).astype(int) +
+        (df['Sharp_Line_Magnitude'] > 0.5).astype(int) +
+        (df['Rec_Line_Magnitude'] > 0.5).astype(int) +
+        (df['Is_Home_Team_Bet'] == 1).astype(int) +
+        (df['SharpMove_Odds_Up'] == 1).astype(int) +
+        (df['SharpMove_Odds_Down'] == 1).astype(int) +
+        (df['SharpMove_Odds_Mag'] > 5).astype(int) +
+        (df['SharpMove_Resistance_Break'] == 1).astype(int) +
+        (df['Late_Game_Steam_Flag'] == 1).astype(int) +
+        (df['Value_Reversal_Flag'] == 1).astype(int) +
+        (df['Odds_Reversal_Flag'] == 1).astype(int)
+    )
 
-        # === Step 4: Line/Model Direction Alignment
-        df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
+    # === Explanation String
+    def build_reason(row):
+        if pd.isna(row['Model_Sharp_Win_Prob']):
+            return "⚠️ Missing — run apply_blended_sharp_score() first"
 
-        def get_line_support_sign(row):
-            try:
-                market = str(row.get('Market', '')).lower()
-                outcome = str(row.get('Outcome', '')).lower()
-                first_line = pd.to_numeric(row.get('First_Line_Value'), errors='coerce')
-                if market == 'totals':
-                    return -1 if outcome == 'under' else 1
-                else:
-                    return -1 if first_line < 0 else 1
-            except:
-                return 1
+        parts = []
+        if row['Sharp_Move_Signal']: parts.append("📈 Sharp Move Detected")
+        if row['Sharp_Limit_Jump']: parts.append("💰 Limit Jumped")
+        if row['Market_Leader']: parts.append("🏆 Market Leader")
+        if row['Is_Reinforced_MultiMarket']: parts.append("📊 Multi-Market Consensus")
+        if row['LimitUp_NoMove_Flag']: parts.append("🛡️ Limit Up + No Line Move")
+        if row['Is_Sharp_Book']: parts.append("🎯 Sharp Book Signal")
+        if row['SharpMove_Odds_Up']: parts.append("🟢 Odds Moved Up (Steam)")
+        if row['SharpMove_Odds_Down']: parts.append("🔻 Odds Moved Down (Buyback)")
+        if row['Is_Home_Team_Bet']: parts.append("🏠 Home Team Bet")
+        if row['Sharp_Line_Magnitude'] > 0.5: parts.append("📏 Big Line Move")
+        if row['Sharp_Time_Score'] > 0.5: parts.append("⏱️ Timing Edge")
+        if row['Rec_Line_Magnitude'] > 0.5: parts.append("📉 Rec Book Move")
+        if row['Sharp_Limit_Total'] > 10000: parts.append("💼 Sharp High Limit")
+        if row['SharpMove_Odds_Mag'] > 5: parts.append("💥 Sharp Odds Steam")
+        if row['SharpMove_Resistance_Break']: parts.append("🧱 Broke Key Resistance")
+        if row['Late_Game_Steam_Flag']: parts.append("⏰ Late Game Steam")
+        if row['Value_Reversal_Flag']: parts.append("🔄 Value Reversal")
+        if row['Odds_Reversal_Flag']: parts.append("📉 Odds Reversal")
+        return " + ".join(parts) if parts else "🤷‍♂️ No clear reason yet"
 
-        df['Line_Support_Sign'] = df.apply(get_line_support_sign, axis=1)
-        df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
+    df['Why Model Likes It'] = df.apply(build_reason, axis=1)
 
-        prob_trend = prob_now - prob_start
-
-        df['Line/Model Direction'] = np.select(
-            [
-                (prob_trend > 0) & (df['Line_Support_Direction'] > 0),
-                (prob_trend < 0) & (df['Line_Support_Direction'] < 0),
-                (prob_trend > 0) & (df['Line_Support_Direction'] < 0),
-                (prob_trend < 0) & (df['Line_Support_Direction'] > 0),
-            ],
-            [
-                "🟢 Aligned ↑",
-                "🔻 Aligned ↓",
-                "🔴 Model ↑ / Line ↓",
-                "🔴 Model ↓ / Line ↑"
-            ],
-            default="⚪ Mixed"
-        )
-    
-        if 'Why Model Likes It' not in df.columns:
-            df['Why Model Likes It'] = "⚠️ Missing from Compute vector — run apply_blended_sharp_score() first"
-    
-        # === Final diagnostics output table
-        diagnostics_df = df[[
+    diagnostics_df = df[[
             'Game_Key', 'Market', 'Outcome', 'Bookmaker',
             'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
         ]].rename(columns={
@@ -1172,6 +1214,7 @@ def compute_diagnostics_vectorized(df):
     
         return diagnostics_df
     
+      
     except Exception as e:
         st.error("❌ Error computing diagnostics")
         st.exception(e)
@@ -2016,160 +2059,8 @@ def render_scanner_tab(label, sport_key, container):
         #st.info(f"✅ Game_Start > now: filtered {before} → {after} rows")
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
-        trained_models = st.session_state.get(model_key)
-        
-        if trained_models is None:
-            trained_models = {}
-            for market_type in ['spreads', 'totals', 'h2h']:
-                model_bundle = load_model_from_gcs(sport=label, market=market_type)
-                if model_bundle:
-                    trained_models[market_type] = model_bundle
-            st.session_state[model_key] = trained_models
-        
-        # === Apply model scoring if models are loaded
-        # === Apply model scoring if models are loaded
-        if trained_models:
-            try:
-                df_pre_game_picks = df_moves_raw.copy()
-                merge_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
-        
-                # ✅ Score everything
-                df_scored = apply_blended_sharp_score(df_pre_game_picks, trained_models)
-                st.write("📋 df_scored.columns BEFORE normalization:", df_scored.columns.tolist())
-        
-                if df_scored.empty:
-                    st.warning("⚠️ No rows successfully scored — possibly model failure or input issues.")
-                    st.dataframe(df_pre_game_picks.head(5))
-                    return pd.DataFrame()
-                for col in merge_keys:
-                    if col in df_scored.columns:
-                        df_scored[col] = df_scored[col].astype(str).str.strip().str.lower()
-                    if col in df_pre_game_picks.columns:
-                        df_pre_game_picks[col] = df_pre_game_picks[col].astype(str).str.strip().str.lower()
-                #st.write("🧪 Model_Sharp_Win_Prob summary:")
-                #st.dataframe(df_scored[['Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 'Model_Confidence']].head())
-                
-                # Count nulls
-                num_scored = df_scored['Model_Sharp_Win_Prob'].notna().sum()
-                #st.write(f"✅ Non-null Model_Sharp_Win_Prob rows: {num_scored:,} / {len(df_scored):,}")
-
-                #st.write("✅ Merge keys normalized.")
-                #st.write("📋 df_scored head:", df_scored[merge_keys].head())
-        
-                # ✅ Deduplicate and finalize scored output
-                df_scored = df_scored.sort_values('Snapshot_Timestamp', ascending=False)
-                df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='first')
-        
-                # ✅ Ensure all necessary columns exist
-                required_score_cols = ['Model_Sharp_Win_Prob', 'Model_Confidence', 'Model_Confidence_Tier', 'Scored_By_Model','Sharp_Line_Delta','Rec_Line_Delta','Why Model Likes It']
-                for col in required_score_cols:
-                    if col not in df_scored.columns:
-                        df_scored[col] = np.nan
-        
-                # ✅ Defensive check
-                # ✅ Defensive check
-                if 'Model_Sharp_Win_Prob' not in df_scored.columns:
-                    st.error("❌ Model_Sharp_Win_Prob missing from df_scored before merge!")
-                    st.dataframe(df_scored.head())
-                    raise ValueError("Model_Sharp_Win_Prob missing — merge will fail.")
-                # 🔒 Save Pre_Game for restoration
-                pre_game_map = df_moves_raw[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Pre_Game']].drop_duplicates()
-                for col in merge_keys:
-                    pre_game_map[col] = pre_game_map[col].astype(str).str.strip().str.lower()
-                              
-                # ✅ Prepare scored data for merge
-                merge_columns = merge_keys + required_score_cols + ['Snapshot_Timestamp']
-                df_scored = df_scored[merge_columns].copy()
-                df_scored['Snapshot_Timestamp'] = pd.to_datetime(df_scored['Snapshot_Timestamp'], errors='coerce', utc=True)
-                
-                df_scored_clean = df_scored[merge_keys + required_score_cols].copy()
-                # Normalize keys on both sides
-                for col in merge_keys:
-                    df_scored_clean[col] = df_scored_clean[col].astype(str).str.strip().str.lower()
-                    df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
-                # Only drop conflicting columns NOT used in merge
-                # 🛡️ Merge-safe columns we want to preserve
-                protected_cols = merge_keys + ['Pre_Game', 'Post_Game']
-                
-                # ✅ Only drop non-protected, conflicting columns
-                cols_to_drop = [
-                    col for col in df_scored_clean.columns
-                    if col in df_moves_raw.columns and col not in protected_cols
-                ]
-                
-                df_moves_raw = df_moves_raw.drop(columns=cols_to_drop, errors='ignore')
-                #st.info(f"🧹 Dropped {len(cols_to_drop)} conflicting non-key, non-protected columns before merge.")
-
-           
-                
-                # Step 2: Now do the merge safely
-                df_moves_raw = df_moves_raw.merge(
-                    df_scored_clean,
-                    on=merge_keys,
-                    how='left',
-                    validate='many_to_one'
-                )
-                
-                # Step 3: Cleanup — now this is safe
-                # ✅ Restore Pre_Game from saved map
-                df_moves_raw = df_moves_raw.merge(
-                    pre_game_map,
-                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                    how='left',
-                    suffixes=('', '_pre_game')
-                )
-                
-                # Defensive cleanup in case of name collision
-                if 'Pre_Game_x' in df_moves_raw.columns and 'Pre_Game_y' in df_moves_raw.columns:
-                    df_moves_raw['Pre_Game'] = df_moves_raw['Pre_Game_x'].combine_first(df_moves_raw['Pre_Game_y'])
-                    df_moves_raw.drop(columns=['Pre_Game_x', 'Pre_Game_y'], inplace=True)
-                elif 'Pre_Game_x' in df_moves_raw.columns:
-                    df_moves_raw.rename(columns={'Pre_Game_x': 'Pre_Game'}, inplace=True)
-                elif 'Pre_Game_y' in df_moves_raw.columns:
-                    df_moves_raw.rename(columns={'Pre_Game_y': 'Pre_Game'}, inplace=True)
-                restored = df_moves_raw['Pre_Game'].notna().sum()
-                total = len(df_moves_raw)
-                #st.info(f"🧠 Pre_Game restored: {restored:,} / {total:,} rows have non-null values")
-
-                
-                df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
-                df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-
-                # Sample mismatch debugging
-                merged_keys = df_scored_clean[merge_keys].drop_duplicates()
-              
-                raw_keys = df_moves_raw[merge_keys].drop_duplicates()
-                
-               
-                merge_check = merged_keys.merge(
-                    raw_keys,
-                    on=merge_keys,
-                    how='outer',
-                    indicator=True
-                )
-              
-
-                # ✅ Clean suffixes
-                df_moves_raw.columns = df_moves_raw.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
-                df_moves_raw = df_moves_raw.loc[:, ~df_moves_raw.columns.duplicated()]
-                
-                # ✅ Final check
-                if 'Model_Sharp_Win_Prob' not in df_moves_raw.columns:
-                    st.error("❌ Post-merge: Model_Sharp_Win_Prob missing entirely from df_moves_raw!")
-                else:
-                    pass#st.success("✅ All rows successfully scored.")
-
-        
-            except Exception as e:
-                error_type = type(e).__name__
-                error_msg = str(e)
-                full_trace = traceback.format_exc()
-        
-                st.error(f"❌ Model scoring failed — {error_type}: {error_msg}")
-                st.code(full_trace, language='python')
-                st.warning("📛 Check the traceback above for where the failure occurred.")
-        else:
-            st.warning("⚠️ No trained models available for scoring.")
+     
+      
         
                 
 
