@@ -1192,7 +1192,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Late'
             ]:
                 df_canon[col] = pd.to_numeric(df_canon.get(col, 0), errors='coerce').fillna(0)
-                df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0), errors='coerce').fillna(0)
+             
 
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
@@ -1304,7 +1304,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 labels=['🚨 ≤30m', '🔥 ≤1h', '⚠️ ≤3h', '⏳ ≤6h', '📅 ≤12h', '🕓 >12h']
             )
             logger.info(f"📋 Inverse3 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
-
+            
+            for col in [
+                'SharpMove_Magnitude_Overnight',
+                'SharpMove_Magnitude_Early',
+                'SharpMove_Magnitude_Midday',
+                'SharpMove_Magnitude_Late'
+            ]:
+                
+            df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0), errors='coerce').fillna(0)
             if 'Value_Reversal_Flag' not in df_inverse.columns:
                 df_inverse['Value_Reversal_Flag'] = 0
             df_inverse['Value_Reversal_Flag'] = df_inverse['Value_Reversal_Flag'].fillna(0).astype(int)
@@ -1846,22 +1854,25 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 now = pd.Timestamp.utcnow()
                 df_scored['Pre_Game'] = df_scored['Game_Start'] > now
                 df_scored['Post_Game'] = ~df_scored['Pre_Game']
-                df_scored['Event_Date'] = df_scored['Game_Start'].dt.strftime('%Y-%m-%d')
+                df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
                 df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
     
                 df = df_scored.copy()
                 logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
     
-                # === Summary consensus metrics (✅ only if df_scored exists)
-                summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
+                # === Summary consensus metrics
+                summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
     
             else:
                 logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
+                df = df_scored.copy()
                 summary_df = pd.DataFrame()
     
         except Exception as e:
             logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
+            df = pd.DataFrame()
             summary_df = pd.DataFrame()
+ 
     else:
         summary_df = pd.DataFrame()
     
