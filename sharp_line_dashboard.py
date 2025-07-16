@@ -1087,7 +1087,9 @@ def compute_diagnostics_vectorized(df):
         df[col] = df[col].astype(str).str.strip()
 
     # === Add normalized model prob
-    df['Model_Sharp_Win_Prob'] = pd.to_numeric(df.get('Model Prob'), errors='coerce')
+    # Rename inline for diagnostics only — use directly
+    prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
+
 
     # === Tier change
     tier_now = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
@@ -1107,7 +1109,7 @@ def compute_diagnostics_vectorized(df):
     )
 
     # === Confidence Trend
-    prob_now = df['Model_Sharp_Win_Prob']
+    prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
     prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
     df['Confidence Trend'] = np.where(
         prob_now.isna() | prob_start.isna(),
