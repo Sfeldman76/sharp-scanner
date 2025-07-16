@@ -1224,9 +1224,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Midday',
                 'SharpMove_Magnitude_Late'
             ]:
-                df_canon[col] = pd.to_numeric(df_canon.get(col, 0), errors='coerce').fillna(0)
-             
-
+                if col in df_canon.columns:
+                    df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0)
+                else:
+                    df_canon[col] = 0.0
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
@@ -1344,9 +1345,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Midday',
                 'SharpMove_Magnitude_Late'
             ]:
-                
-                df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0), errors='coerce').fillna(0)
-
+                if col in df_inverse.columns:
+                    df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0)
+                else:
+                    df_inverse[col] = 0.0
             
             if 'Value_Reversal_Flag' not in df_inverse.columns:
                 df_inverse['Value_Reversal_Flag'] = 0
@@ -1577,6 +1579,16 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
                 df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
                 df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
+                for col in [
+                    'SharpMove_Magnitude_Overnight',
+                    'SharpMove_Magnitude_Early',
+                    'SharpMove_Magnitude_Midday',
+                    'SharpMove_Magnitude_Late'
+                ]:
+                    if col in df_inverse.columns:
+                        df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0)
+                    else:
+                        df_inverse[col] = 0.0
                 df_inverse = compute_value_reversal(df_inverse)
                 df_inverse = compute_odds_reversal(df_inverse)
                 logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
