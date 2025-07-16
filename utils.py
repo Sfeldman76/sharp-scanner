@@ -729,7 +729,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    df['Event_Date'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce').dt.date
+    if 'Game_Start' in df.columns:
+        df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.date
+    else:
+        df['Event_Date'] = pd.NaT
     df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
     df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
     df['Book'] = df['Book'].str.lower()
