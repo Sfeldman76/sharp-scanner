@@ -729,6 +729,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
+    df['Event_Date'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce').dt.date
     df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
     df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
     df['Book'] = df['Book'].str.lower()
@@ -1839,6 +1840,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df_all_snapshots = read_recent_sharp_moves(hours=72)
             market_weights = load_market_weights_from_bq()
             df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
+    
             if not df_scored.empty:
                 df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
                 now = pd.Timestamp.utcnow()
@@ -1846,27 +1848,29 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 df_scored['Post_Game'] = ~df_scored['Pre_Game']
                 df_scored['Event_Date'] = df_scored['Game_Start'].dt.strftime('%Y-%m-%d')
                 df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
-            
+    
                 df = df_scored.copy()
                 logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
-                
+    
+                # === Summary consensus metrics (✅ only if df_scored exists)
+                summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
+    
             else:
                 logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
+                summary_df = pd.DataFrame()
+    
         except Exception as e:
             logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
+            summary_df = pd.DataFrame()
+    else:
+        summary_df = pd.DataFrame()
     
- 
     # === Build main DataFrame
     logging.info(f"📊 Columns after sharp scoring: {df.columns.tolist()}")
-
-   
     
-
-    # === Summary consensus metrics
-    summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
-   
-    # ✅ Final return (no field names changed)
+    # ✅ Final return
     return df, df_history, summary_df
+
 
 def compute_weighted_signal(row, market_weights):
     market = str(row.get('Market', '')).lower()
