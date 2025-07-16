@@ -1233,7 +1233,7 @@ def compute_diagnostics_vectorized(df):
     diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
         'Tier_Change', 'Confidence Trend', 'Line/Model Direction',
-        'Why Model Likes It', 'Passes_Gate', 'Model_Confidence_Tier'
+        'Why Model Likes It', 'Passes_Gate', 'Confidence Tier'
     ]].rename(columns={
         'Tier_Change': 'Tier Δ'
     })
