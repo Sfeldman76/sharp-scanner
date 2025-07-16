@@ -1072,6 +1072,7 @@ def read_market_weights_from_bigquery():
 def compute_diagnostics_vectorized(df):
     df = df.copy()
 
+    # === Tier ordering for change tracking
     TIER_ORDER = {
         '✅ Coinflip': 1,
         '✅ ⭐ Lean': 2,
@@ -1079,14 +1080,14 @@ def compute_diagnostics_vectorized(df):
         '🔥 Steam': 4
     }
 
-    # === Add model prob normalized
-    df['Model_Sharp_Win_Prob'] = pd.to_numeric(df.get('Model Prob'), errors='coerce')
-
     # === Normalize tier columns
     for col in ['Confidence Tier', 'First_Tier']:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].astype(str).str.strip()
+
+    # === Add normalized model prob
+    df['Model_Sharp_Win_Prob'] = pd.to_numeric(df.get('Model Prob'), errors='coerce')
 
     # === Tier change
     tier_now = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
@@ -1113,25 +1114,29 @@ def compute_diagnostics_vectorized(df):
         "⚠️ Missing",
         np.where(
             prob_now - prob_start >= 0.04,
-            (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "% 📈",
+            f"📈 Trending Up: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
             np.where(
                 prob_now - prob_start <= -0.04,
-                (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "% 📉",
-                (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "% ↔"
+                f"📉 Trending Down: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
+                f"↔ Stable: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%"
             )
         )
     )
 
     # === Line/Model Direction Alignment
     df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
-    df['Line_Support_Sign'] = df.apply(lambda row: -1 if (row['Market'].lower() == 'totals' and row['Outcome'].lower() == 'under') else 1, axis=1)
+    df['Line_Support_Sign'] = df.apply(
+        lambda row: -1 if row.get('Market', '').lower() == 'totals' and row.get('Outcome', '').lower() == 'under' else 1,
+        axis=1
+    )
     df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
+    prob_trend = prob_now - prob_start
     df['Line/Model Direction'] = np.select(
         [
-            (prob_now - prob_start > 0) & (df['Line_Support_Direction'] > 0),
-            (prob_now - prob_start < 0) & (df['Line_Support_Direction'] < 0),
-            (prob_now - prob_start > 0) & (df['Line_Support_Direction'] < 0),
-            (prob_now - prob_start < 0) & (df['Line_Support_Direction'] > 0),
+            (prob_trend > 0) & (df['Line_Support_Direction'] > 0),
+            (prob_trend < 0) & (df['Line_Support_Direction'] < 0),
+            (prob_trend > 0) & (df['Line_Support_Direction'] < 0),
+            (prob_trend < 0) & (df['Line_Support_Direction'] > 0),
         ],
         [
             "🟢 Aligned ↑",
@@ -1142,7 +1147,7 @@ def compute_diagnostics_vectorized(df):
         default="⚪ Mixed"
     )
 
-    # === Fill NaNs and coerce signal flags
+    # === Clean and cast signal flags
     safe_flags = [
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score',
         'Sharp_Limit_Total', 'LimitUp_NoMove_Flag', 'Market_Leader',
@@ -1155,7 +1160,7 @@ def compute_diagnostics_vectorized(df):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
 
-    # === Active signal count
+    # === Active Signal Count
     df['Active_Signal_Count'] = (
         (df['Sharp_Move_Signal'] == 1).astype(int) +
         (df['Sharp_Limit_Jump'] == 1).astype(int) +
@@ -1177,8 +1182,24 @@ def compute_diagnostics_vectorized(df):
         (df['Odds_Reversal_Flag'] == 1).astype(int)
     )
 
-    # === Explanation String
-    def build_reason(row):
+    # === Passes Gate
+    df['Passes_Gate'] = (
+        df['Model_Sharp_Win_Prob'] >= 0.55
+    ) & (df['Active_Signal_Count'] > 2)
+
+    # === Confidence Tier from Model
+    df['Model_Confidence_Tier'] = np.where(
+        df['Passes_Gate'],
+        pd.cut(
+            df['Model_Sharp_Win_Prob'],
+            bins=[0, 0.4, 0.6, 0.8, 1],
+            labels=["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
+        ).astype(str),
+        "🕓 Still Gathering Data"
+    )
+
+    # === Why Model Likes It
+    def build_why(row):
         if pd.isna(row['Model_Sharp_Win_Prob']):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
 
@@ -1201,28 +1222,21 @@ def compute_diagnostics_vectorized(df):
         if row['Late_Game_Steam_Flag']: parts.append("⏰ Late Game Steam")
         if row['Value_Reversal_Flag']: parts.append("🔄 Value Reversal")
         if row['Odds_Reversal_Flag']: parts.append("📉 Odds Reversal")
+
         return " + ".join(parts) if parts else "🤷‍♂️ No clear reason yet"
 
-    df['Why Model Likes It'] = df.apply(build_reason, axis=1)
+    df['Why Model Likes It'] = df.apply(build_why, axis=1)
 
+    # === Final Output
     diagnostics_df = df[[
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Tier_Change', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
-        ]].rename(columns={
-            'Tier_Change': 'Tier Δ'
-        })
+        'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+        'Tier_Change', 'Confidence Trend', 'Line/Model Direction',
+        'Why Model Likes It', 'Passes_Gate', 'Model_Confidence_Tier'
+    ]].rename(columns={
+        'Tier_Change': 'Tier Δ'
+    })
     
-        return diagnostics_df
-    
-      
-    except Exception as e:
-        st.error("❌ Error computing diagnostics")
-        st.exception(e)
-        return pd.DataFrame(columns=[
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Tier Δ', 'Confidence Trend', 'Line/Model Direction', 'Why Model Likes It'
-        ])
-
+    return diagnostics_df
 
 
         
