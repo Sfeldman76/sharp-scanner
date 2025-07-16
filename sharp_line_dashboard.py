@@ -1149,18 +1149,23 @@ def compute_diagnostics_vectorized(df):
         default="⚪ Mixed"
     )
 
-    # === Clean and cast signal flags
-    safe_flags = [
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score',
-        'Sharp_Limit_Total', 'LimitUp_NoMove_Flag', 'Market_Leader',
-        'Is_Reinforced_MultiMarket', 'Is_Sharp_Book', 'Sharp_Line_Magnitude',
-        'Rec_Line_Magnitude', 'Is_Home_Team_Bet', 'SharpMove_Odds_Up',
-        'SharpMove_Odds_Down', 'SharpMove_Odds_Mag', 'SharpMove_Resistance_Break',
-        'Late_Game_Steam_Flag', 'Value_Reversal_Flag', 'Odds_Reversal_Flag'
+    # ✅ Cast all diagnostic flags to numeric
+    flag_cols = [
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Market_Leader',
+        'Is_Reinforced_MultiMarket', 'LimitUp_NoMove_Flag', 'Is_Sharp_Book',
+        'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'Is_Home_Team_Bet',
+        'SharpMove_Resistance_Break', 'Late_Game_Steam_Flag',
+        'Value_Reversal_Flag', 'Odds_Reversal_Flag'
     ]
-    for col in safe_flags:
+    
+    magnitude_cols = [
+        'Sharp_Line_Magnitude', 'Sharp_Time_Score', 'Rec_Line_Magnitude',
+        'Sharp_Limit_Total', 'SharpMove_Odds_Mag'
+    ]
+    
+    for col in flag_cols + magnitude_cols:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
     # === Active Signal Count
     df['Active_Signal_Count'] = (
