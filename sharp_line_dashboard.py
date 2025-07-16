@@ -1186,14 +1186,14 @@ def compute_diagnostics_vectorized(df):
 
     # === Passes Gate
     df['Passes_Gate'] = (
-        df['Model_Sharp_Win_Prob'] >= 0.55
+        df['Model Prob'] >= 0.55
     ) & (df['Active_Signal_Count'] > 2)
 
     # === Confidence Tier from Model
-    df['Model_Confidence_Tier'] = np.where(
+    df['Confidence Tier'] = np.where(
         df['Passes_Gate'],
         pd.cut(
-            df['Model_Sharp_Win_Prob'],
+            df['Model Prob'],
             bins=[0, 0.4, 0.6, 0.8, 1],
             labels=["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
         ).astype(str),
@@ -1202,7 +1202,7 @@ def compute_diagnostics_vectorized(df):
 
     # === Why Model Likes It
     def build_why(row):
-        if pd.isna(row['Model_Sharp_Win_Prob']):
+        if pd.isna(row['Model Prob']):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
 
         parts = []
