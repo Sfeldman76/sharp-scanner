@@ -1109,21 +1109,32 @@ def compute_diagnostics_vectorized(df):
     )
 
     # === Confidence Trend
-    prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
-    prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+    # Average prob over all rows in same group (e.g., Market + Outcome)
+    df['Model Prob Grouped'] = (
+        df.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])['Model Prob']
+        .transform('mean')
+    )
+    prob_now = df['Model Prob Grouped']
+    df['First_Sharp_Prob_Grouped'] = (
+        df.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])['First_Sharp_Prob']
+        .transform('mean')
+    )
+    prob_start = df['First_Sharp_Prob_Grouped']
+
     df['Confidence Trend'] = np.where(
         prob_now.isna() | prob_start.isna(),
         "⚠️ Missing",
         np.where(
             prob_now - prob_start >= 0.04,
-            f"📈 Trending Up: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
+            "📈 Trending Up: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
             np.where(
                 prob_now - prob_start <= -0.04,
-                f"📉 Trending Down: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
-                f"↔ Stable: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%"
+                "📉 Trending Down: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
+                "↔ Stable: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%"
             )
         )
     )
+
 
     # === Line/Model Direction Alignment
     df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
