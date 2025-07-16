@@ -349,7 +349,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Open_Value', 'Open_Book_Value', 'Opening_Limit', 'Limit_Jump',
         'Sharp_Timing', 'Limit_NonZero', 'Limit_Min', 'Market_Leader',
         'Is_Pinnacle', 'LimitUp_NoMove_Flag', 'SupportKey', 'CrossMarketSharpSupport',
-        'Is_Reinforced_MultiMarket',
+        'Is_Reinforced_MultiMarket','Is_Sharp_Book',
 
         # Scoring / diagnostics
         'True_Sharp_Confidence_Score', 'Enhanced_Sharp_Confidence_Score',
