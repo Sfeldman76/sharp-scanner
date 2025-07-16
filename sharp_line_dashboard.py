@@ -1487,12 +1487,10 @@ def render_scanner_tab(label, sport_key, container):
             df_history_all
             .sort_values('Snapshot_Timestamp')
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-            .rename(columns={
-                'Value': 'First_Line_Value'
-            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']]
+            .rename(columns={'Value': 'First_Line_Value'})
+            [['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']]
         )
         
-        # Then merge model-specific firsts separately if needed
         df_first_model = (
             df_history_all[df_history_all['Model_Sharp_Win_Prob'].notna()]
             .sort_values('Snapshot_Timestamp')
@@ -1500,11 +1498,17 @@ def render_scanner_tab(label, sport_key, container):
             .rename(columns={
                 'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
                 'Model_Confidence_Tier': 'First_Tier'
-            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Sharp_Prob', 'First_Tier']]
+            })
+            [['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Sharp_Prob', 'First_Tier']]
         )
         
-        # Merge both
-        df_moves_raw = df_moves_raw.merge(df_first_full, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+        df_first_full = df_first.merge(
+            df_first_model,
+            on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+            how='left'
+        )
+
+        df_moves_raw = df_moves_raw.merge(df_first_full, on=merge_keys, how='left')
 
 
 
