@@ -2117,7 +2117,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
             'Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob',
             'First_Odds', 'First_Imp_Prob', 'Odds_Shift', 'Implied_Prob_Shift',
-            'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
+            'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds','Value_Reversal_Flag','Odds_Reversal_Flag', 
     
             # ✅ Resistance logic additions
             'Was_Line_Resistance_Broken',
@@ -2746,7 +2746,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
         'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob','First_Odds', 'First_Imp_Prob','Odds_Shift','Implied_Prob_Shift',
-        'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',       
+        'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds', 'Value_Reversal_Flag','Odds_Reversal_Flag'      
         'Was_Line_Resistance_Broken',
         'SharpMove_Resistance_Break',
         'Line_Resistance_Crossed_Levels',
