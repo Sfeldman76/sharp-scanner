@@ -675,7 +675,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
         
             # 🔥 Timing flags
-            'Late_Game_Steam_Flag'
+            'Late_Game_Steam_Flag','SharpMove_Magnitude_Overnight',
+            'SharpMove_Magnitude_Early',
+            'SharpMove_Magnitude_Midday',
+            'SharpMove_Magnitude_Late',
         ]
             
             
