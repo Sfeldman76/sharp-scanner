@@ -512,7 +512,9 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
     move_magnitude_score = 0.0
     limit_score = 0.0
     total_limit = 0.0
-    entry_count = 0
+    entry_count = 0   
+    time_score = 0.0  # ✅ <-- this line was likely missing
+   
 
     # Movement magnitude per timing bucket
     timing_mags = {
