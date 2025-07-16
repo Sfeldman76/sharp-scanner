@@ -1481,7 +1481,8 @@ def render_scanner_tab(label, sport_key, container):
         start = time.time()
        # Keep all rows for proper line open capture
         df_history_all = get_recent_history()
-        
+        merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
         # === Build First Snapshot: keep *first* rows even if missing model prob
         df_first = (
             df_history_all
