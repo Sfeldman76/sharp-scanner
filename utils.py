@@ -375,7 +375,11 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'SharpMove_Odds_Down',
         'SharpMove_Odds_Mag',
         'SharpMove_Resistance_Break',
-        'Active_Signal_Count'    # ✅ Add this
+        'Active_Signal_Count', 
+        'SharpMove_Magnitude_Overnight',
+        'SharpMove_Magnitude_Early',
+        'SharpMove_Magnitude_Midday',
+        'SharpMove_Magnitude_Late'# ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -504,82 +508,80 @@ def load_market_weights_from_bq():
     
     
 def compute_sharp_metrics(entries, open_val, mtype, label):
-    move_signal = 0
+    move_signal = 0.0
     move_magnitude_score = 0.0
     limit_score = 0.0
-    time_score = 0.0
     total_limit = 0.0
     entry_count = 0
+
+    # Movement magnitude per timing bucket
+    timing_mags = {
+        'Overnight': 0.0,  # 12 AM – 6 AM
+        'Early': 0.0,      # 6 AM – 12 PM
+        'Midday': 0.0,     # 12 PM – 4 PM
+        'Late': 0.0        # 4 PM – 12 AM
+    }
 
     for limit, curr, ts in entries:
         if open_val is not None and curr is not None:
             try:
                 delta = curr - open_val
                 sharp_move_delta = abs(delta)
-        
-                # Total movement magnitude
+
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
-        
-                # Directional sharp move scoring (weighted)
-                if mtype == 'totals':
-                    if 'under' in label and curr < open_val:
-                        move_signal += sharp_move_delta
-                    elif 'over' in label and curr > open_val:
-                        move_signal += sharp_move_delta
-                elif mtype == 'spreads':
-                    # Case 1: Favorite getting more favored (e.g. -3.5 → -5)
-                    if open_val < 0 and curr < open_val:
-                        move_signal += sharp_move_delta
-                
-                    # Case 2: Underdog getting more underdog (e.g. +3.5 → +5.5)
-                    elif open_val > 0 and curr > open_val:
-                        move_signal += sharp_move_delta
-        
+
+                    # Directional signal
+                    if mtype == 'totals':
+                        if 'under' in label and curr < open_val:
+                            move_signal += sharp_move_delta
+                        elif 'over' in label and curr > open_val:
+                            move_signal += sharp_move_delta
+                    elif mtype == 'spreads':
+                        if open_val < 0 and curr < open_val:
+                            move_signal += sharp_move_delta
+                        elif open_val > 0 and curr > open_val:
+                            move_signal += sharp_move_delta
+
+                    # ⏰ Timing-based magnitude tracking
+                    try:
+                        hour = pd.to_datetime(ts).hour
+                        if 0 <= hour <= 5:
+                            timing_mags['Overnight'] += sharp_move_delta
+                        elif 6 <= hour <= 11:
+                            timing_mags['Early'] += sharp_move_delta
+                        elif 12 <= hour <= 15:
+                            timing_mags['Midday'] += sharp_move_delta
+                        else:
+                            timing_mags['Late'] += sharp_move_delta
+                    except:
+                        pass
             except Exception:
                 continue
 
-
-
-        # Weight limit jumps by size
-        if limit is not None and limit >= 100:
-            limit_score += limit
+        if limit is not None:
             total_limit += limit
-        elif limit is not None:
-            total_limit += limit
-
-        # Weighted timing
-        try:
-            hour = pd.to_datetime(ts).hour
-            timing_weight = (
-                1.0 if 0 <= hour <= 5 else
-                0.9 if 6 <= hour <= 11 else
-                0.5 if 12 <= hour <= 15 else
-                0.2
-            )
-            time_score += timing_weight
-        except:
-            time_score += 0.5
+            if limit >= 100:
+                limit_score += limit
 
         entry_count += 1
 
-    # Normalize to avoid overweighting if many entries
-    move_magnitude_score = min(move_magnitude_score, 5.0)
-    time_score = round(time_score / max(1, entry_count), 2)
-    limit_score = round(limit_score / max(1, entry_count), 2)
-
     return {
-        'Sharp_Move_Signal': round(move_signal, 2),
-        'Sharp_Limit_Jump': round(limit_score, 2),
-        'Sharp_Time_Score': time_score,
-        'Sharp_Limit_Total': total_limit,
-        'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2),
+        'Sharp_Move_Signal': int(move_signal > 0),
+        'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
+        'Sharp_Limit_Jump': int(limit_score >= 10000),
+        'Sharp_Limit_Total': round(total_limit, 1),
+        'SharpMove_Magnitude_Overnight': round(timing_mags['Overnight'], 3),
+        'SharpMove_Magnitude_Early': round(timing_mags['Early'], 3),
+        'SharpMove_Magnitude_Midday': round(timing_mags['Midday'], 3),
+        'SharpMove_Magnitude_Late': round(timing_mags['Late'], 3)  
+        
         'SharpBetScore': round(
             2.0 * move_signal +
             2.0 * limit_score +
             1.5 * time_score +
-            0.001 * total_limit +
-            3.0 * move_magnitude_score, 2
+            0.001 * total_limit,
+            2
         )
     }
 
@@ -2149,7 +2151,11 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Was_Line_Resistance_Broken',
             'SharpMove_Resistance_Break',
             'Line_Resistance_Crossed_Levels',
-            'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag' 
+            'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 
+            'SharpMove_Magnitude_Overnight',
+            'SharpMove_Magnitude_Early',
+            'SharpMove_Magnitude_Midday',
+            'SharpMove_Magnitude_Late'#
         ]
     }
 
@@ -2776,7 +2782,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Was_Line_Resistance_Broken',
         'SharpMove_Resistance_Break',
         'Line_Resistance_Crossed_Levels',
-        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag'   # ✅ ADD THESE
+        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 'SharpMove_Magnitude_Overnight',
+        'SharpMove_Magnitude_Early',
+        'SharpMove_Magnitude_Midday',
+        'SharpMove_Magnitude_Late'#   # ✅ ADD THESE
     ]
     
     
