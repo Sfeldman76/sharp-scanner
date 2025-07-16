@@ -1515,6 +1515,9 @@ def render_scanner_tab(label, sport_key, container):
             'Model_Confidence_Tier': 'Confidence Tier',
         }
         for orig, alias in alias_map.items():
+            if orig in df_moves_raw.columns and alias not in df_moves_raw.columns:
+                df_moves_raw[alias] = df_moves_raw[orig]
+
        
        
         # Alias for clarity in trend logic
