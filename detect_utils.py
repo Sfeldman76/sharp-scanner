@@ -34,7 +34,8 @@ from utils import (
     compute_sharp_prob_shift,
     log_memory,
     calc_implied_prob,
-    load_market_weights_from_bq
+    load_market_weights_from_,
+    compute_sharp_magnitude_by_time_bucket
 )
 
 def detect_and_save_all_sports():
