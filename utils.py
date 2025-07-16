@@ -1859,20 +1859,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
                 df = df_scored.copy()
                 logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
-    
-                # === Summary consensus metrics
                 summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
-    
             else:
                 logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
-                df = df_scored.copy()
+                df = pd.DataFrame()
                 summary_df = pd.DataFrame()
     
         except Exception as e:
             logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
             df = pd.DataFrame()
             summary_df = pd.DataFrame()
- 
+  
+      
     else:
         summary_df = pd.DataFrame()
     
