@@ -687,7 +687,26 @@ def compute_line_resistance_flag(df, source='moves'):
 
     return df
 
-    
+def compute_sharp_magnitude_by_time_bucket(df_all_snapshots):
+    results = []
+    grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+
+    for (gk, market, outcome, book), group in grouped:
+        entries = list(zip(group['Limit'], group['Value'], group['Snapshot_Timestamp']))
+        open_val = (
+            group.sort_values('Snapshot_Timestamp')['Value']
+            .dropna().iloc[0] if not group['Value'].isnull().all() else None
+        )
+        metrics = compute_sharp_metrics(entries, open_val, market, outcome)
+        metrics.update({
+            'Game_Key': gk,
+            'Market': market,
+            'Outcome': outcome,
+            'Bookmaker': book
+        })
+        results.append(metrics)
+    return pd.DataFrame(results)
+        
 def add_minutes_to_game(df):
     df = df.copy()
 
@@ -795,7 +814,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         })
     )
     df = df.merge(df_open_book, on=merge_keys, how='left')
-
+    df_magnitude_timing = compute_sharp_magnitude_by_time_bucket(df_all_snapshots)
 
     df_open = (
         df_all_snapshots
