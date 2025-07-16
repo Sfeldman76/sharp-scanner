@@ -34,7 +34,7 @@ from utils import (
     compute_sharp_prob_shift,
     log_memory,
     calc_implied_prob,
-    load_market_weights_from_,
+    load_market_weights_from_bq,
     compute_sharp_magnitude_by_time_bucket
 )
 
