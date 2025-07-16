@@ -574,14 +574,14 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
         'SharpMove_Magnitude_Overnight': round(timing_mags['Overnight'], 3),
         'SharpMove_Magnitude_Early': round(timing_mags['Early'], 3),
         'SharpMove_Magnitude_Midday': round(timing_mags['Midday'], 3),
-        'SharpMove_Magnitude_Late': round(timing_mags['Late'], 3)  
-        
+        'SharpMove_Magnitude_Late': round(timing_mags['Late'], 3),  # ✅ Missing comma WAS here
+        'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2),
         'SharpBetScore': round(
             2.0 * move_signal +
             2.0 * limit_score +
             1.5 * time_score +
-            0.001 * total_limit,
-            2
+            0.001 * total_limit +
+            3.0 * move_magnitude_score, 2
         )
     }
 
