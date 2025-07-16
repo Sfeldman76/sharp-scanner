@@ -1174,7 +1174,10 @@ def compute_diagnostics_vectorized(df):
     
     magnitude_cols = [
         'Sharp_Line_Magnitude', 'Sharp_Time_Score', 'Rec_Line_Magnitude',
-        'Sharp_Limit_Total', 'SharpMove_Odds_Mag'
+        'Sharp_Limit_Total', 'SharpMove_Odds_Mag','SharpMove_Magnitude_Overnight',  # ✅ NEW
+        'SharpMove_Magnitude_Early',
+        'SharpMove_Magnitude_Midday',
+        'SharpMove_Magnitude_Late'
     ]
     
     for col in flag_cols + magnitude_cols:
@@ -1200,7 +1203,12 @@ def compute_diagnostics_vectorized(df):
         (df['SharpMove_Resistance_Break'] == 1).astype(int) +
         (df['Late_Game_Steam_Flag'] == 1).astype(int) +
         (df['Value_Reversal_Flag'] == 1).astype(int) +
-        (df['Odds_Reversal_Flag'] == 1).astype(int)
+        (df['Odds_Reversal_Flag'] == 1).astype(int)+
+        (df['SharpMove_Magnitude_Overnight'] > 0.25).astype(int) +
+        (df['SharpMove_Magnitude_Early'] > 0.25).astype(int) +
+        (df['SharpMove_Magnitude_Midday'] > 0.25).astype(int) +
+        (df['SharpMove_Magnitude_Late'] > 0.25).astype(int)
+
     )
 
     # === Passes Gate
@@ -1243,6 +1251,11 @@ def compute_diagnostics_vectorized(df):
         if row['Late_Game_Steam_Flag']: parts.append("⏰ Late Game Steam")
         if row['Value_Reversal_Flag']: parts.append("🔄 Value Reversal")
         if row['Odds_Reversal_Flag']: parts.append("📉 Odds Reversal")
+        if row['SharpMove_Magnitude_Overnight'] > 0.25: parts.append("🌙 Overnight Steam")
+        if row['SharpMove_Magnitude_Early'] > 0.25: parts.append("🌅 Early Sharp Move")
+        if row['SharpMove_Magnitude_Midday'] > 0.25: parts.append("🌞 Midday Sharp Move")
+        if row['SharpMove_Magnitude_Late'] > 0.25: parts.append("🌆 Late Sharp Move")
+
 
         return " + ".join(parts) if parts else "🤷‍♂️ No clear reason yet"
 
