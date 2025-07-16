@@ -1790,23 +1790,33 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         if (game_name, mtype, label) not in line_open_map:
                             line_open_map[(game_name, mtype, label)] = (value, snapshot_time)
 
-    # === Deduplicate snapshot rows
+                     
     pre_dedup = len(rows)
-    df_rows = pd.DataFrame(rows)
-    
-    # Optional: remove truly exact duplicate rows
-    df_rows = df_rows.drop_duplicates()
-    
-    # Keep latest snapshot row per Game + Book + Market + Outcome
-    df_rows = (
-        df_rows
-        .sort_values('Time')  # You may want descending order to keep most recent
+    rows_df = pd.DataFrame(rows).drop_duplicates()
+    rows_df = (
+        rows_df
+        .sort_values('Time')
         .drop_duplicates(subset=['Game', 'Book', 'Market', 'Outcome'], keep='last')
     )
+    rows = rows_df.to_dict(orient='records')
+    if not rows:
+        logging.warning("⚠️ No valid sharp rows after deduplication — skipping scoring.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+
     
-    logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(df_rows)} duplicates removed")
+    for r in rows:
+        game_key = (r['Game'], r['Market'], r['Outcome'])
+        entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome'], [])
+        open_val = line_open_map.get(game_key, (None,))[0]
+        sharp_scores = compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome'])
+        r.update(sharp_scores)
     
-    rows = df_rows.to_dict(orient='records')
+    logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
+    
+    # ✅ No need to deduplicate again
+    df = pd.DataFrame(rows)
+
 
     if trained_models:
         try:
