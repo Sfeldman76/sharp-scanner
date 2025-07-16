@@ -1312,7 +1312,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Late'
             ]:
                 
-            df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0), errors='coerce').fillna(0)
+                df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0), errors='coerce').fillna(0)
+
+            
             if 'Value_Reversal_Flag' not in df_inverse.columns:
                 df_inverse['Value_Reversal_Flag'] = 0
             df_inverse['Value_Reversal_Flag'] = df_inverse['Value_Reversal_Flag'].fillna(0).astype(int)
