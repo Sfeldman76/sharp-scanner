@@ -369,7 +369,13 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
         'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds', 'Was_Line_Resistance_Broken',
         'Line_Resistance_Crossed_Levels',
-        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag'    # ✅ Add this
+        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 'Sharp_Line_Magnitude',
+        'Rec_Line_Magnitude',
+        'SharpMove_Odds_Up',
+        'SharpMove_Odds_Down',
+        'SharpMove_Odds_Mag',
+        'SharpMove_Resistance_Break',
+        'Active_Signal_Count'    # ✅ Add this
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -1545,7 +1551,27 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
        
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
-        
+            df_final['Active_Signal_Count'] = (
+                (df_final['Sharp_Move_Signal'] == 1).astype(int) +
+                (df_final['Sharp_Limit_Jump'] == 1).astype(int) +
+                (df_final['Sharp_Time_Score'] > 0.5).astype(int) +
+                (df_final['Sharp_Limit_Total'] > 10000).astype(int) +
+                (df_final['LimitUp_NoMove_Flag'] == 1).astype(int) +
+                (df_final['Market_Leader'] == 1).astype(int) +
+                (df_final['Is_Reinforced_MultiMarket'] == 1).astype(int) +
+                (df_final['Is_Sharp_Book'] == 1).astype(int) +
+                (df_final['Sharp_Line_Magnitude'] > 0.5).astype(int) +
+                (df_final['Rec_Line_Magnitude'] > 0.5).astype(int) +
+                (df_final['Is_Home_Team_Bet'] == 1).astype(int) +
+                (df_final['SharpMove_Odds_Up'] == 1).astype(int) +
+                (df_final['SharpMove_Odds_Down'] == 1).astype(int) +
+                (df_final['SharpMove_Odds_Mag'] > 5).astype(int) +
+                (df_final['SharpMove_Resistance_Break'] == 1).astype(int) +
+                (df_final['Late_Game_Steam_Flag'] == 1).astype(int) +
+                (df_final['Value_Reversal_Flag'] == 1).astype(int) +
+                (df_final['Odds_Reversal_Flag'] == 1).astype(int)
+            )
+
             # === 🔍 Diagnostic for unscored rows
             try:
                 unscored_df = df[df['Game_Key'].isin(set(df['Game_Key']) - set(df_final['Game_Key']))]
