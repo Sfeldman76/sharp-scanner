@@ -1479,73 +1479,71 @@ def render_scanner_tab(label, sport_key, container):
         # === 1. Load df_history and compute df_first
         # === Load broader trend history for open line / tier comparison
         start = time.time()
-        df_history = get_recent_history()
+       # Keep all rows for proper line open capture
+        df_history_all = get_recent_history()
         
-                
-        hist_start = time.time()
-
-        # === Filter to only current live games
-        df_history = df_history[df_history['Game_Key'].isin(df_moves_raw['Game_Key'])]
-        df_history = df_history[df_history['Model_Sharp_Win_Prob'].notna()]
-        
-        # === Build First Snapshot
-        # Build First Snapshot (from historical values)
+        # === Build First Snapshot: keep *first* rows even if missing model prob
         df_first = (
-            df_history.sort_values('Snapshot_Timestamp')
+            df_history_all
+            .sort_values('Snapshot_Timestamp')
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
             .rename(columns={
-                'Value': 'First_Line_Value',
-                'Model_Confidence_Tier': 'First_Tier',
-                'Model_Sharp_Win_Prob': 'First_Sharp_Prob'
-            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value', 'First_Tier', 'First_Sharp_Prob']]
+                'Value': 'First_Line_Value'
+            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']]
         )
         
+        # Then merge model-specific firsts separately if needed
+        df_first_model = (
+            df_history_all[df_history_all['Model_Sharp_Win_Prob'].notna()]
+            .sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+            .rename(columns={
+                'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
+                'Model_Confidence_Tier': 'First_Tier'
+            })[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Sharp_Prob', 'First_Tier']]
+        )
+        
+        # Merge both
+        df_moves_raw = df_moves_raw.merge(df_first_full, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+
+
 
                 # === Normalize and merge first snapshot into df_moves_raw
-        df_first['Bookmaker'] = df_first['Bookmaker'].astype(str).str.strip().str.lower()
-        df_moves_raw['Bookmaker'] = df_moves_raw['Bookmaker'].astype(str).str.strip().str.lower()
+    
         alias_map = {
             'Model_Sharp_Win_Prob': 'Model Prob',
             'Model_Confidence_Tier': 'Confidence Tier',
         }
         for orig, alias in alias_map.items():
-            if orig in df_moves_raw.columns and alias not in df_moves_raw.columns:
-                df_moves_raw[alias] = df_moves_raw[orig]
-        df_moves_raw = df_moves_raw.merge(
-            df_first, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left'
-        )
+       
        
         # Alias for clarity in trend logic
         if 'First_Sharp_Prob' in df_moves_raw.columns and 'First_Model_Prob' not in df_moves_raw.columns:
             df_moves_raw['First_Model_Prob'] = df_moves_raw['First_Sharp_Prob']
         
                 # === Deduplicate before filtering and diagnostics
-        before = len(df_moves_raw)
-        df_moves_raw = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'], keep='last')
-        after = len(df_moves_raw)
+        #before = len(df_moves_raw)
+        #df_moves_raw = df_moves_raw.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'], keep='last')
+        #after = len(df_moves_raw)
         #st.info(f"🧹 Deduplicated df_moves_raw: {before:,} → {after:,}")
         
         # === Filter upcoming pre-game picks
         now = pd.Timestamp.utcnow()
         
-        # === Now apply actual filter
-        df_pre = df_moves_raw[
-            (df_moves_raw['Pre_Game'] == True) &
-            (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
-            (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
-        ].copy()
-
+      
+        
         # === Step 0: Define keys and snapshot time
         merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-        now = pd.Timestamp.utcnow()
+       
         first_cols = ['First_Model_Prob', 'First_Line_Value', 'First_Tier']
         
+        # === Step 1: Normalize df_moves_raw BEFORE filtering or extracting
         # === Step 1: Normalize df_moves_raw BEFORE filtering or extracting
         for col in merge_keys:
             df_moves_raw[col] = df_moves_raw[col].astype(str).str.strip().str.lower()
         
         # === Step 2: Build df_first_cols BEFORE slicing
-        df_first_cols = df_moves_raw[merge_keys + first_cols].drop_duplicates()
+        df_first_cols = df_first_full.copy()
         
         # === Step 3: Filter pre-game picks AFTER normalization
         df_pre = df_moves_raw[
@@ -1553,65 +1551,34 @@ def render_scanner_tab(label, sport_key, container):
             (df_moves_raw['Model_Sharp_Win_Prob'].notna()) &
             (pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce') > now)
         ].copy()
+        
         # ✅ Ensure only latest snapshot per bookmaker/outcome is kept
         df_pre = (
             df_pre
             .sort_values('Snapshot_Timestamp')
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+            .drop_duplicates(subset=merge_keys, keep='last')
         )
-
-        # === Step 4: Normalize df_pre again (redundant but safe)
-        merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-
-        # === Normalize both sides (ensure string equality)
+        
+        # === Step 4: Normalize both sides before merge (again, to be safe)
         for col in merge_keys:
             df_pre[col] = df_pre[col].astype(str).str.strip().str.lower()
             df_first_cols[col] = df_first_cols[col].astype(str).str.strip().str.lower()
         
-        # === Ensure expected columns exist before merge
-        for col in ['First_Model_Prob', 'First_Line_Value', 'First_Tier']:
-            if col not in df_pre.columns:
-                df_pre[col] = None
+        # === Step 5: Merge firsts into pre-game picks
+        df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left')
         
-        # === Check pre-merge matches vs misses
-        merge_debug = df_pre[merge_keys].drop_duplicates().merge(
-            df_first_cols[merge_keys].drop_duplicates(),
-            on=merge_keys,
-            how='left',
-            indicator=True
-        )
-        
-        # === Show unmatched keys
-        
-        pre_keys = df_pre[merge_keys].drop_duplicates()
-        first_keys = df_first_cols[merge_keys].drop_duplicates()
-        # === Optional: show matching rows as well
-        
-        # Safe merge
-        df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left', indicator=True)
-        
+        # === Step 6: Resolve _x/_y conflicts
         for col in ['First_Model_Prob', 'First_Line_Value', 'First_Tier']:
             y_col = f"{col}_y"
             x_col = f"{col}_x"
-        
             if y_col in df_pre.columns:
-                df_pre[col] = df_pre[y_col]  # take the good values
+                df_pre[col] = df_pre[y_col]
                 df_pre.drop(columns=[y_col], inplace=True)
-        
             if x_col in df_pre.columns:
                 df_pre.drop(columns=[x_col], inplace=True)
         
-        df_pre.drop(columns=['_merge'], inplace=True)
-        # === Defensive patch for missing First_Tier ===
-        if 'First_Tier' not in df_pre.columns or df_pre['First_Tier'].isnull().all():
-            st.warning("⚠️ First_Tier is missing or null — filling with fallback to prevent Tier Δ defaulting to Steam.")
-            df_pre['First_Tier'] = "✅ Coinflip"  # or your true baseline tier
-        
-        # === Step 6: Confirm merge success
-        
-        
-        # === Step 7: Deduplicate post-merge
-        df_pre = df_pre.drop_duplicates(subset=merge_keys, keep='last')
+        df_pre.drop(columns=['_merge'], errors='ignore', inplace=True)
+
         
         # === Optional: Normalize again (safety for downstream groupby)
         df_pre['Bookmaker'] = df_pre['Bookmaker'].str.lower()
