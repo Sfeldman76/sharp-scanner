@@ -1245,9 +1245,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
                 'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
             ]
-            
+                       
             for col in hybrid_timing_cols:
-                df_canon[col] = pd.to_numeric(df_canon.get(col, 0.0), errors='coerce').fillna(0)
+                if col in df_canon.columns:
+                    df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
+                else:
+                    df_canon[col] = 0.0
 
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
@@ -1372,7 +1375,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             ]
             
             for col in hybrid_timing_cols:
-                df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0.0), errors='coerce').fillna(0)
+                if col in df_inverse.columns:
+                    df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0)
+                else:
+                    df_inverse[col] = 0.0
 
             
             if 'Value_Reversal_Flag' not in df_inverse.columns:
@@ -1621,7 +1627,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 ]
                 
                 for col in hybrid_timing_cols:
-                    df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0.0), errors='coerce').fillna(0)
+                    if col in df_inverse.columns:
+                        df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0)
+                    else:
+                        df_inverse[col] = 0.0
 
                 df_inverse = compute_value_reversal(df_inverse)
                 df_inverse = compute_odds_reversal(df_inverse)
