@@ -1609,7 +1609,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
                 df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
                 df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
-                 hybrid_timing_cols = [
+                hybrid_timing_cols = [
                     'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
                     'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
                     'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
