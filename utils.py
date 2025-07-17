@@ -1913,7 +1913,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     for r in rows:
         game_key = (r['Game'], r['Market'], r['Outcome'])
-        entry_group = sharp_limit_map[(game_name, mtype)][label].append((limit, value, snapshot_time, event_time))
+        entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome']) or []
         open_val = line_open_map.get(game_key, (None,))[0]
         sharp_scores = compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome'])
         r.update(sharp_scores)
