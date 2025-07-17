@@ -814,8 +814,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         })
     )
     df = df.merge(df_open_book, on=merge_keys, how='left')
-    df_magnitude_timing = compute_sharp_magnitude_by_time_bucket(df_all_snapshots)
-
+   
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
@@ -828,17 +827,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             'Implied_Prob': 'First_Imp_Prob'
         })
     )
-    df_open = df_open.merge(
-        df_magnitude_timing[
-            ['Game_Key', 'Market', 'Outcome', 'Bookmaker',
-             'SharpMove_Magnitude_Overnight',
-             'SharpMove_Magnitude_Early',
-             'SharpMove_Magnitude_Midday',
-             'SharpMove_Magnitude_Late']
-        ],
-        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-        how='left'
-    )
+    
     logger.info(f"🧪 df_open columns: {df_open.columns.tolist()}")
     df = df.merge(df_open, on=merge_keys, how='left')
     logger.info(f"✅ Open fields present: {df[['Open_Value', 'Open_Odds', 'First_Imp_Prob']].notnull().sum().to_dict()}")
