@@ -675,10 +675,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
         
             # 🔥 Timing flags
-            'Late_Game_Steam_Flag','SharpMove_Magnitude_Overnight',
-            'SharpMove_Magnitude_Early',
-            'SharpMove_Magnitude_Midday',
-            'SharpMove_Magnitude_Late',
+            'Late_Game_Steam_Flag',
+            'SharpMove_Timing_Magnitude' 
         ]
             
             
@@ -1174,10 +1172,8 @@ def compute_diagnostics_vectorized(df):
     
     magnitude_cols = [
         'Sharp_Line_Magnitude', 'Sharp_Time_Score', 'Rec_Line_Magnitude',
-        'Sharp_Limit_Total', 'SharpMove_Odds_Mag','SharpMove_Magnitude_Overnight',  # ✅ NEW
-        'SharpMove_Magnitude_Early',
-        'SharpMove_Magnitude_Midday',
-        'SharpMove_Magnitude_Late'
+        'Sharp_Limit_Total', 'SharpMove_Odds_Mag', 'SharpMove_Timing_Magnitude'   
+
     ]
     
     for col in flag_cols + magnitude_cols:
@@ -1204,10 +1200,7 @@ def compute_diagnostics_vectorized(df):
         (df['Late_Game_Steam_Flag'] == 1).astype(int) +
         (df['Value_Reversal_Flag'] == 1).astype(int) +
         (df['Odds_Reversal_Flag'] == 1).astype(int)+
-        (df['SharpMove_Magnitude_Overnight'] > 0.25).astype(int) +
-        (df['SharpMove_Magnitude_Early'] > 0.25).astype(int) +
-        (df['SharpMove_Magnitude_Midday'] > 0.25).astype(int) +
-        (df['SharpMove_Magnitude_Late'] > 0.25).astype(int)
+        (df['SharpMove_Timing_Magnitude'] > 0.25).astype(int)
 
     )
 
@@ -1251,10 +1244,26 @@ def compute_diagnostics_vectorized(df):
         if row['Late_Game_Steam_Flag']: parts.append("⏰ Late Game Steam")
         if row['Value_Reversal_Flag']: parts.append("🔄 Value Reversal")
         if row['Odds_Reversal_Flag']: parts.append("📉 Odds Reversal")
-        if row['SharpMove_Magnitude_Overnight'] > 0.25: parts.append("🌙 Overnight Steam")
-        if row['SharpMove_Magnitude_Early'] > 0.25: parts.append("🌅 Early Sharp Move")
-        if row['SharpMove_Magnitude_Midday'] > 0.25: parts.append("🌞 Midday Sharp Move")
-        if row['SharpMove_Magnitude_Late'] > 0.25: parts.append("🌆 Late Sharp Move")
+        HYBRID_TIMING_COLS = [
+            'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+            'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+            'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+            'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+            'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+            'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+            'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+            'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
+        ]
+        
+        EMOJI_MAP = {
+            'Overnight': '🌙', 'Early': '🌅',
+            'Midday': '🌞', 'Late': '🌆'
+        }
+        
+        for col in HYBRID_TIMING_COLS:
+            if row.get(col, 0) > 0.25:
+                parts.append(f"{EMOJI_MAP.get(col.split('_')[2], '⏱️')} {col.replace('SharpMove_Magnitude_', '').replace('_', ' ')} Sharp Move")
+
 
 
         return " + ".join(parts) if parts else "🤷‍♂️ No clear reason yet"
