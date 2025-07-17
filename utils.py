@@ -376,10 +376,14 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'SharpMove_Odds_Mag',
         'SharpMove_Resistance_Break',
         'Active_Signal_Count', 
-        'SharpMove_Magnitude_Overnight',
-        'SharpMove_Magnitude_Early',
-        'SharpMove_Magnitude_Midday',
-        'SharpMove_Magnitude_Late'# ✅ Add this
+        'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+        'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+        'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+        'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+        'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+        'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+        'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+        'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent' 
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -507,24 +511,45 @@ def load_market_weights_from_bq():
     return market_weights
     
     
+from collections import defaultdict
+import pandas as pd
+
 def compute_sharp_metrics(entries, open_val, mtype, label):
     move_signal = 0.0
     move_magnitude_score = 0.0
     limit_score = 0.0
     total_limit = 0.0
-    entry_count = 0   
-    time_score = 0.0  # ✅ <-- this line was likely missing
-   
+    entry_count = 0
+    time_score = 0.0
+    hybrid_timing_mags = defaultdict(float)
 
-    # Movement magnitude per timing bucket
-    timing_mags = {
-        'Overnight': 0.0,  # 12 AM – 6 AM
-        'Early': 0.0,      # 6 AM – 12 PM
-        'Midday': 0.0,     # 12 PM – 4 PM
-        'Late': 0.0        # 4 PM – 12 AM
-    }
+    def get_hybrid_bucket(ts, game_start):
+        hour = pd.to_datetime(ts).hour
+        minutes_to_game = (
+            (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60
+            if pd.notnull(game_start) else None
+        )
 
-    for limit, curr, ts in entries:
+        # Time of day
+        tod = (
+            'Overnight' if 0 <= hour <= 5 else
+            'Early'     if 6 <= hour <= 11 else
+            'Midday'    if 12 <= hour <= 15 else
+            'Late'
+        )
+
+        # Time-to-game
+        mtg = (
+            'VeryEarly' if minutes_to_game is None else
+            'VeryEarly' if minutes_to_game > 720 else
+            'MidRange'  if 180 < minutes_to_game <= 720 else
+            'LateGame'  if 60 < minutes_to_game <= 180 else
+            'Urgent'
+        )
+
+        return f"{tod}_{mtg}"
+
+    for limit, curr, ts, game_start in entries:
         if open_val is not None and curr is not None:
             try:
                 delta = curr - open_val
@@ -533,7 +558,6 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
 
-                    # Directional signal
                     if mtype == 'totals':
                         if 'under' in label and curr < open_val:
                             move_signal += sharp_move_delta
@@ -545,19 +569,9 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
                         elif open_val > 0 and curr > open_val:
                             move_signal += sharp_move_delta
 
-                    # ⏰ Timing-based magnitude tracking
-                    try:
-                        hour = pd.to_datetime(ts).hour
-                        if 0 <= hour <= 5:
-                            timing_mags['Overnight'] += sharp_move_delta
-                        elif 6 <= hour <= 11:
-                            timing_mags['Early'] += sharp_move_delta
-                        elif 12 <= hour <= 15:
-                            timing_mags['Midday'] += sharp_move_delta
-                        else:
-                            timing_mags['Late'] += sharp_move_delta
-                    except:
-                        pass
+                    # Hybrid timing bucket
+                    timing_label = get_hybrid_bucket(ts, game_start)
+                    hybrid_timing_mags[timing_label] += sharp_move_delta
             except Exception:
                 continue
 
@@ -568,27 +582,41 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
 
         entry_count += 1
 
+    # Identify strongest bucket
+    if hybrid_timing_mags:
+        dominant_label, dominant_mag = max(hybrid_timing_mags.items(), key=lambda x: x[1])
+    else:
+        dominant_label, dominant_mag = "unknown", 0.0
+    
+    # Flatten all buckets
+    all_possible_buckets = [
+        'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+        'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+        'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+        'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+    ]
+    flattened_buckets = {
+        f'SharpMove_Magnitude_{b}': round(hybrid_timing_mags.get(b, 0.0), 3)
+        for b in all_possible_buckets
+    }
+    
+    # ✅ Final return dictionary
     return {
         'Sharp_Move_Signal': int(move_signal > 0),
         'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
         'Sharp_Limit_Jump': int(limit_score >= 10000),
         'Sharp_Limit_Total': round(total_limit, 1),
-        'SharpMove_Magnitude_Overnight': round(timing_mags['Overnight'], 3),
-        'SharpMove_Magnitude_Early': round(timing_mags['Early'], 3),
-        'SharpMove_Magnitude_Midday': round(timing_mags['Midday'], 3),
-        'SharpMove_Magnitude_Late': round(timing_mags['Late'], 3),  # ✅ Missing comma WAS here
-        'Sharp_Move_Magnitude_Score': round(move_magnitude_score, 2),
+        'SharpMove_Timing_Dominant': dominant_label,
+        'SharpMove_Timing_Magnitude': round(dominant_mag, 3),
         'SharpBetScore': round(
             2.0 * move_signal +
             2.0 * limit_score +
             1.5 * time_score +
             0.001 * total_limit +
             3.0 * move_magnitude_score, 2
-        )
+        ),
+        **flattened_buckets
     }
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
 def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
@@ -1206,17 +1234,21 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_canon['Odds_Reversal_Flag'] = 0
             df_canon['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].fillna(0).astype(int)
 
-            # === Ensure timing-based sharp move magnitudes are numeric and present
-            for col in [
-                'SharpMove_Magnitude_Overnight',
-                'SharpMove_Magnitude_Early',
-                'SharpMove_Magnitude_Midday',
-                'SharpMove_Magnitude_Late'
-            ]:
-                if col in df_canon.columns:
-                    df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0)
-                else:
-                    df_canon[col] = 0.0
+            # Flattened hybrid timing buckets
+            hybrid_timing_cols = [
+                'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+                'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+                'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+                'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+                'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+                'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+                'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
+            ]
+            
+            for col in hybrid_timing_cols:
+                df_canon[col] = pd.to_numeric(df_canon.get(col, 0.0), errors='coerce').fillna(0)
+
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
@@ -1328,16 +1360,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
             logger.info(f"📋 Inverse3 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             
-            for col in [
-                'SharpMove_Magnitude_Overnight',
-                'SharpMove_Magnitude_Early',
-                'SharpMove_Magnitude_Midday',
-                'SharpMove_Magnitude_Late'
-            ]:
-                if col in df_inverse.columns:
-                    df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0)
-                else:
-                    df_inverse[col] = 0.0
+            hybrid_timing_cols = [
+                'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+                'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+                'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+                'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+                'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+                'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+                'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
+            ]
+            
+            for col in hybrid_timing_cols:
+                df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0.0), errors='coerce').fillna(0)
+
             
             if 'Value_Reversal_Flag' not in df_inverse.columns:
                 df_inverse['Value_Reversal_Flag'] = 0
@@ -1527,10 +1563,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
                     'Value_Reversal_Flag', 'Odds_Reversal_Flag',
                     'Is_Home_Team_Bet', 'Is_Favorite_Bet',
-                    'Delta', 'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs', 'SharpMove_Magnitude_Overnight',
-                    'SharpMove_Magnitude_Early',
-                    'SharpMove_Magnitude_Midday',
-                    'SharpMove_Magnitude_Late'
+                    'Delta', 'Direction_Aligned', 'Line_Move_Magnitude', 'Line_Magnitude_Abs','SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+                    'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+                    'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+                    'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+                    'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+                    'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+                    'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+                    'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent' 
+                    
                 ]
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
             
@@ -1568,16 +1609,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
                 df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
                 df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
-                for col in [
-                    'SharpMove_Magnitude_Overnight',
-                    'SharpMove_Magnitude_Early',
-                    'SharpMove_Magnitude_Midday',
-                    'SharpMove_Magnitude_Late'
-                ]:
-                    if col in df_inverse.columns:
-                        df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0)
-                    else:
-                        df_inverse[col] = 0.0
+                 hybrid_timing_cols = [
+                    'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+                    'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+                    'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+                    'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+                    'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+                    'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+                    'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+                    'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
+                ]
+                
+                for col in hybrid_timing_cols:
+                    df_inverse[col] = pd.to_numeric(df_inverse.get(col, 0.0), errors='coerce').fillna(0)
+
                 df_inverse = compute_value_reversal(df_inverse)
                 df_inverse = compute_odds_reversal(df_inverse)
                 logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
@@ -1868,7 +1913,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     for r in rows:
         game_key = (r['Game'], r['Market'], r['Outcome'])
-        entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome'], [])
+        entry_group = sharp_limit_map[(game_name, mtype)][label].append((limit, value, snapshot_time, event_time))
         open_val = line_open_map.get(game_key, (None,))[0]
         sharp_scores = compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome'])
         r.update(sharp_scores)
@@ -2215,10 +2260,15 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'SharpMove_Resistance_Break',
             'Line_Resistance_Crossed_Levels',
             'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 
-            'SharpMove_Magnitude_Overnight',
-            'SharpMove_Magnitude_Early',
-            'SharpMove_Magnitude_Midday',
-            'SharpMove_Magnitude_Late'#
+            'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+            'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+            'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+            'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+            'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+            'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+            'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+            'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent' 
+    
         ]
     }
 
@@ -2845,10 +2895,15 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Was_Line_Resistance_Broken',
         'SharpMove_Resistance_Break',
         'Line_Resistance_Crossed_Levels',
-        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 'SharpMove_Magnitude_Overnight',
-        'SharpMove_Magnitude_Early',
-        'SharpMove_Magnitude_Midday',
-        'SharpMove_Magnitude_Late'#   # ✅ ADD THESE
+        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 
+        'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
+        'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
+        'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
+        'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
+        'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
+        'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
+        'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
+        'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
     ]
     
     
