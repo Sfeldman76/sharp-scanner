@@ -1890,7 +1890,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
                     if value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
-                        sharp_limit_map[(game_name, mtype)][label].append((limit, value, open_val))
+                        sharp_limit_map[(game_name, mtype)][label].append((limit, value, snapshot_time, event_time))
+
                         if book_key in SHARP_BOOKS:
                             sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
                         if (game_name, mtype, label) not in line_open_map:
