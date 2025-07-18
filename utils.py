@@ -648,9 +648,15 @@ def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_
             continue
 
         open_val = line_open_map.get(game_key, (None,))[0]
-        r.update(compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome']))
-    return rows
 
+        # ✅ Add Game_Key and Bookmaker for logging inside compute_sharp_metrics
+        gk = r.get('Game_Key')
+        book = r.get('Bookmaker')
+
+        logging.debug(f"🧪 Computing sharp metrics for: {game_key}, Book: {book}, Game_Key: {gk}")
+
+        r.update(compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome'], gk=gk, book=book))
+    return rows
     
 
 logging.basicConfig(level=logging.INFO)
