@@ -514,25 +514,20 @@ def load_market_weights_from_bq():
 
 
 def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
-    logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
-    if gk:
-        logging.debug(f"📘 Game Key: {gk}")
-    if book:
-        logging.debug(f"📗 Bookmaker: {book}")
     
+    logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
     logging.debug(f"📥 Open value: {open_val}")
     logging.debug(f"📦 Received {len(entries)} entries")
-    logging.debug("🧩 Expected entry format: (limit, value, timestamp, game_start)")
-
+    
     for i, entry in enumerate(entries[:5]):
+        logging.debug(f"🧾 Entry {i+1}/{len(entries)} — {entry}")
         if len(entry) == 4:
             limit, curr, ts, game_start = entry
-            logging.debug(f"🧾 Entry {i + 1}: Limit={limit}, Curr={curr}, Time={ts}, Game_Start={game_start}")
+            logging.debug(f"🧪 Parsed → Limit={limit}, Value={curr}, Time={ts}, Game_Start={game_start}")
         else:
-            logging.warning(f"⚠️ Malformed entry at index {i}: {entry}")
-
+            logging.warning(f"⚠️ Malformed entry: {entry}")
+        
     
-    logging.debug(f"📋 Columns in group for Game={gk}, Market={market}, Outcome={outcome}, Book={book}: {list(group.columns)}")
      
     move_signal = 0.0
     move_magnitude_score = 0.0
@@ -1942,6 +1937,17 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         if not event_time:
                             logging.warning(f"⚠️ No Game_Start (event_time) for {game_name} — hybrid timing may default to 'unknown'")
                         sharp_limit_map[(game_name, mtype)][label].append((limit, value, snapshot_time, event_time))
+
+                        if event_time is None:
+                            logging.warning(
+                                f"⚠️ NULL Game_Start while appending to sharp_limit_map: "
+                                f"Game={game_name}, Market={mtype}, Outcome={label}, Time={snapshot_time}"
+                            )
+                        else:
+                            logging.debug(
+                                f"📌 Appended to sharp_limit_map: Game={game_name}, Market={mtype}, Outcome={label}, "
+                                f"Time={snapshot_time}, Game_Start={event_time}"
+                            )
              
                         if book_key in SHARP_BOOKS:
                             sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
