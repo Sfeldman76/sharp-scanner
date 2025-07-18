@@ -27,6 +27,7 @@ from google.cloud import bigquery, storage
 import logging
 logging.basicConfig(level=logging.INFO)  # <- Must be INFO or DEBUG to show .info() logs
 logger = logging.getLogger(__name__)
+
 # === Config ===
 GCP_PROJECT_ID = "sharplogger"
 BQ_DATASET = "sharp_data"
@@ -651,31 +652,29 @@ def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_
         entry_group = sharp_limit_map.get(key_map, {}).get(outcome, [])
 
         if not entry_group:
-            logging.warning(f"⚠️ No entry group found for {key_full}")
+            logging.warning(f"⚠️ No entry group for {key_full}")
             continue
 
-        # Defensive check: all entries should be 4-tuples (limit, value, timestamp, game_start)
         malformed = [e for e in entry_group if len(e) != 4]
         if malformed:
-            logging.warning(f"⚠️ Malformed entries for {key_full}: {malformed}")
+            logging.warning(f"⚠️ Malformed entry group for {key_full}: {malformed}")
             continue
 
         open_val = line_open_map.get(key_full, (None,))[0]
 
-        # Debug log to confirm all context
+        # Confirm it's being called
         logging.debug(f"🧠 Computing sharp metrics for Game={gk}, Market={market}, Outcome={outcome}, Book={book}")
         logging.debug(f"📏 open_val={open_val} — entry count={len(entry_group)}")
+        logging.debug(f"🧪 First entry: {entry_group[0]}")
 
         try:
             sharp_metrics = compute_sharp_metrics(entry_group, open_val, market, outcome, gk=gk, book=book)
             r.update(sharp_metrics)
         except Exception as e:
             logging.error(f"❌ Failed to compute sharp metrics for {key_full}: {e}", exc_info=True)
-
     return rows
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+    
+    
 
 
 SPORT_ALIAS = {
@@ -1988,11 +1987,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         logging.warning("⚠️ No valid sharp rows after deduplication — skipping scoring.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
+    logging.info("🧪 About to run apply_sharp_scoring()")
+    logging.info(f"🧪 Rows going into scoring: {len(rows)}")
+    logging.info("🧪 Sample rows:")
+    for row in rows[:3]:
+        logging.info(f"➡️ {row.get('Game')} | {row.get('Market')} | {row.get('Outcome')} | {row.get('Bookmaker')} | Game_Start={row.get('Game_Start')}")
 
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
     logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
-    
-    df = pd.DataFrame(rows)
+    if not entry_group:
+    logging.warning(f"⚠️ No entry group for {key_full}")
+    continue
+
     
     # ✅ Add this debug log
     if 'SharpMove_Timing_Dominant' in df.columns:
