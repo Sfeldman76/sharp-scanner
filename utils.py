@@ -820,7 +820,36 @@ def add_minutes_to_game(df):
     )
 
     return df
+def apply_compute_sharp_metrics_rowwise(row, df_history):
+    key = (row['Game'], row['Market'], row['Outcome'])
+    entries = df_history[
+        (df_history['Game'] == key[0]) &
+        (df_history['Market'] == key[1]) &
+        (df_history['Outcome'] == key[2]) &
+        (df_history['Book'] == row['Book'])  # optional: book filtering
+    ]
+    entries = entries.sort_values('Snapshot_Timestamp')
 
+    entry_group = list(zip(
+        entries['Limit'],
+        entries['Value'],
+        entries['Snapshot_Timestamp'],
+        entries['Game_Start']
+    ))
+
+    open_val = (
+        entries['Value'].iloc[0]
+        if not entries.empty else None
+    )
+
+    try:
+        sharp_metrics = compute_sharp_metrics(entry_group, open_val, row['Market'], row['Outcome'])
+        return pd.Series(sharp_metrics)
+    except Exception as e:
+        logger.warning(f"❌ Failed compute_sharp_metrics for {key}: {e}")
+        return pd.Series({})  # return empty if error
+        
+        
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
@@ -874,7 +903,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
    
     df = compute_line_resistance_flag(df, source='moves')
     df = add_minutes_to_game(df)
-
+    logger.info("🧠 Computing sharp move metrics from historical snapshots...")
+    sharp_metrics_df = df.apply(lambda row: apply_compute_sharp_metrics_rowwise(row, df_all_snapshots), axis=1)
+    
+    logger.info(f"🧮 Merged sharp move metrics — {sharp_metrics_df.shape[1]} columns")
+    
+    df = pd.concat([df.reset_index(drop=True), sharp_metrics_df.reset_index(drop=True)], axis=1)
     # Normalize merge keys
     # Normalize merge keys
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
@@ -1986,24 +2020,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         logging.warning("⚠️ No valid sharp rows after deduplication — skipping scoring.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    logging.info("🧪 About to run apply_sharp_scoring()")
-    logging.info(f"🧪 Rows going into scoring: {len(rows)}")
-    logging.info("🧪 Sample rows:")
-    for row in rows[:3]:
-        logging.info(f"➡️ {row.get('Game')} | {row.get('Market')} | {row.get('Outcome')} | {row.get('Bookmaker')} | Game_Start={row.get('Game_Start')}")
+ 
 
-    rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
-    logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
     
     # ✅ Create df before checking for columns
     df = pd.DataFrame(rows)
     
-    # ✅ Now safe to inspect columns
-    if 'SharpMove_Timing_Dominant' in df.columns:
-        logging.info("📊 Sharp Move Timing Buckets Sample:")
-        logging.info(df[['Game', 'Market', 'Outcome', 'SharpMove_Timing_Dominant', 'SharpMove_Timing_Magnitude']].head(10).to_string(index=False))
-    
-    logging.info(f"✅ Finished scoring — total rows: {len(df)}")
     
    
 
