@@ -621,18 +621,16 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
 
 def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
     for r in rows:
-        # Identify the key for this market
         game_key = (r['Game'], r['Market'], r['Outcome'])
-
-        # Get all relevant line movements for this label
         entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome'], [])
 
-        # Get the original opening line from the stored line_open_map
+        # ✅ Defensive patch: ensure entry tuples are 4-tuple (limit, value, timestamp, game_start)
+        if entry_group and len(entry_group[0]) != 4:
+            logging.warning(f"⚠️ Entry group malformed for {game_key}: {entry_group}")
+            continue
+
         open_val = line_open_map.get(game_key, (None,))[0]
-
-        # Compute sharp signals and update the row dict
         r.update(compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome']))
-
     return rows
 
     
@@ -720,11 +718,20 @@ def compute_sharp_magnitude_by_time_bucket(df_all_snapshots):
     grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
 
     for (gk, market, outcome, book), group in grouped:
-        entries = list(zip(group['Limit'], group['Value'], group['Snapshot_Timestamp']))
+        game_start = group['Game_Start'].dropna().iloc[0] if 'Game_Start' in group and not group['Game_Start'].isnull().all() else None
+
+        entries = list(zip(
+            group['Limit'],
+            group['Value'],
+            group['Snapshot_Timestamp'],
+            [game_start] * len(group)  # 🧠 apply game_start to all rows
+        ))
+
         open_val = (
             group.sort_values('Snapshot_Timestamp')['Value']
             .dropna().iloc[0] if not group['Value'].isnull().all() else None
         )
+
         metrics = compute_sharp_metrics(entries, open_val, market, outcome)
         metrics.update({
             'Game_Key': gk,
@@ -733,6 +740,7 @@ def compute_sharp_magnitude_by_time_bucket(df_all_snapshots):
             'Bookmaker': book
         })
         results.append(metrics)
+
     return pd.DataFrame(results)
         
 def add_minutes_to_game(df):
@@ -1921,12 +1929,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
 
     
-    for r in rows:
-        game_key = (r['Game'], r['Market'], r['Outcome'])
-        entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome']) or []
-        open_val = line_open_map.get(game_key, (None,))[0]
-        sharp_scores = compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome'])
-        r.update(sharp_scores)
+    rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
     
     logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
     
