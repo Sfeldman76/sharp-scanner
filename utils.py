@@ -639,6 +639,8 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
 
 
 def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
+    logging.info(f"🚦 Starting apply_sharp_scoring with {len(rows)} rows")
+    
     for r in rows:
         game = r.get('Game')
         market = r.get('Market')
@@ -652,17 +654,16 @@ def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_
         entry_group = sharp_limit_map.get(key_map, {}).get(outcome, [])
 
         if not entry_group:
-            logging.warning(f"⚠️ No entry group for {key_full}")
+            logging.warning(f"⚠️ No entry group for {key_full} → Row: {r}")
             continue
 
         malformed = [e for e in entry_group if len(e) != 4]
         if malformed:
-            logging.warning(f"⚠️ Malformed entry group for {key_full}: {malformed}")
+            logging.warning(f"⚠️ Malformed entry group for {key_full}: {malformed} → Row: {r}")
             continue
 
         open_val = line_open_map.get(key_full, (None,))[0]
 
-        # Confirm it's being called
         logging.debug(f"🧠 Computing sharp metrics for Game={gk}, Market={market}, Outcome={outcome}, Book={book}")
         logging.debug(f"📏 open_val={open_val} — entry count={len(entry_group)}")
         logging.debug(f"🧪 First entry: {entry_group[0]}")
@@ -673,8 +674,6 @@ def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_
         except Exception as e:
             logging.error(f"❌ Failed to compute sharp metrics for {key_full}: {e}", exc_info=True)
     return rows
-    
-    
 
 
 SPORT_ALIAS = {
