@@ -1928,9 +1928,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
-    
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
+    logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
     
+    df = pd.DataFrame(rows)
+    
+    # ✅ Add this debug log
+    if 'SharpMove_Timing_Dominant' in df.columns:
+        logging.info("📊 Sharp Move Timing Buckets Sample:")
+        logging.info(df[['Game', 'Market', 'Outcome', 'SharpMove_Timing_Dominant', 'SharpMove_Timing_Magnitude']].head(10).to_string(index=False))
+   
     logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
     
     # ✅ No need to deduplicate again
