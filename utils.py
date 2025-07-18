@@ -384,7 +384,9 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
         'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
         'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-        'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent' 
+        'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent',
+        'SharpMove_Timing_Dominant',
+        'SharpMove_Timing_Magnitude', 
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
      
@@ -903,6 +905,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
    
     df = compute_line_resistance_flag(df, source='moves')
     df = add_minutes_to_game(df)
+    
     logger.info("🧠 Computing sharp move metrics from historical snapshots...")
     sharp_metrics_df = df.apply(lambda row: apply_compute_sharp_metrics_rowwise(row, df_all_snapshots), axis=1)
     
@@ -2372,7 +2375,8 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
             'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
             'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-            'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent' 
+            'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant',
+            'SharpMove_Timing_Magnitude',  
     
         ]
     }
@@ -3008,7 +3012,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
         'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
         'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-        'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
+        'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant',
+        'SharpMove_Timing_Magnitude', 
     ]
     
     
