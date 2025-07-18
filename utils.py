@@ -515,6 +515,22 @@ from collections import defaultdict
 import pandas as pd
 
 def compute_sharp_metrics(entries, open_val, mtype, label):
+    logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
+    logging.debug(f"📥 Open value: {open_val}")
+    logging.debug(f"📦 Received {len(entries)} entries")
+
+    # Log structure of first 5 entries
+    for i, entry in enumerate(entries[:5]):
+        if len(entry) == 4:
+            limit, curr, ts, game_start = entry
+            logging.debug(f"🧾 Entry {i + 1}: Limit={limit}, Curr={curr}, Time={ts}, Game_Start={game_start}")
+        else:
+            logging.warning(f"⚠️ Malformed entry at index {i}: {entry}")
+
+    # Optional: Log expected structure
+    logging.debug("🧩 Expected entry format: (limit, value, timestamp, game_start)")
+    logging.debug(f"📋 Columns in group for Game={gk}, Market={market}, Outcome={outcome}, Book={book}: {list(group.columns)}")
+     
     move_signal = 0.0
     move_magnitude_score = 0.0
     limit_score = 0.0
@@ -548,12 +564,16 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
         )
 
         return f"{tod}_{mtg}"
-
     for limit, curr, ts, game_start in entries:
         if open_val is not None and curr is not None:
             try:
                 delta = curr - open_val
                 sharp_move_delta = abs(delta)
+    
+                # ✅ Add this line to log the timing context
+                logging.debug(f"🧪 Delta: {delta:.3f}, Time: {ts}, Game_Start: {game_start}")
+    
+
 
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
