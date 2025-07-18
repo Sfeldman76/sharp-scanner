@@ -639,25 +639,40 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
 
 def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
     for r in rows:
-        game_key = (r['Game'], r['Market'], r['Outcome'])
-        entry_group = sharp_limit_map.get((r['Game'], r['Market']), {}).get(r['Outcome'], [])
+        game = r.get('Game')
+        market = r.get('Market')
+        outcome = r.get('Outcome')
+        book = r.get('Bookmaker')
+        gk = r.get('Game_Key')
 
-        # ✅ Defensive patch: ensure entry tuples are 4-tuple (limit, value, timestamp, game_start)
-        if entry_group and len(entry_group[0]) != 4:
-            logging.warning(f"⚠️ Entry group malformed for {game_key}: {entry_group}")
+        key_full = (game, market, outcome)
+        key_map = (game, market)
+
+        entry_group = sharp_limit_map.get(key_map, {}).get(outcome, [])
+
+        if not entry_group:
+            logging.warning(f"⚠️ No entry group found for {key_full}")
             continue
 
-        open_val = line_open_map.get(game_key, (None,))[0]
+        # Defensive check: all entries should be 4-tuples (limit, value, timestamp, game_start)
+        malformed = [e for e in entry_group if len(e) != 4]
+        if malformed:
+            logging.warning(f"⚠️ Malformed entries for {key_full}: {malformed}")
+            continue
 
-        # ✅ Add Game_Key and Bookmaker for logging inside compute_sharp_metrics
-        gk = r.get('Game_Key')
-        book = r.get('Bookmaker')
+        open_val = line_open_map.get(key_full, (None,))[0]
 
-        logging.debug(f"🧪 Computing sharp metrics for: {game_key}, Book: {book}, Game_Key: {gk}")
+        # Debug log to confirm all context
+        logging.debug(f"🧠 Computing sharp metrics for Game={gk}, Market={market}, Outcome={outcome}, Book={book}")
+        logging.debug(f"📏 open_val={open_val} — entry count={len(entry_group)}")
 
-        r.update(compute_sharp_metrics(entry_group, open_val, r['Market'], r['Outcome'], gk=gk, book=book))
+        try:
+            sharp_metrics = compute_sharp_metrics(entry_group, open_val, market, outcome, gk=gk, book=book)
+            r.update(sharp_metrics)
+        except Exception as e:
+            logging.error(f"❌ Failed to compute sharp metrics for {key_full}: {e}", exc_info=True)
+
     return rows
-    
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
