@@ -1327,6 +1327,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].fillna(0).astype(int)
 
             # Flattened hybrid timing buckets
+            # 🔄 Flattened hybrid timing columns (NUMERIC only)
             hybrid_timing_cols = [
                 'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
                 'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
@@ -1335,15 +1336,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
                 'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
                 'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant','SharpMove_Timing_Magnitude'
+                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent',
+                'SharpMove_Timing_Magnitude'  # ✅ numeric
             ]
-                       
+            
+            # ✅ Process numeric timing features
             for col in hybrid_timing_cols:
                 if col in df_canon.columns:
                     df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
                 else:
                     df_canon[col] = 0.0
-
+            
+            # ✅ Handle string column separately
+            if 'SharpMove_Timing_Dominant' not in df_canon.columns:
+                df_canon['SharpMove_Timing_Dominant'] = 'unknown'
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
@@ -1455,6 +1461,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
             logger.info(f"📋 Inverse3 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             
+            # ✅ Only numeric hybrid timing columns
             hybrid_timing_cols = [
                 'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
                 'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
@@ -1463,16 +1470,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
                 'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
                 'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant','SharpMove_Timing_Magnitude'
+                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent',
+                'SharpMove_Timing_Magnitude'  # ✅ numeric
             ]
             
+            # ✅ Convert numeric timing columns
             for col in hybrid_timing_cols:
                 if col in df_inverse.columns:
                     df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0)
                 else:
                     df_inverse[col] = 0.0
-
             
+            # ✅ Handle string timing label separately
+            if 'SharpMove_Timing_Dominant' not in df_inverse.columns:
+                df_inverse['SharpMove_Timing_Dominant'] = 'unknown'
+            else:
+                df_inverse['SharpMove_Timing_Dominant'] = df_inverse['SharpMove_Timing_Dominant'].fillna('unknown').astype(str)
             if 'Value_Reversal_Flag' not in df_inverse.columns:
                 df_inverse['Value_Reversal_Flag'] = 0
             df_inverse['Value_Reversal_Flag'] = df_inverse['Value_Reversal_Flag'].fillna(0).astype(int)
@@ -1723,7 +1736,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                         df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0)
                     else:
                         df_inverse[col] = 0.0
-
+                # Add SharpMove_Timing_Magnitude (numeric)
+                if 'SharpMove_Timing_Magnitude' in df_inverse.columns:
+                    df_inverse['SharpMove_Timing_Magnitude'] = pd.to_numeric(
+                        df_inverse['SharpMove_Timing_Magnitude'], errors='coerce'
+                    ).fillna(0.0)
+                else:
+                    df_inverse['SharpMove_Timing_Magnitude'] = 0.0
+                
+                # Add SharpMove_Timing_Dominant (string)
+                if 'SharpMove_Timing_Dominant' not in df_inverse.columns:
+                    df_inverse['SharpMove_Timing_Dominant'] = 'unknown'
+                else:
+                    df_inverse['SharpMove_Timing_Dominant'] = df_inverse['SharpMove_Timing_Dominant'].fillna('unknown').astype(str)
+                
                 df_inverse = compute_value_reversal(df_inverse)
                 df_inverse = compute_odds_reversal(df_inverse)
                 logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
