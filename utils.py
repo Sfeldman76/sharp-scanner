@@ -1994,21 +1994,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     rows = apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map)
     logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
-    if not entry_group:
-    logging.warning(f"⚠️ No entry group for {key_full}")
-    continue
-
     
-    # ✅ Add this debug log
+    # ✅ Create df before checking for columns
+    df = pd.DataFrame(rows)
+    
+    # ✅ Now safe to inspect columns
     if 'SharpMove_Timing_Dominant' in df.columns:
         logging.info("📊 Sharp Move Timing Buckets Sample:")
         logging.info(df[['Game', 'Market', 'Outcome', 'SharpMove_Timing_Dominant', 'SharpMove_Timing_Magnitude']].head(10).to_string(index=False))
-   
-    logging.info(f"🧹 Deduplicated rows: {pre_dedup - len(rows)} duplicates removed")
     
-    # ✅ No need to deduplicate again
-    df = pd.DataFrame(rows)
-
+    logging.info(f"✅ Finished scoring — total rows: {len(df)}")
+    
+   
 
     if trained_models:
         try:
