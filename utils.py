@@ -527,6 +527,16 @@ def compute_sharp_metrics(entries, open_val, mtype, label):
         else:
             logging.warning(f"⚠️ Malformed entry at index {i}: {entry}")
 
+    logging.debug("🧩 Expected entry format: (limit, value, timestamp, game_start)")
+
+    # Log structure of first 5 entries
+    for i, entry in enumerate(entries[:5]):
+        if len(entry) == 4:
+            limit, curr, ts, game_start = entry
+            logging.debug(f"🧾 Entry {i + 1}: Limit={limit}, Curr={curr}, Time={ts}, Game_Start={game_start}")
+        else:
+            logging.warning(f"⚠️ Malformed entry at index {i}: {entry}")
+
     # Optional: Log expected structure
     logging.debug("🧩 Expected entry format: (limit, value, timestamp, game_start)")
     logging.debug(f"📋 Columns in group for Game={gk}, Market={market}, Outcome={outcome}, Book={book}: {list(group.columns)}")
@@ -735,21 +745,31 @@ def compute_line_resistance_flag(df, source='moves'):
 
 def compute_sharp_magnitude_by_time_bucket(df_all_snapshots):
     results = []
+
     grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
 
     for (gk, market, outcome, book), group in grouped:
-        game_start = group['Game_Start'].dropna().iloc[0] if 'Game_Start' in group and not group['Game_Start'].isnull().all() else None
+        logging.debug(f"📊 Group: Game={gk}, Market={market}, Outcome={outcome}, Book={book}")
+        logging.debug(f"📋 Columns in group: {list(group.columns)}")
+
+        game_start = (
+            group['Game_Start'].dropna().iloc[0]
+            if 'Game_Start' in group and not group['Game_Start'].isnull().all()
+            else None
+        )
 
         entries = list(zip(
             group['Limit'],
             group['Value'],
             group['Snapshot_Timestamp'],
-            [game_start] * len(group)  # 🧠 apply game_start to all rows
+            [game_start] * len(group)  # Apply game_start to all entries
         ))
 
         open_val = (
             group.sort_values('Snapshot_Timestamp')['Value']
-            .dropna().iloc[0] if not group['Value'].isnull().all() else None
+            .dropna().iloc[0]
+            if not group['Value'].isnull().all()
+            else None
         )
 
         metrics = compute_sharp_metrics(entries, open_val, market, outcome)
