@@ -1335,7 +1335,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
                 'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
                 'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
+                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant','SharpMove_Timing_Magnitude'
             ]
                        
             for col in hybrid_timing_cols:
@@ -1463,7 +1463,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
                 'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
                 'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
+                'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant','SharpMove_Timing_Magnitude'
             ]
             
             for col in hybrid_timing_cols:
@@ -1668,7 +1668,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
                     'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
                     'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-                    'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent' 
+                    'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant','SharpMove_Timing_Magnitude'
                     
                 ]
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
