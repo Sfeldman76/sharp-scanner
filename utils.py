@@ -1904,11 +1904,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         f"[{mtype.upper()}] {label} | Book: {book_key} | Value: {value} | Odds_Price: {odds_price} | "
                         f"Limit: {limit} | Game: {game_name}"
                     )
-
                     if value is not None:
                         sharp_lines[(game_name, mtype, label)] = entry
+                        if not event_time:
+                            logging.warning(f"⚠️ No Game_Start (event_time) for {game_name} — hybrid timing may default to 'unknown'")
                         sharp_limit_map[(game_name, mtype)][label].append((limit, value, snapshot_time, event_time))
-
+             
                         if book_key in SHARP_BOOKS:
                             sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
                         if (game_name, mtype, label) not in line_open_map:
