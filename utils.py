@@ -583,7 +583,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             if open_val is not None and curr_val is not None:
                 delta = curr_val - open_val
                 sharp_move_delta = abs(delta)
-                logging.info(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr_val}")
+                logging.debug(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr_val}")
     
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
