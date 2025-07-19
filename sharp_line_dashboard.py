@@ -678,9 +678,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
             'Late_Game_Steam_Flag',
             'SharpMove_Timing_Magnitude' 
         ]
+        hybrid_timing_features = [
+            f'SharpMove_Magnitude_{b}' for b in [
+                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            ]
+        ]
             
-            
-        
+        features += hybrid_timing_features
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
         df_market = ensure_columns(df_market, features, 0)
         
