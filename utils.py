@@ -389,7 +389,17 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'SharpMove_Timing_Magnitude', 
     ]
     # 🧩 Add schema-consistent consensus fields from summarize_consensus()
-     
+    # 🧩 Add schema-consistent consensus fields from summarize_consensus()
+    ALLOWED_ODDS_MOVE_COLUMNS = [
+        f'OddsMove_Magnitude_{b}' for b in [
+            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+        ]
+    ] + ['Odds_Move_Magnitude']  # ✅ Add this total field
+    
+    ALLOWED_COLS += ALLOWED_ODDS_MOVE_COLUMNS
     # Ensure all required columns exist
     df = ensure_columns(df, ALLOWED_COLS, fill_value=None)
     df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
@@ -516,7 +526,7 @@ def load_market_weights_from_bq():
     
 
 
-def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
+def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None):
     
     logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
     logging.debug(f"📥 Open value: {open_val}")
@@ -539,6 +549,8 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
     entry_count = 0
     time_score = 0.0
     hybrid_timing_mags = defaultdict(float)
+    odds_move_magnitude_score = 0.0
+    hybrid_timing_odds_mags = defaultdict(float)
 
     def get_hybrid_bucket(ts, game_start):
         hour = pd.to_datetime(ts).hour
@@ -565,16 +577,24 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
         )
 
         return f"{tod}_{mtg}"
-    for limit, curr, ts, game_start in entries:
-        if open_val is not None and curr is not None:
-            try:
-                delta = curr - open_val
-                sharp_move_delta = abs(delta)
-    
-                # ✅ Add this line to log the timing context
-                logging.debug(f"🧪 Delta: {delta:.3f}, Time: {ts}, Game_Start: {game_start}")
-    
-
+    for limit, curr_val, curr_odds, ts, game_start in entries:
+        # === Line movement
+        if open_val is not None and curr_val is not None:
+            delta = curr_val - open_val
+            sharp_move_delta = abs(delta)
+            logging.debug(f"🧪 Line Δ: {delta:.3f}, Time: {ts}, Game_Start: {game_start}")
+        
+        # === Odds movement
+        if open_odds is not None and curr_odds is not None:
+            odds_delta = curr_odds - open_odds
+            odds_move_delta = abs(odds_delta)
+            logging.debug(f"🧾 Odds Δ: {odds_delta:.1f}, From {open_odds} → {curr_odds}")
+        
+            if odds_move_delta >= 1:
+                odds_move_magnitude_score += odds_move_delta
+                timing_label = get_hybrid_bucket(ts, game_start)
+                hybrid_timing_odds_mags[timing_label] += odds_move_delta
+        
 
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
@@ -629,7 +649,9 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
         'Sharp_Limit_Total': round(total_limit, 1),
         'SharpMove_Timing_Dominant': dominant_label,
         'SharpMove_Timing_Magnitude': round(dominant_mag, 3),
-        **flattened_buckets
+        **flattened_buckets,  # ✅ comma added here
+        'Odds_Move_Magnitude': round(odds_move_magnitude_score, 2),  # ✅ comma at end
+        **flattened_odds_buckets
     }
     
 def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
@@ -1342,6 +1364,23 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # ✅ Handle string column separately
             if 'SharpMove_Timing_Dominant' not in df_canon.columns:
                 df_canon['SharpMove_Timing_Dominant'] = 'unknown'
+                
+            hybrid_odds_timing_cols = [
+                'Odds_Move_Magnitude',  # total
+            ] + [
+                f'OddsMove_Magnitude_{b}' for b in [
+                    'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                    'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                    'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                    'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+                ]
+            ]
+            # ✅ Process numeric odds timing features
+            for col in hybrid_odds_timing_cols:
+                if col in df_canon.columns:
+                    df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
+                else:
+                    df_canon[col] = 0.0  
             # === Ensure required features exist ===
             model_features = model.get_booster().feature_names
             missing_cols = [col for col in model_features if col not in df_canon.columns]
@@ -1472,12 +1511,30 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0)
                 else:
                     df_inverse[col] = 0.0
-            
-            # ✅ Handle string timing label separately
             if 'SharpMove_Timing_Dominant' not in df_inverse.columns:
                 df_inverse['SharpMove_Timing_Dominant'] = 'unknown'
             else:
                 df_inverse['SharpMove_Timing_Dominant'] = df_inverse['SharpMove_Timing_Dominant'].fillna('unknown').astype(str)
+                
+                           
+            hybrid_odds_timing_cols = [
+                'Odds_Move_Magnitude',
+            ] + [
+                f'OddsMove_Magnitude_{b}' for b in [
+                    'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                    'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                    'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                    'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+                ]
+            ]
+            # ✅ Convert numeric odds timing columns for inverse rows
+            for col in hybrid_odds_timing_cols:
+                if col in df_inverse.columns:
+                    df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0)
+                else:
+                    df_inverse[col] = 0.0
+            # ✅ Handle string timing label separately
+            
             if 'Value_Reversal_Flag' not in df_inverse.columns:
                 df_inverse['Value_Reversal_Flag'] = 0
             df_inverse['Value_Reversal_Flag'] = df_inverse['Value_Reversal_Flag'].fillna(0).astype(int)
@@ -1673,9 +1730,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
                     'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
                     'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-                    'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant','SharpMove_Timing_Magnitude'
-                    
+                    'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant','SharpMove_Timing_Magnitude'                   
+                    # 🎯 Odds timing magnitude (odds) — ✅ NEW ADDITIONS
+                    'Odds_Move_Magnitude',
+                    'OddsMove_Magnitude_Overnight_VeryEarly', 'OddsMove_Magnitude_Overnight_MidRange',
+                    'OddsMove_Magnitude_Overnight_LateGame', 'OddsMove_Magnitude_Overnight_Urgent',
+                    'OddsMove_Magnitude_Early_VeryEarly', 'OddsMove_Magnitude_Early_MidRange',
+                    'OddsMove_Magnitude_Early_LateGame', 'OddsMove_Magnitude_Early_Urgent',
+                    'OddsMove_Magnitude_Midday_VeryEarly', 'OddsMove_Magnitude_Midday_MidRange',
+                    'OddsMove_Magnitude_Midday_LateGame', 'OddsMove_Magnitude_Midday_Urgent',
+                    'OddsMove_Magnitude_Late_VeryEarly', 'OddsMove_Magnitude_Late_MidRange',
+                    'OddsMove_Magnitude_Late_LateGame', 'OddsMove_Magnitude_Late_Urgent'
                 ]
+                
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
             
                 # Merge openers and extremes
@@ -1742,6 +1809,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 else:
                     df_inverse['SharpMove_Timing_Dominant'] = df_inverse['SharpMove_Timing_Dominant'].fillna('unknown').astype(str)
                 
+                hybrid_odds_timing_cols = [
+                    'Odds_Move_Magnitude',
+                ] + [
+                    f'OddsMove_Magnitude_{b}' for b in [
+                        'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                        'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                        'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                        'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+                    ]
+                ]
+                # ✅ Convert numeric odds timing columns for inverse rows
+                for col in hybrid_odds_timing_cols:
+                    if col in df_inverse.columns:
+                        df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0)
+                    else:
+                        df_inverse[col] = 0.0
                 df_inverse = compute_value_reversal(df_inverse)
                 df_inverse = compute_odds_reversal(df_inverse)
                 logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
@@ -1963,9 +2046,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     open_val = old_val_map.get((game_name, mtype, label, book_key))
                     
                     # ✅ Only set the open value if it's not already set
-                    if (game_name, mtype, label) not in line_open_map and value is not None:
-                        line_open_map[(game_name, mtype, label)] = (value, snapshot_time)
                     
+                    if (game_name, mtype, label) not in line_open_map and value is not None:
+                        line_open_map[(game_name, mtype, label)] = (value, odds_price, snapshot_time)
                    
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
                     
@@ -2010,7 +2093,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         sharp_lines[(game_name, mtype, label)] = entry
                         if not event_time:
                             logging.warning(f"⚠️ No Game_Start (event_time) for {game_name} — hybrid timing may default to 'unknown'")
-                        sharp_limit_map[(game_name, mtype)][label].append((limit, value, snapshot_time, event_time))
+                        sharp_limit_map[(game_name, mtype)][label].append((limit, value, odds_price, snapshot_time, event_time))
 
                         if event_time is None:
                             logging.warning(
@@ -2394,7 +2477,18 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
             'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
             'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant',
-            'SharpMove_Timing_Magnitude',  
+            'SharpMove_Timing_Magnitude', 
+                # 🎯 Odds timing magnitude (odds) — ✅ NEW ADDITIONS
+            'Odds_Move_Magnitude',
+            'OddsMove_Magnitude_Overnight_VeryEarly', 'OddsMove_Magnitude_Overnight_MidRange',
+            'OddsMove_Magnitude_Overnight_LateGame', 'OddsMove_Magnitude_Overnight_Urgent',
+            'OddsMove_Magnitude_Early_VeryEarly', 'OddsMove_Magnitude_Early_MidRange',
+            'OddsMove_Magnitude_Early_LateGame', 'OddsMove_Magnitude_Early_Urgent',
+            'OddsMove_Magnitude_Midday_VeryEarly', 'OddsMove_Magnitude_Midday_MidRange',
+            'OddsMove_Magnitude_Midday_LateGame', 'OddsMove_Magnitude_Midday_Urgent',
+            'OddsMove_Magnitude_Late_VeryEarly', 'OddsMove_Magnitude_Late_MidRange',
+            'OddsMove_Magnitude_Late_LateGame', 'OddsMove_Magnitude_Late_Urgent'
+         
     
         ]
     }
@@ -3032,6 +3126,17 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
         'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent','SharpMove_Timing_Dominant',
         'SharpMove_Timing_Magnitude', 
+            # 🎯 Odds timing magnitude (odds) — ✅ NEW ADDITIONS
+        'Odds_Move_Magnitude',
+        'OddsMove_Magnitude_Overnight_VeryEarly', 'OddsMove_Magnitude_Overnight_MidRange',
+        'OddsMove_Magnitude_Overnight_LateGame', 'OddsMove_Magnitude_Overnight_Urgent',
+        'OddsMove_Magnitude_Early_VeryEarly', 'OddsMove_Magnitude_Early_MidRange',
+        'OddsMove_Magnitude_Early_LateGame', 'OddsMove_Magnitude_Early_Urgent',
+        'OddsMove_Magnitude_Midday_VeryEarly', 'OddsMove_Magnitude_Midday_MidRange',
+        'OddsMove_Magnitude_Midday_LateGame', 'OddsMove_Magnitude_Midday_Urgent',
+        'OddsMove_Magnitude_Late_VeryEarly', 'OddsMove_Magnitude_Late_MidRange',
+        'OddsMove_Magnitude_Late_LateGame', 'OddsMove_Magnitude_Late_Urgent'
+
     ]
     
     
