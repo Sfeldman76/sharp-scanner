@@ -577,62 +577,58 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         )
 
         return f"{tod}_{mtg}"
-    for limit, curr_val, curr_odds, ts, game_start in entries:
-        # === Line movement
-        if open_val is not None and curr_val is not None:
-            delta = curr_val - open_val
-            sharp_move_delta = abs(delta)
-            logging.debug(f"🧪 Line Δ: {delta:.3f}, Time: {ts}, Game_Start: {game_start}")
-        
-        # === Odds movement
+    for limit, curr_val, ts, game_start, curr_odds in entries:
         try:
-            # === Line movement logic
-            if open_val is not None and curr is not None:
-                delta = curr - open_val
+            # === Line movement
+            if open_val is not None and curr_val is not None:
+                delta = curr_val - open_val
                 sharp_move_delta = abs(delta)
-                logging.debug(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr}")
-        
+                logging.debug(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr_val}")
+    
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
-        
+    
+                    # Signal only if directionally consistent
                     if mtype == 'totals':
-                        if 'under' in label and curr < open_val:
+                        if 'under' in label and curr_val < open_val:
                             move_signal += sharp_move_delta
-                        elif 'over' in label and curr > open_val:
+                        elif 'over' in label and curr_val > open_val:
                             move_signal += sharp_move_delta
                     elif mtype == 'spreads':
-                        if open_val < 0 and curr < open_val:
+                        if open_val < 0 and curr_val < open_val:
                             move_signal += sharp_move_delta
-                        elif open_val > 0 and curr > open_val:
+                        elif open_val > 0 and curr_val > open_val:
                             move_signal += sharp_move_delta
-        
-                    # Timing bucket for sharp move
+    
+                    # Timing bucket for line move
                     timing_label = get_hybrid_bucket(ts, game_start)
                     hybrid_timing_mags[timing_label] += sharp_move_delta
-        
-            # === Odds movement logic (always check independently)
+    
+            # === Odds movement (independent check)
             if open_odds is not None and curr_odds is not None:
                 odds_delta = curr_odds - open_odds
                 odds_move_delta = abs(odds_delta)
                 logging.debug(f"🧾 Odds Δ: {odds_delta:.1f}, From {open_odds} → {curr_odds}")
-        
+    
                 if odds_move_delta >= 1:
                     odds_move_magnitude_score += odds_move_delta
-        
+    
                     # Timing bucket for odds move
                     timing_label = get_hybrid_bucket(ts, game_start)
                     hybrid_timing_odds_mags[timing_label] += odds_move_delta
-        
+    
+            # Limit handling
+            if limit is not None:
+                total_limit += limit
+                if limit >= 100:
+                    limit_score += limit
+    
+            entry_count += 1
+    
         except Exception as e:
             logging.warning(f"⚠️ Error computing sharp metrics row: {e}")
-
-        if limit is not None:
-            total_limit += limit
-            if limit >= 100:
-                limit_score += limit
-
-        entry_count += 1
-
+    
+        
     # Identify strongest bucket
     if hybrid_timing_mags:
         dominant_label, dominant_mag = max(hybrid_timing_mags.items(), key=lambda x: x[1])
@@ -650,7 +646,10 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         f'SharpMove_Magnitude_{b}': round(hybrid_timing_mags.get(b, 0.0), 3)
         for b in all_possible_buckets
     }
-    
+    flattened_odds_buckets = {
+        f'OddsMove_Magnitude_{b}': round(hybrid_timing_odds_mags.get(b, 0.0), 3)
+        for b in all_possible_buckets
+    }
     # ✅ Final return dictionary
     return {
         'Sharp_Move_Signal': int(move_signal > 0),
