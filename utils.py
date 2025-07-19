@@ -585,20 +585,16 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             logging.debug(f"🧪 Line Δ: {delta:.3f}, Time: {ts}, Game_Start: {game_start}")
         
         # === Odds movement
-        if open_odds is not None and curr_odds is not None:
-            odds_delta = curr_odds - open_odds
-            odds_move_delta = abs(odds_delta)
-            logging.debug(f"🧾 Odds Δ: {odds_delta:.1f}, From {open_odds} → {curr_odds}")
+        try:
+            # === Line movement logic
+            if open_val is not None and curr is not None:
+                delta = curr - open_val
+                sharp_move_delta = abs(delta)
+                logging.debug(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr}")
         
-            if odds_move_delta >= 1:
-                odds_move_magnitude_score += odds_move_delta
-                timing_label = get_hybrid_bucket(ts, game_start)
-                hybrid_timing_odds_mags[timing_label] += odds_move_delta
-        
-
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
-
+        
                     if mtype == 'totals':
                         if 'under' in label and curr < open_val:
                             move_signal += sharp_move_delta
@@ -609,12 +605,26 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                             move_signal += sharp_move_delta
                         elif open_val > 0 and curr > open_val:
                             move_signal += sharp_move_delta
-
-                    # Hybrid timing bucket
+        
+                    # Timing bucket for sharp move
                     timing_label = get_hybrid_bucket(ts, game_start)
                     hybrid_timing_mags[timing_label] += sharp_move_delta
-            except Exception:
-                continue
+        
+            # === Odds movement logic (always check independently)
+            if open_odds is not None and curr_odds is not None:
+                odds_delta = curr_odds - open_odds
+                odds_move_delta = abs(odds_delta)
+                logging.debug(f"🧾 Odds Δ: {odds_delta:.1f}, From {open_odds} → {curr_odds}")
+        
+                if odds_move_delta >= 1:
+                    odds_move_magnitude_score += odds_move_delta
+        
+                    # Timing bucket for odds move
+                    timing_label = get_hybrid_bucket(ts, game_start)
+                    hybrid_timing_odds_mags[timing_label] += odds_move_delta
+        
+        except Exception as e:
+            logging.warning(f"⚠️ Error computing sharp metrics row: {e}")
 
         if limit is not None:
             total_limit += limit
