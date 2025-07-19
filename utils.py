@@ -659,9 +659,12 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         'Sharp_Limit_Total': round(total_limit, 1),
         'SharpMove_Timing_Dominant': dominant_label,
         'SharpMove_Timing_Magnitude': round(dominant_mag, 3),
-        **flattened_buckets,  # ✅ comma added here
-        'Odds_Move_Magnitude': round(odds_move_magnitude_score, 2),  # ✅ comma at end
-        **flattened_odds_buckets
+        **flattened_buckets,
+        'Odds_Move_Magnitude': round(odds_move_magnitude_score, 2),
+        **flattened_odds_buckets,
+        
+        # ✅ Dummy score placeholder
+        'SharpBetScore': 0.0
     }
     
 def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
