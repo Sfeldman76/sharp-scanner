@@ -629,17 +629,9 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None):
         'Sharp_Limit_Total': round(total_limit, 1),
         'SharpMove_Timing_Dominant': dominant_label,
         'SharpMove_Timing_Magnitude': round(dominant_mag, 3),
-        'SharpBetScore': round(
-            2.0 * move_signal +
-            2.0 * limit_score +
-            1.5 * time_score +
-            0.001 * total_limit +
-            3.0 * move_magnitude_score, 2
-        ),
         **flattened_buckets
     }
-
-
+    
 def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
     logging.info(f"🚦 Starting apply_sharp_scoring with {len(rows)} rows")
     
