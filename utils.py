@@ -583,7 +583,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             if open_val is not None and curr_val is not None:
                 delta = curr_val - open_val
                 sharp_move_delta = abs(delta)
-                logging.debug(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr_val}")
+                logging.info(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr_val}")
     
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
@@ -608,7 +608,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             if open_odds is not None and curr_odds is not None:
                 odds_delta = curr_odds - open_odds
                 odds_move_delta = abs(odds_delta)
-                logging.debug(f"🧾 Odds Δ: {odds_delta:.1f}, From {open_odds} → {curr_odds}")
+                logging.info(f"🧾 Odds Δ: {odds_delta:.1f}, From {open_odds} → {curr_odds}")
     
                 if odds_move_delta >= 1:
                     odds_move_magnitude_score += odds_move_delta
