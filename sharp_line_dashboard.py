@@ -327,7 +327,7 @@ def build_merge_key(home, away, game_start):
 
 
 
-def read_recent_sharp_moves(hours=96, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
     try:
         client = bq_client
         query = f"""
@@ -490,7 +490,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 
     
     
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 10):
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 4):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
     # ✅ Load from sharp_scores_full with all necessary columns up front
