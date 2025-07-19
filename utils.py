@@ -534,12 +534,12 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     
     for i, entry in enumerate(entries[:5]):
         logging.debug(f"🧾 Entry {i+1}/{len(entries)} — {entry}")
-        if len(entry) == 4:
-            limit, curr, ts, game_start = entry
-            logging.debug(f"🧪 Parsed → Limit={limit}, Value={curr}, Time={ts}, Game_Start={game_start}")
+        if len(entry) == 5:
+            limit, curr_val, ts, game_start, curr_odds = entry
+            logging.debug(f"🧪 Parsed → Limit={limit}, Value={curr_val}, Time={ts}, Game_Start={game_start}, Odds={curr_odds}")
         else:
             logging.warning(f"⚠️ Malformed entry: {entry}")
-        
+            
     
      
     move_signal = 0.0
