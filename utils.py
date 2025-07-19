@@ -856,11 +856,16 @@ def apply_compute_sharp_metrics_rowwise(row, df_history):
     ]
     entries = entries.sort_values('Snapshot_Timestamp')
 
+    # ✅ Ensure Odds_Price is included — fallback to None if missing
+    if 'Odds_Price' not in entries.columns:
+        entries['Odds_Price'] = None
+
     entry_group = list(zip(
         entries['Limit'],
         entries['Value'],
         entries['Snapshot_Timestamp'],
-        entries['Game_Start']
+        entries['Game_Start'],
+        entries['Odds_Price']  # ✅ Added odds to tuple
     ))
 
     open_val = (
@@ -869,12 +874,18 @@ def apply_compute_sharp_metrics_rowwise(row, df_history):
     )
 
     try:
-        sharp_metrics = compute_sharp_metrics(entry_group, open_val, row['Market'], row['Outcome'])
+        sharp_metrics = compute_sharp_metrics(
+            entry_group,
+            open_val,
+            row['Market'],
+            row['Outcome'],
+            gk=row.get('Game_Key'),
+            book=row.get('Book')
+        )
         return pd.Series(sharp_metrics)
     except Exception as e:
         logger.warning(f"❌ Failed compute_sharp_metrics for {key}: {e}")
-        return pd.Series({})  # return empty if error
-        
+        return pd.Series({})
         
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
