@@ -975,11 +975,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
-        .dropna(subset=['Value', 'Implied_Prob'])  # Ensure all three are present
+        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])  # ✅ all three required
         .drop_duplicates(subset=merge_keys, keep='first')
-        .loc[:, merge_keys + ['Value', 'Implied_Prob']]
+        .loc[:, merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
         .rename(columns={
-            'Value': 'Open_Value',           
+            'Value': 'Open_Value',
+            'Odds_Price': 'Open_Odds',
             'Implied_Prob': 'First_Imp_Prob'
         })
     )
