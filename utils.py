@@ -670,44 +670,53 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         'SharpBetScore': 0.0
     }
     
-def apply_sharp_scoring(rows, sharp_limit_map, line_open_map, sharp_total_limit_map):
-    logging.info(f"🚦 Starting apply_sharp_scoring with {len(rows)} rows")
+def compute_all_sharp_metrics(df_all_snapshots):
+    results = []
+
+    grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+
+    for (gk, market, outcome, book), group in grouped:
+        game_start = (
+            group['Game_Start'].dropna().iloc[0]
+            if 'Game_Start' in group and not group['Game_Start'].isnull().all()
+            else None
+        )
+        open_val = (
+            group.sort_values('Snapshot_Timestamp')['Value']
+            .dropna().iloc[0]
+            if not group['Value'].isnull().all()
+            else None
+        )
+        open_odds = (
+            group.sort_values('Snapshot_Timestamp')['Odds_Price']
+            .dropna().iloc[0]
+            if not group['Odds_Price'].isnull().all()
+            else None
+        )
+
+        entries = list(zip(
+            group['Limit'],
+            group['Value'],
+            group['Snapshot_Timestamp'],
+            [game_start] * len(group),
+            group['Odds_Price']
+        ))
+
+        metrics = compute_sharp_metrics(
+            entries, open_val=open_val, mtype=market, label=outcome,
+            gk=gk, book=book, open_odds=open_odds
+        )
+        metrics.update({
+            'Game_Key': gk,
+            'Market': market,
+            'Outcome': outcome,
+            'Bookmaker': book
+        })
+        results.append(metrics)
+
+    return pd.DataFrame(results)
     
-    for r in rows:
-        game = r.get('Game')
-        market = r.get('Market')
-        outcome = r.get('Outcome')
-        book = r.get('Bookmaker')
-        gk = r.get('Game_Key')
-
-        key_full = (game, market, outcome)
-        key_map = (game, market)
-
-        entry_group = sharp_limit_map.get(key_map, {}).get(outcome, [])
-
-        if not entry_group:
-            logging.warning(f"⚠️ No entry group for {key_full} → Row: {r}")
-            continue
-
-        malformed = [e for e in entry_group if len(e) != 4]
-        if malformed:
-            logging.warning(f"⚠️ Malformed entry group for {key_full}: {malformed} → Row: {r}")
-            continue
-
-        open_val = line_open_map.get(key_full, (None,))[0]
-
-        logging.debug(f"🧠 Computing sharp metrics for Game={gk}, Market={market}, Outcome={outcome}, Book={book}")
-        logging.debug(f"📏 open_val={open_val} — entry count={len(entry_group)}")
-        logging.debug(f"🧪 First entry: {entry_group[0]}")
-
-        try:
-            sharp_metrics = compute_sharp_metrics(entry_group, open_val, market, outcome, gk=gk, book=book)
-            r.update(sharp_metrics)
-        except Exception as e:
-            logging.error(f"❌ Failed to compute sharp metrics for {key_full}: {e}", exc_info=True)
-    return rows
-
-
+    
 SPORT_ALIAS = {
     'AMERICANFOOTBALL_CFL': 'CFL',
     'BASEBALL_MLB': 'MLB',
@@ -852,46 +861,7 @@ def add_minutes_to_game(df):
     )
 
     return df
-def apply_compute_sharp_metrics_rowwise(row, df_history):
-    key = (row['Game'], row['Market'], row['Outcome'])
-    entries = df_history[
-        (df_history['Game'] == key[0]) &
-        (df_history['Market'] == key[1]) &
-        (df_history['Outcome'] == key[2]) &
-        (df_history['Book'] == row['Book'])  # optional: book filtering
-    ]
-    entries = entries.sort_values('Snapshot_Timestamp')
 
-    # ✅ Ensure Odds_Price is included — fallback to None if missing
-    if 'Odds_Price' not in entries.columns:
-        entries['Odds_Price'] = None
-
-    entry_group = list(zip(
-        entries['Limit'],
-        entries['Value'],
-        entries['Snapshot_Timestamp'],
-        entries['Game_Start'],
-        entries['Odds_Price']  # ✅ Added odds to tuple
-    ))
-
-    open_val = (
-        entries['Value'].iloc[0]
-        if not entries.empty else None
-    )
-
-    try:
-        sharp_metrics = compute_sharp_metrics(
-            entry_group,
-            open_val,
-            row['Market'],
-            row['Outcome'],
-            gk=row.get('Game_Key'),
-            book=row.get('Book')
-        )
-        return pd.Series(sharp_metrics)
-    except Exception as e:
-        logger.warning(f"❌ Failed compute_sharp_metrics for {key}: {e}")
-        return pd.Series({})
         
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
@@ -948,11 +918,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = add_minutes_to_game(df)
     
     logger.info("🧠 Computing sharp move metrics from historical snapshots...")
-    sharp_metrics_df = df.apply(lambda row: apply_compute_sharp_metrics_rowwise(row, df_all_snapshots), axis=1)
-    
+    logger.info("🧠 Computing sharp move metrics from historical snapshots...")
+    sharp_metrics_df = compute_all_sharp_metrics(df_all_snapshots)
     logger.info(f"🧮 Merged sharp move metrics — {sharp_metrics_df.shape[1]} columns")
+    df = df.merge(sharp_metrics_df, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')   
+  
     
-    df = pd.concat([df.reset_index(drop=True), sharp_metrics_df.reset_index(drop=True)], axis=1)
+    
     # Normalize merge keys
     # Normalize merge keys
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
@@ -1879,19 +1851,39 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logger.error(f"❌ Failed scoring {market_type.upper()}")
             logger.error(traceback.format_exc())
 
-       
-  
     try:
         df_final = pd.DataFrame()
+        hybrid_line_cols = [
+            f'SharpMove_Magnitude_{b}' for b in [
+                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            ]
+        ]
+    
+        hybrid_odds_cols = [
+            f'OddsMove_Magnitude_{b}' for b in [
+                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            ]
+        ]
     
         if scored_all:
-       
+            # ✅ Concatenate first!
             df_final = pd.concat(scored_all, ignore_index=True)
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
+    
+            # ✅ Then create hybrid timing flags
+            df_final['Hybrid_Line_Timing_Flag'] = df_final[hybrid_line_cols].gt(1.0).any(axis=1).astype(int)
+            df_final['Hybrid_Odds_Timing_Flag'] = df_final[hybrid_odds_cols].gt(1.0).any(axis=1).astype(int)
+    
+            # ✅ Now compute active signals including hybrid flags
             df_final['Active_Signal_Count'] = (
                 (df_final['Sharp_Move_Signal'] == 1).astype(int) +
                 (df_final['Sharp_Limit_Jump'] == 1).astype(int) +
-                (df_final['Sharp_Time_Score'] > 0.5).astype(int) +
                 (df_final['Sharp_Limit_Total'] > 10000).astype(int) +
                 (df_final['LimitUp_NoMove_Flag'] == 1).astype(int) +
                 (df_final['Market_Leader'] == 1).astype(int) +
@@ -1906,7 +1898,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['SharpMove_Resistance_Break'] == 1).astype(int) +
                 (df_final['Late_Game_Steam_Flag'] == 1).astype(int) +
                 (df_final['Value_Reversal_Flag'] == 1).astype(int) +
-                (df_final['Odds_Reversal_Flag'] == 1).astype(int)
+                (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
+                (df_final['SharpMove_Timing_Magnitude'] > 1.0).astype(int) +
+                (df_final['Odds_Move_Magnitude'] > 1.0).astype(int) +
+                df_final['Hybrid_Line_Timing_Flag'] +
+                df_final['Hybrid_Odds_Timing_Flag']
             )
 
             # === 🔍 Diagnostic for unscored rows
