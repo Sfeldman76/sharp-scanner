@@ -29,14 +29,15 @@ from utils import (
     compute_and_write_market_weights,
     build_game_key,
     normalize_book_key, 
-    apply_sharp_scoring,
+    #apply_sharp_scoring,
     compute_sharp_metrics,
     compute_sharp_prob_shift,
     log_memory,
     calc_implied_prob,
     load_market_weights_from_bq,
     compute_sharp_magnitude_by_time_bucket,
-    apply_compute_sharp_metrics_rowwise
+    #apply_compute_sharp_metrics_rowwise
+    compute_all_sharp_metrics
 )
 
 def detect_and_save_all_sports():
