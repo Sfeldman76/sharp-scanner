@@ -531,9 +531,9 @@ def load_market_weights_from_bq():
 
 
 def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None):
-    logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
-    logging.debug(f"📥 Open value: {open_val}, Open odds: {open_odds}")
-    logging.debug(f"📦 Received {len(entries)} entries")
+    logging.info(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
+    logging.info(f"📥 Open value: {open_val}, Open odds: {open_odds}")
+    logging.info(f"📦 Received {len(entries)} entries")
 
     move_signal = 0.0
     move_magnitude_score = 0.0
@@ -581,7 +581,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             continue
         
         limit, curr_val, ts, game_start, curr_odds = entry
-        logging.debug(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
+        logging.info(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
 
         try:
             # === Line movement
@@ -612,7 +612,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                 odds_delta = curr_odds - prev_odds
                 odds_move_delta = abs(odds_delta)
 
-                logging.debug(f"🧾 Odds Δ: {odds_delta:+.1f}, From {prev_odds} → {curr_odds}")
+                logging.info(f"🧾 Odds Δ: {odds_delta:+.1f}, From {prev_odds} → {curr_odds}")
                 if odds_move_delta >= 1:
                     odds_move_magnitude_score += odds_move_delta  # total magnitude
                     timing_label = get_hybrid_bucket(ts, game_start)
@@ -657,8 +657,8 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     dominant_label, dominant_mag = max(
         hybrid_timing_mags.items(), key=lambda x: x[1], default=("unknown", 0.0)
     )
-    logging.debug(f"📊 Final hybrid_timing_mags: {dict(hybrid_timing_mags)}")
-    logging.debug(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
+    logging.info(f"📊 Final hybrid_timing_mags: {dict(hybrid_timing_mags)}")
+    logging.info(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
     return {
         'Sharp_Move_Signal': int(move_signal > 0),
         'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
