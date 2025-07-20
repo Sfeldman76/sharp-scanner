@@ -1986,6 +1986,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         .set_index(['Game', 'Market', 'Outcome', 'Book'])['Value']
         .to_dict()
     )
+    # ✅ Build old odds map using first recorded odds per outcome
+    old_odds_map = (
+        df_history
+        .dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Odds_Price'])
+        .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
+        .set_index(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
+        .to_dict()
+    )
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
@@ -2067,7 +2075,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
                     # ⚠️ Read the open value *before* possibly writing it
                     open_val = old_val_map.get((game_name, mtype, label, book_key))
-                    
+                    open_odds = old_odds_map.get((game_name, mtype, label, book_key))
+                    entry['Open_Odds'] = open_odds
                     # ✅ Only set the open value if it's not already set
                     
                     if (game_name, mtype, label) not in line_open_map and value is not None:
@@ -2094,7 +2103,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
                     }
-                
+                    entry['Open_Odds'] = open_odds
                    
                     # ✅ Defensive check before adding the entry
                     required_fields = ['Game_Key', 'Game', 'Book', 'Market', 'Outcome', 'Value', 'Odds_Price']
