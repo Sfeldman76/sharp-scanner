@@ -547,7 +547,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     abs_net_line_move = None
     net_odds_move = None
     abs_net_odds_move = None
-    
+   
     
     def get_hybrid_bucket(ts, game_start):
         hour = pd.to_datetime(ts).hour
@@ -571,6 +571,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         return f"{tod}_{mtg}"
 
     # === NEW: track previous values for proper delta logic
+    entries = sorted(entries, key=lambda x: x[2])  # Sort by timestamp
     prev_val = open_val
     prev_odds = open_odds
 
@@ -578,7 +579,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         if len(entry) != 5:
             logging.warning(f"⚠️ Malformed entry {i+1}: {entry}")
             continue
-
+        
         limit, curr_val, ts, game_start, curr_odds = entry
         logging.debug(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
 
@@ -602,7 +603,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                             move_signal += sharp_move_delta
 
                     timing_label = get_hybrid_bucket(ts, game_start)
-                    hybrid_timing_mags[timing_label] += delta  # signed value, can be positive or negative
+                    hybrid_timing_mags[timing_label] += sharp_move_delta  # <-- CORRECT  # signed value, can be positive or negative
 
                 prev_val = curr_val
 
@@ -615,7 +616,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                 if odds_move_delta >= 1:
                     odds_move_magnitude_score += odds_move_delta  # total magnitude
                     timing_label = get_hybrid_bucket(ts, game_start)
-                    hybrid_timing_odds_mags[timing_label] += curr_odds - prev_odds  # ✅ signed move (directional)
+                    hybrid_timing_odds_mags[timing_label] += odds_move_delta  # ✅ always positive  # ✅ signed move (directional)
                 
                 prev_odds = curr_odds
             # === Net line movement from open to final value
@@ -656,7 +657,8 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     dominant_label, dominant_mag = max(
         hybrid_timing_mags.items(), key=lambda x: x[1], default=("unknown", 0.0)
     )
-
+    logging.debug(f"📊 Final hybrid_timing_mags: {dict(hybrid_timing_mags)}")
+    logging.debug(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
     return {
         'Sharp_Move_Signal': int(move_signal > 0),
         'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
