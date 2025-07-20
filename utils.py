@@ -605,17 +605,21 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                     hybrid_timing_mags[timing_label] += sharp_move_delta
     
             # === Odds movement (independent check)
-            if open_odds is not None and curr_odds is not None:
-                odds_delta = curr_odds - open_odds
+            # === Odds movement (independent check)
+            if pd.notna(open_odds) and pd.notna(curr_odds):
+                odds_delta = curr_odds - open_odds  # Raw direction
                 odds_move_delta = abs(odds_delta)
-                logging.info(f"🧾 Odds Δ: {odds_delta:.1f}, From {open_odds} → {curr_odds}")
-    
+            
+                logging.info(f"🧾 Odds Δ: {odds_delta:+.1f}, From {open_odds} → {curr_odds}")
+            
+                # ✅ Interpret "sharpness" as getting lower (shorter odds = sharper)
                 if odds_move_delta >= 1:
-                    odds_move_magnitude_score += odds_move_delta
-    
-                    # Timing bucket for odds move
-                    timing_label = get_hybrid_bucket(ts, game_start)
-                    hybrid_timing_odds_mags[timing_label] += odds_move_delta
+                    if abs(curr_odds) < abs(open_odds):
+                        odds_move_magnitude_score += odds_move_delta
+            
+                        # ✅ Only add to bucket if it's actually sharper
+                        timing_label = get_hybrid_bucket(ts, game_start)
+                        hybrid_timing_odds_mags[timing_label] += odds_move_delta
     
             # Limit handling
             if limit is not None:
