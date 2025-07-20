@@ -975,12 +975,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
-        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])  # Ensure all three are present
+        .dropna(subset=['Value', 'Implied_Prob'])  # Ensure all three are present
         .drop_duplicates(subset=merge_keys, keep='first')
-        .loc[:, merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
+        .loc[:, merge_keys + ['Value', 'Implied_Prob']]
         .rename(columns={
-            'Value': 'Open_Value',
-            'Odds_Price': 'Open_Odds',
+            'Value': 'Open_Value',           
             'Implied_Prob': 'First_Imp_Prob'
         })
     )
@@ -2096,14 +2095,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Book': book_key,
                         'Value': value,
                         'Odds_Price': odds_price,
+                        'Open_Odds': open_odds,  # ✅ insert here
                         'Limit': limit,
                         'Old Value': None,
-                        #'Delta': round(value - open_val, 2) if open_val is not None and value is not None else None,
                         'Home_Team_Norm': home_team,
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
                     }
-                    entry['Open_Odds'] = open_odds
                    
                     # ✅ Defensive check before adding the entry
                     required_fields = ['Game_Key', 'Game', 'Book', 'Market', 'Outcome', 'Value', 'Odds_Price']
