@@ -527,27 +527,14 @@ def load_market_weights_from_bq():
 
 
 def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None):
-    
     logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
-    logging.debug(f"📥 Open value: {open_val}")
+    logging.debug(f"📥 Open value: {open_val}, Open odds: {open_odds}")
     logging.debug(f"📦 Received {len(entries)} entries")
-    
-    for i, entry in enumerate(entries[:5]):
-        logging.debug(f"🧾 Entry {i+1}/{len(entries)} — {entry}")
-        if len(entry) == 5:
-            limit, curr_val, ts, game_start, curr_odds = entry
-            logging.debug(f"🧪 Parsed → Limit={limit}, Value={curr_val}, Time={ts}, Game_Start={game_start}, Odds={curr_odds}")
-        else:
-            logging.warning(f"⚠️ Malformed entry: {entry}")
-            
-    
-     
+
     move_signal = 0.0
     move_magnitude_score = 0.0
     limit_score = 0.0
     total_limit = 0.0
-    entry_count = 0
-    time_score = 0.0
     hybrid_timing_mags = defaultdict(float)
     odds_move_magnitude_score = 0.0
     hybrid_timing_odds_mags = defaultdict(float)
@@ -558,16 +545,12 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60
             if pd.notnull(game_start) else None
         )
-
-        # Time of day
         tod = (
             'Overnight' if 0 <= hour <= 5 else
             'Early'     if 6 <= hour <= 11 else
             'Midday'    if 12 <= hour <= 15 else
             'Late'
         )
-
-        # Time-to-game
         mtg = (
             'VeryEarly' if minutes_to_game is None else
             'VeryEarly' if minutes_to_game > 720 else
@@ -575,76 +558,71 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             'LateGame'  if 60 < minutes_to_game <= 180 else
             'Urgent'
         )
-
         return f"{tod}_{mtg}"
-    for limit, curr_val, ts, game_start, curr_odds in entries:
+
+    # === NEW: track previous values for proper delta logic
+    prev_val = open_val
+    prev_odds = open_odds
+
+    for i, entry in enumerate(entries):
+        if len(entry) != 5:
+            logging.warning(f"⚠️ Malformed entry {i+1}: {entry}")
+            continue
+
+        limit, curr_val, ts, game_start, curr_odds = entry
+        logging.debug(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
+
         try:
             # === Line movement
-            if open_val is not None and curr_val is not None:
-                delta = curr_val - open_val
+            if pd.notna(prev_val) and pd.notna(curr_val):
+                delta = curr_val - prev_val
                 sharp_move_delta = abs(delta)
-                logging.debug(f"📏 Line Δ: {delta:.3f}, From {open_val} → {curr_val}")
-    
+
                 if sharp_move_delta >= 0.01:
                     move_magnitude_score += sharp_move_delta
-    
-                    # Signal only if directionally consistent
                     if mtype == 'totals':
-                        if 'under' in label and curr_val < open_val:
+                        if 'under' in label and curr_val < prev_val:
                             move_signal += sharp_move_delta
-                        elif 'over' in label and curr_val > open_val:
+                        elif 'over' in label and curr_val > prev_val:
                             move_signal += sharp_move_delta
                     elif mtype == 'spreads':
-                        if open_val < 0 and curr_val < open_val:
+                        if prev_val < 0 and curr_val < prev_val:
                             move_signal += sharp_move_delta
-                        elif open_val > 0 and curr_val > open_val:
+                        elif prev_val > 0 and curr_val > prev_val:
                             move_signal += sharp_move_delta
-    
-                    # Timing bucket for line move
+
                     timing_label = get_hybrid_bucket(ts, game_start)
-                    hybrid_timing_mags[timing_label] += sharp_move_delta
-    
-            # === Odds movement (independent check)
-            # === Odds movement (independent check)
-            if pd.notna(open_odds) and pd.notna(curr_odds):
-                odds_delta = curr_odds - open_odds  # Raw direction
+                    hybrid_timing_mags[timing_label] += delta  # signed value, can be positive or negative
+
+                prev_val = curr_val
+
+            # === Odds movement
+            if pd.notna(prev_odds) and pd.notna(curr_odds):
+                odds_delta = curr_odds - prev_odds
                 odds_move_delta = abs(odds_delta)
-            
-                logging.debug(f"🧾 Odds Δ: {odds_delta:+.1f}, From {open_odds} → {curr_odds}")
-            
-                # ✅ Interpret "sharpness" as getting lower (shorter odds = sharper)
+
+                logging.debug(f"🧾 Odds Δ: {odds_delta:+.1f}, From {prev_odds} → {curr_odds}")
                 if odds_move_delta >= 1:
-                    if abs(curr_odds) < abs(open_odds):
-                        odds_move_magnitude_score += odds_move_delta
-            
-                        # ✅ Only add to bucket if it's actually sharper
-                        timing_label = get_hybrid_bucket(ts, game_start)
-                        hybrid_timing_odds_mags[timing_label] += odds_move_delta
-    
-            # Limit handling
+                    odds_move_magnitude_score += odds_move_delta  # total magnitude
+                    timing_label = get_hybrid_bucket(ts, game_start)
+                    hybrid_timing_odds_mags[timing_label] += curr_odds - prev_odds  # ✅ signed move (directional)
+                
+                prev_odds = curr_odds
+
+            # === Limit tracking
             if limit is not None:
                 total_limit += limit
                 if limit >= 100:
                     limit_score += limit
-    
-            entry_count += 1
-    
+
         except Exception as e:
-            logging.warning(f"⚠️ Error computing sharp metrics row: {e}")
-    
-        
-    # Identify strongest bucket
-    if hybrid_timing_mags:
-        dominant_label, dominant_mag = max(hybrid_timing_mags.items(), key=lambda x: x[1])
-    else:
-        dominant_label, dominant_mag = "unknown", 0.0
-    
-    # Flatten all buckets
+            logging.warning(f"⚠️ Error in entry {i+1}: {e}")
+
+    # === Final bucket flattening
     all_possible_buckets = [
-        'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-        'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-        'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-        'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+        f"{tod}_{mtg}"
+        for tod in ['Overnight', 'Early', 'Midday', 'Late']
+        for mtg in ['VeryEarly', 'MidRange', 'LateGame', 'Urgent']
     ]
     flattened_buckets = {
         f'SharpMove_Magnitude_{b}': round(hybrid_timing_mags.get(b, 0.0), 3)
@@ -654,7 +632,11 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         f'OddsMove_Magnitude_{b}': round(hybrid_timing_odds_mags.get(b, 0.0), 3)
         for b in all_possible_buckets
     }
-    # ✅ Final return dictionary
+
+    dominant_label, dominant_mag = max(
+        hybrid_timing_mags.items(), key=lambda x: x[1], default=("unknown", 0.0)
+    )
+
     return {
         'Sharp_Move_Signal': int(move_signal > 0),
         'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
@@ -665,10 +647,9 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         **flattened_buckets,
         'Odds_Move_Magnitude': round(odds_move_magnitude_score, 2),
         **flattened_odds_buckets,
-        
-        # ✅ Dummy score placeholder
         'SharpBetScore': 0.0
     }
+    
     
 def compute_all_sharp_metrics(df_all_snapshots):
     results = []
