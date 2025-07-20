@@ -988,7 +988,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             'Implied_Prob': 'First_Imp_Prob'
         })
     )
-    
+    # 🧼 Clean open fields before merge to avoid _x/_y suffixes
+    cols_to_clean = ['Open_Value', 'Open_Odds', 'First_Imp_Prob']
+    df = df.drop(columns=[col for col in cols_to_clean if col in df.columns], errors='ignore')
     logger.info(f"🧪 df_open columns: {df_open.columns.tolist()}")
     df = df.merge(df_open, on=merge_keys, how='left')
     logger.info(f"✅ Open fields present: {df[['Open_Value', 'Open_Odds', 'First_Imp_Prob']].notnull().sum().to_dict()}")
