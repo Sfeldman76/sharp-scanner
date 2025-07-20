@@ -610,7 +610,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                 odds_delta = curr_odds - open_odds  # Raw direction
                 odds_move_delta = abs(odds_delta)
             
-                logging.info(f"🧾 Odds Δ: {odds_delta:+.1f}, From {open_odds} → {curr_odds}")
+                logging.debug(f"🧾 Odds Δ: {odds_delta:+.1f}, From {open_odds} → {curr_odds}")
             
                 # ✅ Interpret "sharpness" as getting lower (shorter odds = sharper)
                 if odds_move_delta >= 1:
