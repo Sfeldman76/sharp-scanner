@@ -532,8 +532,8 @@ def load_market_weights_from_bq():
 
 def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None):
     logging.info(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
-    logging.info(f"📥 Open value: {open_val}, Open odds: {open_odds}")
-    logging.info(f"📦 Received {len(entries)} entries")
+    logging.debug(f"📥 Open value: {open_val}, Open odds: {open_odds}")
+    logging.debug(f"📦 Received {len(entries)} entries")
 
     move_signal = 0.0
     move_magnitude_score = 0.0
@@ -612,7 +612,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                 odds_delta = curr_odds - prev_odds
                 odds_move_delta = abs(odds_delta)
 
-                logging.info(f"🧾 Odds Δ: {odds_delta:+.1f}, From {prev_odds} → {curr_odds}")
+                logging.debug(f"🧾 Odds Δ: {odds_delta:+.1f}, From {prev_odds} → {curr_odds}")
                 if odds_move_delta >= 1:
                     odds_move_magnitude_score += odds_move_delta  # total magnitude
                     timing_label = get_hybrid_bucket(ts, game_start)
@@ -912,6 +912,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     )
     
     # ✅ Log any books missing one side of market
+    # ✅ Log any books missing one side of market
     missing_outcomes = outcome_counts[outcome_counts['Num_Outcomes'] < 2]
     if not missing_outcomes.empty:
         logger.warning(f"⚠️ Some (Game, Market, Bookmaker) combos are missing one side — {len(missing_outcomes)} rows")
@@ -919,29 +920,30 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     else:
         logger.info("✅ All Game + Market + Bookmaker combinations have both outcomes present.")
     
-    # === Load full sharp move history for enrichment
-   
+    # === Enrich with resistance, timing, etc.
     df = compute_line_resistance_flag(df, source='moves')
     df = add_minutes_to_game(df)
     
+    # ✅ Normalize merge keys before filtering and joining
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    for col in merge_keys:
+        df[col] = df[col].astype(str).str.strip().str.lower()
+        df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
+    
+    # ✅ Filter snapshot history to relevant rows
+    relevant_keys = df[merge_keys].drop_duplicates()
+    df_all_snapshots = df_all_snapshots.merge(relevant_keys, on=merge_keys, how='inner')
     
     logger.info("🧠 Computing sharp move metrics from historical snapshots...")
     sharp_metrics_df = compute_all_sharp_metrics(df_all_snapshots)
+    
     logger.info(f"🧮 Merged sharp move metrics — {sharp_metrics_df.shape[1]} columns")
-    df = df.merge(sharp_metrics_df, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')   
-  
+    df = df.merge(sharp_metrics_df, on=merge_keys, how='left')
+        
     
-    
-    # Normalize merge keys
-    # Normalize merge keys
-    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-        df[col] = df[col].astype(str).str.strip().str.lower()
-        df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
-
-
 
     # ✅ Proper openers block with all needed columns
-    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    
     df_open_book = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
