@@ -2075,7 +2075,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     # ⚠️ Read the open value *before* possibly writing it
                     open_val = old_val_map.get((game_name, mtype, label, book_key))
                     open_odds = old_odds_map.get((game_name, mtype, label, book_key))
-                    entry['Open_Odds'] = open_odds
+                    
                     # ✅ Only set the open value if it's not already set
                     
                     if (game_name, mtype, label) not in line_open_map and value is not None:
