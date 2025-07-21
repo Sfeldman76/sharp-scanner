@@ -1344,12 +1344,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['SharpMove_Resistance_Break'] = (
                 df_canon['Sharp_Move_Signal'] * df_canon['Was_Line_Resistance_Broken']
             )
-            for col in [
-                'Net_Line_Move_From_Opening', 'Abs_Line_Move_From_Opening',
-                'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening'
-            ]:
-                
-                df_canon[col] = pd.to_numeric(df_canon.get(col), errors='coerce')
+            df_canon['Net_Line_Move_From_Opening'] = df_canon['Value'] - df_canon['Open_Value']
+            df_canon['Abs_Line_Move_From_Opening'] = df_canon['Net_Line_Move_From_Opening'].abs()
+            df_canon['Net_Odds_Move_From_Opening'] = df_canon['Odds_Price'] - df_canon['Open_Odds']
+            df_canon['Abs_Odds_Move_From_Opening'] = df_canon['Net_Odds_Move_From_Opening'].abs()
             df_canon['Line_Resistance_Crossed_Levels'] = df_canon.get('Line_Resistance_Crossed_Levels', '[]')
             df_canon['Line_Resistance_Crossed_Count'] = df_canon.get('Line_Resistance_Crossed_Count', 0)
             df_canon['Line_Resistance_Crossed_Levels'] = df_canon['Line_Resistance_Crossed_Levels'].apply(
@@ -1498,12 +1496,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['SharpMove_Odds_Up'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] > 0)).astype(int)
             df_inverse['SharpMove_Odds_Down'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] < 0)).astype(int)
             df_inverse['SharpMove_Odds_Mag'] = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
-            for col in [
-                'Net_Line_Move_From_Opening', 'Abs_Line_Move_From_Opening',
-                'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening'
-            ]:
-                df_inverse[col] = pd.to_numeric(df_inverse.get(col), errors='coerce')
-                
+            df_inverse['Net_Line_Move_From_Opening'] = df_inverse['Value'] - df_inverse['Open_Value']
+            df_inverse['Abs_Line_Move_From_Opening'] = df_inverse['Net_Line_Move_From_Opening'].abs()
+            df_inverse['Net_Odds_Move_From_Opening'] = df_inverse['Odds_Price'] - df_inverse['Open_Odds']
+            df_inverse['Abs_Odds_Move_From_Opening'] = df_inverse['Net_Odds_Move_From_Opening'].abs()
+                            
             df_inverse['Was_Line_Resistance_Broken'] = df_inverse.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
             df_inverse['SharpMove_Resistance_Break'] = (
                 df_inverse['Sharp_Move_Signal'] * df_inverse['Was_Line_Resistance_Broken']
