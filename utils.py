@@ -1945,8 +1945,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Late_Game_Steam_Flag'] == 1).astype(int) +
                 (df_final['Value_Reversal_Flag'] == 1).astype(int) +
                 (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
-                (df_final['SharpMove_Timing_Magnitude'] > 1.0).astype(int) +
-                (df_final['Odds_Move_Magnitude'] > 1.0).astype(int) +
                 (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +    # ✅ NEW
                 (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +      # ✅ NEW
                 df_final['Hybrid_Line_Timing_Flag'] +
