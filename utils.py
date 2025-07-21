@@ -596,24 +596,28 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         try:
             # === Line movement
             if pd.notna(prev_val) and pd.notna(curr_val):
-                delta = curr_val - prev_val
-                sharp_move_delta = abs(delta)
+                delta = curr_val - prev_val  # 🔁 Signed delta
+                sharp_move_delta = delta     # No abs()
+            
+                # ✅ Always count signed movement magnitude
+                move_magnitude_score += sharp_move_delta
+            
+                # === Direction-aware sharp signal scoring
+                if mtype == 'totals':
+                    if 'under' in label and sharp_move_delta < 0:
+                        move_signal += sharp_move_delta
+                    elif 'over' in label and sharp_move_delta > 0:
+                        move_signal += sharp_move_delta
+                elif mtype == 'spreads':
+                    if prev_val < 0 and curr_val < prev_val:  # Favorite getting stronger
+                        move_signal += sharp_move_delta
+                    elif prev_val > 0 and curr_val > prev_val:  # Dog getting more dog
+                        move_signal += sharp_move_delta
+            
+                # ✅ Signed per-timing contribution
+                timing_label = get_hybrid_bucket(ts, game_start)
+                hybrid_timing_mags[timing_label] += sharp_move_delta
 
-                if sharp_move_delta >= 0.01:
-                    move_magnitude_score += sharp_move_delta
-                    if mtype == 'totals':
-                        if 'under' in label and curr_val < prev_val:
-                            move_signal += sharp_move_delta
-                        elif 'over' in label and curr_val > prev_val:
-                            move_signal += sharp_move_delta
-                    elif mtype == 'spreads':
-                        if prev_val < 0 and curr_val < prev_val:
-                            move_signal += sharp_move_delta
-                        elif prev_val > 0 and curr_val > prev_val:
-                            move_signal += sharp_move_delta
-
-                    timing_label = get_hybrid_bucket(ts, game_start)
-                    hybrid_timing_mags[timing_label] += sharp_move_delta  # <-- CORRECT  # signed value, can be positive or negative
 
                 prev_val = curr_val
 
@@ -623,18 +627,19 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
                 prev_prob = implied_prob(prev_odds)
                 curr_prob = implied_prob(curr_odds)
             
-                # ✅ Then compute delta
-                odds_delta = abs(curr_prob - prev_prob)
+                # ✅ Then compute delta (signed)
+                odds_delta = curr_prob - prev_prob
                 point_equiv = implied_prob_to_point_move(odds_delta)
             
-                logging.debug(f"🧾 Odds Δ: {odds_delta:+.3f} (~{point_equiv:.1f} pts), From {prev_odds} → {curr_odds}")
+                logging.debug(f"🧾 Odds Δ: {odds_delta:+.3f} (~{point_equiv:+.1f} pts), From {prev_odds} → {curr_odds}")
             
-                if odds_delta >= 0.01:  # i.e. 1 percentage point shift
-                    odds_move_magnitude_score += point_equiv  # count the scaled "point" move
-                    timing_label = get_hybrid_bucket(ts, game_start)
-                    hybrid_timing_odds_mags[timing_label] += point_equiv # ✅ always positive  # ✅ signed move (directional)
-                
-                prev_odds = curr_odds
+                # ✅ Always include signed magnitude
+                odds_move_magnitude_score += point_equiv  # preserve sign
+                timing_label = get_hybrid_bucket(ts, game_start)
+                hybrid_timing_odds_mags[timing_label] += odds_delta  # preserve sign
+            
+                prev_odds = curr_odds  # ✅ Important: update for next iteration
+
                 
                 
             # === Net line movement from open to final value
@@ -1815,11 +1820,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_inverse['Line_Delta'] > 0, 1,
                     np.where(df_inverse['Line_Delta'] < 0, 0, np.nan)
                 ).astype(float)
-                for col in [
-                    'Net_Line_Move_From_Opening', 'Abs_Line_Move_From_Opening',
-                    'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening'
-                ]:
-                    df_inverse[col] = pd.to_numeric(df_inverse.get(col), errors='coerce')
+                df_inverse['Net_Line_Move_From_Opening'] = df_inverse['Value'] - df_inverse['Open_Value']
+                df_inverse['Abs_Line_Move_From_Opening'] = df_inverse['Net_Line_Move_From_Opening'].abs()
+                df_inverse['Net_Odds_Move_From_Opening'] = df_inverse['Odds_Price'] - df_inverse['Open_Odds']
+                df_inverse['Abs_Odds_Move_From_Opening'] = df_inverse['Net_Odds_Move_From_Opening'].abs()
                     
                 df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
                 df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
