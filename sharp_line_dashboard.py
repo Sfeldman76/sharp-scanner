@@ -605,9 +605,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
         # Optional: Keep as debug flag, not as model feature
         # df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] > 10000).astype(int)
         
-        df_market['SharpMove_Odds_Up'] = ((df_market['Sharp_Move_Signal'] == 1) & (df_market['Odds_Shift'] > 0)).astype(int)
-        df_market['SharpMove_Odds_Down'] = ((df_market['Sharp_Move_Signal'] == 1) & (df_market['Odds_Shift'] < 0)).astype(int)
-        df_market['SharpMove_Odds_Mag'] = df_market['Odds_Shift'].abs() * df_market['Sharp_Move_Signal']
+        # Ensure NA-safe boolean logic and conversion
+        df_market['SharpMove_Odds_Up'] = (
+            ((df_market['Sharp_Move_Signal'] == 1) & (df_market['Odds_Shift'] > 0))
+            .fillna(False)
+            .astype(int)
+        )
+        
+        df_market['SharpMove_Odds_Down'] = (
+            ((df_market['Sharp_Move_Signal'] == 1) & (df_market['Odds_Shift'] < 0))
+            .fillna(False)
+            .astype(int)
+        )
+        
+        df_market['SharpMove_Odds_Mag'] = (
+            df_market['Odds_Shift'].abs().fillna(0) * df_market['Sharp_Move_Signal'].fillna(0)
+        )
+
         # === Interaction Features (filtered for value)
         #if 'Odds_Shift' in df_market.columns:
             #df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market['Odds_Shift']
@@ -618,10 +632,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
         df_market['SharpLimit_SharpBook'] = df_market['Is_Sharp_Book'] * df_market['Sharp_Limit_Total']
         df_market['LimitProtect_SharpMag'] = df_market['LimitUp_NoMove_Flag'] * df_market['Sharp_Line_Magnitude']
         # Example for engineered features
-        #df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market.get('Odds_Shift', 0)
+
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
         df_market['Was_Line_Resistance_Broken'] = df_market.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
-        df_market['SharpMove_Resistance_Break'] = (df_market['Sharp_Move_Signal'] * df_market['Was_Line_Resistance_Broken'])
+        df_market['SharpMove_Resistance_Break'] = (
+            df_market['Sharp_Move_Signal'].fillna(0).astype(int) *
+            df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int)
+        )
+
         # === Normalize Resistance Break Count
         df_market['Line_Resistance_Crossed_Count'] = (
             pd.to_numeric(df_market.get('Line_Resistance_Crossed_Count'), errors='coerce')
