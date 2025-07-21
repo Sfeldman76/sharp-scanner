@@ -677,9 +677,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
         
             # 🔥 Timing flags
             'Late_Game_Steam_Flag',
-            'SharpMove_Timing_Magnitude' 
+            
+            'Abs_Line_Move_From_Opening',
+            'Abs_Odds_Move_From_Opening', 
         ]
         hybrid_timing_features = [
+            
             f'SharpMove_Magnitude_{b}' for b in [
                 'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
                 'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
@@ -688,8 +691,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
             ]
         ]
         hybrid_odds_timing_features = [
-            'Odds_Move_Magnitude',
-        ] + [
+
             f'OddsMove_Magnitude_{b}' for b in [
                 'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
                 'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
@@ -1197,7 +1199,23 @@ def compute_diagnostics_vectorized(df):
     for col in flag_cols + magnitude_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
+    HYBRID_LINE_COLS = [
+        f'SharpMove_Magnitude_{b}' for b in [
+            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+        ]
+    ]
+    
+    HYBRID_ODDS_COLS = [
+        f'OddsMove_Magnitude_{b}' for b in [
+            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+        ]
+    ]
     # === Active Signal Count
     df['Active_Signal_Count'] = (
         (df['Sharp_Move_Signal'] == 1).astype(int) +
@@ -1217,11 +1235,12 @@ def compute_diagnostics_vectorized(df):
         (df['SharpMove_Resistance_Break'] == 1).astype(int) +
         (df['Late_Game_Steam_Flag'] == 1).astype(int) +
         (df['Value_Reversal_Flag'] == 1).astype(int) +
-        (df['Odds_Reversal_Flag'] == 1).astype(int)+
-        (df['SharpMove_Timing_Magnitude'] > 0.25).astype(int)
-
+        (df['Odds_Reversal_Flag'] == 1).astype(int) +
+        (df['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
+        (df['Abs_Odds_Move_From_Opening'] > 5.0).astype(int) +
+        df['Hybrid_Line_Timing_Flag'] +
+        df['Hybrid_Odds_Timing_Flag']
     )
-
     # === Passes Gate
     df['Passes_Gate'] = (
         df['Model Prob'] >= 0.55
@@ -1240,29 +1259,45 @@ def compute_diagnostics_vectorized(df):
 
     # === Why Model Likes It
     def build_why(row):
-        if pd.isna(row['Model Prob']):
+        if pd.isna(row.get('Model Prob')):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
-
+        if not row.get('Passes_Gate', False):
+            return "🤷‍♂️ Still Gathering Signal"
+    
         parts = []
-        if row['Sharp_Move_Signal']: parts.append("📈 Sharp Move Detected")
-        if row['Sharp_Limit_Jump']: parts.append("💰 Limit Jumped")
-        if row['Market_Leader']: parts.append("🏆 Market Leader")
-        if row['Is_Reinforced_MultiMarket']: parts.append("📊 Multi-Market Consensus")
-        if row['LimitUp_NoMove_Flag']: parts.append("🛡️ Limit Up + No Line Move")
-        if row['Is_Sharp_Book']: parts.append("🎯 Sharp Book Signal")
-        if row['SharpMove_Odds_Up']: parts.append("🟢 Odds Moved Up (Steam)")
-        if row['SharpMove_Odds_Down']: parts.append("🔻 Odds Moved Down (Buyback)")
-        if row['Is_Home_Team_Bet']: parts.append("🏠 Home Team Bet")
-        if row['Sharp_Line_Magnitude'] > 0.5: parts.append("📏 Big Line Move")
-        if row['Sharp_Time_Score'] > 0.5: parts.append("⏱️ Timing Edge")
-        if row['Rec_Line_Magnitude'] > 0.5: parts.append("📉 Rec Book Move")
-        if row['Sharp_Limit_Total'] > 10000: parts.append("💼 Sharp High Limit")
-        if row['SharpMove_Odds_Mag'] > 5: parts.append("💥 Sharp Odds Steam")
-        if row['SharpMove_Resistance_Break']: parts.append("🧱 Broke Key Resistance")
-        if row['Late_Game_Steam_Flag']: parts.append("⏰ Late Game Steam")
-        if row['Value_Reversal_Flag']: parts.append("🔄 Value Reversal")
-        if row['Odds_Reversal_Flag']: parts.append("📉 Odds Reversal")
-        HYBRID_TIMING_COLS = [
+    
+        # === Core sharp move reasons
+        if row.get('Sharp_Move_Signal'): parts.append("📈 Sharp Move Detected")
+        if row.get('Sharp_Limit_Jump'): parts.append("💰 Limit Jumped")
+        if row.get('Market_Leader'): parts.append("🏆 Market Leader")
+        if row.get('Is_Reinforced_MultiMarket'): parts.append("📊 Multi-Market Consensus")
+        if row.get('LimitUp_NoMove_Flag'): parts.append("🛡️ Limit Up + No Line Move")
+        if row.get('Is_Sharp_Book'): parts.append("🎯 Sharp Book Signal")
+    
+        # === Odds & line movement
+        if row.get('SharpMove_Odds_Up'): parts.append("🟢 Odds Moved Up (Steam)")
+        if row.get('SharpMove_Odds_Down'): parts.append("🔻 Odds Moved Down (Buyback)")
+        if row.get('Is_Home_Team_Bet'): parts.append("🏠 Home Team Bet")
+        if row.get('Sharp_Line_Magnitude', 0) > 0.5: parts.append("📏 Big Line Move")
+        if row.get('Rec_Line_Magnitude', 0) > 0.5: parts.append("📉 Rec Book Move")
+        if row.get('Sharp_Limit_Total', 0) > 10000: parts.append("💼 Sharp High Limit")
+        if row.get('SharpMove_Odds_Mag', 0) > 5: parts.append("💥 Sharp Odds Steam")
+    
+        # === Resistance and timing
+        if row.get('SharpMove_Resistance_Break'): parts.append("🧱 Broke Key Resistance")
+        if row.get('Late_Game_Steam_Flag'): parts.append("⏰ Late Game Steam")
+        if row.get('Value_Reversal_Flag'): parts.append("🔄 Value Reversal")
+        if row.get('Odds_Reversal_Flag'): parts.append("📉 Odds Reversal")
+        if row.get('Sharp_Time_Score', 0) > 0.5: parts.append("⏱️ Timing Edge")
+    
+        # === Line/odds movement from open
+        if row.get('Abs_Line_Move_From_Opening', 0) > 1.0:
+            parts.append("📈 Line Moved from Open")
+        if row.get('Abs_Odds_Move_From_Opening', 0) > 5.0:
+            parts.append("💹 Odds Moved from Open")
+    
+        # === Hybrid timing buckets — LINE
+        HYBRID_LINE_COLS = [
             'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
             'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
             'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
@@ -1272,22 +1307,40 @@ def compute_diagnostics_vectorized(df):
             'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
             'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
         ]
-        
+    
+        # === Hybrid timing buckets — ODDS
+        HYBRID_ODDS_COLS = [
+            'OddsMove_Magnitude_Overnight_VeryEarly', 'OddsMove_Magnitude_Overnight_MidRange',
+            'OddsMove_Magnitude_Overnight_LateGame', 'OddsMove_Magnitude_Overnight_Urgent',
+            'OddsMove_Magnitude_Early_VeryEarly', 'OddsMove_Magnitude_Early_MidRange',
+            'OddsMove_Magnitude_Early_LateGame', 'OddsMove_Magnitude_Early_Urgent',
+            'OddsMove_Magnitude_Midday_VeryEarly', 'OddsMove_Magnitude_Midday_MidRange',
+            'OddsMove_Magnitude_Midday_LateGame', 'OddsMove_Magnitude_Midday_Urgent',
+            'OddsMove_Magnitude_Late_VeryEarly', 'OddsMove_Magnitude_Late_MidRange',
+            'OddsMove_Magnitude_Late_LateGame', 'OddsMove_Magnitude_Late_Urgent'
+        ]
+    
         EMOJI_MAP = {
             'Overnight': '🌙', 'Early': '🌅',
             'Midday': '🌞', 'Late': '🌆'
         }
-        
-        for col in HYBRID_TIMING_COLS:
+    
+        for col in HYBRID_LINE_COLS:
             if row.get(col, 0) > 0.25:
-                parts.append(f"{EMOJI_MAP.get(col.split('_')[2], '⏱️')} {col.replace('SharpMove_Magnitude_', '').replace('_', ' ')} Sharp Move")
-
-
-
-        return " + ".join(parts) if parts else "🤷‍♂️ No clear reason yet"
-
+                bucket = col.replace('SharpMove_Magnitude_', '').replace('_', ' ')
+                emoji = EMOJI_MAP.get(col.split('_')[2], '⏱️')
+                parts.append(f"{emoji} {bucket} Sharp Move")
+    
+        for col in HYBRID_ODDS_COLS:
+            if row.get(col, 0) > 0.5:
+                bucket = col.replace('OddsMove_Magnitude_', '').replace('_', ' ')
+                emoji = EMOJI_MAP.get(col.split('_')[2], '⏱️')
+                parts.append(f"{emoji} {bucket} Odds Steam")
+    
+        return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
+    
+    # Apply to DataFrame
     df['Why Model Likes It'] = df.apply(build_why, axis=1)
-
     # === Final Output
     diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
