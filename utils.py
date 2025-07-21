@@ -687,7 +687,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         'Abs_Line_Move_From_Opening': round(abs_net_line_move, 3) if abs_net_line_move is not None else None,
         'Net_Odds_Move_From_Opening': round(net_odds_move, 3) if net_odds_move is not None else None,
         'Abs_Odds_Move_From_Opening': round(abs_net_odds_move, 3) if abs_net_odds_move is not None else None,
-        'SharpMove_Timing_Magnitude': round(dominant_mag, 3),
+        'SharpMove_Timing_Magnitude': round(move_magnitude_score, 3),
         **flattened_buckets,
         'Odds_Move_Magnitude': round(odds_move_magnitude_score, 2),
         **flattened_odds_buckets,
