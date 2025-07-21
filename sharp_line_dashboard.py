@@ -1216,6 +1216,13 @@ def compute_diagnostics_vectorized(df):
             'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
         ]
     ]
+    # === Compute Hybrid Line/Odds Timing Flags if missing
+    if 'Hybrid_Line_Timing_Flag' not in df.columns:
+        df['Hybrid_Line_Timing_Flag'] = (df[HYBRID_LINE_COLS].sum(axis=1) > 0).astype(int)
+    
+    if 'Hybrid_Odds_Timing_Flag' not in df.columns:
+        df['Hybrid_Odds_Timing_Flag'] = (df[HYBRID_ODDS_COLS].sum(axis=1) > 0).astype(int)
+
     # === Active Signal Count
     df['Active_Signal_Count'] = (
         (df['Sharp_Move_Signal'] == 1).astype(int) +
