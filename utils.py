@@ -581,7 +581,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
             continue
         
         limit, curr_val, ts, game_start, curr_odds = entry
-        logging.info(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
+        logging.debug(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
 
         try:
             # === Line movement
@@ -657,8 +657,8 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     dominant_label, dominant_mag = max(
         hybrid_timing_mags.items(), key=lambda x: x[1], default=("unknown", 0.0)
     )
-    logging.info(f"📊 Final hybrid_timing_mags: {dict(hybrid_timing_mags)}")
-    logging.info(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
+    logging.debug(f"📊 Final hybrid_timing_mags: {dict(hybrid_timing_mags)}")
+    logging.debug(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
     return {
         'Sharp_Move_Signal': int(move_signal > 0),
         'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
