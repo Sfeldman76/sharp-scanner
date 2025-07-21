@@ -36,8 +36,8 @@ from utils import (
     calc_implied_prob,
     load_market_weights_from_bq,
     compute_sharp_magnitude_by_time_bucket,
-    #apply_compute_sharp_metrics_rowwise
-    compute_all_sharp_metrics
+    #apply_compute_sharp_metrics_rowwise,
+    compute_all_sharp_metrics,
     implied_prob_to_point_move
 )
 
