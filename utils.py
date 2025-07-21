@@ -527,7 +527,17 @@ def load_market_weights_from_bq():
     logging.info(f"✅ Loaded market weights for {len(market_weights)} markets")
     return market_weights
     
+def implied_prob_to_point_move(prob_delta, base_odds=-110):
+    """
+    Convert a probability delta into an approximate odds point movement
+    assuming the slope near a base odds value (default -110).
+    """
+    # Use slope near -110 (standard point spread odds)
+    # At -110, implied prob ≈ 0.524, slope ≈ ~0.0045 per point
+    approx_slope = 0.0045  # ← 1 point ≈ 0.0045 prob shift near -110
     
+    point_equiv = prob_delta / approx_slope
+    return point_equiv    
 
 
 def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None):
@@ -609,16 +619,24 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
 
             # === Odds movement
             if pd.notna(prev_odds) and pd.notna(curr_odds):
-                odds_delta = curr_odds - prev_odds
-                odds_move_delta = abs(odds_delta)
-
-                logging.debug(f"🧾 Odds Δ: {odds_delta:+.1f}, From {prev_odds} → {curr_odds}")
-                if odds_move_delta >= 1:
-                    odds_move_magnitude_score += odds_move_delta  # total magnitude
+                # ✅ Convert to implied probability FIRST
+                prev_prob = implied_prob(prev_odds)
+                curr_prob = implied_prob(curr_odds)
+            
+                # ✅ Then compute delta
+                odds_delta = abs(curr_prob - prev_prob)
+                point_equiv = implied_prob_to_point_move(odds_delta)
+            
+                logging.debug(f"🧾 Odds Δ: {odds_delta:+.3f} (~{point_equiv:.1f} pts), From {prev_odds} → {curr_odds}")
+            
+                if odds_delta >= 0.01:  # i.e. 1 percentage point shift
+                    odds_move_magnitude_score += point_equiv  # count the scaled "point" move
                     timing_label = get_hybrid_bucket(ts, game_start)
-                    hybrid_timing_odds_mags[timing_label] += odds_move_delta  # ✅ always positive  # ✅ signed move (directional)
+                    hybrid_timing_odds_mags[timing_label] += point_equiv # ✅ always positive  # ✅ signed move (directional)
                 
                 prev_odds = curr_odds
+                
+                
             # === Net line movement from open to final value
             if pd.notna(open_val) and pd.notna(curr_val):
                 net_line_move = curr_val - open_val
