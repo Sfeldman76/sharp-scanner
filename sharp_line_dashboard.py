@@ -1149,8 +1149,9 @@ def compute_diagnostics_vectorized(df):
     )
 
     # === Confidence Trend
-    prob_now = pd.to_numeric(df['Model Prob'], errors='coerce')
-    prob_start = pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
+    df['Model Prob Snapshot'] = prob_now
+    df['First Prob Snapshot'] = prob_start
+
 
     df['Confidence Trend'] = np.where(
         prob_now.isna() | prob_start.isna(),
@@ -1361,7 +1362,8 @@ def compute_diagnostics_vectorized(df):
     diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
         'Tier_Change', 'Confidence Trend', 'Line/Model Direction',
-        'Why Model Likes It', 'Passes_Gate', 'Confidence Tier'
+        'Why Model Likes It', 'Passes_Gate', 'Confidence Tier',
+        'Model Prob Snapshot', 'First Prob Snapshot'
     ]].rename(columns={
         'Tier_Change': 'Tier Δ'
     })
@@ -1878,18 +1880,36 @@ def render_scanner_tab(label, sport_key, container):
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
       
 
-        # ✅ Normalize keys
+        ## Step 1: Normalize keys
         for col in ['Game_Key', 'Market', 'Outcome']:
             filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
         
-               
+        # Step 2: Deduplicate filtered_df for last snapshot per outcome
         filtered_df = (
             filtered_df
             .sort_values('Snapshot_Timestamp', ascending=False)
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
         )
-
-        # === Group numeric + categorical fields ONLY
+        
+        # Step 3: Pull diagnostics from earlier
+        diagnostics_dedup = diagnostics_df.drop_duplicates(
+            subset=['Game_Key', 'Market', 'Outcome']
+        )[[
+            'Game_Key', 'Market', 'Outcome',
+            'Confidence Trend', 'Tier_Change', 'Line/Model Direction',
+            'Why Model Likes It', 'Model Prob Snapshot'
+        ]].rename(columns={
+            'Model Prob Snapshot': 'Model Prob'
+        })
+        
+        # Step 4: Merge diagnostics into deduped `filtered_df`
+        filtered_df = filtered_df.merge(
+            diagnostics_dedup,
+            on=['Game_Key', 'Market', 'Outcome'],
+            how='left'
+        )
+        
+        # Step 5: Group from merged filtered_df to produce summary
         summary_grouped = (
             filtered_df
             .groupby(['Game_Key', 'Matchup', 'Market', 'Outcome'], as_index=False)
@@ -1899,80 +1919,32 @@ def render_scanner_tab(label, sport_key, container):
                 'Rec Move': 'mean',
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
-                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0]
+                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
+                'Confidence Trend': 'first',
+                'Tier Δ': 'first',
+                'Line/Model Direction': 'first',
+                'Why Model Likes It': 'first'
             })
         )
+
+        st.markdown("### 🧪 Summary Grouped Debug View")
+        
+        # Print column list
+        st.code(f"🧩 Columns in summary_grouped:\n{summary_grouped.columns.tolist()}")
+
+        # Step 6: Add back timestamp if available
         if 'Date + Time (EST)' in summary_df.columns:
             summary_grouped = summary_grouped.merge(
                 summary_df[['Game_Key', 'Date + Time (EST)']].drop_duplicates(),
                 on='Game_Key',
                 how='left'
             )
-        else:
-            st.warning("⚠️ 'Date + Time (EST)' not found in summary_df — timestamp merge skipped.")
         
-        
-        
+    
         required_cols = ['Model Prob', 'Confidence Tier']
-        for col in required_cols:
-            if col not in summary_grouped.columns:
-                summary_grouped[col] = np.nan if 'Prob' in col else ""
-        if 'Model_Sharp_Win_Prob' in filtered_df.columns:
-            filtered_df['Model Prob'] = filtered_df['Model_Sharp_Win_Prob']
-        else:          
-            filtered_df['Model Prob'] = 0
-        if 'Model_Confidence_Tier' in filtered_df.columns:
-            filtered_df['Confidence Tier'] = filtered_df['Model_Confidence_Tier']
-        else:
-            filtered_df['Confidence Tier'] = ""
-
-            
+                   
         # === Re-merge diagnostics AFTER groupby
-        diagnostic_cols = ['Game_Key', 'Market', 'Outcome',
-                           'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
-        
-        # ✅ SAFEGUARD: assign diagnostics_df if missing
-        if 'diagnostics_df' not in locals():
-            st.warning("⚠️ diagnostics_df missing — assigning empty DataFrame fallback")
-            diagnostics_df = pd.DataFrame(columns=diagnostic_cols)
-        
-        # === Re-merge diagnostics AFTER groupby using clean diagnostics_df
-        diagnostics_df_clean = diagnostics_df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
-        
-        # ✅ Normalize merge keys on both sides
-        for col in ['Game_Key', 'Market', 'Outcome']:
-            summary_grouped[col] = summary_grouped[col].astype(str).str.strip().str.lower()
-            diagnostics_df_clean[col] = diagnostics_df_clean[col].astype(str).str.strip().str.lower()
-        
-        
-        # 🧪 Add these diagnostics RIGHT HERE before merging
-        #st.write("🧪 Unique Game_Keys in summary:", summary_grouped['Game_Key'].unique()[:5])
-        #st.write("🧪 Unique Game_Keys in diagnostics:", diagnostics_df_clean['Game_Key'].unique()[:5])
-        merge_keys = ['Game_Key', 'Market', 'Outcome']
-        
-        merged_check = summary_grouped[merge_keys].merge(
-            diagnostics_df_clean[merge_keys],
-            on=merge_keys,
-            how='outer',
-            indicator=True
-        )
-        
-        only_in_summary = merged_check[merged_check['_merge'] == 'left_only']
-        only_in_diagnostics = merged_check[merged_check['_merge'] == 'right_only']
-        
-        #st.warning(f"🚫 {len(only_in_summary)} keys in summary not matched in diagnostics")
-        #st.warning(f"🚫 {len(only_in_diagnostics)} keys in diagnostics not matched in summary")
-        
-        if not only_in_summary.empty:
-            st.dataframe(only_in_summary.head())
-        
-        # === Merge diagnostics back into grouped summary
-        diagnostic_fields = ['Game_Key', 'Market', 'Outcome', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
-        summary_grouped = summary_grouped.merge(
-            diagnostics_df_clean[diagnostic_fields],
-            on=['Game_Key', 'Market', 'Outcome'],
-            how='left'
-        )
+       
 
         
         # ✅ Resolve _y suffixes (only if collision occurred)
