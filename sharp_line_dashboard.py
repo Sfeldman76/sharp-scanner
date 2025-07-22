@@ -1147,8 +1147,11 @@ def compute_diagnostics_vectorized(df):
         ),
         "⚠️ Missing"
     )
-
+            
     # === Confidence Trend
+    prob_now = pd.to_numeric(df['Model Prob'], errors='coerce')
+    prob_start = pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
+    
     df['Model Prob Snapshot'] = prob_now
     df['First Prob Snapshot'] = prob_start
 
