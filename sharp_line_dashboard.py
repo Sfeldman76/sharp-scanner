@@ -1110,6 +1110,7 @@ def read_market_weights_from_bigquery():
         return {}
 def compute_diagnostics_vectorized(df):
     df = df.copy()
+
     # === Ensure only latest snapshot per bookmaker is used (to match df_summary_base logic)
     df = (
         df.sort_values('Snapshot_Timestamp')
@@ -1130,12 +1131,7 @@ def compute_diagnostics_vectorized(df):
             df[col] = ""
         df[col] = df[col].astype(str).str.strip()
 
-    # === Add normalized model prob
-    # Rename inline for diagnostics only — use directly
-    prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
-
-
-    # === Tier change
+    # === Tier Δ logic
     tier_now = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
     tier_first = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
     df['Tier_Change'] = np.where(
@@ -1153,12 +1149,8 @@ def compute_diagnostics_vectorized(df):
     )
 
     # === Confidence Trend
-    # Average prob over all rows in same group (e.g., Market + Outcome)
-    # Use the deduplicated row-level values directly
-    df['Model Prob Grouped'] = pd.to_numeric(df['Model Prob'], errors='coerce')
-    prob_now = df['Model Prob Grouped']
-    df['First_Sharp_Prob_Grouped'] = pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
-    prob_start = df['First_Sharp_Prob_Grouped']
+    prob_now = pd.to_numeric(df['Model Prob'], errors='coerce')
+    prob_start = pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
 
     df['Confidence Trend'] = np.where(
         prob_now.isna() | prob_start.isna(),
@@ -1173,7 +1165,6 @@ def compute_diagnostics_vectorized(df):
             )
         )
     )
-
 
     # === Line/Model Direction Alignment
     df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
