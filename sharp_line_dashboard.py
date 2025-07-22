@@ -1110,6 +1110,11 @@ def read_market_weights_from_bigquery():
         return {}
 def compute_diagnostics_vectorized(df):
     df = df.copy()
+    # === Ensure only latest snapshot per bookmaker is used (to match df_summary_base logic)
+    df = (
+        df.sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+    )
 
     # === Tier ordering for change tracking
     TIER_ORDER = {
