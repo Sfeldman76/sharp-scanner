@@ -1899,7 +1899,7 @@ def render_scanner_tab(label, sport_key, container):
             subset=['Game_Key', 'Market', 'Outcome']
         )[[
             'Game_Key', 'Market', 'Outcome',
-            'Confidence Trend', 'Tier_Change', 'Line/Model Direction',
+            'Confidence Trend', 'Tier Δ', 'Line/Model Direction',
             'Why Model Likes It', 'Model Prob Snapshot'
         ]].rename(columns={
             'Model Prob Snapshot': 'Model Prob'
