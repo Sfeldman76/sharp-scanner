@@ -1895,6 +1895,7 @@ def render_scanner_tab(label, sport_key, container):
         )
         
         # Step 3: Pull diagnostics from earlier
+        # Step 3: Pull diagnostics and rename snapshot → Model Prob
         diagnostics_dedup = diagnostics_df.drop_duplicates(
             subset=['Game_Key', 'Market', 'Outcome']
         )[[
@@ -1905,15 +1906,22 @@ def render_scanner_tab(label, sport_key, container):
             'Model Prob Snapshot': 'Model Prob'
         })
         
-        # Step 4: Merge diagnostics into deduped `filtered_df`
+        # ✅ Drop stale version *before* merge to avoid suffixes
+        filtered_df = filtered_df.drop(columns=['Model Prob'], errors='ignore')
+        
+        # Step 4: Merge snapshot version cleanly
         filtered_df = filtered_df.merge(
             diagnostics_dedup,
             on=['Game_Key', 'Market', 'Outcome'],
             how='left'
         )
+        
+        # ✅ Debug check
         st.write("🧪 Columns in filtered_df after diagnostics merge:")
         st.write(filtered_df.columns.tolist())
-
+                    
+            
+        
         # Step 5: Group from merged filtered_df to produce summary
         summary_grouped = (
             filtered_df
