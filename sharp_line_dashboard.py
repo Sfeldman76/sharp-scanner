@@ -1911,7 +1911,9 @@ def render_scanner_tab(label, sport_key, container):
             on=['Game_Key', 'Market', 'Outcome'],
             how='left'
         )
-        
+        st.write("🧪 Columns in filtered_df after diagnostics merge:")
+        st.write(filtered_df.columns.tolist())
+
         # Step 5: Group from merged filtered_df to produce summary
         summary_grouped = (
             filtered_df
