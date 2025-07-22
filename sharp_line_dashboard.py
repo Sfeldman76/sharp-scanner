@@ -1154,15 +1154,10 @@ def compute_diagnostics_vectorized(df):
 
     # === Confidence Trend
     # Average prob over all rows in same group (e.g., Market + Outcome)
-    df['Model Prob Grouped'] = (
-        df.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])['Model Prob']
-        .transform('mean')
-    )
+    # Use the deduplicated row-level values directly
+    df['Model Prob Grouped'] = pd.to_numeric(df['Model Prob'], errors='coerce')
     prob_now = df['Model Prob Grouped']
-    df['First_Sharp_Prob_Grouped'] = (
-        df.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])['First_Sharp_Prob']
-        .transform('mean')
-    )
+    df['First_Sharp_Prob_Grouped'] = pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
     prob_start = df['First_Sharp_Prob_Grouped']
 
     df['Confidence Trend'] = np.where(
