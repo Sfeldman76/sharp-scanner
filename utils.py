@@ -1896,10 +1896,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
 
-            # ✅ Merge in team-level stats (optional)
-            if team_feature_map is not None and not team_feature_map.empty:
-                df_scored['Team'] = df_scored['Outcome_Norm'].str.lower().str.strip()
-                df_scored = df_scored.merge(team_feature_map, on='Team', how='left')
 
             
             
