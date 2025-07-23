@@ -728,10 +728,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
 
         df_market['Value_Reversal_Flag'] = df_market.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
         df_market['Odds_Reversal_Flag'] = df_market.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
-        df_market['Is_Team_Favorite'] = (df_market['Team_Bet_Role'] == 'favorite').astype(int)
-        df_market['Is_Team_Underdog'] = (df_market['Team_Bet_Role'] == 'underdog').astype(int)
-        df_market['Is_Team_Over'] = (df_market['Team_Bet_Role'] == 'over').astype(int)
-        df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
+        #df_market['Is_Team_Favorite'] = (df_market['Team_Bet_Role'] == 'favorite').astype(int)
+        #df_market['Is_Team_Underdog'] = (df_market['Team_Bet_Role'] == 'underdog').astype(int)
+        #df_market['Is_Team_Over'] = (df_market['Team_Bet_Role'] == 'over').astype(int)
+        #df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
 
 
         
@@ -1068,18 +1068,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
         st.dataframe(calib_df)
         
         team_feature_map = (
-            df_market[[
-                'Team',
-                'Team_Past_Avg_Model_Prob',
-                'Team_Past_Hit_Rate',
-                'Team_Past_Avg_Model_Prob_Home',
-                'Team_Past_Hit_Rate_Home',
-                'Team_Past_Avg_Model_Prob_Away',
-                'Team_Past_Hit_Rate_Away'
-            ]]
-            .drop_duplicates('Team')
-            .reset_index(drop=True)
+            df_market.groupby('Team')
+            .agg({
+                'Model_Sharp_Win_Prob': 'mean',
+                'SHARP_HIT_BOOL': 'mean',                
+                'Team_Past_Avg_Model_Prob_Home': 'mean',
+                'Team_Past_Hit_Rate_Home': 'mean',
+                'Team_Past_Avg_Model_Prob_Away': 'mean',
+                'Team_Past_Hit_Rate_Away': 'mean'
+            })
+            .rename(columns={
+                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob',
+                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate',               
+            })
+            .reset_index()
         )
+
 
 
         # === Save ensemble (choose one or both)
