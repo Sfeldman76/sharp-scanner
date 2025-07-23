@@ -1821,17 +1821,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     how='left'
                 )
                 # === 🔁 Re-merge team-level features onto inverse rows
-                #try:
-                    #if team_feature_map is not None and not team_feature_map.empty:
+                try:
+                    if team_feature_map is not None and not team_feature_map.empty:
                         # Normalize Team column
-                        #df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
+                        df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
                         
                         # Merge features
-                        #df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
+                        df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
                 
-                        #logger.info(f"🔁 Re-merged team-level features for {len(df_inverse)} inverse rows.")
-                #except Exception as e:
-                    #logger.error(f"❌ Failed to re-merge team-level features for inverse rows: {e}")
+                        logger.info(f"🔁 Re-merged team-level features for {len(df_inverse)} inverse rows.")
+                except Exception as e:
+                    logger.error(f"❌ Failed to re-merge team-level features for inverse rows: {e}")
 
                 # === 🔁 Recompute outcome-sensitive fields
                 df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
