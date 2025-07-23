@@ -1798,8 +1798,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     # ✅ NEW — Net movement from open (line & odds)
                     'Net_Line_Move_From_Opening', 'Abs_Line_Move_From_Opening',
                     'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening',
-                    #'Team_Past_Hit_Rate', 'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
-                    #'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
+                    'Team_Past_Hit_Rate', 'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
+                    'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
                 ]
                 
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
