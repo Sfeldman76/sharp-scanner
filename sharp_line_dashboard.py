@@ -557,7 +557,83 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
         
         # ✅ Use existing SHARP_HIT_BOOL as-is (already precomputed)
         df_market = df_market[df_market['SHARP_HIT_BOOL'].isin([0, 1])]
+        def label_team_role(row):
+            market = row['Market']
+            value = row['Value']
+            outcome = row['Outcome_Norm']
+            home_team = row['Home_Team_Norm']
+            
+            if market in ['spreads', 'h2h']:
+                if value < 0:
+                    return 'favorite'
+                elif value > 0:
+                    return 'underdog'
+                else:
+                    return 'even'  # fallback (rare)
+            elif market == 'totals':
+                if outcome == 'over':
+                    return 'over'
+                elif outcome == 'under':
+                    return 'under'
+                else:
+                    return 'unknown'
+            else:
+                return 'unknown'
+            
+        df_market['Team_Bet_Role'] = df_market.apply(label_team_role, axis=1)
+        # Normalize team identifiers
+        df_market['Team'] = df_market['Outcome_Norm']
+        df_market['Is_Home'] = (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
         
+        # === Overall team stats
+        team_stats = (
+            df_market.groupby('Team')
+            .agg({
+                'Model_Sharp_Win_Prob': 'mean',
+                'SHARP_HIT_BOOL': 'mean'
+            })
+            .rename(columns={
+                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob',
+                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate'
+            })
+            .reset_index()
+        )
+        
+        # === Home-only stats
+        home_stats = (
+            df_market[df_market['Is_Home'] == 1]
+            .groupby('Team')
+            .agg({
+                'Model_Sharp_Win_Prob': 'mean',
+                'SHARP_HIT_BOOL': 'mean'
+            })
+            .rename(columns={
+                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob_Home',
+                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate_Home'
+            })
+            .reset_index()
+        )
+        
+        # === Away-only stats
+        away_stats = (
+            df_market[df_market['Is_Home'] == 0]
+            .groupby('Team')
+            .agg({
+                'Model_Sharp_Win_Prob': 'mean',
+                'SHARP_HIT_BOOL': 'mean'
+            })
+            .rename(columns={
+                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob_Away',
+                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate_Away'
+            })
+            .reset_index()
+        )
+        
+        # === Merge all stats into training data
+        df_market = df_market.merge(team_stats, on='Team', how='left')
+        df_market = df_market.merge(home_stats, on='Team', how='left')
+        df_market = df_market.merge(away_stats, on='Team', how='left')
+
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             progress.progress(idx / 3)
@@ -652,7 +728,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
 
         df_market['Value_Reversal_Flag'] = df_market.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
         df_market['Odds_Reversal_Flag'] = df_market.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
-        
+        df_market['Is_Team_Favorite'] = (df_market['Team_Bet_Role'] == 'favorite').astype(int)
+        df_market['Is_Team_Underdog'] = (df_market['Team_Bet_Role'] == 'underdog').astype(int)
+        df_market['Is_Team_Over'] = (df_market['Team_Bet_Role'] == 'over').astype(int)
+        df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
+
+
         
             # === Resistance Flag Debug
         with st.expander(f"📊 Resistance Flag Debug – {market.upper()}"):
@@ -719,9 +800,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
         ]   
         features += hybrid_timing_features
         features += hybrid_odds_timing_features
+    
+        features += [
+            'Team_Past_Avg_Model_Prob',
+            'Team_Past_Hit_Rate',
+            'Team_Past_Avg_Model_Prob_Home',
+            'Team_Past_Hit_Rate_Home',
+            'Team_Past_Avg_Model_Prob_Away',
+            'Team_Past_Hit_Rate_Away',
+            
+            # Optional betting context flags
+            #'Is_Team_Favorite', 'Is_Team_Underdog',
+            #'Is_Team_Over', 'Is_Team_Under'
+        ]
+
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
         df_market = ensure_columns(df_market, features, 0)
-        
+
         X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
         # Step: Check for multicollinearity in features
         corr_matrix = X.corr().abs()
@@ -972,12 +1067,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()}")
         st.dataframe(calib_df)
         
+        team_feature_map = (
+            df_market[[
+                'Team',
+                'Team_Past_Avg_Model_Prob',
+                'Team_Past_Hit_Rate',
+                'Team_Past_Avg_Model_Prob_Home',
+                'Team_Past_Hit_Rate_Home',
+                'Team_Past_Avg_Model_Prob_Away',
+                'Team_Past_Hit_Rate_Away'
+            ]]
+            .drop_duplicates('Team')
+            .reset_index(drop=True)
+        )
+
+
         # === Save ensemble (choose one or both)
         trained_models[market] = {
             "model": model_auc,  # or model_logloss
             "calibrator": cal_auc  # or cal_logloss
         }
-        save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET)
+        save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET, team_feature_map=team_feature_map)
         from scipy.stats import entropy
         
         # === Base features already known to work well
@@ -1390,7 +1500,7 @@ def save_model_to_gcs(model, calibrator, sport, market, bucket_name="sharp-model
 
         # Save both model and calibrator together
         buffer = BytesIO()
-        pickle.dump({"model": model, "calibrator": calibrator}, buffer)
+        pickle.dump({"model": model, "calibrator": calibrator, "team_feature_map": team_feature_map}, buffer)
         blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
 
         print(f"✅ Model + calibrator saved to GCS: gs://{bucket_name}/{filename}")
