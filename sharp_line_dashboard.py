@@ -1915,7 +1915,9 @@ def render_scanner_tab(label, sport_key, container):
 
 
         # ✅ Drop stale version *before* merge to avoid suffixes
-        filtered_df = filtered_df.drop(columns=['Model Prob'], errors='ignore')
+        # ✅ Drop stale versions to prevent _x/_y suffixes
+        filtered_df = filtered_df.drop(columns=['Model Prob', 'Confidence Tier'], errors='ignore')
+
         
         # Step 4: Merge snapshot version cleanly
         filtered_df = filtered_df.merge(
