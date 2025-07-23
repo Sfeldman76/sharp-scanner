@@ -1263,7 +1263,7 @@ def compute_diagnostics_vectorized(df):
     )
     # === Passes Gate
     df['Passes_Gate'] = (
-        df['Model Prob'] >= 0.55
+        df['Model Prob'] >= 0.50
     ) & (df['Active_Signal_Count'] > 2)
 
     # === Confidence Tier from Model
@@ -1274,7 +1274,7 @@ def compute_diagnostics_vectorized(df):
             bins=[0, 0.4, 0.6, 0.8, 1],
             labels=["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
         ).astype(str),
-        "🕓 Still Gathering Data"
+        "Below Probability Threshold"
     )
 
     # === Why Model Likes It
@@ -1282,7 +1282,7 @@ def compute_diagnostics_vectorized(df):
         if pd.isna(row.get('Model Prob')):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
         if not row.get('Passes_Gate', False):
-            return "🤷‍♂️ Still Gathering Signal"
+            return "🤷‍♂️ Still Calculating Signal"
     
         parts = []
     
