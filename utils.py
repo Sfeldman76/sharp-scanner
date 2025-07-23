@@ -1989,7 +1989,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
                 df_final['Hybrid_Line_Timing_Flag'] +
                 df_final['Hybrid_Odds_Timing_Flag'] +
-                (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int)
+                (df_final['Team_Past_Hit_Rate'].fillna(0) > 0.6).astype(int)
             )
 
                 
