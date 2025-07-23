@@ -1914,6 +1914,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+            # === ✅ Combine canonical and inverse rows
+            logger.info(f"🧩 df_scored — Columns: {df_scored.columns.tolist()}")
+            logger.info(f"🔍 df_scored — Sample Rows:\n{df_scored[[
+                'Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 
+                'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob'
+            ]].head(5).to_string(index=False)}")
 
 
             
@@ -1932,6 +1938,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logger.error(f"❌ Failed scoring {market_type.upper()}")
             logger.error(traceback.format_exc())
 
+            
+         
     try:
         df_final = pd.DataFrame()
         hybrid_line_cols = [
