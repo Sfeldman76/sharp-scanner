@@ -1835,7 +1835,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                         logger.info(f"🔁 Re-merged team-level features for {len(df_inverse)} inverse rows.")
                 except Exception as e:
                     logger.error(f"❌ Failed to re-merge team-level features for inverse rows: {e}")
+                
+   
 
+                df_inverse.drop(columns=['Team'], inplace=True, errors='ignore')
                 # === 🔁 Recompute outcome-sensitive fields
                 df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
                 df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
