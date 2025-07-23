@@ -1280,7 +1280,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
 
           
-         
+            if team_feature_map is not None and not team_feature_map.empty:
+                df_canon['Team'] = df_canon['Outcome_Norm'].str.lower().str.strip()
+                df_canon = df_canon.merge(team_feature_map, on='Team', how='left')
+
             # === Core deltas and magnitude features
             df_canon['Line_Move_Magnitude'] = pd.to_numeric(df_canon['Line_Delta'], errors='coerce').abs()
             df_canon['Line_Magnitude_Abs'] = df_canon['Line_Move_Magnitude']  # Alias
@@ -1593,7 +1596,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse = df_inverse[df_inverse['Outcome_Norm'] == 'over'].copy()
                 df_inverse['Outcome'] = 'under'
                 df_inverse['Outcome_Norm'] = 'under'
-            
+                if team_feature_map is not None and not team_feature_map.empty:
+                    df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
+                    df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
             
             
                 # ✅ Step 2: Rebuild keys AFTER flipping
@@ -1653,7 +1658,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            
+                if team_feature_map is not None and not team_feature_map.empty:
+                    df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
+                    df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
@@ -1710,7 +1717,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-            
+                if team_feature_map is not None and not team_feature_map.empty:
+                    df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
+                    df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
                 # Rebuild Game_Key and Game_Key_Base using flipped outcome
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
