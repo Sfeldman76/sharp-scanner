@@ -1194,7 +1194,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         ).astype(float)
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
-    
+    team_feature_map = None
+    for bundle in trained_models.values():
+        team_feature_map = bundle.get('team_feature_map')
+        if team_feature_map is not None:
+            break  # Use the first one found
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
     logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
 
@@ -1204,7 +1208,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
-            team_feature_map = bundle.get('team_feature_map')
            
 
             if model is None or iso is None:
@@ -1280,10 +1283,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
 
           
-            #if team_feature_map is not None and not team_feature_map.empty:
-                #df_canon['Team'] = df_canon['Outcome_Norm'].str.lower().str.strip()
-                #df_canon = df_canon.merge(team_feature_map, on='Team', how='left')
-
+            if team_feature_map is not None and not team_feature_map.empty:
+                df_canon['Team'] = df_canon['Outcome_Norm'].str.lower().str.strip()
+                df_canon = df_canon.merge(team_feature_map, on='Team', how='left')
+            df_canon.drop(columns=['Team'], inplace=True, errors='ignore')
             # === Core deltas and magnitude features
             df_canon['Line_Move_Magnitude'] = pd.to_numeric(df_canon['Line_Delta'], errors='coerce').abs()
             df_canon['Line_Magnitude_Abs'] = df_canon['Line_Move_Magnitude']  # Alias
