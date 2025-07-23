@@ -1204,6 +1204,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
+            team_feature_map = bundle.get('team_feature_map')
+           
+
             if model is None or iso is None:
                 logger.warning(f"⚠️ Skipping {market_type.upper()} — model or calibrator missing")
                 continue
@@ -1272,7 +1275,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             pre_dedup_canon = len(df_canon)
             df_canon = df_canon.drop_duplicates(subset=dedup_keys)
             post_dedup_canon = len(df_canon)
-            
+          
+
             
 
           
@@ -1882,6 +1886,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+
+            # ✅ Merge in team-level stats (optional)
+            if team_feature_map is not None and not team_feature_map.empty:
+                df_scored['Team'] = df_scored['Outcome_Norm'].str.lower().str.strip()
+                df_scored = df_scored.merge(team_feature_map, on='Team', how='left')
+
             
             
             
@@ -1946,11 +1956,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Late_Game_Steam_Flag'] == 1).astype(int) +
                 (df_final['Value_Reversal_Flag'] == 1).astype(int) +
                 (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
-                (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +    # ✅ NEW
-                (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +      # ✅ NEW
+                (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
+                (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
                 df_final['Hybrid_Line_Timing_Flag'] +
-                df_final['Hybrid_Odds_Timing_Flag']
+                df_final['Hybrid_Odds_Timing_Flag'] +
+                (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int)  # ✅ This is the fix
             )
+
                 
         
 
@@ -2493,8 +2505,9 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
 
         print(f"✅ Loaded model + calibrator from GCS: gs://{bucket_name}/{filename}")
         return {
-            "model": data["model"],
-            "calibrator": data["calibrator"]
+            "model": data.get("model"),
+            "calibrator": data.get("calibrator"),
+            "team_feature_map": data.get("team_feature_map", pd.DataFrame())  # ✅ Optional, default empty
         }
     except Exception as e:
         logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
