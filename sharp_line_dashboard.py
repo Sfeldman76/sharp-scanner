@@ -1309,20 +1309,26 @@ def compute_diagnostics_vectorized(df):
     )
 
     # ✅ Cast all diagnostic flags to numeric
+
+    # ✅ Cast all diagnostic flags to numeric
     flag_cols = [
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Market_Leader',
         'Is_Reinforced_MultiMarket', 'LimitUp_NoMove_Flag', 'Is_Sharp_Book',
         'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'Is_Home_Team_Bet',
         'SharpMove_Resistance_Break', 'Late_Game_Steam_Flag',
-        'Value_Reversal_Flag', 'Odds_Reversal_Flag'
+        'Value_Reversal_Flag', 'Odds_Reversal_Flag',
+        'Hybrid_Line_Timing_Flag', 'Hybrid_Odds_Timing_Flag'
     ]
     
     magnitude_cols = [
         'Sharp_Line_Magnitude', 'Sharp_Time_Score', 'Rec_Line_Magnitude',
-        'Sharp_Limit_Total', 'SharpMove_Odds_Mag', 'SharpMove_Timing_Magnitude'   
-
+        'Sharp_Limit_Total', 'SharpMove_Odds_Mag', 'SharpMove_Timing_Magnitude',
+        'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening',
+        'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob',
+        'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
+        'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
     ]
-    
+
     for col in flag_cols + magnitude_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
@@ -1372,9 +1378,12 @@ def compute_diagnostics_vectorized(df):
         (df['Odds_Reversal_Flag'] == 1).astype(int) +
         (df['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
         (df['Abs_Odds_Move_From_Opening'] > 5.0).astype(int) +
+        (df['Team_Past_Hit_Rate'] > 0.6).astype(int) +
+        (df['Team_Past_Avg_Model_Prob'] > 0.6).astype(int) +
         df['Hybrid_Line_Timing_Flag'] +
         df['Hybrid_Odds_Timing_Flag']
     )
+
     # === Passes Gate
     df['Passes_Gate'] = (
         df['Model Prob'] >= 0.50
@@ -1423,7 +1432,11 @@ def compute_diagnostics_vectorized(df):
         if row.get('Value_Reversal_Flag'): parts.append("🔄 Value Reversal")
         if row.get('Odds_Reversal_Flag'): parts.append("📉 Odds Reversal")
         if row.get('Sharp_Time_Score', 0) > 0.5: parts.append("⏱️ Timing Edge")
-    
+        # === Team-level diagnostics
+        if row.get('Team_Past_Hit_Rate', 0) > 0.6:
+            parts.append("📊 Team Historically Sharp")
+        if row.get('Team_Past_Avg_Model_Prob', 0) > 0.6:
+            parts.append("🔮 Model Favored This Team Historically")
         # === Line/odds movement from open
         if row.get('Abs_Line_Move_From_Opening', 0) > 1.0:
             parts.append("📈 Line Moved from Open")
@@ -1495,21 +1508,52 @@ def compute_diagnostics_vectorized(df):
 
 
 
-def save_model_to_gcs(model, calibrator, sport, market, bucket_name="sharp-models"):
+from google.cloud import storage
+from io import BytesIO
+import pickle
+import logging
+
+def save_model_to_gcs(model, calibrator, sport, market, team_feature_map=None, bucket_name="sharp-models"):
+    """
+    Save a trained model, calibrator, and optional team_feature_map to Google Cloud Storage.
+
+    Parameters:
+    - model: Trained XGBoost or sklearn model
+    - calibrator: CalibratedClassifierCV or similar
+    - sport (str): e.g., "nfl"
+    - market (str): e.g., "spreads"
+    - team_feature_map (pd.DataFrame or None): Optional team-level stats used in scoring
+    - bucket_name (str): GCS bucket name
+    """
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
+
     try:
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(filename)
 
-        # Save both model and calibrator together
-        buffer = BytesIO()
-        pickle.dump({"model": model, "calibrator": calibrator, "team_feature_map": team_feature_map}, buffer)
-        blob.upload_from_string(buffer.getvalue(), content_type='application/octet-stream')
+        # Prepare payload
+        payload = {
+            "model": model,
+            "calibrator": calibrator
+        }
 
-        print(f"✅ Model + calibrator saved to GCS: gs://{bucket_name}/{filename}")
+        if team_feature_map is not None:
+            payload["team_feature_map"] = team_feature_map
+
+        # Serialize to bytes
+        buffer = BytesIO()
+        pickle.dump(payload, buffer)
+        buffer.seek(0)
+
+        # Upload to GCS
+        blob.upload_from_file(buffer, content_type='application/octet-stream')
+
+        print(f"✅ Model + calibrator{' + team features' if team_feature_map is not None else ''} saved to GCS: gs://{bucket_name}/{filename}")
+
     except Exception as e:
-        print(f"❌ Failed to save model to GCS: {e}")
+        logging.error(f"❌ Failed to save model to GCS: {e}", exc_info=True)
+
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
