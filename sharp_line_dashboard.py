@@ -1554,7 +1554,6 @@ def save_model_to_gcs(model, calibrator, sport, market, team_feature_map=None, b
     except Exception as e:
         logging.error(f"❌ Failed to save model to GCS: {e}", exc_info=True)
 
-
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
     try:
@@ -1566,11 +1565,12 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
 
         print(f"✅ Loaded model + calibrator from GCS: gs://{bucket_name}/{filename}")
         return {
-            "model": data["model"],
-            "calibrator": data["calibrator"]
+            "model": data.get("model"),
+            "calibrator": data.get("calibrator"),
+            "team_feature_map": data.get("team_feature_map", pd.DataFrame())  # ✅ Optional, default empty
         }
     except Exception as e:
-        print(f"❌ Failed to load model from GCS: {e}")
+        logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
         return None
 
         
@@ -1761,7 +1761,25 @@ def render_scanner_tab(label, sport_key, container):
         #st.info(f"✅ Game_Start > now: filtered {before} → {after} rows")
         # === Load per-market models from GCS (once per session)
         model_key = f'sharp_models_{label.lower()}'
-     
+        # === Load models and team_feature_map from GCS
+        market_list = ['spreads', 'totals', 'h2h']
+        trained_models = {}
+        
+        for market in market_list:
+            model_bundle = load_model_from_gcs(label, market)
+            if model_bundle:
+                trained_models[market] = model_bundle
+            else:
+                st.warning(f"⚠️ No model found for {market.upper()} — skipping.")
+        
+        # Optional: extract a unified team_feature_map if needed
+        team_feature_map = None
+        for bundle in trained_models.values():
+            tfm = bundle.get('team_feature_map')
+            if tfm is not None and not tfm.empty:
+                team_feature_map = tfm
+                break
+
       
         
                 
