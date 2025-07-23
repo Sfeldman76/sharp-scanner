@@ -1797,7 +1797,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'OddsMove_Magnitude_Late_LateGame', 'OddsMove_Magnitude_Late_Urgent',
                     # ✅ NEW — Net movement from open (line & odds)
                     'Net_Line_Move_From_Opening', 'Abs_Line_Move_From_Opening',
-                    'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening'
+                    'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening',
+                    'Team_Past_Hit_Rate', 'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
+                    'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
                 ]
                 
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
@@ -1821,13 +1823,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 # === 🔁 Re-merge team-level features onto inverse rows
                 try:
                     if team_feature_map is not None and not team_feature_map.empty:
-                        # Drop to avoid _x/_y conflicts
-                        team_feature_cols = [
-                            'Team_Past_Hit_Rate', 'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
-                            'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
-                        ]
-                        df_inverse = df_inverse.drop(columns=[col for col in team_feature_cols if col in df_inverse.columns], errors='ignore')
-                        
                         # Normalize Team column
                         df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
                         
