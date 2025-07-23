@@ -1915,11 +1915,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             # === ✅ Combine canonical and inverse rows
-            logger.info(f"🧩 df_scored — Columns: {df_scored.columns.tolist()}")
-            logger.info(f"🔍 df_scored — Sample Rows:\n{df_scored[[
+            logger.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
+            logger.info("🔍 df_scored — Sample Rows:\n%s", df_scored[[
                 'Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 
                 'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob'
-            ]].head(5).to_string(index=False)}")
+            ]].head(5).to_string(index=False))
+
+
 
 
             
@@ -1992,7 +1994,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
                 df_final['Hybrid_Line_Timing_Flag'] +
                 df_final['Hybrid_Odds_Timing_Flag'] +
-                (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int)  # ✅ This is the fix
+                (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int)
             )
 
                 
