@@ -1444,7 +1444,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Scoring_Market'] = market_type
             df_canon['Scored_By_Model'] = True
             
-            
+            logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
 
             # 1. Copy and flip outcome for merge key
             df_inverse = df_canon.copy(deep=True)
