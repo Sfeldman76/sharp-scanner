@@ -1961,6 +1961,10 @@ def render_scanner_tab(label, sport_key, container):
         df_summary_base.columns = [col.replace('_y', '') if col.endswith('_y') else col for col in df_summary_base.columns]
         # Remove true duplicate column names (keep the first occurrence)
         df_summary_base = df_summary_base.loc[:, ~df_summary_base.columns.duplicated()]
+        # === Merge team features into df_summary_base
+        if team_feature_map is not None and not team_feature_map.empty:
+            df_summary_base['Team'] = df_summary_base['Outcome'].str.lower().str.strip()
+            df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
 
 
         st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
