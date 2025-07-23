@@ -1805,9 +1805,9 @@ def render_scanner_tab(label, sport_key, container):
         df_summary_base = df_summary_base.loc[:, ~df_summary_base.columns.duplicated()]
 
 
-        st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
+        #st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         #st.write(f"🔢 Rows: {len(df_summary_base)}")
-        st.write("📋 Columns:", df_summary_base.columns.tolist())
+        #st.write("📋 Columns:", df_summary_base.columns.tolist())
         
         #st.dataframe(df_summary_base.head(10))
        
@@ -1927,8 +1927,8 @@ def render_scanner_tab(label, sport_key, container):
         )
         
         # ✅ Debug check
-        st.write("🧪 Columns in filtered_df after diagnostics merge:")
-        st.write(filtered_df.columns.tolist())
+        #st.write("🧪 Columns in filtered_df after diagnostics merge:")
+        #st.write(filtered_df.columns.tolist())
                     
             
         
@@ -1950,10 +1950,10 @@ def render_scanner_tab(label, sport_key, container):
             })
         )
 
-        st.markdown("### 🧪 Summary Grouped Debug View")
+        #st.markdown("### 🧪 Summary Grouped Debug View")
         
         # Print column list
-        st.code(f"🧩 Columns in summary_grouped:\n{summary_grouped.columns.tolist()}")
+        #st.code(f"🧩 Columns in summary_grouped:\n{summary_grouped.columns.tolist()}")
 
         # Step 6: Add back timestamp if available
         if 'Date + Time (EST)' in summary_df.columns:
