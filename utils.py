@@ -1818,7 +1818,26 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
                     how='left'
                 )
+                # === 🔁 Re-merge team-level features onto inverse rows
+                try:
+                    if team_feature_map is not None and not team_feature_map.empty:
+                        # Drop to avoid _x/_y conflicts
+                        team_feature_cols = [
+                            'Team_Past_Hit_Rate', 'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
+                            'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
+                        ]
+                        df_inverse = df_inverse.drop(columns=[col for col in team_feature_cols if col in df_inverse.columns], errors='ignore')
+                        
+                        # Normalize Team column
+                        df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
+                        
+                        # Merge features
+                        df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
                 
+                        logger.info(f"🔁 Re-merged team-level features for {len(df_inverse)} inverse rows.")
+                except Exception as e:
+                    logger.error(f"❌ Failed to re-merge team-level features for inverse rows: {e}")
+
                 # === 🔁 Recompute outcome-sensitive fields
                 df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
                 df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
