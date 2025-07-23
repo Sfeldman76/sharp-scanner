@@ -1365,7 +1365,7 @@ def compute_diagnostics_vectorized(df):
     df['Model_Confidence_Tier'] = df['Confidence Tier']  # ✅ snapshot tier for summary view
 
     # === Final Output
-   diagnostics_df = df[[
+    diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
         'Tier_Change', 'Confidence Trend', 'Line/Model Direction',
         'Why Model Likes It', 'Passes_Gate', 'Confidence Tier',
