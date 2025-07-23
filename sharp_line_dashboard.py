@@ -1360,16 +1360,22 @@ def compute_diagnostics_vectorized(df):
         return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
     
     # Apply to DataFrame
+   
     df['Why Model Likes It'] = df.apply(build_why, axis=1)
+    df['Model_Confidence_Tier'] = df['Confidence Tier']  # ✅ snapshot tier for summary view
+
     # === Final Output
-    diagnostics_df = df[[
+   diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
         'Tier_Change', 'Confidence Trend', 'Line/Model Direction',
         'Why Model Likes It', 'Passes_Gate', 'Confidence Tier',
-        'Model Prob Snapshot', 'First Prob Snapshot'
+        'Model Prob Snapshot', 'First Prob Snapshot',
+        'Model_Confidence_Tier'   # ✅ Add this
     ]].rename(columns={
         'Tier_Change': 'Tier Δ'
     })
+
+
     
     return diagnostics_df
 
@@ -1901,11 +1907,13 @@ def render_scanner_tab(label, sport_key, container):
         )[[
             'Game_Key', 'Market', 'Outcome',
             'Confidence Trend', 'Tier Δ', 'Line/Model Direction',
-            'Why Model Likes It', 'Model Prob Snapshot'
+            'Why Model Likes It', 'Model Prob Snapshot', 'Model_Confidence_Tier'
         ]].rename(columns={
-            'Model Prob Snapshot': 'Model Prob'
+            'Model Prob Snapshot': 'Model Prob',
+            'Model_Confidence_Tier': 'Confidence Tier'  # ✅ Now this will work
         })
-        
+
+
         # ✅ Drop stale version *before* merge to avoid suffixes
         filtered_df = filtered_df.drop(columns=['Model Prob'], errors='ignore')
         
