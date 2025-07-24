@@ -1370,7 +1370,7 @@ def compute_diagnostics_vectorized(df):
     df['Confidence Tier'] = pd.cut(
         model_prob,
         bins=[0, 0.4, 0.6, 0.8, 1.0],
-        labels=["🪙 Coinflip", "🤏 Lean", "🔥 Strong Indication", "🌋 Steam"]
+        labels=["🪙Low Probability", "🤏 Lean", "🔥 Strong Indication", "🌋 Steam"]
     ).astype(str)
     
     # Override with "zero" if probability is exactly 0
