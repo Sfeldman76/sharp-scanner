@@ -1234,7 +1234,7 @@ def compute_diagnostics_vectorized(df):
 
     # === Tier ordering for change tracking
     TIER_ORDER = {
-        '🪙 Coinflip': 1,
+        '🪙 Low Probability': 1,
         '🤏 Lean': 2,
         '🔥 Strong Indication': 3,
         '🌋 Steam': 4
