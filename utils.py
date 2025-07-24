@@ -154,7 +154,14 @@ def build_game_key(df):
         axis=1
     )
     return df
-
+model_cache = {}  # (label, market) → model bundle
+def get_cached_model(label, market):
+    key = (label.lower(), market.lower())
+    if key not in model_cache:
+        model_cache[key] = load_model_from_gcs(label, market)
+    return model_cache[key]
+    
+    
 def fetch_live_odds(sport_key, api_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -1185,6 +1192,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     except Exception as e:
         logging.warning(f"⚠️ Failed to assign confidence scores: {e}")
     # === Patch derived fields before BigQuery write ===
+    trained_models = get_trained_models(sport)
     try:
         # Line_Delta: Value - Open_Value
         # ✅ corrected (aligned with directional logic)
@@ -2296,7 +2304,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df = pd.DataFrame(rows)
     
     
-   
+   trained_models = get_trained_models(sport)
 
     if trained_models:
         try:
