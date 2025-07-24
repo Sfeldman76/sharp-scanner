@@ -1357,33 +1357,6 @@ def compute_diagnostics_vectorized(df):
     if 'Hybrid_Odds_Timing_Flag' not in df.columns:
         df['Hybrid_Odds_Timing_Flag'] = (df[HYBRID_ODDS_COLS].sum(axis=1) > 0).astype(int)
 
-    # === Active Signal Count
-    df['Active_Signal_Count'] = (
-        (df['Sharp_Move_Signal'] == 1).astype(int) +
-        (df['Sharp_Limit_Jump'] == 1).astype(int) +
-        (df['Sharp_Time_Score'] > 0.5).astype(int) +
-        (df['Sharp_Limit_Total'] > 10000).astype(int) +
-        (df['LimitUp_NoMove_Flag'] == 1).astype(int) +
-        (df['Market_Leader'] == 1).astype(int) +
-        (df['Is_Reinforced_MultiMarket'] == 1).astype(int) +
-        (df['Is_Sharp_Book'] == 1).astype(int) +
-        (df['Sharp_Line_Magnitude'] > 0.5).astype(int) +
-        (df['Rec_Line_Magnitude'] > 0.5).astype(int) +
-        (df['Is_Home_Team_Bet'] == 1).astype(int) +
-        (df['SharpMove_Odds_Up'] == 1).astype(int) +
-        (df['SharpMove_Odds_Down'] == 1).astype(int) +
-        (df['SharpMove_Odds_Mag'] > 5).astype(int) +
-        (df['SharpMove_Resistance_Break'] == 1).astype(int) +
-        (df['Late_Game_Steam_Flag'] == 1).astype(int) +
-        (df['Value_Reversal_Flag'] == 1).astype(int) +
-        (df['Odds_Reversal_Flag'] == 1).astype(int) +
-        (df['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
-        (df['Abs_Odds_Move_From_Opening'] > 5.0).astype(int) +
-        (df['Team_Past_Hit_Rate'] > 0.6).astype(int) +
-        (df['Team_Past_Avg_Model_Prob'] > 0.6).astype(int) +
-        df['Hybrid_Line_Timing_Flag'] +
-        df['Hybrid_Odds_Timing_Flag']
-    )
 
     # === Passes Gate
     df['Passes_Gate'] = (
