@@ -1,6 +1,10 @@
-FROM python:3.10-slim
+FROM python:python:3.10-alpine
 
 WORKDIR /app
+
+
+# Install build dependencies (needed for many Python packages on Alpine)
+RUN apk add --no-cache build-base gcc musl-dev libffi-dev
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
