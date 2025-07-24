@@ -490,7 +490,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 
     
     
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
     # ✅ Load from sharp_scores_full with all necessary columns up front
@@ -1234,10 +1234,10 @@ def compute_diagnostics_vectorized(df):
 
     # === Tier ordering for change tracking
     TIER_ORDER = {
-        '✅ Coinflip': 1,
-        '✅ ⭐ Lean': 2,
+        '🪙 Coinflip': 1,
+        '🤏 Lean': 2,
         '🔥 Strong Indication': 3,
-        '🔥 Steam': 4
+        '🌋 Steam': 4
     }
 
     # === Normalize tier columns
@@ -1361,7 +1361,7 @@ def compute_diagnostics_vectorized(df):
     # === Passes Gate
     df['Passes_Gate'] = (
         pd.to_numeric(df['Model Prob'], errors='coerce') >= 0.0
-    ) & (df['Active_Signal_Count'] > 0)  # You can adjust the threshold if needed
+    ) & (df['Active_Signal_Count'] > 1)  # You can adjust the threshold if needed
     
     # === Confidence Tier from Model
     df['Confidence Tier'] = np.where(
@@ -1369,7 +1369,7 @@ def compute_diagnostics_vectorized(df):
         pd.cut(
             pd.to_numeric(df['Model Prob'], errors='coerce'),
             bins=[0, 0.4, 0.6, 0.8, 1.0],
-            labels=["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
+            labels=["🪙 Coinflip", "🤏 Lean", "🔥 Strong Indication", "🌋 Steam"]
         ).astype(str),
         "Below Probability Threshold"
     )
@@ -1382,7 +1382,7 @@ def compute_diagnostics_vectorized(df):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
     
         if not row.get('Passes_Gate', False):
-            return "🤷‍♂️ Still Calculating Signal"
+            return "🕓 Still Calculating Signal"
     
         parts = []
 
@@ -1412,7 +1412,7 @@ def compute_diagnostics_vectorized(df):
         if row.get('Sharp_Time_Score', 0) > 0.5: parts.append("⏱️ Timing Edge")
         # === Team-level diagnostics
         if row.get('Team_Past_Hit_Rate', 0) > 0.6:
-            parts.append("📊 Team Historically Sharp")
+            parts.append("⚔️📊 Team Historically Sharp")
         if row.get('Team_Past_Avg_Model_Prob', 0) > 0.6:
             parts.append("🔮 Model Favored This Team Historically")
         # === Line/odds movement from open
