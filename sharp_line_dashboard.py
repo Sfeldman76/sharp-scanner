@@ -1088,8 +1088,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 5):
 
         # === Save ensemble (choose one or both)
         trained_models[market] = {
-            "model": model_auc,  # or model_logloss
-            "calibrator": cal_auc  # or cal_logloss
+            "model": model_auc,
+            "calibrator": cal_auc,
+            "team_feature_map": team_feature_map  # ✅ include this here for later use
         }
         save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET, team_feature_map=team_feature_map)
         from scipy.stats import entropy
