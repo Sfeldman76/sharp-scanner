@@ -154,14 +154,34 @@ def build_game_key(df):
         axis=1
     )
     return df
-model_cache = {}  # (label, market) → model bundle
-def get_cached_model(label, market):
-    key = (label.lower(), market.lower())
-    if key not in model_cache:
-        model_cache[key] = load_model_from_gcs(label, market)
-    return model_cache[key]
+
+
+model_cache = {}
+
+def get_trained_models(sport):
+    if sport not in model_cache:
+        model_cache[sport] = {
+            market: load_model_from_gcs(sport, market)
+            for market in ['spreads', 'totals', 'h2h']
+        }
+    return model_cache[sport]
+# Top-level cache
+sharp_moves_cache = {}
+
+
+
+def read_recent_sharp_master_cached(hours=72):
+    cache_key = f"sharp_master_{hours}h"
+    
+    if cache_key in sharp_moves_cache:
+        return sharp_moves_cache[cache_key]
+    
+    df = read_recent_sharp_moves(hours=hours)  # this fetches from BigQuery
+    sharp_moves_cache[cache_key] = df
+    return df
     
     
+            
 def fetch_live_odds(sport_key, api_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -922,7 +942,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     # ✅ Use passed history or fallback
     if df_all_snapshots is None:
-        df_all_snapshots = read_recent_sharp_moves(hours=72)
+        df_all_snapshots = read_recent_sharp_master_cached(hours=72)
     # Drop leftover merge artifacts
     # ✅ Sanity check: Unique outcomes and books
     logger.info(f"🧪 Unique outcomes in snapshot: {df_all_snapshots['Outcome'].nunique()} — {df_all_snapshots['Outcome'].unique().tolist()}")
@@ -2117,7 +2137,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
-    df_history = read_recent_sharp_moves(hours=72)
+    df_history = read_recent_sharp_master_cached(hours=72)
     df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
     df_history = df_history.sort_values('Snapshot_Timestamp')
     
@@ -2308,7 +2328,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     if trained_models:
         try:
-            df_all_snapshots = read_recent_sharp_moves(hours=72)
+            df_all_snapshots = read_recent_sharp_master_cached(hours=72)
             market_weights = load_market_weights_from_bq()
             df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
     
@@ -2592,7 +2612,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
         return None
 
-def read_recent_sharp_moves(hours=140, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves(hours=96, table=BQ_FULL_TABLE):
     try:
         client = bq_client
         query = f"""
@@ -2958,7 +2978,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
         return result_df
     # === 4. Load recent sharp picks
-    df_master = read_recent_sharp_moves(hours=days_back * 72)
+    df_master = read_recent_sharp_master_cached(hours=72)
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
@@ -2998,7 +3018,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
         
     # === 1. Load full snapshots
-    df_all_snapshots = read_recent_sharp_moves(hours=days_back * 72)
+    df_all_snapshots = read_recent_sharp_master_cached(hours=72)
     
     # === 2. Build df_first from raw history for opening lines
     required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']
