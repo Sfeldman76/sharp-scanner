@@ -1364,11 +1364,18 @@ def compute_diagnostics_vectorized(df):
     ) & (df['Active_Signal_Count'] > 1)  # You can adjust the threshold if needed
     
     # === Confidence Tier from Model
+    model_prob = pd.to_numeric(df['Model Prob'], errors='coerce')
+
+    # Assign base tiers
     df['Confidence Tier'] = pd.cut(
-        pd.to_numeric(df['Model Prob'], errors='coerce'),
+        model_prob,
         bins=[0, 0.4, 0.6, 0.8, 1.0],
         labels=["🪙 Coinflip", "🤏 Lean", "🔥 Strong Indication", "🌋 Steam"]
     ).astype(str)
+    
+    # Override with "zero" if probability is exactly 0
+    df.loc[model_prob == 0.0, 'Confidence Tier'] = "None"
+
     
     # === Why Model Likes It
     def build_why(row):
@@ -2146,6 +2153,8 @@ def render_scanner_tab(label, sport_key, container):
             by=['Date + Time (EST)', 'Matchup', 'Market'],
             ascending=[True, True, True]
         )
+        summary_grouped['Model Prob'] = summary_grouped['Model Prob'].apply(lambda x: f"{round(x * 100, 1)}%" if pd.notna(x) else "—")
+
         summary_grouped = summary_grouped[view_cols]
 
         
