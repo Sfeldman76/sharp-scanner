@@ -1364,15 +1364,11 @@ def compute_diagnostics_vectorized(df):
     ) & (df['Active_Signal_Count'] > 1)  # You can adjust the threshold if needed
     
     # === Confidence Tier from Model
-    df['Confidence Tier'] = np.where(
-        df['Passes_Gate'],
-        pd.cut(
-            pd.to_numeric(df['Model Prob'], errors='coerce'),
-            bins=[0, 0.4, 0.6, 0.8, 1.0],
-            labels=["🪙 Coinflip", "🤏 Lean", "🔥 Strong Indication", "🌋 Steam"]
-        ).astype(str),
-        "Below Probability Threshold"
-    )
+    df['Confidence Tier'] = pd.cut(
+        pd.to_numeric(df['Model Prob'], errors='coerce'),
+        bins=[0, 0.4, 0.6, 0.8, 1.0],
+        labels=["🪙 Coinflip", "🤏 Lean", "🔥 Strong Indication", "🌋 Steam"]
+    ).astype(str)
     
     # === Why Model Likes It
     def build_why(row):
