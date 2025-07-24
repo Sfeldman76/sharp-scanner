@@ -153,7 +153,7 @@ def detect_and_save_all_sports():
                 df_moves = df_moves.drop_duplicates(subset=["Line_Hash"])
                 write_sharp_moves_to_master(df_moves)
                
-                write_snapshot_to_gcs_parquet(current)
+                #write_snapshot_to_gcs_parquet(current)
 
             except Exception as e:
                 logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
