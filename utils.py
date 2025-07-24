@@ -1215,7 +1215,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
-           
+            team_feature_map = bundle.get('team_feature_map')
 
             if model is None or iso is None:
                 logger.warning(f"⚠️ Skipping {market_type.upper()} — model or calibrator missing")
@@ -1290,10 +1290,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
 
           
+            
             if team_feature_map is not None and not team_feature_map.empty:
                 df_canon['Team'] = df_canon['Outcome_Norm'].str.lower().str.strip()
                 df_canon = df_canon.merge(team_feature_map, on='Team', how='left')
-            df_canon.drop(columns=['Team'], inplace=True, errors='ignore')
+                df_canon.drop(columns=['Team'], inplace=True, errors='ignore')
+            
             # === Core deltas and magnitude features
             df_canon['Line_Move_Magnitude'] = pd.to_numeric(df_canon['Line_Delta'], errors='coerce').abs()
             df_canon['Line_Magnitude_Abs'] = df_canon['Line_Move_Magnitude']  # Alias
@@ -1459,7 +1461,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # 1. Copy and flip outcome for merge key
             df_inverse = df_canon.copy(deep=True)
             
-                   
+            team_stat_cols = [col for col in df_canon.columns if col.startswith('Team_Past_')]
+            df_inverse[team_stat_cols] = df_canon[team_stat_cols].values     
             logger.info(f"📋 Inverse1 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             logger.info(f"🧪 Inverse rows with Open_Value: {df_inverse['Open_Value'].notnull().sum()} / {len(df_inverse)}")
            
