@@ -1,8 +1,6 @@
 FROM python:3.10-alpine  ✅  # correct
 
-
 WORKDIR /app
-
 
 # Install build dependencies (needed for many Python packages on Alpine)
 RUN apk add --no-cache build-base gcc musl-dev libffi-dev
