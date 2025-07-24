@@ -72,16 +72,18 @@ MARKETS = ['spreads', 'totals', 'h2h']
 
 
 
-
 def implied_prob(odds):
     try:
+        odds = float(odds)
+        if pd.isna(odds):
+            return None
         if odds < 0:
             return -odds / (-odds + 100)
         else:
             return 100 / (odds + 100)
     except:
         return None
-        
+
 def calc_implied_prob(odds):
     try:
         odds = float(odds)
@@ -770,38 +772,32 @@ KEY_LINE_RESISTANCE = {
 
 
 def was_line_resistance_broken(open_val, close_val, key_levels, market_type):
-    if open_val is None or close_val is None:
+    if pd.isna(open_val) or pd.isna(close_val):
         return 0, []
 
     # Flip key levels for spreads (e.g., -3, -7 for favorites)
     if market_type == 'spread':
         key_levels = [-abs(k) for k in key_levels]
 
-    crossed = []
-    for key in key_levels:
-        if (open_val < key < close_val) or (close_val < key < open_val):
-            crossed.append(key)
+    crossed = [
+        key for key in key_levels
+        if (open_val < key < close_val) or (close_val < key < open_val)
+    ]
 
     return int(bool(crossed)), crossed
 
 
-
 def compute_line_resistance_flag(df, source='moves'):
+    # Normalize sport keys using SPORT_ALIAS
     df['Sport'] = df['Sport'].str.upper().map(SPORT_ALIAS).fillna(df['Sport'].str.upper())
 
     def get_key_levels(sport, market):
         if not sport or not market:
             return []
-        sport_key = sport.upper()
-        market_key = market.lower()
-        return KEY_LINE_RESISTANCE.get(sport_key, {}).get(market_key, [])
+        return KEY_LINE_RESISTANCE.get(sport, {}).get(market.lower(), [])
 
     def get_opening_line(row):
-        if source == 'moves':
-            return row.get('Old_Value')
-        elif source == 'scores':
-            return row.get('First_Line_Value')
-        return None
+        return row.get('Open_Value') if source == 'moves' else row.get('First_Line_Value')
 
     def apply_resistance_logic(row):
         open_val = get_opening_line(row)
@@ -818,8 +814,8 @@ def compute_line_resistance_flag(df, source='moves'):
 
     resistance_flags = df.apply(apply_resistance_logic, axis=1)
     df = pd.concat([df, resistance_flags], axis=1)
-
     return df
+
 
 def compute_sharp_magnitude_by_time_bucket(df_all_snapshots):
     results = []
@@ -1039,7 +1035,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
 
     # === Compute shifts
-    df['Odds_Shift'] = pd.to_numeric(df['Odds_Price'], errors='coerce') - pd.to_numeric(df['Open_Odds'], errors='coerce')
+    # === Compute Odds_Shift as change in implied probability
+    df['Odds_Shift'] = (
+        df['Odds_Price'].apply(implied_prob) -
+        df['Open_Odds'].apply(implied_prob)
+    ) * 100  # Optional: express as perce
     df['Implied_Prob_Shift'] = pd.to_numeric(df['Implied_Prob'], errors='coerce') - pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
     # Compute deltas
     df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['Open_Value'], errors='coerce')
@@ -1084,37 +1084,51 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
 
     
-    def compute_odds_reversal(df):
+    def compute_odds_reversal(df, prob_threshold=0.05):
         df = df.copy()
     
-        # Standardize market detection
-        is_spread = df['Market'].str.lower().str.contains('spread')
-        is_total = df['Market'].str.lower().str.contains('total')
-        is_h2h = df['Market'].str.lower().str.contains('h2h')
+        # === Detect Market Type
+        is_spread = df['Market'].str.lower().str.contains('spread', na=False)
+        is_total = df['Market'].str.lower().str.contains('total', na=False)
+        is_h2h = df['Market'].str.lower().str.contains('h2h', na=False)
     
-        # Safe parsing
+        # === Parse numeric odds
         open_odds = pd.to_numeric(df['Open_Odds'], errors='coerce')
         current_odds = pd.to_numeric(df['Odds_Price'], errors='coerce')
         min_odds = pd.to_numeric(df['Min_Odds'], errors='coerce')
         max_odds = pd.to_numeric(df['Max_Odds'], errors='coerce')
     
-        # H2H: both directions could be meaningful (just care about movement extremes)
+        # === Compute implied probabilities
+        implied_prob_vec = np.vectorize(implied_prob)
+        open_prob = implied_prob_vec(open_odds)
+        current_prob = implied_prob_vec(current_odds)
+        min_prob = implied_prob_vec(min_odds)
+        max_prob = implied_prob_vec(max_odds)
+    
+        # === Compute reversal based on implied probability extremes
+        # H2H: movement to extreme edge (min or max)
         h2h_flag = (
-            ((open_odds > min_odds) & (current_odds == min_odds)) |
-            ((open_odds < max_odds) & (current_odds == max_odds))
+            ((open_prob > min_prob) & (current_prob <= min_prob + 1e-5)) |
+            ((open_prob < max_prob) & (current_prob >= max_prob - 1e-5))
         )
     
-        # Spreads / Totals: reversal is usually when odds swing back **away from** sharp direction
-        spread_total_flag = (
-            ((open_odds < max_odds) & (current_odds == max_odds)) |  # Drifted back to long odds
-            ((open_odds > min_odds) & (current_odds == min_odds))    # Crashed to short odds
-        )
+        # Spread/Total: reversal if current odds have shifted away from open by a large % in either direction
+        prob_shift = current_prob - open_prob
+        abs_shift = np.abs(prob_shift)
     
+        # Use threshold for meaningful reversal (default: 5% prob change)
+        spread_total_flag = abs_shift >= prob_threshold
+    
+        # === Final Flag
         df['Odds_Reversal_Flag'] = np.where(
             is_h2h,
             h2h_flag.astype(int),
             np.where(is_spread | is_total, spread_total_flag.astype(int), 0)
         )
+    
+        # Optional: expose shift for debugging
+        df['Implied_Prob_Shift'] = prob_shift
+        df['Abs_Odds_Prob_Move'] = abs_shift
     
         return df
 
@@ -1370,7 +1384,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
             df_canon['Net_Line_Move_From_Opening'] = df_canon['Value'] - df_canon['Open_Value']
             df_canon['Abs_Line_Move_From_Opening'] = df_canon['Net_Line_Move_From_Opening'].abs()
-            df_canon['Net_Odds_Move_From_Opening'] = df_canon['Odds_Price'] - df_canon['Open_Odds']
+            df_canon['Net_Odds_Move_From_Opening'] = (
+                df_canon['Odds_Price'].apply(implied_prob) -
+                df_canon['Open_Odds'].apply(implied_prob)
+            ) * 100  # Optional: express in percentage points
+            
             df_canon['Abs_Odds_Move_From_Opening'] = df_canon['Net_Odds_Move_From_Opening'].abs()
             df_canon['Line_Resistance_Crossed_Levels'] = df_canon.get('Line_Resistance_Crossed_Levels', '[]')
             df_canon['Line_Resistance_Crossed_Count'] = df_canon.get('Line_Resistance_Crossed_Count', 0)
@@ -1523,8 +1541,16 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['SharpMove_Odds_Mag'] = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
             df_inverse['Net_Line_Move_From_Opening'] = df_inverse['Value'] - df_inverse['Open_Value']
             df_inverse['Abs_Line_Move_From_Opening'] = df_inverse['Net_Line_Move_From_Opening'].abs()
-            df_inverse['Net_Odds_Move_From_Opening'] = df_inverse['Odds_Price'] - df_inverse['Open_Odds']
+            # Helper function (ensure it's defined)
+
+            # Apply corrected logic to inverse rows
+            df_inverse['Net_Odds_Move_From_Opening'] = (
+                df_inverse['Odds_Price'].apply(implied_prob) -
+                df_inverse['Open_Odds'].apply(implied_prob)
+            ) * 100  # Optional: percent points
+            
             df_inverse['Abs_Odds_Move_From_Opening'] = df_inverse['Net_Odds_Move_From_Opening'].abs()
+
                             
             df_inverse['Was_Line_Resistance_Broken'] = df_inverse.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
             df_inverse['SharpMove_Resistance_Break'] = (
