@@ -1360,28 +1360,32 @@ def compute_diagnostics_vectorized(df):
 
     # === Passes Gate
     df['Passes_Gate'] = (
-        df['Model Prob'] >= 0.50
-    ) & (df['Active_Signal_Count'] > 2)
-
+        pd.to_numeric(df['Model Prob'], errors='coerce') >= 0.0
+    ) & (df['Active_Signal_Count'] > 0)  # You can adjust the threshold if needed
+    
     # === Confidence Tier from Model
     df['Confidence Tier'] = np.where(
         df['Passes_Gate'],
         pd.cut(
-            df['Model Prob'],
-            bins=[0, 0.4, 0.6, 0.8, 1],
+            pd.to_numeric(df['Model Prob'], errors='coerce'),
+            bins=[0, 0.4, 0.6, 0.8, 1.0],
             labels=["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
         ).astype(str),
         "Below Probability Threshold"
     )
-
+    
     # === Why Model Likes It
     def build_why(row):
-        if pd.isna(row.get('Model Prob')):
+        model_prob = row.get('Model Prob')
+    
+        if pd.isna(model_prob):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
+    
         if not row.get('Passes_Gate', False):
             return "🤷‍♂️ Still Calculating Signal"
     
         parts = []
+
     
         # === Core sharp move reasons
         if row.get('Sharp_Move_Signal'): parts.append("📈 Sharp Move Detected")
