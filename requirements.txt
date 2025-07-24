@@ -14,7 +14,7 @@ streamlit-option-menu
 psutil
 # === Machine Learning ===
 xgboost
-scikit-learn
+scikit-learn==1.7.1 
 scipy
 # === Google Cloud SDKs ===
 google-auth
