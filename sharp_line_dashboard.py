@@ -2016,12 +2016,7 @@ def render_scanner_tab(label, sport_key, container):
                 .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
                 .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
             )
-            # === Drop existing diagnostic columns to avoid _x/_y duplicates
-           # === Resolve diagnostic column suffixes before aggregation
-      
-            # ✅ Debug check
-            st.write("🧪 Columns in filtered_df before diagnostics merge:")
-            st.write(filtered_df.columns.tolist())
+          
                     
             # === Step 4: Merge diagnostics back to deduped summary
             df_summary_base = df_summary_base.merge(
@@ -2030,7 +2025,7 @@ def render_scanner_tab(label, sport_key, container):
                 how='left'
             )
             st.write("🧪 Columns in filtered_df after diagnostics merge:")
-            st.write(filtered_df.columns.tolist())
+            st.write(df_summary_base.columns.tolist())
                     
             # Fallback fill for missing
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
@@ -2099,7 +2094,8 @@ def render_scanner_tab(label, sport_key, container):
             .sort_values('Snapshot_Timestamp', ascending=False)
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
         )
-        
+        st.write("🧪 Columns in filtered after diagnostics merge:")
+        st.write(filtered_df.columns.tolist())
         # Step 3: Pull diagnostics from earlier
         # Step 3: Pull diagnostics and rename snapshot → Model Prob
         diagnostics_dedup = diagnostics_df.drop_duplicates(
