@@ -2028,7 +2028,10 @@ def render_scanner_tab(label, sport_key, container):
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                 df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
         
-
+        st.markdown("### 🧪 Summary Grouped Debug View")
+        
+        # Print column list
+        st.code(f"🧩 Columns in summary_after sharp diag:\n{summary_grouped.columns.tolist()}")
         # === 6. Final Summary Table ===
 
         # Define the core columns we want to extract
