@@ -1983,12 +1983,8 @@ def render_scanner_tab(label, sport_key, container):
             df_summary_base['Team'] = df_summary_base['Outcome'].str.lower().str.strip()
             df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
 
-                # === Aggregate across all books and sharp books
-        group_cols = ['Game_Key', 'Market', 'Outcome']
-
-        agg_max = {col: 'max' for col in flag_cols}
-        agg_mean = {col: 'mean' for col in magnitude_cols + HYBRID_LINE_COLS + HYBRID_ODDS_COLS}
-        agg_allbooks = {**agg_max, **agg_mean}
+     
+       
 
        
         # === Merge both views back into summary base
