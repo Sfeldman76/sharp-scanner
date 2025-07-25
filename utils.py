@@ -158,17 +158,17 @@ def build_game_key(df):
 
 model_cache = {}
 
-def get_trained_models(sport):
-    if sport not in model_cache:
-        model_cache[sport] = {
-            market: load_model_from_gcs(sport, market)
+
+def get_trained_models(sport_key):
+    if sport_key not in model_cache:
+        model_cache[sport_key] = {
+            market: load_model_from_gcs(sport_key, market)
             for market in ['spreads', 'totals', 'h2h']
         }
-    return model_cache[sport]
-# Top-level cache
+    return model_cache[sport_key]
+    
+    
 sharp_moves_cache = {}
-
-
 
 def read_recent_sharp_master_cached(hours=72):
     cache_key = f"sharp_master_{hours}h"
@@ -1212,7 +1212,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     except Exception as e:
         logging.warning(f"⚠️ Failed to assign confidence scores: {e}")
     # === Patch derived fields before BigQuery write ===
-    trained_models = get_trained_models(sport)
+    trained_models = get_trained_models(sport_key)
     try:
         # Line_Delta: Value - Open_Value
         # ✅ corrected (aligned with directional logic)
@@ -2324,7 +2324,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df = pd.DataFrame(rows)
     
     
-    trained_models = get_trained_models(sport)
+    trained_models = get_trained_models(sport_key)
 
     if trained_models:
         try:
