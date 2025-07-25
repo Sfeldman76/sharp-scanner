@@ -1391,6 +1391,10 @@ def compute_diagnostics_vectorized(df):
 
     
         # === Core sharp move reasons
+        parts = []
+
+   
+
         if row.get('Sharp_Move_Signal'): parts.append("📈 Sharp Move Detected")
         if row.get('Sharp_Limit_Jump'): parts.append("💰 Limit Jumped")
         if row.get('Market_Leader'): parts.append("🏆 Market Leader")
@@ -1423,6 +1427,7 @@ def compute_diagnostics_vectorized(df):
             parts.append("📈 Line Moved from Open")
         if row.get('Abs_Odds_Move_From_Opening', 0) > 5.0:
             parts.append("💹 Odds Moved from Open")
+        
     
         # === Hybrid timing buckets — LINE
         HYBRID_LINE_COLS = [
@@ -1923,6 +1928,19 @@ def render_scanner_tab(label, sport_key, container):
         
         # Create df_summary_base
         df_summary_base = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+        # === Use sharp books only to compute final Model Prob per Game × Market × Outcome
+        df_sharp = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)]
+        model_prob_map = (
+            df_sharp
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Model_Sharp_Win_Prob']
+            .mean()
+            .reset_index()
+            .rename(columns={'Model_Sharp_Win_Prob': 'Model Prob'})
+        )
+        
+        df_summary_base = df_summary_base.drop(columns=['Model Prob'], errors='ignore')
+        df_summary_base = df_summary_base.merge(model_prob_map, on=['Game_Key', 'Market', 'Outcome'], how='left')
+
         df_summary_base['Sharp Line'] = df_summary_base['Sharp Line'].fillna(df_pre['Sharp Line'])
         df_summary_base['Rec Line'] = df_summary_base['Rec Line'].fillna(df_pre['Rec Line'])
         # Ensure required columns exist
@@ -1965,6 +1983,17 @@ def render_scanner_tab(label, sport_key, container):
             df_summary_base['Team'] = df_summary_base['Outcome'].str.lower().str.strip()
             df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
 
+                # === Aggregate across all books and sharp books
+        group_cols = ['Game_Key', 'Market', 'Outcome']
+
+        agg_max = {col: 'max' for col in flag_cols}
+        agg_mean = {col: 'mean' for col in magnitude_cols + HYBRID_LINE_COLS + HYBRID_ODDS_COLS}
+        agg_allbooks = {**agg_max, **agg_mean}
+
+       
+        # === Merge both views back into summary base
+        df_summary_base = df_summary_base.drop_duplicates(subset=group_cols)
+       
 
         st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         #st.write(f"🔢 Rows: {len(df_summary_base)}")
