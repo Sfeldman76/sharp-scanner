@@ -1932,11 +1932,11 @@ def render_scanner_tab(label, sport_key, container):
         df_sharp = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)]
         model_prob_map = (
             df_sharp
-            .groupby(['Game_Key', 'Market', 'Outcome'])['Model_Sharp_Win_Prob']
+            .groupby(['Game_Key', 'Market', 'Outcome'])['Model Prob']
             .mean()
             .reset_index()
-            .rename(columns={'Model_Sharp_Win_Prob': 'Model Prob'})
         )
+
         
         df_summary_base = df_summary_base.drop(columns=['Model Prob'], errors='ignore')
         df_summary_base = df_summary_base.merge(model_prob_map, on=['Game_Key', 'Market', 'Outcome'], how='left')
