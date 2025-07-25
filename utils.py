@@ -2330,7 +2330,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         try:
             df_all_snapshots = read_recent_sharp_master_cached(hours=72)
             market_weights = load_market_weights_from_bq()
+            
             df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
+            
     
             if not df_scored.empty:
                 df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
