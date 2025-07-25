@@ -2324,7 +2324,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df = pd.DataFrame(rows)
     
     
-   trained_models = get_trained_models(sport)
+    trained_models = get_trained_models(sport)
 
     if trained_models:
         try:
