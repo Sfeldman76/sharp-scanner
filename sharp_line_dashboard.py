@@ -2112,7 +2112,13 @@ def render_scanner_tab(label, sport_key, container):
 
         # ✅ Drop stale version *before* merge to avoid suffixes
         # ✅ Drop stale versions to prevent _x/_y suffixes
-        filtered_df = filtered_df.drop(columns=['Model Prob', 'Confidence Tier'], errors='ignore')
+        # ✅ Drop all diagnostics to prevent _x/_y suffixes
+        diagnostic_cols = [
+            'Model Prob', 'Confidence Tier',
+            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It'
+        ]
+        filtered_df = filtered_df.drop(columns=[col for col in diagnostic_cols if col in filtered_df.columns], errors='ignore')
+
 
         
         # Step 4: Merge snapshot version cleanly
@@ -2122,7 +2128,8 @@ def render_scanner_tab(label, sport_key, container):
             how='left'
         )
         
-
+        st.write("🧪 Columns ibefore soummary group:")
+        st.write(filtered_df.columns.tolist())
             
         
         # Step 5: Group from merged filtered_df to produce summary
