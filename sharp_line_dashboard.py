@@ -2017,8 +2017,19 @@ def render_scanner_tab(label, sport_key, container):
                 .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
             )
             # === Drop existing diagnostic columns to avoid _x/_y duplicates
-            diagnostic_cols = ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
-            df_summary_base.drop(columns=[col for col in diagnostic_cols if col in df_summary_base.columns], inplace=True)
+           # === Resolve diagnostic column suffixes before aggregation
+            diagnostic_cols = ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']
+            
+            for col in diagnostic_cols:
+                if f"{col}_x" in df_summary_base.columns:
+                    df_summary_base[col] = df_summary_base[f"{col}_x"]
+                elif f"{col}_y" in df_summary_base.columns:
+                    df_summary_base[col] = df_summary_base[f"{col}_y"]
+                elif col not in df_summary_base.columns:
+                    df_summary_base[col] = "⚠️ Missing"
+            
+            # Drop the suffix variants to avoid ambiguity
+            df_summary_base.drop(columns=[c for c in df_summary_base.columns if c.endswith('_x') or c.endswith('_y')], inplace=True)
 
             # === Step 4: Merge diagnostics back to deduped summary
             df_summary_base = df_summary_base.merge(
