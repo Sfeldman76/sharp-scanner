@@ -915,7 +915,7 @@ def add_minutes_to_game(df):
 
     return df
 
-        
+      
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
@@ -1212,7 +1212,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     except Exception as e:
         logging.warning(f"⚠️ Failed to assign confidence scores: {e}")
     # === Patch derived fields before BigQuery write ===
-    trained_models = get_trained_models(sport_key)
+   
     try:
         # Line_Delta: Value - Open_Value
         # ✅ corrected (aligned with directional logic)
