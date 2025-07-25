@@ -2018,7 +2018,7 @@ def render_scanner_tab(label, sport_key, container):
             )
             # === Drop existing diagnostic columns to avoid _x/_y duplicates
            # === Resolve diagnostic column suffixes before aggregation
-            diagnostic_cols = ['Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']
+            diagnostic_cols = [ 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']
             
             for col in diagnostic_cols:
                 if f"{col}_x" in df_summary_base.columns:
