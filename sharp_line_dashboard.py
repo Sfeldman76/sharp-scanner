@@ -1990,7 +1990,16 @@ def render_scanner_tab(label, sport_key, container):
 
        
         # === Merge both views back into summary base
-        df_summary_base = df_summary_base.drop_duplicates(subset=group_cols)
+       # ✅ Prefer sharp books for deduplication
+        df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
+        
+        # ✅ Sort with sharp book priority and recency
+        df_summary_base = (
+            df_summary_base
+            .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
+        )
+
        
 
         st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
