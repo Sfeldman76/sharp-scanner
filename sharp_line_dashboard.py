@@ -1989,18 +1989,6 @@ def render_scanner_tab(label, sport_key, container):
        
 
        
-        # === Merge both views back into summary base
-       # ✅ Prefer sharp books for deduplication
-        df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
-        
-        # ✅ Sort with sharp book priority and recency
-        df_summary_base = (
-            df_summary_base
-            .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
-        )
-
-       
 
         st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         #st.write(f"🔢 Rows: {len(df_summary_base)}")
@@ -2009,43 +1997,37 @@ def render_scanner_tab(label, sport_key, container):
         #st.dataframe(df_summary_base.head(10))
        
         # === Compute diagnostics from df_pre (upcoming + scored)
-        if df_summary_base.empty:
-            st.warning("⚠️ No valid *upcoming* scored picks for diagnostics.")
-            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
-                df_moves_raw[col] = "⚠️ Missing"
-        else:
-            # ✅ Only use SHARP_BOOKS for diagnostic feature computation
-            diag_source = df_summary_base.copy()
-            if 'Bookmaker' in diag_source.columns:
-                diag_source = diag_source[diag_source['Bookmaker'].str.lower().isin(SHARP_BOOKS)]
-            
-            if diag_source.empty:
-                st.warning("⚠️ No sharp book rows available for diagnostics.")
-                for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
-                    df_moves_raw[col] = "⚠️ Missing"
-            else:
-                diagnostics_df = compute_diagnostics_vectorized(diag_source)
-                diag_keys = ['Game_Key', 'Market', 'Outcome']
-                
-                df_moves_raw = df_moves_raw.merge(
-                    diagnostics_df,
-                    on=diag_keys,
-                    how='left',
-                    suffixes=('', '_diagnostics')
-                )
+        # === Step 1: Use only SHARP_BOOKS for diagnostics
+        diag_source = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
         
-                # Fallbacks if diagnostic fields are missing
-                diagnostic_cols = {
-                    'Confidence Trend': 'Confidence Trend_diagnostics',
-                    'Why Model Likes It': 'Why Model Likes It_diagnostics',
-                    'Tier Δ': 'Tier Δ_diagnostics',
-                    'Line/Model Direction': 'Line/Model Direction_diagnostics',
-                }
-                for final_col, diag_col in diagnostic_cols.items():
-                    if diag_col in df_moves_raw.columns:
-                        df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
-                    else:
-                        df_moves_raw[final_col] = "⚠️ Missing"
+        # === Step 2: Compute diagnostics across all sharp book rows (NO deduplication yet)
+        if diag_source.empty:
+            st.warning("⚠️ No sharp book rows available for diagnostics.")
+            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
+                df_summary_base[col] = "⚠️ Missing"
+        else:
+            diagnostics_df = compute_diagnostics_vectorized(diag_source)
+        
+            # === Step 3: Deduplicate AFTER computing diagnostics
+            # Keep the *best* row per outcome — prefer sharp books + latest timestamp
+            df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
+            df_summary_base = (
+                df_summary_base
+                .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
+                .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
+            )
+        
+            # === Step 4: Merge diagnostics back to deduped summary
+            df_summary_base = df_summary_base.merge(
+                diagnostics_df,
+                on=['Game_Key', 'Market', 'Outcome'],
+                how='left'
+            )
+        
+            # Fallback fill for missing
+            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
+                df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
+        
 
         # === 6. Final Summary Table ===
 
