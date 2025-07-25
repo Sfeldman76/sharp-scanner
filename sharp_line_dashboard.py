@@ -2016,7 +2016,10 @@ def render_scanner_tab(label, sport_key, container):
                 .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
                 .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
             )
-        
+            # === Drop existing diagnostic columns to avoid _x/_y duplicates
+            diagnostic_cols = ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']
+            df_summary_base.drop(columns=[col for col in diagnostic_cols if col in df_summary_base.columns], inplace=True)
+
             # === Step 4: Merge diagnostics back to deduped summary
             df_summary_base = df_summary_base.merge(
                 diagnostics_df,
