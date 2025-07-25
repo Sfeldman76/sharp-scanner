@@ -2005,28 +2005,38 @@ def render_scanner_tab(label, sport_key, container):
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                 df_moves_raw[col] = "⚠️ Missing"
         else:
-            diagnostics_df = compute_diagnostics_vectorized(df_summary_base)
-            diag_keys = ['Game_Key', 'Market', 'Outcome']
+            # ✅ Only use SHARP_BOOKS for diagnostic feature computation
+            diag_source = df_summary_base.copy()
+            if 'Bookmaker' in diag_source.columns:
+                diag_source = diag_source[diag_source['Bookmaker'].str.lower().isin(SHARP_BOOKS)]
+            
+            if diag_source.empty:
+                st.warning("⚠️ No sharp book rows available for diagnostics.")
+                for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
+                    df_moves_raw[col] = "⚠️ Missing"
+            else:
+                diagnostics_df = compute_diagnostics_vectorized(diag_source)
+                diag_keys = ['Game_Key', 'Market', 'Outcome']
+                
+                df_moves_raw = df_moves_raw.merge(
+                    diagnostics_df,
+                    on=diag_keys,
+                    how='left',
+                    suffixes=('', '_diagnostics')
+                )
         
-            df_moves_raw = df_moves_raw.merge(
-                diagnostics_df,
-                on=diag_keys,
-                how='left',
-                suffixes=('', '_diagnostics')
-            )
-        
-            # Cleanly attach diagnostic columns with fallback
-            diagnostic_cols = {
-                'Confidence Trend': 'Confidence Trend_diagnostics',
-                'Why Model Likes It': 'Why Model Likes It_diagnostics',
-                'Tier Δ': 'Tier Δ_diagnostics',
-                'Line/Model Direction': 'Line/Model Direction_diagnostics',
-            }
-            for final_col, diag_col in diagnostic_cols.items():
-                if diag_col in df_moves_raw.columns:
-                    df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
-                else:
-                    df_moves_raw[final_col] = "⚠️ Missing"
+                # Fallbacks if diagnostic fields are missing
+                diagnostic_cols = {
+                    'Confidence Trend': 'Confidence Trend_diagnostics',
+                    'Why Model Likes It': 'Why Model Likes It_diagnostics',
+                    'Tier Δ': 'Tier Δ_diagnostics',
+                    'Line/Model Direction': 'Line/Model Direction_diagnostics',
+                }
+                for final_col, diag_col in diagnostic_cols.items():
+                    if diag_col in df_moves_raw.columns:
+                        df_moves_raw[final_col] = df_moves_raw[diag_col].fillna("⚠️ Missing")
+                    else:
+                        df_moves_raw[final_col] = "⚠️ Missing"
 
         # === 6. Final Summary Table ===
 
