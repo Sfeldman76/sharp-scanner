@@ -2018,26 +2018,20 @@ def render_scanner_tab(label, sport_key, container):
             )
             # === Drop existing diagnostic columns to avoid _x/_y duplicates
            # === Resolve diagnostic column suffixes before aggregation
-            diagnostic_cols = [ 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It']
-            
-            for col in diagnostic_cols:
-                if f"{col}_x" in df_summary_base.columns:
-                    df_summary_base[col] = df_summary_base[f"{col}_x"]
-                elif f"{col}_y" in df_summary_base.columns:
-                    df_summary_base[col] = df_summary_base[f"{col}_y"]
-                elif col not in df_summary_base.columns:
-                    df_summary_base[col] = "⚠️ Missing"
-            
-            # Drop the suffix variants to avoid ambiguity
-            df_summary_base.drop(columns=[c for c in df_summary_base.columns if c.endswith('_x') or c.endswith('_y')], inplace=True)
-
+      
+            # ✅ Debug check
+            st.write("🧪 Columns in filtered_df before diagnostics merge:")
+            st.write(filtered_df.columns.tolist())
+                    
             # === Step 4: Merge diagnostics back to deduped summary
             df_summary_base = df_summary_base.merge(
                 diagnostics_df,
                 on=['Game_Key', 'Market', 'Outcome'],
                 how='left'
             )
-        
+            st.write("🧪 Columns in filtered_df after diagnostics merge:")
+            st.write(filtered_df.columns.tolist())
+                    
             # Fallback fill for missing
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
                 df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
@@ -2132,10 +2126,7 @@ def render_scanner_tab(label, sport_key, container):
             how='left'
         )
         
-        # ✅ Debug check
-        st.write("🧪 Columns in filtered_df after diagnostics merge:")
-        st.write(filtered_df.columns.tolist())
-                    
+
             
         
         # Step 5: Group from merged filtered_df to produce summary
