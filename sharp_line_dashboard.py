@@ -1990,9 +1990,9 @@ def render_scanner_tab(label, sport_key, container):
 
        
 
-        st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
+        #st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         #st.write(f"🔢 Rows: {len(df_summary_base)}")
-        st.write("📋 Columns:", df_summary_base.columns.tolist())
+        #st.write("📋 Columns:", df_summary_base.columns.tolist())
         
         #st.dataframe(df_summary_base.head(10))
        
@@ -2024,8 +2024,8 @@ def render_scanner_tab(label, sport_key, container):
                 on=['Game_Key', 'Market', 'Outcome'],
                 how='left'
             )
-            st.write("🧪 Columns in filtered_df after diagnostics merge:")
-            st.write(df_summary_base.columns.tolist())
+            #st.write("🧪 Columns in filtered_df after diagnostics merge:")
+            #st.write(df_summary_base.columns.tolist())
                     
             # Fallback fill for missing
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
@@ -2094,8 +2094,8 @@ def render_scanner_tab(label, sport_key, container):
             .sort_values('Snapshot_Timestamp', ascending=False)
             .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
         )
-        st.write("🧪 Columns in filtered after diagnostics merge:")
-        st.write(filtered_df.columns.tolist())
+        #st.write("🧪 Columns in filtered after diagnostics merge:")
+        #st.write(filtered_df.columns.tolist())
         # Step 3: Pull diagnostics from earlier
         # Step 3: Pull diagnostics and rename snapshot → Model Prob
         diagnostics_dedup = diagnostics_df.drop_duplicates(
@@ -2128,8 +2128,8 @@ def render_scanner_tab(label, sport_key, container):
             how='left'
         )
         
-        st.write("🧪 Columns ibefore soummary group:")
-        st.write(filtered_df.columns.tolist())
+        #st.write("🧪 Columns ibefore soummary group:")
+        #st.write(filtered_df.columns.tolist())
             
         
         # Step 5: Group from merged filtered_df to produce summary
