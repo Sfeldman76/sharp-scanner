@@ -1929,6 +1929,8 @@ def render_scanner_tab(label, sport_key, container):
         # Create df_summary_base
         df_summary_base = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
         # === Use sharp books only to compute final Model Prob per Game × Market × Outcome
+        group_cols = ['Game_Key', 'Market', 'Outcome']
+
         df_sharp = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)]
         model_prob_map = (
             df_sharp
