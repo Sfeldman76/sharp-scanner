@@ -1361,7 +1361,7 @@ def compute_diagnostics_vectorized(df):
     # === Passes Gate
     df['Passes_Gate'] = (
         pd.to_numeric(df['Model Prob'], errors='coerce') >= 0.0
-    ) & (df['Active_Signal_Count'] > 1)  # You can adjust the threshold if needed
+    ) & (df['Active_Signal_Count'] > 2)  # You can adjust the threshold if needed
     
     # === Confidence Tier from Model
     model_prob = pd.to_numeric(df['Model Prob'], errors='coerce')
@@ -1418,9 +1418,9 @@ def compute_diagnostics_vectorized(df):
         if row.get('Odds_Reversal_Flag'): parts.append("📉 Odds Reversal")
         if row.get('Sharp_Time_Score', 0) > 0.5: parts.append("⏱️ Timing Edge")
         # === Team-level diagnostics
-        if row.get('Team_Past_Hit_Rate', 0) > 0.6:
+        if row.get('Team_Past_Hit_Rate', 0) > 0.5:
             parts.append("⚔️📊 Team Historically Sharp")
-        if row.get('Team_Past_Avg_Model_Prob', 0) > 0.6:
+        if row.get('Team_Past_Avg_Model_Prob', 0) > 0.5:
             parts.append("🔮 Model Favored This Team Historically")
         # === Line/odds movement from open
         if row.get('Abs_Line_Move_From_Opening', 0) > 1.0:
