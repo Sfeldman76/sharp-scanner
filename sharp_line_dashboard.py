@@ -1229,7 +1229,7 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
     df['TIMING_OPPORTUNITY_LABEL'] = (
         (df['SHARP_HIT_BOOL'] == 1) &
         (df['Abs_Line_Move_From_Opening'] < 1.5) &
-        (df['Model Prob'] > 0.6) &
+        (df['Model_Sharp_Win_Prob'] > 0.6) &
         (df['Minutes_To_Game_Tier'].str.startswith("Early"))
     ).astype(int)
 
