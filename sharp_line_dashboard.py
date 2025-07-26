@@ -1205,7 +1205,80 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
         "logloss": logloss_val
     }
 
+def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
+    st.info(f"🧠 Training timing opportunity model for {sport.upper()}...")
 
+    # === 1. Load from scored table (sharp_scores_full)
+    query = f"""
+        SELECT *
+        FROM `sharplogger.sharp_data.sharp_scores_full`
+        WHERE Sport = '{sport.upper()}'
+          AND Scored = TRUE
+          AND SHARP_HIT_BOOL IS NOT NULL
+          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
+    """
+    df = bq_client.query(query).to_dataframe()
+
+    if df.empty:
+        st.warning("⚠️ No historical sharp picks available to train timing model.")
+        return
+
+    df = df.copy()
+
+    # === 2. Seed a label for smart timing
+    df['TIMING_OPPORTUNITY_LABEL'] = (
+        (df['SHARP_HIT_BOOL'] == 1) &
+        (df['Abs_Line_Move_From_Opening'] < 1.5) &
+        (df['Model Prob'] > 0.6) &
+        (df['Minutes_To_Game_Tier'].str.startswith("Early"))
+    ).astype(int)
+
+    # === 3. Define features (reusing your schema — no new columns)
+    features = [
+        'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
+    ]
+    features += [
+        f'SharpMove_Magnitude_{b}' for b in [
+            'Overnight_MidRange', 'Early_MidRange', 'Midday_MidRange', 'Late_MidRange',
+            'Late_Urgent', 'Early_Urgent'
+        ]
+    ]
+    features += [
+        f'OddsMove_Magnitude_{b}' for b in [
+            'Early_MidRange', 'Midday_MidRange', 'Late_Urgent'
+        ]
+    ]
+
+    # ✅ Filter valid rows
+    X = df[features].fillna(0)
+    y = df['TIMING_OPPORTUNITY_LABEL']
+
+    if y.nunique() < 2:
+        st.warning("⚠️ Not enough variation in timing labels to train.")
+        return
+
+    # === 4. Train model
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.calibration import CalibratedClassifierCV
+
+    model = GradientBoostingClassifier()
+    calibrated = CalibratedClassifierCV(model, method='isotonic', cv=5)
+    calibrated.fit(X, y)
+
+    # ✅ Save to GCS or pickle (you choose — let me know)
+    # Save the timing model
+    save_model_to_gcs(
+        model=calibrated,
+        calibrator=None,  # no calibrator needed — already applied
+        sport=sport,
+        market="timing",
+        bucket_name=GCS_BUCKET,
+        team_feature_map=None  # not applicable here
+    )
+    st.success("✅ Timing Opportunity Model trained successfully.")
+    return calibrated
+    
+    
 def read_market_weights_from_bigquery():
     try:
         client = bq_client
@@ -1223,6 +1296,8 @@ def read_market_weights_from_bigquery():
     except Exception as e:
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
+        
+        
 def compute_diagnostics_vectorized(df):
     df = df.copy()
 
@@ -1474,16 +1549,38 @@ def compute_diagnostics_vectorized(df):
     
     # Apply to DataFrame
    
-    df['Why Model Likes It'] = df.apply(build_why, axis=1)
-    df['Model_Confidence_Tier'] = df['Confidence Tier']  # ✅ snapshot tier for summary view
 
+    # === Load Timing Opportunity Model
+    timing_model_data = load_model_from_gcs(sport=sport, market="timing", bucket_name=GCS_BUCKET)
+    timing_model = timing_model_data.get("model")
+    
+    # === Apply Timing Opportunity Score
+    if timing_model is not None:
+        for col in timing_feature_cols:
+            if col not in df.columns:
+                df[col] = 0.0  # fallback if column missing
+    
+        X_timing = df[timing_feature_cols].fillna(0)
+        df['Timing_Opportunity_Score'] = timing_model.predict_proba(X_timing)[:, 1]
+    
+        df['Timing_Stage'] = pd.cut(
+            df['Timing_Opportunity_Score'],
+            bins=[-1, 0.4, 0.75, 1.1],
+            labels=["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
+        ).astype(str)
+    else:
+        df['Timing_Opportunity_Score'] = np.nan
+        df['Timing_Stage'] = "⚠️ Unavailable"
+        
     # === Final Output
     diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
         'Tier_Change', 'Confidence Trend', 'Line/Model Direction',
         'Why Model Likes It', 'Passes_Gate', 'Confidence Tier',
         'Model Prob Snapshot', 'First Prob Snapshot',
-        'Model_Confidence_Tier'   # ✅ Add this
+        'Model_Confidence_Tier',
+        'Timing_Opportunity_Score',  # ✅
+        'Timing_Stage'   # ✅ Add this
     ]].rename(columns={
         'Tier_Change': 'Tier Δ'
     })
@@ -1923,7 +2020,7 @@ def render_scanner_tab(label, sport_key, container):
             'Model Prob', 'Confidence Tier',
             'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
             'Game_Key',  # ✅ already there
-            'Snapshot_Timestamp'  # ✅ add this line
+            'Snapshot_Timestamp', 'Timing_Stage', 'Timing_Opportunity_Score'   # ✅ add this line
         ]
         
         # Create df_summary_base
@@ -2103,7 +2200,7 @@ def render_scanner_tab(label, sport_key, container):
         )[[
             'Game_Key', 'Market', 'Outcome',
             'Confidence Trend', 'Tier Δ', 'Line/Model Direction',
-            'Why Model Likes It', 'Model Prob Snapshot', 'Model_Confidence_Tier'
+            'Why Model Likes It', 'Model Prob Snapshot', 'Model_Confidence_Tier', 'Timing_Stage','Timing_Opportunity_Score'
         ]].rename(columns={
             'Model Prob Snapshot': 'Model Prob',
             'Model_Confidence_Tier': 'Confidence Tier'  # ✅ Now this will work
@@ -2142,6 +2239,8 @@ def render_scanner_tab(label, sport_key, container):
                 'Rec Move': 'mean',
                 'Sharp Move': 'mean',
                 'Model Prob': 'mean',
+                'Timing_Opportunity_Score': 'first',
+                'Timing_Stage': 'first', 
                 'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
                 'Confidence Trend': 'first',
                 'Tier Δ': 'first',
@@ -2185,7 +2284,7 @@ def render_scanner_tab(label, sport_key, container):
         view_cols = [
             'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
             'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
-            'Model Prob', 'Confidence Tier',
+            'Model Prob', 'Confidence Tier', 'Timing_Stage','Timing_Opportunity_Score',
             'Why Model Likes It', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
         ]
         summary_grouped = summary_grouped.sort_values(
@@ -2492,9 +2591,10 @@ else:
 
     if st.button(f"📈 Train {sport} Sharp Model"):
         train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
-
+        train_timing_opportunity_model(sport=label)
     # Prevent multiple scanners from running
-    conflicting = [
+   
+     conflicting = [
         k for k, v in scanner_flags.items()
         if k != sport and st.session_state.get(v, False)
     ]
