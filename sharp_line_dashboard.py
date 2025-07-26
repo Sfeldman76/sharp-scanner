@@ -2594,7 +2594,7 @@ else:
         train_timing_opportunity_model(sport=label)
     # Prevent multiple scanners from running
    
-     conflicting = [
+    conflicting = [
         k for k, v in scanner_flags.items()
         if k != sport and st.session_state.get(v, False)
     ]
