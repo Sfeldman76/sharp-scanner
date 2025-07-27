@@ -1153,9 +1153,9 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
     }
 
 def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
-    st.info(f"🧠 Training timing opportunity model for {sport.upper()}...")
+    st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
 
-    # === 1. Load from scored table (sharp_scores_full)
+    # === Load historical scored data
     query = f"""
         SELECT *
         FROM `sharplogger.sharp_data.sharp_scores_full`
@@ -1165,83 +1165,64 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
           AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
     """
     df = bq_client.query(query).to_dataframe()
-
     if df.empty:
-        st.warning("⚠️ No historical sharp picks available to train timing model.")
+        st.warning("⚠️ No historical sharp picks available.")
         return
 
-    df = df.copy()
-    
-    
-    
-    # === 2. Seed a label for smart timing
-    df['TIMING_OPPORTUNITY_LABEL'] = (
-        (df['SHARP_HIT_BOOL'] == 1) &
-        (df['Abs_Line_Move_From_Opening'] < 1.5) &  # ✅ not overmoved
-        (df['Model_Sharp_Win_Prob'] > 0.6)          # ✅ strong signal
-    ).astype(int)
+    # Define markets
+    for market in ['spreads', 'totals', 'h2h']:
+        df_market = df[df['Market'] == market].copy()
+        if df_market.empty:
+            st.warning(f"⚠️ No rows for market: {market}")
+            continue
 
-    # === 3. Define features (reusing your schema — no new columns)
-    features = [
-        'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
-    ]
-    
-    features += [
-        f'SharpMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+        # Create label
+        df_market['TIMING_OPPORTUNITY_LABEL'] = (
+            (df_market['SHARP_HIT_BOOL'] == 1) &
+            (df_market['Abs_Line_Move_From_Opening'] < 1.5) &
+            (df_market['Model_Sharp_Win_Prob'] > 0.6)
+        ).astype(int)
+
+        features = [
+            'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
+        ] + [
+            f'SharpMove_Magnitude_{b}' for b in [
+                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            ]
+        ] + [
+            f'OddsMove_Magnitude_{b}' for b in [
+                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            ]
         ]
-    ]
-    features += [
-        f'OddsMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
-        ]
-    ]
 
-    # ✅ Filter valid rows
-    X = df[features].fillna(0)
-    y = df['TIMING_OPPORTUNITY_LABEL']
+        X = df_market[features].fillna(0)
+        y = df_market['TIMING_OPPORTUNITY_LABEL']
+        if y.nunique() < 2:
+            st.warning(f"⚠️ Not enough variation in label for {market} — skipping.")
+            continue
 
-    if y.nunique() < 2:
-        st.warning("⚠️ Not enough variation in timing labels to train.")
-        return
+        model = GradientBoostingClassifier()
+        calibrated = CalibratedClassifierCV(model, method='isotonic', cv=5)
+        calibrated.fit(X, y)
 
-    # === 4. Train model
-    
-
-    
-    model = GradientBoostingClassifier(
-        n_estimators=100,
-        learning_rate=0.05,
-        max_depth=3,
-        subsample=0.8,
-        max_features='sqrt',
-        random_state=42
+        # ✅ Save market-specific model
+        save_model_to_gcs(
+            model=calibrated,
+            calibrator=None,
+            sport=sport,
+            market=f"timing_{market}",  # 👈 now market is defined
+            bucket_name=GCS_BUCKET,
+            team_feature_map=None
         )
-    
-    calibrator = CalibratedClassifierCV(model, method='isotonic', cv=5)
-    calibrator.fit(X, y)
-
-    # ✅ Save to GCS or pickle (you choose — let me know)
-    # Save the timing model
-    save_model_to_gcs(
-        model=model,
-        calibrator=calibrator,
-        sport=sport,
-        market=f"timing_{market}",
-        bucket_name=GCS_BUCKET,
-        team_feature_map=None
-    )
+        st.success(f"✅ Timing model saved for {market.upper()}")
         
-    st.success("✅ Timing Opportunity Model trained successfully.")
-    return calibrated
-    
-    
+        
     
 def read_market_weights_from_bigquery():
     try:
@@ -2575,8 +2556,9 @@ else:
     sport_key = SPORTS[sport]  # e.g. "basketball_wnba"
 
     if st.button(f"📈 Train {sport} Sharp Model"):
-        train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
         train_timing_opportunity_model(sport=label)
+        train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
+        
     # Prevent multiple scanners from running
    
     conflicting = [
