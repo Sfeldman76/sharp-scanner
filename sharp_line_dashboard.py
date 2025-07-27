@@ -1187,7 +1187,7 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 7):
                 |
                 (df_market['Model_Sharp_Win_Prob'] > 0.6)
             )
-        ).astype(int
+        ).astype(int)
         
         features = [
             'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
