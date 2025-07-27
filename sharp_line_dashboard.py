@@ -1501,8 +1501,16 @@ def compute_diagnostics_vectorized(df):
     if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
         df['Model Prob'] = df['Model_Sharp_Win_Prob']
     # === Load Timing Opportunity Model
-    timing_model_data = load_model_from_gcs(sport=sport, market=f"timing_{market}", bucket_name=GCS_BUCKET)
-    timing_model = timing_model_data.get("calibrator") or timing_model_data.get("model")
+    # === Load All Timing Models by Market
+    timing_models = {}
+    for m in ['spreads', 'totals', 'h2h']:
+        try:
+            data = load_model_from_gcs(sport=sport, market=f"timing_{m}", bucket_name=GCS_BUCKET)
+            timing_models[m] = data.get("calibrator") or data.get("model")
+        except Exception:
+            timing_models[m] = None  # fallback if model not found
+    
+    # === Timing Features
     timing_feature_cols = [
         'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
     ] + [
@@ -1520,24 +1528,31 @@ def compute_diagnostics_vectorized(df):
             'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
         ]
     ]
-    # === Apply Timing Opportunity Score
-    if timing_model is not None:
-        for col in timing_feature_cols:
-            if col not in df.columns:
-                df[col] = 0.0  # fallback if column missing
     
-        X_timing = df[timing_feature_cols].fillna(0)
-        df['Timing_Opportunity_Score'] = timing_model.predict_proba(X_timing)[:, 1]
+    # Ensure all features exist
+    for col in timing_feature_cols:
+        if col not in df.columns:
+            df[col] = 0.0
     
-        df['Timing_Stage'] = pd.cut(
-            df['Timing_Opportunity_Score'],
-            bins=[-1, 0.4, 0.75, 1.1],
-            labels=["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
-        ).astype(str)
-    else:
-        df['Timing_Opportunity_Score'] = np.nan
-        df['Timing_Stage'] = "⚠️ Unavailable"
-        
+    # === Row-wise prediction
+    def apply_timing_model(row):
+        market = str(row.get("Market", "")).lower()
+        model = timing_models.get(market)
+        if model is None:
+            return np.nan
+        X_row = row[timing_feature_cols].fillna(0).values.reshape(1, -1)
+        return model.predict_proba(X_row)[0][1]
+    
+    df['Timing_Opportunity_Score'] = df.apply(apply_timing_model, axis=1)
+    
+    # === Bucket into Timing Stage
+    df['Timing_Stage'] = pd.cut(
+        df['Timing_Opportunity_Score'],
+        bins=[-1, 0.4, 0.75, 1.1],
+        labels=["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
+    ).astype(str)
+    
+    
     # === Final Output
     diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
