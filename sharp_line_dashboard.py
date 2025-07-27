@@ -491,7 +491,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 
     
     
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
     # ✅ Load from sharp_scores_full with all necessary columns up front
