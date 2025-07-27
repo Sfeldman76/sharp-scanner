@@ -1508,14 +1508,15 @@ def compute_diagnostics_vectorized(df):
         df['Model Prob'] = df['Model_Sharp_Win_Prob']
     # === Load Timing Opportunity Model
     # === Load All Timing Models by Market
+    # === Load Timing Opportunity Models by Market
     timing_models = {}
     for m in ['spreads', 'totals', 'h2h']:
         try:
-            data = load_model_from_gcs(sport=sport, market=f"timing_{m}", bucket_name=GCS_BUCKET)
-            timing_models[m] = data.get("calibrator") or data.get("model")
+            model_data = load_model_from_gcs(sport=sport, market=f"timing_{m}", bucket_name=GCS_BUCKET)
+            timing_models[m] = model_data.get("calibrator") or model_data.get("model")
         except Exception:
-            timing_models[m] = None  # fallback if model not found
-    
+            timing_models[m] = None  # fallback if missing
+        
     # === Timing Features
     timing_feature_cols = [
         'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
@@ -1541,29 +1542,41 @@ def compute_diagnostics_vectorized(df):
             df[col] = 0.0
     
     from sklearn.cluster import KMeans
-   
+   # Ensure all required features exist
+    for col in timing_feature_cols:
+        if col not in df.columns:
+            df[col] = 0.0
     
-    # Step 1: Prepare scores
-    scores['Timing_Opportunity_Score'] = scores['Timing_Opportunity_Score'].clip(0, 1)
-    scores = scores.fillna(0)
-    
-    # Step 2: Fit KMeans with 3 clusters
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
-    kmeans.fit(scores)
-    
-    # Step 3: Assign cluster labels
-    df['Timing_Cluster'] = kmeans.labels_
-    
-    # Step 4: Order clusters by mean score
-    cluster_order = np.argsort(kmeans.cluster_centers_.ravel())
-    cluster_map = {
-        cluster_order[0]: "🔴 Late / Overmoved",
-        cluster_order[1]: "🟡 Developing",
-        cluster_order[2]: "🟢 Smart Timing"
-    }
-    df['Timing_Stage'] = df['Timing_Cluster'].map(cluster_map)
+    df['Timing_Opportunity_Score'] = np.nan
+    for m in ['spreads', 'totals', 'h2h']:
+        model = timing_models.get(m)
+        if model is None:
+            continue
+        mask = df['Market'].str.lower() == m
+        if mask.any():
+            X = df.loc[mask, timing_feature_cols].fillna(0)
+            df.loc[mask, 'Timing_Opportunity_Score'] = model.predict_proba(X)[:, 1]
         
+    if 'Timing_Opportunity_Score' in df.columns:
+        scores = df[['Timing_Opportunity_Score']].copy()
+        scores['Timing_Opportunity_Score'] = scores['Timing_Opportunity_Score'].clip(0, 1).fillna(0)
     
+        from sklearn.cluster import KMeans
+        kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
+        kmeans.fit(scores)
+    
+        df['Timing_Cluster'] = kmeans.labels_
+    
+        cluster_order = np.argsort(kmeans.cluster_centers_.ravel())
+        cluster_map = {
+            cluster_order[0]: "🔴 Late / Overmoved",
+            cluster_order[1]: "🟡 Developing",
+            cluster_order[2]: "🟢 Smart Timing"
+        }
+        df['Timing_Stage'] = df['Timing_Cluster'].map(cluster_map)
+    else:
+        df['Timing_Stage'] = "⚠️ Unavailable"
+        
     # === Final Output
     diagnostics_df = df[[
         'Game_Key', 'Market', 'Outcome', 'Bookmaker',
