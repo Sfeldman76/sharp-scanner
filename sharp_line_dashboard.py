@@ -491,7 +491,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 
     
     
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 7):
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
     st.info(f"🎯 Training sharp model for {sport.upper()}...")
 
     # ✅ Load from sharp_scores_full with all necessary columns up front
@@ -1152,7 +1152,7 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
         "logloss": logloss_val
     }
 
-def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 7):
+def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
 
     # === Load historical scored data
