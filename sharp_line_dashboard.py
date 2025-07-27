@@ -1562,7 +1562,23 @@ def compute_diagnostics_vectorized(df):
     # === Load Timing Opportunity Model
     timing_model_data = load_model_from_gcs(sport=sport, market="timing", bucket_name=GCS_BUCKET)
     timing_model = timing_model_data.get("model")
-    
+    timing_feature_cols = [
+        'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
+    ] + [
+        f'SharpMove_Magnitude_{b}' for b in [
+            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+        ]
+    ] + [
+        f'OddsMove_Magnitude_{b}' for b in [
+            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+        ]
+    ]
     # === Apply Timing Opportunity Score
     if timing_model is not None:
         for col in timing_feature_cols:
