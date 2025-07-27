@@ -2186,7 +2186,7 @@ def render_scanner_tab(label, sport_key, container):
         # ✅ Drop all diagnostics to prevent _x/_y suffixes
         diagnostic_cols = [
             'Model Prob', 'Confidence Tier',
-            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It'
+            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It','Timing_Stage', 'Timing_Opportunity_Score'
         ]
         filtered_df = filtered_df.drop(columns=[col for col in diagnostic_cols if col in filtered_df.columns], errors='ignore')
 
