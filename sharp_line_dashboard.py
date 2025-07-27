@@ -1549,7 +1549,9 @@ def compute_diagnostics_vectorized(df):
     
     # Apply to DataFrame
    
-
+    # Diagnostic: Ensure compatibility by aliasing model prob
+    if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
+        df['Model Prob'] = df['Model_Sharp_Win_Prob']
     # === Load Timing Opportunity Model
     timing_model_data = load_model_from_gcs(sport=sport, market="timing", bucket_name=GCS_BUCKET)
     timing_model = timing_model_data.get("model")
