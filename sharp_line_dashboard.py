@@ -1214,22 +1214,33 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
     # === 4. Train model
     
 
-    model = GradientBoostingClassifier()
-    calibrated = CalibratedClassifierCV(model, method='isotonic', cv=5)
-    calibrated.fit(X, y)
+    
+    model = GradientBoostingClassifier(
+        n_estimators=100,
+        learning_rate=0.05,
+        max_depth=3,
+        subsample=0.8,
+        max_features='sqrt',
+        random_state=42
+        )
+    
+    calibrator = CalibratedClassifierCV(model, method='isotonic', cv=5)
+    calibrator.fit(X, y)
 
     # ✅ Save to GCS or pickle (you choose — let me know)
     # Save the timing model
     save_model_to_gcs(
-        model=calibrated,
-        calibrator=None,  # no calibrator needed — already applied
+        model=model,
+        calibrator=calibrator,
         sport=sport,
-        market="timing",
+        market=f"timing_{market}",
         bucket_name=GCS_BUCKET,
-        team_feature_map=None  # not applicable here
+        team_feature_map=None
     )
+        
     st.success("✅ Timing Opportunity Model trained successfully.")
     return calibrated
+    
     
     
 def read_market_weights_from_bigquery():
@@ -1509,8 +1520,8 @@ def compute_diagnostics_vectorized(df):
     if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
         df['Model Prob'] = df['Model_Sharp_Win_Prob']
     # === Load Timing Opportunity Model
-    timing_model_data = load_model_from_gcs(sport=sport, market="timing", bucket_name=GCS_BUCKET)
-    timing_model = timing_model_data.get("model")
+    timing_model_data = load_model_from_gcs(sport=sport, market=f"timing_{market}", bucket_name=GCS_BUCKET)
+    timing_model = timing_model_data.get("calibrator") or timing_model_data.get("model")
     timing_feature_cols = [
         'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
     ] + [
