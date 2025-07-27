@@ -96,11 +96,12 @@ from sklearn.model_selection import GridSearchCV
 from xgboost import XGBClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import RandomizedSearchCV
-from sklearn.calibration import CalibratedClassifierCV
+
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from scipy.stats import entropy
 from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingClassifier
 
 import logging
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
@@ -1224,28 +1225,35 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
         return
 
     df = df.copy()
-
+    
+    
+    
     # === 2. Seed a label for smart timing
     df['TIMING_OPPORTUNITY_LABEL'] = (
         (df['SHARP_HIT_BOOL'] == 1) &
-        (df['Abs_Line_Move_From_Opening'] < 1.5) &
-        (df['Model_Sharp_Win_Prob'] > 0.6) &
-        (df['Minutes_To_Game_Tier'].str.startswith("Early"))
+        (df['Abs_Line_Move_From_Opening'] < 1.5) &  # ✅ not overmoved
+        (df['Model_Sharp_Win_Prob'] > 0.6)          # ✅ strong signal
     ).astype(int)
 
     # === 3. Define features (reusing your schema — no new columns)
     features = [
         'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
     ]
+    
     features += [
         f'SharpMove_Magnitude_{b}' for b in [
-            'Overnight_MidRange', 'Early_MidRange', 'Midday_MidRange', 'Late_MidRange',
-            'Late_Urgent', 'Early_Urgent'
+            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
         ]
     ]
     features += [
         f'OddsMove_Magnitude_{b}' for b in [
-            'Early_MidRange', 'Midday_MidRange', 'Late_Urgent'
+            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
+            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
+            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
+            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
         ]
     ]
 
@@ -1258,8 +1266,7 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
         return
 
     # === 4. Train model
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.calibration import CalibratedClassifierCV
+    
 
     model = GradientBoostingClassifier()
     calibrated = CalibratedClassifierCV(model, method='isotonic', cv=5)
