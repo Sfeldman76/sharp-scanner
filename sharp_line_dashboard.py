@@ -1177,12 +1177,18 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 7):
             continue
 
         # Create label
+        threshold = df_market['Abs_Line_Move_From_Opening'].quantile(0.80)
+        odds_threshold = df_market['Abs_Odds_Move_From_Opening'].quantile(0.80)
         df_market['TIMING_OPPORTUNITY_LABEL'] = (
-            (df_market['SHARP_HIT_BOOL'] == 1) &
-            (df_market['Abs_Line_Move_From_Opening'] < 1.5) &
-            (df_market['Model_Sharp_Win_Prob'] > 0.6)
-        ).astype(int)
-
+        (df_market['SHARP_HIT_BOOL'] == 1) &
+            (
+                ((df_market['Abs_Line_Move_From_Opening'] < threshold) &
+                 (df_market['Abs_Odds_Move_From_Opening'] < odds_threshold))
+                |
+                (df_market['Model_Sharp_Win_Prob'] > 0.6)
+            )
+        ).astype(int
+        
         features = [
             'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
         ] + [
@@ -1534,24 +1540,29 @@ def compute_diagnostics_vectorized(df):
         if col not in df.columns:
             df[col] = 0.0
     
-    # === Row-wise prediction
-    def apply_timing_model(row):
-        market = str(row.get("Market", "")).lower()
-        model = timing_models.get(market)
-        if model is None:
-            return np.nan
-        X_row = row[timing_feature_cols].fillna(0).values.reshape(1, -1)
-        return model.predict_proba(X_row)[0][1]
+    from sklearn.cluster import KMeans
+   
     
-    df['Timing_Opportunity_Score'] = df.apply(apply_timing_model, axis=1)
+    # Step 1: Prepare scores
+    scores['Timing_Opportunity_Score'] = scores['Timing_Opportunity_Score'].clip(0, 1)
+    scores = scores.fillna(0)
     
-    # === Bucket into Timing Stage
-    df['Timing_Stage'] = pd.cut(
-        df['Timing_Opportunity_Score'],
-        bins=[-1, 0.4, 0.75, 1.1],
-        labels=["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
-    ).astype(str)
+    # Step 2: Fit KMeans with 3 clusters
+    kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
+    kmeans.fit(scores)
     
+    # Step 3: Assign cluster labels
+    df['Timing_Cluster'] = kmeans.labels_
+    
+    # Step 4: Order clusters by mean score
+    cluster_order = np.argsort(kmeans.cluster_centers_.ravel())
+    cluster_map = {
+        cluster_order[0]: "🔴 Late / Overmoved",
+        cluster_order[1]: "🟡 Developing",
+        cluster_order[2]: "🟢 Smart Timing"
+    }
+    df['Timing_Stage'] = df['Timing_Cluster'].map(cluster_map)
+        
     
     # === Final Output
     diagnostics_df = df[[
