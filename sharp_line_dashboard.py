@@ -1152,7 +1152,7 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
         "logloss": logloss_val
     }
 
-def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
+def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 7):
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
 
     # === Load historical scored data
