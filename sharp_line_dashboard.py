@@ -1403,8 +1403,8 @@ def compute_diagnostics_vectorized(df):
     
     # Override with "zero" if probability is exactly 0
     df.loc[model_prob == 0.0, 'Confidence Tier'] = "None"
-
-    
+   
+        
     # === Why Model Likes It
     def build_why(row):
         model_prob = row.get('Model Prob')
@@ -1415,8 +1415,7 @@ def compute_diagnostics_vectorized(df):
         if not row.get('Passes_Gate', False):
             return "🕓 Still Calculating Signal"
     
-        parts = []
-
+    
     
         # === Core sharp move reasons
         parts = []
@@ -1501,7 +1500,11 @@ def compute_diagnostics_vectorized(df):
         return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
     
     # Apply to DataFrame
-   
+   # === Model_Confidence_Tier for summary compatibility
+    df['Model_Confidence_Tier'] = df['Confidence Tier']
+    
+    # === Apply "Why Model Likes It"
+    df['Why Model Likes It'] = df.apply(build_why, axis=1)
     # Diagnostic: Ensure compatibility by aliasing model prob
     if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
         df['Model Prob'] = df['Model_Sharp_Win_Prob']
