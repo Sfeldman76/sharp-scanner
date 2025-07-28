@@ -1515,8 +1515,9 @@ def compute_diagnostics_vectorized(df):
         if pd.isna(model_prob):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
     
-        if row.get('Passes_Gate') != True:
+        if not bool(row.get('Passes_Gate', False)):
             return "🕓 Still Calculating Signal"
+
     
     
     
