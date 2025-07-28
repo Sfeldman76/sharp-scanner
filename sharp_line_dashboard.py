@@ -512,7 +512,50 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
 
     df_bt = df_bt.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
- 
+    # Normalize keys
+    df_bt['Game_Key'] = df_bt['Game_Key'].astype(str).str.strip().str.lower()
+    df_bt['Market'] = df_bt['Market'].astype(str).str.lower().str.strip()
+    df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'])
+    
+    # Latest snapshot per market/game/outcome
+    # === Get latest snapshot per Game_Key + Market + Outcome ===
+    df_latest = (
+        df_bt
+        .sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
+    )
+    
+    # === Pivot line values (e.g., -3.5, 210.5, etc.)
+    value_pivot = df_latest.pivot_table(
+        index='Game_Key',
+        columns='Market',
+        values='Value'
+    ).rename(columns={
+        'spreads': 'Spread_Value',
+        'totals': 'Total_Value',
+        'h2h': 'H2H_Value'
+    })
+    
+    # === Pivot odds prices (e.g., -110, +100, etc.)
+    odds_pivot = df_latest.pivot_table(
+        index='Game_Key',
+        columns='Market',
+        values='Odds_Price'
+    ).rename(columns={
+        'spreads': 'Spread_Odds',
+        'totals': 'Total_Odds',
+        'h2h': 'H2H_Odds'
+    })
+    
+    # === Merge line values and odds into one cross-market frame
+    df_cross_market = (
+        value_pivot
+        .join(odds_pivot, how='outer')
+        .reset_index()
+    )
+
+    
+
     dedup_cols = [
         'Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump',
@@ -531,7 +574,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
     for idx, market in enumerate(['spreads', 'totals', 'h2h'], start=1):
         status.write(f"🚧 Training model for `{market.upper()}`...")
         df_market = df_bt[df_bt['Market'] == market].copy()
-
+        df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
             progress.progress(idx / 3)
@@ -813,6 +856,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         #df_market['Is_Team_Underdog'] = (df_market['Team_Bet_Role'] == 'underdog').astype(int)
         #df_market['Is_Team_Over'] = (df_market['Team_Bet_Role'] == 'over').astype(int)
         #df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
+        # === Cross-Market Alignment and Gaps ===
+        df_market['Spread_Implied_Prob'] = df_market['Spread_Odds'].apply(implied_prob)
+        df_market['H2H_Implied_Prob'] = df_market['H2H_Odds'].apply(implied_prob)
+        df_market['Total_Implied_Prob'] = df_market['Total_Odds'].apply(implied_prob)
+
+        # 1. Spread and H2H line alignment (are both favoring same side)
+        df_market['Spread_vs_H2H_Aligned'] = (
+            (df_market['Spread_Value'] < 0)  &
+            (df_market['H2H_Implied_Prob'] > 0.5)
+        ).astype(int)
+
+        
+        # 2. Total vs Spread directional contradiction
+        df_market['Total_vs_Spread_ProbGap'] = df_market['Total_Implied_Prob'] - df_market['Spread_Implied_Prob']
+        df_market['Total_vs_Spread_Contradiction'] = (
+            (df_market['Spread_Implied_Prob'] > 0.55) &
+            (df_market['Total_Implied_Prob'] < 0.48)
+        ).astype(int)
+        df_market['Spread_vs_H2H_ProbGap'] = df_market['Spread_Implied_Prob'] - df_market['H2H_Implied_Prob']
+
+               
+        # 4. Prob gaps
+        df_market['Spread_vs_H2H_ProbGap'] = df_market['Spread_Implied_Prob'] - df_market['H2H_Implied_Prob']
+        df_market['Total_vs_H2H_ProbGap'] = df_market['Total_Implied_Prob'] - df_market['H2H_Implied_Prob']
+        df_market['Total_vs_Spread_ProbGap'] = df_market['Total_Implied_Prob'] - df_market['Spread_Implied_Prob']
+        
+        # 5. Prob dislocation signal
+        df_market['CrossMarket_Prob_Gap_Exists'] = (
+            (df_market['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
+            (df_market['Total_vs_Spread_ProbGap'].abs() > 0.05)
+        ).astype(int)
 
  
         
@@ -862,6 +936,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
             'Abs_Line_Move_From_Opening',
             'Abs_Odds_Move_From_Opening', 
             'Market_Mispricing', 'Abs_Market_Mispricing',
+            'Spread_vs_H2H_Aligned',
+            'Total_vs_Spread_Contradiction',
+            'Spread_vs_H2H_ProbGap',
+            'Total_vs_H2H_ProbGap',
+            'Total_vs_Spread_ProbGap',
+            'CrossMarket_Prob_Gap_Exists'
           
 
         ]
