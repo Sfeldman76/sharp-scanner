@@ -659,8 +659,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
 
 
 
-        df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
-        
         # Away cover streaks
         df_market['Team_Recent_Cover_Streak_Away'] = (
             df_market
@@ -1517,7 +1515,7 @@ def compute_diagnostics_vectorized(df):
         if pd.isna(model_prob):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
     
-        if not row.get('Passes_Gate', False):
+        if row.get('Passes_Gate') != True:
             return "🕓 Still Calculating Signal"
     
     
