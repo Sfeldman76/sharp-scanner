@@ -2163,6 +2163,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
 
         
+        
 
 
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models, weights=None):   
