@@ -1243,6 +1243,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             break  # Use the first one found
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
     logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
+    # === Cross-Market Odds Pivot
+    odds_pivot = (
+        df
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
+        .pivot_table(index='Game_Key', columns='Market', values='Odds_Price')
+        .rename(columns={
+            'spreads': 'Spread_Odds',
+            'totals': 'Total_Odds',
+            'h2h': 'H2H_Odds'
+        })
+        .reset_index()
+    )
+    df = df.merge(odds_pivot, on='Game_Key', how='left')
 
    
 
@@ -1457,6 +1470,29 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
             
             df_canon['Team_Mispriced_Flag'] = (df_canon['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
+            # === Cross-Market Alignment Features
+            df_canon['Spread_Implied_Prob'] = df_canon['Spread_Odds'].apply(implied_prob)
+            df_canon['H2H_Implied_Prob'] = df_canon['H2H_Odds'].apply(implied_prob)
+            df_canon['Total_Implied_Prob'] = df_canon['Total_Odds'].apply(implied_prob)
+            
+            df_canon['Spread_vs_H2H_Aligned'] = (
+                (df_canon['Value'] < 0) &  # Spread_Value
+                (df_canon['H2H_Implied_Prob'] > 0.5)
+            ).astype(int)
+            
+            df_canon['Total_vs_Spread_Contradiction'] = (
+                (df_canon['Spread_Implied_Prob'] > 0.55) &
+                (df_canon['Total_Implied_Prob'] < 0.48)
+            ).astype(int)
+            
+            df_canon['Spread_vs_H2H_ProbGap'] = df_canon['Spread_Implied_Prob'] - df_canon['H2H_Implied_Prob']
+            df_canon['Total_vs_H2H_ProbGap'] = df_canon['Total_Implied_Prob'] - df_canon['H2H_Implied_Prob']
+            df_canon['Total_vs_Spread_ProbGap'] = df_canon['Total_Implied_Prob'] - df_canon['Spread_Implied_Prob']
+            
+            df_canon['CrossMarket_Prob_Gap_Exists'] = (
+                (df_canon['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
+                (df_canon['Total_vs_Spread_ProbGap'].abs() > 0.05)
+            ).astype(int)
 
 
             # Flattened hybrid timing buckets
@@ -1523,7 +1559,33 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
             # 1. Copy and flip outcome for merge key
             df_inverse = df_canon.copy(deep=True)
+            # === Merge cross-market odds into inverse rows
+                    
+            # === Recompute implied probabilities from merged odds
+            df_inverse['Spread_Implied_Prob'] = df_inverse['Spread_Odds'].apply(implied_prob)
+            df_inverse['H2H_Implied_Prob'] = df_inverse['H2H_Odds'].apply(implied_prob)
+            df_inverse['Total_Implied_Prob'] = df_inverse['Total_Odds'].apply(implied_prob)
             
+            # === Cross-market alignment and gaps
+            df_inverse['Spread_vs_H2H_Aligned'] = (
+                (df_inverse['Value'] < 0) &
+                (df_inverse['H2H_Implied_Prob'] > 0.5)
+            ).astype(int)
+            
+            df_inverse['Total_vs_Spread_Contradiction'] = (
+                (df_inverse['Spread_Implied_Prob'] > 0.55) &
+                (df_inverse['Total_Implied_Prob'] < 0.48)
+            ).astype(int)
+            
+            df_inverse['Spread_vs_H2H_ProbGap'] = df_inverse['Spread_Implied_Prob'] - df_inverse['H2H_Implied_Prob']
+            df_inverse['Total_vs_H2H_ProbGap'] = df_inverse['Total_Implied_Prob'] - df_inverse['H2H_Implied_Prob']
+            df_inverse['Total_vs_Spread_ProbGap'] = df_inverse['Total_Implied_Prob'] - df_inverse['Spread_Implied_Prob']
+            
+            df_inverse['CrossMarket_Prob_Gap_Exists'] = (
+                (df_inverse['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
+                (df_inverse['Total_vs_Spread_ProbGap'].abs() > 0.05)
+            ).astype(int)
+
             team_stat_cols = [col for col in df_canon.columns if col.startswith('Team_Past_')]
             df_inverse[team_stat_cols] = df_canon[team_stat_cols].values     
             logger.info(f"📋 Inverse1 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
@@ -1917,6 +1979,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Rate_On_Cover_Streak',
                     'Rate_On_Cover_Streak_Home',
                     'Rate_On_Cover_Streak_Away',
+                    'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction','Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap','CrossMarket_Prob_Gap_Exists',
+                    'Spread_Implied_Prob','H2H_Implied_Prob','Total_Implied_Prob',
+                    
 
                 ]
                 
@@ -1960,7 +2025,34 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Implied_Prob_Shift'] = df_inverse['Implied_Prob'] - pd.to_numeric(df_inverse['First_Imp_Prob'], errors='coerce')
                 df_inverse['Line_Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
                 df_inverse['Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
+                # === Merge cross-market odds into inverse rows
+             
                 
+                # === Recompute implied probabilities from merged odds
+                df_inverse['Spread_Implied_Prob'] = df_inverse['Spread_Odds'].apply(implied_prob)
+                df_inverse['H2H_Implied_Prob'] = df_inverse['H2H_Odds'].apply(implied_prob)
+                df_inverse['Total_Implied_Prob'] = df_inverse['Total_Odds'].apply(implied_prob)
+                
+                # === Cross-market alignment and gaps
+                df_inverse['Spread_vs_H2H_Aligned'] = (
+                    (df_inverse['Value'] < 0) &
+                    (df_inverse['H2H_Implied_Prob'] > 0.5)
+                ).astype(int)
+                
+                df_inverse['Total_vs_Spread_Contradiction'] = (
+                    (df_inverse['Spread_Implied_Prob'] > 0.55) &
+                    (df_inverse['Total_Implied_Prob'] < 0.48)
+                ).astype(int)
+                
+                df_inverse['Spread_vs_H2H_ProbGap'] = df_inverse['Spread_Implied_Prob'] - df_inverse['H2H_Implied_Prob']
+                df_inverse['Total_vs_H2H_ProbGap'] = df_inverse['Total_Implied_Prob'] - df_inverse['H2H_Implied_Prob']
+                df_inverse['Total_vs_Spread_ProbGap'] = df_inverse['Total_Implied_Prob'] - df_inverse['Spread_Implied_Prob']
+                
+                df_inverse['CrossMarket_Prob_Gap_Exists'] = (
+                    (df_inverse['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
+                    (df_inverse['Total_vs_Spread_ProbGap'].abs() > 0.05)
+                ).astype(int)
+
               
                 df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'].str.lower() == df_inverse['Home_Team_Norm'].str.lower()).astype(float)
                 df_inverse['Is_Favorite_Bet'] = (pd.to_numeric(df_inverse['Value'], errors='coerce') < 0).astype(float)
@@ -2144,7 +2236,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Team_Implied_Prob_Gap_Away'].fillna(0) > 0.05).astype(int) +
                 (df_final['Avg_Recent_Cover_Streak'].fillna(0) >= 2).astype(int) +
                 (df_final['Avg_Recent_Cover_Streak_Home'].fillna(0) >= 2).astype(int) +
-                (df_final['Avg_Recent_Cover_Streak_Away'].fillna(0) >= 2).astype(int)
+                (df_final['Avg_Recent_Cover_Streak_Away'].fillna(0) >= 2).astype(int)+
+                df_final['Spread_vs_H2H_Aligned'].fillna(0).astype(int) +
+                df_final['Total_vs_Spread_Contradiction'].fillna(0).astype(int) +
+                df_final['CrossMarket_Prob_Gap_Exists'].fillna(0).astype(int)
             ).fillna(0).astype(int)
 
 
