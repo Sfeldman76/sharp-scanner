@@ -634,6 +634,63 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market = df_market.merge(team_stats, on='Team', how='left')
         df_market = df_market.merge(home_stats, on='Team', how='left')
         df_market = df_market.merge(away_stats, on='Team', how='left')
+        # Sort chronologically per team
+        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+        # For all games
+        df_market['Team_Recent_Cover_Streak'] = (
+            df_market
+            .groupby('Team')['SHARP_HIT_BOOL']
+            .transform(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
+        )
+        df_market['On_Cover_Streak'] = (df_market['Team_Recent_Cover_Streak'] >= 2).astype(int)
+        
+        # For home games — only compute rolling where Is_Home == 1
+        df_market['Team_Recent_Cover_Streak_Home'] = (
+            df_market
+            .groupby('Team')
+            .apply(lambda g: g['SHARP_HIT_BOOL'].where(g['Is_Home'] == 1)
+                    .shift()
+                    .rolling(window=3, min_periods=1)
+                    .sum())
+            .reset_index(level=0, drop=True)
+        )
+        df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
+        
+        # For away games
+        df_market['Team_Recent_Cover_Streak_Away'] = (
+            df_market
+            .groupby('Team')
+            .apply(lambda g: g['SHARP_HIT_BOOL'].where(g['Is_Home'] == 0)
+                    .shift()
+                    .rolling(window=3, min_periods=1)
+                    .sum())
+            .reset_index(level=0, drop=True)
+        )
+        df_market['On_Cover_Streak_Away'] = (df_market['Team_Recent_Cover_Streak_Away'] >= 2).astype(int)
+
+        streak_stats = (
+            df_market.groupby('Team')
+            .agg({
+                'Team_Recent_Cover_Streak': 'mean',
+                'On_Cover_Streak': 'mean',
+                'Team_Recent_Cover_Streak_Home': 'mean',
+                'On_Cover_Streak_Home': 'mean',
+                'Team_Recent_Cover_Streak_Away': 'mean',
+                'On_Cover_Streak_Away': 'mean'
+            })
+            .rename(columns={
+                'Team_Recent_Cover_Streak': 'Avg_Recent_Cover_Streak',
+                'On_Cover_Streak': 'Pct_On_Recent_Cover_Streak',
+                'Team_Recent_Cover_Streak_Home': 'Avg_Recent_Cover_Streak_Home',
+                'On_Cover_Streak_Home': 'Pct_On_Recent_Cover_Streak_Home',
+                'Team_Recent_Cover_Streak_Away': 'Avg_Recent_Cover_Streak_Away',
+                'On_Cover_Streak_Away': 'Pct_On_Recent_Cover_Streak_Away'
+            })
+            .reset_index()
+        )
+
+        team_stats = team_stats.merge(streak_stats, on='Team', how='left')
+
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
@@ -744,17 +801,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         #df_market['Is_Team_Over'] = (df_market['Team_Bet_Role'] == 'over').astype(int)
         #df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
 
-        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
-        df_market['Team_Cover_Streak'] = (
-            df_market
-            .groupby('Team')['SHARP_HIT_BOOL']
-            .apply(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
-        )
-        df_market['On_Cover_Streak'] = (df_market['Team_Cover_Streak'] >= 2).astype(int)
-        # Streak logic based on hit rate
-        df_market['Team_Streak_Strong'] = (df_market['Team_Past_Hit_Rate'] > 0.6).astype(int)
-        df_market['Team_Streak_Weak'] = (df_market['Team_Past_Hit_Rate'] < 0.4).astype(int)
-
+ 
         
             # === Resistance Flag Debug
         with st.expander(f"📊 Resistance Flag Debug – {market.upper()}"):
@@ -781,6 +828,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         
             # 🔹 Market response
             'Sharp_Line_Magnitude', 'Is_Home_Team_Bet',
+            'Team_Implied_Prob_Gap_Home', 'Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
             'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'SharpMove_Odds_Mag',
@@ -801,7 +849,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
             'Abs_Line_Move_From_Opening',
             'Abs_Odds_Move_From_Opening', 
             'Market_Mispricing', 'Abs_Market_Mispricing',
-            'Team_Cover_Streak', 'On_Cover_Streak'
+          
 
         ]
         hybrid_timing_features = [
@@ -826,16 +874,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         features += hybrid_odds_timing_features
     
         features += [
+            # 🔮 Historical team model performance
             'Team_Past_Avg_Model_Prob',
             'Team_Past_Hit_Rate',
             'Team_Past_Avg_Model_Prob_Home',
             'Team_Past_Hit_Rate_Home',
             'Team_Past_Avg_Model_Prob_Away',
             'Team_Past_Hit_Rate_Away',
-            
-            # Optional betting context flags
-            #'Is_Team_Favorite', 'Is_Team_Underdog',
-            #'Is_Team_Over', 'Is_Team_Under'
+        
+            # 🔥 Recent cover streak stats (overall + home/away)
+            'Avg_Recent_Cover_Streak',
+            'Pct_On_Recent_Cover_Streak',
+            'Avg_Recent_Cover_Streak_Home',
+            'Pct_On_Recent_Cover_Streak_Home',
+            'Avg_Recent_Cover_Streak_Away',
+            'Pct_On_Recent_Cover_Streak_Away',
         ]
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
@@ -1090,23 +1143,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         })
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()}")
         st.dataframe(calib_df)
-        
+
         team_feature_map = (
             df_market.groupby('Team')
             .agg({
+                # === Base performance features
                 'Model_Sharp_Win_Prob': 'mean',
-                'SHARP_HIT_BOOL': 'mean',                
+                'SHARP_HIT_BOOL': 'mean',
+        
+                # === Home/Away past hit rate and prob
                 'Team_Past_Avg_Model_Prob_Home': 'mean',
                 'Team_Past_Hit_Rate_Home': 'mean',
                 'Team_Past_Avg_Model_Prob_Away': 'mean',
-                'Team_Past_Hit_Rate_Away': 'mean'
+                'Team_Past_Hit_Rate_Away': 'mean',
+        
+                # === Recent cover streak features (overall + home/away)
+                'Team_Recent_Cover_Streak': 'mean',
+                'On_Cover_Streak': 'mean',
+                'Team_Recent_Cover_Streak_Home': 'mean',
+                'On_Cover_Streak_Home': 'mean',
+                'Team_Recent_Cover_Streak_Away': 'mean',
+                'On_Cover_Streak_Away': 'mean'
             })
             .rename(columns={
                 'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob',
-                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate',               
+                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate',
+                'Team_Recent_Cover_Streak': 'Avg_Recent_Cover_Streak',
+                'On_Cover_Streak': 'Pct_On_Recent_Cover_Streak',
+                'Team_Recent_Cover_Streak_Home': 'Avg_Recent_Cover_Streak_Home',
+                'On_Cover_Streak_Home': 'Pct_On_Recent_Cover_Streak_Home',
+                'Team_Recent_Cover_Streak_Away': 'Avg_Recent_Cover_Streak_Away',
+                'On_Cover_Streak_Away': 'Pct_On_Recent_Cover_Streak_Away'
             })
             .reset_index()
         )
+
 
 
 
@@ -1470,6 +1541,12 @@ def compute_diagnostics_vectorized(df):
             parts.append("⚔️📊 Team Historically Sharp")
         if row.get('Team_Past_Avg_Model_Prob', 0) > 0.5:
             parts.append("🔮 Model Favored This Team Historically")
+        if row.get('Avg_Recent_Cover_Streak', 0) >= 2:
+            parts.append("🔥 Recent Hot Streak")
+        if row.get('Avg_Recent_Cover_Streak_Home', 0) >= 2:
+            parts.append("🏠🔥 Home Streaking")
+        if row.get('Avg_Recent_Cover_Streak_Away', 0) >= 2:
+            parts.append("✈️🔥 Road Streaking")
         # === Line/odds movement from open
         if row.get('Abs_Line_Move_From_Opening', 0) > 1.0:
             parts.append("📈 Line Moved from Open")
