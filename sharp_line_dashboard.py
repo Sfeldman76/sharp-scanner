@@ -788,9 +788,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         
         # === Optional: store decoded JSON for preview/debug only (not as model input)
         df_market['Line_Resistance_Crossed_Levels'] = df_market.get('Line_Resistance_Crossed_Levels', '[]')
-        df_market['Market_Mispricing'] = df_market['Team_Past_Avg_Model_Prob'] - df_market['Implied_Prob']
+        df_market['Market_Implied_Prob'] = df_market['Odds_Price'].apply(implied_prob)
+
+        df_market['Market_Mispricing'] = df_market['Team_Past_Avg_Model_Prob'] - df_market['Market_Implied_Prob']
         df_market['Abs_Market_Mispricing'] = df_market['Market_Mispricing'].abs()
         df_market['Mispricing_Flag'] = (df_market['Abs_Market_Mispricing'] > 0.05).astype(int)
+        
         df_market['Team_Implied_Prob_Gap_Home'] = (
             df_market['Team_Past_Avg_Model_Prob_Home'] - df_market['Market_Implied_Prob']
         )
