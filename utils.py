@@ -1443,11 +1443,21 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].fillna(0).astype(int)
             # Absolute deviation from 50% implied fair odds
             df_canon['Market_Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+
             df_canon['Mispricing_Gap'] = df_canon['Team_Past_Avg_Model_Prob'] - df_canon['Market_Implied_Prob']
             df_canon['Abs_Mispricing_Gap'] = df_canon['Mispricing_Gap'].abs()
-            df_canon['Team_Mispriced_Flag'] = (df_canon['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
+            
             df_canon['Team_Implied_Prob_Gap_Home'] = df_canon['Team_Past_Avg_Model_Prob_Home'] - df_canon['Market_Implied_Prob']
             df_canon['Team_Implied_Prob_Gap_Away'] = df_canon['Team_Past_Avg_Model_Prob_Away'] - df_canon['Market_Implied_Prob']
+            
+            df_canon['Abs_Team_Implied_Prob_Gap'] = np.where(
+                df_canon['Is_Home_Team_Bet'] == 1,
+                df_canon['Team_Implied_Prob_Gap_Home'].abs(),
+                df_canon['Team_Implied_Prob_Gap_Away'].abs()
+            )
+            
+            df_canon['Team_Mispriced_Flag'] = (df_canon['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
+
 
             # Flattened hybrid timing buckets
             # 🔄 Flattened hybrid timing columns (NUMERIC only)
@@ -1606,12 +1616,27 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # Flag: Is this a late steam move?
             df_inverse['Late_Game_Steam_Flag'] = (df_inverse['Minutes_To_Game'] <= 60).astype(int)
             df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
+
             df_inverse['Mispricing_Gap'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
             df_inverse['Abs_Mispricing_Gap'] = df_inverse['Mispricing_Gap'].abs()
             df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
-            df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
-            df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
             
+            df_inverse['Team_Implied_Prob_Gap_Home'] = (
+                df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
+            )
+            
+            df_inverse['Team_Implied_Prob_Gap_Away'] = (
+                df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
+            )
+            
+            # ✅ Context-aware gap (if Is_Home_Team_Bet exists)
+            df_inverse['Abs_Team_Implied_Prob_Gap'] = np.where(
+                df_inverse['Is_Home_Team_Bet'] == 1,
+                df_inverse['Team_Implied_Prob_Gap_Home'].abs(),
+                df_inverse['Team_Implied_Prob_Gap_Away'].abs()
+            )
+            
+            df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
 
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
@@ -1952,11 +1977,29 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
                 df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
                 df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
+                df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
+
                 df_inverse['Mispricing_Gap'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
                 df_inverse['Abs_Mispricing_Gap'] = df_inverse['Mispricing_Gap'].abs()
                 df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
-                df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
-                df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
+                
+                df_inverse['Team_Implied_Prob_Gap_Home'] = (
+                    df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
+                )
+                
+                df_inverse['Team_Implied_Prob_Gap_Away'] = (
+                    df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
+                )
+                
+                # ✅ Context-aware gap (if Is_Home_Team_Bet exists)
+                df_inverse['Abs_Team_Implied_Prob_Gap'] = np.where(
+                    df_inverse['Is_Home_Team_Bet'] == 1,
+                    df_inverse['Team_Implied_Prob_Gap_Home'].abs(),
+                    df_inverse['Team_Implied_Prob_Gap_Away'].abs()
+                )
+                
+                df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
+
                 # Propagate cover streak from canonical rows
                 
 
