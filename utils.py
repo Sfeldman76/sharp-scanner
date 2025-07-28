@@ -1441,6 +1441,16 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             if 'Odds_Reversal_Flag' not in df_canon.columns:
                 df_canon['Odds_Reversal_Flag'] = 0
             df_canon['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].fillna(0).astype(int)
+            # Absolute deviation from 50% implied fair odds
+            df_canon['Market_Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+            df_canon['Mispricing_Gap'] = df_canon['Team_Past_Avg_Model_Prob'] - df_canon['Market_Implied_Prob']
+            df_canon['Abs_Mispricing_Gap'] = df_canon['Mispricing_Gap'].abs()
+            df_canon['Team_Mispriced_Flag'] = (df_canon['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
+            df_canon['Team_Implied_Prob_Gap_Home'] = df_canon['Team_Past_Avg_Model_Prob_Home'] - df_canon['Market_Implied_Prob']
+            df_canon['Team_Implied_Prob_Gap_Away'] = df_canon['Team_Past_Avg_Model_Prob_Away'] - df_canon['Market_Implied_Prob']
+
+            df_canon['Team_Streak_Strong'] = (df_canon['Team_Past_Hit_Rate'] > 0.6).astype(int)
+            df_canon['Team_Streak_Weak'] = (df_canon['Team_Past_Hit_Rate'] < 0.4).astype(int)
 
             # Flattened hybrid timing buckets
             # 🔄 Flattened hybrid timing columns (NUMERIC only)
@@ -1598,7 +1608,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
             # Flag: Is this a late steam move?
             df_inverse['Late_Game_Steam_Flag'] = (df_inverse['Minutes_To_Game'] <= 60).astype(int)
-            
+            df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
+            df_inverse['Mispricing_Gap'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
+            df_inverse['Abs_Mispricing_Gap'] = df_inverse['Mispricing_Gap'].abs()
+            df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
+            df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
+            df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
+            df_inverse['Team_Streak_Strong'] = (df_inverse['Team_Past_Hit_Rate'] > 0.6).astype(int)
+            df_inverse['Team_Streak_Weak'] = (df_inverse['Team_Past_Hit_Rate'] < 0.4).astype(int)
+
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
                 df_inverse['Minutes_To_Game'],
@@ -1866,7 +1884,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Net_Line_Move_From_Opening', 'Abs_Line_Move_From_Opening',
                     'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening',
                     'Team_Past_Hit_Rate', 'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
-                    'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
+                    'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away',
+                    'Market_Implied_Prob', 'Mispricing_Gap','Abs_Mispricing_Gap','Mispricing_Flag','Team_Streak_Strong','Team_Streak_Weak',
+                    'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away'
                 ]
                 
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
@@ -1909,7 +1929,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Implied_Prob_Shift'] = df_inverse['Implied_Prob'] - pd.to_numeric(df_inverse['First_Imp_Prob'], errors='coerce')
                 df_inverse['Line_Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
                 df_inverse['Delta'] = pd.to_numeric(df_inverse['Value'], errors='coerce') - pd.to_numeric(df_inverse['Open_Value'], errors='coerce')
-               
+                
               
                 df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'].str.lower() == df_inverse['Home_Team_Norm'].str.lower()).astype(float)
                 df_inverse['Is_Favorite_Bet'] = (pd.to_numeric(df_inverse['Value'], errors='coerce') < 0).astype(float)
@@ -1921,9 +1941,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Abs_Line_Move_From_Opening'] = df_inverse['Net_Line_Move_From_Opening'].abs()
                 df_inverse['Net_Odds_Move_From_Opening'] = df_inverse['Odds_Price'] - df_inverse['Open_Odds']
                 df_inverse['Abs_Odds_Move_From_Opening'] = df_inverse['Net_Odds_Move_From_Opening'].abs()
+                
                     
                 df_inverse['Line_Move_Magnitude'] = df_inverse['Line_Delta'].abs()
                 df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']
+                df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
+                df_inverse['Mispricing_Gap'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
+                df_inverse['Abs_Mispricing_Gap'] = df_inverse['Mispricing_Gap'].abs()
+                df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
+                df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
+                df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
+                df_inverse['Team_Streak_Strong'] = (df_inverse['Team_Past_Hit_Rate'] > 0.6).astype(int)
+                df_inverse['Team_Streak_Weak'] = (df_inverse['Team_Past_Hit_Rate'] < 0.4).astype(int)
+
                 hybrid_timing_cols = [
                     'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
                     'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
@@ -2059,9 +2089,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
                 df_final['Hybrid_Line_Timing_Flag'] +
                 df_final['Hybrid_Odds_Timing_Flag'] +
-                (df_final['Team_Past_Hit_Rate'].fillna(0) > 0.6).astype(int)
+                (df_final['Team_Past_Hit_Rate'].fillna(0) > 0.6).astype(int) +
+                df_final['Team_Streak_Strong'] +
+                df_final['Team_Streak_Weak'] +
+                df_final['Mispricing_Flag'] +
+                (df_final['Team_Implied_Prob_Gap_Home'] > 0.05).astype(int) +
+                (df_final['Team_Implied_Prob_Gap_Away'] > 0.05).astype(int)
             )
 
+            
                 
         
 
