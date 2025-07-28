@@ -646,35 +646,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         
         # For home games — only compute rolling where Is_Home == 1
         # Home cover streaks
-        team_home_streak = (
+        df_market['Team_Recent_Cover_Streak_Home'] = (
             df_market
-            .groupby('Team')
-            .apply(lambda g: g['SHARP_HIT_BOOL']
-                   .where(g['Is_Home'] == 1)
-                   .shift()
-                   .rolling(window=3, min_periods=1)
-                   .sum())
-            .reset_index(level=0, drop=True)
+            .assign(
+                Cover_Home_Only=df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 1)
+            )
+            .groupby('Team')['Cover_Home_Only']
+            .transform(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
         )
-        df_market['Team_Recent_Cover_Streak_Home'] = team_home_streak
-        df_market['On_Cover_Streak_Home'] = (team_home_streak >= 2).astype(int)
+        
+        df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
+
 
 
         df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
         
         # Away cover streaks
-        team_away_streak = (
+        df_market['Team_Recent_Cover_Streak_Away'] = (
             df_market
-            .groupby('Team')
-            .apply(lambda g: g['SHARP_HIT_BOOL']
-                   .where(g['Is_Home'] == 0)
-                   .shift()
-                   .rolling(window=3, min_periods=1)
-                   .sum())
-            .reset_index(level=0, drop=True)
+            .assign(
+                Cover_Away_Only=df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 0)
+            )
+            .groupby('Team')['Cover_Away_Only']
+            .transform(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
         )
-        df_market['Team_Recent_Cover_Streak_Away'] = team_away_streak
-        df_market['On_Cover_Streak_Away'] = (team_away_streak >= 2).astype(int)
+        
+        df_market['On_Cover_Streak_Away'] = (df_market['Team_Recent_Cover_Streak_Away'] >= 2).astype(int)
+
 
 
         streak_stats = (
