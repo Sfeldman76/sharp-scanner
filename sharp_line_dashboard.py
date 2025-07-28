@@ -654,6 +654,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
                     .sum())
             .reset_index(level=0, drop=True)
         )
+
         df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
         
         # For away games
@@ -666,6 +667,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
                     .sum())
             .reset_index(level=0, drop=True)
         )
+
         df_market['On_Cover_Streak_Away'] = (df_market['Team_Recent_Cover_Streak_Away'] >= 2).astype(int)
 
         streak_stats = (
