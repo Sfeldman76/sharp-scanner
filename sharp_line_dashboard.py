@@ -1232,7 +1232,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         if len(active_features) > 30:
             st.dataframe(active_features.reset_index(drop=True))
         else:
-            st.table(active_features
+            st.table(active_features)
         # === Calibration
         prob_true, prob_pred = calibration_curve(y, ensemble_prob, n_bins=10)
         calib_df = pd.DataFrame({
