@@ -1224,8 +1224,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         }).sort_values(by='Importance', ascending=False)
         
         st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
-        st.table(importance_df.head(30))
+        # Filter only active features (Importance > 0)
+        active_features = importance_df[importance_df['Importance'] > 0]
         
+        # Use dataframe for scrollable view if there are many features
+        if len(active_features) > 30:
+            st.dataframe(active_features.reset_index(drop=True))
+        else:
+            st.table(active_features
         # === Calibration
         prob_true, prob_pred = calibration_curve(y, ensemble_prob, n_bins=10)
         calib_df = pd.DataFrame({
@@ -1481,7 +1487,8 @@ def compute_diagnostics_vectorized(df):
     df['Model Prob Snapshot'] = prob_now
     df['First Prob Snapshot'] = prob_start
 
-
+    # Group and collect snapshot history of model probabilities
+    
     df['Confidence Trend'] = np.where(
         prob_now.isna() | prob_start.isna(),
         "⚠️ Missing",
@@ -1786,7 +1793,16 @@ def compute_diagnostics_vectorized(df):
     
     return diagnostics_df
 
-
+# === Global utility
+def create_sparkline(probs):
+    if not probs or len(probs) < 2 or all(pd.isna(probs)):
+        return "—"
+    chars = "▁▂▃▄▅▆▇█"
+    probs = [p for p in probs if pd.notna(p)]
+    if len(set(probs)) == 1:
+        return chars[0] * len(probs)  # flat line if constant
+    scaled = np.interp(probs, (min(probs), max(probs)), (0, len(chars) - 1))
+    return ''.join(chars[int(round(i))] for i in scaled)
 
 from google.cloud import storage
 from io import BytesIO
@@ -2295,35 +2311,56 @@ def render_scanner_tab(label, sport_key, container):
         diag_source = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
         
         # === Step 2: Compute diagnostics across all sharp book rows (NO deduplication yet)
-        if diag_source.empty:
+       if diag_source.empty:
             st.warning("⚠️ No sharp book rows available for diagnostics.")
-            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
+            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
                 df_summary_base[col] = "⚠️ Missing"
         else:
+            # === Step 1: Run diagnostics
             diagnostics_df = compute_diagnostics_vectorized(diag_source)
         
-            # === Step 3: Deduplicate AFTER computing diagnostics
-            # Keep the *best* row per outcome — prefer sharp books + latest timestamp
+            # === Step 2: Add trend sparkline BEFORE merge
+            trend_history = (
+                df_all_snapshots
+                .sort_values('Snapshot_Timestamp')
+                .groupby(['Game_Key', 'Market', 'Outcome'])['Model Prob']
+                .apply(list)
+                .reset_index(name='Prob_Trend_List')
+            )
+            diagnostics_df = diagnostics_df.merge(trend_history, on=['Game_Key', 'Market', 'Outcome'], how='left')
+            
+
+            # Step 1: Clip the trend list first (before applying the sparkline)
+            MAX_SPARK_POINTS = 10
+            diagnostics_df['Prob_Trend_List'] = diagnostics_df['Prob_Trend_List'].apply(
+                lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst
+            )
+            
+            # Step 2: Then apply the sparkline
+            diagnostics_df['Confidence Spark'] = diagnostics_df['Prob_Trend_List'].apply(create_sparkline)
+            # === Step 3: Deduplicate summary base
             df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
             df_summary_base = (
                 df_summary_base
                 .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
                 .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
             )
-          
-                    
-            # === Step 4: Merge diagnostics back to deduped summary
+        
+            # === Step 4: Merge diagnostics into summary
             df_summary_base = df_summary_base.merge(
                 diagnostics_df,
                 on=['Game_Key', 'Market', 'Outcome'],
                 how='left'
             )
+        
+            # === Step 5: Fallback fill
+            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
+                df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
+            
             #st.write("🧪 Columns in filtered_df after diagnostics merge:")
             #st.write(df_summary_base.columns.tolist())
                     
-            # Fallback fill for missing
-            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It']:
-                df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
+     
         
         #st.markdown("### 🧪 Summary Grouped Debug View")
         
@@ -2397,7 +2434,7 @@ def render_scanner_tab(label, sport_key, container):
         )[[
             'Game_Key', 'Market', 'Outcome',
             'Confidence Trend', 'Tier Δ', 'Line/Model Direction',
-            'Why Model Likes It', 'Model Prob Snapshot', 'Model_Confidence_Tier', 'Timing_Stage','Timing_Opportunity_Score'
+            'Why Model Likes It', 'Model Prob Snapshot', 'Model_Confidence_Tier', 'Timing_Stage','Timing_Opportunity_Score','Confidence Spark'
         ]].rename(columns={
             'Model Prob Snapshot': 'Model Prob',
             'Model_Confidence_Tier': 'Confidence Tier'  # ✅ Now this will work
@@ -2409,7 +2446,7 @@ def render_scanner_tab(label, sport_key, container):
         # ✅ Drop all diagnostics to prevent _x/_y suffixes
         diagnostic_cols = [
             'Model Prob', 'Confidence Tier',
-            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It','Timing_Stage', 'Timing_Opportunity_Score'
+            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It','Timing_Stage', 'Timing_Opportunity_Score','Confidence Spark'
         ]
         filtered_df = filtered_df.drop(columns=[col for col in diagnostic_cols if col in filtered_df.columns], errors='ignore')
 
@@ -2438,11 +2475,12 @@ def render_scanner_tab(label, sport_key, container):
                 'Model Prob': 'mean',
                 'Timing_Opportunity_Score': 'first',
                 'Timing_Stage': 'first', 
-                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else x.iloc[0],
+                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else (x.iloc[0] if not x.empty else "⚠️ Missing")
                 'Confidence Trend': 'first',
                 'Tier Δ': 'first',
                 'Line/Model Direction': 'first',
-                'Why Model Likes It': 'first'
+                'Why Model Likes It': 'first',
+                'Confidence Spark':'first'
             })
         )
 
@@ -2482,7 +2520,7 @@ def render_scanner_tab(label, sport_key, container):
             'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
             'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
             'Model Prob', 'Confidence Tier', 'Timing_Stage','Timing_Opportunity_Score',
-            'Why Model Likes It', 'Confidence Trend', 'Tier Δ', 'Line/Model Direction'
+            'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 'Line/Model Direction'
         ]
         summary_grouped = summary_grouped.sort_values(
             by=['Date + Time (EST)', 'Matchup', 'Market'],
