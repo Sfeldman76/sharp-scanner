@@ -889,11 +889,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         
             # 🔥 Recent cover streak stats (overall + home/away)
             'Avg_Recent_Cover_Streak',
-            'Pct_On_Recent_Cover_Streak',
             'Avg_Recent_Cover_Streak_Home',
-            'Pct_On_Recent_Cover_Streak_Home',
             'Avg_Recent_Cover_Streak_Away',
-            'Pct_On_Recent_Cover_Streak_Away',
+           
         ]
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
