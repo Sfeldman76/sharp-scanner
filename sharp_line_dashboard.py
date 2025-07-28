@@ -272,6 +272,7 @@ def read_from_bigquery(table_name):
     except Exception as e:
         st.error(f"❌ Failed to load `{table_name}`: {e}")
         return pd.DataFrame()
+        
 def safe_to_gbq(df, table, replace=False):
     mode = 'replace' if replace else 'append'
     for attempt in range(3):
@@ -1919,30 +1920,21 @@ def ensure_opposite_side_rows(df, scored_df):
 
 
 def render_scanner_tab(label, sport_key, container):
-    # Optional: Load market weights, skip if not found
-    # market_weights = read_market_weights_from_bigquery()
-    # if not market_weights:
-    #     st.error("❌ No market weights found. Cannot compute confidence scores.")
-    #     return
-
-    # 🔄 Auto-refresh only if not paused
     if st.session_state.get("pause_refresh", False):
         st.info("⏸️ Auto-refresh paused")
-        return  # ❌ exit early — no fetching, no rendering
-    
+        return
+
     timestamp = pd.Timestamp.utcnow()
-    sport_key_lower = sport_key.lower()
 
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
-        # === Fetch live odds for display table
+        # === Live odds snapshot
         live = fetch_live_odds(sport_key)
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
 
-        # === Build current snapshot table (live odds view)
         df_snap = pd.DataFrame([
             {
                 'Game_ID': game.get('id'),
@@ -1962,41 +1954,15 @@ def render_scanner_tab(label, sport_key, container):
         ])
         df_snap = build_game_key(df_snap)
 
-        # === Previous snapshot for live odds comparison
-        # === Previous snapshot for live odds comparison
-        prev = read_latest_snapshot_from_bigquery(hours=48) or {}
+        # ✅ New: Load sharp move history
+        df_all_snapshots = get_recent_history()
+
+        # ✅ Detect and score sharp moves using full pipeline
+        df_final, df_history, summary_df = detect_sharp_moves(
+            df_snap, df_all_snapshots, sport_key=sport_key
+        )
+    
         
-        df_prev_raw = pd.DataFrame([
-            {
-                "Game": f"{game.get('home_team')} vs {game.get('away_team')}",
-                "Market": market['key'],
-                "Outcome": o["name"],
-                "Bookmaker": book.get("title", book.get("key", "Unknown Book")),
-                "Value": o.get('point') if market['key'] != 'h2h' else o.get('price'),
-                "Limit": o.get("bet_limit", 0),
-                "Game_Start": pd.to_datetime(game.get("commence_time"), utc=True)
-            }
-            for game in prev.values()
-            for book in game.get("bookmakers", [])
-            for market in book.get("markets", [])
-            for o in market.get("outcomes", [])
-        ])
-        
-        # === Format and display snapshot table
-        df_prev_display = pd.DataFrame()
-        if not df_prev_raw.empty:
-            df_prev_raw['Value_Limit'] = df_prev_raw.apply(
-                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})"
-                if pd.notnull(r['Limit']) and pd.notnull(r['Value']) else "", axis=1
-            )
-            df_prev_raw['Date + Time (EST)'] = pd.to_datetime(df_prev_raw['Game_Start'], errors='coerce')\
-                .dt.tz_localize('UTC').dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
-            df_prev_display = df_prev_raw.pivot_table(
-                index=["Date + Time (EST)", "Game", "Market", "Outcome"],
-                columns="Bookmaker",
-                values="Value_Limit",
-                aggfunc="first"
-            ).reset_index()
         
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
         detection_key = f"sharp_moves_{sport_key_lower}"
@@ -2475,7 +2441,7 @@ def render_scanner_tab(label, sport_key, container):
                 'Model Prob': 'mean',
                 'Timing_Opportunity_Score': 'first',
                 'Timing_Stage': 'first', 
-                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else (x.iloc[0] if not x.empty else "⚠️ Missing")
+                'Confidence Tier': lambda x: x.mode().iloc[0] if not x.mode().empty else (x.iloc[0] if not x.empty else "⚠️ Missing"),
                 'Confidence Trend': 'first',
                 'Tier Δ': 'first',
                 'Line/Model Direction': 'first',
