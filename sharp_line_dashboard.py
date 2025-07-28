@@ -728,6 +728,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market['Line_Resistance_Crossed_Levels'] = df_market.get('Line_Resistance_Crossed_Levels', '[]')
         df_market['Market_Mispricing'] = df_market['Team_Past_Avg_Model_Prob'] - df_market['Implied_Prob']
         df_market['Abs_Market_Mispricing'] = df_market['Market_Mispricing'].abs()
+        df_market['Mispricing_Flag'] = (df_market['Abs_Market_Mispricing'] > 0.05).astype(int)
+        df_market['Team_Implied_Prob_Gap_Home'] = (
+            df_market['Team_Past_Avg_Model_Prob_Home'] - df_market['Market_Implied_Prob']
+        )
+        
+        df_market['Team_Implied_Prob_Gap_Away'] = (
+            df_market['Team_Past_Avg_Model_Prob_Away'] - df_market['Market_Implied_Prob']
+        )
 
         df_market['Value_Reversal_Flag'] = df_market.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
         df_market['Odds_Reversal_Flag'] = df_market.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
@@ -743,6 +751,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
             .apply(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
         )
         df_market['On_Cover_Streak'] = (df_market['Team_Cover_Streak'] >= 2).astype(int)
+        # Streak logic based on hit rate
+        df_market['Team_Streak_Strong'] = (df_market['Team_Past_Hit_Rate'] > 0.6).astype(int)
+        df_market['Team_Streak_Weak'] = (df_market['Team_Past_Hit_Rate'] < 0.4).astype(int)
 
         
             # === Resistance Flag Debug
