@@ -648,10 +648,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market['Team_Recent_Cover_Streak_Home'] = (
             df_market
             .groupby('Team')
-            .apply(lambda g: g['SHARP_HIT_BOOL'].where(g['Is_Home'] == 1)
-                    .shift()
-                    .rolling(window=3, min_periods=1)
-                    .sum())
+            .apply(lambda g: (
+                g['SHARP_HIT_BOOL']
+                .where(g['Is_Home'] == 1)
+                .shift()
+                .rolling(window=3, min_periods=1)
+                .sum()
+            ))
             .reset_index(level=0, drop=True)
         )
 
@@ -661,12 +664,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market['Team_Recent_Cover_Streak_Away'] = (
             df_market
             .groupby('Team')
-            .apply(lambda g: g['SHARP_HIT_BOOL'].where(g['Is_Home'] == 0)
-                    .shift()
-                    .rolling(window=3, min_periods=1)
-                    .sum())
+            .apply(lambda g: (
+                g['SHARP_HIT_BOOL']
+                .where(g['Is_Home'] == 0)
+                .shift()
+                .rolling(window=3, min_periods=1)
+                .sum()
+            ))
             .reset_index(level=0, drop=True)
         )
+
 
         df_market['On_Cover_Streak_Away'] = (df_market['Team_Recent_Cover_Streak_Away'] >= 2).astype(int)
 
