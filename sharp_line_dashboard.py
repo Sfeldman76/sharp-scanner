@@ -2277,7 +2277,7 @@ def render_scanner_tab(label, sport_key, container):
         diag_source = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
         
         # === Step 2: Compute diagnostics across all sharp book rows (NO deduplication yet)
-       if diag_source.empty:
+        if diag_source.empty:
             st.warning("⚠️ No sharp book rows available for diagnostics.")
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
                 df_summary_base[col] = "⚠️ Missing"
