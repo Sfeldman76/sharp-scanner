@@ -1449,18 +1449,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Team_Implied_Prob_Gap_Home'] = df_canon['Team_Past_Avg_Model_Prob_Home'] - df_canon['Market_Implied_Prob']
             df_canon['Team_Implied_Prob_Gap_Away'] = df_canon['Team_Past_Avg_Model_Prob_Away'] - df_canon['Market_Implied_Prob']
 
-            df_canon['Team_Streak_Strong'] = (df_canon['Team_Past_Hit_Rate'] > 0.6).astype(int)
-            df_canon['Team_Streak_Weak'] = (df_canon['Team_Past_Hit_Rate'] < 0.4).astype(int)
-            # Compute rolling streak for each team
-            df_canon['Team_Cover_Streak'] = (
-                df_canon
-                .sort_values(['Team', 'Game_Start'])
-                .groupby('Team')['SHARP_HIT_BOOL']
-                .apply(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
-            )
-            
-            df_canon['On_Cover_Streak'] = (df_canon['Team_Cover_Streak'] >= 2).astype(int)
-
             # Flattened hybrid timing buckets
             # 🔄 Flattened hybrid timing columns (NUMERIC only)
             hybrid_timing_cols = [
@@ -1623,17 +1611,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
             df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
             df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
-            df_inverse['Team_Streak_Strong'] = (df_inverse['Team_Past_Hit_Rate'] > 0.6).astype(int)
-            df_inverse['Team_Streak_Weak'] = (df_inverse['Team_Past_Hit_Rate'] < 0.4).astype(int)
-            # Propagate cover streak from canonical rows
-            if 'On_Cover_Streak' in df_canon.columns:
-                df_inverse = df_inverse.merge(
-                    df_canon[['Game_Key', 'Outcome_Norm', 'On_Cover_Streak']],
-                    on=['Game_Key', 'Outcome_Norm'],
-                    how='left'
-                )
-            else:
-                df_inverse['On_Cover_Streak'] = 0
+            
 
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
@@ -1903,8 +1881,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Net_Odds_Move_From_Opening', 'Abs_Odds_Move_From_Opening',
                     'Team_Past_Hit_Rate', 'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
                     'Team_Past_Avg_Model_Prob', 'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away',
-                    'Market_Implied_Prob', 'Mispricing_Gap','Abs_Mispricing_Gap','Mispricing_Flag','Team_Streak_Strong','Team_Streak_Weak',
-                    'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away', 'On_Cover_Streak'
+                    'Market_Implied_Prob', 'Mispricing_Gap','Abs_Mispricing_Gap','Mispricing_Flag',
+                    'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away', 
+                    # 🔥 Recent cover streak counts (0–3 range)
+                    'Avg_Recent_Cover_Streak',
+                    'Avg_Recent_Cover_Streak_Home',
+                    'Avg_Recent_Cover_Streak_Away',
+                    
+                    # ✅ Binary flag rate (percentage of rows on a streak)
+                    'Rate_On_Cover_Streak',
+                    'Rate_On_Cover_Streak_Home',
+                    'Rate_On_Cover_Streak_Away',
+
                 ]
                 
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
@@ -1969,17 +1957,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
                 df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
                 df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
-                df_inverse['Team_Streak_Strong'] = (df_inverse['Team_Past_Hit_Rate'] > 0.6).astype(int)
-                df_inverse['Team_Streak_Weak'] = (df_inverse['Team_Past_Hit_Rate'] < 0.4).astype(int)
                 # Propagate cover streak from canonical rows
-                if 'On_Cover_Streak' in df_canon.columns:
-                    df_inverse = df_inverse.merge(
-                        df_canon[['Game_Key', 'Outcome_Norm', 'On_Cover_Streak']],
-                        on=['Game_Key', 'Outcome_Norm'],
-                        how='left'
-                    )
-                else:
-                    df_inverse['On_Cover_Streak'] = 0
+                
 
                 hybrid_timing_cols = [
                     'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
@@ -2117,12 +2096,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_final['Hybrid_Line_Timing_Flag'] +
                 df_final['Hybrid_Odds_Timing_Flag'] +
                 (df_final['Team_Past_Hit_Rate'].fillna(0) > 0.6).astype(int) +
-                df_final['Team_Streak_Strong'] +
-                df_final['Team_Streak_Weak'] +
                 df_final['Mispricing_Flag'] +
                 (df_final['Team_Implied_Prob_Gap_Home'] > 0.05).astype(int) +
                 (df_final['Team_Implied_Prob_Gap_Away'] > 0.05).astype(int) +
-                df_final['On_Cover_Streak']
+                    # 🔹 Recent performance streaks
+                (df_final['Avg_Recent_Cover_Streak'].fillna(0) >= 2).astype(int) +
+                (df_final['Avg_Recent_Cover_Streak_Home'].fillna(0) >= 2).astype(int) +
+                (df_final['Avg_Recent_Cover_Streak_Away'].fillna(0) >= 2).astype(int)
+                
             )
 
             
