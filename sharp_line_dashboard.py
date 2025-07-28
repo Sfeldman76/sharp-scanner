@@ -671,23 +671,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         streak_stats = (
             df_market.groupby('Team')
             .agg({
+                # Rolling 3-game cover counts (values between 0 and 3)
                 'Team_Recent_Cover_Streak': 'mean',
-                'On_Cover_Streak': 'mean',
                 'Team_Recent_Cover_Streak_Home': 'mean',
-                'On_Cover_Streak_Home': 'mean',
                 'Team_Recent_Cover_Streak_Away': 'mean',
+        
+                # Binary flags indicating if team was on a streak (1 if ≥2 covers out of last 3)
+                'On_Cover_Streak': 'mean',
+                'On_Cover_Streak_Home': 'mean',
                 'On_Cover_Streak_Away': 'mean'
             })
             .rename(columns={
                 'Team_Recent_Cover_Streak': 'Avg_Recent_Cover_Streak',
-                'On_Cover_Streak': 'Pct_On_Recent_Cover_Streak',
                 'Team_Recent_Cover_Streak_Home': 'Avg_Recent_Cover_Streak_Home',
-                'On_Cover_Streak_Home': 'Pct_On_Recent_Cover_Streak_Home',
                 'Team_Recent_Cover_Streak_Away': 'Avg_Recent_Cover_Streak_Away',
-                'On_Cover_Streak_Away': 'Pct_On_Recent_Cover_Streak_Away'
+                'On_Cover_Streak': 'Rate_On_Cover_Streak',
+                'On_Cover_Streak_Home': 'Rate_On_Cover_Streak_Home',
+                'On_Cover_Streak_Away': 'Rate_On_Cover_Streak_Away'
             })
             .reset_index()
         )
+
+        
 
         team_stats = team_stats.merge(streak_stats, on='Team', how='left')
 
