@@ -2136,18 +2136,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
                 (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
                 (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
-                df_final['Hybrid_Line_Timing_Flag'] +
-                df_final['Hybrid_Odds_Timing_Flag'] +
+                df_final['Hybrid_Line_Timing_Flag'].fillna(0).astype(int) +
+                df_final['Hybrid_Odds_Timing_Flag'].fillna(0).astype(int) +
                 (df_final['Team_Past_Hit_Rate'].fillna(0) > 0.6).astype(int) +
-                df_final['Mispricing_Flag'] +
-                (df_final['Team_Implied_Prob_Gap_Home'] > 0.05).astype(int) +
-                (df_final['Team_Implied_Prob_Gap_Away'] > 0.05).astype(int) +
-                    # 🔹 Recent performance streaks
+                df_final['Mispricing_Flag'].fillna(0).astype(int) +
+                (df_final['Team_Implied_Prob_Gap_Home'].fillna(0) > 0.05).astype(int) +
+                (df_final['Team_Implied_Prob_Gap_Away'].fillna(0) > 0.05).astype(int) +
                 (df_final['Avg_Recent_Cover_Streak'].fillna(0) >= 2).astype(int) +
                 (df_final['Avg_Recent_Cover_Streak_Home'].fillna(0) >= 2).astype(int) +
                 (df_final['Avg_Recent_Cover_Streak_Away'].fillna(0) >= 2).astype(int)
-                
-            )
+            ).fillna(0).astype(int)
+
 
             
                 
