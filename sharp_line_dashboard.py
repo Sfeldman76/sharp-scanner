@@ -1224,7 +1224,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         }).sort_values(by='Importance', ascending=False)
         
         st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
-        st.table(importance_df.head(10))
+        st.table(importance_df.head(30))
         
         # === Calibration
         prob_true, prob_pred = calibration_curve(y, ensemble_prob, n_bins=10)
