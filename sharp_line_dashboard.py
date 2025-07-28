@@ -726,6 +726,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         
         # === Optional: store decoded JSON for preview/debug only (not as model input)
         df_market['Line_Resistance_Crossed_Levels'] = df_market.get('Line_Resistance_Crossed_Levels', '[]')
+        df_market['Market_Mispricing'] = df_market['Team_Past_Avg_Model_Prob'] - df_market['Implied_Prob']
+        df_market['Abs_Market_Mispricing'] = df_market['Market_Mispricing'].abs()
 
         df_market['Value_Reversal_Flag'] = df_market.get('Value_Reversal_Flag', 0).fillna(0).astype(int)
         df_market['Odds_Reversal_Flag'] = df_market.get('Odds_Reversal_Flag', 0).fillna(0).astype(int)
@@ -734,6 +736,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         #df_market['Is_Team_Over'] = (df_market['Team_Bet_Role'] == 'over').astype(int)
         #df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
 
+        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+        df_market['Team_Cover_Streak'] = (
+            df_market
+            .groupby('Team')['SHARP_HIT_BOOL']
+            .apply(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
+        )
+        df_market['On_Cover_Streak'] = (df_market['Team_Cover_Streak'] >= 2).astype(int)
 
         
             # === Resistance Flag Debug
@@ -780,6 +789,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
             
             'Abs_Line_Move_From_Opening',
             'Abs_Odds_Move_From_Opening', 
+            'Market_Mispricing', 'Abs_Market_Mispricing',
+            'Team_Cover_Streak', 'On_Cover_Streak'
+
         ]
         hybrid_timing_features = [
             
