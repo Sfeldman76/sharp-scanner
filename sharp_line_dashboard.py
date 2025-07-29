@@ -1756,7 +1756,7 @@ def compute_diagnostics_vectorized(df):
     return diagnostics_df
 
 # === Global utility
-def create_sparkline(probs, max_points=24):
+def create_sparkline(probs, max_points=72):
     if not probs or len(probs) < 2 or all(pd.isna(probs)):
         return "—"
 
@@ -2277,7 +2277,7 @@ def render_scanner_tab(label, sport_key, container):
             diagnostics_df = diagnostics_df.merge(trend_history, on=['Game_Key', 'Market', 'Outcome'], how='left')
             
             # Step 2: Clip and apply sparkline (on diagnostics_df)
-            MAX_SPARK_POINTS = 24
+            MAX_SPARK_POINTS = 72
             diagnostics_df['Prob_Trend_List'] = diagnostics_df['Prob_Trend_List'].apply(
                 lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst
             )
@@ -2297,11 +2297,7 @@ def render_scanner_tab(label, sport_key, container):
                 how='left'
             )
             
-            # Step 4: Optionally render HTML preview
-            html = df_summary_base[['Confidence Spark']].to_html(escape=False, index=False)
-            st.markdown(html, unsafe_allow_html=True)
-
-        
+                    
             # === Step 5: Fallback fill
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
                 df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
