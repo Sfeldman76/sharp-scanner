@@ -495,9 +495,23 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 
 
     
-    
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
-    st.info(f"🎯 Training sharp model for {sport.upper()}...")
+    # Dictionary specifying days_back for each sport
+    SPORT_DAYS_BACK = {
+        'NBA': 35,      # 35 days for NBA
+        'NFL': 60,      # 20 days for NFL
+        'CFL': 60,      # 20 days for NFL
+        'WNBA': 30,     # 30 days for WNBA
+        'MLB': 50,      # 50 days for MLB
+        'NCAAF': 30,    # 20 days for NCAAF
+        'NCAAB': 30,    # 30 days for NCAAB
+        # Add more sports as needed
+    }
+
+    # Get the days_back from the dictionary, or use the default if sport is not in the dictionary
+    days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
+    
+    st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
 
     # ✅ Load from sharp_scores_full with all necessary columns up front
     query = f"""
@@ -690,33 +704,44 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # === Ensure data is sorted chronologically
         df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
         
-        # === Cover Streak (Overall)
+        # Define a dictionary to specify rolling window lengths per sport
+        SPORT_COVER_WINDOW = {
+            'NBA': 5,  # Example: For NBA, 5 games
+            'NFL': 4,  # Example: For NFL, 4 games
+            'WNBA': 3,  # Example: For WNBA, 3 games
+            'MLB': 7,  # Example: For MLB, 7 games
+            'CFL': 4,  # Example: For NFL, 4 games
+        }
+        
+        # === Ensure data is sorted chronologically
+        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+        
+        # === Cover Streak (Overall) - Sport-Specific Window Length
+        window_length = SPORT_COVER_WINDOW.get(df_market['Sport'].iloc[0], 4)  # Default to 4 if sport is not in the dict
+        
         df_market['Team_Recent_Cover_Streak'] = (
             df_market.groupby('Team')['SHARP_HIT_BOOL']
-            .transform(lambda x: x.shift().rolling(window=4, min_periods=1).sum())
+            .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
         )
         df_market['On_Cover_Streak'] = (df_market['Team_Recent_Cover_Streak'] >= 2).astype(int)
         
-        # === Cover Streak (Home Only)
+        # === Cover Streak (Home Only) - Sport-Specific Window Length
         df_market['Cover_Home_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 1)
         
         df_market['Team_Recent_Cover_Streak_Home'] = (
-            df_market
-            .groupby('Team')['Cover_Home_Only']
-            .transform(lambda x: x.shift().rolling(window=4, min_periods=1).sum())
+            df_market.groupby('Team')['Cover_Home_Only']
+            .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
         )
         df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
         
-        # === Cover Streak (Away Only)
+        # === Cover Streak (Away Only) - Sport-Specific Window Length
         df_market['Cover_Away_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 0)
         
         df_market['Team_Recent_Cover_Streak_Away'] = (
-            df_market
-            .groupby('Team')['Cover_Away_Only']
-            .transform(lambda x: x.shift().rolling(window=5, min_periods=1).sum())
+            df_market.groupby('Team')['Cover_Away_Only']
+            .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
         )
         df_market['On_Cover_Streak_Away'] = (df_market['Team_Recent_Cover_Streak_Away'] >= 2).astype(int)
-        
 
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
@@ -1597,7 +1622,7 @@ def compute_diagnostics_vectorized(df):
         # === Odds & line movement
         if row.get('SharpMove_Odds_Up'): parts.append("🟢 Odds Moved Up (Steam)")
         if row.get('SharpMove_Odds_Down'): parts.append("🔻 Odds Moved Down (Buyback)")
-        if row.get('Is_Home_Team_Bet'): parts.append("🏠 Home Team Bet")
+        #if row.get('Is_Home_Team_Bet'): parts.append("🏠 Home Team Bet")
         if row.get('Sharp_Line_Magnitude', 0) > 0.5: parts.append("📏 Big Line Move")
         if row.get('Rec_Line_Magnitude', 0) > 0.5: parts.append("📉 Rec Book Move")
         if row.get('Sharp_Limit_Total', 0) > 10000: parts.append("💼 Sharp High Limit")
@@ -1767,8 +1792,8 @@ def compute_diagnostics_vectorized(df):
     
     return diagnostics_df
 
-# === Global utility
-def create_sparkline(probs, max_points=72):
+# === Global utility for creating a sparkline with the full trend history
+def create_sparkline(probs):
     if not probs or len(probs) < 2 or all(pd.isna(probs)):
         return "—"
 
@@ -1776,9 +1801,6 @@ def create_sparkline(probs, max_points=72):
     probs = [p for p in probs if pd.notna(p)]
     if len(probs) == 0:
         return "—"
-    
-    # Trim to last N points
-    probs = probs[-max_points:]
     
     # Prepare label for hover
     percent_labels = [f"{round(p * 100, 1)}%" for p in probs]
@@ -1795,6 +1817,7 @@ def create_sparkline(probs, max_points=72):
     html = f"<span title='{tooltip}' style='cursor: help;'>{spark}</span>"
 
     return html
+
 
 
 
@@ -2280,23 +2303,32 @@ def render_scanner_tab(label, sport_key, container):
             if 'Model_Sharp_Win_Prob' in df_all_snapshots.columns and 'Model Prob' not in df_all_snapshots.columns:
                 df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
             
-            # Step 1: Build and merge trend history
+            # Step 1: Build and merge trend history (keeping full history for analysis)
             trend_history = (
                 df_all_snapshots
-                .sort_values('Snapshot_Timestamp')
-                .groupby(['Game_Key', 'Market', 'Outcome'])['Model Prob']
-                .apply(list)
-                .reset_index(name='Prob_Trend_List')
+                .sort_values('Snapshot_Timestamp')  # Ensure sorted by timestamp
+                .groupby(['Game_Key', 'Market', 'Outcome'])['Model Prob']  # Group by necessary columns
+                .apply(list)  # Collect the entire history of probabilities
+                .reset_index(name='Prob_Trend_List')  # Store the full list of probabilities
             )
             
+            # Merge the trend history back to the diagnostics_df
             diagnostics_df = diagnostics_df.merge(trend_history, on=['Game_Key', 'Market', 'Outcome'], how='left')
             
-            # Step 2: Clip and apply sparkline (on diagnostics_df)
-            MAX_SPARK_POINTS = 72
+            # Step 2: Clip and apply sparkline (for visualization purposes)
+            MAX_SPARK_POINTS = 36
+            
+            # Clip the Prob_Trend_List to only the last MAX_SPARK_POINTS points for sparkline generation
             diagnostics_df['Prob_Trend_List'] = diagnostics_df['Prob_Trend_List'].apply(
                 lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst
             )
+            
+            # Generate a sparkline based on the clipped trend list
             diagnostics_df['Confidence Spark'] = diagnostics_df['Prob_Trend_List'].apply(create_sparkline)
+            
+            # Optionally, display full line history for debugging or review:
+            #diagnostics_df[['Game_Key', 'Market', 'Outcome', 'Prob_Trend_List']].head()  # View the full trend history for some rows
+
             
             # Step 3: Deduplicate and merge into summary base
             df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
@@ -2479,8 +2511,8 @@ def render_scanner_tab(label, sport_key, container):
         view_cols = [
             'Date + Time (EST)', 'Matchup', 'Market', 'Outcome',
             'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
-            'Model Prob', 'Confidence Tier', 'Timing_Stage','Timing_Opportunity_Score',
-            'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 'Line/Model Direction'
+            'Model Prob', 'Confidence Tier', 'Timing_Stage',
+            'Why Model Likes It', 'Confidence Trend','Confidence Spark', 'Tier Δ', 
         ]
         summary_grouped = summary_grouped.sort_values(
             by=['Date + Time (EST)', 'Matchup', 'Market'],
