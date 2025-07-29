@@ -2280,6 +2280,7 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ No sharp book rows available for diagnostics.")
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
                 df_summary_base[col] = "⚠️ Missing"
+                
         else:
             # === Step 1: Run diagnostics
             diagnostics_df = compute_diagnostics_vectorized(diag_source)
