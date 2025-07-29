@@ -1326,7 +1326,7 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
         "logloss": logloss_val
     }
 
-def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 14):
+def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 30):
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
 
     # === Load historical scored data
@@ -1781,6 +1781,7 @@ def create_sparkline(probs, max_points=72):
     if not probs or len(probs) < 2 or all(pd.isna(probs)):
         return "—"
 
+    # Filter out NaN values
     probs = [p for p in probs if pd.notna(p)]
     if len(probs) == 0:
         return "—"
@@ -1792,12 +1793,14 @@ def create_sparkline(probs, max_points=72):
     percent_labels = [f"{round(p * 100, 1)}%" for p in probs]
     tooltip = " → ".join(percent_labels)
 
-    # Characters: clean horizontal bars
+    # Characters: use a compact set of horizontal bars
     chars = "⎽⎼⎻⎺"
     scaled = np.interp(probs, (min(probs), max(probs)), (0, len(chars) - 1))
+    
+    # Generate the sparkline by scaling the probabilities
     spark = ''.join(chars[int(round(i))] for i in scaled)
 
-    # Wrap with <span> and tooltip
+    # Wrap with <span> and tooltip for display
     html = f"<span title='{tooltip}' style='cursor: help;'>{spark}</span>"
 
     return html
