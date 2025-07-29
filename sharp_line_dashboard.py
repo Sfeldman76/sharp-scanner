@@ -886,7 +886,89 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Total_vs_Spread_ProbGap'].abs() > 0.05)
         ).astype(int)
 
- 
+         # Absolute line move
+        SPORT_ALIAS = {
+            'MLB': 'MLB',
+            'NFL': 'NFL',
+            'CFL': 'CFL',
+            'WNBA': 'WNBA',
+            'NBA': 'NBA',
+            'NCAAF': 'NCAAF',
+            'NCAAB': 'NCAAB',
+        }
+                # === Sport and Market Normalization (if not already present)
+        df_market['Sport_Norm'] = df_market['Sport'].map(SPORT_ALIAS).fillna(df_market['Sport'])
+        df_market['Market_Norm'] = df_market['Market'].str.lower()
+        
+        # === Absolute Line and Odds Movement
+        df_market['Abs_Line_Move_From_Opening'] = (df_market['Final_Line_Value'] - df_market['First_Line_Value']).abs()
+        df_market['Odds_Shift'] = df_market['Final_Odds'] - df_market['First_Odds']
+        df_market['Implied_Prob_Shift'] = (
+            calc_implied_prob(df_market['Final_Odds']) - calc_implied_prob(df_market['First_Odds'])
+        )
+        
+        # === Directional Movement Flags
+        df_market['Line_Moved_Toward_Team'] = np.where(
+            ((df_market['Final_Line_Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
+            ((df_market['Final_Line_Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
+            1, 0
+        )
+        
+        df_market['Line_Moved_Away_From_Team'] = np.where(
+            ((df_market['Final_Line_Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
+            ((df_market['Final_Line_Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
+            1, 0
+        )
+        
+        # === Percent Move (Totals only)
+        df_market['Pct_Line_Move_From_Opening'] = np.where(
+            (df_market['Market_Norm'] == 'total') & (df_market['First_Line_Value'].abs() > 0),
+            df_market['Abs_Line_Move_From_Opening'] / df_market['First_Line_Value'].abs(),
+            np.nan
+        )
+        
+        df_market['Pct_Line_Move_Bin'] = pd.cut(
+            df_market['Pct_Line_Move_From_Opening'],
+            bins=[-np.inf, 0.0025, 0.005, 0.01, 0.02, np.inf],
+            labels=['<0.25%', '0.5%', '1%', '2%', '2%+']
+        )
+        
+        # === Disable line-move-based features in moneyline and MLB spread
+        df_market['Disable_Line_Move_Features'] = np.where(
+            ((df_market['Sport_Norm'] == 'MLB') & (df_market['Market_Norm'] == 'spread')) |
+            (df_market['Market_Norm'].isin(['h2h'])),
+            1, 0
+        )
+        
+        # === Overmove flags
+        df_market['Potential_Overmove_Flag'] = np.where(
+            (df_market['Market_Norm'] == 'spread') &
+            (df_market['Line_Moved_Toward_Team'] == 1) &
+            (df_market['Abs_Line_Move_From_Opening'] >= 2) &
+            (df_market['Disable_Line_Move_Features'] == 0),
+            1, 0
+        )
+        
+        df_market['Potential_Overmove_Total_Pct_Flag'] = np.where(
+            (df_market['Market_Norm'] == 'total') &
+            (df_market['Line_Moved_Toward_Team'] == 1) &
+            (df_market['Pct_Line_Move_From_Opening'] >= 0.01) &
+            (df_market['Disable_Line_Move_Features'] == 0),
+            1, 0
+        )
+        
+        # === Postgame diagnostics (only used for understanding missed hits — not features)
+        df_market['Line_Moved_Toward_Team_And_Missed'] = (
+            (df_market['Line_Moved_Toward_Team'] == 1) & (df_market['SHARP_HIT_BOOL'] == 0)
+        ).astype(int)
+        
+        df_market['Line_Moved_Toward_Team_And_Hit'] = (
+            (df_market['Line_Moved_Toward_Team'] == 1) & (df_market['SHARP_HIT_BOOL'] == 1)
+        ).astype(int)
+        
+        df_market['Line_Moved_Away_And_Hit'] = (
+            (df_market['Line_Moved_Away_From_Team'] == 1) & (df_market['SHARP_HIT_BOOL'] == 1)
+        ).astype(int)
         
             # === Resistance Flag Debug
         with st.expander(f"📊 Resistance Flag Debug – {market.upper()}"):
@@ -906,6 +988,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 st.success("✅ Resistance break logic is populating correctly.")
         # === 🧠 Add new features to training
         features = [
+        
             # 🔹 Core sharp signals
             'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 
             'Sharp_Limit_Total',
@@ -940,7 +1023,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Spread_vs_H2H_ProbGap',
             'Total_vs_H2H_ProbGap',
             'Total_vs_Spread_ProbGap',
-            'CrossMarket_Prob_Gap_Exists'
+            'CrossMarket_Prob_Gap_Exists',
+            'Line_Moved_Toward_Team',
+            'Line_Moved_Away_From_Team',            
+            'Pct_Line_Move_From_Opening', 'Pct_Line_Move_Bin',
+            'Potential_Overmove_Flag', 'Potential_Overmove_Total_Pct_Flag',
+        
+            # 🧠 Cross-market alignment
+            'Spread_vs_H2H_Aligned',
+            'Total_vs_Spread_Contradiction',
+            'Spread_vs_H2H_ProbGap',
+            'Total_vs_H2H_ProbGap',
+            'Total_vs_Spread_ProbGap',
+            'CrossMarket_Prob_Gap_Exists', 
           
 
         ]
