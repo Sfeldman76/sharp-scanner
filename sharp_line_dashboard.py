@@ -642,42 +642,57 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
         
         # === Leave-one-out team stats (fast)
-        def compute_loo_stats_fast(df, home_filter=None):
+        # Sort once upfront
+        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+        
+        # === Step 0: Sort once up front
+        df_market = df_market.sort_values(['Team', 'Game_Key'])
+        
+        # === Step 1: Compute LOO Stats with Game_Key
+        def compute_loo_stats_by_game(df, home_filter=None):
             df = df.copy()
             if home_filter is not None:
                 df = df[df['Is_Home'] == home_filter]
+            
+            # Deduplicate: one row per (Game_Key, Team) to avoid explosion
+            df_dedup = (
+                df.sort_values('Snapshot_Timestamp')  # keep earliest per game
+                .drop_duplicates(subset=['Game_Key', 'Team'], keep='first')
+            )
         
-            df = df.sort_values(['Team', 'Snapshot_Timestamp'])
+            # Sort to ensure shift aligns chronologically
+            df_dedup = df_dedup.sort_values(['Team', 'Game_Key'])
         
-            # Leave-one-out using shift(1)
-            df['cum_model_prob'] = df.groupby('Team')['Model_Sharp_Win_Prob'].cumsum().shift(1)
-            df['cum_hit'] = df.groupby('Team')['SHARP_HIT_BOOL'].cumsum().shift(1)
-            df['cum_count'] = df.groupby('Team').cumcount()
+            # Shifted cumulative stats for leave-one-out
+            df_dedup['cum_model_prob'] = df_dedup.groupby('Team')['Model_Sharp_Win_Prob'].cumsum().shift(1)
+            df_dedup['cum_hit'] = df_dedup.groupby('Team')['SHARP_HIT_BOOL'].cumsum().shift(1)
+            df_dedup['cum_count'] = df_dedup.groupby('Team').cumcount()
         
-            df['Team_Past_Avg_Model_Prob'] = df['cum_model_prob'] / df['cum_count'].replace(0, np.nan)
-            df['Team_Past_Hit_Rate'] = df['cum_hit'] / df['cum_count'].replace(0, np.nan)
+            df_dedup['Team_Past_Avg_Model_Prob'] = df_dedup['cum_model_prob'] / df_dedup['cum_count'].replace(0, np.nan)
+            df_dedup['Team_Past_Hit_Rate'] = df_dedup['cum_hit'] / df_dedup['cum_count'].replace(0, np.nan)
         
-            return df[['Team', 'Snapshot_Timestamp', 'Team_Past_Avg_Model_Prob', 'Team_Past_Hit_Rate']]
-        
+            return df_dedup[['Game_Key', 'Team', 'Team_Past_Avg_Model_Prob', 'Team_Past_Hit_Rate']]
+
+
         # === Compute all 3 sets
-        overall_stats = compute_loo_stats_fast(df_market)
+        overall_stats = compute_loo_stats_by_game(df_market)
         
-        home_stats = compute_loo_stats_fast(df_market, home_filter=1)
-        home_stats = home_stats.rename(columns={
+        # Home-only
+        home_stats = compute_loo_stats_by_game(df_market, home_filter=1).rename(columns={
             'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Home',
             'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Home'
         })
         
-        away_stats = compute_loo_stats_fast(df_market, home_filter=0)
-        away_stats = away_stats.rename(columns={
+        # Away-only
+        away_stats = compute_loo_stats_by_game(df_market, home_filter=0).rename(columns={
             'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Away',
             'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Away'
         })
         
         # === Merge back in
-        df_market = df_market.merge(overall_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
-        df_market = df_market.merge(home_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
-        df_market = df_market.merge(away_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
+        df_market = df_market.merge(overall_stats, on=['Game_Key', 'Team'], how='left')
+        df_market = df_market.merge(home_stats, on=['Game_Key', 'Team'], how='left')
+        df_market = df_market.merge(away_stats, on=['Game_Key', 'Team'], how='left')
 
         # Sort chronologically per team
         # === Ensure data is sorted chronologically
