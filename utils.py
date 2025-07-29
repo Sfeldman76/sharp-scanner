@@ -933,14 +933,25 @@ def add_minutes_to_game(df):
 
     return df
 
+from scipy.stats import zscore
+
 def add_line_and_crossmarket_features(df):
+    # === Normalize sport/market
+    SPORT_ALIAS = {
+        'MLB': 'MLB', 'NFL': 'NFL', 'CFL': 'CFL',
+        'WNBA': 'WNBA', 'NBA': 'NBA', 'NCAAF': 'NCAAF', 'NCAAB': 'NCAAB'
+    }
+    df['Sport_Norm'] = df['Sport'].map(SPORT_ALIAS).fillna(df['Sport'])
     df['Market_Norm'] = df['Market'].str.lower()
-    df['Sport_Norm'] = df['Sport']
 
-    # Line movement magnitude
+    # === Absolute line + odds movement
     df['Abs_Line_Move_From_Opening'] = (df['Value'] - df['Open_Value']).abs()
+    df['Odds_Shift'] = df['Odds_Price'] - df['Open_Odds']
+    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+    df['First_Imp_Prob'] = df['Open_Odds'].apply(implied_prob)
+    df['Implied_Prob_Shift'] = df['Implied_Prob'] - df['First_Imp_Prob']
 
-    # Line move direction (based on canonical Is_Favorite_Bet logic)
+    # === Directional movement
     df['Line_Moved_Toward_Team'] = np.where(
         ((df['Value'] > df['Open_Value']) & (df['Is_Favorite_Bet'] == 1)) |
         ((df['Value'] < df['Open_Value']) & (df['Is_Favorite_Bet'] == 0)),
@@ -953,7 +964,7 @@ def add_line_and_crossmarket_features(df):
         1, 0
     )
 
-    # Percentage line move for totals
+    # === Percent line move (totals only)
     df['Pct_Line_Move_From_Opening'] = np.where(
         (df['Market_Norm'] == 'total') & (df['Open_Value'].abs() > 0),
         df['Abs_Line_Move_From_Opening'] / df['Open_Value'].abs(),
@@ -966,17 +977,33 @@ def add_line_and_crossmarket_features(df):
         labels=['<0.25%', '0.5%', '1%', '2%', '2%+']
     )
 
-    # Disable line movement flags if not applicable
+    # === Disable flags for unsupported markets
     df['Disable_Line_Move_Features'] = np.where(
         ((df['Sport_Norm'] == 'MLB') & (df['Market_Norm'] == 'spread')) |
         (df['Market_Norm'].isin(['h2h', 'moneyline'])),
         1, 0
     )
 
+    # === Z-score based overmove detection
+    df['Abs_Line_Move_Z'] = (
+        df.groupby(['Sport_Norm', 'Market_Norm'])['Abs_Line_Move_From_Opening']
+        .transform(lambda x: zscore(x.fillna(0), ddof=0))
+    ).clip(-5, 5)
+
+    df['Pct_Line_Move_Z'] = (
+        df.groupby(['Sport_Norm'])['Pct_Line_Move_From_Opening']
+        .transform(lambda x: zscore(x.fillna(0), ddof=0))
+    ).clip(-5, 5)
+
+    df['Implied_Prob_Shift_Z'] = (
+        df.groupby(['Sport_Norm', 'Market_Norm'])['Implied_Prob_Shift']
+        .transform(lambda x: zscore(x.fillna(0), ddof=0))
+    ).clip(-5, 5)
+
     df['Potential_Overmove_Flag'] = np.where(
         (df['Market_Norm'] == 'spread') &
         (df['Line_Moved_Toward_Team'] == 1) &
-        (df['Abs_Line_Move_From_Opening'] >= 2) &
+        (df['Abs_Line_Move_Z'] >= 2) &
         (df['Disable_Line_Move_Features'] == 0),
         1, 0
     )
@@ -984,12 +1011,17 @@ def add_line_and_crossmarket_features(df):
     df['Potential_Overmove_Total_Pct_Flag'] = np.where(
         (df['Market_Norm'] == 'total') &
         (df['Line_Moved_Toward_Team'] == 1) &
-        (df['Pct_Line_Move_From_Opening'] >= 0.01) &
+        (df['Pct_Line_Move_Z'] >= 2) &
         (df['Disable_Line_Move_Features'] == 0),
         1, 0
     )
 
-    # Cross-market alignment
+    df['Potential_Odds_Overmove_Flag'] = np.where(
+        (df['Implied_Prob_Shift_Z'] >= 2),
+        1, 0
+    )
+
+    # === Cross-market alignment
     df['Spread_Implied_Prob'] = df['Spread_Odds'].apply(implied_prob)
     df['H2H_Implied_Prob'] = df['H2H_Odds'].apply(implied_prob)
     df['Total_Implied_Prob'] = df['Total_Odds'].apply(implied_prob)
@@ -1013,7 +1045,6 @@ def add_line_and_crossmarket_features(df):
     ).astype(int)
 
     return df
-    
             
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
@@ -2081,15 +2112,28 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Rate_On_Cover_Streak_Away',
                     'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction','Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap','CrossMarket_Prob_Gap_Exists',
                     'Spread_Implied_Prob','H2H_Implied_Prob','Total_Implied_Prob',
-                    'Line_Moved_Toward_Team',
-                    'Line_Moved_Away_From_Team',
                     'Abs_Line_Move_From_Opening',
                     'Pct_Line_Move_From_Opening',
                     'Pct_Line_Move_Bin',
+                    'Abs_Line_Move_Z',
+                    'Pct_Line_Move_Z',
+                
+                    # 🧠 Odds movement and Z-score
+                    'Implied_Prob',
+                    'First_Imp_Prob',
+                    'Implied_Prob_Shift',
+                    'Implied_Prob_Shift_Z',
+                
+                    # 🚨 Overmove flags
                     'Potential_Overmove_Flag',
                     'Potential_Overmove_Total_Pct_Flag',
+                    'Potential_Odds_Overmove_Flag',
                 
-                    # 🔁 Cross-market alignment
+                    # 🔁 Directional movement
+                    'Line_Moved_Toward_Team',
+                    'Line_Moved_Away_From_Team',
+                
+                    # 🔁 Cross-market alignment and contradiction
                     'Spread_Implied_Prob',
                     'H2H_Implied_Prob',
                     'Total_Implied_Prob',
@@ -2099,7 +2143,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Total_vs_Spread_ProbGap',
                     'Total_vs_H2H_ProbGap',
                     'CrossMarket_Prob_Gap_Exists',
-                                    
+                
+                    # 🔁 Defensive drop
+                    'Disable_Line_Move_Features',
 
                 ]
                 
@@ -2274,13 +2320,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 'Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 
                 'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob'
             ]].head(5).to_string(index=False))
-
-
-
-
-            
-            
-            
+       
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
