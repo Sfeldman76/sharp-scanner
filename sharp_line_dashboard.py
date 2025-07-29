@@ -1756,7 +1756,7 @@ def compute_diagnostics_vectorized(df):
     return diagnostics_df
 
 # === Global utility
-def create_sparklin(probs, max_points=10):
+def create_sparkline(probs, max_points=24):
     if not probs or len(probs) < 2 or all(pd.isna(probs)):
         return "—"
 
