@@ -633,17 +633,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         # Normalize team identifiers
         df_market['Team'] = df_market['Outcome_Norm']
         df_market['Is_Home'] = (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
+    
         
-        # Sort chronologically per team
-        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
-        
-        # === Leave-one-out team stats
-        # === Sort first to prep for fast rolling logic
-        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
-        
-        # === Leave-one-out team stats (fast)
-        # Sort once upfront
-        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+       
         
         # === Step 0: Sort once up front
         df_market = df_market.sort_values(['Team', 'Game_Key'])
@@ -771,8 +763,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         # === Contextual Flags
         df_market['Is_Home_Team_Bet'] = (df_market['Outcome'] == df_market['Home_Team_Norm']).astype(int)
         df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
-        # Optional: Keep as debug flag, not as model feature
-        # df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] > 10000).astype(int)
+      
         
         # Ensure NA-safe boolean logic and conversion
         df_market['SharpMove_Odds_Up'] = (
