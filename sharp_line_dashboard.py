@@ -2283,8 +2283,11 @@ def render_scanner_tab(label, sport_key, container):
         else:
             # === Step 1: Run diagnostics
             diagnostics_df = compute_diagnostics_vectorized(diag_source)
-        
-            # === Step 2: Add trend sparkline BEFORE merge
+            # Ensure alias exists before using it
+            if 'Model_Sharp_Win_Prob' in df_all_snapshots.columns and 'Model Prob' not in df_all_snapshots.columns:
+                df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
+            
+            # Build trend list
             trend_history = (
                 df_all_snapshots
                 .sort_values('Snapshot_Timestamp')
@@ -2292,6 +2295,7 @@ def render_scanner_tab(label, sport_key, container):
                 .apply(list)
                 .reset_index(name='Prob_Trend_List')
             )
+            
             diagnostics_df = diagnostics_df.merge(trend_history, on=['Game_Key', 'Market', 'Outcome'], how='left')
             
 
