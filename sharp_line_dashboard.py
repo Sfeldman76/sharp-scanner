@@ -634,120 +634,77 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market['Team'] = df_market['Outcome_Norm']
         df_market['Is_Home'] = (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
         
-        # === Overall team stats
-        team_stats = (
-            df_market.groupby('Team')
-            .agg({
-                'Model_Sharp_Win_Prob': 'mean',
-                'SHARP_HIT_BOOL': 'mean'
-            })
-            .rename(columns={
-                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob',
-                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate'
-            })
-            .reset_index()
-        )
-        
-        # === Home-only stats
-        home_stats = (
-            df_market[df_market['Is_Home'] == 1]
-            .groupby('Team')
-            .agg({
-                'Model_Sharp_Win_Prob': 'mean',
-                'SHARP_HIT_BOOL': 'mean'
-            })
-            .rename(columns={
-                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob_Home',
-                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate_Home'
-            })
-            .reset_index()
-        )
-        
-        # === Away-only stats
-        away_stats = (
-            df_market[df_market['Is_Home'] == 0]
-            .groupby('Team')
-            .agg({
-                'Model_Sharp_Win_Prob': 'mean',
-                'SHARP_HIT_BOOL': 'mean'
-            })
-            .rename(columns={
-                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob_Away',
-                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate_Away'
-            })
-            .reset_index()
-        )
-        
-        # === Merge all stats into training data
-        df_market = df_market.merge(team_stats, on='Team', how='left')
-        df_market = df_market.merge(home_stats, on='Team', how='left')
-        df_market = df_market.merge(away_stats, on='Team', how='left')
         # Sort chronologically per team
         df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
-        # For all games
+        
+        # === Leave-one-out team stats
+        def compute_loo_stats(df, home_filter=None):
+            df = df.copy()
+            if home_filter is not None:
+                df = df[df['Is_Home'] == home_filter]
+        
+            # Cumulative sum/count up to the current row, excluding the row itself
+            df['cum_model_prob'] = df.groupby('Team')['Model_Sharp_Win_Prob'].cumsum() - df['Model_Sharp_Win_Prob']
+            df['cum_hit'] = df.groupby('Team')['SHARP_HIT_BOOL'].cumsum() - df['SHARP_HIT_BOOL']
+            df['cum_count'] = df.groupby('Team').cumcount()
+        
+            df['Team_Past_Avg_Model_Prob'] = df['cum_model_prob'] / df['cum_count'].replace(0, np.nan)
+            df['Team_Past_Hit_Rate'] = df['cum_hit'] / df['cum_count'].replace(0, np.nan)
+        
+            return df[['Team', 'Snapshot_Timestamp', 'Team_Past_Avg_Model_Prob', 'Team_Past_Hit_Rate']]
+        
+        # Full
+        overall_stats = compute_loo_stats(df_market)
+        
+        # Home-only
+        home_stats = compute_loo_stats(df_market, home_filter=1)
+        home_stats = home_stats.rename(columns={
+            'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Home',
+            'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Home'
+        })
+        
+        # Away-only
+        away_stats = compute_loo_stats(df_market, home_filter=0)
+        away_stats = away_stats.rename(columns={
+            'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Away',
+            'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Away'
+        })
+        
+        # Merge based on team + timestamp
+        df_market = df_market.merge(overall_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
+        df_market = df_market.merge(home_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
+        df_market = df_market.merge(away_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
+        # Sort chronologically per team
+        # === Ensure data is sorted chronologically
+        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+        
+        # === Cover Streak (Overall)
         df_market['Team_Recent_Cover_Streak'] = (
-            df_market
-            .groupby('Team')['SHARP_HIT_BOOL']
-            .transform(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
+            df_market.groupby('Team')['SHARP_HIT_BOOL']
+            .transform(lambda x: x.shift().rolling(window=5, min_periods=1).sum())
         )
         df_market['On_Cover_Streak'] = (df_market['Team_Recent_Cover_Streak'] >= 2).astype(int)
         
-        # For home games — only compute rolling where Is_Home == 1
-        # Home cover streaks
+        # === Cover Streak (Home Only)
+        df_market['Cover_Home_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 1)
+        
         df_market['Team_Recent_Cover_Streak_Home'] = (
             df_market
-            .assign(
-                Cover_Home_Only=df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 1)
-            )
             .groupby('Team')['Cover_Home_Only']
-            .transform(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
+            .transform(lambda x: x.shift().rolling(window=5, min_periods=1).sum())
         )
-        
         df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
-
-
-
-        # Away cover streaks
+        
+        # === Cover Streak (Away Only)
+        df_market['Cover_Away_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 0)
+        
         df_market['Team_Recent_Cover_Streak_Away'] = (
             df_market
-            .assign(
-                Cover_Away_Only=df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 0)
-            )
             .groupby('Team')['Cover_Away_Only']
-            .transform(lambda x: x.shift().rolling(window=3, min_periods=1).sum())
+            .transform(lambda x: x.shift().rolling(window=5, min_periods=1).sum())
         )
-        
         df_market['On_Cover_Streak_Away'] = (df_market['Team_Recent_Cover_Streak_Away'] >= 2).astype(int)
-
-
-
-        streak_stats = (
-            df_market.groupby('Team')
-            .agg({
-                # Rolling 3-game cover counts (values between 0 and 3)
-                'Team_Recent_Cover_Streak': 'mean',
-                'Team_Recent_Cover_Streak_Home': 'mean',
-                'Team_Recent_Cover_Streak_Away': 'mean',
         
-                # Binary flags indicating if team was on a streak (1 if ≥2 covers out of last 3)
-                'On_Cover_Streak': 'mean',
-                'On_Cover_Streak_Home': 'mean',
-                'On_Cover_Streak_Away': 'mean'
-            })
-            .rename(columns={
-                'Team_Recent_Cover_Streak': 'Avg_Recent_Cover_Streak',
-                'Team_Recent_Cover_Streak_Home': 'Avg_Recent_Cover_Streak_Home',
-                'Team_Recent_Cover_Streak_Away': 'Avg_Recent_Cover_Streak_Away',
-                'On_Cover_Streak': 'Rate_On_Cover_Streak',
-                'On_Cover_Streak_Home': 'Rate_On_Cover_Streak_Home',
-                'On_Cover_Streak_Away': 'Rate_On_Cover_Streak_Away'
-            })
-            .reset_index()
-        )
-
-        
-
-        team_stats = team_stats.merge(streak_stats, on='Team', how='left')
 
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
@@ -1799,15 +1756,32 @@ def compute_diagnostics_vectorized(df):
     return diagnostics_df
 
 # === Global utility
-def create_sparkline(probs):
+def create_sparklin(probs, max_points=10):
     if not probs or len(probs) < 2 or all(pd.isna(probs)):
         return "—"
-    chars = "▁▂▃▄▅▆▇█"
+
     probs = [p for p in probs if pd.notna(p)]
-    if len(set(probs)) == 1:
-        return chars[0] * len(probs)  # flat line if constant
+    if len(probs) == 0:
+        return "—"
+    
+    # Trim to last N points
+    probs = probs[-max_points:]
+    
+    # Prepare label for hover
+    percent_labels = [f"{round(p * 100, 1)}%" for p in probs]
+    tooltip = " → ".join(percent_labels)
+
+    # Characters: clean horizontal bars
+    chars = "⎽⎼⎻⎺"
     scaled = np.interp(probs, (min(probs), max(probs)), (0, len(chars) - 1))
-    return ''.join(chars[int(round(i))] for i in scaled)
+    spark = ''.join(chars[int(round(i))] for i in scaled)
+
+    # Wrap with <span> and tooltip
+    html = f"<span title='{tooltip}' style='cursor: help;'>{spark}</span>"
+
+    return html
+
+
 
 from google.cloud import storage
 from io import BytesIO
@@ -2285,10 +2259,13 @@ def render_scanner_tab(label, sport_key, container):
             # === Step 1: Run diagnostics
             diagnostics_df = compute_diagnostics_vectorized(diag_source)
             # Ensure alias exists before using it
+            diagnostics_df = compute_diagnostics_vectorized(diag_source)
+            
+            # Ensure alias exists for trend extraction
             if 'Model_Sharp_Win_Prob' in df_all_snapshots.columns and 'Model Prob' not in df_all_snapshots.columns:
                 df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
             
-            # Build trend list
+            # Step 1: Build and merge trend history
             trend_history = (
                 df_all_snapshots
                 .sort_values('Snapshot_Timestamp')
@@ -2299,29 +2276,31 @@ def render_scanner_tab(label, sport_key, container):
             
             diagnostics_df = diagnostics_df.merge(trend_history, on=['Game_Key', 'Market', 'Outcome'], how='left')
             
-
-            # Step 1: Clip the trend list first (before applying the sparkline)
-            MAX_SPARK_POINTS = 10
+            # Step 2: Clip and apply sparkline (on diagnostics_df)
+            MAX_SPARK_POINTS = 24
             diagnostics_df['Prob_Trend_List'] = diagnostics_df['Prob_Trend_List'].apply(
                 lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst
             )
-            
-            # Step 2: Then apply the sparkline
             diagnostics_df['Confidence Spark'] = diagnostics_df['Prob_Trend_List'].apply(create_sparkline)
-            # === Step 3: Deduplicate summary base
+            
+            # Step 3: Deduplicate and merge into summary base
             df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
             df_summary_base = (
                 df_summary_base
                 .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
                 .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
             )
-        
-            # === Step 4: Merge diagnostics into summary
+            
             df_summary_base = df_summary_base.merge(
                 diagnostics_df,
                 on=['Game_Key', 'Market', 'Outcome'],
                 how='left'
             )
+            
+            # Step 4: Optionally render HTML preview
+            html = df_summary_base[['Confidence Spark']].to_html(escape=False, index=False)
+            st.markdown(html, unsafe_allow_html=True)
+
         
             # === Step 5: Fallback fill
             for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
