@@ -638,14 +638,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
         
         # === Leave-one-out team stats
-        def compute_loo_stats(df, home_filter=None):
+        # === Sort first to prep for fast rolling logic
+        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+        
+        # === Leave-one-out team stats (fast)
+        def compute_loo_stats_fast(df, home_filter=None):
             df = df.copy()
             if home_filter is not None:
                 df = df[df['Is_Home'] == home_filter]
         
-            # Cumulative sum/count up to the current row, excluding the row itself
-            df['cum_model_prob'] = df.groupby('Team')['Model_Sharp_Win_Prob'].cumsum() - df['Model_Sharp_Win_Prob']
-            df['cum_hit'] = df.groupby('Team')['SHARP_HIT_BOOL'].cumsum() - df['SHARP_HIT_BOOL']
+            df = df.sort_values(['Team', 'Snapshot_Timestamp'])
+        
+            # Leave-one-out using shift(1)
+            df['cum_model_prob'] = df.groupby('Team')['Model_Sharp_Win_Prob'].cumsum().shift(1)
+            df['cum_hit'] = df.groupby('Team')['SHARP_HIT_BOOL'].cumsum().shift(1)
             df['cum_count'] = df.groupby('Team').cumcount()
         
             df['Team_Past_Avg_Model_Prob'] = df['cum_model_prob'] / df['cum_count'].replace(0, np.nan)
@@ -653,27 +659,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         
             return df[['Team', 'Snapshot_Timestamp', 'Team_Past_Avg_Model_Prob', 'Team_Past_Hit_Rate']]
         
-        # Full
-        overall_stats = compute_loo_stats(df_market)
+        # === Compute all 3 sets
+        overall_stats = compute_loo_stats_fast(df_market)
         
-        # Home-only
-        home_stats = compute_loo_stats(df_market, home_filter=1)
+        home_stats = compute_loo_stats_fast(df_market, home_filter=1)
         home_stats = home_stats.rename(columns={
             'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Home',
             'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Home'
         })
         
-        # Away-only
-        away_stats = compute_loo_stats(df_market, home_filter=0)
+        away_stats = compute_loo_stats_fast(df_market, home_filter=0)
         away_stats = away_stats.rename(columns={
             'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Away',
             'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Away'
         })
         
-        # Merge based on team + timestamp
+        # === Merge back in
         df_market = df_market.merge(overall_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
         df_market = df_market.merge(home_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
         df_market = df_market.merge(away_stats, on=['Team', 'Snapshot_Timestamp'], how='left')
+
         # Sort chronologically per team
         # === Ensure data is sorted chronologically
         df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
