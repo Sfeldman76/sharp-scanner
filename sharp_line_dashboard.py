@@ -1957,12 +1957,7 @@ def render_scanner_tab(label, sport_key, container):
         # ✅ New: Load sharp move history
         df_all_snapshots = get_recent_history()
 
-        # ✅ Detect and score sharp moves using full pipeline
-        df_final, df_history, summary_df = detect_sharp_moves(
-            df_snap, df_all_snapshots, sport_key=sport_key
-        )
-    
-        
+
         
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
         detection_key = f"sharp_moves_{sport_key_lower}"
