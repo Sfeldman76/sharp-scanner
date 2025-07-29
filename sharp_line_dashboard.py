@@ -701,7 +701,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         # === Cover Streak (Overall)
         df_market['Team_Recent_Cover_Streak'] = (
             df_market.groupby('Team')['SHARP_HIT_BOOL']
-            .transform(lambda x: x.shift().rolling(window=5, min_periods=1).sum())
+            .transform(lambda x: x.shift().rolling(window=4, min_periods=1).sum())
         )
         df_market['On_Cover_Streak'] = (df_market['Team_Recent_Cover_Streak'] >= 2).astype(int)
         
@@ -711,7 +711,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         df_market['Team_Recent_Cover_Streak_Home'] = (
             df_market
             .groupby('Team')['Cover_Home_Only']
-            .transform(lambda x: x.shift().rolling(window=5, min_periods=1).sum())
+            .transform(lambda x: x.shift().rolling(window=4, min_periods=1).sum())
         )
         df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
         
@@ -896,7 +896,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
             'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            'Sharp_Line_Magnitude', 'Is_Home_Team_Bet',
+            'Sharp_Line_Magnitude', #'Is_Home_Team_Bet',
             'Team_Implied_Prob_Gap_Home', 'Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
@@ -904,7 +904,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
         
             # 🔹 Engineered interactions
             'MarketLeader_ImpProbShift', 'LimitProtect_SharpMag', 'Delta_Sharp_vs_Rec',
-            'Sharp_Leads', 'SharpMove_Resistance_Break',
+            #'Sharp_Leads',
+            'SharpMove_Resistance_Break',
         
             # 🔹 Resistance feature
             'Line_Resistance_Crossed_Count',  # ✅ newly added here
@@ -913,7 +914,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 14):
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
         
             # 🔥 Timing flags
-            'Late_Game_Steam_Flag',
+            #'Late_Game_Steam_Flag',
             
             'Abs_Line_Move_From_Opening',
             'Abs_Odds_Move_From_Opening', 
