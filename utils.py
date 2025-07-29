@@ -933,7 +933,88 @@ def add_minutes_to_game(df):
 
     return df
 
-      
+def add_line_and_crossmarket_features(df):
+    df['Market_Norm'] = df['Market'].str.lower()
+    df['Sport_Norm'] = df['Sport']
+
+    # Line movement magnitude
+    df['Abs_Line_Move_From_Opening'] = (df['Value'] - df['Open_Value']).abs()
+
+    # Line move direction (based on canonical Is_Favorite_Bet logic)
+    df['Line_Moved_Toward_Team'] = np.where(
+        ((df['Value'] > df['Open_Value']) & (df['Is_Favorite_Bet'] == 1)) |
+        ((df['Value'] < df['Open_Value']) & (df['Is_Favorite_Bet'] == 0)),
+        1, 0
+    )
+
+    df['Line_Moved_Away_From_Team'] = np.where(
+        ((df['Value'] < df['Open_Value']) & (df['Is_Favorite_Bet'] == 1)) |
+        ((df['Value'] > df['Open_Value']) & (df['Is_Favorite_Bet'] == 0)),
+        1, 0
+    )
+
+    # Percentage line move for totals
+    df['Pct_Line_Move_From_Opening'] = np.where(
+        (df['Market_Norm'] == 'total') & (df['Open_Value'].abs() > 0),
+        df['Abs_Line_Move_From_Opening'] / df['Open_Value'].abs(),
+        np.nan
+    )
+
+    df['Pct_Line_Move_Bin'] = pd.cut(
+        df['Pct_Line_Move_From_Opening'],
+        bins=[-np.inf, 0.0025, 0.005, 0.01, 0.02, np.inf],
+        labels=['<0.25%', '0.5%', '1%', '2%', '2%+']
+    )
+
+    # Disable line movement flags if not applicable
+    df['Disable_Line_Move_Features'] = np.where(
+        ((df['Sport_Norm'] == 'MLB') & (df['Market_Norm'] == 'spread')) |
+        (df['Market_Norm'].isin(['h2h', 'moneyline'])),
+        1, 0
+    )
+
+    df['Potential_Overmove_Flag'] = np.where(
+        (df['Market_Norm'] == 'spread') &
+        (df['Line_Moved_Toward_Team'] == 1) &
+        (df['Abs_Line_Move_From_Opening'] >= 2) &
+        (df['Disable_Line_Move_Features'] == 0),
+        1, 0
+    )
+
+    df['Potential_Overmove_Total_Pct_Flag'] = np.where(
+        (df['Market_Norm'] == 'total') &
+        (df['Line_Moved_Toward_Team'] == 1) &
+        (df['Pct_Line_Move_From_Opening'] >= 0.01) &
+        (df['Disable_Line_Move_Features'] == 0),
+        1, 0
+    )
+
+    # Cross-market alignment
+    df['Spread_Implied_Prob'] = df['Spread_Odds'].apply(implied_prob)
+    df['H2H_Implied_Prob'] = df['H2H_Odds'].apply(implied_prob)
+    df['Total_Implied_Prob'] = df['Total_Odds'].apply(implied_prob)
+
+    df['Spread_vs_H2H_Aligned'] = (
+        (df['Spread_Value'] < 0) & (df['H2H_Implied_Prob'] > 0.5)
+    ).astype(int)
+
+    df['Total_vs_Spread_Contradiction'] = (
+        (df['Spread_Implied_Prob'] > 0.55) &
+        (df['Total_Implied_Prob'] < 0.48)
+    ).astype(int)
+
+    df['Spread_vs_H2H_ProbGap'] = df['Spread_Implied_Prob'] - df['H2H_Implied_Prob']
+    df['Total_vs_H2H_ProbGap'] = df['Total_Implied_Prob'] - df['H2H_Implied_Prob']
+    df['Total_vs_Spread_ProbGap'] = df['Total_Implied_Prob'] - df['Spread_Implied_Prob']
+
+    df['CrossMarket_Prob_Gap_Exists'] = (
+        (df['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
+        (df['Total_vs_Spread_ProbGap'].abs() > 0.05)
+    ).astype(int)
+
+    return df
+    
+            
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
@@ -1512,6 +1593,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_canon['Total_vs_Spread_ProbGap'].abs() > 0.05)
             ).astype(int)
 
+            df_canon = add_line_and_crossmarket_features(df_canon)
 
             # Flattened hybrid timing buckets
             # 🔄 Flattened hybrid timing columns (NUMERIC only)
@@ -1717,7 +1799,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
             
             df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
-
+            df_inverse = add_line_and_crossmarket_features(df_inverse)
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
                 df_inverse['Minutes_To_Game'],
@@ -1999,7 +2081,25 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Rate_On_Cover_Streak_Away',
                     'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction','Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap','CrossMarket_Prob_Gap_Exists',
                     'Spread_Implied_Prob','H2H_Implied_Prob','Total_Implied_Prob',
-                    
+                    'Line_Moved_Toward_Team',
+                    'Line_Moved_Away_From_Team',
+                    'Abs_Line_Move_From_Opening',
+                    'Pct_Line_Move_From_Opening',
+                    'Pct_Line_Move_Bin',
+                    'Potential_Overmove_Flag',
+                    'Potential_Overmove_Total_Pct_Flag',
+                
+                    # 🔁 Cross-market alignment
+                    'Spread_Implied_Prob',
+                    'H2H_Implied_Prob',
+                    'Total_Implied_Prob',
+                    'Spread_vs_H2H_Aligned',
+                    'Spread_vs_H2H_ProbGap',
+                    'Total_vs_Spread_Contradiction',
+                    'Total_vs_Spread_ProbGap',
+                    'Total_vs_H2H_ProbGap',
+                    'CrossMarket_Prob_Gap_Exists',
+                                    
 
                 ]
                 
@@ -2109,7 +2209,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 
                 df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
-
+                df_inverse = add_line_and_crossmarket_features(df_inverse)
                 # Propagate cover streak from canonical rows
                 
 
