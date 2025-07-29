@@ -328,6 +328,7 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
+st.cache_data(ttl=600) 
 
 def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
     try:
@@ -346,10 +347,13 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
         return pd.DataFrame()
 
 # ✅ Cached wrapper for diagnostics and line movement history
+
 @st.cache_data(ttl=600)
 def get_recent_history():
+    st.write("📦 Using cached sharp history (get_recent_history)")
     return read_recent_sharp_moves(hours=72)
-       
+    
+    
 def read_latest_snapshot_from_bigquery(hours=2):
     try:
         client = bq_client
@@ -1960,7 +1964,7 @@ def render_scanner_tab(label, sport_key, container):
 
         
         # === Load sharp moves from BigQuery (from Cloud Scheduler)
-        detection_key = f"sharp_moves_{sport_key_lower}"
+        detection_key = f"sharp_moves_{sport_key.lower()}"
         
         if detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
