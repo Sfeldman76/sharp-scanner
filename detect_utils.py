@@ -40,7 +40,8 @@ from utils import (
     compute_all_sharp_metrics,
     implied_prob_to_point_move,
     get_trained_models,
-    was_line_resistance_broken
+    was_line_resistance_broken,
+    compute_line_resistance_flag
 )
 
 def detect_and_save_all_sports():
