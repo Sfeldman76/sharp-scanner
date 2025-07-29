@@ -2304,17 +2304,20 @@ def render_scanner_tab(label, sport_key, container):
                 df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
             
             # Step 1: Build and merge trend history (keeping full history for analysis)
+            
             trend_history = (
                 df_all_snapshots
-                .sort_values('Snapshot_Timestamp')  # Ensure sorted by timestamp
-                .groupby(['Game_Key', 'Market', 'Outcome'])['Model Prob']  # Group by necessary columns
-                .apply(list)  # Collect the entire history of probabilities
-                .reset_index(name='Prob_Trend_List')  # Store the full list of probabilities
+                .sort_values('Snapshot_Timestamp')
+                .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])['Model Prob']
+                .apply(list)
+                .reset_index(name='Prob_Trend_List')
             )
-            
-            # Merge the trend history back to the diagnostics_df
-            diagnostics_df = diagnostics_df.merge(trend_history, on=['Game_Key', 'Market', 'Outcome'], how='left')
-            
+
+            diagnostics_df = diagnostics_df.merge(
+                trend_history,
+                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                how='left'
+            )
             # Step 2: Clip and apply sparkline (for visualization purposes)
             MAX_SPARK_POINTS = 36
             
