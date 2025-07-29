@@ -784,16 +784,32 @@ SPORT_ALIAS = {
     'AMERICANFOOTBALL_NCAAF': 'NCAAF',
     'BASKETBALL_NBA': 'NBA',
     'BASKETBALL_NCAAB': 'NCAAB',
+    'CFL': 'CFL',
+    'MLB': 'MLB',
+    'WNBA': 'WNBA',
+    'NFL': 'NFL',
+    'NCAAF': 'NCAAF',
+    'NBA': 'NBA',
+    'NCAAB': 'NCAAB'
 }
 
 KEY_LINE_RESISTANCE = {
     'NFL': {'spread': [3, 7, 10, 14], 'total': [41, 44, 47, 51]},
     'NBA': {'spread': [2.5, 5, 7, 10], 'total': [210, 220, 225, 230]},
-    'WNBA': {'spread': [2, 4.5, 6.5], 'total': [155, 160, 165, 170]},
-    'CFL': {'spread': [3, 6.5, 9.5], 'total': [48, 52, 55, 58]},
+    'WNBA': {
+        'spread': [1.5, 3.5, 6.5, 9.5],     # updated with common clustering points
+        'total': [157.5, 162.5, 167.5, 172.5]  # reflects key ranges in WNBA totals
+    },
+    'CFL': {
+        'spread': [2.5, 4.5, 6.5, 9.5],      # narrower CFL games; 6.5 is key for TDs
+        'total': [48.5, 52.5, 55.5, 58.5]    # aligns with common key total zones
+    },
     'NCAAF': {'spread': [3, 7, 10, 14, 17], 'total': [45, 52, 59, 66]},
     'NCAAB': {'spread': [2, 5, 7, 10], 'total': [125, 135, 145, 150]},
-    'MLB': {'spread': [], 'total': [7, 7.5, 8.5, 9]},
+    'MLB': {
+        'spread': [],                        # runline is fixed at -1.5 / +1.5
+        'total': [6.5, 7, 7.5, 8, 8.5, 9]     # updated with common clustering points
+    },
     'NHL': {'spread': [], 'total': [5.5, 6, 6.5, 7]},
 }
 
@@ -802,9 +818,10 @@ def was_line_resistance_broken(open_val, close_val, key_levels, market_type):
     if pd.isna(open_val) or pd.isna(close_val):
         return 0, []
 
-    # Flip key levels for spreads (e.g., -3, -7 for favorites)
+    # Use absolute values for spread resistance checks
     if market_type == 'spread':
-        key_levels = [-abs(k) for k in key_levels]
+        open_val, close_val = abs(open_val), abs(close_val)
+        key_levels = [abs(k) for k in key_levels]
 
     crossed = [
         key for key in key_levels
@@ -812,6 +829,7 @@ def was_line_resistance_broken(open_val, close_val, key_levels, market_type):
     ]
 
     return int(bool(crossed)), crossed
+
 
 
 def compute_line_resistance_flag(df, source='moves'):
@@ -2797,7 +2815,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
         return None
 
-def read_recent_sharp_moves(hours=96, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
     try:
         client = bq_client
         query = f"""
@@ -3611,6 +3629,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['First_Imp_Prob'] = pd.to_numeric(df_scores_out['First_Imp_Prob'], errors='coerce')
     df_scores_out['Odds_Shift'] = df_scores_out['Odds_Price'] - df_scores_out['First_Odds']
     df_scores_out['Implied_Prob_Shift'] = df_scores_out['Implied_Prob'] - df_scores_out['First_Imp_Prob']
+    df_scores_out['Was_Line_Resistance_Broken'] = pd.to_numeric(df_scores_out['Was_Line_Resistance_Broken'], errors='coerce').astype('Int64')
+    df_scores_out['SharpMove_Resistance_Break'] = pd.to_numeric(df_scores_out['SharpMove_Resistance_Break'], errors='coerce').astype('Int64')
+    df_scores_out['Line_Resistance_Crossed_Count'] = pd.to_numeric(df_scores_out['Line_Resistance_Crossed_Count'], errors='coerce').astype('Int64')
+    df_scores_out['Odds_Reversal_Flag'] = pd.to_numeric(df_scores_out['Odds_Reversal_Flag'], errors='coerce').astype('Int64')
 
     # === Final upload
     try:
