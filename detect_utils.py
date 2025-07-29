@@ -41,7 +41,8 @@ from utils import (
     implied_prob_to_point_move,
     get_trained_models,
     was_line_resistance_broken,
-    compute_line_resistance_flag
+    compute_line_resistance_flag,
+    add_line_and_crossmarket_features
 )
 
 def detect_and_save_all_sports():
