@@ -939,24 +939,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Market_Norm'].isin(['h2h'])),
             1, 0
         )
+        from scipy.stats import zscore
+
+        # Z-scores for line movement magnitude by sport and market
+        df_market['Abs_Line_Move_Z'] = (
+            df_market
+            .groupby(['Sport_Norm', 'Market_Norm'])['Abs_Line_Move_From_Opening']
+            .transform(lambda x: zscore(x.fillna(0), ddof=0))
+        )
         
-        # === Overmove flags
+        # For totals: Z-score of percentage movement
+        df_market['Pct_Line_Move_Z'] = (
+            df_market
+            .groupby(['Sport_Norm'])['Pct_Line_Move_From_Opening']
+            .transform(lambda x: zscore(x.fillna(0), ddof=0))
+        )
+        df_market['Abs_Line_Move_Z'] = df_market['Abs_Line_Move_Z'].clip(-5, 5)
+        df_market['Pct_Line_Move_Z'] = df_market['Pct_Line_Move_Z'].clip(-5, 5)
+        # Spread: Z ≥ 2 (extreme)
         df_market['Potential_Overmove_Flag'] = np.where(
             (df_market['Market_Norm'] == 'spread') &
             (df_market['Line_Moved_Toward_Team'] == 1) &
-            (df_market['Abs_Line_Move_From_Opening'] >= 2) &
+            (df_market['Abs_Line_Move_Z'] >= 2) &
             (df_market['Disable_Line_Move_Features'] == 0),
             1, 0
         )
         
+        # Totals: Z ≥ 2 for % move
         df_market['Potential_Overmove_Total_Pct_Flag'] = np.where(
             (df_market['Market_Norm'] == 'total') &
             (df_market['Line_Moved_Toward_Team'] == 1) &
-            (df_market['Pct_Line_Move_From_Opening'] >= 0.01) &
+            (df_market['Pct_Line_Move_Z'] >= 2) &
             (df_market['Disable_Line_Move_Features'] == 0),
             1, 0
         )
-        
+       
+        df_market['Implied_Prob_Shift_Z'] = df_market.groupby(['Sport_Norm', 'Market_Norm'])['Implied_Prob_Shift']\
+        .transform(lambda x: zscore(x.fillna(0), ddof=0))
+        df_market['Potential_Odds_Overmove_Flag'] = np.where(
+            df_market['Implied_Prob_Shift_Z'] >= 2,
+            1, 0
+        )
         # === Postgame diagnostics (only used for understanding missed hits — not features)
         df_market['Line_Moved_Toward_Team_And_Missed'] = (
             (df_market['Line_Moved_Toward_Team'] == 1) & (df_market['SHARP_HIT_BOOL'] == 0)
@@ -1026,8 +1049,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'CrossMarket_Prob_Gap_Exists',
             'Line_Moved_Toward_Team',
             'Line_Moved_Away_From_Team',            
-            'Pct_Line_Move_From_Opening', 'Pct_Line_Move_Bin',
-            'Potential_Overmove_Flag', 'Potential_Overmove_Total_Pct_Flag',
+            'Pct_Line_Move_From_Opening', 
+            'Pct_Line_Move_Bin',
+            'Potential_Overmove_Flag', 
+            'Potential_Overmove_Total_Pct_Flag',
         
             # 🧠 Cross-market alignment
             'Spread_vs_H2H_Aligned',
@@ -1036,8 +1061,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Total_vs_H2H_ProbGap',
             'Total_vs_Spread_ProbGap',
             'CrossMarket_Prob_Gap_Exists', 
-          
-
+            'Line_Moved_Toward_Team',
+            'Abs_Line_Move_Z',
+            'Pct_Line_Move_Z'
+    
         ]
         hybrid_timing_features = [
             
