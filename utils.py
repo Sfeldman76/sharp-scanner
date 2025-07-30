@@ -100,17 +100,21 @@ def ensure_columns(df, required_cols, fill_value=None):
             df[col] = fill_value
     return df
 
-def normalize_book_name(book):
-    if pd.isna(book):
-        return book
-    book = book.lower()
-    if book == 'betfair_ex_uk':
+def normalize_book_name(book: str, bookmaker: str) -> str:
+    if pd.isna(bookmaker):
+        return book  # fallback if bookmaker is missing
+
+    bookmaker = bookmaker.lower()
+    
+    if 'betfair_ex_uk' in bookmaker:
         return 'betfair_uk'
-    elif book == 'betfair_ex_eu':
+    elif 'betfair_ex_eu' in bookmaker:
         return 'betfair_eu'
-    elif book.startswith('betfair'):
+    elif 'betfair' in bookmaker:
         return 'betfair_other'
-    return book
+    
+    return book.lower()
+
 
 
 def normalize_team(t):
@@ -346,7 +350,8 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     # Apply normalization early
     # ✅ Normalize book names before any filtering
     df['Book'] = df['Book'].str.lower()
-    df['Book'] = df['Book'].apply(normalize_book_name)
+    
+
     
     # ✅ Now apply the filtering with normalized names
     df = df[df['Book'].isin(allowed_books)]
@@ -1149,7 +1154,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
     # Apply normalization early
     df['Book'] = df['Book'].str.lower()
-    df['Book'] = df['Book'].apply(normalize_book_name)
+    df_history['Book'] = df_history.apply(
+        lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
+    )
 
     
     # Drop merge artifacts
@@ -2611,7 +2618,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_history = df_history.sort_values('Snapshot_Timestamp')
     # Apply normalization consistently early on
     df_history['Book'] = df_history['Book'].str.lower()
-    df_history['Book'] = df_history['Book'].apply(normalize_book_name)
+    df_history['Book'] = df_history.apply(
+        lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
+    )
+
 
 
    
@@ -2953,7 +2963,10 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
     df_history['Time'] = pd.to_datetime(df_history['Time'])
     df_history['Book'] = df_history['Book'].str.lower()
-    df_history['Book'] = df_history['Book'].apply(normalize_book_name)
+    df_history['Book'] = df_history.apply(
+        lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
+    )
+
 
     # === LINE MOVE DETECTION ===
     df_open_line = (
