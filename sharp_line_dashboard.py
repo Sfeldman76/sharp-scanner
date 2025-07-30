@@ -519,7 +519,6 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
 
-
     # Handle empty or missing groups gracefully
     try:
         small_limit_agg = (
@@ -534,20 +533,19 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
             .reset_index()
         )
     except Exception:
-        # Fallback to empty DataFrame if aggregation fails
         small_limit_agg = pd.DataFrame(columns=[
             'Game_Key', 'Outcome', 'SmallBook_Total_Limit',
             'SmallBook_Max_Limit', 'SmallBook_Min_Limit', 'SmallBook_Limit_Count'
         ])
 
-    # Merge back safely
     df = df.merge(small_limit_agg, on=['Game_Key', 'Outcome'], how='left')
 
-    # Fill NaNs with 0 for numeric features
     for col in ['SmallBook_Total_Limit', 'SmallBook_Max_Limit', 'SmallBook_Min_Limit']:
-        df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
+        df[col] = pd.to_numeric(
+            df[col] if col in df.columns else pd.Series(0, index=df.index),
+            errors='coerce'
+        ).fillna(0)
 
-    # Derived features
     df['SmallBook_Limit_Skew'] = df['SmallBook_Max_Limit'] - df['SmallBook_Min_Limit']
     df['SmallBook_Heavy_Liquidity_Flag'] = (df['SmallBook_Total_Limit'] > 500).astype(int)
     df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Skew'] > 100).astype(int)
