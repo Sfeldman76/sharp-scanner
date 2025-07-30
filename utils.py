@@ -1676,18 +1676,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
             # === Align features to model input
             X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+            # === Batch assign all new columns at once to avoid fragmentation
+            new_cols = {
+                'Model_Sharp_Win_Prob': trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1],
+                'Model_Confidence': None,  # Filled below
+                'Was_Canonical': True,
+                'Scoring_Market': market_type,
+                'Scored_By_Model': True,
+            }
+            new_cols['Model_Confidence'] = new_cols['Model_Sharp_Win_Prob']
             
-            ## ✅ USE THE CALIBRATED PROBABILITIES FOR MAIN MODEL OUTPUT
-            df_canon['Model_Sharp_Win_Prob'] = trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1]
+            df_new = pd.DataFrame(new_cols, index=df_canon.index)
+            df_canon = pd.concat([df_canon, df_new], axis=1)
             
-            # Optional: you can drop Model_Confidence entirely or alias it to the same
-            df_canon['Model_Confidence'] = df_canon['Model_Sharp_Win_Prob']
+            # Optional: trigger defragmentation
+            df_canon = df_canon.copy()
 
-            # === Tag for downstream usage
-            df_canon['Was_Canonical'] = True
-            df_canon['Scoring_Market'] = market_type
-            df_canon['Scored_By_Model'] = True
-            
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
 
             # 1. Copy and flip outcome for merge key
@@ -2379,10 +2383,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['LimitUp_NoMove_Flag'] == 1).astype(int) +
                 (df_final['Market_Leader'] == 1).astype(int) +
                 (df_final['Is_Reinforced_MultiMarket'] == 1).astype(int) +
-                (df_final['Is_Sharp_Book'] == 1).astype(int) +
+               
                 (df_final['Sharp_Line_Magnitude'] > 0.5).astype(int) +
-                (df_final['Rec_Line_Magnitude'] > 0.5).astype(int) +
-                (df_final['Is_Home_Team_Bet'] == 1).astype(int) +
+               
+               
                 (df_final['SharpMove_Odds_Up'] == 1).astype(int) +
                 (df_final['SharpMove_Odds_Down'] == 1).astype(int) +
                 (df_final['SharpMove_Odds_Mag'] > 5).astype(int) +
@@ -2403,7 +2407,16 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Avg_Recent_Cover_Streak_Away'].fillna(0) >= 2).astype(int)+
                 df_final['Spread_vs_H2H_Aligned'].fillna(0).astype(int) +
                 df_final['Total_vs_Spread_Contradiction'].fillna(0).astype(int) +
-                df_final['CrossMarket_Prob_Gap_Exists'].fillna(0).astype(int)
+                df_final['CrossMarket_Prob_Gap_Exists'].fillna(0).astype(int)+
+                (df_final['Potential_Overmove_Flag'] == 1).astype(int) +
+                (df_final['Potential_Overmove_Total_Pct_Flag'] == 1).astype(int) +
+                (df_final['Potential_Odds_Overmove_Flag'] == 1).astype(int) +
+                (df_final['Line_Moved_Toward_Team'] == 1).astype(int) +
+                (df_final['Line_Moved_Away_From_Team'] == 1).astype(int) +
+                (df_final['Line_Resistance_Crossed_Count'].fillna(0) >= 1).astype(int) +
+                (df_final['Abs_Line_Move_Z'].fillna(0) > 1).astype(int) +
+                (df_final['Pct_Line_Move_Z'].fillna(0) > 1).astype(int)
+
             ).fillna(0).astype(int)
 
 
