@@ -1990,15 +1990,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
                 # ✅ Step 5: Merge inverse rows with real UNDER snapshot rows
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value', 'Odds_Price']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
+
             
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
+                df_inverse['Limit'] = df_inverse['Limit_opponent']
+                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
+
             
                 # ✅ Step 6: Diagnostics
                 missing_val = df_inverse['Value'].isna().sum()
@@ -2046,15 +2049,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
             
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value', 'Odds_Price']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
+
             
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
+                df_inverse['Limit'] = df_inverse['Limit_opponent']
+                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
+
             
                 missing_val = df_inverse['Value'].isna().sum()
                 missing_odds = df_inverse['Odds_Price'].isna().sum()
@@ -2108,15 +2114,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value', 'Odds_Price']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit']],
                     on='Team_Key',
                     how='left',
                     suffixes=('', '_opponent')
                 )
-                
+
+            
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent'], inplace=True, errors='ignore')
+                df_inverse['Limit'] = df_inverse['Limit_opponent']
+                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
 
             
                 # Final deduplication
