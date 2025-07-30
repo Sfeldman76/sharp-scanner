@@ -498,6 +498,72 @@ def initialize_all_tables(df_snap, df_audit, market_weights_dict):
 
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
 
+def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds small-book liquidity features to the DataFrame.
+    Safe for games or sports with no small-limit books or missing limit data.
+    Should be run before canonical filtering.
+    """
+    SMALL_LIMIT_BOOKS = ['betfair', 'matchbook']
+
+    df = df.copy()
+
+    # Normalize bookmaker names
+    df['Bookmaker_Norm'] = (
+        df['Bookmaker']
+        .astype(str)
+        .str.lower()
+        .str.replace('.ag', '', regex=False)
+        .str.replace('_uk', '', regex=False)
+        .str.replace('_eu', '', regex=False)
+        .str.strip()
+        .str.replace(' ', '')
+
+    )
+
+    df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
+
+    # Ensure Limit column is numeric
+    if 'Limit' not in df.columns:
+        df['Limit'] = 0
+    else:
+        df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+
+
+    # Handle empty or missing groups gracefully
+    try:
+        small_limit_agg = (
+            df[df['Is_Small_Limit_Book'] == 1]
+            .groupby(['Game_Key', 'Outcome'])
+            .agg(
+                SmallBook_Total_Limit=('Limit', 'sum'),
+                SmallBook_Max_Limit=('Limit', 'max'),
+                SmallBook_Min_Limit=('Limit', 'min'),
+                SmallBook_Limit_Count=('Limit', 'count')
+            )
+            .reset_index()
+        )
+    except Exception:
+        # Fallback to empty DataFrame if aggregation fails
+        small_limit_agg = pd.DataFrame(columns=[
+            'Game_Key', 'Outcome', 'SmallBook_Total_Limit',
+            'SmallBook_Max_Limit', 'SmallBook_Min_Limit', 'SmallBook_Limit_Count'
+        ])
+
+    # Merge back safely
+    df = df.merge(small_limit_agg, on=['Game_Key', 'Outcome'], how='left')
+
+    # Fill NaNs with 0 for numeric features
+    for col in ['SmallBook_Total_Limit', 'SmallBook_Max_Limit', 'SmallBook_Min_Limit']:
+        df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
+
+    # Derived features
+    df['SmallBook_Limit_Skew'] = df['SmallBook_Max_Limit'] - df['SmallBook_Min_Limit']
+    df['SmallBook_Heavy_Liquidity_Flag'] = (df['SmallBook_Total_Limit'] > 500).astype(int)
+    df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Skew'] > 100).astype(int)
+
+    return df
+
 
 
     
@@ -599,6 +665,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     for idx, market in enumerate(['spreads', 'totals', 'h2h'], start=1):
         status.write(f"🚧 Training model for `{market.upper()}`...")
         df_market = df_bt[df_bt['Market'] == market].copy()
+        df_market = compute_small_book_liquidity_features(df_market)  
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
@@ -1071,7 +1138,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Potential_Odds_Overmove_Flag'
             'Line_Moved_Toward_Team',
             'Abs_Line_Move_Z',
-            'Pct_Line_Move_Z'
+            'Pct_Line_Move_Z', 
+            'SmallBook_Total_Limit',
+            'SmallBook_Max_Limit',
+            'SmallBook_Min_Limit',
+            'SmallBook_Limit_Skew',
+            'SmallBook_Heavy_Liquidity_Flag',
+            'SmallBook_Limit_Skew_Flag',
     
         ]
         hybrid_timing_features = [
