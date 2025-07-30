@@ -504,22 +504,12 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     Safe for games or sports with no small-limit books or missing limit data.
     Should be run before canonical filtering.
     """
-    SMALL_LIMIT_BOOKS = ['betfair', 'matchbook']
+    SMALL_LIMIT_BOOKS = ['betfair_uk', 'betfair_eu', 'matchbook']
 
     df = df.copy()
 
     # Normalize bookmaker names
-    df['Bookmaker_Norm'] = (
-        df['Bookmaker']
-        .astype(str)
-        .str.lower()
-        .str.replace('.ag', '', regex=False)
-        .str.replace('_uk', '', regex=False)
-        .str.replace('_eu', '', regex=False)
-        .str.strip()
-        .str.replace(' ', '')
-
-    )
+    df['Bookmaker_Norm'] = df['Book']
 
     df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
 
