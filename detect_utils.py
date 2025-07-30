@@ -135,6 +135,7 @@ def detect_and_save_all_sports():
                         'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
                         'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
                         'Bookmaker': book.get('key'),
+                        'Book': normalize_book_name(book.get('key'), book.get('title')),  # ✅ normalized
                         'Market': market.get('key'),
                         'Outcome': outcome.get('name'),
                         'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
@@ -146,6 +147,7 @@ def detect_and_save_all_sports():
                     for market in book.get('markets', [])
                     for outcome in market.get('outcomes', [])
                 ])
+
                 df_snap = build_game_key(df_snap)
 
                 
