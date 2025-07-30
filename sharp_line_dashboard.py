@@ -232,6 +232,14 @@ def ensure_columns(df, required_cols, fill_value=None):
 
 
 
+def calc_implied_prob(series):
+    series = pd.to_numeric(series, errors='coerce')
+    return np.where(
+        series < 0,
+        -series / (-series + 100),
+        100 / (series + 100)
+    )
+
 
 
 def fetch_live_odds(sport_key):
@@ -904,7 +912,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Abs_Line_Move_From_Opening'] = (df_market['Value'] - df_market['First_Line_Value']).abs()
         df_market['Odds_Shift'] = df_market['Odds_Price'] - df_market['First_Odds']
         df_market['Implied_Prob_Shift'] = (
-            implied_prob(df_market['Odds_Price']) - implied_prob(df_market['First_Odds'])
+            calc_implied_prob(df_market['Odds_Price']) - calc_implied_prob(df_market['First_Odds'])
         )
         
         # === Directional Movement Flags
