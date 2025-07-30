@@ -1925,7 +1925,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
             df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
             df_inverse = add_line_and_crossmarket_features(df_inverse)
-            df_inverse = compute_small_book_liquidity_features(df_inverse)
+            #df_inverse = compute_small_book_liquidity_features(df_inverse)
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
                 df_inverse['Minutes_To_Game'],
@@ -2258,6 +2258,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SmallBook_Limit_Skew',
                     'SmallBook_Heavy_Liquidity_Flag',
                     'SmallBook_Limit_Skew_Flag',
+                  
                     
 
                 ]
