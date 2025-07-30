@@ -941,6 +941,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             labels=['<0.25%', '0.5%', '1%', '2%', '2%+']
         )
         
+       
+
+        # 🧼 Add this after:
+        df_market['Pct_Line_Move_Bin'] = df_market['Pct_Line_Move_Bin'].astype(str)
+        
+        
         # === Disable line-move-based features in moneyline and MLB spread
         df_market['Disable_Line_Move_Features'] = np.where(
             ((df_market['Sport_Norm'] == 'MLB') & (df_market['Market_Norm'] == 'spread')) |
@@ -1194,6 +1200,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             random_state=42
         )
+        # 🚫 Detect and drop nested/bad columns from X_train
+        bad_cols = []
+        for col in X_train.columns:
+            sample_val = X_train[col].dropna().iloc[0] if not X_train[col].dropna().empty else None
+            if isinstance(sample_val, (pd.DataFrame, pd.Series, list, dict)):
+                print(f"❌ Column '{col}' contains nested/unsupported type: {type(sample_val)}")
+                bad_cols.append(col)
+        
+        if bad_cols:
+            print(f"🧹 Dropping bad columns: {bad_cols}")
+            X_train = X_train.drop(columns=bad_cols)
         grid_logloss.fit(X_train, y_train)
         model_logloss = grid_logloss.best_estimator_
         
