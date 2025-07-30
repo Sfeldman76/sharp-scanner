@@ -902,21 +902,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # === Absolute Line and Odds Movement
         df_market['Abs_Line_Move_From_Opening'] = (df_market['Final_Line_Value'] - df_market['First_Line_Value']).abs()
-        df_market['Odds_Shift'] = df_market['Final_Odds'] - df_market['First_Odds']
+        df_market['Odds_Shift'] = df_market['Odds_Price'] - df_market['First_Odds']
         df_market['Implied_Prob_Shift'] = (
-            calc_implied_prob(df_market['Final_Odds']) - calc_implied_prob(df_market['First_Odds'])
+            calc_implied_prob(df_market['Odds_Price']) - calc_implied_prob(df_market['First_Odds'])
         )
         
         # === Directional Movement Flags
         df_market['Line_Moved_Toward_Team'] = np.where(
-            ((df_market['Final_Line_Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
-            ((df_market['Final_Line_Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
+            ((df_market['Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
+            ((df_market['Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
             1, 0
         )
         
         df_market['Line_Moved_Away_From_Team'] = np.where(
-            ((df_market['Final_Line_Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
-            ((df_market['Final_Line_Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
+            ((df_market['Value'] < df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 1)) |
+            ((df_market['Value'] > df_market['First_Line_Value']) & (df_market['Is_Favorite_Bet'] == 0)),
             1, 0
         )
         
