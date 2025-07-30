@@ -1065,7 +1065,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Pct_Line_Move_From_Opening', 
             'Pct_Line_Move_Bin',
             'Potential_Overmove_Flag', 
-            'Potential_Overmove_Total_Pct_Flag',
+            'Potential_Overmove_Total_Pct_Flag', 'Mispricing_Flag',
         
             # 🧠 Cross-market alignment                       
             'Potential_Odds_Overmove_Flag'
@@ -1763,7 +1763,7 @@ def compute_diagnostics_vectorized(df):
     
     
         # === Core sharp move reasons
-        parts = []
+     parts = []
 
    
 
@@ -1772,7 +1772,7 @@ def compute_diagnostics_vectorized(df):
         if row.get('Market_Leader'): parts.append("🏆 Market Leader")
         if row.get('Is_Reinforced_MultiMarket'): parts.append("📊 Multi-Market Consensus")
         if row.get('LimitUp_NoMove_Flag'): parts.append("🛡️ Limit Up + No Line Move")
-        if row.get('Is_Sharp_Book'): parts.append("🎯 Sharp Book Signal")
+        if row.get('Is_Sharp_Book'): parts.append("🎯 Sharp Book S   ignal")
     
         # === Odds & line movement
         if row.get('SharpMove_Odds_Up'): parts.append("🟢 Odds Moved Up (Steam)")
@@ -1805,7 +1805,28 @@ def compute_diagnostics_vectorized(df):
             parts.append("📈 Line Moved from Open")
         if row.get('Abs_Odds_Move_From_Opening', 0) > 5.0:
             parts.append("💹 Odds Moved from Open")
+        # === Additional diagnostics for full feature match
+
+        if row.get('Spread_vs_H2H_Aligned'): parts.append("🧩 Spread and H2H Align")
+        if row.get('Total_vs_Spread_Contradiction'): parts.append("⚠️ Total Contradicts Spread")
+        if row.get('CrossMarket_Prob_Gap_Exists'): parts.append("🔀 Cross-Market Probability Gap")
         
+        if row.get('Potential_Overmove_Flag'): parts.append("📊 Line Possibly Overmoved")
+        if row.get('Potential_Overmove_Total_Pct_Flag'): parts.append("📉 Total Possibly Overmoved")
+        if row.get('Potential_Odds_Overmove_Flag'): parts.append("🎯 Odds Possibly Overmoved")
+        
+        if row.get('Line_Moved_Toward_Team'): parts.append("🧲 Line Moved Toward This Team")
+        if row.get('Line_Moved_Away_From_Team'): parts.append("🚫 Line Moved Away From This Team")
+        
+        if row.get('Line_Resistance_Crossed_Count', 0) >= 1: parts.append("🧱 Crossed Resistance Levels")
+        if row.get('Abs_Line_Move_Z', 0) > 1: parts.append("📊 Unusual Line Z-Move")
+        if row.get('Pct_Line_Move_Z', 0) > 1: parts.append("📈 Abnormal % Line Z-Score")
+        
+        if row.get('Mispricing_Flag'): parts.append("💸 Market Mispricing Detected")
+        
+        if row.get('Hybrid_Line_Timing_Flag'): parts.append("⏱️ Sharp Line Timing Bucket")
+        if row.get('Hybrid_Odds_Timing_Flag'): parts.append("🕰️ Sharp Odds Timing Bucket")
+
     
         # === Hybrid timing buckets — LINE
         HYBRID_LINE_COLS = [
