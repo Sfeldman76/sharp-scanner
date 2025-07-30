@@ -3004,7 +3004,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
 
     allowed_cols = {
         'sharp_data.sharp_scores_full': [
-            'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+            'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Limit', 'Ref_Sharp_Value',
             'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
             'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
             'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
@@ -3660,7 +3660,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_master['Line_Move_Magnitude'] = (df_master['Value'] - df_master['First_Line_Value']).abs()
     # === Final Output DataFrame ===
     score_cols = [
-        'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
+        'Game_Key', 'Bookmaker', 'Market', 'Limit', 'Outcome', 'Ref_Sharp_Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
         'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
