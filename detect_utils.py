@@ -43,7 +43,8 @@ from utils import (
     was_line_resistance_broken,
     compute_line_resistance_flag,
     add_line_and_crossmarket_features,
-    compute_small_book_liquidity_features
+    compute_small_book_liquidity_features,
+    normalize_book_name
 )
 
 def detect_and_save_all_sports():
