@@ -80,7 +80,7 @@ import pandas_gbq  # ✅ Required for setting .context.project / .context.creden
 from google.cloud import storage
 from google.cloud import bigquery
 from pandas_gbq import to_gbq
-import pandas as pd
+
 import google.api_core.exceptions
 from google.cloud import bigquery_storage_v1
 import pyarrow as pa
@@ -102,6 +102,7 @@ from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from scipy.stats import entropy
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
+
 
 import logging
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
@@ -230,16 +231,13 @@ def ensure_columns(df, required_cols, fill_value=None):
     return df
 
 
-
-
 def calc_implied_prob(series):
-    series = pd.to_numeric(series, errors='coerce')
+    series = pd.to_numeric(series, errors='coerce').clip(lower=-10000, upper=10000)
     return np.where(
         series < 0,
         -series / (-series + 100),
         100 / (series + 100)
     )
-
 
 
 def fetch_live_odds(sport_key):
@@ -1459,9 +1457,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.error("❌ No models were trained.")
     return trained_models
 
-from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
-from scipy.stats import entropy
-import numpy as np
+
 
 def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base"):
     model = xgb.XGBClassifier(eval_metric='logloss', tree_method='hist', n_jobs=-1)
