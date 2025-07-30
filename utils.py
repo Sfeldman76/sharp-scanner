@@ -105,11 +105,9 @@ def normalize_book_name(book: str, bookmaker: str) -> str:
         return book  # Fallback if bookmaker is missing
 
     bookmaker = bookmaker.lower()
-    print(f"Original bookmaker: {bookmaker}")
 
-    # Keep Betfair names raw (no normalization)
-    if 'betfair' in bookmaker:
-        return bookmaker  # Return bookmaker as it is, raw
+    # Print both book and bookmaker for debugging
+    print(f"Original bookmaker: {bookmaker}, Original book: {book}")
 
     # Normalize other bookmakers (convert to lowercase)
     return book.lower()
