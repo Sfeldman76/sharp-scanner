@@ -96,7 +96,7 @@ from sklearn.model_selection import GridSearchCV
 from xgboost import XGBClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import RandomizedSearchCV
-
+from scipy.stats import zscore
 from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from scipy.stats import entropy
@@ -953,7 +953,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Market_Norm'].isin(['h2h'])),
             1, 0
         )
-        from scipy.stats import zscore
+        
 
         # Z-scores for line movement magnitude by sport and market
         df_market['Abs_Line_Move_Z'] = (
@@ -990,6 +990,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
         df_market['Implied_Prob_Shift_Z'] = df_market.groupby(['Sport_Norm', 'Market_Norm'])['Implied_Prob_Shift']\
         .transform(lambda x: zscore(x.fillna(0), ddof=0))
+        
         df_market['Potential_Odds_Overmove_Flag'] = np.where(
             df_market['Implied_Prob_Shift_Z'] >= 2,
             1, 0
@@ -1068,13 +1069,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Potential_Overmove_Flag', 
             'Potential_Overmove_Total_Pct_Flag',
         
-            # 🧠 Cross-market alignment
-            'Spread_vs_H2H_Aligned',
-            'Total_vs_Spread_Contradiction',
-            'Spread_vs_H2H_ProbGap',
-            'Total_vs_H2H_ProbGap',
-            'Total_vs_Spread_ProbGap',
-            'CrossMarket_Prob_Gap_Exists', 
+            # 🧠 Cross-market alignment                       
+            'Potential_Odds_Overmove_Flag'
             'Line_Moved_Toward_Team',
             'Abs_Line_Move_Z',
             'Pct_Line_Move_Z'
@@ -1201,16 +1197,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             random_state=42
         )
         # 🚫 Detect and drop nested/bad columns from X_train
-        bad_cols = []
-        for col in X_train.columns:
-            sample_val = X_train[col].dropna().iloc[0] if not X_train[col].dropna().empty else None
-            if isinstance(sample_val, (pd.DataFrame, pd.Series, list, dict)):
-                print(f"❌ Column '{col}' contains nested/unsupported type: {type(sample_val)}")
-                bad_cols.append(col)
         
-        if bad_cols:
-            print(f"🧹 Dropping bad columns: {bad_cols}")
-            X_train = X_train.drop(columns=bad_cols)
         grid_logloss.fit(X_train, y_train)
         model_logloss = grid_logloss.best_estimator_
         
@@ -1257,9 +1244,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 print(f"❌ Feature '{col}' has bad type: {type(sample_val)} — value: {sample_val}")
             elif not hasattr(sample_val, 'dtype'):
                 print(f"⚠️ Feature '{col}' has unknown/non-numeric type: {type(sample_val)} — value: {sample_val}")
+        # 🚫 Detect and drop nested/bad columns from X
+        # 🧹 Clean X BEFORE any predict_proba calls or calibrator usage
+        bad_cols = []
+        for col in X.columns:
+            sample_val = X[col].dropna().iloc[0] if not X[col].dropna().empty else None
+            if isinstance(sample_val, (pd.DataFrame, pd.Series, list, dict)):
+                print(f"❌ Feature '{col}' has bad type: {type(sample_val)} — value: {sample_val}")
+                bad_cols.append(col)
+        
+        if bad_cols:
+            print(f"🧹 Dropping from X: {bad_cols}")
+            X = X.drop(columns=bad_cols)
+        
         # === Predict calibrated probabilities
         prob_logloss = cal_logloss.predict_proba(X)[:, 1]
         prob_auc = cal_auc.predict_proba(X)[:, 1]
+        
+        
         # === Predict calibrated probabilities on validation set
         val_prob_logloss = cal_logloss.predict_proba(X_val)[:, 1]
         val_prob_auc = cal_auc.predict_proba(X_val)[:, 1]
