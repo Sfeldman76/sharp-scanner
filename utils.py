@@ -100,6 +100,18 @@ def ensure_columns(df, required_cols, fill_value=None):
             df[col] = fill_value
     return df
 
+def normalize_book_name(book):
+    if pd.isna(book):
+        return book
+    book = book.lower()
+    if book == 'betfair_ex_uk':
+        return 'betfair_uk'
+    elif book == 'betfair_ex_eu':
+        return 'betfair_eu'
+    elif book.startswith('betfair'):
+        return 'betfair_other'
+    return book
+
 
 def normalize_team(t):
     return str(t).strip().lower().replace('.', '').replace('&', 'and')
@@ -331,7 +343,14 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     df = build_game_key(df)
 
     allowed_books = SHARP_BOOKS + REC_BOOKS
+    # Apply normalization early
+    # ✅ Normalize book names before any filtering
+    df['Book'] = df['Book'].str.lower()
+    df['Book'] = df['Book'].apply(normalize_book_name)
+    
+    # ✅ Now apply the filtering with normalized names
     df = df[df['Book'].isin(allowed_books)]
+
 
     if 'Game_Key' not in df.columns or df['Game_Key'].isnull().all():
         logging.warning("❌ No valid Game_Key present — skipping upload.")
@@ -522,13 +541,29 @@ def normalize_label(label):
      return str(label).strip().lower().replace('.0', '')
 
 def normalize_book_key(raw_key, sharp_books, rec_books):
+    raw_key = raw_key.lower()
+
+    # First: Exact matches for sharp books (preserve unique identifiers like betfair_uk/eu)
+    for sharp in sharp_books:
+        if raw_key == sharp:
+            return sharp
+
+    # Second: Exact matches for rec books
+    for rec in rec_books:
+        if raw_key == rec:
+            return rec
+
+    # Third: Fallback to partial match — but only if no exact match occurred
     for rec in rec_books:
         if rec.replace(" ", "") in raw_key:
             return rec.replace(" ", "")
     for sharp in sharp_books:
         if sharp in raw_key:
             return sharp
+
+    # Default: return raw key
     return raw_key
+
 
 #def implied_prob(odds):
     #try:
@@ -1048,19 +1083,11 @@ def add_line_and_crossmarket_features(df):
 
     return df
 def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
-    SMALL_LIMIT_BOOKS = ['betus', 'mybookie', 'betfair', 'lowvig', 'betonline', 'matchbook']
+    SMALL_LIMIT_BOOKS = ['betus', 'mybookie', 'betfair_eu', 'betfair_uk', 'lowvig', 'betonline', 'matchbook']
     df = df.copy()
 
-    df['Bookmaker_Norm'] = (
-        df['Bookmaker']
-        .astype(str)
-        .str.lower()
-        .str.replace('.ag', '', regex=False)
-        .str.replace('_uk', '', regex=False)
-        .str.replace('_eu', '', regex=False)
-        .str.strip()
-        .str.replace(' ', '')
-    )
+    df['Bookmaker_Norm'] = df['Book']
+
 
     df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
 
@@ -1116,7 +1143,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Event_Date'] = pd.NaT
     df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
     df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+    # Apply normalization early
     df['Book'] = df['Book'].str.lower()
+    df['Book'] = df['Book'].apply(normalize_book_name)
+
+    
     # Drop merge artifacts
     try:
         df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
@@ -2573,7 +2604,12 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_history = read_recent_sharp_master_cached(hours=72)
     df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
     df_history = df_history.sort_values('Snapshot_Timestamp')
-    
+    # Apply normalization consistently early on
+    df_history['Book'] = df_history['Book'].str.lower()
+    df_history['Book'] = df_history['Book'].apply(normalize_book_name)
+
+
+   
     # ✅ Build old value map using first recorded value per outcome
     old_val_map = (
         df_history
@@ -2598,7 +2634,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     previous_odds_map = {}
     for g in previous_map.values():
         for book in g.get('bookmakers', []):
-            book_key = book.get('key')
+            book_key = normalize_book_name(book.get('key', '').lower())
+
             for market in book.get('markets', []):
                 mtype = market.get('key')
                 for outcome in market.get('outcomes', []):
@@ -2619,7 +2656,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
         for book in game.get('bookmakers', []):
             book_key_raw = book.get('key', '').lower()
-            book_key = normalize_book_key(book_key_raw, SHARP_BOOKS, REC_BOOKS)
+            book_key = normalize_book_name(book_key_raw)  # ✅ preserve betfair_uk vs betfair_eu
+
 
             if book_key not in SHARP_BOOKS + REC_BOOKS:
                 continue
@@ -2910,6 +2948,7 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
     df_history['Time'] = pd.to_datetime(df_history['Time'])
     df_history['Book'] = df_history['Book'].str.lower()
+    df_history['Book'] = df_history['Book'].apply(normalize_book_nam
 
     # === LINE MOVE DETECTION ===
     df_open_line = (
@@ -3077,7 +3116,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
 
     allowed_cols = {
         'sharp_data.sharp_scores_full': [
-            'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Limit', 'Ref_Sharp_Value',
+            'Game_Key', 'Bookmaker','Book', 'Market', 'Outcome', 'Limit', 'Ref_Sharp_Value',
             'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
             'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
             'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
@@ -3733,7 +3772,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         df_master['Line_Move_Magnitude'] = (df_master['Value'] - df_master['First_Line_Value']).abs()
     # === Final Output DataFrame ===
     score_cols = [
-        'Game_Key', 'Bookmaker', 'Market', 'Limit', 'Outcome', 'Ref_Sharp_Value',
+        'Game_Key', 'Bookmaker','Book', 'Market', 'Limit', 'Outcome', 'Ref_Sharp_Value',
         'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
         'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
