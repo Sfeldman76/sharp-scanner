@@ -2948,7 +2948,7 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     df_history = df_history.copy()
     df_history['Time'] = pd.to_datetime(df_history['Time'])
     df_history['Book'] = df_history['Book'].str.lower()
-    df_history['Book'] = df_history['Book'].apply(normalize_book_nam
+    df_history['Book'] = df_history['Book'].apply(normalize_book_name)
 
     # === LINE MOVE DETECTION ===
     df_open_line = (
