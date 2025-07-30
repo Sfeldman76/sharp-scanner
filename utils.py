@@ -1047,6 +1047,58 @@ def add_line_and_crossmarket_features(df):
     ).astype(int)
 
     return df
+def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
+    SMALL_LIMIT_BOOKS = ['betus', 'mybookie', 'betfair', 'lowvig', 'betonline', 'matchbook']
+    df = df.copy()
+
+    df['Bookmaker_Norm'] = (
+        df['Bookmaker']
+        .astype(str)
+        .str.lower()
+        .str.replace('.ag', '', regex=False)
+        .str.replace('_uk', '', regex=False)
+        .str.replace('_eu', '', regex=False)
+        .str.strip()
+        .str.replace(' ', '')
+    )
+
+    df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
+
+    if 'Limit' not in df.columns:
+        df['Limit'] = 0
+    else:
+        df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+
+    try:
+        agg = (
+            df[df['Is_Small_Limit_Book'] == 1]
+            .groupby(['Game_Key', 'Outcome'])
+            .agg(
+                SmallBook_Total_Limit=('Limit', 'sum'),
+                SmallBook_Max_Limit=('Limit', 'max'),
+                SmallBook_Min_Limit=('Limit', 'min'),
+                SmallBook_Limit_Count=('Limit', 'count')
+            )
+            .reset_index()
+        )
+    except Exception:
+        agg = pd.DataFrame(columns=[
+            'Game_Key', 'Outcome', 'SmallBook_Total_Limit',
+            'SmallBook_Max_Limit', 'SmallBook_Min_Limit', 'SmallBook_Limit_Count'
+        ])
+
+    df = df.merge(agg, on=['Game_Key', 'Outcome'], how='left')
+
+    for col in ['SmallBook_Total_Limit', 'SmallBook_Max_Limit', 'SmallBook_Min_Limit']:
+        df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
+
+    df['SmallBook_Limit_Skew'] = df['SmallBook_Max_Limit'] - df['SmallBook_Min_Limit']
+    df['SmallBook_Heavy_Liquidity_Flag'] = (df['SmallBook_Total_Limit'] > 1000).astype(int)
+    df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Skew'] > 500).astype(int)
+
+    return df
+
+
             
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
@@ -1627,6 +1679,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             ).astype(int)
 
             df_canon = add_line_and_crossmarket_features(df_canon)
+            df_canon = compute_small_book_liquidity_features(df_canon)
 
             # Flattened hybrid timing buckets
             # 🔄 Flattened hybrid timing columns (NUMERIC only)
@@ -1837,6 +1890,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
             df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
             df_inverse = add_line_and_crossmarket_features(df_inverse)
+            df_inverse = compute_small_book_liquidity_features(df_inverse)
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
                 df_inverse['Minutes_To_Game'],
@@ -2154,7 +2208,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Disable_Line_Move_Features',
                     'Pct_On_Recent_Cover_Streak_Home',
                     'Pct_On_Recent_Cover_Streak_Away',
-                    'Pct_On_Recent_Cover_Streak'
+                    'Pct_On_Recent_Cover_Streak',
+                    'SmallBook_Total_Limit',
+                    'SmallBook_Max_Limit',
+                    'SmallBook_Min_Limit',
+                    'SmallBook_Limit_Skew',
+                    'SmallBook_Heavy_Liquidity_Flag',
+                    'SmallBook_Limit_Skew_Flag',
                     
 
                 ]
@@ -2266,6 +2326,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 
                 df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
                 df_inverse = add_line_and_crossmarket_features(df_inverse)
+                df_inverse = compute_small_book_liquidity_features(df_inverse)
                 # Propagate cover streak from canonical rows
                 
 
@@ -2415,7 +2476,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Line_Moved_Away_From_Team'] == 1).astype(int) +
                 (df_final['Line_Resistance_Crossed_Count'].fillna(0) >= 1).astype(int) +
                 (df_final['Abs_Line_Move_Z'].fillna(0) > 1).astype(int) +
-                (df_final['Pct_Line_Move_Z'].fillna(0) > 1).astype(int)
+                (df_final['Pct_Line_Move_Z'].fillna(0) > 1).astype(int)+
+                (df_final['SmallBook_Heavy_Liquidity_Flag'] == 1).astype(int) +
+                (df_final['SmallBook_Limit_Skew_Flag'] == 1).astype(int) +
+                (df_final['SmallBook_Total_Limit'].fillna(0) > 500).astype(int)
+
 
             ).fillna(0).astype(int)
 
