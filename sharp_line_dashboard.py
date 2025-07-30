@@ -1246,7 +1246,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             cal_auc = CalibratedClassifierCV(model_auc, method='isotonic', cv=cv).fit(X_train, y_train)
         # ✅ Use isotonic calibration (more stable for reducing std dev)
         
+        # 🕵️‍♂️ Debug: Inspect problematic features in X
+        for col in X.columns:
+            try:
+                sample_val = X[col].dropna().iloc[0]
+            except IndexError:
+                continue  # Skip empty columns
         
+            if isinstance(sample_val, (pd.DataFrame, pd.Series, list, dict)):
+                print(f"❌ Feature '{col}' has bad type: {type(sample_val)} — value: {sample_val}")
+            elif not hasattr(sample_val, 'dtype'):
+                print(f"⚠️ Feature '{col}' has unknown/non-numeric type: {type(sample_val)} — value: {sample_val}")
         # === Predict calibrated probabilities
         prob_logloss = cal_logloss.predict_proba(X)[:, 1]
         prob_auc = cal_auc.predict_proba(X)[:, 1]
