@@ -2148,6 +2148,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 
                     # 🔁 Defensive drop
                     'Disable_Line_Move_Features',
+                    'Pct_On_Recent_Cover_Streak_Home',
+                    'Pct_On_Recent_Cover_Streak_Away',
+                     'Pct_On_Recent_Cover_Streak"
+                    
 
                 ]
                 
