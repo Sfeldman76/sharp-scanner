@@ -1026,10 +1026,12 @@ def add_line_and_crossmarket_features(df):
     df['H2H_Implied_Prob'] = df['H2H_Odds'].apply(implied_prob)
     df['Total_Implied_Prob'] = df['Total_Odds'].apply(implied_prob)
 
-    df['Spread_vs_H2H_Aligned'] = (
-        (df['Spread_Value'] < 0) & (df['H2H_Implied_Prob'] > 0.5)
-    ).astype(int)
-
+    df['Spread_vs_H2H_Aligned'] = np.where(
+        (df['Market_Norm'] == 'spread') &
+        (df['Value'] < 0) &  # favorite
+        (df.get('H2H_Implied_Prob', 0) > 0.5),
+        1, 0
+    )
     df['Total_vs_Spread_Contradiction'] = (
         (df['Spread_Implied_Prob'] > 0.55) &
         (df['Total_Implied_Prob'] < 0.48)
