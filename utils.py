@@ -102,17 +102,16 @@ def ensure_columns(df, required_cols, fill_value=None):
 
 def normalize_book_name(book: str, bookmaker: str) -> str:
     if pd.isna(bookmaker):
-        return book  # fallback if bookmaker is missing
+        return book  # Fallback if bookmaker is missing
 
     bookmaker = bookmaker.lower()
-    
-    if 'betfair_ex_uk' in bookmaker:
-        return 'betfair_ex_uk'
-    elif 'betfair_ex_eu' in bookmaker:
-        return 'betfair_ex_eu'
-    elif 'betfair' in bookmaker:
-        return 'betfair_other'
-    
+    print(f"Original bookmaker: {bookmaker}")
+
+    # Keep Betfair names raw (no normalization)
+    if 'betfair' in bookmaker:
+        return bookmaker  # Return bookmaker as it is, raw
+
+    # Normalize other bookmakers (convert to lowercase)
     return book.lower()
 
 
