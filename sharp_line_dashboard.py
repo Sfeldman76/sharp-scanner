@@ -904,7 +904,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Abs_Line_Move_From_Opening'] = (df_market['Value'] - df_market['First_Line_Value']).abs()
         df_market['Odds_Shift'] = df_market['Odds_Price'] - df_market['First_Odds']
         df_market['Implied_Prob_Shift'] = (
-            calc_implied_prob(df_market['Odds_Price']) - calc_implied_prob(df_market['First_Odds'])
+            implied_prob(df_market['Odds_Price']) - implied_prob(df_market['First_Odds'])
         )
         
         # === Directional Movement Flags
