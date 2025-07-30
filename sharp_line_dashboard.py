@@ -1763,7 +1763,7 @@ def compute_diagnostics_vectorized(df):
     
     
         # === Core sharp move reasons
-     parts = []
+    parts = []
 
    
 
