@@ -107,9 +107,9 @@ def normalize_book_name(book: str, bookmaker: str) -> str:
     bookmaker = bookmaker.lower()
     
     if 'betfair_ex_uk' in bookmaker:
-        return 'betfair_uk'
+        return 'betfair_ex_uk'
     elif 'betfair_ex_eu' in bookmaker:
-        return 'betfair_eu'
+        return 'betfair_ex_eu'
     elif 'betfair' in bookmaker:
         return 'betfair_other'
     
