@@ -1154,9 +1154,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
     # Apply normalization early
     df['Book'] = df['Book'].str.lower()
-    df_history['Book'] = df_history.apply(
+    df['Book'] = df.apply(
         lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
     )
+
 
     
     # Drop merge artifacts
