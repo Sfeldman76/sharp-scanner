@@ -1117,7 +1117,11 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.merge(agg, on=['Game_Key', 'Outcome'], how='left')
 
     for col in ['SmallBook_Total_Limit', 'SmallBook_Max_Limit', 'SmallBook_Min_Limit']:
-        df[col] = pd.to_numeric(df.get(col, 0), errors='coerce').fillna(0)
+        df[col] = pd.to_numeric(
+            df[col] if col in df.columns else pd.Series(0, index=df.index),
+            errors='coerce'
+        ).fillna(0)
+
 
     df['SmallBook_Limit_Skew'] = df['SmallBook_Max_Limit'] - df['SmallBook_Min_Limit']
     df['SmallBook_Heavy_Liquidity_Flag'] = (df['SmallBook_Total_Limit'] > 1000).astype(int)
