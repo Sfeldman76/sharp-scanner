@@ -107,9 +107,7 @@ def normalize_book_name(book: str, bookmaker: str) -> str:
     bookmaker = bookmaker.lower()
     book = book.lower() if isinstance(book, str) else book
 
-    # Debug print
-    print(f"Original bookmaker: {bookmaker}, Original book: {book}")
-
+   
     # Special handling for Betfair exchanges
     if bookmaker.startswith("betfair_ex_"):
         region = bookmaker.split("_")[-1]
