@@ -50,7 +50,7 @@ SPORTS = {
 
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','smarkets','betfair_ex_eu','"betfair_ex_uk','betfair_ex_au','lowvig','betonlineag','matchbook']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','smarkets','betfair_ex_eu','betfair_ex_uk','betfair_ex_au','lowvig','betonlineag','matchbook']
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
@@ -2691,9 +2691,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_history = df_history.sort_values('Snapshot_Timestamp')
     # Apply normalization consistently early on
     df_history['Book'] = df_history['Book'].str.lower()
-    df_history['Book'] = df_history.apply(
-        lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
+    print("✅ Bookmaker before normalization:", df_history['Bookmaker'].unique())
+    print(df_history[df_history['Bookmaker'].str.contains('betfair', case=False, na=False)].head())
+
+    df_history['Bookmaker'] = df_history.apply(
+        lambda row: normalize_book_name(row['Bookmaker'], row.get('Book')), axis=1
     )
+
 
 
 
