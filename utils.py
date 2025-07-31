@@ -1337,6 +1337,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
 
     
+ 
     def compute_odds_reversal(df, prob_threshold=0.05):
         df = df.copy()
     
@@ -1358,27 +1359,36 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         min_prob = implied_prob_vec(min_odds)
         max_prob = implied_prob_vec(max_odds)
     
-        # === Compute reversal based on implied probability extremes
-        # H2H: movement to extreme edge (min or max)
-        h2h_flag = (
-            ((open_prob > min_prob) & (current_prob <= min_prob + 1e-5)) |
-            ((open_prob < max_prob) & (current_prob >= max_prob - 1e-5))
+        # === Build safe masks for H2H reversal
+        valid_mask = (
+            pd.notna(open_prob) &
+            pd.notna(current_prob) &
+            pd.notna(min_prob) &
+            pd.notna(max_prob)
         )
     
-        # Spread/Total: reversal if current odds have shifted away from open by a large % in either direction
+        h2h_flag = np.zeros(len(df), dtype=int)
+        h2h_flag[valid_mask] = (
+            ((open_prob[valid_mask] > min_prob[valid_mask]) &
+             (current_prob[valid_mask] <= min_prob[valid_mask] + 1e-5)) |
+            ((open_prob[valid_mask] < max_prob[valid_mask]) &
+             (current_prob[valid_mask] >= max_prob[valid_mask] - 1e-5))
+        ).astype(int)
+    
+        # === Spread/Total: flag large movement in implied probability
         prob_shift = current_prob - open_prob
         abs_shift = np.abs(prob_shift)
-    
-        # Use threshold for meaningful reversal (default: 5% prob change)
-        spread_total_flag = abs_shift >= prob_threshold
+        spread_total_flag = (abs_shift >= prob_threshold).astype(int)
+        spread_total_flag[~pd.notna(abs_shift)] = 0  # fallback for missing odds
     
         # === Final Flag
         df['Odds_Reversal_Flag'] = np.where(
             is_h2h,
-            h2h_flag.astype(int),
-            np.where(is_spread | is_total, spread_total_flag.astype(int), 0)
+            h2h_flag,
+            np.where(is_spread | is_total, spread_total_flag, 0)
         )
-    
+
+
         # Optional: expose shift for debugging
         df['Implied_Prob_Shift'] = prob_shift
         df['Abs_Odds_Prob_Move'] = abs_shift
