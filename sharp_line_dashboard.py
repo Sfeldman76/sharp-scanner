@@ -505,51 +505,47 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     Safe for games or sports with no small-limit books or missing limit data.
     Should be run before canonical filtering.
     """
-    SMALL_LIMIT_BOOKS = ['betfair_uk', 'betfair_eu', 'matchbook']
+    SMALL_LIMIT_BOOKS = ['betfair_ex_uk', 'betfair_ex_eu', 'betfair_ex_au','matchbook','smarkets']
 
-    df = df.copy()
-
-    # Normalize bookmaker names
-    df['Bookmaker_Norm'] = df['Book']
-
+   
+    
+    # Normalize and flag
     df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
-
-    # Ensure Limit column is numeric
-    if 'Limit' not in df.columns:
-        df['Limit'] = 0
+    
+    # Ensure numeric
+    df['Limit'] = pd.to_numeric(df.get('Limit', 0), errors='coerce').fillna(0)
+    
+    # === Aggregate per outcome
+    small_limit_rows = df[df['Is_Small_Limit_Book'] == 1].copy()
+    outcome_agg = (
+        small_limit_rows
+        .groupby(['Game_Key', 'Outcome'])
+        .agg(SmallBook_Limit=('Limit', 'sum'))
+        .reset_index()
+    )
+    
+    # === Pivot so both sides are columns
+    pivoted = outcome_agg.pivot(index='Game_Key', columns='Outcome', values='SmallBook_Limit')
+    pivoted.columns = [f"SmallBook_Limit_{col}" for col in pivoted.columns]
+    pivoted = pivoted.reset_index()
+    
+    # === Merge pivoted results back
+    df = df.merge(pivoted, on='Game_Key', how='left')
+    
+    # === Compute asymmetry metrics
+    outcome_cols = [col for col in pivoted.columns if col.startswith('SmallBook_Limit_') and col != 'Game_Key']
+    if len(outcome_cols) == 2:
+        col1, col2 = outcome_cols
+        df['SmallBook_Limit_Diff'] = (df[col1] - df[col2]).abs()
+        df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Diff'] > 100).astype(int)
+        df['SmallBook_Heavy_Liquidity_Flag'] = (
+            df[[col1, col2]].max(axis=1) > 700
+        ).astype(int)
     else:
-        df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
-
-    # Handle empty or missing groups gracefully
-    try:
-        small_limit_agg = (
-            df[df['Is_Small_Limit_Book'] == 1]
-            .groupby(['Game_Key', 'Outcome'])
-            .agg(
-                SmallBook_Total_Limit=('Limit', 'sum'),
-                SmallBook_Max_Limit=('Limit', 'max'),
-                SmallBook_Min_Limit=('Limit', 'min'),
-                SmallBook_Limit_Count=('Limit', 'count')
-            )
-            .reset_index()
-        )
-    except Exception:
-        small_limit_agg = pd.DataFrame(columns=[
-            'Game_Key', 'Outcome', 'SmallBook_Total_Limit',
-            'SmallBook_Max_Limit', 'SmallBook_Min_Limit', 'SmallBook_Limit_Count'
-        ])
-
-    df = df.merge(small_limit_agg, on=['Game_Key', 'Outcome'], how='left')
-
-    for col in ['SmallBook_Total_Limit', 'SmallBook_Max_Limit', 'SmallBook_Min_Limit']:
-        df[col] = pd.to_numeric(
-            df[col] if col in df.columns else pd.Series(0, index=df.index),
-            errors='coerce'
-        ).fillna(0)
-
-    df['SmallBook_Limit_Skew'] = df['SmallBook_Max_Limit'] - df['SmallBook_Min_Limit']
-    df['SmallBook_Heavy_Liquidity_Flag'] = (df['SmallBook_Total_Limit'] > 500).astype(int)
-    df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Skew'] > 100).astype(int)
+        # Fallback if only one side present
+        df['SmallBook_Limit_Diff'] = 0
+        df['SmallBook_Limit_Skew_Flag'] = 0
+        df['SmallBook_Heavy_Liquidity_Flag'] = 0
 
     return df
 
@@ -2192,19 +2188,20 @@ def render_scanner_tab(label, sport_key, container):
        
         from utils import normalize_book_name 
 
-        df_snap = pd.DataFrame([
-            {
-                'Game_ID': game.get('id'),
-                'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
-                'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
-                'Bookmaker': book.get('title'),  # keep full name
-                'Book': normalize_book_name(book.get('key'), book.get('title')),  # ✅ FIXED
-                'Market': market.get('key'),
-                'Outcome': outcome.get('name'),
-                'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
-                'Limit': outcome.get('bet_limit'),
-                'Snapshot_Timestamp': timestamp
-            }
+    df_snap = pd.DataFrame([
+        {
+            'Game_ID': game.get('id'),
+            'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
+            'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
+            'Bookmaker': normalize_book_name(book.get('key', ''), book.get('key', '')),
+            'Book': normalize_book_name(book.get('key', ''), book.get('key', '')),
+    
+            'Market': market.get('key'),
+            'Outcome': outcome.get('name'),
+            'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
+            'Limit': outcome.get('bet_limit'),
+            'Snapshot_Timestamp': timestamp
+        }
             for game in live
             for book in game.get('bookmakers', [])
             for market in book.get('markets', [])
