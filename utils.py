@@ -2326,6 +2326,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
    
 
                 df_inverse.drop(columns=['Team'], inplace=True, errors='ignore')
+                df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
+                df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
+                df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
                 # === 🔁 Recompute outcome-sensitive fields
                 df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
                 df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
