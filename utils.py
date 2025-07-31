@@ -2019,15 +2019,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 # ✅ Step 4: Deduplicate snapshot to keep latest valid lines
                 df_full_market = (
                     df_full_market
-                    .dropna(subset=['Value', 'Odds_Price'])
+                    .dropna(subset=['Value'])
                     .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
                     .drop_duplicates(subset=['Team_Key'], keep='last')
                 )
-            
-                # Merge df_inverse with canonical rows to pull 'Value', 'Odds_Price', and 'Limit'
-                # Step 1: Merge inverse rows with canonical rows to pull relevant columns including 'Limit'
+                
+                # Merge inverse rows with canonical rows to pull relevant columns
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit', 'Outcome', 'Book']],  # Include Outcome and Book for accurate merge
                     on='Team_Key', 
                     how='left', 
                     suffixes=('', '_opponent')
@@ -2037,37 +2036,32 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
                 
-                # Ensure 'Limit' is only assigned if the book is valid for limits
-                # If the book is not in SHARP_BOOKS or doesn't meet criteria, remove the limit
-                df_inverse['Limit'] = df_inverse['Limit_opponent']
-                
-                # For inverse rows, clear the 'Limit' when the book shouldn't have one
-                df_inverse['Limit'] = df_inverse.apply(
-                    lambda row: None if row['Book'] not in SHARP_BOOKS else row['Limit'],
-                    axis=1
+                # Ensure that Limit is assigned correctly based on the correct book and outcome
+                df_inverse['Limit'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],  # Ensure the Limit is assigned correctly
+                    df_inverse['Limit_opponent'], 
+                    df_inverse['Limit']  # Retain existing Limit if no match
                 )
                 
-                # Clean up temporary columns after merge
+                # Clean up the opponent columns after the merge
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
                 
-                # Check for any missing limits after the merge
+                # Optional: Verify if any inverse rows are missing a 'Limit' value
                 missing_limit = df_inverse['Limit'].isna().sum()
                 if missing_limit > 0:
                     logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
                 
-                # Step 3: Final deduplication
+                # Final deduplication to ensure no duplicate rows exist
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
-                
-                # Now df_inverse has properly filtered limits and other values
-
-                # Now you can proceed with the rest of your logic for inverse rows without unintended 'Limit' assignment
 
             
 
             elif market_type == "h2h":
+                # Create canonical team column and normalize outcomes
                 df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
-            
+                
+                # Flip outcome for inverse rows (Home becomes Away and vice versa)
                 df_inverse['Outcome'] = np.where(
                     df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
                     df_inverse['Away_Team_Norm'],
@@ -2075,9 +2069,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
                 df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-                #if team_feature_map is not None and not team_feature_map.empty:
-                    #df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
-                    #df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
+                
+                # Rebuild keys after flipping outcome
                 df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
                 df_inverse['Game_Key'] = (
                     df_inverse['Home_Team_Norm'] + "_" +
@@ -2092,19 +2085,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_inverse['Commence_Hour'].astype(str) + "_" +
                     df_inverse['Market']
                 )
-            
+                
+                # Create a unique team key
                 df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
                 df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-            
+                
+                # Deduplicate to keep the latest value from the correct outcome (Home or Away)
                 df_full_market = (
                     df_full_market
                     .dropna(subset=['Value'])
                     .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
                     .drop_duplicates(subset=['Team_Key'], keep='last')
                 )
-            
+                
+                # Merge inverse rows with canonical rows to pull relevant columns
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit', 'Outcome', 'Book']],  # Include Outcome and Book for accurate merge
                     on='Team_Key', 
                     how='left', 
                     suffixes=('', '_opponent')
@@ -2114,16 +2110,25 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
                 
-                # Ensure 'Limit' is only assigned if the book is valid for limits
-                # If the book is not in SHARP_BOOKS or doesn't meet criteria, remove the limit
-                df_inverse['Limit'] = df_inverse['Limit_opponent']
-                
-                # For inverse rows, clear the 'Limit' when the book shouldn't have one
-                df_inverse['Limit'] = df_inverse.apply(
-                    lambda row: None if row['Book'] not in SHARP_BOOKS else row['Limit'],
-                    axis=1
+                # Ensure that Limit is assigned correctly based on the correct book and outcome
+                df_inverse['Limit'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],  # Ensure the Limit is assigned correctly
+                    df_inverse['Limit_opponent'], 
+                    df_inverse['Limit']  # Retain existing Limit if no match
                 )
                 
+                # Clean up the opponent columns after the merge
+                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
+                
+                # Optional: Verify if any inverse rows are missing a 'Limit' value
+                missing_limit = df_inverse['Limit'].isna().sum()
+                if missing_limit > 0:
+                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
+                
+                # Final deduplication to ensure no duplicate rows exist
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
+
+                       
                 # Clean up temporary columns after merge
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
                 
@@ -2185,12 +2190,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_full_market = (
                     df_full_market
                     .dropna(subset=['Value'])
-                    .sort_values(['Snapshot_Timestamp', 'Bookmaker'])  # You can customize sorting if needed
-                    .drop_duplicates(subset=['Team_Key'], keep='last')  # ⬅️ Keep only the most recent line
+                    .sort_values(['Snapshot_Timestamp', 'Bookmaker'])
+                    .drop_duplicates(subset=['Team_Key'], keep='last')
                 )
                 
+                # Merge inverse rows with canonical rows to pull relevant columns
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit']],
+                    df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit', 'Outcome', 'Book']],  # Include Outcome and Book for accurate merge
                     on='Team_Key', 
                     how='left', 
                     suffixes=('', '_opponent')
@@ -2200,18 +2206,23 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
                 
-                # Ensure 'Limit' is only assigned if the book is valid for limits
-                # If the book is not in SHARP_BOOKS or doesn't meet criteria, remove the limit
-                df_inverse['Limit'] = df_inverse['Limit_opponent']
-                
-                # For inverse rows, clear the 'Limit' when the book shouldn't have one
-                df_inverse['Limit'] = df_inverse.apply(
-                    lambda row: None if row['Book'] not in SHARP_BOOKS else row['Limit'],
-                    axis=1
+                # Ensure that Limit is assigned correctly based on the correct book and outcome
+                df_inverse['Limit'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],  # Ensure the Limit is assigned correctly
+                    df_inverse['Limit_opponent'], 
+                    df_inverse['Limit']  # Retain existing Limit if no match
                 )
                 
-                # Clean up temporary columns after merge
+                # Clean up the opponent columns after the merge
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
+                
+                # Optional: Verify if any inverse rows are missing a 'Limit' value
+                missing_limit = df_inverse['Limit'].isna().sum()
+                if missing_limit > 0:
+                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
+                
+                # Final deduplication to ensure no duplicate rows exist
+                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
                 
                 # Check for any missing limits after the merge
                 missing_limit = df_inverse['Limit'].isna().sum()
