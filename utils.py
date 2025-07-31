@@ -2038,8 +2038,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 
                 # Step 2: Copy relevant columns for the inverse row, but apply stricter checks for the 'Limit'
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
+                df_inverse['Value'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],
+                    df_inverse['Value_opponent'],
+                    df_inverse['Value']  # Retain original if no match
+                )
+                
+                df_inverse['Odds_Price'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],
+                    df_inverse['Odds_Price_opponent'],
+                    df_inverse['Odds_Price']
+                )
                 
                 # Ensure that Limit is assigned correctly based on the correct book and outcome
                 df_inverse['Limit'] = np.where(
@@ -2112,8 +2121,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 
                 # Step 2: Copy relevant columns for the inverse row, but apply stricter checks for the 'Limit'
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
+                 df_inverse['Value'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],
+                    df_inverse['Value_opponent'],
+                    df_inverse['Value']  # Retain original if no match
+                )
+                
+                df_inverse['Odds_Price'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],
+                    df_inverse['Odds_Price_opponent'],
+                    df_inverse['Odds_Price']
+                )
                 
                 # Ensure that Limit is assigned correctly based on the correct book and outcome
                 df_inverse['Limit'] = np.where(
@@ -2208,8 +2226,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 
                 # Step 2: Copy relevant columns for the inverse row, but apply stricter checks for the 'Limit'
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
+                df_inverse['Value'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],
+                    df_inverse['Value_opponent'],
+                    df_inverse['Value']  # Retain original if no match
+                )
+                
+                df_inverse['Odds_Price'] = np.where(
+                    df_inverse['Book'] == df_inverse['Book_opponent'],
+                    df_inverse['Odds_Price_opponent'],
+                    df_inverse['Odds_Price']
+                )
                 
                 # Ensure that Limit is assigned correctly based on the correct book and outcome
                 df_inverse['Limit'] = np.where(
