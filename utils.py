@@ -2249,56 +2249,41 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SmallBook_Limit_Skew',
                     'SmallBook_Heavy_Liquidity_Flag',
                     'SmallBook_Limit_Skew_Flag',
-                    'Odds_Price',
-                    'Limit',
-                    'Value'
+                    
                     
 
                 ]
                 
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
                 
-                df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
-                # Merge openers and extremes
-                df_inverse = df_inverse.merge(
-                    df_open,
-                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                    how='left'
-                )
-                df_inverse = df_inverse.merge(
-                    df_open_book,
-                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                    how='left'
-                )
-                df_inverse = df_inverse.merge(
-                    df_extremes,
-                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                    how='left'
-                )
-                # === 🔁 Re-merge team-level features onto inverse rows
-                try:
-                    if team_feature_map is not None and not team_feature_map.empty:
-                        # Normalize Team column
-                        df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
-                        
-                        # Merge features
-                        df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
-                
-                        logger.info(f"🔁 Re-merged team-level features for {len(df_inverse)} inverse rows.")
-                except Exception as e:
-                    logger.error(f"❌ Failed to re-merge team-level features for inverse rows: {e}")
-                
-   
-
-                df_inverse.drop(columns=['Team'], inplace=True, errors='ignore')
-
-                # ✅ Recover Value, Odds_Price, and Limit from canonical rows
-          
-
-      
-                df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
-                df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
-                df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
+               # 🧹 Drop stale enriched columns
+                  
+                    
+                    # ✅ Rehydrate real bookmaker line data for Value, Odds_Price, Limit
+                    df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
+                    
+                    # ✅ Ensure correct numeric typing (moved here, cleanly)
+                    df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
+                    df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
+                    df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
+                    
+                    # 🔁 Merge openers/extremes
+                    df_inverse = df_inverse.merge(df_open, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+                    df_inverse = df_inverse.merge(df_open_book, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+                    df_inverse = df_inverse.merge(df_extremes, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+                    
+                    # 🔁 Re-merge team-level features
+                    try:
+                        if team_feature_map is not None and not team_feature_map.empty:
+                            df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
+                            df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
+                            logger.info(f"🔁 Re-merged team-level features for {len(df_inverse)} inverse rows.")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to re-merge team-level features for inverse rows: {e}")
+                    
+                    df_inverse.drop(columns=['Team'], inplace=True, errors='ignore')
+                    
+                    
                 # === 🔁 Recompute outcome-sensitive fields
                 df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
                 df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
