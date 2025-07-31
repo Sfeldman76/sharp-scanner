@@ -2717,6 +2717,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
     df_history = df_history.sort_values('Snapshot_Timestamp')
     # Apply normalization consistently early on
+    print("🧪 df_history columns:", df_history.columns.tolist())
     df_history['Book'] = df_history['Book'].str.lower().str.strip()
     df_history['Bookmaker'] = df_history['Bookmaker'].str.lower().str.strip()
     
