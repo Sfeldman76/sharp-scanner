@@ -2054,15 +2054,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     suffixes=('', '_opponent')
                 )
                 
-                # Flip value from canonical side
-                df_inverse['Value'] = df_inverse['Value_opponent'])
-                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
           
-                # Optional: Verify if any inverse rows are missing a 'Limit' value
-                missing_limit = df_inverse['Limit'].isna().sum()
-                if missing_limit > 0:
-                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
-                
+                               
                 # Final deduplication to ensure no duplicate rows exist
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
 
@@ -2123,15 +2116,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     suffixes=('', '_opponent')
                 )
                 
-                # Flip value from canonical side
-                df_inverse['Value'] = df_inverse['Value_opponent'])
-                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
-               
-                
-                # Optional: Verify if any inverse rows are missing a 'Limit' value
-                missing_limit = df_inverse['Limit'].isna().sum()
-                if missing_limit > 0:
-                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
+              
+             
                 
                 # Final deduplication to ensure no duplicate rows exist
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
@@ -2195,18 +2181,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     suffixes=('', '_opponent')
                 )
                 
-                # Flip value from canonical side
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
+             
 
 
              
          
-                # Optional: Verify if any inverse rows are missing a 'Limit' value
-                missing_limit = df_inverse['Limit'].isna().sum()
-                if missing_limit > 0:
-                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
-                
                 # Final deduplication to ensure no duplicate rows exist
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
                 
@@ -2307,7 +2286,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SmallBook_Heavy_Liquidity_Flag',
                     'SmallBook_Limit_Skew_Flag',
                     'Odds_Price',
-                    'Limit'
+                    'Limit',
+                    'Value'
                     
 
                 ]
@@ -2382,6 +2362,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
                 df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
                 df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
+                df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
 
                 
                 df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'].str.lower() == df_inverse['Home_Team_Norm'].str.lower()).astype(float)
