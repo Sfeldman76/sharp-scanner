@@ -2121,7 +2121,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
                 
                 # Step 2: Copy relevant columns for the inverse row, but apply stricter checks for the 'Limit'
-                 df_inverse['Value'] = np.where(
+                df_inverse['Value'] = np.where(
                     df_inverse['Book'] == df_inverse['Book_opponent'],
                     df_inverse['Value_opponent'],
                     df_inverse['Value']  # Retain original if no match
