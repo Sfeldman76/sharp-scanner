@@ -2326,6 +2326,25 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
    
 
                 df_inverse.drop(columns=['Team'], inplace=True, errors='ignore')
+
+                # ✅ Recover Value, Odds_Price, and Limit from canonical rows
+          # ✅ Recover Value, Odds_Price, and Limit from canonical rows
+                df_inverse = df_inverse.merge(
+                    df_canon[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']],
+                    on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
+                    how='left',
+                    suffixes=('', '_canon')
+                )
+                
+                # ✅ Use canonical values if missing
+                df_inverse['Value'] = df_inverse['Value'].combine_first(df_inverse['Value_canon'])
+                df_inverse['Odds_Price'] = df_inverse['Odds_Price'].combine_first(df_inverse['Odds_Price_canon'])
+                df_inverse['Limit'] = df_inverse['Limit'].combine_first(df_inverse['Limit_canon'])
+                
+                # ✅ Clean up temp columns
+                df_inverse.drop(columns=['Value_canon', 'Odds_Price_canon', 'Limit_canon'], inplace=True)
+
+      
                 df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
                 df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
                 df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
