@@ -50,7 +50,7 @@ SPORTS = {
 
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','betfair_ex_eu','betfair_sb_uk','betfair_ex_uk','lowvig','betonlineag','matchbook']
+SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','smarkets','betfair_ex_eu','"betfair_ex_uk','betfair_ex_au','lowvig','betonlineag','matchbook']
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
@@ -563,7 +563,7 @@ def normalize_book_key(raw_key, sharp_books, rec_books):
         if sharp in raw_key:
             return sharp
 
-    # Default: return raw key
+    # ✅ Final fallback — return normalized key as-is
     return raw_key
 
 
