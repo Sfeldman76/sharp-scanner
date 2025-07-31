@@ -2760,8 +2760,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     for g in previous_map.values():
         for book in g.get('bookmakers', []):
             
-            bookmaker_raw = book.get('key', '').lower()
-            book_key = normalize_book_name(bookmaker_raw, bookmaker_raw)
+           
+            book_key_raw = book.get('key', '').lower()
+            book_key = normalize_book_name(book_key_raw, book_key_raw)
+            bookmaker = book_key  # Use the normalized book key as the bookmaker
 
             for market in book.get('markets', []):
                 mtype = market.get('key')
