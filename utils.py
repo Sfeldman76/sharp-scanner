@@ -101,19 +101,10 @@ def ensure_columns(df, required_cols, fill_value=None):
     return df
 
 def normalize_book_name(book: str, bookmaker: str) -> str:
-    if pd.isna(bookmaker):
-        return book.lower() if isinstance(book, str) else book
-
-    bookmaker = bookmaker.lower()
-    book = book.lower() if isinstance(book, str) else book
-
-    # ✅ Normalize Betfair books based on bookmaker value
-    if bookmaker.startswith("betfair_ex_"):
-        region = bookmaker.split("_")[-1]
-        return f"betfair_{region}"
-
-    # Fallback
+    if isinstance(book, str):
+        return book.lower().strip()
     return book
+
 
 
 def normalize_team(t):
