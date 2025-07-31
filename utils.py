@@ -2048,17 +2048,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_full_market['Bookmaker'] = df_full_market['Bookmaker'].str.lower().str.strip()
                 
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']],
-                    on=['Team_Key', 'Bookmaker'],  # Add Bookmaker here
+                    df_full_market[['Team_Key', 'Bookmaker', 'Value']],
+                    on=['Team_Key', 'Bookmaker'],
                     how='left',
                     suffixes=('', '_opponent')
                 )
-
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse['Limit'] = df_inverse['Limit'].fillna(0)
-                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
-
+                
+                # Flip value from canonical side
+                df_inverse['Value'] = df_inverse['Value_opponent'])
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
           
                 # Optional: Verify if any inverse rows are missing a 'Limit' value
                 missing_limit = df_inverse['Limit'].isna().sum()
@@ -2119,17 +2117,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_full_market['Bookmaker'] = df_full_market['Bookmaker'].str.lower().str.strip()
                 
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']],
-                    on=['Team_Key', 'Bookmaker'],  # Add Bookmaker here
+                    df_full_market[['Team_Key', 'Bookmaker', 'Value']],
+                    on=['Team_Key', 'Bookmaker'],
                     how='left',
                     suffixes=('', '_opponent')
                 )
-
-                df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse['Limit'] = df_inverse['Limit'].fillna(0)
-                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
-
+                
+                # Flip value from canonical side
+                df_inverse['Value'] = df_inverse['Value_opponent'])
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
                
                 
                 # Optional: Verify if any inverse rows are missing a 'Limit' value
@@ -2191,19 +2187,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 # Normalize book column if needed
                 df_inverse['Bookmaker'] = df_inverse['Bookmaker'].str.lower().str.strip()
                 df_full_market['Bookmaker'] = df_full_market['Bookmaker'].str.lower().str.strip()
-                
+                  
                 df_inverse = df_inverse.merge(
-                    df_full_market[['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']],
-                    on=['Team_Key', 'Bookmaker'],  # Add Bookmaker here
+                    df_full_market[['Team_Key', 'Bookmaker', 'Value']],
+                    on=['Team_Key', 'Bookmaker'],
                     how='left',
                     suffixes=('', '_opponent')
                 )
-
+                
+                # Flip value from canonical side
                 df_inverse['Value'] = df_inverse['Value_opponent']
-                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse['Limit'] = df_inverse['Limit'].fillna(0)
+                df_inverse.drop(columns=['Value_opponent'], inplace=True, errors='ignore')
 
-                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
 
              
          
@@ -2311,7 +2306,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SmallBook_Limit_Skew',
                     'SmallBook_Heavy_Liquidity_Flag',
                     'SmallBook_Limit_Skew_Flag',
-                  
+                    'Odds_Price',
+                    'Limit'
                     
 
                 ]
@@ -2384,7 +2380,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     (df_inverse['Total_vs_Spread_ProbGap'].abs() > 0.05)
                 ).astype(int)
 
-              
+                df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
+                df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
+
+                
                 df_inverse['Is_Home_Team_Bet'] = (df_inverse['Outcome'].str.lower() == df_inverse['Home_Team_Norm'].str.lower()).astype(float)
                 df_inverse['Is_Favorite_Bet'] = (pd.to_numeric(df_inverse['Value'], errors='coerce') < 0).astype(float)
                 df_inverse['Direction_Aligned'] = np.where(
