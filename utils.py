@@ -104,11 +104,11 @@ def normalize_book_name(bookmaker: str, book: str) -> str:
     book = book.lower().strip() if isinstance(book, str) else ""
     bookmaker = bookmaker.lower().strip() if isinstance(bookmaker, str) else ""
 
-    if book.startswith("betfair_ex_"):
-        region = book.split("_")[-1]
-        return f"betfair_{region}"
-    
+    if bookmaker == "betfair" and book.startswith("betfair_ex_"):
+        return book  # e.g., betfair_ex_uk
+
     return bookmaker
+
 
 
 
@@ -2690,13 +2690,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
     df_history = df_history.sort_values('Snapshot_Timestamp')
     # Apply normalization consistently early on
-    df_history['Book'] = df_history['Book'].str.lower()
-    print("✅ Bookmaker before normalization:", df_history['Bookmaker'].unique())
-    print(df_history[df_history['Bookmaker'].str.contains('betfair', case=False, na=False)].head())
-
+    df_history['Book'] = df_history['Book'].str.lower().str.strip()
+    df_history['Bookmaker'] = df_history['Bookmaker'].str.lower().str.strip()
+    
+    # Normalize Bookmaker using Book (only overrides betfair)
     df_history['Bookmaker'] = df_history.apply(
-        lambda row: normalize_book_name(row['Bookmaker'], row.get('Book')), axis=1
+        lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')),
+        axis=1
     )
+    
+    print("✅ Bookmaker values after normalization:", df_history['Bookmaker'].unique())
+    print("✅ Sample Betfair rows:")
+    print(df_history[df_history['Bookmaker'].str.contains('betfair', case=False, na=False)].head())
 
 
 
@@ -2726,7 +2731,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     previous_odds_map = {}
     for g in previous_map.values():
         for book in g.get('bookmakers', []):
-            book_key = normalize_book_name(book.get('key', '').lower())
+            
+            bookmaker_raw = book.get('key', '').lower()
+            book_key = normalize_book_name(bookmaker_raw, bookmaker_raw)
 
             for market in book.get('markets', []):
                 mtype = market.get('key')
