@@ -2034,6 +2034,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
             
                 # Merge df_inverse with canonical rows to pull 'Value', 'Odds_Price', and 'Limit'
+                # Step 1: Merge inverse rows with canonical rows to pull relevant columns including 'Limit'
                 df_inverse = df_inverse.merge(
                     df_full_market[['Team_Key', 'Value', 'Odds_Price', 'Limit']],
                     on='Team_Key', 
@@ -2041,25 +2042,33 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     suffixes=('', '_opponent')
                 )
                 
-                # Apply proper checks for 'Limit' assignment only when valid
+                # Step 2: Copy relevant columns for the inverse row, but apply stricter checks for the 'Limit'
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
                 
-                # Ensure 'Limit' is only copied when there is a valid value in the canonical row
+                # Ensure 'Limit' is only assigned if the book is valid for limits
+                # If the book is not in SHARP_BOOKS or doesn't meet criteria, remove the limit
                 df_inverse['Limit'] = df_inverse['Limit_opponent']
-                df_inverse['Limit'] = df_inverse['Limit'].where(df_inverse['Limit'].notna(), None)  # Only keep non-null limits
                 
-                # Drop the temporary columns used during the merge
+                # For inverse rows, clear the 'Limit' when the book shouldn't have one
+                df_inverse['Limit'] = df_inverse.apply(
+                    lambda row: None if row['Book'] not in SHARP_BOOKS else row['Limit'],
+                    axis=1
+                )
+                
+                # Clean up temporary columns after merge
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
                 
-                # Check if 'Limit' column is correctly applied
+                # Check for any missing limits after the merge
                 missing_limit = df_inverse['Limit'].isna().sum()
                 if missing_limit > 0:
-                    logger.warning(f"⚠️ {missing_limit} inverse rows missing Limit value after merge.")
+                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
                 
-                # Final deduplication to ensure clean data
+                # Step 3: Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
                 
+                # Now df_inverse has properly filtered limits and other values
+
                 # Now you can proceed with the rest of your logic for inverse rows without unintended 'Limit' assignment
 
             
@@ -2110,25 +2119,37 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     suffixes=('', '_opponent')
                 )
                 
-                # Apply proper checks for 'Limit' assignment only when valid
+                # Step 2: Copy relevant columns for the inverse row, but apply stricter checks for the 'Limit'
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
                 
-                # Ensure 'Limit' is only copied when there is a valid value in the canonical row
+                # Ensure 'Limit' is only assigned if the book is valid for limits
+                # If the book is not in SHARP_BOOKS or doesn't meet criteria, remove the limit
                 df_inverse['Limit'] = df_inverse['Limit_opponent']
-                df_inverse['Limit'] = df_inverse['Limit'].where(df_inverse['Limit'].notna(), None)  # Only keep non-null limits
                 
-                # Drop the temporary columns used during the merge
+                # For inverse rows, clear the 'Limit' when the book shouldn't have one
+                df_inverse['Limit'] = df_inverse.apply(
+                    lambda row: None if row['Book'] not in SHARP_BOOKS else row['Limit'],
+                    axis=1
+                )
+                
+                # Clean up temporary columns after merge
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
                 
-                # Check if 'Limit' column is correctly applied
+                # Check for any missing limits after the merge
                 missing_limit = df_inverse['Limit'].isna().sum()
                 if missing_limit > 0:
-                    logger.warning(f"⚠️ {missing_limit} inverse rows missing Limit value after merge.")
+                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
                 
-                # Final deduplication to ensure clean data
+                # Step 3: Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
                 
+                # Now df_inverse has properly filtered limits and other values
+
+                # Now you can proceed with the rest of your logic for inverse rows without unintended 'Limit' assignment
+
+            
+
                 # Now you can proceed with the rest of your logic for inverse rows without unintended 'Limit' assignment
 
 
@@ -2184,25 +2205,37 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     suffixes=('', '_opponent')
                 )
                 
-                # Apply proper checks for 'Limit' assignment only when valid
+                # Step 2: Copy relevant columns for the inverse row, but apply stricter checks for the 'Limit'
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
                 
-                # Ensure 'Limit' is only copied when there is a valid value in the canonical row
+                # Ensure 'Limit' is only assigned if the book is valid for limits
+                # If the book is not in SHARP_BOOKS or doesn't meet criteria, remove the limit
                 df_inverse['Limit'] = df_inverse['Limit_opponent']
-                df_inverse['Limit'] = df_inverse['Limit'].where(df_inverse['Limit'].notna(), None)  # Only keep non-null limits
                 
-                # Drop the temporary columns used during the merge
+                # For inverse rows, clear the 'Limit' when the book shouldn't have one
+                df_inverse['Limit'] = df_inverse.apply(
+                    lambda row: None if row['Book'] not in SHARP_BOOKS else row['Limit'],
+                    axis=1
+                )
+                
+                # Clean up temporary columns after merge
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
                 
-                # Check if 'Limit' column is correctly applied
+                # Check for any missing limits after the merge
                 missing_limit = df_inverse['Limit'].isna().sum()
                 if missing_limit > 0:
-                    logger.warning(f"⚠️ {missing_limit} inverse rows missing Limit value after merge.")
+                    logger.warning(f"⚠️ {missing_limit} inverse rows missing 'Limit' value after merge.")
                 
-                # Final deduplication to ensure clean data
+                # Step 3: Final deduplication
                 df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
                 
+                # Now df_inverse has properly filtered limits and other values
+
+                # Now you can proceed with the rest of your logic for inverse rows without unintended 'Limit' assignment
+
+            
+
                 # Now you can proceed with the rest of your logic for inverse rows without unintended 'Limit' assignment
 
             if df_inverse.empty:
