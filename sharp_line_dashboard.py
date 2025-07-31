@@ -2189,15 +2189,16 @@ def render_scanner_tab(label, sport_key, container):
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
 
+       
         from utils import normalize_book_name 
-        
+
         df_snap = pd.DataFrame([
             {
                 'Game_ID': game.get('id'),
                 'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
                 'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
                 'Bookmaker': book.get('title'),  # keep full name
-                'Book': normalize_book_name(book.get('key')),  # ✅ normalized
+                'Book': normalize_book_name(book.get('key'), book.get('title')),  # ✅ FIXED
                 'Market': market.get('key'),
                 'Outcome': outcome.get('name'),
                 'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
