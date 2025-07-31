@@ -2785,8 +2785,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
         for book in game.get('bookmakers', []):
             book_key_raw = book.get('key', '').lower()
-            
-            book_key = normalize_book_name(book_key_raw, book.get('key', ''))
+            book_key = normalize_book_name(book_key_raw, book_key_raw)
+            bookmaker = book_key  # <-- this line prevents UnboundLocalError
 
             if book_key not in SHARP_BOOKS + REC_BOOKS:
                 continue
