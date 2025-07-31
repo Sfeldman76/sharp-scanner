@@ -1221,32 +1221,28 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_open_book = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
-        .dropna(subset=['Value'])  # Only drop rows without value, leave limits alone
+        .dropna(subset=['Value', 'Limit'])
         .drop_duplicates(subset=merge_keys, keep='first')
         .loc[:, merge_keys + ['Value', 'Limit']]
-        .rename(columns={'Value': 'Open_Book_Value', 'Limit': 'Opening_Limit'})
+        .rename(columns={
+            'Value': 'Open_Book_Value',
+            'Limit': 'Opening_Limit'
+        })
     )
-    
-    # Merge to ensure we only copy 'Limit' values when valid
     df = df.merge(df_open_book, on=merge_keys, how='left')
-    
-    # After merge, ensure that if there's no 'Limit' in the row, it stays NaN (do not copy from another book)
-    df['Opening_Limit'] = df['Opening_Limit'].where(df['Opening_Limit'].notna(), None)
-    
-    # Same handling for 'Limit' in 'df_open'
+   
     df_open = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
-        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])  # Ensure all required fields exist
+        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])  # ✅ all three required
         .drop_duplicates(subset=merge_keys, keep='first')
         .loc[:, merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
-        .rename(columns={'Value': 'Open_Value', 'Odds_Price': 'Open_Odds', 'Implied_Prob': 'First_Imp_Prob'})
+        .rename(columns={
+            'Value': 'Open_Value',
+            'Odds_Price': 'Open_Odds',
+            'Implied_Prob': 'First_Imp_Prob'
+        })
     )
-    
-    # Clean up 'Limit' columns from df if they were copied incorrectly
-    df = df.drop(columns=['Limit'], errors='ignore')  # Ensure no Limit from wrong sources
-    df = df.merge(df_open, on=merge_keys, how='left')
-
     # 🧼 Clean open fields before merge to avoid _x/_y suffixes
     cols_to_clean = ['Open_Value', 'Open_Odds', 'First_Imp_Prob']
     df = df.drop(columns=[col for col in cols_to_clean if col in df.columns], errors='ignore')
@@ -1260,6 +1256,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
     missing_keys = pd.merge(df_keys, df_open_keys, on=merge_keys, how='left', indicator=True)
     missing = missing_keys[missing_keys['_merge'] == 'left_only']
+
     
     logger.info(f"🧪 Total unique (Game, Market, Outcome, Bookmaker) combos in df: {len(df_keys)}")
     logger.info(f"❌ Missing Open_Value for {len(missing)} combos in df_open")
