@@ -507,7 +507,8 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     SMALL_LIMIT_BOOKS = ['betfair_ex_uk', 'betfair_ex_eu', 'betfair_ex_au','matchbook','smarkets']
 
-   
+    if 'Bookmaker_Norm' not in df.columns:
+        df['Bookmaker_Norm'] = df['Bookmaker'].str.lower().str.strip()
     
     # Normalize and flag
     df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
