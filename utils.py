@@ -107,8 +107,8 @@ def normalize_book_name(book: str, bookmaker: str) -> str:
     bookmaker = bookmaker.lower()
     book = book.lower() if isinstance(book, str) else book
 
-    # ✅ Overwrite generic 'betfair' with region-specific name
-    if "betfair" in book and bookmaker.startswith("betfair_ex_"):
+    # ✅ Normalize Betfair books based on bookmaker value
+    if bookmaker.startswith("betfair_ex_"):
         region = bookmaker.split("_")[-1]
         return f"betfair_{region}"
 
