@@ -100,10 +100,15 @@ def ensure_columns(df, required_cols, fill_value=None):
             df[col] = fill_value
     return df
 
-def normalize_book_name(book: str, bookmaker: str) -> str:
-    if isinstance(book, str):
-        return book.lower().strip()
-    return book
+def normalize_book_name(bookmaker: str, book: str) -> str:
+    book = book.lower().strip() if isinstance(book, str) else ""
+    bookmaker = bookmaker.lower().strip() if isinstance(bookmaker, str) else ""
+
+    if book.startswith("betfair_ex_"):
+        region = book.split("_")[-1]
+        return f"betfair_{region}"
+    
+    return bookmaker
 
 
 
