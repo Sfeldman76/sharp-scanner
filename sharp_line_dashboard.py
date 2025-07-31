@@ -2870,6 +2870,7 @@ def render_scanner_tab(label, sport_key, container):
    
     
     
+        
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
             game_start = pd.to_datetime(game.get("commence_time"), utc=True) if game.get("commence_time") else pd.NaT
@@ -2884,15 +2885,17 @@ def render_scanner_tab(label, sport_key, container):
         
                     for outcome in market.get("outcomes", []):
                         price = outcome.get('point') if market['key'] != 'h2h' else outcome.get('price')
+        
                         odds_rows.append({
                             "Game": game_name,
                             "Market": market["key"],
                             "Outcome": outcome["name"],
-                            "Bookmaker": book["title"],
+                            "Bookmaker": normalize_book_name(book.get("key", ""), book.get("key", "")),  # ✅ normalized key only
                             "Value": price,
                             "Limit": outcome.get("bet_limit", 0),
                             "Game_Start": game_start
                         })
+
         
         df_odds_raw = pd.DataFrame(odds_rows)
         
