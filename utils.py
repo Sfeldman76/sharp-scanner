@@ -2045,7 +2045,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse['Limit'] = df_inverse['Limit_opponent']
+                df_inverse['Limit'] = df_inverse['Limit'].fillna(0)
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
 
           
@@ -2116,7 +2116,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse['Limit'] = df_inverse['Limit_opponent']
+                df_inverse['Limit'] = df_inverse['Limit'].fillna(0)
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
 
                
@@ -2190,7 +2190,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
                 df_inverse['Value'] = df_inverse['Value_opponent']
                 df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent']
-                df_inverse['Limit'] = df_inverse['Limit_opponent']
+                df_inverse['Limit'] = df_inverse['Limit'].fillna(0)
+
                 df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], inplace=True, errors='ignore')
 
              
