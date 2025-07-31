@@ -381,6 +381,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
    
+
    
     # Convert object columns safely
     for col in df.columns:
