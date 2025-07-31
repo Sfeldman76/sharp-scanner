@@ -2852,7 +2852,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Game_Start': event_time,
                         'Market': mtype,
                         'Outcome': label,
-                        'Bookmaker': book_title,
+                        'Bookmaker': bookmaker,
                         'Book': book_key,
                         'Value': value,
                         'Odds_Price': odds_price,
