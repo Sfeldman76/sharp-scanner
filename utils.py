@@ -19,7 +19,8 @@ import logging
 from pandas_gbq import to_gbq
 import traceback
 import pickle  # ✅ Add this at the top of your script
-
+          
+import sys
 from xgboost import XGBClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import train_test_split
@@ -2466,8 +2467,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse = compute_odds_reversal(df_inverse)
                 logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
             
+
+            
             except Exception as e:
-                logger.error(f"❌ Failed to refresh inverse rows after re-merge: {e}")
+                exc_type, exc_value, exc_traceback = sys.exc_info()
+                tb_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+                tb_str = ''.join(tb_lines)
+            
+                logger.error("❌ Failed to refresh inverse rows after re-merge.")
+                logger.error(f"🛠 Exception Type: {exc_type.__name__}")
+                logger.error(f"📍 Exception Message: {e}")
+                logger.error(f"🧵 Full Traceback:\n{tb_str}")
 
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
