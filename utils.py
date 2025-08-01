@@ -1139,7 +1139,7 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
     """
     df = df_inverse.copy()
 
-    # Normalize keys
+    # Normalize
     df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
     df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
 
@@ -1162,7 +1162,7 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
             df_all_snapshots['Outcome']
         )
 
-    # Deduplicate snapshots to latest
+    # Deduplicate to get most recent snapshot per Team_Key + Bookmaker
     df_snapshot_latest = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp', ascending=False)
@@ -1175,18 +1175,30 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
         })
     )
 
-    # Merge in opponent values
+    # Merge opponent data
     df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
 
-    # ✅ Safely update Value, Odds, and Limit
-    df['Value'] = df.get('Value_opponent', pd.Series(index=df.index)).combine_first(df.get('Value', pd.Series(index=df.index)))
-    df['Odds_Price'] = df.get('Odds_Price_opponent', pd.Series(index=df.index)).combine_first(df.get('Odds_Price', pd.Series(index=df.index)))
+    # Combine values safely
+    # Overwrite instead of combine
+    df['Value'] = df['Value_opponent']
+    df['Odds_Price'] = df['Odds_Price_opponent']
+    
+   
 
-    # No Book_opponent column — so skip book match check
-    df['Limit'] = df.get('Limit_opponent', pd.Series(index=df.index)).combine_first(df.get('Limit', pd.Series(index=df.index)))
+    # Defensive check: make sure Book column exists
+    if 'Book' not in df.columns:
+        df['Book'] = df['Bookmaker']  # fallback if Book is missing
 
-    # Clean up temporary opponent fields
-    df = df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore')
+    df['Limit'] = np.where(
+        df['Book'] == df['Book'],  # Same book, keep updated value
+        df.get('Limit_opponent', pd.Series(index=df.index)),
+        df.get('Limit', pd.Series(index=df.index))
+    )
+
+    # Clean up
+    df = df.drop(columns=[
+        'Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'
+    ], errors='ignore')
 
     return df
           
