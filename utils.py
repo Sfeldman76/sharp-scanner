@@ -1148,6 +1148,11 @@ def hydrate_inverse_rows_from_snapshot(
     Returns:
         pd.DataFrame: df_inverse with missing fields filled from df_all_snapshots.
     """
+    # Normalize before merging
+    for col in ['Outcome', 'Bookmaker']:
+        df_inverse[col] = df_inverse[col].str.lower().str.strip()
+        df_all_snapshots[col] = df_all_snapshots[col].str.lower().str.strip()
+
     snapshot_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] + fields
     snapshot_merge = df_all_snapshots[snapshot_cols].copy()
 
@@ -1162,13 +1167,13 @@ def hydrate_inverse_rows_from_snapshot(
         how='left'
     )
 
-    # Fill missing values from snapshot
+    # Fill missing fields from snapshot
     for col in fields:
         snapshot_col = f"{col}_from_snapshot"
         if snapshot_col in df_inverse.columns:
             df_inverse[col] = df_inverse[col].combine_first(df_inverse[snapshot_col])
-    
-    # Clean up snapshot merge columns
+
+    # Drop temporary columns
     df_inverse.drop(columns=[f"{col}_from_snapshot" for col in fields], inplace=True, errors='ignore')
 
     return df_inverse
