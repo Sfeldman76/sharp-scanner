@@ -1132,19 +1132,17 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
-    """
-    Rehydrates `Value`, `Odds_Price`, and `Limit` for inverse rows
-    by merging from the original historical snapshot (df_all_snapshots),
-    using Team_Key and Bookmaker as the lookup.
-    """
     df = df_inverse.copy()
 
     # Normalize
     df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
-    print("🧼 Bookmaker normalization check:")
-    print(df['Bookmaker'].unique()[:5])
-    print(df_all_snapshots['Bookmaker'].unique()[:5])
     df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
+
+    # Validate required columns exist in snapshot
+    required_cols = ['Value', 'Odds_Price', 'Limit']
+    missing_cols = [col for col in required_cols if col not in df_all_snapshots.columns]
+    if missing_cols:
+        raise KeyError(f"❌ Missing required columns in snapshot: {missing_cols}")
 
     # Build Team_Key if missing
     if 'Team_Key' not in df.columns:
@@ -1155,7 +1153,6 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
             df['Market'] + "_" + 
             df['Outcome']
         )
-
     if 'Team_Key' not in df_all_snapshots.columns:
         df_all_snapshots['Team_Key'] = (
             df_all_snapshots['Home_Team_Norm'] + "_" + 
@@ -1165,7 +1162,7 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
             df_all_snapshots['Outcome']
         )
 
-    # Deduplicate to get most recent snapshot per Team_Key + Bookmaker
+    # Deduplicate most recent snapshot per Team_Key + Bookmaker
     df_snapshot_latest = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp', ascending=False)
@@ -1178,39 +1175,32 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
         })
     )
     print("🔍 Inverse Sample Keys:")
-    print(df[['Team_Key', 'Bookmaker']].drop_duplicates().head())
+    print(df[['Team_Key', 'Bookmaker', 'Value']].drop_duplicates().head())
     
     print("🔍 Snapshot Sample Keys:")
-    print(df_all_snapshots[['Team_Key', 'Bookmaker']].drop_duplicates().head())
-    
-    # Merge opponent data
-    df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
-
-    # Combine values safely
-    # Overwrite instead of combine
-    df['Value'] = df['Value_opponent']
-    df['Odds_Price'] = df['Odds_Price_opponent']
-    
-   
-    print("✅ Value_opponent filled rows:", df['Value_opponent'].notna().sum())
-    print("✅ Odds_Price_opponent filled rows:", df['Odds_Price_opponent'].notna().sum())
-    print("✅ Limit_opponent filled rows:", df['Limit_opponent'].notna().sum())
-    
-    
-    # Defensive check: make sure Book column exists
-    if 'Book' not in df.columns:
-        df['Book'] = df['Bookmaker']  # fallback if Book is missing
-
-    df['Limit'] = np.where(
-        df['Book'] == df['Book'],  # Same book, keep updated value
-        df.get('Limit_opponent', pd.Series(index=df.index)),
-        df.get('Limit', pd.Series(index=df.index))
+    print(
+        df_all_snapshots[['Team_Key', 'Bookmaker', 'Value']]
+        .drop_duplicates()
+        .sort_values('Team_Key')
+        .head()
     )
+    # Merge
+    df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
+    # Merge snapshot latest
+    df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
+    
+    # Show side-by-side pre and post merge
+    print("🔁 Sample rows after merge:")
+    print(df[['Team_Key', 'Bookmaker', 'Value', 'Value_opponent', 'Odds_Price', 'Odds_Price_opponent', 'Limit', 'Limit_opponent']].head())
+    
+    # Safe assignment only if columns exist
+    for col in ['Value', 'Odds_Price', 'Limit']:
+        opponent_col = f"{col}_opponent"
+        if opponent_col in df.columns:
+            df[col] = df[opponent_col]
 
-    # Clean up
-    df = df.drop(columns=[
-        'Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'
-    ], errors='ignore')
+    # Drop hydrated columns
+    df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
 
     return df
           
@@ -2298,23 +2288,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         
               
                   
-                # 🧹 Drop stale enriched columns
+                # Drop old enriched columns
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
                 
-                # ✅ Rehydrate real bookmaker line data for Value, Odds_Price, Limit
+                # ✅ Hydrate value/odds/limit from historical snapshot
                 df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
-
-                # ✅ Explicitly assign opponent values (make sure to use combine_first in case some are missing)
-                df_inverse['Value'] = df_inverse['Value_opponent'].combine_first(df_inverse['Value'])
-                df_inverse['Odds_Price'] = df_inverse['Odds_Price_opponent'].combine_first(df_inverse['Odds_Price'])
-                df_inverse['Limit'] = df_inverse['Limit_opponent'].combine_first(df_inverse['Limit'])
                 
-                df_inverse.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
-                          
                 # 🔁 Merge openers/extremes
                 df_inverse = df_inverse.merge(df_open, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
                 df_inverse = df_inverse.merge(df_open_book, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
                 df_inverse = df_inverse.merge(df_extremes, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+                # ✅ Rehydrate real bookmaker line data for Value, Odds_Price, Limit
+              
                 
                 # 🔁 Re-merge team-level features
                 try:
