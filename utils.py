@@ -2249,6 +2249,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SmallBook_Limit_Skew',
                     'SmallBook_Heavy_Liquidity_Flag',
                     'SmallBook_Limit_Skew_Flag',
+                    'Odds_Price','Limit', 'Value'
                     
                     
 
@@ -2263,9 +2264,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
                 
                 # ✅ Ensure correct numeric typing (moved here, cleanly)
-                df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
-                df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
-                df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
+                #df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
+                #df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
+                #df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
                 
                 # 🔁 Merge openers/extremes
                 df_inverse = df_inverse.merge(df_open, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
