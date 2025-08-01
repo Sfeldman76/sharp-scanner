@@ -2270,7 +2270,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SmallBook_Limit_Skew',
                     'SmallBook_Heavy_Liquidity_Flag',
                     'SmallBook_Limit_Skew_Flag',
-                    'Odds_Price','Limit', 'Value'
+                    
                     
                     
 
