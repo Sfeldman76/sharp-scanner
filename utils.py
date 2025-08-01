@@ -1141,6 +1141,9 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
 
     # Normalize
     df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
+    print("🧼 Bookmaker normalization check:")
+    print(df['Bookmaker'].unique()[:5])
+    print(df_all_snapshots['Bookmaker'].unique()[:5])
     df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
 
     # Build Team_Key if missing
@@ -1174,7 +1177,12 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
             'Limit': 'Limit_opponent'
         })
     )
-
+    print("🔍 Inverse Sample Keys:")
+    print(df[['Team_Key', 'Bookmaker']].drop_duplicates().head())
+    
+    print("🔍 Snapshot Sample Keys:")
+    print(df_all_snapshots[['Team_Key', 'Bookmaker']].drop_duplicates().head())
+    
     # Merge opponent data
     df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
 
@@ -1184,7 +1192,11 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
     df['Odds_Price'] = df['Odds_Price_opponent']
     
    
-
+    print("✅ Value_opponent filled rows:", df['Value_opponent'].notna().sum())
+    print("✅ Odds_Price_opponent filled rows:", df['Odds_Price_opponent'].notna().sum())
+    print("✅ Limit_opponent filled rows:", df['Limit_opponent'].notna().sum())
+    
+    
     # Defensive check: make sure Book column exists
     if 'Book' not in df.columns:
         df['Book'] = df['Bookmaker']  # fallback if Book is missing
