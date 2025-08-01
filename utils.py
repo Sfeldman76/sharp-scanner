@@ -1185,14 +1185,9 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
         .head()
     )
     # Merge
-    df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
     # Merge snapshot latest
     df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
-    
-    # Show side-by-side pre and post merge
-    print("🔁 Sample rows after merge:")
-    print(df[['Team_Key', 'Bookmaker', 'Value', 'Value_opponent', 'Odds_Price', 'Odds_Price_opponent', 'Limit', 'Limit_opponent']].head())
-    
+   
     # Safe assignment only if columns exist
     for col in ['Value', 'Odds_Price', 'Limit']:
         opponent_col = f"{col}_opponent"
@@ -1647,11 +1642,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             pre_dedup_canon = len(df_canon)
             df_canon = df_canon.drop_duplicates(subset=dedup_keys)
             post_dedup_canon = len(df_canon)
-          
-
-            
-
-          
             
             if team_feature_map is not None and not team_feature_map.empty:
                 df_canon['Team'] = df_canon['Outcome_Norm'].str.lower().str.strip()
@@ -2785,17 +2775,36 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
                     }
-                   
-                    # ✅ Defensive check before adding the entry
-                    required_fields = ['Game_Key', 'Game', 'Book', 'Market', 'Outcome', 'Value', 'Odds_Price']
-                    if any(entry.get(f) is None for f in required_fields):
-                        logging.warning(
-                            f"⚠️ Skipping incomplete row: "
-                            f"{game_name} | {mtype} | {label} | Book: {book_key} | Value: {value} | Odds: {odds_price}"
+                    rows.append(entry)  # Append the original row first
+
+                    # === Inverse Row Handling ===
+                    if mtype in ['spreads', 'totals'] and value is not None:
+                        inverse_entry = entry.copy()
+                        inverse_entry['Outcome'] = (
+                            'under' if label == 'over' else 'over'  # totals
+                            if mtype == 'totals' else
+                            away_team if label == home_team else home_team  # spreads
                         )
-                        continue
+                        inverse_entry['Outcome'] = inverse_entry['Outcome'].strip().lower()
+                        inverse_entry['Value'] = None  # Defer until hydration
+                        inverse_entry['Odds_Price'] = None  # Defer until hydration
+                        inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_entry['Outcome']}"
+                        rows.append(inverse_entry)
                     
-                    rows.append(entry)
+                    elif mtype == 'h2h':
+                        inverse_label = away_team if label == home_team else home_team
+                        inverse_label = inverse_label.strip().lower()
+                        inverse_odds = odds_map.get((inverse_label, None))
+                        if inverse_odds is not None:
+                            inverse_entry = entry.copy()
+                            inverse_entry['Outcome'] = inverse_label
+                            inverse_entry['Outcome'] = inverse_entry['Outcome'].strip().lower()
+                            inverse_entry['Value'] = inverse_odds
+                            inverse_entry['Odds_Price'] = inverse_odds
+                            inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
+                            rows.append(inverse_entry)
+                    
+                   
 
        
                     logging.debug(
