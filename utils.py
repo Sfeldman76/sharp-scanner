@@ -1131,53 +1131,69 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def hydrate_inverse_rows_from_snapshot(
-    df_inverse: pd.DataFrame,
-    df_all_snapshots: pd.DataFrame,
-    fields: list = ['Value', 'Odds_Price', 'Limit']
-) -> pd.DataFrame:
+def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     """
-    Rehydrates missing line values (like Value, Odds_Price, Limit) for inverse rows
-    using canonical data from df_all_snapshots.
-
-    Parameters:
-        df_inverse (pd.DataFrame): Inverse rows that need line data.
-        df_all_snapshots (pd.DataFrame): Full snapshot table with all bookmaker lines.
-        fields (list): Fields to rehydrate. Default = ['Value', 'Odds_Price', 'Limit'].
-
-    Returns:
-        pd.DataFrame: df_inverse with missing fields filled from df_all_snapshots.
+    Rehydrates `Value`, `Odds_Price`, and `Limit` for inverse rows
+    by merging from the original historical snapshot (df_all_snapshots),
+    using Team_Key and Bookmaker as the lookup.
     """
-    # Normalize before merging
-    for col in ['Outcome', 'Bookmaker']:
-        df_inverse[col] = df_inverse[col].str.lower().str.strip()
-        df_all_snapshots[col] = df_all_snapshots[col].str.lower().str.strip()
+    df = df_inverse.copy()
 
-    snapshot_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker'] + fields
-    snapshot_merge = df_all_snapshots[snapshot_cols].copy()
+    # Make sure keys are normalized
+    df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
+    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
 
-    # Rename to prevent collision
-    suffix_map = {col: f"{col}_from_snapshot" for col in fields}
-    snapshot_merge.rename(columns=suffix_map, inplace=True)
+    # Build merge key
+    if 'Team_Key' not in df.columns:
+        df['Team_Key'] = (
+            df['Home_Team_Norm'] + "_" + 
+            df['Away_Team_Norm'] + "_" + 
+            df['Commence_Hour'].astype(str) + "_" +
+            df['Market'] + "_" + 
+            df['Outcome']
+        )
 
-    # Merge on key fields
-    df_inverse = df_inverse.merge(
-        snapshot_merge,
-        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-        how='left'
+    if 'Team_Key' not in df_all_snapshots.columns:
+        df_all_snapshots['Team_Key'] = (
+            df_all_snapshots['Home_Team_Norm'] + "_" + 
+            df_all_snapshots['Away_Team_Norm'] + "_" + 
+            pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h').astype(str) + "_" +
+            df_all_snapshots['Market'] + "_" + 
+            df_all_snapshots['Outcome']
+        )
+
+    # Deduplicate to get most recent line
+    df_snapshot_latest = (
+        df_all_snapshots
+        .sort_values('Snapshot_Timestamp', ascending=False)
+        .drop_duplicates(subset=['Team_Key', 'Bookmaker'], keep='first')
+        [['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']]
+        .rename(columns={
+            'Value': 'Value_opponent',
+            'Odds_Price': 'Odds_Price_opponent',
+            'Limit': 'Limit_opponent'
+        })
     )
 
-    # Fill missing fields from snapshot
-    for col in fields:
-        snapshot_col = f"{col}_from_snapshot"
-        if snapshot_col in df_inverse.columns:
-            df_inverse[col] = df_inverse[col].combine_first(df_inverse[snapshot_col])
+    # Merge
+    df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
 
-    # Drop temporary columns
-    df_inverse.drop(columns=[f"{col}_from_snapshot" for col in fields], inplace=True, errors='ignore')
+    # Assign if matched
+    df['Value'] = df['Value_opponent'].combine_first(df['Value'])
+    df['Odds_Price'] = df['Odds_Price_opponent'].combine_first(df['Odds_Price'])
+    df['Limit'] = np.where(
+        df['Book'] == df['Book_opponent'],
+        df['Limit_opponent'],
+        df['Limit']
+    )
 
-    return df_inverse
-            
+    # Clean up
+    df = df.drop(columns=[
+        'Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'
+    ], errors='ignore')
+
+    return df
+          
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
 
@@ -2269,9 +2285,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
                 
                 # ✅ Ensure correct numeric typing (moved here, cleanly)
-                #df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
-                #df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
-                #df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
+                df_inverse['Odds_Price'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce')
+                df_inverse['Limit'] = pd.to_numeric(df_inverse['Limit'], errors='coerce').fillna(0)
+                df_inverse['Value'] = pd.to_numeric(df_inverse['Value'], errors='coerce')
                 
                 # 🔁 Merge openers/extremes
                 df_inverse = df_inverse.merge(df_open, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
