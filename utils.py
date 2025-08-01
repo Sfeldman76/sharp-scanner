@@ -1139,11 +1139,11 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
     """
     df = df_inverse.copy()
 
-    # Make sure keys are normalized
+    # Normalize keys
     df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
     df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
 
-    # Build merge key
+    # Build Team_Key if missing
     if 'Team_Key' not in df.columns:
         df['Team_Key'] = (
             df['Home_Team_Norm'] + "_" + 
@@ -1162,7 +1162,7 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
             df_all_snapshots['Outcome']
         )
 
-    # Deduplicate to get most recent line
+    # Deduplicate snapshots to latest
     df_snapshot_latest = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp', ascending=False)
@@ -1175,22 +1175,18 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
         })
     )
 
-    # Merge
+    # Merge in opponent values
     df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
 
-    # Assign if matched
-    df['Value'] = df['Value_opponent'].combine_first(df['Value'])
-    df['Odds_Price'] = df['Odds_Price_opponent'].combine_first(df['Odds_Price'])
-    df['Limit'] = np.where(
-        df['Book'] == df['Book_opponent'],
-        df['Limit_opponent'],
-        df['Limit']
-    )
+    # ✅ Safely update Value, Odds, and Limit
+    df['Value'] = df.get('Value_opponent', pd.Series(index=df.index)).combine_first(df.get('Value', pd.Series(index=df.index)))
+    df['Odds_Price'] = df.get('Odds_Price_opponent', pd.Series(index=df.index)).combine_first(df.get('Odds_Price', pd.Series(index=df.index)))
 
-    # Clean up
-    df = df.drop(columns=[
-        'Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'
-    ], errors='ignore')
+    # No Book_opponent column — so skip book match check
+    df['Limit'] = df.get('Limit_opponent', pd.Series(index=df.index)).combine_first(df.get('Limit', pd.Series(index=df.index)))
+
+    # Clean up temporary opponent fields
+    df = df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore')
 
     return df
           
