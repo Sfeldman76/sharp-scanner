@@ -1281,8 +1281,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) >= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'])) &
         (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) <= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open']) + pd.Timedelta(minutes=10))
     ]
-  
+  # === Show sample rows after filtering to open snapshot window
+    logger.info("📋 Sample rows from df_open_rows (within ±10 min of open):")
+    try:
+        sample_rows = df_open_rows[
+            ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp_Open', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
+        ].sort_values('Snapshot_Timestamp').head(200)
     
+        logger.info(f"\n{sample_rows.to_string(index=False)}")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to print sample open snapshot rows: {e}")
+        
     df_open = (
         df_open_rows
         .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])
