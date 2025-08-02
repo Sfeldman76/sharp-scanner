@@ -1263,25 +1263,28 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = compute_line_resistance_flag(df, source='moves')
     df = add_minutes_to_game(df)
     
-    # ✅ Normalize merge keys before filtering and joining
+   
+    # ✅ Filter snapshot history to relevant rows
+    # ✅ Normalize Book + Bookmaker FIRST
+    df_all_snapshots['Book'] = df_all_snapshots['Book'].astype(str).str.lower().str.strip()
+    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.lower().str.strip()
+    df_all_snapshots['Bookmaker'] = df_all_snapshots.apply(
+        lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1
+    )
+    df_all_snapshots['Book'] = df_all_snapshots.apply(
+        lambda row: normalize_book_name(row.get('Book'), row.get('Bookmaker')), axis=1
+    )
+    
+    # ✅ THEN normalize merge keys for both df and df_all_snapshots
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     for col in merge_keys:
         df[col] = df[col].astype(str).str.strip().str.lower()
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
     
-    # ✅ Filter snapshot history to relevant rows
+    # ✅ Filter to only rows present in df
     relevant_keys = df[merge_keys].drop_duplicates()
     df_all_snapshots = df_all_snapshots.merge(relevant_keys, on=merge_keys, how='inner')
-    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.lower().str.strip()
-    logger.info("🧠 Computing sharp move metrics from historical snapshots...")
-    sharp_metrics_df = compute_all_sharp_metrics(df_all_snapshots)
     
-    logger.info(f"🧮 Merged sharp move metrics — {sharp_metrics_df.shape[1]} columns")
-    df = df.merge(sharp_metrics_df, on=merge_keys, how='left')
-        
-    
-
-    # ✅ Proper openers block with all needed columns
     
     # Inside the 'df_open_book' and 'df_open' merge logic:
     df_open_book = (
