@@ -1263,7 +1263,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     snapshot_counts = snapshot_counts.groupby(['Game_Key', 'Market', 'Bookmaker']).head(30)
     # Step 3: Merge df_all_snapshots with first available timestamp with both sides
     first_complete_snapshots = (
-        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
+        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 1]
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
     )
