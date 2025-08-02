@@ -606,7 +606,7 @@ def implied_prob_to_point_move(prob_delta, base_odds=-110):
     return point_equiv    
 
 
-def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None):
+def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None, opening_limit=None):
     logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
     logging.debug(f"📥 Open value: {open_val}, Open odds: {open_odds}")
     logging.debug(f"📦 Received {len(entries)} entries")
@@ -750,6 +750,7 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     logging.debug(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
     return {
         'Sharp_Move_Signal': int(move_signal > 0),
+        'Opening_Limit': opening_limit,
         'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
         'Sharp_Limit_Jump': int(limit_score >= 10000),
         'Sharp_Limit_Total': round(total_limit, 1),
@@ -2642,9 +2643,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     
                     # ✅ Only set the open value if it's not already set
                     
-                    if (game_name, mtype, label) not in line_open_map and value is not None:
-                        line_open_map[(game_name, mtype, label)] = (value, odds_price, snapshot_time)
                    
+                    if (game_name, mtype, label) not in line_open_map and value is not None:
+                        line_open_map[(game_name, mtype, label)] = (value, odds_price, limit, snapshot_time)
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
                     
                     entry = {
@@ -2666,6 +2667,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour
                     }
+                    entry['Was_Canonical'] = True            # ✅ Add this
+                    entry['Outcome_Norm'] = label      
                     rows.append(entry)  # Append the original row first
 
                     # === Inverse Row Handling ===
@@ -2679,7 +2682,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         inverse_entry['Outcome'] = inverse_entry['Outcome'].strip().lower()
                         inverse_entry['Value'] = None  # Defer until hydration
                         inverse_entry['Odds_Price'] = None  # Defer until hydration
+                        
                         inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_entry['Outcome']}"
+                        inverse_entry['Was_Canonical'] = False
+                        inverse_entry['Outcome_Norm'] = inverse_entry['Outcome']
                         rows.append(inverse_entry)
                     
                     elif mtype == 'h2h':
@@ -2692,7 +2698,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                             inverse_entry['Outcome'] = inverse_entry['Outcome'].strip().lower()
                             inverse_entry['Value'] = inverse_odds
                             inverse_entry['Odds_Price'] = inverse_odds
+                            
                             inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
+                            inverse_entry['Was_Canonical'] = False
+                            inverse_entry['Outcome_Norm'] = inverse_entry['Outcome']
                             rows.append(inverse_entry)
                     
                    
