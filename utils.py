@@ -2718,7 +2718,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
     # ✅ Convert to DataFrame AFTER all rows built
     df = pd.DataFrame(rows)
-
+    df = hydrate_inverse_rows_from_snapshot(df, df_all_snapshots)
     if df.empty:
         logging.warning("⚠️ No sharp rows built.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
