@@ -1906,11 +1906,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logger.info(f"📋 Inverse1 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             logger.info(f"🧪 Inverse rows with Open_Value: {df_inverse['Open_Value'].notnull().sum()} / {len(df_inverse)}")
             # Merge canonical model predictions into inverse rows by Outcome_Norm
-            df_inverse = df_inverse.merge(
-                df_canon[['Outcome_Norm', 'Model_Sharp_Win_Prob', 'Model_Confidence']],
-                on='Outcome_Norm', how='left',
-                suffixes=('', '_canon')
+            # Ensure the merge has correct source columns
+            df_canon_preds = (
+                df_canon[['Outcome_Norm', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
+                .drop_duplicates(subset='Outcome_Norm')
+                .rename(columns={
+                    'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_canon',
+                    'Model_Confidence': 'Model_Confidence_canon'
+                })
             )
+            
+            # Merge onto inverse using Outcome_Norm
+            df_inverse = df_inverse.merge(df_canon_preds, on='Outcome_Norm', how='left')
             
             # Flip the canonical predictions for inverse row scoring
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_canon']
