@@ -2554,8 +2554,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
 
         
-        
-
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models=None, weights=None):   
     if not current:
         logging.warning("⚠️ No current odds data provided.")
@@ -2752,7 +2750,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df = pd.DataFrame()
         summary_df = pd.DataFrame()
 
-    return df, df_history, summary_df
+    return df, df_history, summary_df   
+
 
 
 def compute_weighted_signal(row, market_weights):
