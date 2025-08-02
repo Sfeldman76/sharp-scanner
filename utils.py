@@ -1859,8 +1859,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon = df_canon.copy()
 
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
-            df_canon = df[df['Was_Canonical'] == True].copy()
-            df_inverse = df[df['Was_Canonical'] == False].copy() 
+           
+            df_inverse = df[df['Was_Canonical'] == False].copy() if 'Was_Canonical' in df.columns else pd.DataFrame()
             # 1. Copy and flip outcome for merge key
             # ✅ Hydrate inverse rows using snapshot
             df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
