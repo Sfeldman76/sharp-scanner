@@ -1276,22 +1276,28 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .reset_index(name='Num_Outcomes')
     )
     
+   
+    # Step 3: Merge df_all_snapshots with first available timestamp with both sides
     first_complete_snapshots = (
         snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
-        .rename(columns={'Snapshot_Timestamp': 'Open_Timestamp'})
     )
     
-    # Step 3: Join snapshot history with those timestamps
+    # Merge and allow ±10 minute grace window
     df_all_snapshots = df_all_snapshots.merge(
         first_complete_snapshots,
         on=['Game_Key', 'Market', 'Bookmaker'],
-        how='inner'
+        how='inner',
+        suffixes=('', '_Open')
     )
     
-    # Step 4: Filter to just the open snapshot for each side
-    df_open_rows = df_all_snapshots[df_all_snapshots['Snapshot_Timestamp'] == df_all_snapshots['Open_Timestamp']]
+    # Filter to within ±10 minutes of open timestamp
+    df_open_rows = df_all_snapshots[
+        (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) >= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'])) &
+        (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) <= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open']) + pd.Timedelta(minutes=10))
+    ]
+  
     
     df_open = (
         df_open_rows
