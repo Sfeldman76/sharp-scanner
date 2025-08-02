@@ -1239,14 +1239,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     else:
         logger.info("✅ All Game + Market + Bookmaker combinations have both outcomes present.")
     
-    # === Enrich with resistance, timing, etc.
-    df = compute_line_resistance_flag(df, source='moves')
-    df = add_minutes_to_game(df)
+   
     # Step 1: Ensure all merge keys are normalized
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     for col in merge_keys:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
-    
+   
     # Step 2: Identify first timestamp where both sides are present per Game/Market/Book
     snapshot_counts = (
         df_all_snapshots
@@ -1256,7 +1254,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .reset_index(name='Num_Outcomes')
     )
     
-   
+    snapshot_counts = snapshot_counts.groupby(['Game_Key', 'Market', 'Bookmaker']).head(30)
     # Step 3: Merge df_all_snapshots with first available timestamp with both sides
     first_complete_snapshots = (
         snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
@@ -1376,7 +1374,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # Compute deltas
     df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['Open_Value'], errors='coerce')
     
-    
+     # === Enrich with resistance, timing, etc.
+    df = compute_line_resistance_flag(df, source='moves')
+    df = add_minutes_to_game(df)
     # === Clean columns
     df.drop(columns=['First_Imp_Prob'], inplace=True, errors='ignore')
 
