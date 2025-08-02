@@ -1135,39 +1135,33 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
 def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     df = df_inverse.copy()
 
-    # Normalize
-    df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
-    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
-
-    # Validate required columns exist in snapshot
-    required_cols = ['Value', 'Odds_Price', 'Limit']
-    missing_cols = [col for col in required_cols if col not in df_all_snapshots.columns]
-    if missing_cols:
-        raise KeyError(f"❌ Missing required columns in snapshot: {missing_cols}")
+    # Normalize Bookmaker properly
+    df['Bookmaker'] = df.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
+    df_all_snapshots['Bookmaker'] = df_all_snapshots.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
 
     # Build Team_Key if missing
     if 'Team_Key' not in df.columns:
         df['Team_Key'] = (
-            df['Home_Team_Norm'] + "_" + 
-            df['Away_Team_Norm'] + "_" + 
+            df['Home_Team_Norm'] + "_" +
+            df['Away_Team_Norm'] + "_" +
             df['Commence_Hour'].astype(str) + "_" +
-            df['Market'] + "_" + 
+            df['Market'] + "_" +
             df['Outcome']
         )
     if 'Team_Key' not in df_all_snapshots.columns:
         df_all_snapshots['Team_Key'] = (
-            df_all_snapshots['Home_Team_Norm'] + "_" + 
-            df_all_snapshots['Away_Team_Norm'] + "_" + 
+            df_all_snapshots['Home_Team_Norm'] + "_" +
+            df_all_snapshots['Away_Team_Norm'] + "_" +
             pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h').astype(str) + "_" +
-            df_all_snapshots['Market'] + "_" + 
+            df_all_snapshots['Market'] + "_" +
             df_all_snapshots['Outcome']
         )
 
-    # Deduplicate most recent snapshot per Team_Key + Bookmaker
-    df_snapshot_latest = (
+    # Most recent snapshot per Team_Key + Bookmaker
+    df_latest = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp', ascending=False)
-        .drop_duplicates(subset=['Team_Key', 'Bookmaker'], keep='first')
+        .drop_duplicates(subset=['Team_Key', 'Bookmaker'])
         [['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']]
         .rename(columns={
             'Value': 'Value_opponent',
@@ -1175,29 +1169,15 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
             'Limit': 'Limit_opponent'
         })
     )
-    print("🔍 Inverse Sample Keys:")
-    print(df[['Team_Key', 'Bookmaker', 'Value']].drop_duplicates().head())
-    
-    print("🔍 Snapshot Sample Keys:")
-    print(
-        df_all_snapshots[['Team_Key', 'Bookmaker', 'Value']]
-        .drop_duplicates()
-        .sort_values('Team_Key')
-        .head()
-    )
-    # Merge
-    # Merge snapshot latest
-    df = df.merge(df_snapshot_latest, on=['Team_Key', 'Bookmaker'], how='left')
-   
-    # Safe assignment only if columns exist
+
+    df = df.merge(df_latest, on=['Team_Key', 'Bookmaker'], how='left')
+
     for col in ['Value', 'Odds_Price', 'Limit']:
-        opponent_col = f"{col}_opponent"
-        if opponent_col in df.columns:
-            df[col] = df[opponent_col]
+        opp_col = f"{col}_opponent"
+        if opp_col in df.columns:
+            df[col] = df[opp_col]
 
-    # Drop hydrated columns
     df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
-
     return df
           
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
