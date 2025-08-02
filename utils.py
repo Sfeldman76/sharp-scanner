@@ -1221,16 +1221,23 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info(f"🧪 Unique outcomes in snapshot: {df_all_snapshots['Outcome'].nunique()} — {df_all_snapshots['Outcome'].unique().tolist()}")
     logger.info(f"🧪 Unique books in snapshot: {df_all_snapshots['Bookmaker'].nunique()} — {df_all_snapshots['Bookmaker'].unique().tolist()}")
     
-    # ✅ Count outcomes per Game + Market + Bookmaker
+    # ✅ Build Game_Key_Base for outcome-agnostic grouping
+    df_all_snapshots['Game_Key_Base'] = (
+        df_all_snapshots['Home_Team_Norm'].astype(str).str.strip().str.lower() + "_" +
+        df_all_snapshots['Away_Team_Norm'].astype(str).str.strip().str.lower() + "_" +
+        pd.to_datetime(df_all_snapshots['Game_Start'], errors='coerce', utc=True).dt.floor('h').astype(str) + "_" +
+        df_all_snapshots['Market'].astype(str).str.strip().str.lower()
+    )
+    
+    # ✅ Count unique outcomes per Game/Market/Bookmaker using Game_Key_Base
     outcome_counts = (
         df_all_snapshots
-        .groupby(['Game_Key', 'Market', 'Bookmaker'])['Outcome']
+        .groupby(['Game_Key_Base', 'Market', 'Bookmaker'])['Outcome']
         .nunique()
         .reset_index()
         .rename(columns={'Outcome': 'Num_Outcomes'})
     )
     
-    # ✅ Log any books missing one side of market
     # ✅ Log any books missing one side of market
     missing_outcomes = outcome_counts[outcome_counts['Num_Outcomes'] < 2]
     if not missing_outcomes.empty:
@@ -1238,8 +1245,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         logger.debug(f"{missing_outcomes.head(10).to_string(index=False)}")
     else:
         logger.info("✅ All Game + Market + Bookmaker combinations have both outcomes present.")
-    
-   
+       
     # Step 1: Ensure all merge keys are normalized
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     for col in merge_keys:
