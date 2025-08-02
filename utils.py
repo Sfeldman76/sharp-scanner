@@ -1272,7 +1272,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # ✅ Filter snapshot history to relevant rows
     relevant_keys = df[merge_keys].drop_duplicates()
     df_all_snapshots = df_all_snapshots.merge(relevant_keys, on=merge_keys, how='inner')
-    
+    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.lower().str.strip()
     logger.info("🧠 Computing sharp move metrics from historical snapshots...")
     sharp_metrics_df = compute_all_sharp_metrics(df_all_snapshots)
     
@@ -2736,6 +2736,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_entry['Outcome']}"
                         inverse_entry['Was_Canonical'] = False
                         inverse_entry['Outcome_Norm'] = inverse_entry['Outcome']
+                        entry['Book'] = normalize_book_name(book_key_raw, book_key_raw)
+                        entry['Bookmaker'] = normalize_book_name(book_key_raw, book_key_raw)
                         rows.append(inverse_entry)
                     
                     elif mtype == 'h2h':
