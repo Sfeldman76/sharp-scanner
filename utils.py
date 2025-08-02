@@ -1262,30 +1262,50 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # === Enrich with resistance, timing, etc.
     df = compute_line_resistance_flag(df, source='moves')
     df = add_minutes_to_game(df)
-    
-   
-    # ✅ Filter snapshot history to relevant rows
-    # ✅ Normalize Book + Bookmaker FIRST
-    df_all_snapshots['Book'] = df_all_snapshots['Book'].astype(str).str.lower().str.strip()
-    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.lower().str.strip()
-    df_all_snapshots['Bookmaker'] = df_all_snapshots.apply(
-        lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1
-    )
-    df_all_snapshots['Book'] = df_all_snapshots.apply(
-        lambda row: normalize_book_name(row.get('Book'), row.get('Bookmaker')), axis=1
-    )
-    
-    # ✅ THEN normalize merge keys for both df and df_all_snapshots
+    # Step 1: Ensure all merge keys are normalized
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     for col in merge_keys:
-        df[col] = df[col].astype(str).str.strip().str.lower()
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
     
-    # ✅ Filter to only rows present in df
-    relevant_keys = df[merge_keys].drop_duplicates()
-    df_all_snapshots = df_all_snapshots.merge(relevant_keys, on=merge_keys, how='inner')
+    # Step 2: Identify first timestamp where both sides are present per Game/Market/Book
+    snapshot_counts = (
+        df_all_snapshots
+        .dropna(subset=['Outcome'])
+        .groupby(['Game_Key', 'Market', 'Bookmaker', 'Snapshot_Timestamp'])['Outcome']
+        .nunique()
+        .reset_index(name='Num_Outcomes')
+    )
     
+    first_complete_snapshots = (
+        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
+        .sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
+        .rename(columns={'Snapshot_Timestamp': 'Open_Timestamp'})
+    )
     
+    # Step 3: Join snapshot history with those timestamps
+    df_all_snapshots = df_all_snapshots.merge(
+        first_complete_snapshots,
+        on=['Game_Key', 'Market', 'Bookmaker'],
+        how='inner'
+    )
+    
+    # Step 4: Filter to just the open snapshot for each side
+    df_open_rows = df_all_snapshots[df_all_snapshots['Snapshot_Timestamp'] == df_all_snapshots['Open_Timestamp']]
+    
+    df_open = (
+        df_open_rows
+        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])
+        .drop_duplicates(subset=merge_keys)
+        .loc[:, merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
+        .rename(columns={
+            'Value': 'Open_Value',
+            'Odds_Price': 'Open_Odds',
+            'Implied_Prob': 'First_Imp_Prob'
+        })
+    )
+       
+       
     # Inside the 'df_open_book' and 'df_open' merge logic:
     df_open_book = (
         df_all_snapshots
@@ -1300,18 +1320,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     )
     df = df.merge(df_open_book, on=merge_keys, how='left')
    
-    df_open = (
-        df_all_snapshots
-        .sort_values('Snapshot_Timestamp')
-        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])  # ✅ all three required
-        .drop_duplicates(subset=merge_keys, keep='first')
-        .loc[:, merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
-        .rename(columns={
-            'Value': 'Open_Value',
-            'Odds_Price': 'Open_Odds',
-            'Implied_Prob': 'First_Imp_Prob'
-        })
-    )
+    # ✅ CORRECT ORDER
+    # Step 2: Then filter snapshots for any other use (metrics, enrichment, etc.)
+    relevant_keys = df[merge_keys].drop_duplicates()
+    df_all_snapshots = df_all_snapshots.merge(relevant_keys, on=merge_keys, how='inner')
     # 🧼 Clean open fields before merge to avoid _x/_y suffixes
     cols_to_clean = ['Open_Value', 'Open_Odds', 'First_Imp_Prob']
     df = df.drop(columns=[col for col in cols_to_clean if col in df.columns], errors='ignore')
@@ -2632,32 +2644,16 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 mtype = market.get('key', '').strip().lower()
                 if mtype not in ['spreads', 'totals', 'h2h']:
                     continue
-
-                canonical_outcomes = []
-                odds_map = {}
                 for o in market.get('outcomes', []):
                     label = normalize_label(o.get('name', ''))
                     point = o.get('point')
-                    price = o.get('price')
-                    canonical_outcomes.append(o)
-                    odds_map[(label, point)] = price
-
-                for o in canonical_outcomes:
-                    label = normalize_label(o.get('name', ''))
-                    point = o.get('point')
-                    price = o.get('price')
-                    value = price if mtype == 'h2h' else point
-                    odds_price = price if mtype == 'h2h' else odds_map.get((label, point))
+                    odds_price = o.get('price')
+                    value = odds_price if mtype == 'h2h' else point
                     limit = o.get('bet_limit')
-
-                    open_val = old_val_map.get((game_name, mtype, label, book_key))
-                    open_odds = old_odds_map.get((game_name, mtype, label, book_key))
-
-                    # ✅ Key now includes Book
-                    if (game_name, mtype, label, book_key) not in line_open_map and value is not None:
-                        line_open_map[(game_name, mtype, label, book_key)] = (value, odds_price, limit, snapshot_time)
-
+                
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
+                    team_key = game_key
+                
                     entry = {
                         'Sport': sport_key.upper(),
                         'Game_Key': game_key,
@@ -2671,54 +2667,32 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Book': book_key,
                         'Value': value,
                         'Odds_Price': odds_price,
-                        'Open_Odds': open_odds,
                         'Limit': limit,
                         'Old Value': None,
                         'Home_Team_Norm': home_team,
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour,
-                        'Was_Canonical': True,
-                        'Team_Key': f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
+                        'Was_Canonical': None,  # To be set later based on side
+                        'Team_Key': team_key,
                     }
                     rows.append(entry)
-
-                    # ✅ Inverse row generation (rehydrated later)
-                    if mtype in ['spreads', 'totals'] and value is not None:
-                        inverse_label = (
-                            'under' if label == 'over' else 'over'
-                            if mtype == 'totals' else
-                            away_team if label == home_team else home_team
-                        )
-                        inverse_label = inverse_label.strip().lower()
-
-                        inverse_entry = entry.copy()
-                        inverse_entry['Outcome'] = inverse_label
-                        inverse_entry['Outcome_Norm'] = inverse_label
-                        inverse_entry['Value'] = None
-                        inverse_entry['Odds_Price'] = None
-                        inverse_entry['Was_Canonical'] = False
-                        inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
-                        inverse_entry['Team_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
-                        rows.append(inverse_entry)
-
-                    elif mtype == 'h2h':
-                        inverse_label = away_team if label == home_team else home_team
-                        inverse_label = inverse_label.strip().lower()
-                        inverse_odds = odds_map.get((inverse_label, None))
-                        if inverse_odds is not None:
-                            inverse_entry = entry.copy()
-                            inverse_entry['Outcome'] = inverse_label
-                            inverse_entry['Outcome_Norm'] = inverse_label
-                            inverse_entry['Value'] = inverse_odds
-                            inverse_entry['Odds_Price'] = inverse_odds
-                            inverse_entry['Was_Canonical'] = False
-                            inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
-                            inverse_entry['Team_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
-                            rows.append(inverse_entry)
-
-    # ✅ Convert to DataFrame AFTER all rows built
+                    
     df = pd.DataFrame(rows)
-    
+    if not df.empty:
+        df['Was_Canonical'] = False
+        df.loc[
+            (df['Market'] == 'totals') & (df['Outcome_Norm'] == 'over'),
+            'Was_Canonical'
+        ] = True
+        df.loc[
+            (df['Market'] == 'spreads') & (df['Value'] < 0),
+            'Was_Canonical'
+        ] = True
+        df.loc[
+            (df['Market'] == 'h2h') & (df['Value'] < 0),
+            'Was_Canonical'
+        ] = True
+        
     if df.empty:
         logging.warning("⚠️ No sharp rows built.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
