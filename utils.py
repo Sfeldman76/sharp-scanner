@@ -1285,12 +1285,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_open_book = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp')
-        .dropna(subset=['Value', 'Limit'])
+        .dropna(subset=['Value'])
         .drop_duplicates(subset=merge_keys, keep='first')
-        .loc[:, merge_keys + ['Value', 'Limit']]
+        .loc[:, merge_keys + ['Value']]
         .rename(columns={
             'Value': 'Open_Book_Value',
-            'Limit': 'Opening_Limit'
+            
         })
     )
     df = df.merge(df_open_book, on=merge_keys, how='left')
