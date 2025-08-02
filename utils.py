@@ -1246,60 +1246,50 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     else:
         logger.info("✅ All Game + Market + Bookmaker combinations have both outcomes present.")
        
-    # Step 1: Ensure all merge keys are normalized
+    # Step 1: Normalize merge keys
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     for col in merge_keys:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
-   
-    # Step 2: Identify first timestamp where both sides are present per Game/Market/Book
+    
+    # Step 2: Identify first timestamp where both sides are present
     snapshot_counts = (
         df_all_snapshots
-        .dropna(subset=['Outcome'])
         .groupby(['Game_Key', 'Market', 'Bookmaker', 'Snapshot_Timestamp'])['Outcome']
         .nunique()
         .reset_index(name='Num_Outcomes')
     )
-    logger.info("📋 Sample of raw df_all_snapshots before open detection:")
-    try:
-        snapshot_sample = df_all_snapshots[
-            ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
-        ].sort_values('Snapshot_Timestamp').head(100)
-        logger.info(f"\n{snapshot_sample.to_string(index=False)}")
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to print snapshot sample: {e}")
     
-    snapshot_counts = snapshot_counts.groupby(['Game_Key', 'Market', 'Bookmaker']).head(30)
-    # Step 3: Merge df_all_snapshots with first available timestamp with both sides
-    first_complete_snapshots = (
-        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 1]
+    first_complete_timestamps = (
+        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
+        .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
     )
     
-    # Merge and allow ±10 minute grace window
+    # Step 3: Merge that back to full snapshot data
     df_all_snapshots = df_all_snapshots.merge(
-        first_complete_snapshots,
+        first_complete_timestamps,
         on=['Game_Key', 'Market', 'Bookmaker'],
-        how='inner',
-        suffixes=('', '_Open')
+        how='inner'
     )
     
-    # Filter to within ±10 minutes of open timestamp
+    # Step 4: Filter for rows within ±10 minutes of open timestamp
     df_open_rows = df_all_snapshots[
         (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) >= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'])) &
         (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) <= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open']) + pd.Timedelta(minutes=10))
     ]
-  # === Show sample rows after filtering to open snapshot window
+    
+    # ✅ Step 5: Actually log open row content
     logger.info("📋 Sample rows from df_open_rows (within ±10 min of open):")
     try:
         sample_rows = df_open_rows[
             ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp_Open', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
         ].sort_values('Snapshot_Timestamp').head(200)
-    
         logger.info(f"\n{sample_rows.to_string(index=False)}")
     except Exception as e:
         logger.warning(f"⚠️ Failed to print sample open snapshot rows: {e}")
-        
+    
+    # Step 6: Build df_open
     df_open = (
         df_open_rows
         .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])
@@ -1311,7 +1301,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             'Implied_Prob': 'First_Imp_Prob'
         })
     )
-       
+   
+   
        
     # Inside the 'df_open_book' and 'df_open' merge logic:
     df_open_book = (
