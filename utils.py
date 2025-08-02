@@ -1905,9 +1905,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 )
             logger.info(f"📋 Inverse1 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             logger.info(f"🧪 Inverse rows with Open_Value: {df_inverse['Open_Value'].notnull().sum()} / {len(df_inverse)}")
-           
-            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob']
-            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence']
+            # Merge canonical model predictions into inverse rows by Outcome_Norm
+            df_inverse = df_inverse.merge(
+                df_canon[['Outcome_Norm', 'Model_Sharp_Win_Prob', 'Model_Confidence']],
+                on='Outcome_Norm', how='left',
+                suffixes=('', '_canon')
+            )
+            
+            # Flip the canonical predictions for inverse row scoring
+            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_canon']
+            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence_canon']
+            
+            # Drop canon fields after inversion
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_canon', 'Model_Confidence_canon'], inplace=True)
+            # Now drop the canon columns so they don't persist
+                 
+            
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
             logger.info(f"📋 Inverse2 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
