@@ -1945,7 +1945,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # === Core deltas and magnitude features
             df_inverse['Line_Move_Magnitude'] = pd.to_numeric(df_inverse['Line_Delta'], errors='coerce').abs()
             df_inverse['Line_Magnitude_Abs'] = df_inverse['Line_Move_Magnitude']  # Alias
-             df_inverse['Sharp_Line_Delta'] = np.where(
+            df_inverse['Sharp_Line_Delta'] = np.where(
                 df_inverse['Is_Sharp_Book'] == 1,
                 df_inverse['Line_Delta'],
                 0
