@@ -2556,66 +2556,50 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         
         
 
-
-def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models, weights=None):   
-    
+def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models=None, weights=None):   
     if not current:
         logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
+
     df_history = read_recent_sharp_master_cached(hours=72)
     df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
     df_history = df_history.sort_values('Snapshot_Timestamp')
-    # Apply normalization consistently early on
-    print("🧪 df_history columns:", df_history.columns.tolist())
+
+    # ✅ Normalize book and bookmaker
     df_history['Book'] = df_history['Book'].str.lower().str.strip()
     df_history['Bookmaker'] = df_history['Bookmaker'].str.lower().str.strip()
-    
-    # Normalize Bookmaker using Book (only overrides betfair)
-    df_history['Bookmaker'] = df_history.apply(
-        lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')),
-        axis=1
-    )
-    
-    print("✅ Bookmaker values after normalization:", df_history['Bookmaker'].unique())
-    print("✅ Sample Betfair rows:")
-    print(df_history[df_history['Bookmaker'].str.contains('betfair', case=False, na=False)].head())
+    df_history['Game'] = df_history['Game'].str.strip().str.lower()  # ✅ Normalize Game name for mapping
+    print("🧪 df_history columns:", df_history.columns.tolist())
 
-
-
-
-   
-    # ✅ Build old value map using first recorded value per outcome
+    # ✅ Build old value/odds maps using normalized keys
     old_val_map = (
         df_history
         .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
         .set_index(['Game', 'Market', 'Outcome', 'Book'])['Value']
         .to_dict()
     )
-    # ✅ Build old odds map using first recorded odds per outcome
     old_odds_map = (
         df_history
-        .dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Odds_Price'])
+        .dropna(subset=['Odds_Price'])
         .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
         .set_index(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
         .to_dict()
     )
+
     rows = []
     sharp_limit_map = defaultdict(lambda: defaultdict(list))
     sharp_total_limit_map = defaultdict(int)
     sharp_lines = {}
-    line_open_map = {}
-    
+    line_open_map = {}  # ✅ Will now use Book-level keys
+
     previous_odds_map = {}
     for g in previous_map.values():
         for book in g.get('bookmakers', []):
-            
-           
             book_key_raw = book.get('key', '').lower()
             book_key = normalize_book_name(book_key_raw, book_key_raw)
-            bookmaker = book_key  # Use the normalized book key as the bookmaker
 
             for market in book.get('markets', []):
                 mtype = market.get('key')
@@ -2630,7 +2614,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         if not home_team or not away_team:
             continue
 
-        game_name = f"{home_team.title()} vs {away_team.title()}"
+        game_name = f"{home_team.title()} vs {away_team.title()}".strip().lower()  # ✅ Normalize for matching
         event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
         game_hour = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
         gid = game.get('id')
@@ -2638,66 +2622,41 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         for book in game.get('bookmakers', []):
             book_key_raw = book.get('key', '').lower()
             book_key = normalize_book_name(book_key_raw, book_key_raw)
-            bookmaker = book_key  # <-- this line prevents UnboundLocalError
+            bookmaker = book_key
 
             if book_key not in SHARP_BOOKS + REC_BOOKS:
                 continue
-
-            book_title = book.get('title', book_key)
 
             for market in book.get('markets', []):
                 mtype = market.get('key', '').strip().lower()
                 if mtype not in ['spreads', 'totals', 'h2h']:
                     continue
 
-                
-                seen = {}
                 canonical_outcomes = []
                 odds_map = {}
-                #logger.debug(f"Game: {game['home_team']} vs {game['away_team']} | Market: {mtype}")
-                # === First pass to deduplicate and store odds
                 for o in market.get('outcomes', []):
-                    logging.debug(f"  Outcome: {o.get('name')} | Point: {o.get('point')} | Price: {o.get('price')}")
                     label = normalize_label(o.get('name', ''))
                     point = o.get('point')
                     price = o.get('price')
-                    #logging.debug(f"[{mtype}] Outcome: {label} | Point: {point} | Price: {price}")
-                
-                    key = (label, point)
-                    # Keep all outcomes — no deduping
                     canonical_outcomes.append(o)
-                    odds_map[(normalize_label(o['name']), o.get('point'))] = o.get('price')
+                    odds_map[(label, point)] = price
 
-                
-                # === Second pass to build entries
                 for o in canonical_outcomes:
-                    label = normalize_label(o.get('name', ''))  # ✅ FIXED: per-outcome label
-                    raw_label = o.get('name', '').strip().lower()
+                    label = normalize_label(o.get('name', ''))
                     point = o.get('point')
                     price = o.get('price')
-                
-                    if mtype == 'h2h':
-                        value = price
-                        odds_price = price
-                    else:
-                        value = point
-                        odds_price = odds_map.get((label, point))  # ✅ ensure odds match label+point
-                    #logging.debug(f"{label} {point}: odds_price = {odds_price}")
-
-                
+                    value = price if mtype == 'h2h' else point
+                    odds_price = price if mtype == 'h2h' else odds_map.get((label, point))
                     limit = o.get('bet_limit')
-                    prev_key = (game.get('home_team'), game.get('away_team'), mtype, label, book_key)
-                    # ⚠️ Read the open value *before* possibly writing it
+
                     open_val = old_val_map.get((game_name, mtype, label, book_key))
                     open_odds = old_odds_map.get((game_name, mtype, label, book_key))
-                    
-                    # ✅ Only set the open value if it's not already set
-                    
-                   
-                    if (game_name, mtype, label) not in line_open_map and value is not None:
-                        line_open_map[(game_name, mtype, label)] = (value, odds_price, limit, snapshot_time)
+
+                    # ✅ Key now includes Book
+                    if (game_name, mtype, label, book_key) not in line_open_map and value is not None:
+                        line_open_map[(game_name, mtype, label, book_key)] = (value, odds_price, limit, snapshot_time)
+
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
-                    
                     entry = {
                         'Sport': sport_key.upper(),
                         'Game_Key': game_key,
@@ -2706,40 +2665,41 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Game_Start': event_time,
                         'Market': mtype,
                         'Outcome': label,
+                        'Outcome_Norm': label,
                         'Bookmaker': bookmaker,
                         'Book': book_key,
                         'Value': value,
                         'Odds_Price': odds_price,
-                        'Open_Odds': open_odds,  # ✅ insert here
+                        'Open_Odds': open_odds,
                         'Limit': limit,
                         'Old Value': None,
                         'Home_Team_Norm': home_team,
                         'Away_Team_Norm': away_team,
-                        'Commence_Hour': game_hour
+                        'Commence_Hour': game_hour,
+                        'Was_Canonical': True,
+                        'Team_Key': f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
                     }
-                    entry['Was_Canonical'] = True            # ✅ Add this
-                    entry['Outcome_Norm'] = label      
-                    rows.append(entry)  # Append the original row first
+                    rows.append(entry)
 
-                    # === Inverse Row Handling ===
+                    # ✅ Inverse row generation (rehydrated later)
                     if mtype in ['spreads', 'totals'] and value is not None:
-                        inverse_entry = entry.copy()
-                        inverse_entry['Outcome'] = (
-                            'under' if label == 'over' else 'over'  # totals
+                        inverse_label = (
+                            'under' if label == 'over' else 'over'
                             if mtype == 'totals' else
-                            away_team if label == home_team else home_team  # spreads
+                            away_team if label == home_team else home_team
                         )
-                        inverse_entry['Outcome'] = inverse_entry['Outcome'].strip().lower()
-                        inverse_entry['Value'] = None  # Defer until hydration
-                        inverse_entry['Odds_Price'] = None  # Defer until hydration
-                        
-                        inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_entry['Outcome']}"
+                        inverse_label = inverse_label.strip().lower()
+
+                        inverse_entry = entry.copy()
+                        inverse_entry['Outcome'] = inverse_label
+                        inverse_entry['Outcome_Norm'] = inverse_label
+                        inverse_entry['Value'] = None
+                        inverse_entry['Odds_Price'] = None
                         inverse_entry['Was_Canonical'] = False
-                        inverse_entry['Outcome_Norm'] = inverse_entry['Outcome']
-                        entry['Book'] = normalize_book_name(book_key_raw, book_key_raw)
-                        entry['Bookmaker'] = normalize_book_name(book_key_raw, book_key_raw)
+                        inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
+                        inverse_entry['Team_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
                         rows.append(inverse_entry)
-                    
+
                     elif mtype == 'h2h':
                         inverse_label = away_team if label == home_team else home_team
                         inverse_label = inverse_label.strip().lower()
@@ -2747,103 +2707,51 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         if inverse_odds is not None:
                             inverse_entry = entry.copy()
                             inverse_entry['Outcome'] = inverse_label
-                            inverse_entry['Outcome'] = inverse_entry['Outcome'].strip().lower()
+                            inverse_entry['Outcome_Norm'] = inverse_label
                             inverse_entry['Value'] = inverse_odds
                             inverse_entry['Odds_Price'] = inverse_odds
-                            
-                            inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
                             inverse_entry['Was_Canonical'] = False
-                            inverse_entry['Outcome_Norm'] = inverse_entry['Outcome']
+                            inverse_entry['Game_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
+                            inverse_entry['Team_Key'] = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{inverse_label}"
                             rows.append(inverse_entry)
-                    
-                   
 
-       
-                    logging.debug(
-                        f"[{mtype.upper()}] {label} | Book: {book_key} | Value: {value} | Odds_Price: {odds_price} | "
-                        f"Limit: {limit} | Game: {game_name}"
-                    )
-                    if value is not None:
-                        sharp_lines[(game_name, mtype, label)] = entry
-                        if not event_time:
-                            logging.warning(f"⚠️ No Game_Start (event_time) for {game_name} — hybrid timing may default to 'unknown'")
-                        sharp_limit_map[(game_name, mtype)][label].append((limit, value, odds_price, snapshot_time, event_time))
+    # ✅ Convert to DataFrame AFTER all rows built
+    df = pd.DataFrame(rows)
 
-                        if event_time is None:
-                            logging.warning(
-                                f"⚠️ NULL Game_Start while appending to sharp_limit_map: "
-                                f"Game={game_name}, Market={mtype}, Outcome={label}, Time={snapshot_time}"
-                            )
-                        else:
-                            logging.debug(
-                                f"📌 Appended to sharp_limit_map: Game={game_name}, Market={mtype}, Outcome={label}, "
-                                f"Time={snapshot_time}, Game_Start={event_time}"
-                            )
-             
-                        if book_key in SHARP_BOOKS:
-                            sharp_total_limit_map[(game_name, mtype, label)] += limit or 0
-                        if (game_name, mtype, label) not in line_open_map:
-                            line_open_map[(game_name, mtype, label)] = (value, snapshot_time)
-
-                     
-    pre_dedup = len(rows)
-    rows_df = pd.DataFrame(rows).drop_duplicates()
-    rows_df = (
-        rows_df
-        .sort_values('Time')
-        .drop_duplicates(subset=['Game', 'Book', 'Market', 'Outcome'], keep='last')
-    )
-    rows = rows_df.to_dict(orient='records')
-    if not rows:
-        logging.warning("⚠️ No valid sharp rows after deduplication — skipping scoring.")
+    if df.empty:
+        logging.warning("⚠️ No sharp rows built.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
- 
+    # ✅ Apply model scoring
+    if trained_models is None:
+        trained_models = get_trained_models(sport_key)
 
-    
-    # ✅ Create df before checking for columns
-    df = pd.DataFrame(rows)
-    
-    
-    trained_models = get_trained_models(sport_key)
+    try:
+        df_all_snapshots = read_recent_sharp_master_cached(hours=72)
+        market_weights = load_market_weights_from_bq()
+        df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
 
-    if trained_models:
-        try:
-            df_all_snapshots = read_recent_sharp_master_cached(hours=72)
-            market_weights = load_market_weights_from_bq()
-            
-            df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
-            
-    
-            if not df_scored.empty:
-                df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
-                now = pd.Timestamp.utcnow()
-                df_scored['Pre_Game'] = df_scored['Game_Start'] > now
-                df_scored['Post_Game'] = ~df_scored['Pre_Game']
-                df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
-                df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
-    
-                df = df_scored.copy()
-                logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
-                summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
-            else:
-                logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
-                df = pd.DataFrame()
-                summary_df = pd.DataFrame()
-    
-        except Exception as e:
-            logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
+        if not df_scored.empty:
+            df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
+            now = pd.Timestamp.utcnow()
+            df_scored['Pre_Game'] = df_scored['Game_Start'] > now
+            df_scored['Post_Game'] = ~df_scored['Pre_Game']
+            df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
+            df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
+
+            df = df_scored.copy()
+            logging.info(f"✅ Scored {len(df)} rows using apply_blended_sharp_score()")
+            summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
+        else:
+            logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
             df = pd.DataFrame()
             summary_df = pd.DataFrame()
-  
-      
-    else:
+
+    except Exception as e:
+        logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
+        df = pd.DataFrame()
         summary_df = pd.DataFrame()
-    
-    # === Build main DataFrame
-    logging.info(f"📊 Columns after sharp scoring: {df.columns.tolist()}")
-    
-    # ✅ Final return
+
     return df, df_history, summary_df
 
 
