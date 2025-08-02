@@ -1259,6 +1259,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .nunique()
         .reset_index(name='Num_Outcomes')
     )
+    logger.info("📋 Sample of raw df_all_snapshots before open detection:")
+    try:
+        snapshot_sample = df_all_snapshots[
+            ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
+        ].sort_values('Snapshot_Timestamp').head(100)
+        logger.info(f"\n{snapshot_sample.to_string(index=False)}")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to print snapshot sample: {e}")
     
     snapshot_counts = snapshot_counts.groupby(['Game_Key', 'Market', 'Bookmaker']).head(30)
     # Step 3: Merge df_all_snapshots with first available timestamp with both sides
