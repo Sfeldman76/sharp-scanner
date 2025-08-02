@@ -1222,7 +1222,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
     )
 
-
+   
     
     # Drop merge artifacts
     try:
@@ -1234,6 +1234,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # ✅ Use passed history or fallback
     if df_all_snapshots is None:
         df_all_snapshots = read_recent_sharp_master_cached(hours=72)
+    df['Outcome'] = df['Outcome'].astype(str).str.strip().str.lower()
+    df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower()
     # Drop leftover merge artifacts
     # ✅ Sanity check: Unique outcomes and books
     logger.info(f"🧪 Unique outcomes in snapshot: {df_all_snapshots['Outcome'].nunique()} — {df_all_snapshots['Outcome'].unique().tolist()}")
@@ -1318,9 +1320,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_keys = df[merge_keys].drop_duplicates()
     df_open_keys = df_open[merge_keys].drop_duplicates()
     
+    # Merge and identify missing keys
     missing_keys = pd.merge(df_keys, df_open_keys, on=merge_keys, how='left', indicator=True)
     missing = missing_keys[missing_keys['_merge'] == 'left_only']
-
+    
+    logger.info(f"🧪 Total unique (Game, Market, Outcome, Bookmaker) combos in df: {len(df_keys)}")
+    logger.info(f"❌ Missing Open_Value for {len(missing)} combos in df_open")
+    
+    # Sample of unmatched keys for debug
+    if not missing.empty:
+        sample_missing = missing.drop(columns=['_merge']).head().to_dict(orient='records')
+        logger.warning(f"🔍 Unmatched snapshot keys (sample): {sample_missing}")
+    
     
     logger.info(f"🧪 Total unique (Game, Market, Outcome, Bookmaker) combos in df: {len(df_keys)}")
     logger.info(f"❌ Missing Open_Value for {len(missing)} combos in df_open")
