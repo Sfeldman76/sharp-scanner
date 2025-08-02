@@ -1894,11 +1894,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
             team_stat_cols = [col for col in df_canon.columns if col.startswith('Team_Past_')]
             if team_stat_cols:
-            df_inverse = df_inverse.drop(columns=team_stat_cols, errors='ignore')
-            df_inverse = df_inverse.merge(
-                df_canon[['Outcome_Norm'] + team_stat_cols].drop_duplicates(subset=['Outcome_Norm']),
-                on='Outcome_Norm', how='left'
-            )
+                df_inverse = df_inverse.drop(columns=team_stat_cols, errors='ignore')
+                df_inverse = df_inverse.merge(
+                    df_canon[['Outcome_Norm'] + team_stat_cols].drop_duplicates(subset=['Outcome_Norm']),
+                    on='Outcome_Norm', how='left'
+                )
             df_inverse[team_stat_cols] = df_canon[team_stat_cols].values   
             
             logger.info(f"📋 Inverse1 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
