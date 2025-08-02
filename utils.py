@@ -1859,11 +1859,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon = df_canon.copy()
 
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
-
+            df_canon = df[df['Was_Canonical'] == True].copy()
+            df_inverse = df[df['Was_Canonical'] == False].copy() 
             # 1. Copy and flip outcome for merge key
-            df_inverse = df_canon.copy(deep=True)
+            # ✅ Hydrate inverse rows using snapshot
+            df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
             # === Merge cross-market odds into inverse rows
-                    
+                
             # === Recompute implied probabilities from merged odds
             df_inverse['Spread_Implied_Prob'] = df_inverse['Spread_Odds'].apply(implied_prob)
             df_inverse['H2H_Implied_Prob'] = df_inverse['H2H_Odds'].apply(implied_prob)
@@ -2063,123 +2065,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Odds_Reversal_Flag'] = 0
             df_inverse['Odds_Reversal_Flag'] = df_inverse['Odds_Reversal_Flag'].fillna(0).astype(int)
 
-            if market_type == "totals":
-                # ✅ Step 1: Filter to canonical 'over' rows only
-                df_inverse = df_inverse[df_inverse['Outcome_Norm'] == 'over'].copy()
-                df_inverse['Outcome'] = 'under'
-                df_inverse['Outcome_Norm'] = 'under'
-                #if team_feature_map is not None and not team_feature_map.empty:
-                    #df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
-                    #df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
-            
-            
-                # ✅ Step 2: Rebuild keys AFTER flipping
-                df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-                df_inverse['Game_Key'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market'] + "_" +
-                    df_inverse['Outcome']
-                )
-                df_inverse['Game_Key_Base'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market']
-                )
-                df_inverse['Team_Key'] = df_inverse['Game_Key_Base'] + "_" + df_inverse['Outcome']
-            
-                # ✅ Step 3: Build df_full_market Team_Key from real snapshot
-                df_full_market['Team_Key'] = df_full_market['Game_Key_Base'] + "_" + df_full_market['Outcome']
-            
+           
                 # ✅ Step 4: Deduplicate snapshot to keep latest valid lines
                 
           
                                
-                # Final deduplication to ensure no duplicate rows exist
-                df_inverse = df_inverse.drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker', 'Outcome'])
-
-            
-
-            elif market_type == "h2h":
-                # Create canonical team column and normalize outcomes
-                df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
-                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
-                
-                # Flip outcome for inverse rows (Home becomes Away and vice versa)
-                df_inverse['Outcome'] = np.where(
-                    df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
-                    df_inverse['Away_Team_Norm'],
-                    df_inverse['Home_Team_Norm']
-                )
-                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
-                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-                
-                # Rebuild keys after flipping outcome
-                df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-                df_inverse['Game_Key'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market'] + "_" +
-                    df_inverse['Outcome']
-                )
-                df_inverse['Game_Key_Base'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market']
-                )
-                
-              
-                
-               
-                       
-
-
-
-            elif market_type == "spreads":
-                
-                df_inverse['Canonical_Team'] = df_inverse['Outcome'].str.lower().str.strip()
-                df_full_market['Outcome'] = df_full_market['Outcome'].str.lower().str.strip()
-            
-                df_inverse['Outcome'] = np.where(
-                    df_inverse['Canonical_Team'] == df_inverse['Home_Team_Norm'],
-                    df_inverse['Away_Team_Norm'],
-                    df_inverse['Home_Team_Norm']
-                )
-                df_inverse['Outcome'] = df_inverse['Outcome'].str.lower().str.strip()
-                df_inverse['Outcome_Norm'] = df_inverse['Outcome']
-                #if team_feature_map is not None and not team_feature_map.empty:
-                    #df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
-                    #df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
-                # Rebuild Game_Key and Game_Key_Base using flipped outcome
-                df_inverse['Commence_Hour'] = pd.to_datetime(df_inverse['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-                df_inverse['Game_Key'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market'] + "_" +
-                    df_inverse['Outcome']
-                )
-                df_inverse['Game_Key_Base'] = (
-                    df_inverse['Home_Team_Norm'] + "_" +
-                    df_inverse['Away_Team_Norm'] + "_" +
-                    df_inverse['Commence_Hour'].astype(str) + "_" +
-                    df_inverse['Market']
-                )
-                  # ✅ Build Team_Key for safe merge
-                
-
-
              
-         
-            
-
-            if df_inverse.empty:
-                logger.warning("⚠️ No inverse rows generated — check canonical filtering or flip logic.")
-                continue  # optional: skip this scoring loop if inverse fails
             
             # === 🔁 Re-merge opening/extremes onto inverse rows
             try:
