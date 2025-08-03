@@ -1258,13 +1258,31 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .nunique()
         .reset_index(name='Num_Outcomes')
     )
+    # === LOG SNAPSHOT CONTENT BEFORE OPEN FILTERING
+    try:
+        logger.info("🧪 Snapshot rows BEFORE open-row filtering (grouped by Game_Key + Market + Outcome):")
+        
+        snapshot_debug_sample = (
+            df_all_snapshots
+            .sort_values('Snapshot_Timestamp')
+            .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']]
+            .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+            .head(10)  # limit rows per group for debug readability
+            .reset_index(drop=True)
+        )
     
-    first_complete_timestamps = (
-        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
-        .sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
-        .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
-    )
+        if snapshot_debug_sample.empty:
+            logger.warning("⚠️ No snapshot rows found before open filtering.")
+        else:
+            logger.info(f"\n{snapshot_debug_sample.to_string(index=False)}")
+    except Exception as e:
+        logger.error(f"❌ Failed to log snapshot preview before open filtering: {e}")
+        first_complete_timestamps = (
+            snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
+            .sort_values('Snapshot_Timestamp')
+            .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
+            .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
+        )
     
     # Step 3: Merge that back to full snapshot data
     df_all_snapshots = df_all_snapshots.merge(
