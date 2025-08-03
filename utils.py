@@ -1238,14 +1238,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .rename(columns={'Outcome': 'Num_Outcomes'})
     )
     
-    # ✅ Log any books missing one side of market
-    missing_outcomes = outcome_counts[outcome_counts['Num_Outcomes'] < 2]
-    if not missing_outcomes.empty:
-        logger.warning(f"⚠️ Some (Game, Market, Bookmaker) combos are missing one side — {len(missing_outcomes)} rows")
-        logger.debug(f"{missing_outcomes.head(10).to_string(index=False)}")
-    else:
-        logger.info("✅ All Game + Market + Bookmaker combinations have both outcomes present.")
-       
+    
     # Step 1: Normalize merge keys
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     for col in merge_keys:
@@ -1259,6 +1252,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .reset_index(name='Num_Outcomes')
     )
     # === LOG SNAPSHOT CONTENT BEFORE OPEN FILTERING
+   
     try:
         logger.info("🧪 Snapshot rows BEFORE open-row filtering (grouped by Game_Key + Market + Outcome):")
         
@@ -1267,7 +1261,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             .sort_values('Snapshot_Timestamp')
             .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']]
             .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
-            .head(10)  # limit rows per group for debug readability
+            .head(5)  # limit per group for readability
             .reset_index(drop=True)
         )
     
@@ -1275,22 +1269,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logger.warning("⚠️ No snapshot rows found before open filtering.")
         else:
             logger.info(f"\n{snapshot_debug_sample.to_string(index=False)}")
+    
     except Exception as e:
         logger.error(f"❌ Failed to log snapshot preview before open filtering: {e}")
-        first_complete_timestamps = (
-            snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
-            .sort_values('Snapshot_Timestamp')
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
-            .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
-        )
-    
-    # Step 3: Merge that back to full snapshot data
-    df_all_snapshots = df_all_snapshots.merge(
-        first_complete_timestamps,
-        on=['Game_Key', 'Market', 'Bookmaker'],
-        how='inner'
-    )
-    
+        
     # Step 4: Filter for rows within ±10 minutes of open timestamp
     df_open_rows = df_all_snapshots[
         (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) >= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'])) &
