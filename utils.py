@@ -1272,7 +1272,21 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
     except Exception as e:
         logger.error(f"❌ Failed to log snapshot preview before open filtering: {e}")
-        
+    # Step 3: Identify first snapshot time where both outcomes exist
+    first_complete_snapshots = (
+        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 0]
+        .sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
+        .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
+    )
+    
+    # Step 3.5: Merge open timestamp into main snapshot table
+    df_all_snapshots = df_all_snapshots.merge(
+        first_complete_snapshots,
+        on=['Game_Key', 'Market', 'Bookmaker'],
+        how='inner',
+        suffixes=('', '_Open')
+    )   
     # Step 4: Filter for rows within ±10 minutes of open timestamp
     df_open_rows = df_all_snapshots[
         (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) >= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'])) &
