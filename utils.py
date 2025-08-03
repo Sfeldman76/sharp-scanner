@@ -1201,22 +1201,36 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Book'] = df.apply(
         lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
     )
-
    
-    
-    # Drop merge artifacts
-    try:
-        df = df.drop(columns=[col for col in df.columns if col.endswith(('_x', '_y'))], errors='ignore')
-    except Exception as e:
-        logger.error(f"❌ Cleanup failed: {e}")
-        return pd.DataFrame()
+        
 
     # ✅ Use passed history or fallback
     if df_all_snapshots is None:
         df_all_snapshots = read_recent_sharp_master_cached(hours=72)
     df['Outcome'] = df['Outcome'].astype(str).str.strip().str.lower()
-    df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower()
+    # === ✅ Log raw snapshot sample (before any filtering or grouping)
+    try:
+        logger.info("🧪 Snapshot rows (raw) — sample by Game_Key + Market + Outcome + Bookmaker:")
+        
+        raw_snapshot_sample = (
+            df_all_snapshots
+            .sort_values('Snapshot_Timestamp')
+            .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']]
+            .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+            .head(10)  # Limit per combo
+            .reset_index(drop=True)
+        )
+    
+        if raw_snapshot_sample.empty:
+            logger.warning("⚠️ Raw snapshot data is empty — check source or snapshot join.")
+        else:
+            logger.info(f"\n{raw_snapshot_sample.to_string(index=False)}")
+    
+    except Exception as e:
+        logger.error(f"❌ Failed to print raw snapshot sample: {e}")
+    df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower(
     # Drop leftover merge artifacts
+    
     # ✅ Sanity check: Unique outcomes and books
     logger.info(f"🧪 Unique outcomes in snapshot: {df_all_snapshots['Outcome'].nunique()} — {df_all_snapshots['Outcome'].unique().tolist()}")
     logger.info(f"🧪 Unique books in snapshot: {df_all_snapshots['Bookmaker'].nunique()} — {df_all_snapshots['Bookmaker'].unique().tolist()}")
@@ -1288,10 +1302,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         suffixes=('', '_Open')
     )   
     # Step 4: Filter for rows within ±10 minutes of open timestamp
-    df_open_rows = df_all_snapshots[
-        (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) >= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'])) &
-        (pd.to_datetime(df_all_snapshots['Snapshot_Timestamp']) <= pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open']) + pd.Timedelta(minutes=10))
-    ]
+    # Use closest available snapshot after open (with fallback if exact match fails)
+    df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], utc=True)
+    df_all_snapshots['Snapshot_Timestamp_Open'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'], utc=True)
+    
+    df_open_rows = (
+        df_all_snapshots
+        .assign(
+            Time_Delta=(df_all_snapshots['Snapshot_Timestamp'] - df_all_snapshots['Snapshot_Timestamp_Open']).abs()
+        )
+        .sort_values('Time_Delta')
+        .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+        .head(1)
+    )
     
     # ✅ Step 5: Actually log open row content
     logger.info("📋 Sample rows from df_open_rows (within ±10 min of open):")
@@ -2716,6 +2739,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         trained_models = get_trained_models(sport_key)
 
     try:
+        df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
+        df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower()
         df_all_snapshots = read_recent_sharp_master_cached(hours=72)
         df = hydrate_inverse_rows_from_snapshot(df, df_all_snapshots)
         market_weights = load_market_weights_from_bq()
