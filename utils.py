@@ -1295,15 +1295,18 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     )
 
     df = df.merge(df_open_book, on=merge_keys, how='left')
-   
+   # ✅ Merge keys for enrichment
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    
+    # Ensure numeric types
     df_all_snapshots['Value'] = pd.to_numeric(df_all_snapshots['Value'], errors='coerce')
     df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
-
-   
-    # Extremes per outcome + book
+    
+    # ✅ Compute extremes per outcome + book
     df_extremes = (
         df_all_snapshots
-        .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])[['Value', 'Odds_Price']]
+        .dropna(subset=['Value', 'Odds_Price'], how='all')  # only drop if both are null
+        .groupby(merge_keys)[['Value', 'Odds_Price']]
         .agg(
             Max_Value=('Value', 'max'),
             Min_Value=('Value', 'min'),
@@ -1313,21 +1316,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .reset_index()
     )
     
-    # Merge
-    line_enrichment = df_extremes.copy()
-    # ✅ Ensure df matches on merge keys
-    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+    # ✅ Normalize keys before merge
+    for col in merge_keys:
         df[col] = df[col].astype(str).str.strip().str.lower()
-    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-
+        df_extremes[col] = df_extremes[col].astype(str).str.strip().str.lower()
+    
+    # ✅ Merge extremes into main df
+    df = df.merge(df_extremes, on=merge_keys, how='left')
+    
+    # ✅ Diagnostics
     logger.info("🧪 Sample merge keys from df:")
     logger.info(df[merge_keys].drop_duplicates().head(5).to_string(index=False))
     
     logger.info("🧪 Sample merge keys from df_open_rows:")
     logger.info(df_open_rows[merge_keys].drop_duplicates().head(5).to_string(index=False))
-
-    df = df.merge(line_enrichment, on=merge_keys, how='left')
-
+    
+    # ✅ Final preview
     try:
         logger.info("🧪 Sample of enriched df after merging open values and extremes:")
         sample_cols = [
@@ -1340,7 +1344,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         logger.info(f"\n{sample.to_string(index=False)}")
     except Exception as e:
         logger.warning(f"⚠️ Failed to print enriched df sample: {e}")
-
 
     # === Compute shifts
     # === Compute Odds_Shift as change in implied probability
@@ -2913,14 +2916,20 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     return first_moves
 
 
-def detect_cross_market_sharp_support(df_moves, SHARP_BOOKS, score_threshold=15):
+def detect_cross_market_sharp_support(df_moves, SHARP_BOOKS):
     df = df_moves.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
-    df['SupportKey'] = df['Game'].astype(str) + " | " + df['Outcome'].astype(str)
+    df['SupportKey'] = df['Game'].astype(str).str.strip() + " | " + df['Outcome'].astype(str).str.strip()
 
-    df_sharp = df[df['SharpBetScore'] >= score_threshold].copy()
+    # ✅ Step 1: Define a "sharp" row: book is sharp and sharp signal exists
+    df['Is_Sharp_Row'] = (
+        df['Book'].isin(SHARP_BOOKS) & 
+        (df['Sharp_Move_Signal'].astype(bool))  # could also include other flags like Limit_Jump or Prob_Shift
+    )
 
-    # Cross-market count
+    df_sharp = df[df['Is_Sharp_Row']].copy()
+
+    # ✅ Step 2: Count cross-market sharp support per (Game + Outcome)
     market_counts = (
         df_sharp.groupby('SupportKey')['Market']
         .nunique()
@@ -2928,26 +2937,28 @@ def detect_cross_market_sharp_support(df_moves, SHARP_BOOKS, score_threshold=15)
         .rename(columns={'Market': 'CrossMarketSharpSupport'})
     )
 
-    # Sharp books per outcome
+    # ✅ Step 3: Count how many sharp books have that outcome
     sharp_book_counts = (
-        df_sharp[df_sharp['Book'].isin(SHARP_BOOKS)]
-        .groupby('SupportKey')['Book']
+        df_sharp.groupby('SupportKey')['Book']
         .nunique()
         .reset_index()
         .rename(columns={'Book': 'Unique_Sharp_Books'})
     )
 
-    # Merge and flag
+    # ✅ Step 4: Merge back to original dataframe
     df = df.merge(market_counts, on='SupportKey', how='left')
     df = df.merge(sharp_book_counts, on='SupportKey', how='left')
+
     df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
 
+    # ✅ Step 5: Final flag
     df['Is_Reinforced_MultiMarket'] = (
         (df['CrossMarketSharpSupport'] >= 2) | (df['Unique_Sharp_Books'] >= 2)
     )
 
     return df
+
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
     try:
