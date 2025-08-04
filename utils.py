@@ -2737,8 +2737,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         trained_models = get_trained_models(sport_key)
 
     try:
-        df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
-        df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower()
+       
         df_all_snapshots = read_recent_sharp_master_cached(hours=72)
         df = hydrate_inverse_rows_from_snapshot(df, df_all_snapshots)
         market_weights = load_market_weights_from_bq()
