@@ -1219,14 +1219,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
         df_all_snapshots['Implied_Prob'] = df_all_snapshots['Odds_Price'].apply(implied_prob)
 
-    # Step 2: Find first snapshot for each outcome per book
     first_outcome_snapshots = (
-        df_all_snapshots
-        .sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-        .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
-    )
-    
+    df_all_snapshots
+    .sort_values('Snapshot_Timestamp')
+    .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
+    .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
+    [['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp_Open']]  # ✅ restrict columns
+)
+
     # Step 3: Merge open timestamp into main snapshot table
     df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], utc=True)
     first_outcome_snapshots['Snapshot_Timestamp_Open'] = pd.to_datetime(first_outcome_snapshots['Snapshot_Timestamp_Open'], utc=True)
