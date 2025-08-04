@@ -2532,7 +2532,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_history['Book'] = df_history['Book'].str.lower().str.strip()
     df_history['Bookmaker'] = df_history['Bookmaker'].str.lower().str.strip()
     df_history['Game'] = df_history['Game'].str.strip().str.lower()  # ✅ Normalize Game name for mapping
-    logging.info("🧪 df_history columns:", df_history.columns.tolist())
+    logging.info(f"🧪 df_history columns: {df_history.columns.tolist()}")
+
     logging.info(f"📦 df_history shape: {df_history.shape}")
     logging.info(f"🔍 Sample rows:\n{df_history.head(30).to_string(index=False)}")
     # ✅ Build old value/odds maps using normalized keys
@@ -2652,7 +2653,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     try:
        
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
-        df = hydrate_inverse_rows_from_snapshot(df, df_all_snapshots)
+        # ✅ Separate inverse rows
+        df_inverse = df[df['Was_Canonical'] == False].copy()
+        df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
+        
+        # ✅ Update original df with hydrated inverse data
+        df.update(df_inverse)
+        
+    
+      
         missing_val = df['Value'].isna().sum()
         logger.info(f"🧪 After hydration: {missing_val} rows missing Value")
 
