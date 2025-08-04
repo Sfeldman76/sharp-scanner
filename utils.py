@@ -1503,43 +1503,46 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     def compute_odds_reversal(df, prob_threshold=0.05):
         df = df.copy()
     
-        # Market type flags
+        print("✅ compute_odds_reversal: reusing existing implied prob columns")
+    
+        # Market flags
         is_spread = df['Market'].str.lower().str.contains('spread', na=False)
         is_total = df['Market'].str.lower().str.contains('total', na=False)
         is_h2h = df['Market'].str.lower().str.contains('h2h', na=False)
     
-        # Numeric odds parsing
-        open_odds = pd.to_numeric(df['Open_Odds'], errors='coerce')
-        current_odds = pd.to_numeric(df['Odds_Price'], errors='coerce')
-        min_odds = pd.to_numeric(df['Min_Odds'], errors='coerce')
-        max_odds = pd.to_numeric(df['Max_Odds'], errors='coerce')
+        # Ensure all required columns exist
+        if 'Implied_Prob' not in df.columns:
+            df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+        if 'First_Imp_Prob' not in df.columns:
+            df['First_Imp_Prob'] = df['Implied_Prob']
+        if 'Min_Odds' not in df.columns or 'Max_Odds' not in df.columns:
+            df['Min_Odds'] = df['Odds_Price']
+            df['Max_Odds'] = df['Odds_Price']
     
-        # Implied probabilities
-        implied_prob_vec = np.vectorize(implied_prob)
-        open_prob = implied_prob_vec(open_odds)
-        current_prob = implied_prob_vec(current_odds)
-        min_prob = implied_prob_vec(min_odds)
-        max_prob = implied_prob_vec(max_odds)
+        # H2H reversal using stored implied probs
+        min_prob = df['Min_Odds'].apply(implied_prob)
+        max_prob = df['Max_Odds'].apply(implied_prob)
     
-        # H2H reversal
         valid_mask = (
-            pd.notna(open_prob) &
-            pd.notna(current_prob) &
+            pd.notna(df['First_Imp_Prob']) &
+            pd.notna(df['Implied_Prob']) &
             pd.notna(min_prob) &
             pd.notna(max_prob)
         )
     
         h2h_flag = np.zeros(len(df), dtype=int)
         h2h_flag[valid_mask] = (
-            ((open_prob[valid_mask] > min_prob[valid_mask]) &
-             (current_prob[valid_mask] <= min_prob[valid_mask] + 1e-5)) |
-            ((open_prob[valid_mask] < max_prob[valid_mask]) &
-             (current_prob[valid_mask] >= max_prob[valid_mask] - 1e-5))
+            ((df['First_Imp_Prob'][valid_mask] > min_prob[valid_mask]) &
+             (df['Implied_Prob'][valid_mask] <= min_prob[valid_mask] + 1e-5)) |
+            ((df['First_Imp_Prob'][valid_mask] < max_prob[valid_mask]) &
+             (df['Implied_Prob'][valid_mask] >= max_prob[valid_mask] - 1e-5))
         ).astype(int)
     
-        # Safe shift and flag for spreads/totals
-        prob_shift = current_prob - open_prob
-        abs_shift = np.abs(prob_shift)
+        # Reuse Implied_Prob_Shift or compute if missing
+        if 'Implied_Prob_Shift' not in df.columns:
+            df['Implied_Prob_Shift'] = df['Implied_Prob'] - df['First_Imp_Prob']
+    
+        abs_shift = df['Implied_Prob_Shift'].abs()
         spread_total_flag = (abs_shift >= prob_threshold).astype(int)
     
         # Final flag
@@ -1549,8 +1552,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             np.where(is_spread | is_total, spread_total_flag, 0)
         )
     
-        # Diagnostics (named safely to avoid overwrite)
-        df['Implied_Prob_Shift_Reversal'] = prob_shift
+        # Optional diagnostics
         df['Abs_Odds_Prob_Move'] = abs_shift
     
         return df
