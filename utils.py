@@ -182,16 +182,22 @@ def get_trained_models(sport_key):
     
 sharp_moves_cache = {}
 
+#def read_recent_sharp_master_cached(hours=72):
+    #cache_key = f"sharp_master_{hours}h"
+    
+    #if cache_key in sharp_moves_cache:
+        #return sharp_moves_cache[cache_key]
+    
+    #df = read_recent_sharp_moves(hours=hours)  # this fetches from BigQuery
+    #sharp_moves_cache[cache_key] = df
+    #return df
 def read_recent_sharp_master_cached(hours=72):
-    cache_key = f"sharp_master_{hours}h"
-    
-    if cache_key in sharp_moves_cache:
-        return sharp_moves_cache[cache_key]
-    
-    df = read_recent_sharp_moves(hours=hours)  # this fetches from BigQuery
-    sharp_moves_cache[cache_key] = df
-    return df
-    
+    # TEMP: Disable caching for debugging
+    query = f"""
+        SELECT * FROM sharp_data.sharp_moves_master
+        WHERE Snapshot_Timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+    """
+    return bq_read(query)
     
             
 def fetch_live_odds(sport_key, api_key):
