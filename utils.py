@@ -2486,12 +2486,25 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logging.info("🔎 df_canon columns: %s", sorted(df_canon.columns.tolist()))
             logging.info("🔎 df_inverse columns: %s", sorted(df_inverse.columns.tolist()))
             logging.info("🔎 Column sets equal? %s", set(df_canon.columns) == set(df_inverse.columns))
+
+                        # ✅ Auto-align if needed
+            if not columns_match:
+                all_cols = sorted(set(df_canon.columns).union(set(df_inverse.columns)))
+            
+                for col in all_cols:
+                    if col not in df_canon.columns:
+                        df_canon[col] = np.nan
+                    if col not in df_inverse.columns:
+                        df_inverse[col] = np.nan
+            
+                df_canon = df_canon[all_cols]
+                df_inverse = df_inverse[all_cols
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
            
            
             # === ✅ Combine canonical and inverse rows
-            logger.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
-            logger.info("🔍 df_scored — Sample Rows:\n%s", df_scored[[
+            logging.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
+            logging.info("🔍 df_scored — Sample Rows:\n%s", df_scored[[
                 'Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 
                 'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob'
             ]].head(5).to_string(index=False))
