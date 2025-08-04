@@ -1543,6 +1543,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             current_prob - open_prob,
             np.nan
         )
+
         abs_shift = np.abs(prob_shift)
         spread_total_flag = (abs_shift >= prob_threshold).astype(int)
     
@@ -2474,7 +2475,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 logger.error(f"🧵 Full Traceback:\n{tb_str}")
 
             # ✅ Combine canonical and inverse into one scored DataFrame
+            df_canon = df_canon.reset_index(drop=True)
+            df_inverse = df_inverse.reset_index(drop=True)
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+
+           
             # === ✅ Combine canonical and inverse rows
             logger.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
             logger.info("🔍 df_scored — Sample Rows:\n%s", df_scored[[
