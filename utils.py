@@ -1269,8 +1269,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         })
     )
 
-   
+  
     df = df.merge(df_open, on=merge_keys, how='left')
+    logger.info(f"🧪 Columns in df after merging df_open: {df.columns.tolist()}")
+
+    # Ensure Implied_Prob is available for fallback
+    if 'Implied_Prob' not in df.columns:
+        df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
+        df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+
     # Fallback: If Open_Value/First_Imp_Prob are missing, use current values
     fallback_cols = ['Open_Value', 'Open_Odds', 'First_Imp_Prob']
     fallback_map = {
