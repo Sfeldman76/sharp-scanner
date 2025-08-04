@@ -1278,13 +1278,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
         df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
 
-    # Fallback: If Open_Value/First_Imp_Prob are missing, use current values
-    fallback_cols = ['Open_Value', 'Open_Odds', 'First_Imp_Prob']
-    fallback_map = {
-        'Open_Value': 'Value',
-        'Open_Odds': 'Odds_Price',
-        'First_Imp_Prob': 'Implied_Prob'
-    }
+
     
     for col in fallback_cols:
         if col not in df.columns:
@@ -1302,7 +1296,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     df = df.merge(df_open_book, on=merge_keys, how='left')
    
-   
+    df_all_snapshots['Value'] = pd.to_numeric(df_all_snapshots['Value'], errors='coerce')
+    df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
+
    
     # Extremes per outcome + book
     df_extremes = (
