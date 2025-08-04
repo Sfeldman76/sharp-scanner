@@ -1319,7 +1319,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     try:
         sample_rows = df_open_rows[
             ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp_Open', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
-        ].sort_values('Snapshot_Timestamp').head(200)
+        ].sort_values('Snapshot_Timestamp').head(5)
         logger.info(f"\n{sample_rows.to_string(index=False)}")
     except Exception as e:
         logger.warning(f"⚠️ Failed to print sample open snapshot rows: {e}")
