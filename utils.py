@@ -1538,22 +1538,24 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         ).astype(int)
     
         # Safe probability shift
+        # === Safe elementwise subtraction, preventing NoneType errors
         prob_shift = np.where(
             pd.notna(current_prob) & pd.notna(open_prob),
             current_prob - open_prob,
             np.nan
         )
-
         abs_shift = np.abs(prob_shift)
+        
+        # Flag reversals on spreads/totals based on movement magnitude
         spread_total_flag = (abs_shift >= prob_threshold).astype(int)
-    
-        # Final flag
+        
+        # Final flag: H2H vs Spread/Total logic
         df['Odds_Reversal_Flag'] = np.where(
             is_h2h,
             h2h_flag,
             np.where(is_spread | is_total, spread_total_flag, 0)
         )
-    
+            
         # Expose diagnostics
         df['Implied_Prob_Shift'] = prob_shift
         df['Abs_Odds_Prob_Move'] = abs_shift
@@ -1940,8 +1942,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             missing_cols = [col for col in model_features if col not in df_canon.columns]
             df_canon[missing_cols] = 0
             
-            # === Align features to model input
-            X_canon = df_canon[model_features].replace({'True': 1, 'False': 0}).apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+            df_canon[model_features] = (
+                df_canon[model_features]
+                .replace({'True': 1, 'False': 0})
+                .infer_objects(copy=False)
+            )
+            
+            X_canon = df_canon[model_features]
+                                    
             # === Batch assign all new columns at once to avoid fragmentation
             new_cols = {
                 'Model_Sharp_Win_Prob': trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1],
