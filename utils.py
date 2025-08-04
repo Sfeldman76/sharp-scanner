@@ -1283,6 +1283,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = df.merge(df_open, on=merge_keys, how='left')
     df = df.merge(df_open_book, on=merge_keys, how='left')
     df = df.merge(df_extremes, on=merge_keys, how='left')
+    # === Fill fallback values where open/extreme data is missing
+    df['Open_Value'] = df['Open_Value'].fillna(df['Value'])
+    df['Open_Odds'] = df['Open_Odds'].fillna(df['Odds_Price'])
+    df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(df['Implied_Prob'])
+    
+    df['Open_Book_Value'] = df['Open_Book_Value'].fillna(df['Value'])
+    
+    df['Max_Value'] = df['Max_Value'].fillna(df['Value'])
+    df['Min_Value'] = df['Min_Value'].fillna(df['Value'])
+    df['Max_Odds'] = df['Max_Odds'].fillna(df['Odds_Price'])
+    df['Min_Odds'] = df['Min_Odds'].fillna(df['Odds_Price'])
 
     # === Diagnostics
     logger.info("🧪 Merge keys sample from df:")
