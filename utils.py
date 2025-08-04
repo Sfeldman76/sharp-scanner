@@ -806,9 +806,35 @@ def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame, df_all_snapshots: pd.D
 
         try:
             group = snapshots_grouped.get_group((gk, market, outcome, book))
+
         except KeyError:
-            enriched_rows.append({**row, 'Sharp_Move_Signal': 0})  # fallback with default
+            default_metrics = {
+                'Sharp_Move_Signal': 0,
+                'Opening_Limit': None,
+                'Sharp_Line_Magnitude': 0.0,
+                'Sharp_Limit_Jump': 0,
+                'Sharp_Limit_Total': 0.0,
+                'SharpMove_Timing_Dominant': 'unknown',
+                'Net_Line_Move_From_Opening': None,
+                'Abs_Line_Move_From_Opening': None,
+                'Net_Odds_Move_From_Opening': None,
+                'Abs_Odds_Move_From_Opening': None,
+                'SharpMove_Timing_Magnitude': 0.0,
+                'Odds_Move_Magnitude': 0.0,
+                'SharpBetScore': 0.0,
+                **{f'SharpMove_Magnitude_{b}': 0.0 for b in [
+                    f'{tod}_{mtg}' for tod in ['Overnight', 'Early', 'Midday', 'Late']
+                                    for mtg in ['VeryEarly', 'MidRange', 'LateGame', 'Urgent']
+                ]},
+                **{f'OddsMove_Magnitude_{b}': 0.0 for b in [
+                    f'{tod}_{mtg}' for tod in ['Overnight', 'Early', 'Midday', 'Late']
+                                    for mtg in ['VeryEarly', 'MidRange', 'LateGame', 'Urgent']
+                ]}
+            }
+            enriched_rows.append({**row, **default_metrics})
             continue
+
+          
 
         group = group.sort_values('Snapshot_Timestamp')
 
