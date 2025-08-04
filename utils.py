@@ -2499,8 +2499,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
                 df_canon = df_canon[all_cols]
                 df_inverse = df_inverse[all_cols
+            logger.info(f"📋 Inverse2 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
+            logger.info(f"📋 canon row columns after enrichment: {sorted(df_canon.columns.tolist())}")
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-           
+            logger.info(f"📋 scored row columns after enrichment: {sorted(df_scored.columns.tolist())}")
            
             # === ✅ Combine canonical and inverse rows
             logging.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
