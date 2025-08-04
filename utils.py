@@ -1219,33 +1219,24 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
         df_all_snapshots['Implied_Prob'] = df_all_snapshots['Odds_Price'].apply(implied_prob)
 
-    # Step 2: Identify first timestamp where both outcomes are present
-    snapshot_counts = (
+    # Step 2: Find first snapshot for each outcome per book
+    first_outcome_snapshots = (
         df_all_snapshots
-        .groupby(['Game_Key', 'Market', 'Bookmaker', 'Snapshot_Timestamp'])['Outcome']
-        .nunique()
-        .reset_index(name='Num_Outcomes')
-    )
-
-    first_complete_snapshots = (
-        snapshot_counts
         .sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
+        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
         .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
     )
-    logger.warning("⚠️ Using fallback open snapshots without requiring 2 outcomes — may be less accurate.")
-
-
-    # Step 3.5: Merge open timestamp into main snapshot table
+    
+    # Step 3: Merge open timestamp into main snapshot table
     df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], utc=True)
-    first_complete_snapshots['Snapshot_Timestamp_Open'] = pd.to_datetime(first_complete_snapshots['Snapshot_Timestamp_Open'], utc=True)
-
+    first_outcome_snapshots['Snapshot_Timestamp_Open'] = pd.to_datetime(first_outcome_snapshots['Snapshot_Timestamp_Open'], utc=True)
+    
     df_all_snapshots = df_all_snapshots.merge(
-        first_complete_snapshots,
-        on=['Game_Key', 'Market', 'Bookmaker'],
+        first_outcome_snapshots,
+        on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
         how='inner'
     )
-
+    
     # Step 4: Pick snapshot closest to open time
     df_open_rows = (
         df_all_snapshots
@@ -1254,7 +1245,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
         .head(1)
     )
-
+    
     # Step 5: Build df_open
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     df_open = (
@@ -1268,9 +1259,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             'Implied_Prob': 'First_Imp_Prob'
         })
     )
+
    
     df = df.merge(df_open, on=merge_keys, how='left')
-   
+    # Fallback: If Open_Value/First_Imp_Prob are missing, use current values
+    fallback_cols = ['Open_Value', 'Open_Odds', 'First_Imp_Prob']
+    fallback_map = {
+        'Open_Value': 'Value',
+        'Open_Odds': 'Odds_Price',
+        'First_Imp_Prob': 'Implied_Prob'
+    }
+    
+    for col in fallback_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+        df[col] = df[col].fillna(df[fallback_map[col]])
+
     # Inside the 'df_open_book' and 'df_open' merge logic:
     df_open_book = (
         df_open_rows
