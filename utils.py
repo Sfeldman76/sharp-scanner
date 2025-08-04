@@ -1291,6 +1291,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
     # Merge
     line_enrichment = df_extremes.copy()
+    # ✅ Ensure df matches on merge keys
+    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        df[col] = df[col].astype(str).str.strip().str.lower()
+
     df = df.merge(line_enrichment, on=merge_keys, how='left')
 
     try:
