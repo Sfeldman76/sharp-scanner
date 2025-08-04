@@ -1293,7 +1293,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     line_enrichment = df_extremes.copy()
     df = df.merge(line_enrichment, on=merge_keys, how='left')
 
-    
+    try:
+        logger.info("🧪 Sample of enriched df after merging open values and extremes:")
+        sample_cols = [
+            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
+            'Odds_Price', 'Value',
+            'Open_Odds', 'Open_Value', 'First_Imp_Prob', 'Open_Book_Value',
+            'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds'
+        ]
+        sample = df[sample_cols].drop_duplicates().sort_values('Game_Key').head(5)
+        logger.info(f"\n{sample.to_string(index=False)}")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to print enriched df sample: {e}")
+
 
     # === Compute shifts
     # === Compute Odds_Shift as change in implied probability
