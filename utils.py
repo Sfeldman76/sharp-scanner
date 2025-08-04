@@ -1228,9 +1228,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
     except Exception as e:
         logger.error(f"❌ Failed to print raw snapshot sample: {e}")
-    df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower(
-    # Drop leftover merge artifacts
-    
+        
     # ✅ Sanity check: Unique outcomes and books
     logger.info(f"🧪 Unique outcomes in snapshot: {df_all_snapshots['Outcome'].nunique()} — {df_all_snapshots['Outcome'].unique().tolist()}")
     logger.info(f"🧪 Unique books in snapshot: {df_all_snapshots['Bookmaker'].nunique()} — {df_all_snapshots['Bookmaker'].unique().tolist()}")
