@@ -191,6 +191,14 @@ sharp_moves_cache = {}
     #df = read_recent_sharp_moves(hours=hours)  # this fetches from BigQuery
     #sharp_moves_cache[cache_key] = df
     #return df
+
+def bq_read(query: str) -> pd.DataFrame:
+    try:
+        logger.info(f"📡 Executing BigQuery: {query[:80]}...")
+        return bq_client.query(query).result().to_dataframe()
+    except Exception as e:
+        logger.error(f"❌ BigQuery query failed: {e}", exc_info=True)
+        return pd.DataFrame()
 def read_recent_sharp_master_cached(hours=72):
     # TEMP: Disable caching for debugging
     query = f"""
