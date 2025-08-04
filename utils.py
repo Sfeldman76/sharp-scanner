@@ -1194,137 +1194,61 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.date
     else:
         df['Event_Date'] = pd.NaT
-    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
-    df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
-    # Apply normalization early
-    df['Book'] = df['Book'].str.lower()
-    df['Book'] = df.apply(
-        lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
-    )
-   
-        
+        # Normalize relevant fields in df
+    # Normalize relevant fields in df
+    for col in ['Outcome', 'Market', 'Bookmaker', 'Game_Key']:
+        df[col] = df[col].astype(str).str.strip().str.lower()
 
     # ✅ Use passed history or fallback
     if df_all_snapshots is None:
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
-    df['Outcome'] = df['Outcome'].astype(str).str.strip().str.lower()
-    # === ✅ Log raw snapshot sample (before any filtering or grouping)
-    try:
-        logger.info("🧪 Snapshot rows (raw) — sample by Game_Key + Market + Outcome + Bookmaker:")
-        
-        raw_snapshot_sample = (
-            df_all_snapshots
-            .sort_values('Snapshot_Timestamp')
-            .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']]
-            .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
-            .head(10)  # Limit per combo
-            .reset_index(drop=True)
-        )
-    
-        if raw_snapshot_sample.empty:
-            logger.warning("⚠️ Raw snapshot data is empty — check source or snapshot join.")
-        else:
-            logger.info(f"\n{raw_snapshot_sample.to_string(index=False)}")
-    
-    except Exception as e:
-        logger.error(f"❌ Failed to print raw snapshot sample: {e}")
-        
-    # ✅ Sanity check: Unique outcomes and books
-    logger.info(f"🧪 Unique outcomes in snapshot: {df_all_snapshots['Outcome'].nunique()} — {df_all_snapshots['Outcome'].unique().tolist()}")
-    logger.info(f"🧪 Unique books in snapshot: {df_all_snapshots['Bookmaker'].nunique()} — {df_all_snapshots['Bookmaker'].unique().tolist()}")
-    
-    # ✅ Build Game_Key_Base for outcome-agnostic grouping
-    df_all_snapshots['Game_Key_Base'] = (
-        df_all_snapshots['Home_Team_Norm'].astype(str).str.strip().str.lower() + "_" +
-        df_all_snapshots['Away_Team_Norm'].astype(str).str.strip().str.lower() + "_" +
-        pd.to_datetime(df_all_snapshots['Game_Start'], errors='coerce', utc=True).dt.floor('h').astype(str) + "_" +
-        df_all_snapshots['Market'].astype(str).str.strip().str.lower()
-    )
-    
-    # ✅ Count unique outcomes per Game/Market/Bookmaker using Game_Key_Base
-    outcome_counts = (
-        df_all_snapshots
-        .groupby(['Game_Key_Base', 'Market', 'Bookmaker'])['Outcome']
-        .nunique()
-        .reset_index()
-        .rename(columns={'Outcome': 'Num_Outcomes'})
-    )
-    
-    
-    # Step 1: Normalize merge keys
-    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-    for col in merge_keys:
+
+    # Normalize relevant fields in df_all_snapshots
+    for col in ['Outcome', 'Market', 'Bookmaker', 'Game_Key']:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
-    
-    # Step 2: Identify first timestamp where both sides are present
+
+    # Compute Implied_Prob in snapshots if needed
+    if 'Implied_Prob' not in df_all_snapshots.columns:
+        df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
+        df_all_snapshots['Implied_Prob'] = df_all_snapshots['Odds_Price'].apply(implied_prob)
+
+    # Step 2: Identify first timestamp where both outcomes are present
     snapshot_counts = (
         df_all_snapshots
         .groupby(['Game_Key', 'Market', 'Bookmaker', 'Snapshot_Timestamp'])['Outcome']
         .nunique()
         .reset_index(name='Num_Outcomes')
     )
-    # === LOG SNAPSHOT CONTENT BEFORE OPEN FILTERING
-   
-    try:
-        logger.info("🧪 Snapshot rows BEFORE open-row filtering (grouped by Game_Key + Market + Outcome):")
-        
-        snapshot_debug_sample = (
-            df_all_snapshots
-            .sort_values('Snapshot_Timestamp')
-            .loc[:, ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']]
-            .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
-            .head(5)  # limit per group for readability
-            .reset_index(drop=True)
-        )
-    
-        if snapshot_debug_sample.empty:
-            logger.warning("⚠️ No snapshot rows found before open filtering.")
-        else:
-            logger.info(f"\n{snapshot_debug_sample.to_string(index=False)}")
-    
-    except Exception as e:
-        logger.error(f"❌ Failed to log snapshot preview before open filtering: {e}")
-    # Step 3: Identify first snapshot time where both outcomes exist
+
+    # ✅ Require at least two sides present
     first_complete_snapshots = (
-        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 0]
+        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
         .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
     )
-    
+
     # Step 3.5: Merge open timestamp into main snapshot table
+    df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], utc=True)
+    first_complete_snapshots['Snapshot_Timestamp_Open'] = pd.to_datetime(first_complete_snapshots['Snapshot_Timestamp_Open'], utc=True)
+
     df_all_snapshots = df_all_snapshots.merge(
         first_complete_snapshots,
         on=['Game_Key', 'Market', 'Bookmaker'],
-        how='inner',
-        suffixes=('', '_Open')
-    )   
-    # Step 4: Filter for rows within ±10 minutes of open timestamp
-    # Use closest available snapshot after open (with fallback if exact match fails)
-    df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], utc=True)
-    df_all_snapshots['Snapshot_Timestamp_Open'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp_Open'], utc=True)
-    
+        how='inner'
+    )
+
+    # Step 4: Pick snapshot closest to open time
     df_open_rows = (
         df_all_snapshots
-        .assign(
-            Time_Delta=(df_all_snapshots['Snapshot_Timestamp'] - df_all_snapshots['Snapshot_Timestamp_Open']).abs()
-        )
+        .assign(Time_Delta=(df_all_snapshots['Snapshot_Timestamp'] - df_all_snapshots['Snapshot_Timestamp_Open']).abs())
         .sort_values('Time_Delta')
         .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
         .head(1)
     )
-    
-    # ✅ Step 5: Actually log open row content
-    logger.info("📋 Sample rows from df_open_rows (within ±10 min of open):")
-    try:
-        sample_rows = df_open_rows[
-            ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp_Open', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
-        ].sort_values('Snapshot_Timestamp').head(5)
-        logger.info(f"\n{sample_rows.to_string(index=False)}")
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to print sample open snapshot rows: {e}")
-    
-    # Step 6: Build df_open
+
+    # Step 5: Build df_open
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     df_open = (
         df_open_rows
         .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])
@@ -1337,63 +1261,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         })
     )
    
-   
        
     # Inside the 'df_open_book' and 'df_open' merge logic:
     df_open_book = (
-        df_all_snapshots
-        .sort_values('Snapshot_Timestamp')
+        df_open_rows
         .dropna(subset=['Value'])
         .drop_duplicates(subset=merge_keys, keep='first')
         .loc[:, merge_keys + ['Value']]
-        .rename(columns={
-            'Value': 'Open_Book_Value',
-            
-        })
+        .rename(columns={'Value': 'Open_Book_Value'})
     )
+
     df = df.merge(df_open_book, on=merge_keys, how='left')
    
-    # ✅ CORRECT ORDER
-    # Step 2: Then filter snapshots for any other use (metrics, enrichment, etc.)
-    relevant_keys = df[merge_keys].drop_duplicates()
-    df_all_snapshots = df_all_snapshots.merge(relevant_keys, on=merge_keys, how='inner')
-    # 🧼 Clean open fields before merge to avoid _x/_y suffixes
-    cols_to_clean = ['Open_Value', 'Open_Odds', 'First_Imp_Prob']
-    df = df.drop(columns=[col for col in cols_to_clean if col in df.columns], errors='ignore')
-    logger.info(f"🧪 df_open columns: {df_open.columns.tolist()}")
-    df = df.merge(df_open, on=merge_keys, how='left')
-    logger.info(f"✅ Open fields present: {df[['Open_Value', 'Open_Odds', 'First_Imp_Prob']].notnull().sum().to_dict()}")
-     
-    # Log key coverage before merging
-    df_keys = df[merge_keys].drop_duplicates()
-    df_open_keys = df_open[merge_keys].drop_duplicates()
-    
-    # Merge and identify missing keys
-    missing_keys = pd.merge(df_keys, df_open_keys, on=merge_keys, how='left', indicator=True)
-    missing = missing_keys[missing_keys['_merge'] == 'left_only']
-    
-    logger.info(f"🧪 Total unique (Game, Market, Outcome, Bookmaker) combos in df: {len(df_keys)}")
-    logger.info(f"❌ Missing Open_Value for {len(missing)} combos in df_open")
-    
-    # Sample of unmatched keys for debug
-    if not missing.empty:
-        sample_missing = missing.drop(columns=['_merge']).head().to_dict(orient='records')
-        logger.warning(f"🔍 Unmatched snapshot keys (sample): {sample_missing}")
-    
-    
-    logger.info(f"🧪 Total unique (Game, Market, Outcome, Bookmaker) combos in df: {len(df_keys)}")
-    logger.info(f"❌ Missing Open_Value for {len(missing)} combos in df_open")
-    
-    # Optionally log a few samples
-    if not missing.empty:
-        sample = missing.drop(columns=['_merge']).head(5).to_dict(orient='records')
-        logger.warning(f"⚠️ Sample missing openers: {sample}")
- 
-
-    matched = df['Open_Value'].notnull().sum()
-    logger.info(f"✅ Rows with Open_Value after merge: {matched:,} / {len(df):,}")
-
-    
+   
+   
     # Extremes per outcome + book
     df_extremes = (
         df_all_snapshots
