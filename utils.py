@@ -1207,6 +1207,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     for col in merge_keys:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
+    # 🚨 Ensure current df rows are included in snapshots to support fallback
+    if df_all_snapshots is not None:
+        df_all_snapshots = pd.concat([
+            df_all_snapshots,
+            df[merge_keys + ['Value', 'Odds_Price', 'Snapshot_Timestamp']]
+        ], ignore_index=True).drop_duplicates(subset=merge_keys + ['Snapshot_Timestamp'])
 
     # === Compute implied probability if missing
     df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
