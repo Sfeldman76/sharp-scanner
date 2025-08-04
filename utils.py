@@ -2477,8 +2477,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # ✅ Combine canonical and inverse into one scored DataFrame
             df_canon = df_canon.reset_index(drop=True)
             df_inverse = df_inverse.reset_index(drop=True)
+            df_canon.index.name = None
+            df_inverse.index.name = None
+            
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-
+           
            
             # === ✅ Combine canonical and inverse rows
             logger.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
