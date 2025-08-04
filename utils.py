@@ -1279,11 +1279,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
 
 
-    
-    for col in fallback_cols:
-        if col not in df.columns:
-            df[col] = np.nan
-        df[col] = df[col].fillna(df[fallback_map[col]])
+ 
 
     # Inside the 'df_open_book' and 'df_open' merge logic:
     df_open_book = (
