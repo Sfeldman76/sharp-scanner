@@ -1227,13 +1227,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .reset_index(name='Num_Outcomes')
     )
 
-    # ✅ Require at least two sides present
-    first_complete_snapshots = (
-        snapshot_counts[snapshot_counts['Num_Outcomes'] >= 2]
+   first_complete_snapshots = (
+        snapshot_counts
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
         .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
     )
+    logger.warning("⚠️ Using fallback open snapshots without requiring 2 outcomes — may be less accurate.")
+
 
     # Step 3.5: Merge open timestamp into main snapshot table
     df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], utc=True)
