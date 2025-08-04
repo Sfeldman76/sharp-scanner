@@ -199,12 +199,12 @@ def bq_read(query: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"❌ BigQuery query failed: {e}", exc_info=True)
         return pd.DataFrame()
-def read_recent_sharp_master_cached(hours=72):
+def read_recent_sharp_master_cached(hours=120):
     query = f"""
         SELECT * FROM `{BQ_FULL_TABLE}`
         WHERE Snapshot_Timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
         ORDER BY Snapshot_Timestamp DESC
-        LIMIT 1000
+        
     """
     df = bq_client.query(query).result().to_dataframe()
     logger.info(f"📦 Loaded {len(df)} rows from sharp_moves_master in last {hours}h")
