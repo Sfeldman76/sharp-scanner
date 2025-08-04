@@ -1131,7 +1131,7 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Skew'] > 500).astype(int)
 
     return df
-
+          
 def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     df = df_inverse.copy()
 
@@ -1139,46 +1139,49 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
     df['Bookmaker'] = df.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
     df_all_snapshots['Bookmaker'] = df_all_snapshots.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
 
-    # Build Team_Key if missing
-    if 'Team_Key' not in df.columns:
-        df['Team_Key'] = (
-            df['Home_Team_Norm'] + "_" +
-            df['Away_Team_Norm'] + "_" +
-            df['Commence_Hour'].astype(str) + "_" +
-            df['Market'] + "_" +
-            df['Outcome']
-        )
-    if 'Team_Key' not in df_all_snapshots.columns:
-        df_all_snapshots['Team_Key'] = (
-            df_all_snapshots['Home_Team_Norm'] + "_" +
-            df_all_snapshots['Away_Team_Norm'] + "_" +
-            pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h').astype(str) + "_" +
-            df_all_snapshots['Market'] + "_" +
-            df_all_snapshots['Outcome']
-        )
+    # Build Team_Key
+    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce').dt.floor('h')
+    df['Team_Key'] = df['Home_Team_Norm'] + "_" + df['Away_Team_Norm'] + "_" + df['Commence_Hour'].astype(str) + "_" + df['Market'] + "_" + df['Outcome']
 
-    # Most recent snapshot per Team_Key + Bookmaker
+    df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+    df_all_snapshots['Team_Key'] = df_all_snapshots['Home_Team_Norm'] + "_" + df_all_snapshots['Away_Team_Norm'] + "_" + df_all_snapshots['Commence_Hour'].astype(str) + "_" + df_all_snapshots['Market'] + "_" + df_all_snapshots['Outcome']
+
+    # 🔁 Create Opponent_Team_Key
+    df['Opponent_Team_Key'] = df.apply(lambda row: (
+        row['Home_Team_Norm'] + "_" +
+        row['Away_Team_Norm'] + "_" +
+        str(row['Commence_Hour']) + "_" +
+        row['Market'] + "_" +
+        row['Opponent']
+    ), axis=1)
+
+    # Most recent snapshot per Opponent_Team_Key + Bookmaker
+    df_all_snapshots['Team_Key'] = df_all_snapshots['Team_Key'].astype(str)
     df_latest = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp', ascending=False)
         .drop_duplicates(subset=['Team_Key', 'Bookmaker'])
         [['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']]
         .rename(columns={
+            'Team_Key': 'Opponent_Team_Key',
             'Value': 'Value_opponent',
             'Odds_Price': 'Odds_Price_opponent',
             'Limit': 'Limit_opponent'
         })
     )
 
-    df = df.merge(df_latest, on=['Team_Key', 'Bookmaker'], how='left')
+    # Merge by opponent
+    df = df.merge(df_latest, on=['Opponent_Team_Key', 'Bookmaker'], how='left')
 
+    # Assign opponent values safely
     for col in ['Value', 'Odds_Price', 'Limit']:
         opp_col = f"{col}_opponent"
         if opp_col in df.columns:
             df[col] = df[opp_col]
 
-    df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
+    df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent', 'Opponent_Team_Key'], errors='ignore', inplace=True)
     return df
+
           
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
