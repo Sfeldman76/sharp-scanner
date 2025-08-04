@@ -766,6 +766,97 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         'SharpBetScore': 0.0
     }
     
+def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
+    """
+    Applies compute_sharp_metrics() to each row in df using historical snapshots.
+    Enriches df with sharp movement features like Sharp_Move_Signal, timing buckets, etc.
+    """
+    if df.empty or df_all_snapshots.empty:
+        return df
+
+    df = df.copy()
+    
+    # Ensure required fields exist
+    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column in df: {col}")
+    
+    # Normalize keys for consistency
+    df_all_snapshots = df_all_snapshots.copy()
+    df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], errors='coerce', utc=True)
+    df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], errors='coerce', utc=True).dt.floor('h')
+    df_all_snapshots['Team_Key'] = (
+        df_all_snapshots['Home_Team_Norm'] + "_" +
+        df_all_snapshots['Away_Team_Norm'] + "_" +
+        df_all_snapshots['Commence_Hour'].astype(str) + "_" +
+        df_all_snapshots['Market'] + "_" +
+        df_all_snapshots['Outcome']
+    )
+
+    # Index for faster access
+    snapshots_grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+
+    enriched_rows = []
+
+    for idx, row in df.iterrows():
+        gk = row['Game_Key']
+        market = row['Market']
+        outcome = row['Outcome']
+        book = row['Bookmaker']
+
+        try:
+            group = snapshots_grouped.get_group((gk, market, outcome, book))
+        except KeyError:
+            enriched_rows.append({**row, 'Sharp_Move_Signal': 0})  # fallback with default
+            continue
+
+        group = group.sort_values('Snapshot_Timestamp')
+
+        game_start = (
+            group['Game_Start'].dropna().iloc[0]
+            if 'Game_Start' in group and not group['Game_Start'].isnull().all()
+            else None
+        )
+        open_val = (
+            group['Value'].dropna().iloc[0]
+            if not group['Value'].isnull().all()
+            else None
+        )
+        open_odds = (
+            group['Odds_Price'].dropna().iloc[0]
+            if not group['Odds_Price'].isnull().all()
+            else None
+        )
+        opening_limit = (
+            group['Limit'].dropna().iloc[0]
+            if not group['Limit'].isnull().all()
+            else None
+        )
+
+        entries = list(zip(
+            group['Limit'],
+            group['Value'],
+            group['Snapshot_Timestamp'],
+            [game_start] * len(group),
+            group['Odds_Price']
+        ))
+
+        metrics = compute_sharp_metrics(
+            entries=entries,
+            open_val=open_val,
+            mtype=market,
+            label=outcome,
+            gk=gk,
+            book=book,
+            open_odds=open_odds,
+            opening_limit=opening_limit
+        )
+
+        enriched_rows.append({**row, **metrics})
+
+    df_enriched = pd.DataFrame(enriched_rows)
+
+    return df_enriched
     
 def compute_all_sharp_metrics(df_all_snapshots):
     results = []
@@ -2637,7 +2728,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df.update(df_inverse)
 
         logger.info(f"🧪 After hydration: {df['Value'].isna().sum()} rows missing Value")
-        df = compute_all_sharp_metrics(df, df_all_snapshots)
+        df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
+
+
 
         market_weights = load_market_weights_from_bq()
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
