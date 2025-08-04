@@ -1145,6 +1145,11 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
 
     df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h')
     df_all_snapshots['Team_Key'] = df_all_snapshots['Home_Team_Norm'] + "_" + df_all_snapshots['Away_Team_Norm'] + "_" + df_all_snapshots['Commence_Hour'].astype(str) + "_" + df_all_snapshots['Market'] + "_" + df_all_snapshots['Outcome']
+    # ✅ Build Opponent column if missing
+    df['Opponent'] = df.apply(
+        lambda row: row['Away_Team_Norm'] if row['Outcome'] == row['Home_Team_Norm'] else row['Home_Team_Norm'],
+        axis=1
+    )
 
     # 🔁 Create Opponent_Team_Key
     df['Opponent_Team_Key'] = df.apply(lambda row: (
