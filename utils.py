@@ -1208,7 +1208,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         logger.info(f"🧪 Preview of df_all_snapshots merge keys:")
         logger.info(df_all_snapshots[['Game_Key', 'Outcome', 'Bookmaker', 'Market']].drop_duplicates().head(5).to_string(index=False))
 
-    
+
+          
     # Normalize relevant fields in df_all_snapshots
     for col in ['Outcome', 'Market', 'Bookmaker', 'Game_Key']:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
