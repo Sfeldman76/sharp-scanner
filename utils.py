@@ -1499,28 +1499,29 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     
  
+  
     def compute_odds_reversal(df, prob_threshold=0.05):
         df = df.copy()
     
-        # === Detect Market Type
+        # Detect market type
         is_spread = df['Market'].str.lower().str.contains('spread', na=False)
         is_total = df['Market'].str.lower().str.contains('total', na=False)
         is_h2h = df['Market'].str.lower().str.contains('h2h', na=False)
     
-        # === Parse numeric odds
+        # Parse numeric odds
         open_odds = pd.to_numeric(df['Open_Odds'], errors='coerce')
         current_odds = pd.to_numeric(df['Odds_Price'], errors='coerce')
         min_odds = pd.to_numeric(df['Min_Odds'], errors='coerce')
         max_odds = pd.to_numeric(df['Max_Odds'], errors='coerce')
     
-        # === Compute implied probabilities
+        # Compute implied probabilities
         implied_prob_vec = np.vectorize(implied_prob)
         open_prob = implied_prob_vec(open_odds)
         current_prob = implied_prob_vec(current_odds)
         min_prob = implied_prob_vec(min_odds)
         max_prob = implied_prob_vec(max_odds)
     
-        # === Build safe masks for H2H reversal
+        # H2H reversal logic
         valid_mask = (
             pd.notna(open_prob) &
             pd.notna(current_prob) &
@@ -1536,25 +1537,28 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
              (current_prob[valid_mask] >= max_prob[valid_mask] - 1e-5))
         ).astype(int)
     
-        # === Spread/Total: flag large movement in implied probability
-        prob_shift = current_prob - open_prob
+        # Safe probability shift
+        prob_shift = np.where(
+            pd.notna(current_prob) & pd.notna(open_prob),
+            current_prob - open_prob,
+            np.nan
+        )
         abs_shift = np.abs(prob_shift)
         spread_total_flag = (abs_shift >= prob_threshold).astype(int)
-        spread_total_flag[~pd.notna(abs_shift)] = 0  # fallback for missing odds
     
-        # === Final Flag
+        # Final flag
         df['Odds_Reversal_Flag'] = np.where(
             is_h2h,
             h2h_flag,
             np.where(is_spread | is_total, spread_total_flag, 0)
         )
-
-
-        # Optional: expose shift for debugging
+    
+        # Expose diagnostics
         df['Implied_Prob_Shift'] = prob_shift
         df['Abs_Odds_Prob_Move'] = abs_shift
     
         return df
+
 
         
     # === Compute Openers BEFORE creating df_history_sorted
