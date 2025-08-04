@@ -1186,7 +1186,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = df.copy()
     scored_all = []
     total_start = time.time()
-    
+  
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
@@ -1201,8 +1201,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     # ✅ Use passed history or fallback
     if df_all_snapshots is None:
+        logger.warning("⚠️ df_all_snapshots was not passed — reloading from BigQuery as fallback.")
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    else:
+        logger.info(f"🧪 Using df_all_snapshots passed from detect_sharp_moves() — {len(df_all_snapshots)} rows")
+        logger.info(f"🧪 Preview of df_all_snapshots merge keys:")
+        logger.info(df_all_snapshots[['Game_Key', 'Outcome', 'Bookmaker', 'Market']].drop_duplicates().head(5).to_string(index=False))
 
+    
     # Normalize relevant fields in df_all_snapshots
     for col in ['Outcome', 'Market', 'Bookmaker', 'Game_Key']:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
@@ -1294,6 +1300,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # ✅ Ensure df matches on merge keys
     for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
         df[col] = df[col].astype(str).str.strip().str.lower()
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
+    logger.info("🧪 Sample merge keys from df:")
+    logger.info(df[merge_keys].drop_duplicates().head(5).to_string(index=False))
+    
+    logger.info("🧪 Sample merge keys from df_open_rows:")
+    logger.info(df_open_rows[merge_keys].drop_duplicates().head(5).to_string(index=False))
 
     df = df.merge(line_enrichment, on=merge_keys, how='left')
 
@@ -2639,7 +2652,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
        
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
         df = hydrate_inverse_rows_from_snapshot(df, df_all_snapshots)
+        missing_val = df['Value'].isna().sum()
+        logger.info(f"🧪 After hydration: {missing_val} rows missing Value")
+
         market_weights = load_market_weights_from_bq()
+        logger.info(f"🧪 df_all_snapshots in detect_sharp_moves: {len(df_all_snapshots)} rows")
+        logger.info(f"🧪 Preview of df before scoring (first 5):")
+        logger.info(df[['Game_Key', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].drop_duplicates().head(5).to_string(index=False))
+
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
 
         if not df_scored.empty:
