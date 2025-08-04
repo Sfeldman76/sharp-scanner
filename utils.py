@@ -2481,7 +2481,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse = df_inverse.reset_index(drop=True)
             df_canon.index.name = None
             df_inverse.index.name = None
-            
+          
+
+            logging.info("🔎 df_canon columns: %s", sorted(df_canon.columns.tolist()))
+            logging.info("🔎 df_inverse columns: %s", sorted(df_inverse.columns.tolist()))
+            logging.info("🔎 Column sets equal? %s", set(df_canon.columns) == set(df_inverse.columns))
             df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
            
            
