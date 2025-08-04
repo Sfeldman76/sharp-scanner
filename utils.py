@@ -1236,7 +1236,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
         how='inner'
     )
+    # === Ensure required columns exist before filtering
+    for col in ['Value', 'Odds_Price']:
+        if col not in df_all_snapshots.columns:
+            df_all_snapshots[col] = np.nan
     
+    if 'Implied_Prob' not in df_all_snapshots.columns:
+        df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
+        df_all_snapshots['Implied_Prob'] = df_all_snapshots['Odds_Price'].apply(implied_prob)
+
     # Step 4: Pick snapshot closest to open time
     df_open_rows = (
         df_all_snapshots
@@ -1245,7 +1253,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
         .head(1)
     )
-    
+    logger.info(f"🧪 Columns in df_open_rows: {df_open_rows.columns.tolist()}")
+
     # Step 5: Build df_open
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     df_open = (
@@ -1336,6 +1345,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Odds_Price'].apply(implied_prob) -
         df['Open_Odds'].apply(implied_prob)
     ) * 100  # Optional: express as perce
+    
     df['Implied_Prob_Shift'] = pd.to_numeric(df['Implied_Prob'], errors='coerce') - pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
     # Compute deltas
     df['Line_Delta'] = pd.to_numeric(df['Value'], errors='coerce') - pd.to_numeric(df['Open_Value'], errors='coerce')
