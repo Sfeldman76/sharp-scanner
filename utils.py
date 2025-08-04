@@ -2637,6 +2637,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df.update(df_inverse)
 
         logger.info(f"🧪 After hydration: {df['Value'].isna().sum()} rows missing Value")
+        df = compute_all_sharp_metrics(df, df_all_snapshots)
 
         market_weights = load_market_weights_from_bq()
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
