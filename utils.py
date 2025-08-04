@@ -1261,7 +1261,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         })
     )
    
-       
+    df = df.merge(df_open, on=merge_keys, how='left')
+   
     # Inside the 'df_open_book' and 'df_open' merge logic:
     df_open_book = (
         df_open_rows
