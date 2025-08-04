@@ -200,13 +200,19 @@ def bq_read(query: str) -> pd.DataFrame:
         logger.error(f"❌ BigQuery query failed: {e}", exc_info=True)
         return pd.DataFrame()
 def read_recent_sharp_master_cached(hours=72):
-    # TEMP: Disable caching for debugging
     query = f"""
-        SELECT * FROM sharp_data.sharp_moves_master
+        SELECT * FROM `{BQ_FULL_TABLE}`
         WHERE Snapshot_Timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+        ORDER BY Snapshot_Timestamp DESC
+        LIMIT 1000
     """
-    return bq_read(query)
-    
+    df = bq_client.query(query).result().to_dataframe()
+    logger.info(f"📦 Loaded {len(df)} rows from sharp_moves_master in last {hours}h")
+    if df.empty:
+        logger.warning("⚠️ sharp_moves_master returned no rows — check BQ table or filters")
+    else:
+        logger.info(f"🔍 Sample:\n{df[['Game', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp']].head(10).to_string(index=False)}")
+    return df
             
 def fetch_live_odds(sport_key, api_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
@@ -2634,8 +2640,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     df_history['Book'] = df_history['Book'].str.lower().str.strip()
     df_history['Bookmaker'] = df_history['Bookmaker'].str.lower().str.strip()
     df_history['Game'] = df_history['Game'].str.strip().str.lower()  # ✅ Normalize Game name for mapping
-    print("🧪 df_history columns:", df_history.columns.tolist())
-
+    logging.info("🧪 df_history columns:", df_history.columns.tolist())
+    logging.info(f"📦 df_history shape: {df_history.shape}")
+    logging.info(f"🔍 Sample rows:\n{df_history.head(30).to_string(index=False)}")
     # ✅ Build old value/odds maps using normalized keys
     old_val_map = (
         df_history
