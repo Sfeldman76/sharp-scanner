@@ -1227,7 +1227,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .reset_index(name='Num_Outcomes')
     )
 
-   first_complete_snapshots = (
+    first_complete_snapshots = (
         snapshot_counts
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Bookmaker'], keep='first')
