@@ -2859,36 +2859,24 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         # 🧠 Preserve original outcome before hydration flip
         df_inverse['Original_Outcome_Norm'] = df_inverse['Outcome_Norm']
     
-        if not df_inverse.empty:
-            df_before = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
-            df_before.reset_index(drop=True, inplace=True)
-    
-            df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
-            df_inverse = fallback_flip_inverse_rows(df_inverse)
-      
-            df_after = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
-            df_after.reset_index(drop=True, inplace=True)
-    
-            changed_mask = (
-                (df_before['Value'] != df_after['Value']) |
-                (df_before['Odds_Price'] != df_after['Odds_Price']) |
-                (df_before['Limit'] != df_after['Limit'])
-            )
-    
-            changed_rows = df_after[changed_mask]
-    
-            logger.info(f"🛠️ {len(changed_rows)} inverse rows were updated by hydration.")
-            if not changed_rows.empty:
-                # ⚠️ Make sure to also align the outcome columns with correct index
-                changed_rows = changed_rows.copy()  # ensure SettingWithCopyWarning doesn't trigger
-                changed_rows['Hydrated_Outcome'] = df_inverse.loc[changed_rows.index, 'Outcome_Norm'].values
-                changed_rows['Original_Outcome'] = df_inverse.loc[changed_rows.index, 'Original_Outcome_Norm'].values
-    
-                logger.info("🔁 Sample of changed rows (with outcome flip):")
-                logger.info(changed_rows[['Team_Key', 'Original_Outcome', 'Hydrated_Outcome', 'Value', 'Odds_Price', 'Limit']].head(50).to_string(index=False))
-    
-            # Update main df with hydrated values
-            df.update(df_inverse)
+       # Only hydrate if Value or Odds_Price is missing
+        needs_hydration = df_inverse[
+            df_inverse['Value'].isna() | df_inverse['Odds_Price'].isna()
+        ].copy()
+        
+        logger.info(f"💧 {len(needs_hydration)} inverse rows need hydration (missing Value or Odds)")
+        
+        if not needs_hydration.empty:
+            needs_hydration = hydrate_inverse_rows_from_snapshot(needs_hydration, df_all_snapshots)
+            needs_hydration = fallback_flip_inverse_rows(needs_hydration)
+        
+            # Update only those rows in the main df
+            df.set_index('Team_Key', inplace=True)
+            needs_hydration.set_index('Team_Key', inplace=True)
+            df.update(needs_hydration)
+            df.reset_index(inplace=True)
+        else:
+            logger.info("✅ All inverse rows already had Value and Odds_Price — no hydration needed.")
 
 
     
@@ -2906,7 +2894,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df['Event_Date'] = df['Game_Start'].dt.date
         df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
         logging.info("🧪 Sample final spread rows before scoring:")
-        logging.info(df[df['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].head(10).to_string(index=False))
+        logging.info(df[df['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].head(50).to_string(index=False))
    
         df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
 
