@@ -2816,8 +2816,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
         if not df_inverse.empty:
             df_before = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
+            df_before.reset_index(drop=True, inplace=True)
+            
             df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
+            
             df_after = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
+            df_after.reset_index(drop=True, inplace=True)
+
     
             changed_mask = (
                 (df_before['Value'] != df_after['Value']) |
