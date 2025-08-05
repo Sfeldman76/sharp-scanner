@@ -2746,6 +2746,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     for game in current:
         home_team = game.get('home_team', '').strip().lower()
         away_team = game.get('away_team', '').strip().lower()
+        logger.info(f"🧾 FULL API GAME DUMP:\n{json.dumps(game, indent=2)}")
+
         if not home_team or not away_team:
             continue
 
