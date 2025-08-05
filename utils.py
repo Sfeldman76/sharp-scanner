@@ -2817,12 +2817,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
             df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
     
-            try:
-                write_sharp_moves_to_master(df_scored)
-                logging.info(f"✅ Wrote {len(df_scored)} rows to sharp_moves_master")
-            except Exception as e:
-                logging.error(f"❌ Failed to write sharp moves to BigQuery: {e}", exc_info=True)
-    
+            
             df = df_scored.copy()
             summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
         else:
