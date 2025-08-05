@@ -2769,6 +2769,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     odds_price = o.get('price')
                     value = odds_price if mtype == 'h2h' else point
                     limit = o.get('bet_limit')
+                    logger.info(f"🧪 API ROW [{mtype.upper()}] | Book: {book_key} | Outcome: {label} | Point: {point} | Odds: {odds_price} | Limit: {limit}")
 
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
                     team_key = game_key
