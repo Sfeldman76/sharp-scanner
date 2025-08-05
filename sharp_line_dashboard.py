@@ -335,8 +335,6 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-st.cache_data(ttl=600) 
-
 def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
     try:
         client = bq_client
@@ -346,7 +344,6 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
         """
         df = client.query(query).to_dataframe()
         df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
-
         print(f"✅ Loaded {len(df)} rows from BigQuery (last {hours}h)")
         return df
     except Exception as e:
@@ -355,17 +352,22 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
 
 # ✅ Cached wrapper for diagnostics and line movement history
 # Smart getter — use cache unless forced to reload
+
+@st.cache_data(ttl=600)
+def read_recent_sharp_moves_cached(hours=72, table=BQ_FULL_TABLE):
+    return read_recent_sharp_moves(hours=hours, table=table)
+
 def read_recent_sharp_moves_conditional(force_reload=False, hours=72, table=BQ_FULL_TABLE):
     if force_reload:
         st.info("🔁 Reloading sharp moves from BigQuery...")
-        return _read_recent_sharp_moves(hours=hours, table=table)
+        return read_recent_sharp_moves(hours=hours, table=table)  # Uncached
     else:
-        return read_recent_sharp_moves(hours=hours, table=table)
+        return read_recent_sharp_moves_cached(hours=hours, table=table)  # Cached
 
 @st.cache_data(ttl=600)
 def get_recent_history():
     st.write("📦 Using cached sharp history (get_recent_history)")
-    return read_recent_sharp_moves(hours=72)
+    return read_recent_sharp_moves_cached(hours=72)
     
     
 def read_latest_snapshot_from_bigquery(hours=2):
@@ -400,6 +402,8 @@ def read_latest_snapshot_from_bigquery(hours=2):
     except Exception as e:
         print(f"❌ Failed to load snapshot from BigQuery: {e}")
         return {}
+
+
 
 def write_market_weights_to_bigquery(weights_dict):
     rows = []
@@ -2231,7 +2235,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            df_moves_raw = read_recent_sharp_moves_conditional(force_reload=True, hours=48)
+            df_moves_raw = read_recent_sharp_moves_conditional(force_reload=force_reload, hours=48)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
 
