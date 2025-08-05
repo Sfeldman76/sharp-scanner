@@ -2834,7 +2834,11 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Team_Key': team_key,
                     })
 
-   
+                    if mtype == "spreads":
+                        logging.info(f"✅ Final Spread Row for {label} @ {book_key} = {value}")
+
+    
+
     df = pd.DataFrame(rows)
     if df.empty:
         logging.warning("⚠️ No sharp rows built.")
