@@ -2907,9 +2907,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df_scored['Post_Game'] = ~df_scored['Pre_Game']
          
           
-    
-            df_scored = df_scored.drop_duplicates(subset=["Line_Hash"])
-    
+            logger.info(f"✅ Final scored row count: total={len(df_scored)}, canonical={df_scored['Was_Canonical'].sum()}, inverse={(~df_scored['Was_Canonical']).sum()}")
+
+            df_scored = df_scored.drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"])
+
+            logger.info("🔎 Sample scored spread rows:")
+            logger.info(df_scored[df_scored['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Was_Canonical']].head(30).to_string(index=False))
+
             try:
                 write_sharp_moves_to_master(df_scored)
                 logging.info(f"✅ Wrote {len(df_scored)} rows to sharp_moves_master")
