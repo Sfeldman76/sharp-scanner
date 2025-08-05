@@ -2872,6 +2872,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
     
         market_weights = load_market_weights_from_bq()
+        now = pd.Timestamp.utcnow()  # ✅ Add this line BEFORE using `now`
+
+
+
         df['Snapshot_Timestamp'] = now
         df['Event_Date'] = df['Game_Start'].dt.date
         df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
