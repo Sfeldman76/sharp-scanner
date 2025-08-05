@@ -1252,48 +1252,62 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
 def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     df = df_inverse.copy()
 
+    # Normalize bookmaker names
     df['Bookmaker'] = df.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
     df_all_snapshots['Bookmaker'] = df_all_snapshots.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
 
+    # Inverse logic
+    def get_inverse_label(row):
+        if row['Market'] == 'totals':
+            return 'under' if row['Outcome_Norm'] == 'over' else 'over'
+        elif row['Market'] in ['h2h', 'spreads']:
+            return row['Away_Team_Norm'] if row['Outcome_Norm'] == row['Home_Team_Norm'] else row['Home_Team_Norm']
+        return row['Outcome_Norm']
+
+    # Apply Commence Hour and Team Key
     df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce').dt.floor('h')
-    df['Team_Key'] = df['Home_Team_Norm'] + "_" + df['Away_Team_Norm'] + "_" + df['Commence_Hour'].astype(str) + "_" + df['Market'] + "_" + df['Outcome']
-
-    df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-    df_all_snapshots['Team_Key'] = df_all_snapshots['Home_Team_Norm'] + "_" + df_all_snapshots['Away_Team_Norm'] + "_" + df_all_snapshots['Commence_Hour'].astype(str) + "_" + df_all_snapshots['Market'] + "_" + df_all_snapshots['Outcome']
-
-    df['Opponent'] = df.apply(lambda row: row['Away_Team_Norm'] if row['Outcome'] == row['Home_Team_Norm'] else row['Home_Team_Norm'], axis=1)
-    df['Opponent'] = df['Opponent'].apply(normalize_label)
-
-    df['Opponent_Team_Key'] = (
+    df['Outcome'] = df.apply(get_inverse_label, axis=1)  # ✅ Flip the outcome label
+    df['Outcome_Norm'] = df['Outcome']
+    df['Team_Key'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
         df['Commence_Hour'].astype(str) + "_" +
         df['Market'] + "_" +
-        df['Opponent']
+        df['Outcome']
     )
 
-    df_all_snapshots['Team_Key'] = df_all_snapshots['Team_Key'].astype(str)
+    # Build snapshot keys
+    df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+    df_all_snapshots['Team_Key'] = (
+        df_all_snapshots['Home_Team_Norm'] + "_" +
+        df_all_snapshots['Away_Team_Norm'] + "_" +
+        df_all_snapshots['Commence_Hour'].astype(str) + "_" +
+        df_all_snapshots['Market'] + "_" +
+        df_all_snapshots['Outcome']
+    )
+
+    # Merge in latest snapshot for inverse side
     df_latest = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp', ascending=False)
         .drop_duplicates(subset=['Team_Key', 'Bookmaker'])
         [['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']]
         .rename(columns={
-            'Team_Key': 'Opponent_Team_Key',
+            'Team_Key': 'Team_Key',  # Keeping same name for merge
             'Value': 'Value_opponent',
             'Odds_Price': 'Odds_Price_opponent',
             'Limit': 'Limit_opponent'
         })
     )
 
-    df = df.merge(df_latest, on=['Opponent_Team_Key', 'Bookmaker'], how='left')
+    df = df.merge(df_latest, on=['Team_Key', 'Bookmaker'], how='left')
 
     for col in ['Value', 'Odds_Price', 'Limit']:
         opp_col = f"{col}_opponent"
         if opp_col in df.columns:
             df[col] = np.where(df[opp_col].notna(), df[opp_col], df[col])
 
-    df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent', 'Opponent_Team_Key'], errors='ignore', inplace=True)
+    df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
     return df
 
 
@@ -2793,16 +2807,36 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     if trained_models is None:
         trained_models = get_trained_models(sport_key)
-    
+
     try:
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    
+        # ➕ Define inverse rows BEFORE using them
         df_inverse = df[df['Was_Canonical'] == False].copy()
     
         if not df_inverse.empty:
+            df_before = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
             df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
-            df.update(df_inverse)
+            df_after = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
     
-        logger.info(f"🧪 After hydration: {df['Value'].isna().sum()} rows missing Value")
+            changed_mask = (
+                (df_before['Value'] != df_after['Value']) |
+                (df_before['Odds_Price'] != df_after['Odds_Price']) |
+                (df_before['Limit'] != df_after['Limit'])
+            )
+            changed_rows = df_after[changed_mask]
+    
+            logger.info(f"🛠️ {len(changed_rows)} inverse rows were updated by hydration.")
+            if not changed_rows.empty:
+                logger.info("🔁 Sample of changed rows:")
+                logger.info(changed_rows.head(10).to_string(index=False))
+    
+            # Update main df with hydrated inverse rows
+            df.update(df_inverse)
+
+    
+        # ✅ Deduplicate before computing sharp metrics
+        df = df.drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"])
     
         df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
     
@@ -2815,9 +2849,17 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df_scored['Pre_Game'] = df_scored['Game_Start'] > now
             df_scored['Post_Game'] = ~df_scored['Pre_Game']
             df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
+            df_scored['Snapshot_Timestamp'] = now
             df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
     
-            
+            df_scored = df_scored.drop_duplicates(subset=["Line_Hash"])
+    
+            try:
+                write_sharp_moves_to_master(df_scored)
+                logging.info(f"✅ Wrote {len(df_scored)} rows to sharp_moves_master")
+            except Exception as e:
+                logging.error(f"❌ Failed to write sharp moves to BigQuery: {e}", exc_info=True)
+    
             df = df_scored.copy()
             summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
         else:
@@ -2830,7 +2872,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df = pd.DataFrame()
         summary_df = pd.DataFrame()
     
-    return df, df_history, summary_df
+    # ✅ Return same snapshot history as df_history for consistency
+    return df, df_all_snapshots, summary_df
+
 
 def compute_weighted_signal(row, market_weights):
     market = str(row.get('Market', '')).lower()
