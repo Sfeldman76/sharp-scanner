@@ -3959,11 +3959,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'MLB': 'MLB',  # handles redundancy safely
         'NBA': 'NBA',
         'WNBA': 'WNBA',
-        'CFL': 'CFL'
-        'NFL': 'NFL'
-        'NCAAF: 'NCAAF
-    
-
+        'CFL': 'CFL',
+        'NFL': 'NFL',
+        'NCAAF': 'NCAAF',
     }).str.upper()
     
     if 'Snapshot_Timestamp' in df.columns:
