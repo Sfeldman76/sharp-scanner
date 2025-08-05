@@ -354,6 +354,13 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
         return pd.DataFrame()
 
 # ✅ Cached wrapper for diagnostics and line movement history
+# Smart getter — use cache unless forced to reload
+def read_recent_sharp_moves_conditional(force_reload=False, hours=72, table=BQ_FULL_TABLE):
+    if force_reload:
+        st.info("🔁 Reloading sharp moves from BigQuery...")
+        return _read_recent_sharp_moves(hours=hours, table=table)
+    else:
+        return read_recent_sharp_moves(hours=hours, table=table)
 
 @st.cache_data(ttl=600)
 def get_recent_history():
@@ -2170,10 +2177,13 @@ def ensure_opposite_side_rows(df, scored_df):
 
 
 
-def render_scanner_tab(label, sport_key, container):
+
+def render_scanner_tab(label, sport_key, container, force_reload=False):
+
     if st.session_state.get("pause_refresh", False):
         st.info("⏸️ Auto-refresh paused")
         return
+
 
     timestamp = pd.Timestamp.utcnow()
 
@@ -2213,21 +2223,19 @@ def render_scanner_tab(label, sport_key, container):
             for outcome in market.get('outcomes', [])
         ])
 
-        # ✅ New: Load sharp move history
         df_all_snapshots = get_recent_history()
 
-
-        
-        # === Load sharp moves from BigQuery (from Cloud Scheduler)
+        # === Load sharp moves from BigQuery (from Cloud Scheduler or live)
         detection_key = f"sharp_moves_{sport_key.lower()}"
-        
-        if detection_key in st.session_state:
+        if not force_reload and detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            df_moves_raw = read_recent_sharp_moves(hours=48)
+            df_moves_raw = read_recent_sharp_moves_conditional(force_reload=True, hours=48)
             st.session_state[detection_key] = df_moves_raw
             st.success(f"📥 Loaded sharp moves from BigQuery")
+
+       
         # === Filter to current tab's sport
         # Normalize and match directly
         df_moves_raw['Sport_Norm'] = df_moves_raw['Sport'].astype(str).str.upper().str.strip()
@@ -3042,6 +3050,7 @@ sport = st.sidebar.radio("Select a League", ["General", "NFL", "NCAAF", "NBA", "
 
 st.sidebar.markdown("### ⚙️ Controls")
 st.sidebar.checkbox("⏸️ Pause Auto Refresh", key="pause_refresh")
+force_reload = st.sidebar.button("🔁 Force Reload")
 
 # --- Optional: Track scanner checkboxes by sport
 scanner_flags = {
