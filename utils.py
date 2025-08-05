@@ -128,6 +128,7 @@ def normalize_team(t):
 def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
+
 def compute_line_hash(row):
     try:
         key_fields = [
@@ -137,10 +138,7 @@ def compute_line_hash(row):
             str(row.get('Outcome', '')).strip().lower(),
             str(row.get('Value', '')).strip(),
             str(row.get('Odds_Price', '')).strip(),
-            str(row.get('Sharp_Move_Signal', '')).strip(),
-            str(row.get('Sharp_Limit_Total', '')).strip(),
-            str(row.get('Open_Value', '')).strip(),
-            str(row.get('Snapshot_Timestamp', '')).strip(),  # ✅ NEW LINE
+            str(row.get('Limit', '')).strip(),
         ]
         key = "|".join(key_fields)
         return hashlib.md5(key.encode()).hexdigest()
@@ -2878,16 +2876,18 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
         df['Snapshot_Timestamp'] = now
         df['Event_Date'] = df['Game_Start'].dt.date
+        df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
+           
         df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
 
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
     
         if not df_scored.empty:
-            df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
-            now = pd.Timestamp.utcnow()
+         
+           
             df_scored['Pre_Game'] = df_scored['Game_Start'] > now
             df_scored['Post_Game'] = ~df_scored['Pre_Game']
-            df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
+         
           
     
             df_scored = df_scored.drop_duplicates(subset=["Line_Hash"])
