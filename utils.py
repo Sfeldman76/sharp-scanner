@@ -1311,41 +1311,25 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
     df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
     return df
 def fallback_flip_inverse_rows(df_inverse: pd.DataFrame) -> pd.DataFrame:
-    df = df_inverse.copy()
+    # Only flip if Value is missing
+    missing_value_mask = df_inverse['Value'].isnull()
 
-    # Identify rows where Value or Odds_Price is still missing
-    missing_rows = df[df['Value'].isna() | df['Odds_Price'].isna()].copy()
+    df_to_flip = df_inverse[missing_value_mask].copy()
+    if df_to_flip.empty:
+        return df_inverse  # Nothing to flip
 
-    if missing_rows.empty:
-        return df  # ✅ Nothing to fix
+    logger.info(f"🔁 Fallback flipping {len(df_to_flip)} inverse rows missing value...")
 
-    # Build a lookup from canonical rows (already hydrated) by key
-    lookup = (
-        df_inverse[df_inverse['Was_Canonical'] == True]
-        .dropna(subset=['Value', 'Odds_Price'])
-        .set_index(['Game_Key', 'Market', 'Bookmaker'])
-    )
+    if 'Market' in df_to_flip.columns:
+        df_to_flip.loc[df_to_flip['Market'] == 'spreads', 'Value'] *= -1
+        df_to_flip.loc[df_to_flip['Market'] == 'totals', 'Outcome_Norm'] = df_to_flip['Outcome_Norm'].map(
+            {'over': 'under', 'under': 'over'}
+        )
+        df_to_flip.loc[df_to_flip['Market'] == 'totals', 'Outcome'] = df_to_flip['Outcome_Norm']
+    
+    df_inverse.update(df_to_flip)
+    return df_inverse
 
-    # Iterate through the inverse rows missing data
-    for idx, row in missing_rows.iterrows():
-        key = (row['Game_Key'], row['Market'], row['Bookmaker'])
-
-        if key not in lookup.index:
-            continue  # Nothing to do
-
-        canon_row = lookup.loc[key]
-        # Flip value and price if still missing
-        if pd.isna(row['Value']):
-            df.at[idx, 'Value'] = -canon_row['Value']
-        if pd.isna(row['Odds_Price']):
-            # Optionally flip odds (if you want implied prob symmetry)
-            df.at[idx, 'Odds_Price'] = canon_row['Odds_Price']
-
-        # Log what was fixed
-        logging.info(f"🔁 Fallback flipped inverse row for {key}: "
-                     f"Value={df.at[idx, 'Value']}, Odds={df.at[idx, 'Odds_Price']}")
-
-    return df
 
 
           
@@ -2807,7 +2791,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                     odds_price = o.get('price')
                     value = odds_price if mtype == 'h2h' else point
                     limit = o.get('bet_limit')
-                    logger.info(f"🧪 API ROW [{mtype.upper()}] | Book: {book_key} | Outcome: {label} | Point: {point} | Odds: {odds_price} | Limit: {limit}")
+                    #logger.info(f"🧪 API ROW [{mtype.upper()}] | Book: {book_key} | Outcome: {label} | Point: {point} | Odds: {odds_price} | Limit: {limit}")
 
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
                     team_key = game_key
@@ -2921,7 +2905,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df['Snapshot_Timestamp'] = now
         df['Event_Date'] = df['Game_Start'].dt.date
         df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
-           
+        logging.info("🧪 Sample final spread rows before scoring:")
+        logging.info(df[df['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].head(10).to_string(index=False))
+   
         df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
 
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
