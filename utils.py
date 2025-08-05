@@ -2808,7 +2808,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
 
         market_weights = load_market_weights_from_bq()
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
-
+        # ✅ Write scored rows to sharp_moves_master
+        t\
         if not df_scored.empty:
             df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
             now = pd.Timestamp.utcnow()
@@ -2822,6 +2823,15 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
             df = pd.DataFrame()
             summary_df = pd.DataFrame()
+        # ✅ Write scored rows to sharp_moves_master
+       try:
+          if not df_scored.empty:
+              write_sharp_moves_to_master(df_scored)
+              logging.info(f"✅ Wrote {len(df_scored)} rows to sharp_moves_master")
+       else:
+           logging.warning("⚠️ No rows to write to sharp_moves_master")
+except Exception as e:
+    logging.error(f"❌ Failed to write sharp moves to BigQuery: {e}", exc_info=True)
     except Exception as e:
         logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
         df = pd.DataFrame()
