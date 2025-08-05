@@ -3038,15 +3038,19 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
 
 # --- Sidebar navigation
-sport = st.sidebar.radio("🏈 Select a League", ["General", "NBA", "MLB", "CFL", "WNBA"])
+sport = st.sidebar.radio("Select a League", ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"])
+
 st.sidebar.markdown("### ⚙️ Controls")
 st.sidebar.checkbox("⏸️ Pause Auto Refresh", key="pause_refresh")
+
 # --- Optional: Track scanner checkboxes by sport
 scanner_flags = {
+    "NFL": "run_nfl_scanner",
+    "NCAAF": "run_ncaaf_scanner",
     "NBA": "run_nba_scanner",
     "MLB": "run_mlb_scanner",
     "CFL": "run_cfl_scanner",
-    "WNBA": "run_wnba_scanner"
+    "WNBA": "run_wnba_scanner",
 }
 
 # === GENERAL PAGE ===
