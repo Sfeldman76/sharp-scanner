@@ -13,8 +13,8 @@ joblib    # For saving isotonic calibrators
 streamlit-option-menu
 psutil
 # === Machine Learning ===
-xgboost==1.7.6
-scikit-learn==1.7.0
+xgboost
+scikit-learn
 scipy
 # === Google Cloud SDKs ===
 google-auth
@@ -27,4 +27,5 @@ google-cloud-bigquery
 google-cloud-bigquery-storage
 google-cloud-storage
 pandas-gbq
+
 
