@@ -2872,6 +2872,10 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
     
         market_weights = load_market_weights_from_bq()
+        df['Snapshot_Timestamp'] = now
+        df['Event_Date'] = df['Game_Start'].dt.date
+        df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
+
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
     
         if not df_scored.empty:
@@ -2880,8 +2884,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df_scored['Pre_Game'] = df_scored['Game_Start'] > now
             df_scored['Post_Game'] = ~df_scored['Pre_Game']
             df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
-            df_scored['Snapshot_Timestamp'] = now
-            df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
+          
     
             df_scored = df_scored.drop_duplicates(subset=["Line_Hash"])
     
