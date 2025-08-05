@@ -2477,51 +2477,40 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 logger.error(f"🧵 Full Traceback:\n{tb_str}")
 
             # ✅ Combine canonical and inverse into one scored DataFrame
-        def dedupe_columns(df):
-            return df.loc[:, ~df.columns.duplicated()]
-
-        # Dedupe columns
-        df_canon = dedupe_columns(df_canon)
-        df_inverse = dedupe_columns(df_inverse)
-        
-        # Align columns
-        all_cols = sorted(set(df_canon.columns).union(set(df_inverse.columns)))
-        
-        for col in all_cols:
-            if col not in df_canon.columns:
-                df_canon[col] = np.nan
-            if col not in df_inverse.columns:
-                df_inverse[col] = np.nan
-        
-        # Reorder for consistency
-        df_canon = df_canon[all_cols]
-        df_inverse = df_inverse[all_cols]
-        
-        # Reset index and concat
-        df_canon = df_canon.reset_index(drop=True)
-        df_inverse = df_inverse.reset_index(drop=True)
-        df_canon.index.name = None
-        df_inverse.index.name = None
-        
-        df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-                        # ✅ Auto-align if needed
-            if not columns_match:
-                all_cols = sorted(set(df_canon.columns).union(set(df_inverse.columns)))
             
-                for col in all_cols:
-                    if col not in df_canon.columns:
-                        df_canon[col] = np.nan
-                    if col not in df_inverse.columns:
-                        df_inverse[col] = np.nan
-            
-                df_canon = df_canon[all_cols]
-                df_inverse = df_inverse[all_cols]
             logger.info(f"📋 Inverse2 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
             logger.info(f"📋 canon row columns after enrichment: {sorted(df_canon.columns.tolist())}")
-            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
-            logger.info(f"📋 scored row columns after enrichment: {sorted(df_scored.columns.tolist())}")
            
+            
+            def dedupe_columns(df):
+                return df.loc[:, ~df.columns.duplicated()]
+            
+            # Dedupe columns
+            df_canon = dedupe_columns(df_canon)
+            df_inverse = dedupe_columns(df_inverse)
+            
+            # Align columns
+            all_cols = sorted(set(df_canon.columns).union(set(df_inverse.columns)))
+            
+            for col in all_cols:
+                if col not in df_canon.columns:
+                    df_canon[col] = np.nan
+                if col not in df_inverse.columns:
+                    df_inverse[col] = np.nan
+            
+            # Reorder for consistency
+            df_canon = df_canon[all_cols]
+            df_inverse = df_inverse[all_cols]
+            
+            # Reset index and concat
+            df_canon = df_canon.reset_index(drop=True)
+            df_inverse = df_inverse.reset_index(drop=True)
+            df_canon.index.name = None
+            df_inverse.index.name = None
+            
+            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             # === ✅ Combine canonical and inverse rows
+            logger.info(f"📋 scored row columns after enrichment: {sorted(df_scored.columns.tolist())}")
             logging.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
             logging.info("🔍 df_scored — Sample Rows:\n%s", df_scored[[
                 'Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 
