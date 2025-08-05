@@ -1310,6 +1310,42 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
 
     df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
     return df
+def fallback_flip_inverse_rows(df_inverse: pd.DataFrame) -> pd.DataFrame:
+    df = df_inverse.copy()
+
+    # Identify rows where Value or Odds_Price is still missing
+    missing_rows = df[df['Value'].isna() | df['Odds_Price'].isna()].copy()
+
+    if missing_rows.empty:
+        return df  # ✅ Nothing to fix
+
+    # Build a lookup from canonical rows (already hydrated) by key
+    lookup = (
+        df_inverse[df_inverse['Was_Canonical'] == True]
+        .dropna(subset=['Value', 'Odds_Price'])
+        .set_index(['Game_Key', 'Market', 'Bookmaker'])
+    )
+
+    # Iterate through the inverse rows missing data
+    for idx, row in missing_rows.iterrows():
+        key = (row['Game_Key'], row['Market'], row['Bookmaker'])
+
+        if key not in lookup.index:
+            continue  # Nothing to do
+
+        canon_row = lookup.loc[key]
+        # Flip value and price if still missing
+        if pd.isna(row['Value']):
+            df.at[idx, 'Value'] = -canon_row['Value']
+        if pd.isna(row['Odds_Price']):
+            # Optionally flip odds (if you want implied prob symmetry)
+            df.at[idx, 'Odds_Price'] = canon_row['Odds_Price']
+
+        # Log what was fixed
+        logging.info(f"🔁 Fallback flipped inverse row for {key}: "
+                     f"Value={df.at[idx, 'Value']}, Odds={df.at[idx, 'Odds_Price']}")
+
+    return df
 
 
           
@@ -2746,7 +2782,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     for game in current:
         home_team = game.get('home_team', '').strip().lower()
         away_team = game.get('away_team', '').strip().lower()
-        logger.info(f"🧾 FULL API GAME DUMP:\n{json.dumps(game, indent=2)}")
+        
 
         if not home_team or not away_team:
             continue
