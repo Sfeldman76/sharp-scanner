@@ -2051,16 +2051,15 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logger.info(f"🧪 Inverse rows with Open_Value: {df_inverse['Open_Value'].notnull().sum()} / {len(df_inverse)}")
             # Merge canonical model predictions into inverse rows by Outcome_Norm
             # Ensure the merge has correct source columns
-            df_canon_preds = (
-                df_canon[['Line_Hash', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
-                .drop_duplicates(subset='Line_Hash')
-                .rename(columns={
-                    'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_canon',
-                    'Model_Confidence': 'Model_Confidence_canon'
-                })
-            )
+            merge_cols = ['Game_Key', 'Market', 'Bookmaker', 'Outcome_Norm']
+            df_canon_preds = df_canon[merge_cols + ['Model_Sharp_Win_Prob', 'Model_Confidence']].drop_duplicates(merge_cols)
+            df_canon_preds.rename(columns={
+                'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_canon',
+                'Model_Confidence': 'Model_Confidence_canon'
+            }, inplace=True)
             
-            df_inverse = df_inverse.merge(df_canon_preds, on='Line_Hash', how='left')
+            df_inverse = df_inverse.merge(df_canon_preds, on=merge_cols, how='left')
+      
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_canon']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence_canon']
             df_inverse.drop(columns=['Model_Sharp_Win_Prob_canon', 'Model_Confidence_canon'], inplace=True)
