@@ -1256,18 +1256,12 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
     df['Bookmaker'] = df.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
     df_all_snapshots['Bookmaker'] = df_all_snapshots.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
 
-    # Inverse logic
-    def get_inverse_label(row):
-        if row['Market'] == 'totals':
-            return 'under' if row['Outcome_Norm'] == 'over' else 'over'
-        elif row['Market'] in ['h2h', 'spreads']:
-            return row['Away_Team_Norm'] if row['Outcome_Norm'] == row['Home_Team_Norm'] else row['Home_Team_Norm']
-        return row['Outcome_Norm']
+    # ⛔️ DO NOT FLIP OUTCOMES — inverse rows are already constructed correctly
+    # df['Outcome'] = df.apply(get_inverse_label, axis=1)
+    # df['Outcome_Norm'] = df['Outcome']
 
-    # Apply Commence Hour and Team Key
+    # Ensure Commence_Hour is normalized
     df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce').dt.floor('h')
-    df['Outcome'] = df.apply(get_inverse_label, axis=1)  # ✅ Flip the outcome label
-    df['Outcome_Norm'] = df['Outcome']
     df['Team_Key'] = (
         df['Home_Team_Norm'] + "_" +
         df['Away_Team_Norm'] + "_" +
@@ -1276,7 +1270,7 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
         df['Outcome']
     )
 
-    # Build snapshot keys
+    # Build snapshot Team_Key
     df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h')
     df_all_snapshots['Team_Key'] = (
         df_all_snapshots['Home_Team_Norm'] + "_" +
@@ -1286,14 +1280,13 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
         df_all_snapshots['Outcome']
     )
 
-    # Merge in latest snapshot for inverse side
+    # Merge latest snapshot per (Team_Key, Bookmaker)
     df_latest = (
         df_all_snapshots
         .sort_values('Snapshot_Timestamp', ascending=False)
         .drop_duplicates(subset=['Team_Key', 'Bookmaker'])
         [['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']]
         .rename(columns={
-            'Team_Key': 'Team_Key',  # Keeping same name for merge
             'Value': 'Value_opponent',
             'Odds_Price': 'Odds_Price_opponent',
             'Limit': 'Limit_opponent'
@@ -1302,6 +1295,7 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
 
     df = df.merge(df_latest, on=['Team_Key', 'Bookmaker'], how='left')
 
+    # Only overwrite if snapshot value is available
     for col in ['Value', 'Odds_Price', 'Limit']:
         opp_col = f"{col}_opponent"
         if opp_col in df.columns:
