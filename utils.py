@@ -2780,37 +2780,35 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Team_Key': team_key,
                     })
 
+   
     df = pd.DataFrame(rows)
     if df.empty:
         logging.warning("⚠️ No sharp rows built.")
         return df, df_history, pd.DataFrame()
-
+    
     df['Was_Canonical'] = False
     df.loc[(df['Market'] == 'totals') & (df['Outcome_Norm'] == 'over'), 'Was_Canonical'] = True
     df.loc[(df['Market'] == 'spreads') & (df['Value'] < 0), 'Was_Canonical'] = True
     df.loc[(df['Market'] == 'h2h') & (df['Value'] < 0), 'Was_Canonical'] = True
-
+    
     if trained_models is None:
         trained_models = get_trained_models(sport_key)
-
+    
     try:
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
         df_inverse = df[df['Was_Canonical'] == False].copy()
-
+    
         if not df_inverse.empty:
             df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
             df.update(df_inverse)
-
+    
         logger.info(f"🧪 After hydration: {df['Value'].isna().sum()} rows missing Value")
+    
         df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
-
-
-
+    
         market_weights = load_market_weights_from_bq()
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
-        market_weights = load_market_weights_from_bq()
-        df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
-        
+    
         if not df_scored.empty:
             df_scored['Game_Start'] = pd.to_datetime(df_scored['Game_Start'], errors='coerce', utc=True)
             now = pd.Timestamp.utcnow()
@@ -2818,27 +2816,26 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df_scored['Post_Game'] = ~df_scored['Pre_Game']
             df_scored['Event_Date'] = df_scored['Game_Start'].dt.date
             df_scored['Line_Hash'] = df_scored.apply(compute_line_hash, axis=1)
-        
-            # ✅ Write scored rows to sharp_moves_master
+    
             try:
                 write_sharp_moves_to_master(df_scored)
                 logging.info(f"✅ Wrote {len(df_scored)} rows to sharp_moves_master")
             except Exception as e:
                 logging.error(f"❌ Failed to write sharp moves to BigQuery: {e}", exc_info=True)
-        
+    
             df = df_scored.copy()
             summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
         else:
             logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
             df = pd.DataFrame()
             summary_df = pd.DataFrame()
-   
+    
+    except Exception as e:
         logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
         df = pd.DataFrame()
         summary_df = pd.DataFrame()
-
+    
     return df, df_history, summary_df
-
 
 def compute_weighted_signal(row, market_weights):
     market = str(row.get('Market', '')).lower()
