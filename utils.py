@@ -1300,7 +1300,8 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
           
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
-
+    scored_all = []
+    total_start = time.time()
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Is_Sharp_Book'] = df['Bookmaker'].astype(str).str.lower().str.strip().isin(SHARP_BOOKS).astype(int)
@@ -1663,7 +1664,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         logger.info(f"\n{sample_log}")
     else:
         logger.warning("⚠️ team_feature_map is empty or missing.")
-    scored_all = []
+    
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
@@ -2507,8 +2508,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse = df_inverse.reset_index(drop=True)
             df_canon.index.name = None
             df_inverse.index.name = None
-            
-            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+            if scored_all:
+    
+               df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
             # === ✅ Combine canonical and inverse rows
             logger.info(f"📋 scored row columns after enrichment: {sorted(df_scored.columns.tolist())}")
             logging.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
