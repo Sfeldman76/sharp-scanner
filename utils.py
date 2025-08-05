@@ -2857,7 +2857,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 changed_rows['Original_Outcome'] = df_inverse.loc[changed_rows.index, 'Original_Outcome_Norm'].values
     
                 logger.info("🔁 Sample of changed rows (with outcome flip):")
-                logger.info(changed_rows[['Team_Key', 'Original_Outcome', 'Hydrated_Outcome', 'Value', 'Odds_Price', 'Limit']].head(10).to_string(index=False))
+                logger.info(changed_rows[['Team_Key', 'Original_Outcome', 'Hydrated_Outcome', 'Value', 'Odds_Price', 'Limit']].head(50).to_string(index=False))
     
             # Update main df with hydrated values
             df.update(df_inverse)
