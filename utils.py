@@ -51,13 +51,15 @@ API_KEY = "3879659fe861d68dfa2866c211294684"
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)
 gcs_client = storage.Client(project=GCP_PROJECT_ID)
 
+
 SPORTS = {
     "NBA": "basketball_nba",
     "MLB": "baseball_mlb",
     "CFL": "americanfootball_cfl",
     "WNBA": "basketball_wnba",
+    "NFL": "americanfootball_nfl",     # National Football League
+    "NCAAF": "americanfootball_ncaaf", # NCAA College Football
 }
-
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
 SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','smarkets','betfair_ex_eu','betfair_ex_uk','betfair_ex_au','lowvig','betonlineag','matchbook']
@@ -3958,6 +3960,10 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'NBA': 'NBA',
         'WNBA': 'WNBA',
         'CFL': 'CFL'
+        'NFL': 'NFL'
+        'NCAAF: 'NCAAF
+    
+
     }).str.upper()
     
     if 'Snapshot_Timestamp' in df.columns:
