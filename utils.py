@@ -2003,10 +2003,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
            
-            df_inverse = df[df['Was_Canonical'] == False].copy() if 'Was_Canonical' in df.columns else pd.DataFrame()
-            # 1. Copy and flip outcome for merge key
-            # ✅ Hydrate inverse rows using snapshot
-            df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
+            df_inverse = df_full_market[df_full_market['Was_Canonical'] == False].copy()
+
+            logger.info(f"🧪 Inverse rows found for {market_type.upper()}: {len(df_inverse)}")
+
             # === Merge cross-market odds into inverse rows
                 
             # === Recompute implied probabilities from merged odds
@@ -2352,14 +2352,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
                 
                 # ✅ Hydrate value/odds/limit from historical snapshot
-                df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
+           
                 
                 # 🔁 Merge openers/extremes
                 df_inverse = df_inverse.merge(df_open, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
                 df_inverse = df_inverse.merge(df_open_book, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
                 df_inverse = df_inverse.merge(df_extremes, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
-                # ✅ Rehydrate real bookmaker line data for Value, Odds_Price, Limit
-              
+            
                 
                 # 🔁 Re-merge team-level features
                 try:
