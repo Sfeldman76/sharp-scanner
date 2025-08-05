@@ -1341,14 +1341,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     else:
         logger.info(f"🧪 Using df_all_snapshots from caller — {len(df_all_snapshots)} rows")
 
+    # ✅ Only concat rows where Value is not null and Outcome is non-canonical
     for col in merge_keys:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
-    # 🚨 Ensure current df rows are included in snapshots to support fallback
-    if df_all_snapshots is not None:
-        df_all_snapshots = pd.concat([
-            df_all_snapshots,
-            df[merge_keys + ['Value', 'Odds_Price', 'Snapshot_Timestamp']]
-        ], ignore_index=True).drop_duplicates(subset=merge_keys + ['Snapshot_Timestamp'])
+        
+    # ✅ Only add inverse rows back into snapshots
+    inverse_snapshot_rows = df[df['Was_Canonical'] == False][
+        merge_keys + ['Value', 'Odds_Price', 'Snapshot_Timestamp']
+    ]
+    
+    df_all_snapshots = pd.concat([
+        df_all_snapshots,
+        inverse_snapshot_rows
+    ], ignore_index=True).drop_duplicates(subset=merge_keys + ['Snapshot_Timestamp'])
 
     # === Compute implied probability if missing
     df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
@@ -2027,25 +2032,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # Merge canonical model predictions into inverse rows by Outcome_Norm
             # Ensure the merge has correct source columns
             df_canon_preds = (
-                df_canon[['Outcome_Norm', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
-                .drop_duplicates(subset='Outcome_Norm')
+                df_canon[['Line_Hash', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
+                .drop_duplicates(subset='Line_Hash')
                 .rename(columns={
                     'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_canon',
                     'Model_Confidence': 'Model_Confidence_canon'
                 })
             )
             
-            # Merge onto inverse using Outcome_Norm
-            df_inverse = df_inverse.merge(df_canon_preds, on='Outcome_Norm', how='left')
-            
-            # Flip the canonical predictions for inverse row scoring
+            df_inverse = df_inverse.merge(df_canon_preds, on='Line_Hash', how='left')
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_canon']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence_canon']
-            
-            # Drop canon fields after inversion
             df_inverse.drop(columns=['Model_Sharp_Win_Prob_canon', 'Model_Confidence_canon'], inplace=True)
-            # Now drop the canon columns so they don't persist
-                 
+
+            
+          
+                         
             
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
@@ -2642,14 +2644,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
             # === 🔍 Diagnostic for unscored rows
             try:
-                unscored_df = df[df['Game_Key'].isin(set(df['Game_Key']) - set(df_final['Game_Key']))]
-                if not unscored_df.empty:
-                    logger.warning(f"⚠️ {len(unscored_df)} rows were not scored.")
-                    logger.warning("🔍 Breakdown by market type:")
-                    logger.warning(unscored_df['Market'].value_counts().to_string())
+                unscored_rows = df[df['Model_Sharp_Win_Prob'].isnull()]
+                if not unscored_rows.empty:
+                    logger.warning(f"⚠️ {len(unscored_rows)} rows were not scored (Model_Sharp_Win_Prob is null).")
+                    logger.warning(unscored_rows[['Game', 'Bookmaker', 'Market', 'Outcome', 'Was_Canonical']].head(10).to_string(index=False))
+
         
-                    logger.warning("🧪 Sample of unscored rows:")
-                    logger.warning(unscored_df[['Game', 'Bookmaker', 'Market', 'Outcome', 'Value']].head(5).to_string(index=False))
             except Exception as e:
                 logger.error(f"❌ Failed to log unscored rows by market: {e}")
 
