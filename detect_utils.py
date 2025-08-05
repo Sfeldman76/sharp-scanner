@@ -45,7 +45,8 @@ from utils import (
     add_line_and_crossmarket_features,
     compute_small_book_liquidity_features,
     normalize_book_name,
-    hydrate_inverse_rows_from_snapshot
+    hydrate_inverse_rows_from_snapshot,
+    fallback_flip_inverse_rows
 )
 
 def detect_and_save_all_sports():
