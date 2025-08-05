@@ -2799,7 +2799,9 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     if df.empty:
         logging.warning("⚠️ No sharp rows built.")
         return df, df_history, pd.DataFrame()
-    
+    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
+    df['Outcome_Norm'] = df['Outcome_Norm'].astype(str).str.lower().str.strip()
+
     df['Was_Canonical'] = False
     df.loc[(df['Market'] == 'totals') & (df['Outcome_Norm'] == 'over'), 'Was_Canonical'] = True
     df.loc[(df['Market'] == 'spreads') & (df['Value'] < 0), 'Was_Canonical'] = True
@@ -2808,36 +2810,57 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     if trained_models is None:
         trained_models = get_trained_models(sport_key)
 
+    
     try:
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
     
         # ➕ Define inverse rows BEFORE using them
         df_inverse = df[df['Was_Canonical'] == False].copy()
+        logger.info(f"📦 Built {len(df_inverse)} inverse rows")
+    
+        # 🔍 Check for misclassified canonical outcomes in inverse rows
+        bad_inverse_rows = df_inverse[
+            ((df_inverse['Market'] == 'totals') & (df_inverse['Outcome_Norm'] == 'over')) |
+            ((df_inverse['Market'].isin(['spreads', 'h2h'])) & (df_inverse['Value'] < 0))
+        ]
+    
+        if not bad_inverse_rows.empty:
+            logger.warning(f"🚨 {len(bad_inverse_rows)} rows in df_inverse should have been canonical!")
+            logger.warning(bad_inverse_rows[['Team_Key', 'Market', 'Outcome_Norm', 'Value']].head(10).to_string(index=False))
+    
+        # 🧠 Preserve original outcome before hydration flip
+        df_inverse['Original_Outcome_Norm'] = df_inverse['Outcome_Norm']
     
         if not df_inverse.empty:
             df_before = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
             df_before.reset_index(drop=True, inplace=True)
-            
+    
             df_inverse = hydrate_inverse_rows_from_snapshot(df_inverse, df_all_snapshots)
-            
+    
             df_after = df_inverse[['Team_Key', 'Value', 'Odds_Price', 'Limit']].copy()
             df_after.reset_index(drop=True, inplace=True)
-
     
             changed_mask = (
                 (df_before['Value'] != df_after['Value']) |
                 (df_before['Odds_Price'] != df_after['Odds_Price']) |
                 (df_before['Limit'] != df_after['Limit'])
             )
+    
             changed_rows = df_after[changed_mask]
     
             logger.info(f"🛠️ {len(changed_rows)} inverse rows were updated by hydration.")
             if not changed_rows.empty:
-                logger.info("🔁 Sample of changed rows:")
-                logger.info(changed_rows.head(10).to_string(index=False))
+                # ⚠️ Make sure to also align the outcome columns with correct index
+                changed_rows = changed_rows.copy()  # ensure SettingWithCopyWarning doesn't trigger
+                changed_rows['Hydrated_Outcome'] = df_inverse.loc[changed_rows.index, 'Outcome_Norm'].values
+                changed_rows['Original_Outcome'] = df_inverse.loc[changed_rows.index, 'Original_Outcome_Norm'].values
     
-            # Update main df with hydrated inverse rows
+                logger.info("🔁 Sample of changed rows (with outcome flip):")
+                logger.info(changed_rows[['Team_Key', 'Original_Outcome', 'Hydrated_Outcome', 'Value', 'Odds_Price', 'Limit']].head(10).to_string(index=False))
+    
+            # Update main df with hydrated values
             df.update(df_inverse)
+
 
     
         # ✅ Deduplicate before computing sharp metrics
