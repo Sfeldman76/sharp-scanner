@@ -2508,17 +2508,24 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse = df_inverse.reset_index(drop=True)
             df_canon.index.name = None
             df_inverse.index.name = None
-            if scored_all:
-    
-               df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+            # ✅ Always generate df_scored
+            df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
+          
+            # ✅ Safe logging
+            try:
+                logger.info(f"📋 scored row columns after enrichment: {sorted(df_scored.columns.tolist())}")
+                logger.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
+                logger.info("🔍 df_scored — Sample Rows:\n%s", df_scored[[
+                    'Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 
+                    'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob'
+                ]].head(5).to_string(index=False))
+            except Exception as log_error:
+                logger.warning(f"⚠️ Could not log scored row preview: {log_error}")
+          
+            # ✅ Append after logging
+            scored_all.append(df_scored)
             # === ✅ Combine canonical and inverse rows
-            logger.info(f"📋 scored row columns after enrichment: {sorted(df_scored.columns.tolist())}")
-            logging.info("🧩 df_scored — Columns: %s", df_scored.columns.tolist())
-            logging.info("🔍 df_scored — Sample Rows:\n%s", df_scored[[
-                'Game_Key', 'Market', 'Outcome', 'Model_Sharp_Win_Prob', 
-                'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob'
-            ]].head(5).to_string(index=False))
-       
+            
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
