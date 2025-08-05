@@ -2351,8 +2351,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 # Drop old enriched columns
                 df_inverse = df_inverse.drop(columns=[col for col in cols_to_refresh if col in df_inverse.columns], errors='ignore')
                 
-                # ✅ Hydrate value/odds/limit from historical snapshot
-           
+            
                 
                 # 🔁 Merge openers/extremes
                 df_inverse = df_inverse.merge(df_open, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
@@ -2558,10 +2557,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             except Exception as log_error:
                 logger.warning(f"⚠️ Could not log scored row preview: {log_error}")
           
-            # ✅ Append after logging
-            scored_all.append(df_scored)
-            # === ✅ Combine canonical and inverse rows
-            
+    
 
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
@@ -2600,6 +2596,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         if scored_all:
             # ✅ Concatenate first!
             df_final = pd.concat(scored_all, ignore_index=True)
+          
+            logger.info(f"🧮 Final scored breakdown — total={len(df_final)}, canonical={df_final['Was_Canonical'].sum()}, inverse={(~df_final['Was_Canonical']).sum()}")
+  
             df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
     
             # ✅ Then create hybrid timing flags
