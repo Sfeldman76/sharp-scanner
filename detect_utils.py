@@ -151,18 +151,7 @@ def detect_and_save_all_sports():
 
                 df_snap = build_game_key(df_snap)
 
-                
-                # Before writing sharp_moves
-                if not df_moves.empty and df_moves.columns.size > 0:
-                    df_moves["Line_Hash"] = df_moves.apply(compute_line_hash, axis=1)
-                    df_moves = df_moves.drop_duplicates(subset=["Line_Hash"])
-                else:
-                    logging.warning(f"⚠️ df_moves is empty or has no columns — skipping Line_Hash computation for {sport_label}")
-                    continue
-                df_moves = df_moves.drop_duplicates(subset=["Line_Hash"])
-                write_sharp_moves_to_master(df_moves)
                
-                #write_snapshot_to_gcs_parquet(current)
 
             except Exception as e:
                 logging.error(f"❌ Failed to write snapshot or move data for {sport_label}: {e}", exc_info=True)
