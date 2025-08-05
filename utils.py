@@ -2218,7 +2218,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 # Drop existing versions to avoid _x/_y suffixes
                 cols_to_refresh = [
                     'Open_Value', 'Open_Odds', 'First_Imp_Prob',
-                    'Open_Book_Value', 'Opening_Limit',  # ✅ ADD THESE
+                    'Open_Book_Value',  # ✅ ADD THESE
                     'Min_Value', 'Max_Value', 'Min_Odds', 'Max_Odds',
                     'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
                     'Value_Reversal_Flag', 'Odds_Reversal_Flag',
@@ -2274,10 +2274,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     # 🚨 Overmove flags
                     'Potential_Overmove_Flag',
                     'Potential_Overmove_Total_Pct_Flag',
-                    'Potential_Odds_Overmove_Flag',
+                    #'Potential_Odds_Overmove_Flag',
                 
                     # 🔁 Directional movement
-                    'Line_Moved_Toward_Team',
+                    #'Line_Moved_Toward_Team',
                     'Line_Moved_Away_From_Team',
                 
                     # 🔁 Cross-market alignment and contradiction
@@ -2477,16 +2477,33 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 logger.error(f"🧵 Full Traceback:\n{tb_str}")
 
             # ✅ Combine canonical and inverse into one scored DataFrame
-            df_canon = df_canon.reset_index(drop=True)
-            df_inverse = df_inverse.reset_index(drop=True)
-            df_canon.index.name = None
-            df_inverse.index.name = None
-          
+        def dedupe_columns(df):
+            return df.loc[:, ~df.columns.duplicated()]
 
-            logging.info("🔎 df_canon columns: %s", sorted(df_canon.columns.tolist()))
-            logging.info("🔎 df_inverse columns: %s", sorted(df_inverse.columns.tolist()))
-            logging.info("🔎 Column sets equal? %s", set(df_canon.columns) == set(df_inverse.columns))
-
+        # Dedupe columns
+        df_canon = dedupe_columns(df_canon)
+        df_inverse = dedupe_columns(df_inverse)
+        
+        # Align columns
+        all_cols = sorted(set(df_canon.columns).union(set(df_inverse.columns)))
+        
+        for col in all_cols:
+            if col not in df_canon.columns:
+                df_canon[col] = np.nan
+            if col not in df_inverse.columns:
+                df_inverse[col] = np.nan
+        
+        # Reorder for consistency
+        df_canon = df_canon[all_cols]
+        df_inverse = df_inverse[all_cols]
+        
+        # Reset index and concat
+        df_canon = df_canon.reset_index(drop=True)
+        df_inverse = df_inverse.reset_index(drop=True)
+        df_canon.index.name = None
+        df_inverse.index.name = None
+        
+        df_scored = pd.concat([df_canon, df_inverse], ignore_index=True)
                         # ✅ Auto-align if needed
             if not columns_match:
                 all_cols = sorted(set(df_canon.columns).union(set(df_inverse.columns)))
