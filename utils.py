@@ -2645,7 +2645,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 unscored_rows = df[df['Model_Sharp_Win_Prob'].isnull()]
                 if not unscored_rows.empty:
                     logger.warning(f"⚠️ {len(unscored_rows)} rows were not scored (Model_Sharp_Win_Prob is null).")
-                    logger.warning(unscored_rows[['Game', 'Bookmaker', 'Market', 'Outcome', 'Was_Canonical']].head(10).to_string(index=False))
+                    logger.warning(unscored_rows[['Game', 'Bookmaker', 'Market', 'Outcome', 'Was_Canonical']].head(40).to_string(index=False))
 
         
             except Exception as e:
