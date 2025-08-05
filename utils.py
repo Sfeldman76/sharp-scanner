@@ -2599,7 +2599,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
           
             logger.info(f"🧮 Final scored breakdown — total={len(df_final)}, canonical={df_final['Was_Canonical'].sum()}, inverse={(~df_final['Was_Canonical']).sum()}")
   
-            df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
+        
     
             # ✅ Then create hybrid timing flags
             df_final['Hybrid_Line_Timing_Flag'] = df_final[hybrid_line_cols].gt(1.0).any(axis=1).astype(int)
@@ -2660,7 +2660,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
             # === 🔍 Diagnostic for unscored rows
             try:
-                unscored_rows = df[df['Model_Sharp_Win_Prob'].isnull()]
+                unscored_rows = df_final[df_final['Model_Sharp_Win_Prob'].isnull()]
+
                 if not unscored_rows.empty:
                     logger.warning(f"⚠️ {len(unscored_rows)} rows were not scored (Model_Sharp_Win_Prob is null).")
                     logger.warning(unscored_rows[['Game', 'Bookmaker', 'Market', 'Outcome', 'Was_Canonical']].head(40).to_string(index=False))
@@ -2679,11 +2680,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
             # Leave Sharp_Prob_Shift to be computed with historical context later
             df_final['Sharp_Prob_Shift'] = 0.0
-
+            #df_final = df_final[df_final['Model_Sharp_Win_Prob'].notna()]
     
             # === 🔍 Debug unscored rows
             try:
-                original_keys = set(df['Game_Key'])
+                original_keys = set(df_final['Game_Key']) | set(df['Game_Key'])  # defensive
+
                 scored_keys = set(df_final['Game_Key'])
                 unscored_keys = original_keys - scored_keys
     
