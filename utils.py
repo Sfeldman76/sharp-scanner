@@ -1656,14 +1656,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = df.merge(odds_pivot, on='Game_Key', how='left')
 
    
-
+    
     if team_feature_map is not None and not team_feature_map.empty:
         logger.info("📊 Team Historical Performance Metrics (Hit Rate and Avg Model Prob):")
         sample_log = team_feature_map.head(40).to_string(index=False)
         logger.info(f"\n{sample_log}")
     else:
         logger.warning("⚠️ team_feature_map is empty or missing.")
-
+    scored_all = []
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
