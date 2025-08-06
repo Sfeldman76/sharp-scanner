@@ -1333,29 +1333,56 @@ def fallback_flip_inverse_rows(df_inverse: pd.DataFrame) -> pd.DataFrame:
     return df_inverse
 
 def get_opening_snapshot(df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
-    df_open = df_all_snapshots.copy()
-    df_open['Snapshot_Timestamp'] = pd.to_datetime(df_open['Snapshot_Timestamp'], errors='coerce', utc=True)
+    """
+    Returns the first valid snapshot per (Game_Key, Market, Outcome, Bookmaker) with:
+    - Open_Value
+    - Open_Odds
+    - First_Imp_Prob
+    - Opening_Limit (optional, only if 'Limit' exists and is not null)
+    """
+    if df_all_snapshots.empty:
+        logging.warning("⚠️ df_all_snapshots is empty — returning empty opening snapshot")
+        return pd.DataFrame(columns=['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit'])
 
-    # Build Commence_Hour & Team_Key if not set
-    df_open['Commence_Hour'] = pd.to_datetime(df_open['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-    df_open['Team_Key'] = (
-        df_open['Home_Team_Norm'] + "_" +
-        df_open['Away_Team_Norm'] + "_" +
-        df_open['Commence_Hour'].astype(str) + "_" +
-        df_open['Market'] + "_" +
-        df_open['Outcome']
+    required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
+    for col in required_cols:
+        if col not in df_all_snapshots.columns:
+            raise ValueError(f"Missing required column in df_all_snapshots: {col}")
+
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    df = df_all_snapshots.copy()
+    for col in merge_keys:
+        df[col] = df[col].astype(str).str.strip().str.lower()
+
+    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], errors='coerce', utc=True)
+    df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
+    df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+    if 'Limit' in df.columns:
+        df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce')
+
+    # Compute Implied_Prob if missing
+    if 'Implied_Prob' not in df.columns:
+        df['Implied_Prob'] = np.nan
+    df['Implied_Prob'] = df['Implied_Prob'].fillna(df['Odds_Price'].apply(implied_prob))
+
+    # Drop bad rows
+    df = df.dropna(subset=['Snapshot_Timestamp', 'Value', 'Odds_Price'])
+
+    # === Get first snapshot per outcome
+    df_first = (
+        df.sort_values('Snapshot_Timestamp')
+        .drop_duplicates(subset=merge_keys, keep='first')
+        [merge_keys + ['Value', 'Odds_Price', 'Implied_Prob'] + (['Limit'] if 'Limit' in df.columns else [])]
     )
 
-    # Deduplicate: first available value with both sides available
-    df_open = df_open.sort_values('Snapshot_Timestamp')
-    df_open = (
-        df_open.groupby(['Game_Key', 'Market', 'Bookmaker', 'Outcome'], as_index=False)
-        .first()
-        [['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Value', 'Odds_Price', 'Limit']]
-        .rename(columns={'Value': 'Open_Value', 'Odds_Price': 'Open_Odds', 'Limit': 'Opening_Limit'})
-    )
+    df_first = df_first.rename(columns={
+        'Value': 'Open_Value',
+        'Odds_Price': 'Open_Odds',
+        'Implied_Prob': 'First_Imp_Prob',
+        'Limit': 'Opening_Limit' if 'Limit' in df_first.columns else None
+    })
 
-    return df_open
+    return df_first
 
 
           
