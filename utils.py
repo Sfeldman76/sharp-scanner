@@ -2885,7 +2885,13 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     
     try:
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
-    
+        df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
+        df_all_snapshots['Book'] = df_all_snapshots['Book'].astype(str).str.strip().str.lower()
+        df_all_snapshots['Game'] = df_all_snapshots['Game'].astype(str).str.strip().str.lower()
+        df_all_snapshots['Market'] = df_all_snapshots['Market'].astype(str).str.strip().str.lower()
+        df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower()
+        df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], errors='coerce', utc=True)
+
         # ➕ Define inverse rows BEFORE using them
         df_inverse = df[df['Was_Canonical'] == False].copy()
         logger.info(f"📦 Built {len(df_inverse)} inverse rows")
