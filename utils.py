@@ -1332,6 +1332,30 @@ def fallback_flip_inverse_rows(df_inverse: pd.DataFrame) -> pd.DataFrame:
     df_inverse.update(df_to_flip)
     return df_inverse
 
+def get_opening_snapshot(df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
+    df_open = df_all_snapshots.copy()
+    df_open['Snapshot_Timestamp'] = pd.to_datetime(df_open['Snapshot_Timestamp'], errors='coerce', utc=True)
+
+    # Build Commence_Hour & Team_Key if not set
+    df_open['Commence_Hour'] = pd.to_datetime(df_open['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+    df_open['Team_Key'] = (
+        df_open['Home_Team_Norm'] + "_" +
+        df_open['Away_Team_Norm'] + "_" +
+        df_open['Commence_Hour'].astype(str) + "_" +
+        df_open['Market'] + "_" +
+        df_open['Outcome']
+    )
+
+    # Deduplicate: first available value with both sides available
+    df_open = df_open.sort_values('Snapshot_Timestamp')
+    df_open = (
+        df_open.groupby(['Game_Key', 'Market', 'Bookmaker', 'Outcome'], as_index=False)
+        .first()
+        [['Game_Key', 'Market', 'Bookmaker', 'Outcome', 'Value', 'Odds_Price', 'Limit']]
+        .rename(columns={'Value': 'Open_Value', 'Odds_Price': 'Open_Odds', 'Limit': 'Opening_Limit'})
+    )
+
+    return df_open
 
 
           
@@ -1362,10 +1386,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         logger.info(f"🧪 Using df_all_snapshots from caller — {len(df_all_snapshots)} rows")
 
     # ✅ Only concat rows where Value is not null and Outcome is non-canonical
+    # ✅ Normalize snapshot history
     for col in merge_keys:
         df_all_snapshots[col] = df_all_snapshots[col].astype(str).str.strip().str.lower()
-        
-    # ✅ Only add inverse rows back into snapshots
+    
+    # ✅ Add inverse rows back into snapshots (so both sides can be hydrated)
     inverse_snapshot_rows = df[df['Was_Canonical'] == False][
         merge_keys + ['Value', 'Odds_Price', 'Snapshot_Timestamp']
     ]
@@ -1374,70 +1399,34 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df_all_snapshots,
         inverse_snapshot_rows
     ], ignore_index=True).drop_duplicates(subset=merge_keys + ['Snapshot_Timestamp'])
-
-    # === Compute implied probability if missing
+    
+    # ✅ Clean and compute Implied_Prob
     df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
     df_all_snapshots['Value'] = pd.to_numeric(df_all_snapshots['Value'], errors='coerce')
-    # Always (re)compute missing Implied_Prob safely
-    if 'Implied_Prob' not in df_all_snapshots.columns:
-        df_all_snapshots['Implied_Prob'] = np.nan
-    
+    df_all_snapshots['Implied_Prob'] = df_all_snapshots.get('Implied_Prob')
     df_all_snapshots['Implied_Prob'] = df_all_snapshots['Implied_Prob'].fillna(
         df_all_snapshots['Odds_Price'].apply(implied_prob)
     )
-
-    # === Step 1: Determine first snapshot timestamp per outcome
-    first_open_snap = (
-        df_all_snapshots
-        .sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=merge_keys, keep='first')
-        .rename(columns={'Snapshot_Timestamp': 'Snapshot_Timestamp_Open'})
-        [merge_keys + ['Snapshot_Timestamp_Open']]
+    
+    # ✅ Use consistent opening snapshot logic
+    df_open = get_opening_snapshot(df_all_snapshots)
+    
+    # ✅ Merge open values into main df
+    df = df.merge(
+        df_open,
+        how='left',
+        on=merge_keys
     )
-
-    df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], utc=True)
-    first_open_snap['Snapshot_Timestamp_Open'] = pd.to_datetime(first_open_snap['Snapshot_Timestamp_Open'], utc=True)
-
-    df_all_snapshots = df_all_snapshots.merge(
-        first_open_snap,
-        on=merge_keys,
-        how='inner'
-    )
-
-    # === Step 2: Find snapshot closest to open time
-    df_open_rows = (
-        df_all_snapshots
-        .assign(Time_Delta=(df_all_snapshots['Snapshot_Timestamp'] - df_all_snapshots['Snapshot_Timestamp_Open']).abs())
-        .sort_values('Time_Delta')
-        .groupby(merge_keys)
-        .head(1)
-    )
-    # Ensure Implied_Prob is present in df_open_rows
-    df_open_rows['Implied_Prob'] = df_open_rows.get('Implied_Prob') if 'Implied_Prob' in df_open_rows.columns else np.nan
-    df_open_rows['Implied_Prob'] = df_open_rows['Implied_Prob'].fillna(
-        df_open_rows['Odds_Price'].apply(implied_prob)
-    )
-
-    # === Step 3: Build open value / odds maps
-    df_open = (
-        df_open_rows
-        .dropna(subset=['Value', 'Odds_Price', 'Implied_Prob'])
-        .drop_duplicates(subset=merge_keys)
-        [merge_keys + ['Value', 'Odds_Price', 'Implied_Prob']]
-        .rename(columns={
-            'Value': 'Open_Value',
-            'Odds_Price': 'Open_Odds',
-            'Implied_Prob': 'First_Imp_Prob'
-        })
-    )
-
+    
+    # ✅ Optional: Open_Book_Value (if still needed for reference or diagnostics)
     df_open_book = (
-        df_open_rows
-        .dropna(subset=['Value'])
+        df_open
+        .dropna(subset=['Open_Value'])
         .drop_duplicates(subset=merge_keys)
-        [merge_keys + ['Value']]
-        .rename(columns={'Value': 'Open_Book_Value'})
+        [merge_keys + ['Open_Value']]
+        .rename(columns={'Open_Value': 'Open_Book_Value'})
     )
+
 
     # === Step 4: Compute extremes even with one row
     df_extremes = (
