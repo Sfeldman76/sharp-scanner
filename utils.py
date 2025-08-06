@@ -1378,8 +1378,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # === Compute implied probability if missing
     df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
     df_all_snapshots['Value'] = pd.to_numeric(df_all_snapshots['Value'], errors='coerce')
+    # Always (re)compute missing Implied_Prob safely
     if 'Implied_Prob' not in df_all_snapshots.columns:
-        df_all_snapshots['Implied_Prob'] = df_all_snapshots['Odds_Price'].apply(implied_prob)
+        df_all_snapshots['Implied_Prob'] = np.nan
+    
+    df_all_snapshots['Implied_Prob'] = df_all_snapshots['Implied_Prob'].fillna(
+        df_all_snapshots['Odds_Price'].apply(implied_prob)
+    )
 
     # === Step 1: Determine first snapshot timestamp per outcome
     first_open_snap = (
@@ -1397,6 +1402,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         first_open_snap,
         on=merge_keys,
         how='inner'
+    )
+    # Ensure Implied_Prob is present in df_open_rows
+    df_open_rows['Implied_Prob'] = df_open_rows.get('Implied_Prob') if 'Implied_Prob' in df_open_rows.columns else np.nan
+    df_open_rows['Implied_Prob'] = df_open_rows['Implied_Prob'].fillna(
+        df_open_rows['Odds_Price'].apply(implied_prob)
     )
 
     # === Step 2: Find snapshot closest to open time
