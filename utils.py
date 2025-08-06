@@ -1434,13 +1434,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_all_snapshots['Implied_Prob'] = df_all_snapshots['Implied_Prob'].fillna(
         df_all_snapshots['Odds_Price'].apply(implied_prob)
     )
-    
+    logger.info(f"🔍 Columns in df_all_snapshots before opening snapshot: {df_all_snapshots.columns.tolist()}")
+    logger.info(f"📌 Sample snapshot rows:\n{df_all_snapshots[merge_keys + ['Value', 'Odds_Price']].dropna().head(20)}")
     df_open = get_opening_snapshot(df_all_snapshots)
+    
+
+    logger.info(f"📦 get_opening_snapshot() returned {len(df_open)} rows")
+    logger.info(f"🧾 df_open columns: {df_open.columns.tolist()}")
+    logger.info(f"🔍 df_open sample:\n{df_open.head(20)}")
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
     for col in merge_keys:
         df[col] = df[col].astype(str).str.strip().str.lower()
         df_open[col] = df_open[col].astype(str).str.strip().str.lower()
-
+    logger.info(f"🔑 Merging on keys: {merge_keys}")
+    logger.info(f"🧮 df rows before merge: {len(df)}, df_open rows: {len(df_open)}")
     if df_open.empty or 'Open_Value' not in df_open.columns:
         logger.warning("⚠️ Open snapshot merge returned empty or missing Open_Value")
         df['Open_Value'] = df['Value']  # fallback to current
@@ -1453,7 +1460,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             on=['Game_Key', 'Market', 'Bookmaker', 'Outcome']
         )
         df['Open_Value'] = df['Open_Value'].fillna(df['Value'])
-
+    logger.info(f"✅ Columns after open merge: {df.columns.tolist()}")
+    missing_cols = [col for col in ['Open_Value', 'Open_Odds', 'First_Imp_Prob'] if col not in df.columns]
+    if missing_cols:
+        logger.warning(f"⚠️ Missing columns after merge: {missing_cols}")
     
     # ✅ Optional: Open_Book_Value (if still needed for reference or diagnostics)
     df_open_book = (
