@@ -1975,36 +1975,37 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 else:
                     df_canon[col] = 0.0  
             # === Ensure required features exist ===
-            model_features = model.get_booster().feature_names
-            missing_cols = [col for col in model_features if col not in df_canon.columns]
-            df_canon[missing_cols] = 0
+            # === Ensure required features exist ===
+            model_features = trained_models[market_type]['model'].get_booster().feature_names
             
-            df_canon[model_features] = (
-                df_canon[model_features]
+            missing_cols = [col for col in model_features if col not in df_full_market.columns]
+            df_full_market[missing_cols] = 0  # Fill missing model features
+            
+            # Normalize booleans and ensure types on canonical rows only
+            df_full_market.loc[df_full_market['Was_Canonical'], model_features] = (
+                df_full_market.loc[df_full_market['Was_Canonical'], model_features]
                 .replace({'True': 1, 'False': 0})
                 .infer_objects(copy=False)
             )
             
-            X_canon = df_canon[model_features]
-                                    
+            # Score on full_market canonical rows directly
+            X_full = df_full_market.loc[df_full_market['Was_Canonical'], model_features]
+            preds = trained_models[market_type]['calibrator'].predict_proba(X_full)[:, 1]
+            
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Sharp_Win_Prob'] = preds
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Confidence'] = preds
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Scored_By_Model'] = True
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Was_Canonical'] = True
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Scoring_Market'] = market_type                       
             # === Batch assign all new columns at once to avoid fragmentation
-            new_cols = {
-                'Model_Sharp_Win_Prob': trained_models[market_type]['calibrator'].predict_proba(X_canon)[:, 1],
-                'Model_Confidence': None,  # Filled below
-                'Was_Canonical': True,
-                'Scoring_Market': market_type,
-                'Scored_By_Model': True,
-            }
-            new_cols['Model_Confidence'] = new_cols['Model_Sharp_Win_Prob']
             
-            df_new = pd.DataFrame(new_cols, index=df_canon.index)
-            df_canon = pd.concat([df_canon, df_new], axis=1)
+        
             
-            # Optional: trigger defragmentation
-            df_canon = df_canon.copy()
+            # Optional: trigger defragmentation  df_canon = df_canon.copy()
 
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
-           
+            df_canon = df_full_market[df_full_market['Was_Canonical'] == True].copy()
+
             df_inverse = df_full_market[df_full_market['Was_Canonical'] == False].copy()
 
             logger.info(f"🧪 Inverse rows found for {market_type.upper()}: {len(df_inverse)}")
