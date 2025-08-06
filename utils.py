@@ -1403,11 +1403,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         on=merge_keys,
         how='inner'
     )
-    # Ensure Implied_Prob is present in df_open_rows
-    df_open_rows['Implied_Prob'] = df_open_rows.get('Implied_Prob') if 'Implied_Prob' in df_open_rows.columns else np.nan
-    df_open_rows['Implied_Prob'] = df_open_rows['Implied_Prob'].fillna(
-        df_open_rows['Odds_Price'].apply(implied_prob)
-    )
 
     # === Step 2: Find snapshot closest to open time
     df_open_rows = (
@@ -1416,6 +1411,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         .sort_values('Time_Delta')
         .groupby(merge_keys)
         .head(1)
+    )
+    # Ensure Implied_Prob is present in df_open_rows
+    df_open_rows['Implied_Prob'] = df_open_rows.get('Implied_Prob') if 'Implied_Prob' in df_open_rows.columns else np.nan
+    df_open_rows['Implied_Prob'] = df_open_rows['Implied_Prob'].fillna(
+        df_open_rows['Odds_Price'].apply(implied_prob)
     )
 
     # === Step 3: Build open value / odds maps
