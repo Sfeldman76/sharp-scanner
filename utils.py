@@ -2051,6 +2051,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_opponent']
             df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence_opponent']
             df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent', 'Model_Confidence_opponent'], inplace=True)
+            
+            df_inverse['Was_Canonical'] = False
+            df_inverse['Scored_By_Model'] = True
+            df_inverse['Scoring_Market'] = market_type
+
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent', 'Model_Confidence_opponent'], inplace=True)
 
             logger.info(f"✅ Canonical rows with non-null model prob: {df_canon['Model_Sharp_Win_Prob'].notnull().sum()} / {len(df_canon)}")
             
