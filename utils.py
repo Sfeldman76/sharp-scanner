@@ -2065,7 +2065,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
           
                         
             logger.info("🔑 Inverse merge keys sample:")
-            logger.info(df_inverse[['Team_Key', 'Bookmaker']].drop_duplicates().head())
+            logger.info(df_inverse[['Team_Key', 'Bookmaker']].drop_duplicates().head(5))
             
             logger.info(f"✅ Canonical rows with non-null model prob: {df_canon['Model_Sharp_Win_Prob'].notnull().sum()} / {len(df_canon)}")
             
@@ -2079,15 +2079,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'Model_Confidence': 'Model_Confidence_opponent'
                 })
             )
+            logger.info(f"🧪 Canonical prediction rows for merge: {len(df_canon_preds)}")
+            logger.info(df_canon_preds.head(5))
             
             # ✅ Step 4: Safe merge with predeclared columns
             df_inverse['Model_Sharp_Win_Prob_opponent'] = np.nan
             df_inverse['Model_Confidence_opponent'] = np.nan
-            
+            logger.info("🧪 Sample inverse rows before merge:")
+            logger.info (df_inverse[['Team_Key', 'Bookmaker']].drop_duplicates().head(5))
             df_inverse = df_inverse.merge(df_canon_preds, on=merge_cols, how='left')
             
+            missing_keys = df_inverse[~df_inverse['Team_Key'].isin(df_canon_preds['Team_Key'])]
+            logger.info(f"🔍 Missing Team_Keys (inverse not matched to canon): {missing_keys[['Team_Key', 'Bookmaker']].drop_duplicates().head()}")
             logger.info(f"🔁 Inverse rows with opponent prob: {df_inverse['Model_Sharp_Win_Prob_opponent'].notnull().sum()} / {len(df_inverse)}")
-            logger.debug(df_inverse[df_inverse['Model_Sharp_Win_Prob_opponent'].isnull()][['Team_Key', 'Bookmaker']].drop_duplicates())
+            logger.info(df_inverse[df_inverse['Model_Sharp_Win_Prob_opponent'].isnull()][['Team_Key', 'Bookmaker']].drop_duplicates())
             
             # ✅ Step 5: Fallback by Team_Key only
             fallback = (
