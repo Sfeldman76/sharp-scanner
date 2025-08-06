@@ -1435,15 +1435,25 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df_all_snapshots['Odds_Price'].apply(implied_prob)
     )
     
-    # ✅ Use consistent opening snapshot logic
     df_open = get_opening_snapshot(df_all_snapshots)
-    
-    # ✅ Merge open values into main df
-    df = df.merge(
-        df_open,
-        how='left',
-        on=merge_keys
-    )
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    for col in merge_keys:
+        df[col] = df[col].astype(str).str.strip().str.lower()
+        df_open[col] = df_open[col].astype(str).str.strip().str.lower()
+
+    if df_open.empty or 'Open_Value' not in df_open.columns:
+        logger.warning("⚠️ Open snapshot merge returned empty or missing Open_Value")
+        df['Open_Value'] = df['Value']  # fallback to current
+        df['Open_Odds'] = df['Odds_Price']
+        df['First_Imp_Prob'] = df.get('Implied_Prob', df['Odds_Price'].apply(implied_prob))
+    else:
+        df = df.merge(
+            df_open,
+            how='left',
+            on=['Game_Key', 'Market', 'Bookmaker', 'Outcome']
+        )
+        df['Open_Value'] = df['Open_Value'].fillna(df['Value'])
+
     
     # ✅ Optional: Open_Book_Value (if still needed for reference or diagnostics)
     df_open_book = (
