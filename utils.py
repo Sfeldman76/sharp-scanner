@@ -2051,20 +2051,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logger.info(f"🧪 Inverse rows with Open_Value: {df_inverse['Open_Value'].notnull().sum()} / {len(df_inverse)}")
             # Merge canonical model predictions into inverse rows by Outcome_Norm
             # Ensure the merge has correct source columns
-            df_canon['Bookmaker'] = df_canon['Bookmaker'].str.lower().str.strip()
-            df_inverse['Bookmaker'] = df_inverse['Bookmaker'].str.lower().str.strip()
-            # ✅ Step 0: Split canonical/inverse BEFORE anything else
+            # ✅ Step 0: Extract canonical rows first — before logging anything
             df_canon = df_full_market[df_full_market['Was_Canonical'] == True].copy()
             df_inverse = df_full_market[df_full_market['Was_Canonical'] == False].copy()
             
-            # ✅ Step 1: Normalize BEFORE using Bookmaker as a key
+            # ✅ Step 1: Normalize for safe key matching
             df_canon['Bookmaker'] = df_canon['Bookmaker'].str.lower().str.strip()
             df_inverse['Bookmaker'] = df_inverse['Bookmaker'].str.lower().str.strip()
             
-            # ✅ Step 2: Log actual data from correct df_canon
-            logger.info("🔑 Canonical merge keys sample:")
-            logger.info(df_canon[['Team_Key', 'Bookmaker']].drop_duplicates().head())
+            # ✅ Step 2: Only now is it safe to inspect df_canon
+            logger.info(f"✅ Canonical rows with non-null model prob: {df_canon['Model_Sharp_Win_Prob'].notnull().sum()} / {len(df_canon)}")
             
+          
+                        
             logger.info("🔑 Inverse merge keys sample:")
             logger.info(df_inverse[['Team_Key', 'Bookmaker']].drop_duplicates().head())
             
