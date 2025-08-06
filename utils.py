@@ -2009,7 +2009,43 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse = df_full_market[df_full_market['Was_Canonical'] == False].copy()
 
             logger.info(f"🧪 Inverse rows found for {market_type.upper()}: {len(df_inverse)}")
+            df_canon['Bookmaker'] = df_canon['Bookmaker'].str.lower().str.strip()
+            df_inverse['Bookmaker'] = df_inverse['Bookmaker'].str.lower().str.strip()
+            
+            # ✅ Step 2: Only now is it safe to inspect df_canon
+            # Better: Keep keys simple and merge on both columns
+            df_canon['Team_Key_Base'] = (
+                df_canon['Home_Team_Norm'].str.lower().str.strip() + "_" +
+                df_canon['Away_Team_Norm'].str.lower().str.strip() + "_" +
+                df_canon['Commence_Hour'].astype(str) + "_" +
+                df_canon['Market'].str.lower().str.strip()
+            )
+            
+            df_inverse['Team_Key_Base'] = (
+                df_inverse['Home_Team_Norm'].str.lower().str.strip() + "_" +
+                df_inverse['Away_Team_Norm'].str.lower().str.strip() + "_" +
+                df_inverse['Commence_Hour'].astype(str) + "_" +
+                df_inverse['Market'].str.lower().str.strip()
+            )
+            
+            df_canon_preds = (
+                df_canon[['Team_Key_Base', 'Bookmaker', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
+                .drop_duplicates(subset=['Team_Key_Base', 'Bookmaker'])
+                .rename(columns={
+                    'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
+                    'Model_Confidence': 'Model_Confidence_opponent'
+                })
+            )
+            
+            df_inverse = df_inverse.merge(df_canon_preds, on=['Team_Key_Base', 'Bookmaker'], how='left')
+            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_opponent']
+            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence_opponent']
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent', 'Model_Confidence_opponent'], inplace=True)
 
+            logger.info(f"✅ Canonical rows with non-null model prob: {df_canon['Model_Sharp_Win_Prob'].notnull().sum()} / {len(df_canon)}")
+            
+            # ✅ Step 3: Build canonical prediction map
+            
             # === Merge cross-market odds into inverse rows
                 
             # === Recompute implied probabilities from merged odds
@@ -2057,65 +2093,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
             
             # ✅ Step 1: Normalize for safe key matching
-            df_canon['Bookmaker'] = df_canon['Bookmaker'].str.lower().str.strip()
-            df_inverse['Bookmaker'] = df_inverse['Bookmaker'].str.lower().str.strip()
-            
-            # ✅ Step 2: Only now is it safe to inspect df_canon
-            logger.info(f"✅ Canonical rows with non-null model prob: {df_canon['Model_Sharp_Win_Prob'].notnull().sum()} / {len(df_canon)}")
-            
-          
-                        
-            logger.info("🔑 Inverse merge keys sample:")
-            logger.info(df_inverse[['Team_Key', 'Bookmaker']].drop_duplicates().head(5))
-            
-            logger.info(f"✅ Canonical rows with non-null model prob: {df_canon['Model_Sharp_Win_Prob'].notnull().sum()} / {len(df_canon)}")
-            
-            # ✅ Step 3: Build canonical prediction map
-            merge_cols = ['Team_Key', 'Bookmaker']
-            df_canon_preds = (
-                df_canon[merge_cols + ['Model_Sharp_Win_Prob', 'Model_Confidence']]
-                .drop_duplicates(subset=merge_cols)
-                .rename(columns={
-                    'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
-                    'Model_Confidence': 'Model_Confidence_opponent'
-                })
-            )
-            logger.info(f"🧪 Canonical prediction rows for merge: {len(df_canon_preds)}")
-            logger.info(df_canon_preds.head(5))
-            
-            # ✅ Step 4: Safe merge with predeclared columns
-            df_inverse['Model_Sharp_Win_Prob_opponent'] = np.nan
-            df_inverse['Model_Confidence_opponent'] = np.nan
-            logger.info("🧪 Sample inverse rows before merge:")
-            logger.info (df_inverse[['Team_Key', 'Bookmaker']].drop_duplicates().head(5))
-            df_inverse = df_inverse.merge(df_canon_preds, on=merge_cols, how='left')
-            
-            missing_keys = df_inverse[~df_inverse['Team_Key'].isin(df_canon_preds['Team_Key'])]
-            logger.info(f"🔍 Missing Team_Keys (inverse not matched to canon): {missing_keys[['Team_Key', 'Bookmaker']].drop_duplicates().head()}")
-            logger.info(f"🔁 Inverse rows with opponent prob: {df_inverse['Model_Sharp_Win_Prob_opponent'].notnull().sum()} / {len(df_inverse)}")
-            logger.info(df_inverse[df_inverse['Model_Sharp_Win_Prob_opponent'].isnull()][['Team_Key', 'Bookmaker']].drop_duplicates())
-            
-            # ✅ Step 5: Fallback by Team_Key only
-            fallback = (
-                df_canon[['Team_Key', 'Model_Sharp_Win_Prob', 'Model_Confidence']]
-                .drop_duplicates('Team_Key')
-                .rename(columns={
-                    'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
-                    'Model_Confidence': 'Model_Confidence_opponent'
-                })
-            )
-            
-            mask = df_inverse['Model_Sharp_Win_Prob_opponent'].isna()
-            df_inverse.loc[mask, ['Model_Sharp_Win_Prob_opponent', 'Model_Confidence_opponent']] = (
-                df_inverse[mask]
-                .merge(fallback, on='Team_Key', how='left')[['Model_Sharp_Win_Prob_opponent', 'Model_Confidence_opponent']]
-            )
-            
-            # ✅ Step 6: Final inversion
-            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_opponent']
-            df_inverse['Model_Confidence'] = 1 - df_inverse['Model_Confidence_opponent']
-            df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent', 'Model_Confidence_opponent'], inplace=True)
-            
+
             df_inverse['Was_Canonical'] = False
             df_inverse['Scored_By_Model'] = True
             logger.info(f"📋 Inverse2 row columns after enrichment: {sorted(df_inverse.columns.tolist())}")
