@@ -1462,8 +1462,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             on=['Game_Key', 'Market', 'Bookmaker', 'Outcome']
         )
         df['Open_Value'] = df['Open_Value'].fillna(df['Value'])
+    
+        # ✅ Only run if merge succeeded
+        df['Opening_Limit'] = df['Opening_Limit_y'].fillna(df.get('Opening_Limit_x'))
+        df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], inplace=True)         
+    
     logger.info(f"✅ Columns AFTER open merge: {df.columns.tolist()}")
-    logger.info(f"📌 Sample df rows AFTER merge:\n{df.head(5)}")
+    logger.info("📌 Sample df rows AFTER merge:\n%s", df.head(5).to_string(index=False))     
+   
     
     # Show percentage of missing Open_Value and Opening_Limit
     logger.info(f"📊 Missing Open_Value: {(df['Open_Value'].isna().mean() * 100):.2f}%")
