@@ -2052,7 +2052,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # Merge canonical model predictions into inverse rows by Outcome_Norm
             # Ensure the merge has correct source columns
             # ✅ Step 0: Extract canonical rows first — before logging anything
-            df_canon = df_full_market[df_full_market['Was_Canonical'] == True].copy()
+            
             df_inverse = df_full_market[df_full_market['Was_Canonical'] == False].copy()
             
             # ✅ Step 1: Normalize for safe key matching
