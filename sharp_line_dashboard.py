@@ -2230,21 +2230,20 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         df_all_snapshots = get_recent_history()
 
         # === Load sharp moves from BigQuery (from Cloud Scheduler or live)
+       
         detection_key = f"sharp_moves_{sport_key.lower()}"
         if not force_reload and detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
-            df_moves_raw = read_recent_sharp_moves_conditional(force_reload=force_reload, hours=48)
-            st.session_state[detection_key] = df_moves_raw
-            st.success(f"📥 Loaded sharp moves from BigQuery")
+            with st.spinner(f"📥 Loading sharp moves for {label} from BigQuery..."):
+                df_moves_raw = read_recent_sharp_moves_conditional(force_reload=force_reload, hours=48)
+                st.session_state[detection_key] = df_moves_raw
+                st.success(f"✅ Loaded {len(df_moves_raw)} sharp move rows from BigQuery")
 
-       
         # === Filter to current tab's sport
-        # Normalize and match directly
         df_moves_raw['Sport_Norm'] = df_moves_raw['Sport'].astype(str).str.upper().str.strip()
         df_moves_raw = df_moves_raw[df_moves_raw['Sport_Norm'] == label.upper()]
-        
        
         
        
