@@ -1450,31 +1450,71 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info(f"🔍 df_open Columns: {df_open.columns.tolist()}")
     logger.info(f"📌 Sample df rows BEFORE merge:\n{df[merge_keys + ['Value', 'Odds_Price']].head(5)}")
     logger.info(f"📌 Sample df_open rows:\n{df_open.head(5)}")
-    if df_open.empty or 'Open_Value' not in df_open.columns:
-        logger.warning("⚠️ Open snapshot merge returned empty or missing Open_Value")
-        df['Open_Value'] = df['Value']  # fallback to current
-        df['Open_Odds'] = df['Odds_Price']
-        df['First_Imp_Prob'] = df.get('Implied_Prob', df['Odds_Price'].apply(implied_prob))
+    
+      # --- 1) Normalize merge keys ---
+    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    for c in merge_keys:
+        df[c] = df[c].astype(str).str.strip().str.lower()
+    
+    # --- 2) Build a clean opening snapshot with final names (no suffixes anywhere) ---
+    df_open_raw = get_opening_snapshot(df_all_snapshots)  # must include the same merge keys
+    for c in merge_keys:
+        df_open_raw[c] = df_open_raw[c].astype(str).str.strip().str.lower()
+    
+    # Whatever get_opening_snapshot returns, force the final column names here
+    rename_map = {
+        'Value': 'Open_Value',
+        'Odds_Price': 'Open_Odds',
+        'Implied_Prob': 'First_Imp_Prob',
+        'Opening_Limit': 'Opening_Limit',
+    }
+    df_open = df_open_raw.rename(columns={k: v for k, v in rename_map.items() if k in df_open_raw.columns})
+    
+    # keep ONLY the columns we need to merge
+    needed_open_cols = merge_keys + ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit']
+    df_open = df_open[[c for c in needed_open_cols if c in df_open.columns]].copy()
+    
+    # --- 3) Merge (no suffixes expected now) ---
+    df = df.merge(df_open, how='left', on=merge_keys)
+    
+    # --- 4) Defensive guarantees BEFORE any use downstream ---
+    # If Open_Value is absent (column missing) create it; if present but NaN, fill from current Value.
+    if 'Open_Value' not in df.columns:
+        df['Open_Value'] = df['Value']
     else:
-        df = df.merge(
-            df_open,
-            how='left',
-            on=['Game_Key', 'Market', 'Bookmaker', 'Outcome']
-        )
         df['Open_Value'] = df['Open_Value'].fillna(df['Value'])
     
-        # ✅ Only run if merge succeeded
-        df['Opening_Limit'] = df['Opening_Limit_y'].fillna(df.get('Opening_Limit_x'))
-        df.drop(columns=[col for col in df.columns if col.endswith('_x') or col.endswith('_y')], inplace=True)         
+    if 'Open_Odds' not in df.columns:
+        df['Open_Odds'] = df.get('Odds_Price')
+    else:
+        df['Open_Odds'] = df['Open_Odds'].fillna(df.get('Odds_Price'))
     
-    logger.info(f"✅ Columns AFTER open merge: {df.columns.tolist()}")
-    logger.info("📌 Sample df rows AFTER merge:\n%s", df.head(5).to_string(index=False))     
-   
+    # First_Imp_Prob final fallback
+    if 'First_Imp_Prob' not in df.columns:
+        df['First_Imp_Prob'] = np.nan
+    if df['First_Imp_Prob'].isna().any():
+        if 'Odds_Price' in df.columns:
+            df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(df['Odds_Price'].apply(implied_prob))
+        else:
+            df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(0.5)
     
-    # Show percentage of missing Open_Value and Opening_Limit
-    logger.info(f"📊 Missing Open_Value: {(df['Open_Value'].isna().mean() * 100):.2f}%")
-    logger.info(f"📊 Missing Opening_Limit: {(df['Opening_Limit'].isna().mean() * 100):.2f}%")
-    missing_cols = [col for col in ['Open_Value', 'Open_Odds', 'First_Imp_Prob'] if col not in df.columns]
+    # Opening_Limit can be legitimately missing for some books; ensure the column exists
+    if 'Opening_Limit' not in df.columns:
+        df['Opening_Limit'] = np.nan
+    
+    # --- 5) Hard assertions with context (better than mystery KeyError later) ---
+    missing_cols = [c for c in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit'] if c not in df.columns]
+    if missing_cols:
+        raise RuntimeError(f"Opening merge failed to create columns: {missing_cols}. "
+                           f"df_open columns: {list(df_open.columns)}")
+    
+    # Optional diagnostics
+    logger.info("📊 Missing Open_Value: %.2f%%", 100*df['Open_Value'].isna().mean())
+    logger.info("📊 Missing Open_Odds: %.2f%%", 100*df['Open_Odds'].isna().mean())
+    logger.info("📊 Missing First_Imp_Prob: %.2f%%", 100*df['First_Imp_Prob'].isna().mean())
+    logger.info("📊 Missing Opening_Limit: %.2f%%", 100*df['Opening_Limit'].isna().mean())
+        
+   f.columns]
     if missing_cols:
         logger.warning(f"⚠️ Missing columns after merge: {missing_cols}")
     
