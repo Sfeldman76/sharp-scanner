@@ -1473,7 +1473,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # keep ONLY the columns we need to merge
     needed_open_cols = merge_keys + ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit']
     df_open = df_open[[c for c in needed_open_cols if c in df_open.columns]].copy()
+    # Before merging with df_open
+    if 'Opening_Limit' in df.columns:
+        df = df.drop(columns=['Opening_Limit'])
     
+    df = df.merge(df_open, how='left', on=merge_keys)
     # --- 3) Merge (no suffixes expected now) ---
     df = df.merge(df_open, how='left', on=merge_keys)
     
