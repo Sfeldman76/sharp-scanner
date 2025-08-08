@@ -1477,10 +1477,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     if 'Opening_Limit' in df.columns:
         df = df.drop(columns=['Opening_Limit'])
     
-    df = df.merge(df_open, how='left', on=merge_keys)
-    # --- 3) Merge (no suffixes expected now) ---
-    df = df.merge(df_open, how='left', on=merge_keys)
     
+    # --- 3) Merge (no suffixes expected now) ---
+    # --- 3) Merge without duplicate conflicts ---
+    # Drop any old/stale versions of these columns before merge
+    cols_to_drop = ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit']
+    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+
+
     # --- 4) Defensive guarantees BEFORE any use downstream ---
     # If Open_Value is absent (column missing) create it; if present but NaN, fill from current Value.
     if 'Open_Value' not in df.columns:
