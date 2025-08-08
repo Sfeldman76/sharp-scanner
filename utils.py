@@ -1503,18 +1503,19 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Opening_Limit'] = np.nan
     
     # --- 5) Hard assertions with context (better than mystery KeyError later) ---
+    
+       # --- 5) Hard assertions with context (better than mystery KeyError later) ---
     missing_cols = [c for c in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit'] if c not in df.columns]
     if missing_cols:
         raise RuntimeError(f"Opening merge failed to create columns: {missing_cols}. "
                            f"df_open columns: {list(df_open.columns)}")
-    
+
     # Optional diagnostics
     logger.info("📊 Missing Open_Value: %.2f%%", 100*df['Open_Value'].isna().mean())
     logger.info("📊 Missing Open_Odds: %.2f%%", 100*df['Open_Odds'].isna().mean())
     logger.info("📊 Missing First_Imp_Prob: %.2f%%", 100*df['First_Imp_Prob'].isna().mean())
     logger.info("📊 Missing Opening_Limit: %.2f%%", 100*df['Opening_Limit'].isna().mean())
-        
-   f.columns]
+
     if missing_cols:
         logger.warning(f"⚠️ Missing columns after merge: {missing_cols}")
     
