@@ -1457,7 +1457,51 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_open = df_open[[c for c in needed_open_cols if c in df_open.columns]].copy()
 
     logger.info("📌 Sample df_open rows:\n%s", df_open.head(20).to_string())
-
+    # --- DEBUG: Compare detect df vs df_open before merge ---
+    logger.info("=== DEBUG: Compare detect df vs df_open before merge ===")
+    
+    # Normalized copies for comparison
+    A = df[merge_keys + ['Value','Odds_Price']].copy()
+    B = df_open[merge_keys + ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']].copy()
+    
+    for c in merge_keys:
+        A[c] = A[c].astype(str).str.strip().str.lower()
+        B[c] = B[c].astype(str).str.strip().str.lower()
+    
+    logger.info("📦 Sample from detect df:\n%s", A.head(10).to_string(index=False))
+    logger.info("📦 Sample from df_open:\n%s", B.head(10).to_string(index=False))
+    
+    # Unmatched from df side
+    left_only = (
+        A[merge_keys].drop_duplicates()
+          .merge(B[merge_keys].drop_duplicates(), on=merge_keys, how='left', indicator=True)
+          .query('_merge == "left_only"')
+          .drop(columns=['_merge'])
+    )
+    logger.info("🚫 Unmatched LEFT (detect df rows with no opener): %d", len(left_only))
+    if len(left_only):
+        logger.info("Unmatched LEFT sample:\n%s", left_only.head(10).to_string(index=False))
+    
+    # Unmatched from df_open side
+    right_only = (
+        B[merge_keys].drop_duplicates()
+          .merge(A[merge_keys].drop_duplicates(), on=merge_keys, how='left', indicator=True)
+          .query('_merge == "left_only"')
+          .drop(columns=['_merge'])
+    )
+    logger.info("❗ Unmatched RIGHT (opener rows not present in detect df): %d", len(right_only))
+    if len(right_only):
+        logger.info("Unmatched RIGHT sample:\n%s", right_only.head(10).to_string(index=False))
+    
+    # Side-by-side for matched rows
+    shared = A.merge(B, on=merge_keys, how='inner').head(10)
+    if len(shared):
+        logger.info("🔗 Side-by-side matched sample:\n%s",
+                    shared[merge_keys + ['Value','Odds_Price','Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']].to_string(index=False))
+    
+    # Breakdown of unmatched by bookmaker
+    if len(left_only):
+        logger.info("🔢 Unmatched LEFT by Bookmaker:\n%s", left_only['Bookmaker'].value_counts().head(10).to_string())
     # --- Merge opening fields (no suffix conflicts)
     cols_to_drop = ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit']
     df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
