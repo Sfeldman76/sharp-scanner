@@ -614,7 +614,6 @@ def implied_prob_to_point_move(prob_delta, base_odds=-110):
     point_equiv = prob_delta / approx_slope
     return point_equiv    
 
-
 def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None, opening_limit=None):
     logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
     logging.debug(f"📥 Open value: {open_val}, Open odds: {open_odds}")
@@ -627,53 +626,48 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     hybrid_timing_mags = defaultdict(float)
     odds_move_magnitude_score = 0.0
     hybrid_timing_odds_mags = defaultdict(float)
-        # === Net movement from opening
+
+    # === Net movement from opening
     net_line_move = None
     abs_net_line_move = None
     net_odds_move = None
     abs_net_odds_move = None
-     # --- Always sort first
+
+    # --- Always sort first
     mtype = (mtype or "").strip().lower()
     label = (label or "").strip().lower()
     entries = sorted(entries, key=lambda x: x[2])  # (limit, value, ts, game_start, odds)
 
-    
-    if open_val is None or open_odds is None or opening_limit is None:
-        for (lim, val, ts, game_start, odds) in entries:
-            if open_val is None and pd.notna(val):
-                open_val = val
-            if open_odds is None and pd.notna(odds):
-                open_odds = odds
-            if opening_limit is None and pd.notna(lim):
-                opening_limit = lim
-            if (open_val is not None) and (open_odds is not None) and (opening_limit is not None):
-                break
-
-   
-    
     def get_hybrid_bucket(ts, game_start):
         hour = pd.to_datetime(ts).hour
         minutes_to_game = (
             (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60
             if pd.notnull(game_start) else None
         )
-        tod = (
-            'Overnight' if 0 <= hour <= 5 else
-            'Early'     if 6 <= hour <= 11 else
-            'Midday'    if 12 <= hour <= 15 else
-            'Late'
-        )
-        mtg = (
-            'VeryEarly' if minutes_to_game is None else
-            'VeryEarly' if minutes_to_game > 720 else
-            'MidRange'  if 180 < minutes_to_game <= 720 else
-            'LateGame'  if 60 < minutes_to_game <= 180 else
-            'Urgent'
-        )
+        tod = ('Overnight' if 0 <= hour <= 5 else
+               'Early'     if 6 <= hour <= 11 else
+               'Midday'    if 12 <= hour <= 15 else
+               'Late')
+        mtg = ('VeryEarly' if minutes_to_game is None else
+               'VeryEarly' if minutes_to_game > 720 else
+               'MidRange'  if 180 < minutes_to_game <= 720 else
+               'LateGame'  if 60 < minutes_to_game <= 180 else
+               'Urgent')
         return f"{tod}_{mtg}"
 
-    # === NEW: track previous values for proper delta logic
-    
+    # --- Bootstrap open trio from earliest non-nulls in entries if missing
+    if (open_val is None or pd.isna(open_val)) or (open_odds is None or pd.isna(open_odds)) or (opening_limit is None or pd.isna(opening_limit)):
+        for (lim, val, ts, game_start, odds) in entries:
+            if (open_val is None or pd.isna(open_val)) and pd.notna(val):
+                open_val = val
+            if (open_odds is None or pd.isna(open_odds)) and pd.notna(odds):
+                open_odds = odds
+            if (opening_limit is None or pd.isna(opening_limit)) and pd.notna(lim):
+                opening_limit = lim
+            if pd.notna(open_val) and pd.notna(open_odds) and (opening_limit is not None):
+                break
+
+    # === Track previous values for proper delta logic
     prev_val = open_val
     prev_odds = open_odds
 
@@ -681,75 +675,69 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         if len(entry) != 5:
             logging.warning(f"⚠️ Malformed entry {i+1}: {entry}")
             continue
-        
+
         limit, curr_val, ts, game_start, curr_odds = entry
         logging.debug(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
 
         try:
+            # ensure numerics
+            curr_val = pd.to_numeric(curr_val, errors='coerce')
+            curr_odds = pd.to_numeric(curr_odds, errors='coerce')
+            limit = pd.to_numeric(limit, errors='coerce')
+
             # === Line movement
             if pd.notna(prev_val) and pd.notna(curr_val):
-                delta = curr_val - prev_val  # 🔁 Signed delta
-                sharp_move_delta = delta     # No abs()
-            
-                # ✅ Always count signed movement magnitude
+                delta = curr_val - prev_val
+                sharp_move_delta = delta
+
                 move_magnitude_score += sharp_move_delta
-            
-                # === Direction-aware sharp signal scoring
+
                 if mtype == 'totals':
                     if 'under' in label and sharp_move_delta < 0:
                         move_signal += sharp_move_delta
                     elif 'over' in label and sharp_move_delta > 0:
                         move_signal += sharp_move_delta
                 elif mtype == 'spreads':
-                    if prev_val < 0 and curr_val < prev_val:  # Favorite getting stronger
+                    if prev_val < 0 and curr_val < prev_val:
                         move_signal += sharp_move_delta
-                    elif prev_val > 0 and curr_val > prev_val:  # Dog getting more dog
+                    elif prev_val > 0 and curr_val > prev_val:
                         move_signal += sharp_move_delta
-            
-                # ✅ Signed per-timing contribution
+
                 timing_label = get_hybrid_bucket(ts, game_start)
                 hybrid_timing_mags[timing_label] += sharp_move_delta
-
 
                 prev_val = curr_val
 
             # === Odds movement
             if pd.notna(prev_odds) and pd.notna(curr_odds):
-                # ✅ Convert to implied probability FIRST
                 prev_prob = implied_prob(prev_odds)
                 curr_prob = implied_prob(curr_odds)
-            
-                # ✅ Then compute delta (signed)
+
                 odds_delta = curr_prob - prev_prob
                 point_equiv = implied_prob_to_point_move(odds_delta)
-            
-                logging.debug(f"🧾 Odds Δ: {odds_delta:+.3f} (~{point_equiv:+.1f} pts), From {prev_odds} → {curr_odds}")
-            
-                # ✅ Always include signed magnitude
-                odds_move_magnitude_score += point_equiv  # preserve sign
-                timing_label = get_hybrid_bucket(ts, game_start)
-                hybrid_timing_odds_mags[timing_label] += odds_delta  # preserve sign
-            
-                prev_odds = curr_odds  # ✅ Important: update for next iteration
 
-                
-                
-            # === Net line movement from open to final value
+                logging.debug(f"🧾 Odds Δ: {odds_delta:+.3f} (~{point_equiv:+.1f} pts), From {prev_odds} → {curr_odds}")
+
+                odds_move_magnitude_score += point_equiv
+                timing_label = get_hybrid_bucket(ts, game_start)
+                hybrid_timing_odds_mags[timing_label] += odds_delta
+
+                prev_odds = curr_odds
+
+            # === Net moves from opening
             if pd.notna(open_val) and pd.notna(curr_val):
                 net_line_move = curr_val - open_val
                 abs_net_line_move = abs(net_line_move)
-        
-            # === Net odds movement from open to final odds
+
             if pd.notna(open_odds) and pd.notna(curr_odds):
                 net_odds_move = curr_odds - open_odds
                 abs_net_odds_move = abs(net_odds_move)
-                
-                
+
             # === Limit tracking
-            if limit is not None:
-                total_limit += limit
-                if limit >= 100:
-                    limit_score += limit
+            if pd.notna(limit):
+                total_limit += float(limit)
+                if float(limit) >= 100:
+                    limit_score += float(limit)
 
         except Exception as e:
             logging.warning(f"⚠️ Error in entry {i+1}: {e}")
@@ -760,26 +748,25 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         for tod in ['Overnight', 'Early', 'Midday', 'Late']
         for mtg in ['VeryEarly', 'MidRange', 'LateGame', 'Urgent']
     ]
-    flattened_buckets = {
-        f'SharpMove_Magnitude_{b}': round(hybrid_timing_mags.get(b, 0.0), 3)
-        for b in all_possible_buckets
-    }
-    flattened_odds_buckets = {
-        f'OddsMove_Magnitude_{b}': round(hybrid_timing_odds_mags.get(b, 0.0), 3)
-        for b in all_possible_buckets
-    }
+    flattened_buckets = {f'SharpMove_Magnitude_{b}': round(hybrid_timing_mags.get(b, 0.0), 3) for b in all_possible_buckets}
+    flattened_odds_buckets = {f'OddsMove_Magnitude_{b}': round(hybrid_timing_odds_mags.get(b, 0.0), 3) for b in all_possible_buckets}
 
-    dominant_label, dominant_mag = max(
-        hybrid_timing_mags.items(), key=lambda x: x[1], default=("unknown", 0.0)
-    )
+    dominant_label, dominant_mag = max(hybrid_timing_mags.items(), key=lambda x: x[1], default=("unknown", 0.0))
+
+    # derive First_Imp_Prob from the open odds we ended up with
+    first_imp_prob = implied_prob(open_odds) if pd.notna(open_odds) else None
+
     logging.debug(f"📊 Final hybrid_timing_mags: {dict(hybrid_timing_mags)}")
     logging.debug(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
+
     return {
+        # ← return the open trio so callers can use them
         'Open_Value': open_val,
         'Open_Odds': open_odds,
         'Opening_Limit': opening_limit,
+        'First_Imp_Prob': first_imp_prob,
+
         'Sharp_Move_Signal': int(move_signal > 0),
-       
         'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
         'Sharp_Limit_Jump': int(limit_score >= 10000),
         'Sharp_Limit_Total': round(total_limit, 1),
@@ -794,7 +781,6 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         **flattened_odds_buckets,
         'SharpBetScore': 0.0
     }
-    
 def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     """
     Applies compute_sharp_metrics() to each row in df using historical snapshots.
@@ -1410,88 +1396,51 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
     scored_all = []
     total_start = time.time()
+def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
+    logger.info("🛠️ Running `apply_blended_sharp_score()`")
+    total_start = time.time()
 
     df = df.copy()
 
-    # ---------------- Base normalization ----------------
+    # ---- Base normalization (does not touch open/extreme columns) ----
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
     df['Is_Sharp_Book'] = df['Bookmaker'].astype(str).str.lower().str.strip().isin(SHARP_BOOKS).astype(int)
     if 'Game_Start' in df.columns:
-        df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.date
+        df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.date
     else:
         df['Event_Date'] = pd.NaT
 
-    keys = ['Game_Key','Market','Outcome','Bookmaker']
-    for k in keys:
+    merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
+    for k in merge_keys:
         if k in df.columns:
             df[k] = df[k].astype(str).str.strip().str.lower()
 
-    # ---------------- Snapshots prep ----------------
-    if df_all_snapshots is None:
-        logger.warning("⚠️ df_all_snapshots not passed — loading fallback from BigQuery")
-        df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    # ---- Sanity logs for inputs merged in detect() ----
+    have_cols = [c for c in ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob',
+                             'Max_Value','Min_Value','Max_Odds','Min_Odds'] if c in df.columns]
+    logger.info("🔎 Pre-scoring columns present: %s", sorted(have_cols))
 
-    snaps = df_all_snapshots.copy()
-    for k in keys:
-        snaps[k] = snaps[k].astype(str).str.strip().str.lower()
+    # ---- Fallbacks (soft) if detect didn't fill something ----
+    # Implied prob for current row (used as fallback for First_Imp_Prob)
+    if 'Implied_Prob' not in df.columns and 'Odds_Price' in df.columns:
+        df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
+        df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
 
-    # Ensure needed cols exist + parse times
-    need_cols = ['Snapshot_Timestamp','Value','Odds_Price','Game_Start','Limit']
-    for c in need_cols:
-        if c not in snaps.columns:
-            snaps[c] = np.nan
-    snaps['Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
-    snaps['Game_Start'] = pd.to_datetime(snaps['Game_Start'], errors='coerce', utc=True)
+    # Open trio safety nets
+    if 'Open_Value' not in df.columns:
+        df['Open_Value'] = df.get('Value')
+    else:
+        df['Open_Value'] = df['Open_Value'].fillna(df.get('Value'))
 
-    # Keep only snapshot rows for keys present in this batch
-    uniq = df[keys].drop_duplicates()
-    snaps = (
-        snaps.merge(uniq, on=keys, how='inner')
-             .sort_values('Snapshot_Timestamp')
-    )
+    if 'Open_Odds' not in df.columns:
+        df['Open_Odds'] = df.get('Odds_Price')
+    else:
+        df['Open_Odds'] = df['Open_Odds'].fillna(df.get('Odds_Price'))
 
-    # ---------------- Sharp metrics (open trio comes from compute_sharp_metrics) ----------------
-    keys = ['Game_Key','Market','Outcome','Bookmaker']
-
-    keys = ['Game_Key','Market','Outcome','Bookmaker']
-
-    def _entries_for_group(g):
-      return [(r.Limit, r.Value, r.Snapshot_Timestamp, r.Game_Start, r.Odds_Price)
-              for r in g[['Limit','Value','Snapshot_Timestamp','Game_Start','Odds_Price']]
-              .itertuples(index=False, name='Row')]
-    
-    def _compute_for_group(g):
-      k0 = g.iloc[0]
-      # compute_sharp_metrics returns a dict; turn it into a Series for apply
-      res = compute_sharp_metrics(
-          entries=_entries_for_group(g),
-          open_val=None,
-          mtype=str(k0['Market']),
-          label=str(k0['Outcome']),
-          gk=str(k0['Game_Key']),
-          book=str(k0['Bookmaker']),
-          open_odds=None,
-          opening_limit=None
-      )
-      return pd.Series(res)
-    
-    # Build metrics_df without reset_index (avoid column collisions)
-    try:
-      metrics_df = (
-          snaps.groupby(keys, as_index=False, sort=False)
-               .apply(_compute_for_group, include_groups=False)
-      )
-    except TypeError:
-      # pandas < 2.2 fallback (no include_groups kw)
-      metrics_df = (
-          snaps.groupby(keys, as_index=False, sort=False)
-               .apply(_compute_for_group)
-      )
-
-    # Merge metrics (includes Open_Value / Open_Odds / Opening_Limit)
-    df = df.drop(columns=[c for c in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit'] if c in df.columns])
-    df = df.merge(metrics_df, on=keys, how='left')
+    if 'Opening_Limit' not in df.columns:
+        df['Opening_Limit'] = np.nan
+    df['Opening_Limit'] = pd.to_numeric(df['Opening_Limit'], errors='coerce').replace(0, np.nan)
 
     # First_Imp_Prob from Open_Odds if missing
     if 'First_Imp_Prob' not in df.columns:
@@ -1499,44 +1448,26 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     need_imp = df['First_Imp_Prob'].isna() & df['Open_Odds'].notna()
     if need_imp.any():
         df.loc[need_imp, 'First_Imp_Prob'] = df.loc[need_imp, 'Open_Odds'].apply(implied_prob)
+    if df['First_Imp_Prob'].isna().any() and 'Implied_Prob' in df.columns:
+        df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(df['Implied_Prob'])
 
-    # Guards
-    if 'Open_Value' not in df.columns: df['Open_Value'] = df.get('Value')
-    if 'Open_Odds'  not in df.columns: df['Open_Odds']  = df.get('Odds_Price')
-    if 'Opening_Limit' not in df.columns: df['Opening_Limit'] = np.nan
-    df['Opening_Limit'] = df['Opening_Limit'].replace(0, np.nan)
+    # Extremes safety nets
+    for col, fallback in [
+        ('Max_Value', 'Value'),
+        ('Min_Value', 'Value'),
+        ('Max_Odds', 'Odds_Price'),
+        ('Min_Odds', 'Odds_Price'),
+    ]:
+        if col not in df.columns:
+            df[col] = df.get(fallback)
+        else:
+            df[col] = df[col].fillna(df.get(fallback))
 
-    # ---------------- Extremes (by book) ----------------
-    df_extremes = (
-        snaps
-        .dropna(subset=['Value','Odds_Price'], how='all')
-        .groupby(keys)[['Value','Odds_Price']]
-        .agg(Max_Value=('Value','max'),
-             Min_Value=('Value','min'),
-             Max_Odds=('Odds_Price','max'),
-             Min_Odds=('Odds_Price','min'))
-        .reset_index()
-    )
-    for k in keys:
-        df_extremes[k] = df_extremes[k].astype(str).str.strip().str.lower()
-
-    df = df.merge(df_extremes, on=keys, how='left')
-
-    logger.info("📈 Sharp metrics computed for %d key groups", metrics_df.shape[0])
+    # ---- Quick diagnostics ----
     logger.info("📊 Missing Open_Value: %.2f%%", 100*df['Open_Value'].isna().mean())
     logger.info("📊 Missing Open_Odds: %.2f%%", 100*df['Open_Odds'].isna().mean())
     logger.info("📊 Missing First_Imp_Prob: %.2f%%", 100*df['First_Imp_Prob'].isna().mean())
     logger.info("📊 Missing Opening_Limit: %.2f%%", 100*df['Opening_Limit'].isna().mean())
-
-    
-
-   
-
-    # === Final merges
-    df = df.merge(df_open, on=merge_keys, how='left')
-    df = df.merge(df_open_book, on=merge_keys, how='left')
-    df = df.merge(df_extremes, on=merge_keys, how='left')
-    # === Fill fallback values where open/extreme data is missing
 
     # 🛡️ Ensure Implied_Prob exists in df for fallback to work
     if 'Implied_Prob' not in df.columns:
@@ -2783,7 +2714,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
     if not current:
         logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
+    df_scored = pd.DataFrame()
+    summary_df = pd.DataFrame()
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
@@ -2906,7 +2838,91 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df_all_snapshots['Market'] = df_all_snapshots['Market'].astype(str).str.strip().str.lower()
         df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower()
         df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], errors='coerce', utc=True)
+        
+   
+    
+                # --- 3) Normalize keys (both sides) ---
+        merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
+        for k in merge_keys:
+            df[k] = df[k].astype(str).str.strip().str.lower()
+            df_all_snapshots[k] = df_all_snapshots[k].astype(str).str.strip().str.lower()
 
+        # --- 4) Ensure required snapshot columns & parse times ---
+        for c in ['Limit','Value','Odds_Price','Game_Start','Snapshot_Timestamp']:
+            if c not in df_all_snapshots.columns:
+                df_all_snapshots[c] = np.nan
+        df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(
+            df_all_snapshots['Snapshot_Timestamp'], errors='coerce', utc=True
+        )
+        df_all_snapshots['Game_Start'] = pd.to_datetime(
+            df_all_snapshots['Game_Start'], errors='coerce', utc=True
+        )
+
+        # --- 5) Open-trio via compute_sharp_metrics (per key+book) ---
+        snaps = (
+            df_all_snapshots.merge(df[merge_keys].drop_duplicates(), on=merge_keys, how='inner')
+                            .sort_values('Snapshot_Timestamp')
+        )
+
+        if snaps.empty:
+            # Safe fallbacks so apply_blended_sharp_score still runs
+            df['Open_Value'] = df.get('Open_Value', df.get('Value'))
+            df['Open_Odds']  = df.get('Open_Odds',  df.get('Odds_Price'))
+            df['Opening_Limit'] = df.get('Opening_Limit', np.nan)
+            if 'First_Imp_Prob' not in df.columns:
+                df['First_Imp_Prob'] = np.nan
+        else:
+            def _entries_for_group(g):
+                # (limit, value, ts, game_start, odds)
+                return [
+                    (r.Limit, r.Value, r.Snapshot_Timestamp, r.Game_Start, r.Odds_Price)
+                    for r in g[['Limit','Value','Snapshot_Timestamp','Game_Start','Odds_Price']]
+                        .itertuples(index=False, name='Row')
+                ]
+
+            def _compute_for_group(g):
+                k0 = g.iloc[0]
+                res = compute_sharp_metrics(
+                    entries=_entries_for_group(g),
+                    open_val=None, open_odds=None, opening_limit=None,   # let function derive earliest
+                    mtype=str(k0['Market']),
+                    label=str(k0['Outcome']),
+                    gk=str(k0['Game_Key']),
+                    book=str(k0['Bookmaker'])
+                )
+                return pd.Series({
+                    'Open_Value':    res.get('Open_Value'),
+                    'Open_Odds':     res.get('Open_Odds'),
+                    'Opening_Limit': res.get('Opening_Limit'),
+                })
+
+            try:
+                opens_df = snaps.groupby(merge_keys, as_index=False, sort=False) \
+                                .apply(_compute_for_group, include_groups=False)
+            except TypeError:
+                # pandas < 2.1
+                opens_df = snaps.groupby(merge_keys, as_index=False, sort=False) \
+                                .apply(_compute_for_group)
+
+            # Normalize keys & types on the result, then merge
+            for k in merge_keys:
+                opens_df[k] = opens_df[k].astype(str).str.strip().str.lower()
+            for c in ['Open_Value','Open_Odds','Opening_Limit']:
+                opens_df[c] = pd.to_numeric(opens_df[c], errors='coerce')
+
+            df = df.drop(columns=[c for c in ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob']
+                                  if c in df.columns], errors='ignore')
+            df = df.merge(opens_df, on=merge_keys, how='left')
+
+        # Compute First_Imp_Prob from Open_Odds if missing
+        if 'First_Imp_Prob' not in df.columns:
+            df['First_Imp_Prob'] = np.nan
+        need_imp = df['First_Imp_Prob'].isna() & df['Open_Odds'].notna()
+        if need_imp.any():
+            df.loc[need_imp, 'First_Imp_Prob'] = df.loc[need_imp, 'Open_Odds'].apply(implied_prob)
+
+        # --- continue with your inverse hydration block as-is ---
+    
         # ➕ Define inverse rows BEFORE using them
         df_inverse = df[df['Was_Canonical'] == False].copy()
         logger.info(f"📦 Built {len(df_inverse)} inverse rows")
@@ -2962,7 +2978,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         logging.info(df[df['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].head(50).to_string(index=False))
    
         df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
-
+        # 📝 Log column list before scoring
+        logging.info(f"🧾 Columns before scoring: {df.columns.tolist()}")
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
     
         if not df_scored.empty:
@@ -2998,8 +3015,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         summary_df = pd.DataFrame()
     
     # ✅ Return same snapshot history as df_history for consistency
-    return df, df_all_snapshots, summary_df
-
+    
+    return df_scored, df_all_snapshots, summary_df
 
 def compute_weighted_signal(row, market_weights):
     market = str(row.get('Market', '')).lower()
