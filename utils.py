@@ -1407,41 +1407,26 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     for c in merge_keys:
         df[c] = df[c].astype(str).str.strip().str.lower()
     
-    # --- Pull / prep snapshot history
-    if df_all_snapshots is None:
-        logger.warning("⚠️ df_all_snapshots not passed — loading fallback from BigQuery")
-        df_all_snapshots = read_recent_sharp_master_cached(hours=120)
-    else:
-        logger.info(f"🧪 Using df_all_snapshots from caller — {len(df_all_snapshots)} rows")
-    
-    # Normalize merge keys in df_all_snapshots (no separate Bookmaker_Norm)
-    for c in merge_keys:
-        df_all_snapshots[c] = df_all_snapshots[c].astype(str).str.strip().str.lower()
-
     # ---------------- Pull / prep snapshot history ----------------
     if df_all_snapshots is None:
         logger.warning("⚠️ df_all_snapshots not passed — loading fallback from BigQuery")
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
     else:
-        logger.info(f"🧪 Using df_all_snapshots from caller — {len(df_all_snapshots)} rows")
-
-    # Normalize keys and bookmaker in snapshots
+        logger.info("🧪 Using df_all_snapshots from caller — %d rows", len(df_all_snapshots))
+    
+    # Normalize keys in snapshots
     for c in merge_keys:
-        if c != 'Bookmaker':
-            df_all_snapshots[c] = df_all_snapshots[c].astype(str).str.strip().str.lower()
-    df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
-    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
-    df_open_raw['Bookmaker'] = df_open_raw['Bookmaker'].astype(str).str.strip().str.lower()
-
-    # Add inverse rows from current df so both sides can hydrate
+        df_all_snapshots[c] = df_all_snapshots[c].astype(str).str.strip().str.lower()
+    
+    # Add inverse rows (optional)
     if 'Was_Canonical' in df.columns:
-        inverse_snapshot_rows = df.loc[df['Was_Canonical'] == False, merge_keys + ['Value', 'Odds_Price', 'Snapshot_Timestamp']]
+        inverse_snapshot_rows = df.loc[df['Was_Canonical'] == False, merge_keys + ['Value','Odds_Price','Snapshot_Timestamp']]
         df_all_snapshots = (
             pd.concat([df_all_snapshots, inverse_snapshot_rows], ignore_index=True)
               .drop_duplicates(subset=merge_keys + ['Snapshot_Timestamp'])
         )
-
-    # Clean types + implied prob in snapshots
+    
+    # Types + implied prob
     df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
     df_all_snapshots['Value'] = pd.to_numeric(df_all_snapshots['Value'], errors='coerce')
     if 'Implied_Prob' not in df_all_snapshots.columns:
@@ -1449,52 +1434,33 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df_all_snapshots['Implied_Prob'] = df_all_snapshots['Implied_Prob'].fillna(
         df_all_snapshots['Odds_Price'].apply(implied_prob)
     )
-
-    logger.info("🔍 Columns in df_all_snapshots before opening snapshot: %s", df_all_snapshots.columns.tolist())
-    # Debug: snapshot columns + a safe sample of key fields
     
-    # ---------------- Build clean opening snapshot ----------------
-    df_open_raw = get_opening_snapshot(df_all_snapshots)
+    # --- Build clean opening snapshot ONCE (robust) ---
+    try:
+        df_open_raw = get_opening_snapshot(df_all_snapshots)
+        if df_open_raw is None:
+            df_open_raw = pd.DataFrame()
+    except Exception as e:
+        logger.exception("❌ get_opening_snapshot() failed: %s", e)
+        df_open_raw = pd.DataFrame()
+    
+    # Ensure df_open_raw exists with the expected columns even if empty
+    base_open_cols = merge_keys + ['Value','Odds_Price','Implied_Prob','Opening_Limit']
+    for col in base_open_cols:
+        if col not in df_open_raw.columns:
+            df_open_raw[col] = pd.Series(dtype='object')
+    
     logger.info("📦 get_opening_snapshot() returned %d rows", len(df_open_raw))
     logger.info("🧾 df_open_raw columns: %s", df_open_raw.columns.tolist())
-    # --- Debug: snapshot columns + safe sample of key fields ---
-    cols_wanted = merge_keys + ['Value', 'Odds_Price']
-    cols_present = [c for c in cols_wanted if c in df_all_snapshots.columns]
     
-    logger.info(
-        "🔍 df_all_snapshots columns (%d): %s",
-        len(df_all_snapshots.columns),
-        df_all_snapshots.columns.tolist()
-    )
-    logger.info("📏 df_all_snapshots rows: %d", len(df_all_snapshots))
-    
-    if cols_present:
-        sample = (
-            df_all_snapshots
-            .loc[:, cols_present]
-            .dropna(how='all', subset=[c for c in ['Value', 'Odds_Price'] if c in cols_present])
-            .head(12)
-        )
-        logger.info(
-            "📌 Sample snapshot rows (cols=%s):\n%s",
-            cols_present,
-            sample.to_string(index=False)
-        )
-    else:
-        logger.info(
-            "⚠️ None of the requested columns are present for preview: %s",
-            cols_wanted
-        )
-    # Normalize keys and bookmaker on opener
+    # Normalize keys on opener (now that it DEFINITELY exists)
     for c in merge_keys:
-        if c != 'Bookmaker':
-            df_open_raw[c] = df_open_raw[c].astype(str).str.strip().str.lower()
-    df_open_raw['Bookmaker'] = _norm_book(df_open_raw['Bookmaker'])
-
+        df_open_raw[c] = df_open_raw[c].astype(str).str.strip().str.lower()
+    
     # Rename to Open_* and keep only needed columns
-    rename_map = {'Value': 'Open_Value', 'Odds_Price': 'Open_Odds', 'Implied_Prob': 'First_Imp_Prob', 'Opening_Limit': 'Opening_Limit'}
-    df_open = df_open_raw.rename(columns={k: v for k, v in rename_map.items() if k in df_open_raw.columns})
-    needed_open_cols = merge_keys + ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit']
+    rename_map = {'Value':'Open_Value', 'Odds_Price':'Open_Odds', 'Implied_Prob':'First_Imp_Prob', 'Opening_Limit':'Opening_Limit'}
+    df_open = df_open_raw.rename(columns={k:v for k,v in rename_map.items() if k in df_open_raw.columns})
+    needed_open_cols = merge_keys + ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']
     df_open = df_open[[c for c in needed_open_cols if c in df_open.columns]].copy()
     logger.info("📌 Sample df_open rows:\n%s", df_open.head(12).to_string(index=False))
 
