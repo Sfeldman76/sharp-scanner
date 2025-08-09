@@ -1393,30 +1393,45 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     df = df.copy()
 
-    # --- Base normalization
+    # ---------------- Base normalization ----------------
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
-    df['Is_Sharp_Book'] = df['Bookmaker'].astype(str).str.lower().str.strip().isin(SHARP_BOOKS).astype(int)
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    if 'Game_Start' in df.columns:
-        df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.date
-    else:
-        df['Event_Date'] = pd.NaT
+    df['Is_Sharp_Book'] = df['Bookmaker'].astype(str).str.lower().str.strip().isin(SHARP_BOOKS).astype(int)
+    df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce').dt.date if 'Game_Start' in df.columns else pd.NaT
+
+   
 
     merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+
+    # Normalize merge keys in df
     for c in merge_keys:
         df[c] = df[c].astype(str).str.strip().str.lower()
-
+    
     # --- Pull / prep snapshot history
     if df_all_snapshots is None:
         logger.warning("⚠️ df_all_snapshots not passed — loading fallback from BigQuery")
         df_all_snapshots = read_recent_sharp_master_cached(hours=120)
     else:
         logger.info(f"🧪 Using df_all_snapshots from caller — {len(df_all_snapshots)} rows")
-
+    
+    # Normalize merge keys in df_all_snapshots (no separate Bookmaker_Norm)
     for c in merge_keys:
         df_all_snapshots[c] = df_all_snapshots[c].astype(str).str.strip().str.lower()
 
-    # Add inverse rows from the current df so both sides can hydrate
+    # ---------------- Pull / prep snapshot history ----------------
+    if df_all_snapshots is None:
+        logger.warning("⚠️ df_all_snapshots not passed — loading fallback from BigQuery")
+        df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    else:
+        logger.info(f"🧪 Using df_all_snapshots from caller — {len(df_all_snapshots)} rows")
+
+    # Normalize keys and bookmaker in snapshots
+    for c in merge_keys:
+        if c != 'Bookmaker':
+            df_all_snapshots[c] = df_all_snapshots[c].astype(str).str.strip().str.lower()
+    df_all_snapshots['Bookmaker'] = _norm_book(df_all_snapshots['Bookmaker'])
+
+    # Add inverse rows from current df so both sides can hydrate
     if 'Was_Canonical' in df.columns:
         inverse_snapshot_rows = df.loc[df['Was_Canonical'] == False, merge_keys + ['Value', 'Odds_Price', 'Snapshot_Timestamp']]
         df_all_snapshots = (
@@ -1424,7 +1439,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
               .drop_duplicates(subset=merge_keys + ['Snapshot_Timestamp'])
         )
 
-    # Compute implied prob in snapshots
+    # Clean types + implied prob in snapshots
     df_all_snapshots['Odds_Price'] = pd.to_numeric(df_all_snapshots['Odds_Price'], errors='coerce')
     df_all_snapshots['Value'] = pd.to_numeric(df_all_snapshots['Value'], errors='coerce')
     if 'Implied_Prob' not in df_all_snapshots.columns:
@@ -1433,128 +1448,107 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df_all_snapshots['Odds_Price'].apply(implied_prob)
     )
 
-    logger.info(f"🔍 Columns in df_all_snapshots before opening snapshot: {df_all_snapshots.columns.tolist()}")
-    logger.info("📌 Sample snapshot rows:\n%s",
-                df_all_snapshots[merge_keys + ['Value', 'Odds_Price']].dropna().head(20).to_string())
+    logger.info("🔍 Columns in df_all_snapshots before opening snapshot: %s", df_all_snapshots.columns.tolist())
+    try:
+        logger.info("📌 Sample snapshot rows:\n%s",
+                    df_all_snapshots[merge_keys + ['Value', 'Odds_Price']].dropna().head(12).to_string(index=False))
+    except Exception:
+        pass
 
-    # --- Build clean opening snapshot once
+    # ---------------- Build clean opening snapshot ----------------
     df_open_raw = get_opening_snapshot(df_all_snapshots)
-    logger.info(f"📦 get_opening_snapshot() returned {len(df_open_raw)} rows")
-    logger.info(f"🧾 df_open_raw columns: {df_open_raw.columns.tolist()}")
+    logger.info("📦 get_opening_snapshot() returned %d rows", len(df_open_raw))
+    logger.info("🧾 df_open_raw columns: %s", df_open_raw.columns.tolist())
 
+    # Normalize keys and bookmaker on opener
     for c in merge_keys:
-        df_open_raw[c] = df_open_raw[c].astype(str).str.strip().str.lower()
+        if c != 'Bookmaker':
+            df_open_raw[c] = df_open_raw[c].astype(str).str.strip().str.lower()
+    df_open_raw['Bookmaker'] = _norm_book(df_open_raw['Bookmaker'])
 
-    rename_map = {
-        'Value': 'Open_Value',
-        'Odds_Price': 'Open_Odds',
-        'Implied_Prob': 'First_Imp_Prob',
-        'Opening_Limit': 'Opening_Limit',
-    }
+    # Rename to Open_* and keep only needed columns
+    rename_map = {'Value': 'Open_Value', 'Odds_Price': 'Open_Odds', 'Implied_Prob': 'First_Imp_Prob', 'Opening_Limit': 'Opening_Limit'}
     df_open = df_open_raw.rename(columns={k: v for k, v in rename_map.items() if k in df_open_raw.columns})
-
     needed_open_cols = merge_keys + ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit']
     df_open = df_open[[c for c in needed_open_cols if c in df_open.columns]].copy()
+    logger.info("📌 Sample df_open rows:\n%s", df_open.head(12).to_string(index=False))
 
-    logger.info("📌 Sample df_open rows:\n%s", df_open.head(20).to_string())
-    # --- DEBUG: Compare detect df vs df_open before merge ---
-    logger.info("=== DEBUG: Compare detect df vs df_open before merge ===")
-    
-    # Normalized copies for comparison
-    A = df[merge_keys + ['Value','Odds_Price']].copy()
-    B = df_open[merge_keys + ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']].copy()
-    
-    for c in merge_keys:
-        A[c] = A[c].astype(str).str.strip().str.lower()
-        B[c] = B[c].astype(str).str.strip().str.lower()
-    
-    logger.info("📦 Sample from detect df:\n%s", A.head(10).to_string(index=False))
-    logger.info("📦 Sample from df_open:\n%s", B.head(10).to_string(index=False))
-    
-    # Unmatched from df side
-    left_only = (
-        A[merge_keys].drop_duplicates()
-          .merge(B[merge_keys].drop_duplicates(), on=merge_keys, how='left', indicator=True)
-          .query('_merge == "left_only"')
-          .drop(columns=['_merge'])
-    )
-    logger.info("🚫 Unmatched LEFT (detect df rows with no opener): %d", len(left_only))
-    if len(left_only):
-        logger.info("Unmatched LEFT sample:\n%s", left_only.head(10).to_string(index=False))
-    
-    # Unmatched from df_open side
-    right_only = (
-        B[merge_keys].drop_duplicates()
-          .merge(A[merge_keys].drop_duplicates(), on=merge_keys, how='left', indicator=True)
-          .query('_merge == "left_only"')
-          .drop(columns=['_merge'])
-    )
-    logger.info("❗ Unmatched RIGHT (opener rows not present in detect df): %d", len(right_only))
-    if len(right_only):
-        logger.info("Unmatched RIGHT sample:\n%s", right_only.head(10).to_string(index=False))
-    
-    # Side-by-side for matched rows
-    shared = A.merge(B, on=merge_keys, how='inner').head(10)
-    if len(shared):
-        logger.info("🔗 Side-by-side matched sample:\n%s",
-                    shared[merge_keys + ['Value','Odds_Price','Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']].to_string(index=False))
-    
-    # Breakdown of unmatched by bookmaker
-    if len(left_only):
-        logger.info("🔢 Unmatched LEFT by Bookmaker:\n%s", left_only['Bookmaker'].value_counts().head(10).to_string())
-    # --- Merge opening fields (no suffix conflicts)
-    cols_to_drop = ['Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit']
-    df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+    # ---------------- Compact debug (before merge) ----------------
+    try:
+        A = df[merge_keys + ['Value','Odds_Price']].copy()
+        B = df_open[merge_keys + ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']].copy()
+        for c in merge_keys:
+            A[c] = A[c].astype(str).str.strip().str.lower()
+            B[c] = B[c].astype(str).str.strip().str.lower()
+        left_only = (
+            A[merge_keys].drop_duplicates()
+             .merge(B[merge_keys].drop_duplicates(), on=merge_keys, how='left', indicator=True)
+             .query('_merge == "left_only"')
+        )
+        logger.info("🚫 Unmatched LEFT (no opener): %d", len(left_only))
+        if len(left_only):
+            logger.info("🔢 Unmatched LEFT by Bookmaker:\n%s", left_only['Bookmaker'].value_counts().head(10).to_string(index=False))
+    except Exception:
+        pass
 
+    # ---------------- Merge opening fields (no suffixes) ----------------
+    df = df.drop(columns=[c for c in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit'] if c in df.columns])
     df = df.merge(df_open, how='left', on=merge_keys)
 
-    # --- Guarantees + fallbacks
-    if 'Open_Value' not in df.columns:
-        df['Open_Value'] = df.get('Value')
-    else:
-        df['Open_Value'] = df['Open_Value'].fillna(df.get('Value'))
+    # ---------------- Fallback opener: earliest available snapshot per key ----------------
+    agg_dict = {
+        'Open_Value':     ('Value', 'first'),
+        'Open_Odds':      ('Odds_Price', 'first'),
+        'First_Imp_Prob': ('Implied_Prob', 'first'),
+    }
+    if 'Limit' in df_all_snapshots.columns:
+        agg_dict['Opening_Limit'] = ('Limit', 'first')
 
-    if 'Open_Odds' not in df.columns:
-        df['Open_Odds'] = df.get('Odds_Price')
-    else:
-        df['Open_Odds'] = df['Open_Odds'].fillna(df.get('Odds_Price'))
+    df_open_any = (
+        df_all_snapshots
+          .dropna(subset=['Value','Odds_Price'], how='all')
+          .sort_values('Snapshot_Timestamp')
+          .groupby(merge_keys, as_index=False)
+          .agg(**agg_dict)
+    )
 
+    need_open = df['Open_Value'].isna() | df['Open_Odds'].isna() | df['First_Imp_Prob'].isna() | df['Opening_Limit'].isna()
+    if need_open.any():
+        df_fallback = df.loc[need_open, merge_keys].drop_duplicates().merge(df_open_any, on=merge_keys, how='left')
+        df = df.merge(df_fallback, on=merge_keys, how='left', suffixes=('', '_fb'))
+        for col in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']:
+            fb = f"{col}_fb"
+            if fb in df.columns:
+                df[col] = df[col].where(~df[col].isna(), df[fb])
+                df.drop(columns=[fb], inplace=True, errors='ignore')
+
+    # Treat zero limits as unknown
+    if 'Opening_Limit' in df.columns:
+        df['Opening_Limit'] = df['Opening_Limit'].replace(0, np.nan)
+
+    # ---------------- Final guarantees + diagnostics ----------------
+    df['Open_Value'] = df.get('Open_Value', df.get('Value'))
+    df['Open_Odds'] = df.get('Open_Odds', df.get('Odds_Price'))
     if 'First_Imp_Prob' not in df.columns:
         df['First_Imp_Prob'] = np.nan
     if df['First_Imp_Prob'].isna().any():
-        if 'Odds_Price' in df.columns:
-            df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(df['Odds_Price'].apply(implied_prob))
-        else:
-            df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(0.5)
-
+        df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(
+            df['Odds_Price'].apply(implied_prob) if 'Odds_Price' in df.columns else 0.5
+        )
     if 'Opening_Limit' not in df.columns:
         df['Opening_Limit'] = np.nan
 
-    # --- Assertions + diagnostics
     missing_cols = [c for c in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit'] if c not in df.columns]
     if missing_cols:
-        raise RuntimeError(f"Opening merge failed to create columns: {missing_cols}. "
-                           f"df_open columns: {list(df_open.columns)}")
+        raise RuntimeError(f"Opening merge failed to create columns: {missing_cols}. df_open columns: {list(df_open.columns)}")
 
     logger.info("📊 Missing Open_Value: %.2f%%", 100*df['Open_Value'].isna().mean())
     logger.info("📊 Missing Open_Odds: %.2f%%", 100*df['Open_Odds'].isna().mean())
     logger.info("📊 Missing First_Imp_Prob: %.2f%%", 100*df['First_Imp_Prob'].isna().mean())
     logger.info("📊 Missing Opening_Limit: %.2f%%", 100*df['Opening_Limit'].isna().mean())
 
-    # If Opening_Limit still looks empty, run a quick anti-join to debug key mismatches
-    if df['Opening_Limit'].isna().mean() > 0.5 and len(df_open):
-        _unmatched = (
-            df[merge_keys]
-            .merge(df_open[merge_keys].drop_duplicates(), on=merge_keys, how='left', indicator=True)
-            .query('_merge == "left_only"')
-            .drop(columns=['_merge'])
-        )
-        logger.info("🧪 Unmatched after opening merge: %d rows (%.2f%%)",
-                    len(_unmatched), 100 * len(_unmatched) / max(len(df), 1))
-        if len(_unmatched):
-            logger.info("🔎 Unmatched sample:\n%s", _unmatched.head(10).to_string())
-
-    
+    # (continue with extremes / reversals / model scoring...)
+    # ...
     df_open_book = (
         df_open
         .dropna(subset=['Open_Value'])
