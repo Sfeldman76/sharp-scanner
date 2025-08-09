@@ -632,7 +632,17 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
     abs_net_line_move = None
     net_odds_move = None
     abs_net_odds_move = None
-
+    # derive opening trio from entries if missing
+    if open_val is None or open_odds is None or opening_limit is None:
+        for (lim, val, ts, game_start, odds) in sorted(entries, key=lambda x: x[2]):
+            if open_val is None and pd.notna(val):
+                open_val = val
+            if open_odds is None and pd.notna(odds):
+                open_odds = odds
+            if opening_limit is None and pd.notna(lim):
+                opening_limit = lim
+            if (open_val is not None) and (open_odds is not None) and (opening_limit is not None):
+                break
     # --- Always sort first
     mtype = (mtype or "").strip().lower()
     label = (label or "").strip().lower()
@@ -1489,9 +1499,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info("🧪 Merge keys sample from df:")
     logger.info(df[merge_keys].drop_duplicates().head().to_string(index=False))
 
-    logger.info("🧪 Merge keys sample from df_open_rows:")
-    logger.info(df_open_rows[merge_keys].drop_duplicates().head().to_string(index=False))
-
+    
     try:
         logger.info("🧪 Sample of enriched df after merge:")
         logger.info(df[[
@@ -2913,7 +2921,21 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df = df.drop(columns=[c for c in ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob']
                                   if c in df.columns], errors='ignore')
             df = df.merge(opens_df, on=merge_keys, how='left')
-
+                        # --- Fallback: if Opening_Limit still null, use earliest non-null Limit from snapshots ---
+            if df['Opening_Limit'].isna().any():
+                earliest_limit = (
+                    snaps.dropna(subset=['Limit'])
+                         .sort_values('Snapshot_Timestamp')
+                         .groupby(['Game_Key','Market','Outcome','Bookmaker'], as_index=False)
+                         .agg(Opening_Limit=('Limit','first'))
+                )
+                for k in ['Game_Key','Market','Outcome','Bookmaker']:
+                    earliest_limit[k] = earliest_limit[k].astype(str).str.strip().str.lower()
+            
+                df = df.drop(columns=['Opening_Limit'], errors='ignore') \
+                       .merge(earliest_limit, on=['Game_Key','Market','Outcome','Bookmaker'], how='left')
+            
+           
         # Compute First_Imp_Prob from Open_Odds if missing
         if 'First_Imp_Prob' not in df.columns:
             df['First_Imp_Prob'] = np.nan
