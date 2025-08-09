@@ -1436,34 +1436,35 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     )
     
     # --- Build clean opening snapshot ONCE (robust) ---
-    try:
-        df_open_raw = get_opening_snapshot(df_all_snapshots)
-        if df_open_raw is None:
-            df_open_raw = pd.DataFrame()
-    except Exception as e:
-        logger.exception("❌ get_opening_snapshot() failed: %s", e)
-        df_open_raw = pd.DataFrame()
-    
-    # Ensure df_open_raw exists with the expected columns even if empty
-    base_open_cols = merge_keys + ['Value','Odds_Price','Implied_Prob','Opening_Limit']
-    for col in base_open_cols:
-        if col not in df_open_raw.columns:
-            df_open_raw[col] = pd.Series(dtype='object')
-    
+    # --- Build clean opening snapshot once (no duplicate columns) ---
+    df_open_raw = get_opening_snapshot(df_all_snapshots)
     logger.info("📦 get_opening_snapshot() returned %d rows", len(df_open_raw))
     logger.info("🧾 df_open_raw columns: %s", df_open_raw.columns.tolist())
     
-    # Normalize keys on opener (now that it DEFINITELY exists)
+    # Normalize keys
     for c in merge_keys:
         df_open_raw[c] = df_open_raw[c].astype(str).str.strip().str.lower()
     
-    # Rename to Open_* and keep only needed columns
-    rename_map = {'Value':'Open_Value', 'Odds_Price':'Open_Odds', 'Implied_Prob':'First_Imp_Prob', 'Opening_Limit':'Opening_Limit'}
-    df_open = df_open_raw.rename(columns={k:v for k,v in rename_map.items() if k in df_open_raw.columns})
+    # If Open_* already exist, keep them; otherwise, derive them from raw columns
+    have_open = {'Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit'} & set(df_open_raw.columns)
+    if not have_open:
+        rename_map = {'Value': 'Open_Value', 'Odds_Price': 'Open_Odds', 'Implied_Prob': 'First_Imp_Prob'}
+        df_open_tmp = df_open_raw.rename(columns={k:v for k,v in rename_map.items() if k in df_open_raw.columns})
+    else:
+        df_open_tmp = df_open_raw.copy()
+    
+    # If both Open_* and raw exist, drop the raw so we don't carry duplicate names in later logs
+    raw_cols_to_drop = [c for c in ['Value','Odds_Price','Implied_Prob'] if c in df_open_tmp.columns and f"Open_{c.split('_')[0]}" in df_open_tmp.columns]
+    df_open_tmp.drop(columns=raw_cols_to_drop, inplace=True, errors='ignore')
+    
     needed_open_cols = merge_keys + ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']
-    df_open = df_open[[c for c in needed_open_cols if c in df_open.columns]].copy()
-    logger.info("📌 Sample df_open rows:\n%s", df_open.head(12).to_string(index=False))
-
+    df_open = df_open_tmp[[c for c in needed_open_cols if c in df_open_tmp.columns]].copy()
+    # Ensure truly unique column names
+    df_open = df_open.loc[:, ~df_open.columns.duplicated()].copy()
+    
+    logger.info("📌 Sample df_open rows:\n%s", df_open.head(12).to_string(index=False))🧾 df_open_raw columns: %s", df_open_raw.columns.tolist())
+        
+  
     # ---------------- Compact debug (before merge) ----------------
     try:
         A = df[merge_keys + ['Value','Odds_Price']].copy()
@@ -1487,6 +1488,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df = df.merge(df_open, how='left', on=merge_keys)
 
     # ---------------- Fallback opener: earliest available snapshot per key ----------------
+    # --- Fallback opener: earliest available snapshot per key ---
     agg_dict = {
         'Open_Value':     ('Value', 'first'),
         'Open_Odds':      ('Odds_Price', 'first'),
@@ -1494,7 +1496,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     }
     if 'Limit' in df_all_snapshots.columns:
         agg_dict['Opening_Limit'] = ('Limit', 'first')
-
+    
     df_open_any = (
         df_all_snapshots
           .dropna(subset=['Value','Odds_Price'], how='all')
@@ -1502,21 +1504,23 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
           .groupby(merge_keys, as_index=False)
           .agg(**agg_dict)
     )
-
+    
+    # Fill only where still missing, using a second merge with suffixes
     need_open = df['Open_Value'].isna() | df['Open_Odds'].isna() | df['First_Imp_Prob'].isna() | df['Opening_Limit'].isna()
     if need_open.any():
-        df_fallback = df.loc[need_open, merge_keys].drop_duplicates().merge(df_open_any, on=merge_keys, how='left')
-        df = df.merge(df_fallback, on=merge_keys, how='left', suffixes=('', '_fb'))
+        df_need = df.loc[need_open, merge_keys].drop_duplicates()
+        df_fb = df_need.merge(df_open_any, on=merge_keys, how='left')
+        df = df.merge(df_fb, on=merge_keys, how='left', suffixes=('', '_fb'))
+    
         for col in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit']:
             fb = f"{col}_fb"
             if fb in df.columns:
                 df[col] = df[col].where(~df[col].isna(), df[fb])
                 df.drop(columns=[fb], inplace=True, errors='ignore')
-
-    # Treat zero limits as unknown
+    
+    # Treat zero as unknown (optional)
     if 'Opening_Limit' in df.columns:
         df['Opening_Limit'] = df['Opening_Limit'].replace(0, np.nan)
-
     # ---------------- Final guarantees + diagnostics ----------------
     df['Open_Value'] = df.get('Open_Value', df.get('Value'))
     df['Open_Odds'] = df.get('Open_Odds', df.get('Odds_Price'))
