@@ -1454,26 +1454,40 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # ---------------- Sharp metrics (open trio comes from compute_sharp_metrics) ----------------
     keys = ['Game_Key','Market','Outcome','Bookmaker']
 
+    keys = ['Game_Key','Market','Outcome','Bookmaker']
+
     def _entries_for_group(g):
-        return [(r.Limit, r.Value, r.Snapshot_Timestamp, r.Game_Start, r.Odds_Price)
-                for r in g[['Limit','Value','Snapshot_Timestamp','Game_Start','Odds_Price']]
-                .itertuples(index=False, name='Row')]
+      return [(r.Limit, r.Value, r.Snapshot_Timestamp, r.Game_Start, r.Odds_Price)
+              for r in g[['Limit','Value','Snapshot_Timestamp','Game_Start','Odds_Price']]
+              .itertuples(index=False, name='Row')]
     
     def _compute_for_group(g):
-        k0 = g.iloc[0]
-        return compute_sharp_metrics(
-            entries=_entries_for_group(g),
-            open_val=None,
-            mtype=str(k0['Market']),
-            label=str(k0['Outcome']),
-            gk=str(k0['Game_Key']),
-            book=str(k0['Bookmaker']),
-            open_odds=None,
-            opening_limit=None
-    metrics_df = (
-        snaps.groupby(keys, as_index=False, sort=False)
-             .apply(lambda g: pd.Series(_compute_for_group(g)), include_groups=False)
-    )
+      k0 = g.iloc[0]
+      # compute_sharp_metrics returns a dict; turn it into a Series for apply
+      res = compute_sharp_metrics(
+          entries=_entries_for_group(g),
+          open_val=None,
+          mtype=str(k0['Market']),
+          label=str(k0['Outcome']),
+          gk=str(k0['Game_Key']),
+          book=str(k0['Bookmaker']),
+          open_odds=None,
+          opening_limit=None
+      )
+      return pd.Series(res)
+    
+    # Build metrics_df without reset_index (avoid column collisions)
+    try:
+      metrics_df = (
+          snaps.groupby(keys, as_index=False, sort=False)
+               .apply(_compute_for_group, include_groups=False)
+      )
+    except TypeError:
+      # pandas < 2.2 fallback (no include_groups kw)
+      metrics_df = (
+          snaps.groupby(keys, as_index=False, sort=False)
+               .apply(_compute_for_group)
+      )
 
     # Merge metrics (includes Open_Value / Open_Odds / Opening_Limit)
     df = df.drop(columns=[c for c in ['Open_Value','Open_Odds','First_Imp_Prob','Opening_Limit'] if c in df.columns])
