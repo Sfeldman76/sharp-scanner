@@ -1429,7 +1429,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     for c in merge_keys:
         if c != 'Bookmaker':
             df_all_snapshots[c] = df_all_snapshots[c].astype(str).str.strip().str.lower()
-    df_all_snapshots['Bookmaker'] = _norm_book(df_all_snapshots['Bookmaker'])
+    df['Bookmaker'] = df['Bookmaker'].astype(str).str.strip().str.lower()
+    df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
+    df_open_raw['Bookmaker'] = df_open_raw['Bookmaker'].astype(str).str.strip().str.lower()
 
     # Add inverse rows from current df so both sides can hydrate
     if 'Was_Canonical' in df.columns:
@@ -1449,11 +1451,25 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     )
 
     logger.info("🔍 Columns in df_all_snapshots before opening snapshot: %s", df_all_snapshots.columns.tolist())
-    try:
-        logger.info("📌 Sample snapshot rows:\n%s",
-                    df_all_snapshots[merge_keys + ['Value', 'Odds_Price']].dropna().head(12).to_string(index=False))
-    except Exception:
-        pass
+    # Debug: snapshot columns + a safe sample of key fields
+    cols_wanted = merge_keys + ['Value', 'Odds_Price']
+    cols_present = [c for c in cols_wanted if c in df_all_snapshots.columns]
+    
+    logger.info("🔍 df_all_snapshots columns (%d): %s",
+                len(df_all_snapshots.columns), df_all_snapshots.columns.tolist())
+    logger.info("📏 df_all_snapshots rows: %d", len(df_all_snapshots))
+    
+    if cols_present:
+        sample = (
+            df_all_snapshots
+            .loc[:, cols_present]
+            .dropna(how='all', subset=[c for c in ['Value','Odds_Price'] if c in cols_present])
+            .head(12)
+        )
+        logger.info("📌 Sample snapshot rows (cols=%s):\n%s",
+                    cols_present, sample.to_string(index=False))
+    else:
+        logger.info("⚠️ None of the requested columns are present for preview: %s", cols_wanted)
 
     # ---------------- Build clean opening snapshot ----------------
     df_open_raw = get_opening_snapshot(df_all_snapshots)
