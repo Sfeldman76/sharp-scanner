@@ -1462,8 +1462,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # Ensure truly unique column names
     df_open = df_open.loc[:, ~df_open.columns.duplicated()].copy()
     
-    logger.info("📌 Sample df_open rows:\n%s", df_open.head(12).to_string(index=False))🧾 df_open_raw columns: %s", df_open_raw.columns.tolist())
-        
+    logger.info("📌 Sample df_open rows:\n%s\n🧾 df_open_raw columns: %s",
+        df_open.head(12).to_string(index=False),
+        df_open_raw.columns.tolist()) 
   
     # ---------------- Compact debug (before merge) ----------------
     try:
