@@ -1980,53 +1980,84 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_canon[col] = 0.0
             
             # ✅ Handle string column separately
+            # Ensure timing label exists on canon
             if 'SharpMove_Timing_Dominant' not in df_canon.columns:
                 df_canon['SharpMove_Timing_Dominant'] = 'unknown'
-                
-            hybrid_odds_timing_cols = [
-                'Odds_Move_Magnitude',  # total
-            ] + [
-                f'OddsMove_Magnitude_{b}' for b in [
-                    'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-                    'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-                    'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-                    'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
-                ]
-            ]
-            # ✅ Process numeric odds timing features
+            
+            # --- Canon: normalize odds timing features (numeric) ---
+            hybrid_odds_timing_cols = (
+                ['Odds_Move_Magnitude'] +
+                [f'OddsMove_Magnitude_{b}' for b in [
+                    'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+                    'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+                    'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+                    'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
+                ]]
+            )
             for col in hybrid_odds_timing_cols:
                 if col in df_canon.columns:
                     df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
                 else:
-                    df_canon[col] = 0.0  
-            # === Ensure required features exist ===
-            # === Ensure required features exist ===
-            model_features = trained_models[market_type]['model'].get_booster().feature_names
+                    df_canon[col] = 0.0
             
-            missing_cols = [col for col in model_features if col not in df_full_market.columns]
-            df_full_market[missing_cols] = 0  # Fill missing model features
+            # === Build the feature list exactly as used in training ===
+            feature_cols = None
+            # Prefer a saved feature list from training if you have it
+            if 'feature_cols' in trained_models[market_type]:
+                feature_cols = trained_models[market_type]['feature_cols']
+            else:
+                # Fallbacks: sklearn stores feature_names_in_ ; xgb Booster may have feature_names
+                feature_cols = getattr(trained_models[market_type]['model'], 'feature_names_in_', None)
+                if feature_cols is None:
+                    booster = trained_models[market_type]['model'].get_booster()
+                    feature_cols = booster.feature_names or []  # may still be None → []
             
-            # Normalize booleans and ensure types on canonical rows only
-            df_full_market.loc[df_full_market['Was_Canonical'], model_features] = (
-                df_full_market.loc[df_full_market['Was_Canonical'], model_features]
-                .replace({'True': 1, 'False': 0})
-                .infer_objects(copy=False)
-            )
+            feature_cols = list(feature_cols)  # ensure list
             
-            # Score on full_market canonical rows directly
-            X_full = df_full_market.loc[df_full_market['Was_Canonical'], model_features]
+            # Ensure all model features exist in df_full_market
+            missing_cols = [c for c in feature_cols if c not in df_full_market.columns]
+            if missing_cols:
+                df_full_market[missing_cols] = 0.0
+            
+            # Coerce *only* the model features to numeric/bool-compatible dtypes
+            for c in feature_cols:
+                if c in df_full_market.columns:
+                    # convert common stringy booleans
+                    if df_full_market[c].dtype == object:
+                        df_full_market[c] = (
+                            df_full_market[c]
+                            .replace({'True': 1, 'False': 0, True: 1, False: 0, '': np.nan, 'none': np.nan, 'None': np.nan})
+                        )
+                    df_full_market[c] = pd.to_numeric(df_full_market[c], errors='coerce')
+            
+            # Replace +/-inf and fill NaNs (match training policy!)
+            df_full_market[feature_cols] = df_full_market[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            
+            # (Optional) sanity check before modeling
+            obj_left = df_full_market[feature_cols].select_dtypes(include=['object']).columns.tolist()
+            if obj_left:
+                logger.warning("⚠️ Object dtypes remain in features: %s", obj_left)
+                # hard-coerce as last resort
+                df_full_market[obj_left] = df_full_market[obj_left].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+            
+            # === Score only canonical rows ===
+            X_full = df_full_market.loc[df_full_market['Was_Canonical'], feature_cols]
+            
+            # One more guard on X_full
+            obj_in_X = X_full.select_dtypes(include='object').columns.tolist()
+            if obj_in_X:
+                logger.error("❌ Object columns in X_full: %s", obj_in_X)
+                X_full[obj_in_X] = X_full[obj_in_X].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+            
             preds = trained_models[market_type]['calibrator'].predict_proba(X_full)[:, 1]
             
             df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Sharp_Win_Prob'] = preds
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Confidence'] = preds
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Scored_By_Model'] = True
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Was_Canonical'] = True
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Scoring_Market'] = market_type                       
-            # === Batch assign all new columns at once to avoid fragmentation
-            
-        
-            
-            # Optional: trigger defragmentation  df_canon = df_canon.copy()
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Confidence']    = preds
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Scored_By_Model']     = True
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Was_Canonical']       = True
+            df_full_market.loc[df_full_market['Was_Canonical'], 'Scoring_Market']      = market_type
+                        
+                        # Optional: trigger defragmentation  df_canon = df_canon.copy()
 
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
             df_canon = df_full_market[df_full_market['Was_Canonical'] == True].copy()
