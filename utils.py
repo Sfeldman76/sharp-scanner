@@ -1452,30 +1452,39 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
 
     logger.info("🔍 Columns in df_all_snapshots before opening snapshot: %s", df_all_snapshots.columns.tolist())
     # Debug: snapshot columns + a safe sample of key fields
+    
+    # ---------------- Build clean opening snapshot ----------------
+    df_open_raw = get_opening_snapshot(df_all_snapshots)
+    logger.info("📦 get_opening_snapshot() returned %d rows", len(df_open_raw))
+    logger.info("🧾 df_open_raw columns: %s", df_open_raw.columns.tolist())
+    # --- Debug: snapshot columns + safe sample of key fields ---
     cols_wanted = merge_keys + ['Value', 'Odds_Price']
     cols_present = [c for c in cols_wanted if c in df_all_snapshots.columns]
     
-    logger.info("🔍 df_all_snapshots columns (%d): %s",
-                len(df_all_snapshots.columns), df_all_snapshots.columns.tolist())
+    logger.info(
+        "🔍 df_all_snapshots columns (%d): %s",
+        len(df_all_snapshots.columns),
+        df_all_snapshots.columns.tolist()
+    )
     logger.info("📏 df_all_snapshots rows: %d", len(df_all_snapshots))
     
     if cols_present:
         sample = (
             df_all_snapshots
             .loc[:, cols_present]
-            .dropna(how='all', subset=[c for c in ['Value','Odds_Price'] if c in cols_present])
+            .dropna(how='all', subset=[c for c in ['Value', 'Odds_Price'] if c in cols_present])
             .head(12)
         )
-        logger.info("📌 Sample snapshot rows (cols=%s):\n%s",
-                    cols_present, sample.to_string(index=False))
+        logger.info(
+            "📌 Sample snapshot rows (cols=%s):\n%s",
+            cols_present,
+            sample.to_string(index=False)
+        )
     else:
-        logger.info("⚠️ None of the requested columns are present for preview: %s", cols_wanted)
-
-    # ---------------- Build clean opening snapshot ----------------
-    df_open_raw = get_opening_snapshot(df_all_snapshots)
-    logger.info("📦 get_opening_snapshot() returned %d rows", len(df_open_raw))
-    logger.info("🧾 df_open_raw columns: %s", df_open_raw.columns.tolist())
-
+        logger.info(
+            "⚠️ None of the requested columns are present for preview: %s",
+            cols_wanted
+        )
     # Normalize keys and bookmaker on opener
     for c in merge_keys:
         if c != 'Bookmaker':
