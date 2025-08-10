@@ -2987,7 +2987,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         if {'Opening_Limit','Limit'}.issubset(df.columns):
             need = df['Opening_Limit'].isna() & df['Limit'].notna()
             if need.any():
-                df.loc[need, 'Opening_Limit'] = pd.to_numeric(df.loc[need, 'Limit'], errors='coerce').
+                df.loc[need, 'Opening_Limit'] = pd.to_numeric(df.loc[need, 'Limit'], errors='coerce')
                            
         # Compute First_Imp_Prob from Open_Odds if missing
         if 'First_Imp_Prob' not in df.columns:
