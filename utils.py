@@ -1474,7 +1474,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info("📊 Missing Open_Odds: %.2f%%", 100*df['Open_Odds'].isna().mean())
     logger.info("📊 Missing First_Imp_Prob: %.2f%%", 100*df['First_Imp_Prob'].isna().mean())
     logger.info("📊 Missing Opening_Limit: %.2f%%", 100*df['Opening_Limit'].isna().mean())
-
+    if 'Value' in snaps.columns:
+        sizes = snaps.groupby(['Game_Key','Market','Outcome','Bookmaker']).size()
+        logger.info("🧪 snapshot sizes per key: mean=%.2f, max=%d, pct_single=%.1f%%",
+                    sizes.mean(), sizes.max(), sizes.eq(1).mean()*100)
     # 🛡️ Ensure Implied_Prob exists in df for fallback to work
     if 'Implied_Prob' not in df.columns:
         df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
@@ -1490,11 +1493,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Min_Value'] = df['Min_Value'].fillna(df['Value'])
     df['Max_Odds'] = df['Max_Odds'].fillna(df['Odds_Price'])
     df['Min_Odds'] = df['Min_Odds'].fillna(df['Odds_Price'])
-
-    # === Diagnostics
-    logger.info("🧪 Merge keys sample from df:")
-    logger.info(df[merge_keys].drop_duplicates().head().to_string(index=False))
-
+    # Extremes safety nets (fill only if still missing)
     
     try:
         logger.info("🧪 Sample of enriched df after merge:")
@@ -2908,6 +2907,14 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         )
         
         df_extremes = ext_val.join(ext_odds, how='outer').reset_index()
+       
+
+        # merge into df
+        for k in merge_keys:
+            df_extremes[k] = df_extremes[k].astype(str).str.strip().str.lower()
+        df = df.merge(df_extremes, on=merge_keys, how='left')
+        logger.info("📈 Extremes merged from history: Max/Min columns now present: %s",
+                    sorted(set(df.columns) & {'Max_Value','Min_Value','Max_Odds','Min_Odds'}))
         if snaps.empty:
             # Safe fallbacks so apply_blended_sharp_score still runs
             df['Open_Value'] = df.get('Open_Value', df.get('Value'))
