@@ -2549,10 +2549,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 
         else:
             # === Step 1: Run diagnostics
-            diagnostics_df = compute_diagnostics_vectorized(diag_source)
-            # Ensure alias exists before using it
-            diagnostics_df = compute_diagnostics_vectorized(diag_source)
-            
+            diagnostics_df = compute_diagnostics_vectorized(diag_source)        
             # Ensure alias exists for trend extraction
             if 'Model_Sharp_Win_Prob' in df_all_snapshots.columns and 'Model Prob' not in df_all_snapshots.columns:
                 df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
@@ -2654,60 +2651,95 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         date_only_options = ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique())
         selected_date = st.selectbox(f"📅 Filter {label} by Date", date_only_options, key=f"{label}_date_filter")
         
-        
         filtered_df = summary_df.copy()
-
-        # ✅ Apply UI filters
+        
+        # ✅ UI filters (run before any normalization)
         if selected_market != "All":
             filtered_df = filtered_df[filtered_df['Market'] == selected_market]
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
-      
-
-        ## Step 1: Normalize keys
-        for col in ['Game_Key', 'Market', 'Outcome']:
-            filtered_df[col] = filtered_df[col].astype(str).str.strip().str.lower()
         
-        # Step 2: Deduplicate filtered_df for last snapshot per outcome
+        # --- guard diagnostics_df ---
+        if diagnostics_df is None or diagnostics_df.empty:
+            diagnostics_df = pd.DataFrame()
+        
+        # 1) Alias 'Model Prob Snapshot'
+        if 'Model Prob Snapshot' not in diagnostics_df.columns:
+            if 'Model Prob' in diagnostics_df.columns:
+                diagnostics_df['Model Prob Snapshot'] = diagnostics_df['Model Prob']
+            elif 'Model_Sharp_Win_Prob' in diagnostics_df.columns:
+                diagnostics_df['Model Prob Snapshot'] = diagnostics_df['Model_Sharp_Win_Prob']
+            else:
+                diagnostics_df['Model Prob Snapshot'] = np.nan
+        
+        # 2) Ensure optional columns exist
+        for col in ['Model_Confidence_Tier','Timing_Stage','Timing_Opportunity_Score','Confidence Spark']:
+            if col not in diagnostics_df.columns:
+                diagnostics_df[col] = np.nan
+        
+        # 2a) Keep score numeric if present
+        diagnostics_df['Timing_Opportunity_Score'] = pd.to_numeric(
+            diagnostics_df['Timing_Opportunity_Score'], errors='coerce'
+        )
+        
+        # 3) Create shadow normalized keys (don’t mutate display columns)
+        for df_ in (diagnostics_df, filtered_df):
+            for c in ['Game_Key','Market','Outcome']:
+                df_[f'{c}_norm'] = df_[c].astype(str).str.strip().str.lower()
+        
+        # 4) Dedup base
         filtered_df = (
             filtered_df
             .sort_values('Snapshot_Timestamp', ascending=False)
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
+            .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='first')
         )
-        #st.write("🧪 Columns in filtered after diagnostics merge:")
-        #st.write(filtered_df.columns.tolist())
-        # Step 3: Pull diagnostics from earlier
-        # Step 3: Pull diagnostics and rename snapshot → Model Prob
-        diagnostics_dedup = diagnostics_df.drop_duplicates(
-            subset=['Game_Key', 'Market', 'Outcome']
-        )[[
-            'Game_Key', 'Market', 'Outcome',
-            'Confidence Trend', 'Tier Δ', 'Line/Model Direction',
-            'Why Model Likes It', 'Model Prob Snapshot', 'Model_Confidence_Tier', 'Timing_Stage','Timing_Opportunity_Score','Confidence Spark'
-        ]].rename(columns={
-            'Model Prob Snapshot': 'Model Prob',
-            'Model_Confidence_Tier': 'Confidence Tier'  # ✅ Now this will work
-        })
-
-
-        # ✅ Drop stale version *before* merge to avoid suffixes
-        # ✅ Drop stale versions to prevent _x/_y suffixes
-        # ✅ Drop all diagnostics to prevent _x/_y suffixes
-        diagnostic_cols = [
-            'Model Prob', 'Confidence Tier',
-            'Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It','Timing_Stage', 'Timing_Opportunity_Score','Confidence Spark'
-        ]
-        filtered_df = filtered_df.drop(columns=[col for col in diagnostic_cols if col in filtered_df.columns], errors='ignore')
-
-
         
-        # Step 4: Merge snapshot version cleanly
+        # 5) Build diagnostics_dedup safely
+        select_cols = [
+            'Game_Key','Market','Outcome',
+            'Confidence Trend','Tier Δ','Line/Model Direction','Why Model Likes It',
+            'Model Prob Snapshot','Model_Confidence_Tier','Timing_Stage','Timing_Opportunity_Score','Confidence Spark',
+            # include the norm keys for join
+            'Game_Key_norm','Market_norm','Outcome_norm'
+        ]
+        
+        missing = [c for c in select_cols if c not in diagnostics_df.columns]
+        for c in missing:  # should be none due to defaults, but just in case
+            diagnostics_df[c] = np.nan
+        
+        diagnostics_dedup = (
+            diagnostics_df
+            .drop_duplicates(subset=['Game_Key_norm','Market_norm','Outcome_norm'], keep='last')
+            .loc[:, select_cols]
+            .rename(columns={
+                'Model Prob Snapshot': 'Model Prob',
+                'Model_Confidence_Tier': 'Confidence Tier'
+            })
+        )
+        
+        # 🔻 drop any old diagnostics in filtered_df to avoid _x/_y
+        diagnostic_cols = [
+            'Model Prob','Confidence Tier',
+            'Confidence Trend','Tier Δ','Line/Model Direction','Why Model Likes It',
+            'Timing_Stage','Timing_Opportunity_Score','Confidence Spark'
+        ]
+        filtered_df = filtered_df.drop(columns=[c for c in diagnostic_cols if c in filtered_df.columns], errors='ignore')
+        
+        # 🔑 create norm keys in filtered_df for join
+        # (already created above)
+        
+        # ✅ Merge on the shadow keys, keep originals for display
         filtered_df = filtered_df.merge(
-            diagnostics_dedup,
-            on=['Game_Key', 'Market', 'Outcome'],
+            diagnostics_dedup.drop(columns=['Game_Key','Market','Outcome']),  # avoid overwriting display cols
+            left_on=['Game_Key_norm','Market_norm','Outcome_norm'],
+            right_on=['Game_Key_norm','Market_norm','Outcome_norm'],
             how='left'
         )
         
+        # (optional) drop the *_norm helper columns after merge
+        filtered_df = filtered_df.drop(columns=['Game_Key_norm','Market_norm','Outcome_norm'], errors='ignore')
+
+      
         #st.write("🧪 Columns ibefore soummary group:")
         #st.write(filtered_df.columns.tolist())
             
