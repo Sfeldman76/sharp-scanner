@@ -1406,11 +1406,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
     scored_all = []
     total_start = time.time()
-def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
-    logger.info("🛠️ Running `apply_blended_sharp_score()`")
-    total_start = time.time()
 
-    df = df.copy()
 
     # ---- Base normalization (does not touch open/extreme columns) ----
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
