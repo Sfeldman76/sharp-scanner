@@ -2943,20 +2943,38 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                                   if c in df.columns], errors='ignore')
             df = df.merge(opens_df, on=merge_keys, how='left')
                         # --- Fallback: if Opening_Limit still null, use earliest non-null Limit from snapshots ---
-            if df['Opening_Limit'].isna().any():
-                earliest_limit = (
-                    snaps.dropna(subset=['Limit'])
-                         .sort_values('Snapshot_Timestamp')
-                         .groupby(['Game_Key','Market','Outcome','Bookmaker'], as_index=False)
-                         .agg(Opening_Limit=('Limit','first'))
-                )
-                for k in ['Game_Key','Market','Outcome','Bookmaker']:
-                    earliest_limit[k] = earliest_limit[k].astype(str).str.strip().str.lower()
-            
-                df = df.drop(columns=['Opening_Limit'], errors='ignore') \
-                       .merge(earliest_limit, on=['Game_Key','Market','Outcome','Bookmaker'], how='left')
-            
-           
+            # after df = df.merge(opens_df, on=merge_keys, how='left')
+
+        # --- Fallbacks for Opening_Limit (run after merge with opens_df) ---
+        if 'Limit' in df_all_snapshots.columns:
+            df_all_snapshots['Limit'] = pd.to_numeric(df_all_snapshots['Limit'], errors='coerce')
+        
+        if 'Opening_Limit' not in df.columns:
+            df['Opening_Limit'] = np.nan  # safety
+        
+        # Only try earliest-from-snapshots if we actually have snapshots
+        if not snaps.empty and df['Opening_Limit'].isna().any():
+            earliest_limit = (
+                snaps.dropna(subset=['Limit'])
+                     .sort_values('Snapshot_Timestamp')
+                     .groupby(merge_keys, as_index=False)
+                     .agg(Opening_Limit_Earliest=('Limit','first'))
+            )
+            for k in merge_keys:
+                earliest_limit[k] = earliest_limit[k].astype(str).str.strip().str.lower()
+        
+            df = df.merge(earliest_limit, on=merge_keys, how='left')
+            # fill only where missing; keep any already-present Opening_Limit
+            if 'Opening_Limit_Earliest' in df.columns:
+                df['Opening_Limit'] = df['Opening_Limit'].fillna(df['Opening_Limit_Earliest'])
+                df.drop(columns=['Opening_Limit_Earliest'], inplace=True)
+        
+        # Last resort: use current Limit if still missing
+        if {'Opening_Limit','Limit'}.issubset(df.columns):
+            need = df['Opening_Limit'].isna() & df['Limit'].notna()
+            if need.any():
+                df.loc[need, 'Opening_Limit'] = pd.to_numeric(df.loc[need, 'Limit'], errors='coerce').
+                           
         # Compute First_Imp_Prob from Open_Odds if missing
         if 'First_Imp_Prob' not in df.columns:
             df['First_Imp_Prob'] = np.nan
