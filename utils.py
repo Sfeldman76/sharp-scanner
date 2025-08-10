@@ -2909,21 +2909,33 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         .itertuples(index=False, name='Row')
                 ]
 
+            
             def _compute_for_group(g):
-                k0 = g.iloc[0]
+                # pull keys from the group name, not from a row
+                if isinstance(g.name, tuple):
+                    key_tuple = g.name
+                else:
+                    key_tuple = (g.name,)
+            
+                # map tuple positions back to names
+                idx = {name: pos for pos, name in enumerate(merge_keys)}
+                mtype = str(key_tuple[idx['Market']])
+                label = str(key_tuple[idx['Outcome']])
+                gk    = str(key_tuple[idx['Game_Key']])
+                book  = str(key_tuple[idx['Bookmaker']])
+            
                 res = compute_sharp_metrics(
                     entries=_entries_for_group(g),
                     open_val=None, open_odds=None, opening_limit=None,   # let function derive earliest
-                    mtype=str(k0['Market']),
-                    label=str(k0['Outcome']),
-                    gk=str(k0['Game_Key']),
-                    book=str(k0['Bookmaker'])
+                    mtype=mtype, label=label, gk=gk, book=book
                 )
                 return pd.Series({
                     'Open_Value':    res.get('Open_Value'),
                     'Open_Odds':     res.get('Open_Odds'),
                     'Opening_Limit': res.get('Opening_Limit'),
                 })
+
+
 
             try:
                 opens_df = snaps.groupby(merge_keys, as_index=False, sort=False) \
@@ -2932,6 +2944,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                 # pandas < 2.1
                 opens_df = snaps.groupby(merge_keys, as_index=False, sort=False) \
                                 .apply(_compute_for_group)
+            
+
 
             # Normalize keys & types on the result, then merge
             for k in merge_keys:
