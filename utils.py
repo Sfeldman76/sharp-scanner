@@ -2892,7 +2892,22 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             df_all_snapshots.merge(df[merge_keys].drop_duplicates(), on=merge_keys, how='inner')
                             .sort_values('Snapshot_Timestamp')
         )
-
+        # spreads/totals → line extremes from Value
+        ext_val = (
+            snaps[snaps['Market'].isin(['spreads','totals'])]
+              .dropna(subset=['Value'])
+              .groupby(merge_keys)['Value']
+              .agg(Max_Value='max', Min_Value='min')
+        )
+        
+        # all markets → odds extremes from Odds_Price
+        ext_odds = (
+            snaps.dropna(subset=['Odds_Price'])
+                 .groupby(merge_keys)['Odds_Price']
+                 .agg(Max_Odds='max', Min_Odds='min')
+        )
+        
+        df_extremes = ext_val.join(ext_odds, how='outer').reset_index()
         if snaps.empty:
             # Safe fallbacks so apply_blended_sharp_score still runs
             df['Open_Value'] = df.get('Open_Value', df.get('Value'))
