@@ -2417,7 +2417,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 ]
         
               
-                  
+                  # also drop any leftover *_x / *_y and prior Team_Past_* copies
+                suffix_cols = [c for c in df_inverse.columns if c.endswith('_x') or c.endswith('_y')]
+                team_stat_cols = [c for c in df_inverse.columns if c.startswith('Team_Past_')]
+            
+                drop_cols = list(set(cols_to_refresh + suffix_cols + team_stat_cols))
+                df_inverse = df_inverse.drop(columns=[c for c in drop_cols if c in df_inverse.columns], errors='ignore')
+            
+                # 2) ATTACH: 
                
                 
             
