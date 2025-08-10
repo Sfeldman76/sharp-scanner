@@ -2345,9 +2345,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             try:
                 # Drop existing versions to avoid _x/_y suffixes
                 cols_to_refresh = [
-                    'Open_Value', 'Open_Odds', 'First_Imp_Prob',
+                    'Open_Value', 'Open_Odds', 
                 
-                    'Min_Value', 'Max_Value', 'Min_Odds', 'Max_Odds',
+                   
                     'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
                     'Value_Reversal_Flag', 'Odds_Reversal_Flag',
                     'Is_Home_Team_Bet', 'Is_Favorite_Bet',
@@ -2378,7 +2378,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 
                     # 🧠 Odds movement and Z-score
                     'Implied_Prob',
-                    'First_Imp_Prob',
+                    
                     'Implied_Prob_Shift',
                     'Implied_Prob_Shift_Z',
                 
@@ -2449,15 +2449,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 else:
                     logger.warning("⚠️ df_extremes not available; skipping extremes merge for inverse rows.")
                 
-                # Safety: treat 0 as unknown for limits
-                if 'Opening_Limit' in df_inverse.columns:
-                    df_inverse['Opening_Limit'] = pd.to_numeric(df_inverse['Opening_Limit'], errors='coerce').replace(0, np.nan)
-                
-                # (Optional) recompute First_Imp_Prob from Open_Odds if still missing
-                if 'First_Imp_Prob' in df_inverse.columns and 'Open_Odds' in df_inverse.columns:
-                    need_imp = df_inverse['First_Imp_Prob'].isna() & df_inverse['Open_Odds'].notna()
-                    if need_imp.any():
-                        df_inverse.loc[need_imp, 'First_Imp_Prob'] = df_inverse.loc[need_imp, 'Open_Odds'].apply(implied_prob)
+               
                 
                 # 🔁 Re-merge team-level features
                 try:
