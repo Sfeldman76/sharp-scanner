@@ -51,7 +51,7 @@ from utils import (
 )
 
 def detect_and_save_all_sports():
-    for sport_label in ["NBA", "MLB", "WNBA", "CFL","NFL", "NCAAF"]:
+    for sport_label in ["NBA", "MLB", "WNBA", "CFL", "NFL", "NCAAF"]:
         try:
             sport_key = SPORTS[sport_label]
             logging.info(f"🔍 Running sharp detection for {sport_label}...")
