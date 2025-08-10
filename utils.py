@@ -130,9 +130,9 @@ def normalize_team(t):
 def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
-
-def compute_line_hash(row):
+def compute_line_hash(row, include_time_bucket=False, window='1H'):
     try:
+        # Always include these (current snapshot's full detail)
         key_fields = [
             str(row.get('Game_Key', '')).strip().lower(),
             str(row.get('Bookmaker', '')).strip().lower(),
@@ -142,10 +142,35 @@ def compute_line_hash(row):
             str(row.get('Odds_Price', '')).strip(),
             str(row.get('Limit', '')).strip(),
         ]
+
+        # If you want to group into hourly (or 15-min) snapshots for tracking
+        if include_time_bucket:
+            ts = pd.to_datetime(row.get('Snapshot_Timestamp'), utc=True, errors='coerce')
+            if pd.notna(ts):
+                ts_bucket = ts.floor(window)
+                key_fields.append(str(ts_bucket))
+
         key = "|".join(key_fields)
         return hashlib.md5(key.encode()).hexdigest()
+
     except Exception as e:
         return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
+
+#def compute_line_hash(row):
+    #try:
+        #key_fields = [
+            #str(row.get('Game_Key', '')).strip().lower(),
+            #str(row.get('Bookmaker', '')).strip().lower(),
+            #str(row.get('Market', '')).strip().lower(),
+            #str(row.get('Outcome', '')).strip().lower(),
+            #str(row.get('Value', '')).strip(),
+            #str(row.get('Odds_Price', '')).strip(),
+            #str(row.get('Limit', '')).strip(),
+        #]
+        #key = "|".join(key_fields)
+        #return hashlib.md5(key.encode()).hexdigest()
+    #except Exception as e:
+        #return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
 
 
 def log_memory(msg=""):
