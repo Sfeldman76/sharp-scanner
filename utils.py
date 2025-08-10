@@ -1474,10 +1474,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info("📊 Missing Open_Odds: %.2f%%", 100*df['Open_Odds'].isna().mean())
     logger.info("📊 Missing First_Imp_Prob: %.2f%%", 100*df['First_Imp_Prob'].isna().mean())
     logger.info("📊 Missing Opening_Limit: %.2f%%", 100*df['Opening_Limit'].isna().mean())
-    if 'Value' in snaps.columns:
-        sizes = snaps.groupby(['Game_Key','Market','Outcome','Bookmaker']).size()
-        logger.info("🧪 snapshot sizes per key: mean=%.2f, max=%d, pct_single=%.1f%%",
-                    sizes.mean(), sizes.max(), sizes.eq(1).mean()*100)
+    
     # 🛡️ Ensure Implied_Prob exists in df for fallback to work
     if 'Implied_Prob' not in df.columns:
         df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
