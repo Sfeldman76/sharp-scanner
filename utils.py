@@ -2419,36 +2419,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
               
                   
                
-                # Drop old enriched columns
-                df_inverse = df_inverse.drop(columns=[c for c in cols_to_refresh if c in df_inverse.columns],
-                                             errors='ignore')
                 
-                # --- Attach open trio from the main df (NOT metrics_df) ---
-                merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
-                
-                # Build once from df which already has the open trio merged in detect_sharp_moves
-                open_cols = ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob']
-                have_cols = [c for c in open_cols if c in df.columns]
-                
-                if have_cols:
-                    open_attach = (
-                        df[merge_keys + have_cols]
-                        .drop_duplicates(subset=merge_keys)
-                    )
-                    # normalize keys just in case
-                    for k in merge_keys:
-                        open_attach[k] = open_attach[k].astype(str).str.strip().str.lower()
-                
-                    df_inverse = df_inverse.merge(open_attach, on=merge_keys, how='left')
-                else:
-                    logger.warning("⚠️ Open trio not found on df; skipping open trio re-attach for inverse rows.")
-                
-                # --- Extremes (df_extremes must be precomputed upstream) ---
-                if 'df_extremes' in locals() or 'df_extremes' in globals():
-                    df_inverse = df_inverse.merge(df_extremes, on=merge_keys, how='left')
-                else:
-                    logger.warning("⚠️ df_extremes not available; skipping extremes merge for inverse rows.")
-                
+            
                
                 
                 # 🔁 Re-merge team-level features
