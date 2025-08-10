@@ -2345,7 +2345,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             try:
                 # Drop existing versions to avoid _x/_y suffixes
                 cols_to_refresh = [
-                    'Open_Value', 'Open_Odds', 
+                    
                 
                    
                     'Odds_Shift', 'Line_Delta', 'Implied_Prob_Shift',
