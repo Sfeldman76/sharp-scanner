@@ -2413,40 +2413,63 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     'SmallBook_Limit_Skew',
                     'SmallBook_Heavy_Liquidity_Flag',
                     'SmallBook_Limit_Skew_Flag',
-                    
-                    
-                    
-
+ 
                 ]
         
               
                   
+               
                 # Drop old enriched columns
-                df_inverse = df_inverse.drop(columns=[c for c in cols_to_refresh if c in df_inverse.columns], errors='ignore')
-
-                # metrics_df must include Open_Value, Open_Odds, Opening_Limit (returned from compute_sharp_metrics)
-                open_attach = metrics_df[merge_keys + ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob']].drop_duplicates(merge_keys)
-                df_inverse = df_inverse.merge(open_attach, on=merge_keys, how='left')
+                df_inverse = df_inverse.drop(columns=[c for c in cols_to_refresh if c in df_inverse.columns],
+                                             errors='ignore')
                 
-                # df_extremes should be precomputed from snapshots grouped by merge_keys
-                df_inverse = df_inverse.merge(df_extremes, on=merge_keys, how='left')
+                # --- Attach open trio from the main df (NOT metrics_df) ---
+                merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
+                
+                # Build once from df which already has the open trio merged in detect_sharp_moves
+                open_cols = ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob']
+                have_cols = [c for c in open_cols if c in df.columns]
+                
+                if have_cols:
+                    open_attach = (
+                        df[merge_keys + have_cols]
+                        .drop_duplicates(subset=merge_keys)
+                    )
+                    # normalize keys just in case
+                    for k in merge_keys:
+                        open_attach[k] = open_attach[k].astype(str).str.strip().str.lower()
+                
+                    df_inverse = df_inverse.merge(open_attach, on=merge_keys, how='left')
+                else:
+                    logger.warning("⚠️ Open trio not found on df; skipping open trio re-attach for inverse rows.")
+                
+                # --- Extremes (df_extremes must be precomputed upstream) ---
+                if 'df_extremes' in locals() or 'df_extremes' in globals():
+                    df_inverse = df_inverse.merge(df_extremes, on=merge_keys, how='left')
+                else:
+                    logger.warning("⚠️ df_extremes not available; skipping extremes merge for inverse rows.")
                 
                 # Safety: treat 0 as unknown for limits
                 if 'Opening_Limit' in df_inverse.columns:
-                    df_inverse['Opening_Limit'] = df_inverse['Opening_Limit'].replace(0, np.nan)
-            
+                    df_inverse['Opening_Limit'] = pd.to_numeric(df_inverse['Opening_Limit'], errors='coerce').replace(0, np.nan)
+                
+                # (Optional) recompute First_Imp_Prob from Open_Odds if still missing
+                if 'First_Imp_Prob' in df_inverse.columns and 'Open_Odds' in df_inverse.columns:
+                    need_imp = df_inverse['First_Imp_Prob'].isna() & df_inverse['Open_Odds'].notna()
+                    if need_imp.any():
+                        df_inverse.loc[need_imp, 'First_Imp_Prob'] = df_inverse.loc[need_imp, 'Open_Odds'].apply(implied_prob)
+                
                 # 🔁 Re-merge team-level features
                 try:
-                    if team_feature_map is not None and not team_feature_map.empty:
-                        df_inverse['Team'] = df_inverse['Outcome_Norm'].str.lower().str.strip()
+                    if 'team_feature_map' in locals() and team_feature_map is not None and not team_feature_map.empty:
+                        df_inverse['Team'] = df_inverse['Outcome_Norm'].astype(str).str.lower().str.strip()
                         df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
-                        logger.info(f"🔁 Re-merged team-level features for {len(df_inverse)} inverse rows.")
+                        logger.info("🔁 Re-merged team-level features for %d inverse rows.", len(df_inverse))
                 except Exception as e:
-                    logger.error(f"❌ Failed to re-merge team-level features for inverse rows: {e}")
+                    logger.error("❌ Failed to re-merge team-level features for inverse rows: %s", e)
                 
                 df_inverse.drop(columns=['Team'], inplace=True, errors='ignore')
-                  
-                    
+                                    
                 # === 🔁 Recompute outcome-sensitive fields
                 df_inverse['Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
                 df_inverse['Odds_Shift'] = pd.to_numeric(df_inverse['Odds_Price'], errors='coerce') - pd.to_numeric(df_inverse['Open_Odds'], errors='coerce')
