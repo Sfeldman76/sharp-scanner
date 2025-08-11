@@ -598,7 +598,7 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
     else:
         out['Is_PrimeTime'] = 0
 
-    (Optional) cyclical DOW encodings
+    #(Optional) cyclical DOW encodings
     out['DOW_Sin'] = np.sin(2*np.pi*(out['Game_DOW'] / 7.0))
     out['DOW_Cos'] = np.cos(2*np.pi*(out['Game_DOW'] / 7.0))
 
