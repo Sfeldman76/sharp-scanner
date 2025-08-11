@@ -299,34 +299,60 @@ def safe_to_gbq(df, table, replace=False):
     return False
 
         
-def build_game_key(df):
-    required = ['Game', 'Game_Start', 'Market', 'Outcome']
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        print(f"⚠️ Skipping build_game_key — missing columns: {missing}")
+def build_game_key(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
         return df
-
     df = df.copy()
-    df['Home_Team_Norm'] = df['Game'].str.extract(r'^(.*?) vs')[0].str.strip().str.lower()
-    df['Away_Team_Norm'] = df['Game'].str.extract(r'vs (.*)$')[0].str.strip().str.lower()
-    df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
-    df['Market_Norm'] = df['Market'].str.strip().str.lower()
-    df['Outcome_Norm'] = df['Outcome'].str.strip().str.lower()
 
-    df['Game_Key'] = (
-        df['Home_Team_Norm'] + "_" +
-        df['Away_Team_Norm'] + "_" +
-        df['Commence_Hour'].astype(str) + "_" +
-        df['Market_Norm'] + "_" +
-        df['Outcome_Norm']
+    # --- Ensure columns exist (best-effort, no early return) ---
+    for c in ['Game', 'Home_Team_Norm', 'Away_Team_Norm', 'Game_Start', 'Market', 'Outcome']:
+        if c not in df.columns:
+            df[c] = ''
+
+    # --- Derive home/away from "Game" if needed ---
+    need_home = df['Home_Team_Norm'].astype(str).str.strip().eq('')
+    need_away = df['Away_Team_Norm'].astype(str).str.strip().eq('')
+    if need_home.any() or need_away.any():
+        home_from_game = df['Game'].astype(str).str.extract(r'^(.*?)\s+vs', expand=False)
+        away_from_game = df['Game'].astype(str).str.extract(r'vs\s+(.*)$', expand=False)
+        df.loc[need_home, 'Home_Team_Norm'] = home_from_game.where(need_home, df['Home_Team_Norm'])
+        df.loc[need_away, 'Away_Team_Norm'] = away_from_game.where(need_away, df['Away_Team_Norm'])
+
+    # --- Normalize fields ---
+    df['Home_Team_Norm'] = df['Home_Team_Norm'].astype(str).str.lower().str.strip()
+    df['Away_Team_Norm'] = df['Away_Team_Norm'].astype(str).str.lower().str.strip()
+    df['Market_Norm']    = df['Market'].astype(str).str.lower().str.strip()
+    df['Outcome_Norm']   = df['Outcome'].astype(str).str.lower().str.strip()
+
+    # --- Commence hour (floored) ---
+    start = pd.to_datetime(df['Game_Start'], utc=True, errors='coerce')
+    df['Commence_Hour'] = start.dt.floor('h')
+    hour_str = df['Commence_Hour'].dt.strftime('%Y-%m-%dT%H:00Z').fillna('')
+
+    # --- Canonicalize team pair (stable regardless of home/away ordering) ---
+    left  = df['Home_Team_Norm'].where(df['Home_Team_Norm'] <= df['Away_Team_Norm'], df['Away_Team_Norm'])
+    right = df['Away_Team_Norm'].where(df['Home_Team_Norm'] <= df['Away_Team_Norm'], df['Home_Team_Norm'])
+
+    # --- Always-on Merge_Key_Short (no apply, always scalar) ---
+    fallback_merge = left.fillna('') + '_' + right.fillna('') + '_' + hour_str
+    df['Merge_Key_Short'] = fallback_merge
+
+    # --- Synthetic Game_Key (keeps your original shape when Market/Outcome exist) ---
+    synthetic_game_key = (
+        left.fillna('') + '_' + right.fillna('') + '_' + hour_str + '_' +
+        df['Market_Norm'].fillna('') + '_' + df['Outcome_Norm'].fillna('')
     )
 
-    df['Merge_Key_Short'] = df.apply(
-        lambda row: build_merge_key(row['Home_Team_Norm'], row['Away_Team_Norm'], row['Commence_Hour']),
-        axis=1
-    )
+    # If a Game_Key column exists, only fill blanks; otherwise create it
+    if 'Game_Key' in df.columns:
+        df['Game_Key'] = df['Game_Key'].astype(str)
+        blank = df['Game_Key'].eq('') | df['Game_Key'].isna()
+        df.loc[blank, 'Game_Key'] = synthetic_game_key
+    else:
+        df['Game_Key'] = synthetic_game_key
 
     return df
+
     
 def normalize_team(t):
     return str(t).strip().lower().replace('.', '').replace('&', 'and')
@@ -2309,10 +2335,14 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             st.dataframe(df_moves_raw.head())
             skip_grading = True
 
+                
+        if 'Snapshot_Timestamp' in df_moves_raw.columns and not df_moves_raw.empty:
+            # Use a tighter subset to avoid shape/nullable weirdness
+            dedup_cols = [c for c in [
+                'Home_Team_Norm','Away_Team_Norm','Game_Start','Market','Outcome',
+                'Bookmaker','Value','Odds_Price','Limit'
+            ] if c in df_moves_raw.columns]
         
-        # ✅ Deduplicate snapshot duplicates (exact matches except timestamp)
-        if 'Snapshot_Timestamp' in df_moves_raw.columns:
-            dedup_cols = [col for col in df_moves_raw.columns if col != 'Snapshot_Timestamp']
             before = len(df_moves_raw)
             df_moves_raw = df_moves_raw.sort_values('Snapshot_Timestamp', ascending=False)
             df_moves_raw = df_moves_raw.drop_duplicates(subset=dedup_cols, keep='first')
@@ -2321,9 +2351,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         
         # === Build game keys (for merging)
         df_moves_raw = build_game_key(df_moves_raw)
-        # === Keep only sharp picks for upcoming games (filter by Game_Start, not Pre_Game)
-        #st.info("🕒 Filtering to truly live (upcoming) picks based on Game_Start...")
-        
+                
         now = pd.Timestamp.utcnow()
         df_moves_raw['Game_Start'] = pd.to_datetime(df_moves_raw['Game_Start'], errors='coerce', utc=True)
         
