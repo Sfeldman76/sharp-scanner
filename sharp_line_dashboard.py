@@ -1393,11 +1393,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # ================================
         # === 📊 MODEL STRESS TESTS  ====
         # ================================
-        import numpy as np
-        import pandas as pd
-        from sklearn.metrics import roc_auc_score, log_loss
-        from datetime import timedelta
-
+       
         st.subheader(f"🧪 Holdout Validation – {market.upper()}")
 
         # --- Helpers
