@@ -561,6 +561,48 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "America/New_York") -> pd.DataFrame:
+    out = df.copy()
+
+    # 1) Pick a timestamp source (prefer Commence_Hour, else Game_Start)
+    if 'Commence_Hour' in out.columns:
+        ts = pd.to_datetime(out['Commence_Hour'], errors='coerce', utc=True)
+    elif 'Game_Start' in out.columns:
+        ts = pd.to_datetime(out['Game_Start'], errors='coerce', utc=True)
+    else:
+        # if neither exist, create dummies and return
+        out['Is_Weekend'] = 0
+        out['Is_Night_Game'] = 0
+        out['Game_Local_Hour'] = np.nan
+        out['Game_DOW'] = np.nan
+        return out
+
+    # 2) Convert to local for day/night & weekend logic
+    ts_local = ts.dt.tz_convert(local_tz)
+    out['Game_Local_Hour'] = ts_local.dt.hour
+    out['Game_DOW'] = ts_local.dt.dayofweek  # Mon=0 ... Sun=6
+    out['Is_Weekend'] = out['Game_DOW'].isin([5, 6]).astype(int)
+
+    # 3) Night cutoffs by sport (tweak to taste)
+    SPORT_NIGHT_CUTOFF = {
+        'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'NCAAB': 18
+    }
+    night_cutoff = SPORT_NIGHT_CUTOFF.get(str(sport).upper(), 18)
+    out['Is_Night_Game'] = (out['Game_Local_Hour'] >= night_cutoff).astype(int)
+
+    # (Optional) primetime flag (example tuned for NFL)
+    if str(sport).upper() in {'NFL', 'CFL'}:
+        # Thu(3), Sun(6), Mon(0) and 7–11pm local
+        out['Is_PrimeTime'] = ((out['Game_DOW'].isin([3, 6, 0])) &
+                               (out['Game_Local_Hour'].between(19, 23))).astype(int)
+    else:
+        out['Is_PrimeTime'] = 0
+
+    (Optional) cyclical DOW encodings
+    out['DOW_Sin'] = np.sin(2*np.pi*(out['Game_DOW'] / 7.0))
+    out['DOW_Cos'] = np.cos(2*np.pi*(out['Game_DOW'] / 7.0))
+
+    return out
 
 
     
@@ -1180,6 +1222,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Avg_Recent_Cover_Streak_Away',
            
         ]
+        df_market = add_time_context_flags(df_market, sport=sport)
+        
+        # add to features
+        features += [
+            'Is_Weekend',
+            'Is_Night_Game',
+            'Is_PrimeTime',      # if you kept it
+            'DOW_Sin','DOW_Cos' # if you enabled cyclical
+        ]
+
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
         df_market = ensure_columns(df_market, features, 0)
