@@ -2561,9 +2561,9 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
 
        
 
-        #st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
+        st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
         #st.write(f"🔢 Rows: {len(df_summary_base)}")
-        #st.write("📋 Columns:", df_summary_base.columns.tolist())
+        st.write("📋 Columns:", df_summary_base.columns.tolist())
         
         #st.dataframe(df_summary_base.head(10))
        
