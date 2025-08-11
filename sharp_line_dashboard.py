@@ -737,12 +737,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     before = len(df_bt)
     df_bt = df_bt.drop_duplicates(subset=dedup_cols, keep='last')
     after = len(df_bt)
-
+    
     trained_models = {}
-    progress = st.progress(0)
+    markets = ['spreads', 'totals', 'h2h']
+    n_markets = len(markets)
+    pb = st.progress(0)  # use int 0–100
     status = st.status("🔄 Training in progress...", expanded=True)
 
-    for idx, market in enumerate(['spreads', 'totals', 'h2h'], start=1):
+    for idx, market in enumerate(markets, start=1):
         status.write(f"🚧 Training model for `{market.upper()}`...")
         df_market = df_bt[df_bt['Market'] == market].copy()
         df_market = compute_small_book_liquidity_features(df_market)  
