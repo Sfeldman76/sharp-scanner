@@ -3639,12 +3639,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 3. Upload scores to `game_scores_final` ===
     # === 3. Upload scores to `game_scores_final` ===
     try:
-        # Safe fallback to avoid UnboundLocalError or bad structure
+        # Safe fallback
         if 'df_scores_needed' not in locals() or not isinstance(df_scores_needed, pd.DataFrame):
             df_scores_needed = pd.DataFrame()
     
         existing_keys = bq_client.query("""
-            SELECT DISTINCT Merge_Key_Short FROM `sharp_data.game_scores_final`
+            SELECT DISTINCT Merge_Key_Short FROM `sharplogger.sharp_data.game_scores_final`
         """).to_dataframe()
         existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
     
@@ -3652,37 +3652,43 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         blocked = df_scores[df_scores['Merge_Key_Short'].isin(existing_keys)]
     
         logging.info(f"⛔ Skipped (already in table): {len(blocked)}")
-        logging.info(f"🧪 Sample skipped keys:\n{blocked[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head().to_string(index=False)}")
+        if not blocked.empty:
+            logging.info("🧪 Sample skipped keys:\n" +
+                blocked[['Merge_Key_Short','Home_Team','Away_Team','Game_Start']].head().to_string(index=False))
     
-        # === Safe diagnostics for df_scores_needed
+        # === df_scores_needed diagnostics
         if df_scores_needed.empty or df_scores_needed.shape[1] == 0:
             logging.warning("⚠️ df_scores_needed is empty or has no columns.")
+            logging.info("ℹ️ No unscored completed games in window. Exiting backtest early.")
+            return pd.DataFrame()
+    
+        logging.info(f"🧪 df_scores_needed shape: {df_scores_needed.shape}")
+        logging.info("🧪 df_scores_needed head:\n" + df_scores_needed.head().to_string(index=False))
+    
+        if 'Merge_Key_Short' in df_scores_needed.columns and df_scores_needed['Merge_Key_Short'].isnull().any():
+            logging.warning("⚠️ At least one row in df_scores_needed has a NULL Merge_Key_Short")
+        elif 'Merge_Key_Short' not in df_scores_needed.columns:
+            logging.warning("⚠️ 'Merge_Key_Short' column missing from df_scores_needed")
+    
+        if {'Home_Team','Away_Team'}.issubset(df_scores_needed.columns):
+            if df_scores_needed[['Home_Team','Away_Team']].isnull().any().any():
+                logging.warning("⚠️ At least one row has missing team names")
         else:
-            logging.info(f"🧪 df_scores_needed shape: {df_scores_needed.shape}")
-            logging.info(f"🧪 df_scores_needed head:\n{df_scores_needed.head().to_string(index=False)}")
+            logging.warning("⚠️ Missing 'Home_Team' or 'Away_Team' columns in df_scores_needed")
     
-            if 'Merge_Key_Short' in df_scores_needed.columns:
-                if df_scores_needed['Merge_Key_Short'].isnull().any():
-                    logging.warning("⚠️ At least one row in df_scores_needed has a NULL Merge_Key_Short")
-            else:
-                logging.warning("⚠️ 'Merge_Key_Short' column missing from df_scores_needed")
+        empty_rows = df_scores_needed[df_scores_needed.isnull().all(axis=1)]
+        if not empty_rows.empty:
+            logging.warning("⚠️ Found completely empty rows in df_scores_needed:\n" + empty_rows.to_string(index=False))
     
-            if {'Home_Team', 'Away_Team'}.issubset(df_scores_needed.columns):
-                if df_scores_needed[['Home_Team', 'Away_Team']].isnull().any().any():
-                    logging.warning("⚠️ At least one row has missing team names")
-            else:
-                logging.warning("⚠️ Missing 'Home_Team' or 'Away_Team' columns in df_scores_needed")
+        try:
+            sample = df_scores_needed[['Merge_Key_Short','Home_Team','Away_Team','Game_Start']].head(5)
+        except KeyError:
+            sample = df_scores_needed.head(5)
+        logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
     
-            empty_rows = df_scores_needed[df_scores_needed.isnull().all(axis=1)]
-            if not empty_rows.empty:
-                logging.warning(f"⚠️ Found completely empty rows in df_scores_needed:\n{empty_rows}")
-    
-            try:
-                sample = df_scores_needed[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head(5)
-            except KeyError as e:
-                logging.warning(f"⚠️ Could not extract sample unscored game(s): {e}")
-                sample = df_scores_needed.head(5)
-            logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
+    except Exception:
+        logging.exception("❌ Failed to upload game scores")
+        return pd.DataFrame()
     
         # Detect keys that are neither new nor already in BigQuery
         all_found_keys = set(new_scores['Merge_Key_Short']) | existing_keys
@@ -3972,6 +3978,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         on='Merge_Key_Short',
         how='inner'
     )
+
     # === Log resulting columns after merging df_first into df_master
     logging.info("🧩 Columns after merging df_first into df_master:")
     logging.info("🧩 df_master columns:\n" + ", ".join(df_master.columns.tolist()))
@@ -4003,29 +4010,33 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info(df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
     
     # === 8. Final cleanup and return
+    # === 8. Final cleanup and return
     df = df_master
     logging.info(f"✅ Final df columns before scoring: {df.columns.tolist()}")
     log_memory("AFTER merge with df_scores_needed")
     logging.info(f"df shape after merge: {df.shape}")
+    
+    # 🚨 Guard: stop now if no rows to process
+    if df.empty:
+        logging.warning("ℹ️ No rows after merge with scores — skipping backtest scoring.")
+        return pd.DataFrame()
+    
     # === Reassign Merge_Key_Short from df_master using Game_Key
     if 'Merge_Key_Short' in df_master.columns:
         logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key (optimized)")
-        # Build mapping dictionary (Game_Key → Merge_Key_Short)
-        key_map = df_master.drop_duplicates(subset=['Game_Key'])[['Game_Key', 'Merge_Key_Short']].set_index('Game_Key')['Merge_Key_Short'].to_dict()
-        # Reassign inplace without merge
+        key_map = df_master.drop_duplicates(subset=['Game_Key'])[['Game_Key', 'Merge_Key_Short']] \
+                           .set_index('Game_Key')['Merge_Key_Short'].to_dict()
         df['Merge_Key_Short'] = df['Game_Key'].map(key_map)
-    
     
     # Final logging
     null_count = df['Merge_Key_Short'].isnull().sum()
     logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
     df['Sport'] = sport_label.upper()
     
- 
     # === Track memory usage before the operation
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-    
+        
     # Function to process DataFrame in smaller chunks
     def process_chunk_logic(df_chunk):
         df_chunk = df_chunk.copy()
@@ -4050,6 +4061,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         
     
     def process_in_chunks(df, chunk_size=10000):
+        if df.empty:
+            logging.info("ℹ️ Empty DataFrame passed to process_in_chunks — returning empty.")
+            return df
         chunks = []
         for start in range(0, len(df), chunk_size):
             df_chunk = df.iloc[start:start + chunk_size]
@@ -4059,11 +4073,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             gc.collect()
         return pd.concat(chunks, ignore_index=True)
     
-    
-    # === ✅ Apply the chunk processing
     df = process_in_chunks(df, chunk_size=10000)
-    
     # === Track memory usage after the operation
+
     logging.info(f"Memory after operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
     # === Clean up temporary columns and other resources if necessary
