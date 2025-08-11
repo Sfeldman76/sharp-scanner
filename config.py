@@ -14,7 +14,7 @@ SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','smarkets','betfair
 
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
-    'fanatics', 'espnbet', 'hardrockbet' ]
+    'fanatics', 'espnbet', 'hardrockbet','sport888', 'fanatics', 'bovada', 'bet365', 'williamhillus', 'ballybet', 'bet365_au','betopenly']
 
 BOOKMAKER_REGIONS = {
     # 🔹 Sharp Books
