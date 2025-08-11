@@ -3116,8 +3116,7 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
             logger.info(df_scored[df_scored['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Was_Canonical']].head(30).to_string(index=False))
 
             try:
-                write_sharp_moves_to_master(df_scored)
-                logging.info(f"✅ Wrote {len(df_scored)} rows to sharp_moves_master")
+                write_sharp_moves_to_master(df_scored)                
             except Exception as e:
                 logging.error(f"❌ Failed to write sharp moves to BigQuery: {e}", exc_info=True)
     
