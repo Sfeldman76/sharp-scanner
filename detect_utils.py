@@ -47,7 +47,8 @@ from utils import (
     normalize_book_name,
     hydrate_inverse_rows_from_snapshot,
     fallback_flip_inverse_rows,
-    get_opening_snapshot
+    get_opening_snapshot,
+    add_time_context_flags
 )
 
 def detect_and_save_all_sports():
