@@ -2638,7 +2638,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
 
 
         # === Preview & column check
-        st.write("📋 Columns in summary_df:", summary_df.columns.tolist())
+        #st.write("📋 Columns in summary_df:", summary_df.columns.tolist())
         
         # Optional: final sort if needed
         #summary_df.sort_values(by=['Game_Start', 'Matchup', 'Market'], inplace=True)
