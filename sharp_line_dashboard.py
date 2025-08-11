@@ -1189,7 +1189,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Potential_Overmove_Total_Pct_Flag', 'Mispricing_Flag',
         
             # 🧠 Cross-market alignment                       
-            'Potential_Odds_Overmove_Flag'
+            'Potential_Odds_Overmove_Flag',
             'Line_Moved_Toward_Team',
             'Abs_Line_Move_Z',
             'Pct_Line_Move_Z', 
