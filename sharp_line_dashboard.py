@@ -512,54 +512,69 @@ from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score
 
 def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds small-book liquidity features to the DataFrame.
-    Safe for games or sports with no small-limit books or missing limit data.
-    Should be run before canonical filtering.
+    UI-only: Adds small-book liquidity features.
+    Market-aware and safe if no small-limit books or missing Limit values.
+    Run on df_pre (latest snapshot per book/outcome) BEFORE building df_summary_base.
     """
-    SMALL_LIMIT_BOOKS = ['betfair_ex_uk', 'betfair_ex_eu', 'betfair_ex_au','matchbook','smarkets']
+    SMALL_LIMIT_BOOKS = ['betfair_ex_uk','betfair_ex_eu','betfair_ex_au','matchbook','smarkets']
 
-    if 'Bookmaker_Norm' not in df.columns:
-        df['Bookmaker_Norm'] = df['Bookmaker'].str.lower().str.strip()
-    
-    # Normalize and flag
-    df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
-    
-    # Ensure numeric
-    df['Limit'] = pd.to_numeric(df.get('Limit', 0), errors='coerce').fillna(0)
-    
-    # === Aggregate per outcome
-    small_limit_rows = df[df['Is_Small_Limit_Book'] == 1].copy()
-    outcome_agg = (
-        small_limit_rows
-        .groupby(['Game_Key', 'Outcome'])
-        .agg(SmallBook_Limit=('Limit', 'sum'))
-        .reset_index()
+    out = df.copy()
+
+    # Normalize
+    out['Bookmaker_Norm'] = out.get('Bookmaker_Norm', out.get('Bookmaker', '')).astype(str).str.lower().str.strip()
+    out['Market'] = out['Market'].astype(str).str.lower().str.strip()
+    out['Outcome'] = out['Outcome'].astype(str).str.lower().str.strip()
+
+    # Numeric limit
+    out['Limit'] = pd.to_numeric(out.get('Limit', 0), errors='coerce').fillna(0)
+
+    # Filter small-limit books
+    sb = out[out['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS)].copy()
+    if sb.empty:
+        # Create empty columns and return (UI-safe)
+        for c in [
+            'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
+            'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag'
+        ]:
+            out[c] = np.nan if c == 'SmallBook_Limit_Skew' else 0
+        return out
+
+    # Aggregate per Game_Key × Market × Outcome
+    agg = (
+        sb.groupby(['Game_Key','Market','Outcome'])
+          .agg(
+              SmallBook_Total_Limit=('Limit','sum'),
+              SmallBook_Max_Limit=('Limit','max'),
+              SmallBook_Min_Limit=('Limit','min'),
+              SmallBook_Count=('Limit','size')
+          )
+          .reset_index()
     )
-    
-    # === Pivot so both sides are columns
-    pivoted = outcome_agg.pivot(index='Game_Key', columns='Outcome', values='SmallBook_Limit')
-    pivoted.columns = [f"SmallBook_Limit_{col}" for col in pivoted.columns]
-    pivoted = pivoted.reset_index()
-    
-    # === Merge pivoted results back
-    df = df.merge(pivoted, on='Game_Key', how='left')
-    
-    # === Compute asymmetry metrics
-    outcome_cols = [col for col in pivoted.columns if col.startswith('SmallBook_Limit_') and col != 'Game_Key']
-    if len(outcome_cols) == 2:
-        col1, col2 = outcome_cols
-        df['SmallBook_Limit_Diff'] = (df[col1] - df[col2]).abs()
-        df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Diff'] > 100).astype(int)
-        df['SmallBook_Heavy_Liquidity_Flag'] = (
-            df[[col1, col2]].max(axis=1) > 700
-        ).astype(int)
-    else:
-        # Fallback if only one side present
-        df['SmallBook_Limit_Diff'] = 0
-        df['SmallBook_Limit_Skew_Flag'] = 0
-        df['SmallBook_Heavy_Liquidity_Flag'] = 0
 
-    return df
+    # Compute skew (avoid /0)
+    agg['SmallBook_Limit_Skew'] = np.where(
+        agg['SmallBook_Min_Limit'] > 0,
+        agg['SmallBook_Max_Limit'] / agg['SmallBook_Min_Limit'],
+        np.nan
+    )
+
+    # Flags (tune thresholds as you wish)
+    HEAVY_TOTAL = 700    # you used 700 in your current skew/heavy logic
+    SKEW_RATIO  = 1.5
+
+    agg['SmallBook_Heavy_Liquidity_Flag'] = (agg['SmallBook_Total_Limit'] >= HEAVY_TOTAL).astype(int)
+    agg['SmallBook_Limit_Skew_Flag']      = (agg['SmallBook_Limit_Skew'] >= SKEW_RATIO).astype(int)
+
+    # Merge skinny back (left)
+    out = out.merge(
+        agg[['Game_Key','Market','Outcome',
+             'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
+             'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag']],
+        on=['Game_Key','Market','Outcome'],
+        how='left'
+    )
+
+    return out
 
 def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "America/New_York") -> pd.DataFrame:
     out = df.copy()
@@ -2556,7 +2571,18 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         if team_feature_map is not None and not team_feature_map.empty:
             df_summary_base['Team'] = df_summary_base['Outcome'].str.lower().str.strip()
             df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
+        sb_skinny = compute_smallbook_metrics(df_pre)
 
+        # after you build df_summary_base (or right before)
+        df_summary_base = df_summary_base.merge(
+            sb_skinny, on=['Game_Key','Market','Outcome'], how='left'
+        )
+        
+        # optional defaults
+        for c in ['SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
+                  'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag']:
+            if c not in df_summary_base.columns:
+                df_summary_base[c] = np.nan
      
        
 
