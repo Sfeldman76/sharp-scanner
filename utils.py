@@ -1254,23 +1254,35 @@ def add_line_and_crossmarket_features(df):
 
     return df
 def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
-    SMALL_LIMIT_BOOKS = ['betus', 'mybookie', 'betfair_eu', 'betfair_uk', 'lowvig', 'betonline', 'matchbook']
+    """
+    Adds market-aware small-book liquidity features.
+    Used in both background scoring and UI to ensure consistent fields.
+    """
+    SMALL_LIMIT_BOOKS = [
+        'betfair_ex_uk','betfair_ex_eu','betfair_ex_au',
+        'matchbook','smarkets'
+    ]
+
     df = df.copy()
 
-    df['Bookmaker_Norm'] = df['Book']
+    # Normalize bookmaker field
+    if 'Bookmaker_Norm' not in df.columns:
+        df['Bookmaker_Norm'] = df['Bookmaker'].astype(str).str.lower().str.strip()
 
+    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
+    df['Outcome'] = df['Outcome'].astype(str).str.lower().str.strip()
 
+    # Flag small limit books
     df['Is_Small_Limit_Book'] = df['Bookmaker_Norm'].isin(SMALL_LIMIT_BOOKS).astype(int)
 
-    if 'Limit' not in df.columns:
-        df['Limit'] = 0
-    else:
-        df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
+    # Ensure numeric limit
+    df['Limit'] = pd.to_numeric(df.get('Limit', 0), errors='coerce').fillna(0)
 
+    # Aggregate for small-limit rows
     try:
         agg = (
             df[df['Is_Small_Limit_Book'] == 1]
-            .groupby(['Game_Key', 'Outcome'])
+            .groupby(['Game_Key', 'Market', 'Outcome'])
             .agg(
                 SmallBook_Total_Limit=('Limit', 'sum'),
                 SmallBook_Max_Limit=('Limit', 'max'),
@@ -1281,24 +1293,30 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
         )
     except Exception:
         agg = pd.DataFrame(columns=[
-            'Game_Key', 'Outcome', 'SmallBook_Total_Limit',
-            'SmallBook_Max_Limit', 'SmallBook_Min_Limit', 'SmallBook_Limit_Count'
+            'Game_Key','Market','Outcome',
+            'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit','SmallBook_Limit_Count'
         ])
 
-    df = df.merge(agg, on=['Game_Key', 'Outcome'], how='left')
+    df = df.merge(agg, on=['Game_Key', 'Market', 'Outcome'], how='left')
 
     for col in ['SmallBook_Total_Limit', 'SmallBook_Max_Limit', 'SmallBook_Min_Limit']:
-        df[col] = pd.to_numeric(
-            df[col] if col in df.columns else pd.Series(0, index=df.index),
-            errors='coerce'
-        ).fillna(0)
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
+    # Skew ratio instead of raw diff
+    df['SmallBook_Limit_Skew'] = np.where(
+        df['SmallBook_Min_Limit'] > 0,
+        df['SmallBook_Max_Limit'] / df['SmallBook_Min_Limit'],
+        np.nan
+    )
 
-    df['SmallBook_Limit_Skew'] = df['SmallBook_Max_Limit'] - df['SmallBook_Min_Limit']
-    df['SmallBook_Heavy_Liquidity_Flag'] = (df['SmallBook_Total_Limit'] > 1000).astype(int)
-    df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Skew'] > 500).astype(int)
+    # Flags — match UI thresholds
+    HEAVY_TOTAL = 700
+    SKEW_RATIO = 1.5
+    df['SmallBook_Heavy_Liquidity_Flag'] = (df['SmallBook_Total_Limit'] >= HEAVY_TOTAL).astype(int)
+    df['SmallBook_Limit_Skew_Flag'] = (df['SmallBook_Limit_Skew'] >= SKEW_RATIO).astype(int)
 
     return df
+
           
 def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     df = df_inverse.copy()
