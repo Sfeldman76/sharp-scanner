@@ -1390,7 +1390,204 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=cv).fit(X_train, y_train)
             cal_auc = CalibratedClassifierCV(model_auc, method='isotonic', cv=cv).fit(X_train, y_train)
         # ✅ Use isotonic calibration (more stable for reducing std dev)
-        
+                # ================================
+        # === 📊 MODEL STRESS TESTS  ====
+        # ================================
+        import numpy as np
+        import pandas as pd
+        from sklearn.metrics import roc_auc_score, log_loss
+        from datetime import timedelta
+
+        st.subheader(f"🧪 Holdout Validation – {market.upper()}")
+
+        # --- Helpers
+        def _american_to_roi(odds_series, outcome_bool):
+            """
+            Unit stake ROI given American odds and binary outcomes.
+            ROI = (return - stake)/stake. For a win:
+              - If odds > 0: profit = odds/100
+              - If odds < 0: profit = 100/|odds|
+            For a loss: -1
+            """
+            odds = pd.to_numeric(odds_series, errors='coerce')
+            win = pd.Series(outcome_bool).astype(int)
+            pos = (odds > 0).astype(int)
+
+            profit_on_win_pos = odds.where(odds > 0, np.nan) / 100.0
+            profit_on_win_neg = 100.0 / odds.abs()
+            profit_on_win = np.where(pos == 1, profit_on_win_pos, profit_on_win_neg)
+            profit_on_win = pd.Series(profit_on_win).fillna(0.0)
+
+            roi = win * profit_on_win - (1 - win) * 1.0
+            return roi
+
+        def _psi(expected, actual, bins=10):
+            """
+            Population Stability Index for numeric arrays.
+            Bins are derived from expected distribution.
+            """
+            exp = pd.to_numeric(pd.Series(expected).dropna(), errors='coerce')
+            act = pd.to_numeric(pd.Series(actual).dropna(), errors='coerce')
+            if exp.empty or act.empty:
+                return np.nan
+
+            # use quantiles from expected to define bins
+            qs = np.linspace(0, 1, bins + 1)
+            try:
+                cuts = np.unique(np.quantile(exp, qs))
+                if len(cuts) < 3:  # not enough spread
+                    return 0.0
+                exp_bins = pd.cut(exp, cuts, include_lowest=True)
+                act_bins = pd.cut(act, cuts, include_lowest=True)
+            except Exception:
+                return np.nan
+
+            exp_dist = exp_bins.value_counts(normalize=True).reindex(exp_bins.cat.categories, fill_value=0)
+            act_dist = act_bins.value_counts(normalize=True).reindex(exp_bins.cat.categories, fill_value=0)
+
+            # avoid log(0)
+            exp_dist = exp_dist.replace(0, 1e-6)
+            act_dist = act_dist.replace(0, 1e-6)
+
+            return float(((act_dist - exp_dist) * np.log(act_dist / exp_dist)).sum())
+
+        def _grade_psi(v):
+            if pd.isna(v):
+                return "n/a"
+            if v > 0.3:
+                return "🚨 heavy drift"
+            if v > 0.2:
+                return "⚠️ medium drift"
+            return "✅ stable"
+
+        # === 1) DRIFT & STABILITY (PSI) =======================================
+        st.markdown("### 🔁 Drift & Stability (PSI)")
+        # choose most recent 7 days in df_market as "live" window
+        if pd.api.types.is_datetime64_any_dtype(df_market['Snapshot_Timestamp']) and not df_market['Snapshot_Timestamp'].isna().all():
+            recent_end = df_market['Snapshot_Timestamp'].max()
+            recent_start = recent_end - pd.Timedelta(days=7)
+            df_recent = df_market[(df_market['Snapshot_Timestamp'] >= recent_start) & (df_market['Snapshot_Timestamp'] <= recent_end)]
+        else:
+            df_recent = pd.DataFrame()
+
+        psi_rows = []
+        if not df_recent.empty:
+            X_recent = df_recent.reindex(columns=features)
+            # numeric-only for PSI
+            X_base = X[features].apply(pd.to_numeric, errors='coerce')
+            X_recent_num = X_recent.apply(pd.to_numeric, errors='coerce')
+            shared_cols = [c for c in X_base.columns if c in X_recent_num.columns]
+
+            for col in shared_cols:
+                try:
+                    v = _psi(X_base[col], X_recent_num[col])
+                    psi_rows.append((col, v, _grade_psi(v)))
+                except Exception:
+                    psi_rows.append((col, np.nan, "n/a"))
+
+            df_psi = pd.DataFrame(psi_rows, columns=["Feature", "PSI", "Assessment"]).sort_values("PSI", ascending=False)
+            st.dataframe(df_psi.head(30))
+        else:
+            st.info("No recent window found for PSI (missing or non-datetime Snapshot_Timestamp).")
+
+        # === 2) EDGE CONFIDENCE (BINNED HIT RATE & ROI) =======================
+        st.markdown("### 🎯 Edge Confidence Check (Holdout bins)")
+        # holdout predictions (use calibrated logloss model for probs)
+        try:
+            val_proba = pd.Series(cal_logloss.predict_proba(X_val)[:, 1], index=X_val.index)
+        except Exception:
+            # fallback to raw model if not calibrated
+            val_proba = pd.Series(model_logloss.predict_proba(X_val)[:, 1], index=X_val.index)
+
+        # attach back odds for ROI; default to Odds_Price in df_market
+        odds_val = pd.to_numeric(df_market.loc[val_proba.index, 'Odds_Price'], errors='coerce')
+        yv = y_val.copy()
+
+        # 10 equal-width bins
+        bins = np.linspace(0, 1, 11)
+        labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
+        cuts = pd.cut(val_proba, bins=bins, include_lowest=True, labels=labels)
+
+        out_rows = []
+        for lb in labels:
+            idx = cuts[cuts == lb].index
+            if len(idx) == 0:
+                out_rows.append((lb, 0, np.nan, np.nan, np.nan))
+                continue
+            hr = float(yv.loc[idx].mean())
+            roi = float(_american_to_roi(odds_val.loc[idx], yv.loc[idx]).mean())
+            n = int(len(idx))
+            avg_p = float(val_proba.loc[idx].mean())
+            out_rows.append((lb, n, hr, roi, avg_p))
+
+        df_bins = pd.DataFrame(out_rows, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
+        df_bins["N"] = df_bins["N"].astype(int)
+        st.dataframe(df_bins)
+
+        # quick extreme-bucket snapshot
+        hi = df_bins.iloc[-1]
+        lo = df_bins.iloc[0]
+        st.write(f"**High bin ({hi['Prob Bin']}):** N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}")
+        st.write(f"**Low bin  ({lo['Prob Bin']}):** N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}")
+
+        # === 3) ADVERSE SCENARIO REPLAY ======================================
+        st.markdown("### 🌪️ Adverse Scenario Replay (reversal-heavy days)")
+        if "Value_Reversal_Flag" in df_market.columns or "Odds_Reversal_Flag" in df_market.columns:
+            df_market["_rev_flag"] = (
+                df_market.get("Value_Reversal_Flag", 0).fillna(0).astype(int) |
+                df_market.get("Odds_Reversal_Flag", 0).fillna(0).astype(int)
+            )
+            # day-level reversal rate
+            if "Snapshot_Timestamp" in df_market.columns and pd.api.types.is_datetime64_any_dtype(df_market["Snapshot_Timestamp"]):
+                df_market["_day"] = pd.to_datetime(df_market["Snapshot_Timestamp"], utc=True, errors='coerce').dt.date
+                daily = df_market.groupby("_day")["_rev_flag"].mean().sort_values(ascending=False).head(5).index.tolist()
+                if len(daily) == 0:
+                    st.info("No reversal-heavy days found.")
+                else:
+                    rows = []
+                    for d in daily:
+                        mask = df_market["_day"] == d
+                        Xd = df_market.loc[mask, features].apply(pd.to_numeric, errors='coerce').fillna(0)
+                        yd = df_market.loc[mask, "SHARP_HIT_BOOL"].astype(int)
+                        if len(yd.unique()) < 2:
+                            continue
+                        try:
+                            pd_pred = pd.Series(cal_logloss.predict_proba(Xd)[:, 1], index=Xd.index)
+                        except Exception:
+                            pd_pred = pd.Series(model_logloss.predict_proba(Xd)[:, 1], index=Xd.index)
+                        auc_d = roc_auc_score(yd, pd_pred)
+                        ll_d = log_loss(yd, pd_pred, labels=[0,1])
+                        conf = pd_pred.apply(lambda p: max(p, 1-p)).mean()
+                        rows.append((str(d), len(yd), auc_d, ll_d, conf))
+                    if rows:
+                        df_bad = pd.DataFrame(rows, columns=["Day", "N", "AUC", "LogLoss", "Avg Confidence"])
+                        st.dataframe(df_bad)
+                    else:
+                        st.info("Reversal-heavy days did not have enough label variety for evaluation.")
+            else:
+                st.info("Missing/invalid Snapshot_Timestamp for adverse replay.")
+        else:
+            st.info("Reversal flags not present — skipping adverse replay.")
+
+        # === Summary Card =====================================================
+        st.markdown("### ✅ Deployment Readiness Snapshot")
+        # PSI summary
+        psi_flag = "Unknown"
+        if 'df_psi' in locals():
+            psi_worst = df_psi['PSI'].replace(np.nan, 0).max()
+            if psi_worst > 0.3:
+                psi_flag = "🚨 heavy drift"
+            elif psi_worst > 0.2:
+                psi_flag = "⚠️ medium drift"
+            else:
+                psi_flag = "✅ stable"
+        # extreme bin checks
+        hi_ok = (hi["N"] > 0) and (hi["Hit Rate"] >= 0.60 or hi["Avg ROI (unit)"] > 0)
+        lo_ok = (lo["N"] > 0) and ((1 - lo["Hit Rate"]) >= 0.60 or lo["Avg ROI (unit)"] > 0)
+
+        st.write(f"- **PSI status:** {psi_flag}")
+        st.write(f"- **High-confidence bucket profitable/accurate?** {'✅' if hi_ok else '⚠️'}")
+        st.write(f"- **Low-confidence bucket fade profitable/accurate?** {'✅' if lo_ok else '⚠️'}")
         # 🕵️‍♂️ Debug: Inspect problematic features in X
         for col in X.columns:
             try:
