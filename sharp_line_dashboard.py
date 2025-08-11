@@ -751,7 +751,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
-            progress.progress(idx / 3)
+            pb.progress(int(round(idx / n_markets * 100)))
             continue
 
         # ✅ You now safely have Home_Team_Norm and Away_Team_Norm here
@@ -901,7 +901,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
-            progress.progress(idx / 3)
+            pb.progress(int(round(idx / n_markets * 100)))
             continue
         # === Directional agreement (for spreads/h2h invert line logic)
         df_market['Line_Delta'] = pd.to_numeric(df_market['Line_Delta'], errors='coerce')
@@ -1307,7 +1307,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # === Abort early if label has only one class
         if y.nunique() < 2:
             st.warning(f"⚠️ Skipping {market.upper()} — only one label class.")
-            progress.progress(idx / 3)
+            pb.progress(int(round(idx / n_markets * 100)))
             continue
       
         # === Check each fold for label balance
@@ -1488,39 +1488,40 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         else:
             st.info("No recent window found for PSI (missing or non-datetime Snapshot_Timestamp).")
 
-        # === 2) EDGE CONFIDENCE (BINNED HIT RATE & ROI) =======================
-        st.markdown("### 🎯 Edge Confidence Check (Holdout bins)")
-        # holdout predictions (use calibrated logloss model for probs)
+        # Ensure val_proba is a Series with the X_val index
         try:
-            val_proba = pd.Series(cal_logloss.predict_proba(X_val)[:, 1], index=X_val.index)
+            val_proba = pd.Series(val_proba, index=X_val.index)
         except Exception:
-            # fallback to raw model if not calibrated
-            val_proba = pd.Series(model_logloss.predict_proba(X_val)[:, 1], index=X_val.index)
-
-        # attach back odds for ROI; default to Odds_Price in df_market
-        odds_val = pd.to_numeric(df_market.loc[val_proba.index, 'Odds_Price'], errors='coerce')
-        yv = y_val.copy()
-
-        # 10 equal-width bins
+            val_proba = pd.Series(cal_logloss.predict_proba(X_val)[:, 1], index=X_val.index)
+        
+        # Build one aligned frame
+        df_eval = pd.DataFrame({
+            "p": val_proba,
+            "y": pd.Series(y_val, index=val_proba.index),
+            "odds": pd.to_numeric(df_market.loc[val_proba.index, "Odds_Price"], errors="coerce")
+        })
+        
+        # Define bins
         bins = np.linspace(0, 1, 11)
         labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
-        cuts = pd.cut(val_proba, bins=bins, include_lowest=True, labels=labels)
-
+        cuts = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
+        
+        # Compute per-bin metrics safely
         out_rows = []
         for lb in labels:
-            idx = cuts[cuts == lb].index
-            if len(idx) == 0:
+            sub = df_eval[cuts == lb]
+            n = int(len(sub))
+            if n == 0:
                 out_rows.append((lb, 0, np.nan, np.nan, np.nan))
                 continue
-            hr = float(yv.loc[idx].mean())
-            roi = float(_american_to_roi(odds_val.loc[idx], yv.loc[idx]).mean())
-            n = int(len(idx))
-            avg_p = float(val_proba.loc[idx].mean())
+        
+            hr = float(sub["y"].mean())
+            roi = float(_american_to_roi(sub["odds"], sub["y"]).mean()) if sub["odds"].notna().any() else np.nan
+            avg_p = float(sub["p"].mean())
             out_rows.append((lb, n, hr, roi, avg_p))
-
+        
         df_bins = pd.DataFrame(out_rows, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
         df_bins["N"] = df_bins["N"].astype(int)
-        st.dataframe(df_bins)
 
         # quick extreme-bucket snapshot
         hi = df_bins.iloc[-1]
@@ -1805,7 +1806,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         - Log Loss: {logloss:.4f}
         - Brier Score: {brier:.4f}
         """)
-        progress.progress(idx / 3)
+        pb.progress(int(round(idx / n_markets * 100)))
 
     status.update(label="✅ All models trained", state="complete", expanded=False)
     if not trained_models:
