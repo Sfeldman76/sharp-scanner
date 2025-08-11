@@ -2679,14 +2679,40 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_final = pd.concat(scored_all, ignore_index=True)
           
             logger.info(f"🧮 Final scored breakdown — total={len(df_final)}, canonical={df_final['Was_Canonical'].sum()}, inverse={(~df_final['Was_Canonical']).sum()}")
-  
-        
-    
-            # ✅ Then create hybrid timing flags
-            df_final['Hybrid_Line_Timing_Flag'] = df_final[hybrid_line_cols].gt(1.0).any(axis=1).astype(int)
-            df_final['Hybrid_Odds_Timing_Flag'] = df_final[hybrid_odds_cols].gt(1.0).any(axis=1).astype(int)
-    
-            # ✅ Now compute active signals including hybrid flags
+                  
+            # 1) match UI snapshot collapsing (latest per book)
+            df_final = (
+                df_final.sort_values('Snapshot_Timestamp')
+                        .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
+            )
+            
+            # 2) force numeric + fillna for all columns we’ll use
+            cols_for_count = [
+                'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Limit_Total','LimitUp_NoMove_Flag',
+                'Market_Leader','Is_Reinforced_MultiMarket','Sharp_Line_Magnitude','SharpMove_Odds_Up',
+                'SharpMove_Odds_Down','SharpMove_Odds_Mag','SharpMove_Resistance_Break','Late_Game_Steam_Flag',
+                'Value_Reversal_Flag','Odds_Reversal_Flag','Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
+                'Team_Past_Hit_Rate','Mispricing_Flag','Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
+                'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home','Avg_Recent_Cover_Streak_Away',
+                'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction','CrossMarket_Prob_Gap_Exists',
+                'Potential_Overmove_Flag','Potential_Overmove_Total_Pct_Flag','Potential_Odds_Overmove_Flag',
+                'Line_Moved_Toward_Team','Line_Moved_Away_From_Team','Line_Resistance_Crossed_Count',
+                'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
+                'SmallBook_Total_Limit'
+            ] + hybrid_line_cols + hybrid_odds_cols
+            
+            for c in cols_for_count:
+                if c not in df_final.columns:
+                    df_final[c] = 0
+                df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0)
+            
+            # 3) match hybrid timing flag logic to UI
+            df_final['Hybrid_Line_Timing_Flag'] = (df_final[hybrid_line_cols].sum(axis=1) > 0).astype(int)
+            df_final['Hybrid_Odds_Timing_Flag'] = (df_final[hybrid_odds_cols].sum(axis=1) > 0).astype(int)
+            
+            # 4) (optional) include same items as the UI’s Why text
+            # add Rec_Line_Magnitude if you want it counted like Why mentions it
+            # (or remove SmallBook_* etc. if you don’t show them in UI)
             df_final['Active_Signal_Count'] = (
                 (df_final['Sharp_Move_Signal'] == 1).astype(int) +
                 (df_final['Sharp_Limit_Jump'] == 1).astype(int) +
@@ -2694,10 +2720,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['LimitUp_NoMove_Flag'] == 1).astype(int) +
                 (df_final['Market_Leader'] == 1).astype(int) +
                 (df_final['Is_Reinforced_MultiMarket'] == 1).astype(int) +
-               
                 (df_final['Sharp_Line_Magnitude'] > 0.5).astype(int) +
-               
-               
+                # (optional) align with UI "Why"
+                (df_final['Rec_Line_Magnitude'] > 0.5).astype(int) +
                 (df_final['SharpMove_Odds_Up'] == 1).astype(int) +
                 (df_final['SharpMove_Odds_Down'] == 1).astype(int) +
                 (df_final['SharpMove_Odds_Mag'] > 5).astype(int) +
@@ -2707,33 +2732,31 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
                 (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
                 (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
-                df_final['Hybrid_Line_Timing_Flag'].fillna(0).astype(int) +
-                df_final['Hybrid_Odds_Timing_Flag'].fillna(0).astype(int) +
-                (df_final['Team_Past_Hit_Rate'].fillna(0) > 0.6).astype(int) +
-                df_final['Mispricing_Flag'].fillna(0).astype(int) +
-                (df_final['Team_Implied_Prob_Gap_Home'].fillna(0) > 0.05).astype(int) +
-                (df_final['Team_Implied_Prob_Gap_Away'].fillna(0) > 0.05).astype(int) +
-                (df_final['Avg_Recent_Cover_Streak'].fillna(0) >= 2).astype(int) +
-                (df_final['Avg_Recent_Cover_Streak_Home'].fillna(0) >= 2).astype(int) +
-                (df_final['Avg_Recent_Cover_Streak_Away'].fillna(0) >= 2).astype(int)+
-                df_final['Spread_vs_H2H_Aligned'].fillna(0).astype(int) +
-                df_final['Total_vs_Spread_Contradiction'].fillna(0).astype(int) +
-                df_final['CrossMarket_Prob_Gap_Exists'].fillna(0).astype(int)+
+                df_final['Hybrid_Line_Timing_Flag'] +
+                df_final['Hybrid_Odds_Timing_Flag'] +
+                (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int) +
+                df_final['Mispricing_Flag'].astype(int) +
+                (df_final['Team_Implied_Prob_Gap_Home'] > 0.05).astype(int) +
+                (df_final['Team_Implied_Prob_Gap_Away'] > 0.05).astype(int) +
+                (df_final['Avg_Recent_Cover_Streak'] >= 2).astype(int) +
+                (df_final['Avg_Recent_Cover_Streak_Home'] >= 2).astype(int) +
+                (df_final['Avg_Recent_Cover_Streak_Away'] >= 2).astype(int) +
+                df_final['Spread_vs_H2H_Aligned'].astype(int) +
+                df_final['Total_vs_Spread_Contradiction'].astype(int) +
+                df_final['CrossMarket_Prob_Gap_Exists'].astype(int) +
                 (df_final['Potential_Overmove_Flag'] == 1).astype(int) +
                 (df_final['Potential_Overmove_Total_Pct_Flag'] == 1).astype(int) +
                 (df_final['Potential_Odds_Overmove_Flag'] == 1).astype(int) +
                 (df_final['Line_Moved_Toward_Team'] == 1).astype(int) +
                 (df_final['Line_Moved_Away_From_Team'] == 1).astype(int) +
-                (df_final['Line_Resistance_Crossed_Count'].fillna(0) >= 1).astype(int) +
-                (df_final['Abs_Line_Move_Z'].fillna(0) > 1).astype(int) +
-                (df_final['Pct_Line_Move_Z'].fillna(0) > 1).astype(int)+
-                (df_final['SmallBook_Heavy_Liquidity_Flag'] == 1).astype(int) +
-                (df_final['SmallBook_Limit_Skew_Flag'] == 1).astype(int) +
-                (df_final['SmallBook_Total_Limit'].fillna(0) > 500).astype(int)
-
-
-            ).fillna(0).astype(int)
-
+                (df_final['Line_Resistance_Crossed_Count'] >= 1).astype(int) +
+                (df_final['Abs_Line_Move_Z'] > 1).astype(int) +
+                (df_final['Pct_Line_Move_Z'] > 1).astype(int)
+                # (optional) keep or drop the SmallBook_* trio depending on what the UI shows
+                + (df_final['SmallBook_Heavy_Liquidity_Flag'] == 1).astype(int)
+                + (df_final['SmallBook_Limit_Skew_Flag'] == 1).astype(int)
+                + (df_final['SmallBook_Total_Limit'] > 500).astype(int)
+            ).astype(int)
 
             
                 
