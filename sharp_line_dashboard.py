@@ -1852,156 +1852,131 @@ def compute_diagnostics_vectorized(df):
         df['Hybrid_Odds_Timing_Flag'] = (df[HYBRID_ODDS_COLS].sum(axis=1) > 0).astype(int)
 
 
-    # === Passes Gate
-    df['Passes_Gate'] = (
-        pd.to_numeric(df['Model Prob'], errors='coerce') >= 0.0
-    ) & (df['Active_Signal_Count'] > 2)  # You can adjust the threshold if needed
-    
-    # === Confidence Tier from Model
-    model_prob = pd.to_numeric(df['Model Prob'], errors='coerce')
+    # --- make sure aliases/defaults exist *before* build_why runs
+if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
+    df['Model Prob'] = df['Model_Sharp_Win_Prob']
 
-    # Assign base tiers
-    df['Confidence Tier'] = pd.cut(
-        model_prob,
-        bins=[0, 0.4, 0.6, 0.8, 1.0],
-        labels=["🪙Low Probability", "🤏 Lean", "🔥 Strong Indication", "🌋 Steam"]
-    ).astype(str)
-    
-    # Override with "zero" if probability is exactly 0
-    df.loc[model_prob == 0.0, 'Confidence Tier'] = "None"
-   
-        
-    # === Why Model Likes It
-    def build_why(row):
-        model_prob = row.get('Model Prob')
-    
-        if pd.isna(model_prob):
-            return "⚠️ Missing — run apply_blended_sharp_score() first"
-    
-        if not bool(row.get('Passes_Gate', False)):
-            return "🕓 Still Calculating Signal"
+# sensible default for Passes_Gate if it's missing or NaN (prevents one side showing "Still Calculating")
+core_flags = [
+    'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
+    'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book'
+]
+for c in core_flags:
+    if c not in df.columns:
+        df[c] = 0
+df['Passes_Gate'] = (
+    df.get('Passes_Gate')
+    .fillna((df[core_flags].fillna(0).astype(int).sum(axis=1) > 0))
+    if 'Passes_Gate' in df.columns else
+    (df[core_flags].fillna(0).astype(int).sum(axis=1) > 0)
+)
 
-    
-    
-    
-        # === Core sharp move reasons
-        parts = []
+def build_why(row):
+    model_prob = row.get('Model Prob')
+    if pd.isna(model_prob):
+        return "⚠️ Missing — run apply_blended_sharp_score() first"
 
-   
+    parts = []
 
-        if row.get('Sharp_Move_Signal'): parts.append("📈 Sharp Move Detected")
-        if row.get('Sharp_Limit_Jump'): parts.append("💰 Limit Jumped")
-        if row.get('Market_Leader'): parts.append("🏆 Market Leader")
-        if row.get('Is_Reinforced_MultiMarket'): parts.append("📊 Multi-Market Consensus")
-        if row.get('LimitUp_NoMove_Flag'): parts.append("🛡️ Limit Up + No Line Move")
-        if row.get('Is_Sharp_Book'): parts.append("🎯 Sharp Book S   ignal")
-    
-        # === Odds & line movement
-        if row.get('SharpMove_Odds_Up'): parts.append("🟢 Odds Moved Up (Steam)")
-        if row.get('SharpMove_Odds_Down'): parts.append("🔻 Odds Moved Down (Buyback)")
-        #if row.get('Is_Home_Team_Bet'): parts.append("🏠 Home Team Bet")
-        if row.get('Sharp_Line_Magnitude', 0) > 0.5: parts.append("📏 Big Line Move")
-        if row.get('Rec_Line_Magnitude', 0) > 0.5: parts.append("📉 Rec Book Move")
-        if row.get('Sharp_Limit_Total', 0) > 10000: parts.append("💼 Sharp High Limit")
-        if row.get('SharpMove_Odds_Mag', 0) > 5: parts.append("💥 Sharp Odds Steam")
-    
-        # === Resistance and timing
-        if row.get('SharpMove_Resistance_Break'): parts.append("🧱 Broke Key Resistance")
-        if row.get('Late_Game_Steam_Flag'): parts.append("⏰ Late Game Steam")
-        if row.get('Value_Reversal_Flag'): parts.append("🔄 Value Reversal")
-        if row.get('Odds_Reversal_Flag'): parts.append("📉 Odds Reversal")
-        if row.get('Sharp_Time_Score', 0) > 0.5: parts.append("⏱️ Timing Edge")
-        # === Team-level diagnostics
-        if row.get('Team_Past_Hit_Rate', 0) > 0.5:
-            parts.append("⚔️📊 Team Historically Sharp")
-        if row.get('Team_Past_Avg_Model_Prob', 0) > 0.5:
-            parts.append("🔮 Model Favored This Team Historically")
-        if row.get('Avg_Recent_Cover_Streak', 0) >= 2:
-            parts.append("🔥 Recent Hot Streak")
-        if row.get('Avg_Recent_Cover_Streak_Home', 0) >= 2:
-            parts.append("🏠🔥 Home Streaking")
-        if row.get('Avg_Recent_Cover_Streak_Away', 0) >= 2:
-            parts.append("✈️🔥 Road Streaking")
-        # === Line/odds movement from open
-        if row.get('Abs_Line_Move_From_Opening', 0) > 1.0:
-            parts.append("📈 Line Moved from Open")
-        if row.get('Abs_Odds_Move_From_Opening', 0) > 5.0:
-            parts.append("💹 Odds Moved from Open")
-        # === Additional diagnostics for full feature match
+    # --- Core sharp move reasons (cast to bool so 0/1 ints work)
+    if bool(row.get('Sharp_Move_Signal', 0)): parts.append("📈 Sharp Move Detected")
+    if bool(row.get('Sharp_Limit_Jump', 0)): parts.append("💰 Limit Jumped")
+    if bool(row.get('Market_Leader', 0)): parts.append("🏆 Market Leader")
+    if bool(row.get('Is_Reinforced_MultiMarket', 0)): parts.append("📊 Multi-Market Consensus")
+    if bool(row.get('LimitUp_NoMove_Flag', 0)): parts.append("🛡️ Limit Up + No Line Move")
+    if bool(row.get('Is_Sharp_Book', 0)): parts.append("🎯 Sharp Book Signal")  # ← typo fixed
 
-        if row.get('Spread_vs_H2H_Aligned'): parts.append("🧩 Spread and H2H Align")
-        if row.get('Total_vs_Spread_Contradiction'): parts.append("⚠️ Total Contradicts Spread")
-        if row.get('CrossMarket_Prob_Gap_Exists'): parts.append("🔀 Cross-Market Probability Gap")
-        
-        if row.get('Potential_Overmove_Flag'): parts.append("📊 Line Possibly Overmoved")
-        if row.get('Potential_Overmove_Total_Pct_Flag'): parts.append("📉 Total Possibly Overmoved")
-        if row.get('Potential_Odds_Overmove_Flag'): parts.append("🎯 Odds Possibly Overmoved")
-        
-        if row.get('Line_Moved_Toward_Team'): parts.append("🧲 Line Moved Toward This Team")
-        if row.get('Line_Moved_Away_From_Team'): parts.append("🚫 Line Moved Away From This Team")
-        
-        if row.get('Line_Resistance_Crossed_Count', 0) >= 1: parts.append("🧱 Crossed Resistance Levels")
-        if row.get('Abs_Line_Move_Z', 0) > 1: parts.append("📊 Unusual Line Z-Move")
-        if row.get('Pct_Line_Move_Z', 0) > 1: parts.append("📈 Abnormal % Line Z-Score")
-        
-        if row.get('Mispricing_Flag'): parts.append("💸 Market Mispricing Detected")
-        
-        if row.get('Hybrid_Line_Timing_Flag'): parts.append("⏱️ Sharp Line Timing Bucket")
-        if row.get('Hybrid_Odds_Timing_Flag'): parts.append("🕰️ Sharp Odds Timing Bucket")
+    # --- Odds & line movement
+    if bool(row.get('SharpMove_Odds_Up', 0)): parts.append("🟢 Odds Moved Up (Steam)")
+    if bool(row.get('SharpMove_Odds_Down', 0)): parts.append("🔻 Odds Moved Down (Buyback)")
+    if float(row.get('Sharp_Line_Magnitude', 0)) > 0.5: parts.append("📏 Big Line Move")
+    if float(row.get('Rec_Line_Magnitude', 0)) > 0.5: parts.append("📉 Rec Book Move")
+    if float(row.get('Sharp_Limit_Total', 0)) > 10000: parts.append("💼 Sharp High Limit")
+    if float(row.get('SharpMove_Odds_Mag', 0)) > 5: parts.append("💥 Sharp Odds Steam")
 
-    
-        # === Hybrid timing buckets — LINE
-        HYBRID_LINE_COLS = [
-            'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
-            'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
-            'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
-            'SharpMove_Magnitude_Early_LateGame', 'SharpMove_Magnitude_Early_Urgent',
-            'SharpMove_Magnitude_Midday_VeryEarly', 'SharpMove_Magnitude_Midday_MidRange',
-            'SharpMove_Magnitude_Midday_LateGame', 'SharpMove_Magnitude_Midday_Urgent',
-            'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
-            'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent'
-        ]
-    
-        # === Hybrid timing buckets — ODDS
-        HYBRID_ODDS_COLS = [
-            'OddsMove_Magnitude_Overnight_VeryEarly', 'OddsMove_Magnitude_Overnight_MidRange',
-            'OddsMove_Magnitude_Overnight_LateGame', 'OddsMove_Magnitude_Overnight_Urgent',
-            'OddsMove_Magnitude_Early_VeryEarly', 'OddsMove_Magnitude_Early_MidRange',
-            'OddsMove_Magnitude_Early_LateGame', 'OddsMove_Magnitude_Early_Urgent',
-            'OddsMove_Magnitude_Midday_VeryEarly', 'OddsMove_Magnitude_Midday_MidRange',
-            'OddsMove_Magnitude_Midday_LateGame', 'OddsMove_Magnitude_Midday_Urgent',
-            'OddsMove_Magnitude_Late_VeryEarly', 'OddsMove_Magnitude_Late_MidRange',
-            'OddsMove_Magnitude_Late_LateGame', 'OddsMove_Magnitude_Late_Urgent'
-        ]
-    
-        EMOJI_MAP = {
-            'Overnight': '🌙', 'Early': '🌅',
-            'Midday': '🌞', 'Late': '🌆'
-        }
-    
-        for col in HYBRID_LINE_COLS:
-            if row.get(col, 0) > 0.25:
-                bucket = col.replace('SharpMove_Magnitude_', '').replace('_', ' ')
-                emoji = EMOJI_MAP.get(col.split('_')[2], '⏱️')
-                parts.append(f"{emoji} {bucket} Sharp Move")
-    
-        for col in HYBRID_ODDS_COLS:
-            if row.get(col, 0) > 0.5:
-                bucket = col.replace('OddsMove_Magnitude_', '').replace('_', ' ')
-                emoji = EMOJI_MAP.get(col.split('_')[2], '⏱️')
-                parts.append(f"{emoji} {bucket} Odds Steam")
-    
-        return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
-    
+    # --- Resistance & timing
+    if bool(row.get('SharpMove_Resistance_Break', 0)): parts.append("🧱 Broke Key Resistance")
+    if bool(row.get('Late_Game_Steam_Flag', 0)): parts.append("⏰ Late Game Steam")
+    if bool(row.get('Value_Reversal_Flag', 0)): parts.append("🔄 Value Reversal")
+    if bool(row.get('Odds_Reversal_Flag', 0)): parts.append("📉 Odds Reversal")
+    if float(row.get('Sharp_Time_Score', 0)) > 0.5: parts.append("⏱️ Timing Edge")
+
+    # --- Team-level
+    if float(row.get('Team_Past_Hit_Rate', 0)) > 0.5: parts.append("⚔️📊 Team Historically Sharp")
+    if float(row.get('Team_Past_Avg_Model_Prob', 0)) > 0.5: parts.append("🔮 Model Favored This Team Historically")
+    if float(row.get('Avg_Recent_Cover_Streak', 0)) >= 2: parts.append("🔥 Recent Hot Streak")
+    if float(row.get('Avg_Recent_Cover_Streak_Home', 0)) >= 2: parts.append("🏠🔥 Home Streaking")
+    if float(row.get('Avg_Recent_Cover_Streak_Away', 0)) >= 2: parts.append("✈️🔥 Road Streaking")
+
+    # --- From open
+    if float(row.get('Abs_Line_Move_From_Opening', 0)) > 1.0: parts.append("📈 Line Moved from Open")
+    if float(row.get('Abs_Odds_Move_From_Opening', 0)) > 5.0: parts.append("💹 Odds Moved from Open")
+
+    # --- Cross-market + diagnostics
+    if bool(row.get('Spread_vs_H2H_Aligned', 0)): parts.append("🧩 Spread and H2H Align")
+    if bool(row.get('Total_vs_Spread_Contradiction', 0)): parts.append("⚠️ Total Contradicts Spread")
+    if bool(row.get('CrossMarket_Prob_Gap_Exists', 0)): parts.append("🔀 Cross-Market Probability Gap")
+    if bool(row.get('Potential_Overmove_Flag', 0)): parts.append("📊 Line Possibly Overmoved")
+    if bool(row.get('Potential_Overmove_Total_Pct_Flag', 0)): parts.append("📉 Total Possibly Overmoved")
+    if bool(row.get('Potential_Odds_Overmove_Flag', 0)): parts.append("🎯 Odds Possibly Overmoved")
+    if bool(row.get('Line_Moved_Toward_Team', 0)): parts.append("🧲 Line Moved Toward This Team")
+    if bool(row.get('Line_Moved_Away_From_Team', 0)): parts.append("🚫 Line Moved Away From This Team")
+    if float(row.get('Line_Resistance_Crossed_Count', 0)) >= 1: parts.append("🧱 Crossed Resistance Levels")
+    if float(row.get('Abs_Line_Move_Z', 0)) > 1: parts.append("📊 Unusual Line Z-Move")
+    if float(row.get('Pct_Line_Move_Z', 0)) > 1: parts.append("📈 Abnormal % Line Z-Score")
+    if bool(row.get('Mispricing_Flag', 0)): parts.append("💸 Market Mispricing Detected")
+    if bool(row.get('Hybrid_Line_Timing_Flag', 0)): parts.append("⏱️ Sharp Line Timing Bucket")
+    if bool(row.get('Hybrid_Odds_Timing_Flag', 0)): parts.append("🕰️ Sharp Odds Timing Bucket")
+
+    # --- Hybrid timing buckets
+    HYBRID_LINE_COLS = [
+        'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
+        'SharpMove_Magnitude_Overnight_LateGame','SharpMove_Magnitude_Overnight_Urgent',
+        'SharpMove_Magnitude_Early_VeryEarly','SharpMove_Magnitude_Early_MidRange',
+        'SharpMove_Magnitude_Early_LateGame','SharpMove_Magnitude_Early_Urgent',
+        'SharpMove_Magnitude_Midday_VeryEarly','SharpMove_Magnitude_Midday_MidRange',
+        'SharpMove_Magnitude_Midday_LateGame','SharpMove_Magnitude_Midday_Urgent',
+        'SharpMove_Magnitude_Late_VeryEarly','SharpMove_Magnitude_Late_MidRange',
+        'SharpMove_Magnitude_Late_LateGame','SharpMove_Magnitude_Late_Urgent'
+    ]
+    HYBRID_ODDS_COLS = [
+        'OddsMove_Magnitude_Overnight_VeryEarly','OddsMove_Magnitude_Overnight_MidRange',
+        'OddsMove_Magnitude_Overnight_LateGame','OddsMove_Magnitude_Overnight_Urgent',
+        'OddsMove_Magnitude_Early_VeryEarly','OddsMove_Magnitude_Early_MidRange',
+        'OddsMove_Magnitude_Early_LateGame','OddsMove_Magnitude_Early_Urgent',
+        'OddsMove_Magnitude_Midday_VeryEarly','OddsMove_Magnitude_Midday_MidRange',
+        'OddsMove_Magnitude_Midday_LateGame','OddsMove_Magnitude_Midday_Urgent',
+        'OddsMove_Magnitude_Late_VeryEarly','OddsMove_Magnitude_Late_MidRange',
+        'OddsMove_Magnitude_Late_LateGame','OddsMove_Magnitude_Late_Urgent'
+    ]
+    EMOJI_MAP = {'Overnight':'🌙','Early':'🌅','Midday':'🌞','Late':'🌆'}
+
+    for col in HYBRID_LINE_COLS:
+        if float(row.get(col, 0)) > 0.25:
+            bucket = col.replace('SharpMove_Magnitude_', '').replace('_', ' ')
+            epoch = col.split('_')[2]  # Overnight/Early/Midday/Late
+            parts.append(f"{EMOJI_MAP.get(epoch, '⏱️')} {bucket} Sharp Move")
+
+    for col in HYBRID_ODDS_COLS:
+        if float(row.get(col, 0)) > 0.5:
+            bucket = col.replace('OddsMove_Magnitude_', '').replace('_', ' ')
+            epoch = col.split('_')[2]
+            parts.append(f"{EMOJI_MAP.get(epoch, '⏱️')} {bucket} Odds Steam")
+
+    # If we truly have nothing and gate is false, show the waiting message
+    if not parts and not bool(row.get('Passes_Gate', False)):
+        return "🕓 Still Calculating Signal"
+
+    return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
+
+# keep this AFTER the aliasing above
+df['Why Model Likes It'] = df.apply(build_why, axis=1)
+
     # Apply to DataFrame
    # === Model_Confidence_Tier for summary compatibility
     df['Model_Confidence_Tier'] = df['Confidence Tier']
     
-    # === Apply "Why Model Likes It"
-    df['Why Model Likes It'] = df.apply(build_why, axis=1)
-    # Diagnostic: Ensure compatibility by aliasing model prob
-    if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
-        df['Model Prob'] = df['Model_Sharp_Win_Prob']
+ 
     # === Load Timing Opportunity Model
     # === Load All Timing Models by Market
     # === Load Timing Opportunity Models by Market
