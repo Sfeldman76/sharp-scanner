@@ -2571,20 +2571,22 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         if team_feature_map is not None and not team_feature_map.empty:
             df_summary_base['Team'] = df_summary_base['Outcome'].str.lower().str.strip()
             df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
-        sb_skinny = compute_smallbook_metrics(df_pre)
-
-        # after you build df_summary_base (or right before)
-        df_summary_base = df_summary_base.merge(
-            sb_skinny, on=['Game_Key','Market','Outcome'], how='left'
+       # Compute on df_pre, then build a skinny frame for merging
+        df_pre = compute_small_book_liquidity_features(df_pre)  # <-- use your existing function name
+        
+        sb_cols = [
+            'Game_Key','Market','Outcome',
+            'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
+            'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag'
+        ]
+        
+        sb_skinny = (
+            df_pre[sb_cols]
+            .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
         )
         
-        # optional defaults
-        for c in ['SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
-                  'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag']:
-            if c not in df_summary_base.columns:
-                df_summary_base[c] = np.nan
-     
-       
+        df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
+
 
        
 
