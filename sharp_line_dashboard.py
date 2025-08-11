@@ -1927,6 +1927,9 @@ def compute_diagnostics_vectorized(df):
         if bool(row.get('Mispricing_Flag', 0)): parts.append("💸 Market Mispricing Detected")
         if bool(row.get('Hybrid_Line_Timing_Flag', 0)): parts.append("⏱️ Sharp Line Timing Bucket")
         if bool(row.get('Hybrid_Odds_Timing_Flag', 0)): parts.append("🕰️ Sharp Odds Timing Bucket")
+        if bool(row.get('Is_Weekend', 0)): parts.append("📅 Weekend Game")
+        if bool(row.get('Is_Night_Game', 0)): parts.append("🌙 Night Game")
+        if bool(row.get('Is_PrimeTime', 0)): parts.append("⭐ Prime Time Matchup")
     
         # --- Hybrid timing buckets
         HYBRID_LINE_COLS = [
