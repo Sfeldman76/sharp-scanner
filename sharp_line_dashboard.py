@@ -1970,7 +1970,7 @@ def build_why(row):
     return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
 
 # keep this AFTER the aliasing above
-df['Why Model Likes It'] = df.apply(build_why, axis=1)
+    df['Why Model Likes It'] = df.apply(build_why, axis=1)
 
     # Apply to DataFrame
    # === Model_Confidence_Tier for summary compatibility
