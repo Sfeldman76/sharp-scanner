@@ -2286,13 +2286,14 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         missing = [col for col in required_cols if col not in df_moves_raw.columns]
         
         if df_moves_raw.empty:
-            st.warning("⚠️ No picks returned — df_moves_raw is empty before build_game_key")
-            return pd.DataFrame()
+            st.warning("⚠️ No graded picks available yet. I’ll still show live odds below.")
+            skip_grading = True
         
         if missing:
             st.error(f"❌ Required columns missing before build_game_key: {missing}")
             st.dataframe(df_moves_raw.head())
-            return pd.DataFrame()
+            skip_grading = True
+
         
         # ✅ Deduplicate snapshot duplicates (exact matches except timestamp)
         if 'Snapshot_Timestamp' in df_moves_raw.columns:
