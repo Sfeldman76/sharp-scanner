@@ -1208,8 +1208,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 🔥 Timing flags
             #'Late_Game_Steam_Flag',
             
-            'Abs_Line_Move_From_Opening',
-            'Abs_Odds_Move_From_Opening', 
+            #'Abs_Line_Move_From_Opening',
+            #'Abs_Odds_Move_From_Opening', 
             'Market_Mispricing', 'Abs_Market_Mispricing',
             'Spread_vs_H2H_Aligned',
             'Total_vs_Spread_Contradiction',
