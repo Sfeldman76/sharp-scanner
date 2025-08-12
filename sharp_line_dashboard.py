@@ -2627,13 +2627,13 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
 
                 # === Normalize and merge first snapshot into df_moves_raw
     
-        alias_map = {
-            'Model_Sharp_Win_Prob': 'Model Prob',
-            'Model_Confidence_Tier': 'Confidence Tier',
-        }
-        for orig, alias in alias_map.items():
-            if orig in df_moves_raw.columns and alias not in df_moves_raw.columns:
-                df_moves_raw[alias] = df_moves_raw[orig]
+        #alias_map = {
+            #'Model_Sharp_Win_Prob': 'Model Prob',
+            #'Model_Confidence_Tier': 'Confidence Tier',
+        #}
+        #for orig, alias in alias_map.items():
+            #if orig in df_moves_raw.columns and alias not in df_moves_raw.columns:
+                #df_moves_raw[alias] = df_moves_raw[orig]
 
        
        
@@ -2710,12 +2710,27 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # === Step 8: Rename columns for display
         df_pre.rename(columns={
                 'Game': 'Matchup',
-                'Model_Sharp_Win_Prob': 'Model Prob',
-                'Model_Confidence_Tier': 'Confidence Tier'
+              
         }, inplace=True)
+     # === Step 8: Rename columns for display (safe, duplicate-proof)
+        # If 'Model Prob' already exists, drop the source instead of renaming into it
+        if 'Model Prob' in df_pre.columns and 'Model_Sharp_Win_Prob' in df_pre.columns:
+            df_pre.drop(columns=['Model_Sharp_Win_Prob'], inplace=True)
+        else:
+            if 'Model_Sharp_Win_Prob' in df_pre.columns:
+                df_pre.rename(columns={'Model_Sharp_Win_Prob': 'Model Prob'}, inplace=True)
         
+        if 'Confidence Tier' in df_pre.columns and 'Model_Confidence_Tier' in df_pre.columns:
+            df_pre.drop(columns=['Model_Confidence_Tier'], inplace=True)
+        else:
+            if 'Model_Confidence_Tier' in df_pre.columns:
+                df_pre.rename(columns={'Model_Confidence_Tier': 'Confidence Tier'}, inplace=True)
+           
        
 
+        # === Preview & column check
+        st.write("📋 Columns in df_pre:", df_pre.columns.tolist())
+        
         # === Compute consensus lines
         sharp_consensus = (
             df_pre[df_pre['Bookmaker'].isin(SHARP_BOOKS)]
@@ -2767,7 +2782,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             )
         else:
             model_prob_map = pd.DataFrame(columns=['Game_Key','Market','Outcome','Model_Prob_SharpAvg'])
-        
+        st.write("📋 Columns in df_summary_base_mid:", df_summary_base.columns.tolist())
         # 3) Merge sharp-avg (or create empty column)
         df_summary_base = df_summary_base.drop(columns=['Model_Prob_SharpAvg'], errors='ignore')
         if not model_prob_map.empty:
@@ -2817,7 +2832,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         )
 
 
-        
+        st.write("📋 Columns in df_summary_base_end:", df_summary_base.columns.tolist())
         # === 4) STEP 3: safely hydrate Sharp/Rec/First_Line_Value via skinny merge (avoid row-order fillna) ===
         skinny_lines = (
             df_pre[['Game_Key','Market','Outcome','Sharp Line','Rec Line','First_Line_Value']]
@@ -2975,9 +2990,6 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         
 
 
-        # === Preview & column check
-        #st.write("📋 Columns in summary_df:", summary_df.columns.tolist())
-        
         # Optional: final sort if needed
         #summary_df.sort_values(by=['Game_Start', 'Matchup', 'Market'], inplace=True)
         
