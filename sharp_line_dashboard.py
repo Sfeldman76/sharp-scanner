@@ -2733,12 +2733,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # Fill Sharp/Rec Line for missing rows (consensus lines)
         
               
-            # === 0) Rename for display (you already did above) ===
-        # df_pre.rename({...}, inplace=True)
-        
-        # === 1) Consensus lines (you already built Sharp/Rec Line on df_pre) ===
-        # sharp_consensus / rec_consensus merges already done above on df_pre
-        
+           
         # === 2) Create df_summary_base as latest-per-book rows ===
         df_summary_base = (
             df_pre
@@ -2747,28 +2742,23 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
               .copy()
         )
         
-      # === 3) Sharp-book average Model Prob & Tier (safe) ===
+
+        # === Sharp-book average Model Prob & Tier (safe) ===
         
-        # Ensure 'Model Prob' exists
+        # 0) Make sure a base prob exists (row-level)
         if 'Model Prob' not in df_summary_base.columns:
             if 'Model_Sharp_Win_Prob' in df_summary_base.columns:
-                df_summary_base['Model Prob'] = df_summary_base['Model_Sharp_Win_Prob']
+                df_summary_base['Model Prob'] = pd.to_numeric(df_summary_base['Model_Sharp_Win_Prob'], errors='coerce')
             else:
                 df_summary_base['Model Prob'] = np.nan
         
-        # Normalize keys
+        # 1) Normalize keys
         for k in ['Bookmaker','Market','Outcome']:
             df_summary_base[k] = df_summary_base[k].astype(str).str.strip().str.lower()
-             
-        # Filter sharp rows
+        
+        # 2) Build sharp-only average map
         df_sharp = df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)].copy()
-        
-        # Build map if we have sharp rows
         if not df_sharp.empty:
-            # (re)normalize keys on the subframe just in case
-            for k in ['Market','Outcome']:
-                df_sharp[k] = df_sharp[k].astype(str).str.strip().str.lower()
-        
             model_prob_map = (
                 df_sharp
                 .groupby(['Game_Key','Market','Outcome'], as_index=False)['Model Prob']
@@ -2778,19 +2768,13 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         else:
             model_prob_map = pd.DataFrame(columns=['Game_Key','Market','Outcome','Model_Prob_SharpAvg'])
         
-        # Remove any stale column
+        # 3) Merge sharp-avg (or create empty column)
         df_summary_base = df_summary_base.drop(columns=['Model_Prob_SharpAvg'], errors='ignore')
-        
-        # Merge only if the map has rows; otherwise create the column explicitly
         if not model_prob_map.empty:
             df_summary_base = df_summary_base.merge(
-                model_prob_map,
-                on=['Game_Key','Market','Outcome'],
-                how='left',
-                validate='many_to_one',
-                suffixes=('','_dup')
+                model_prob_map, on=['Game_Key','Market','Outcome'],
+                how='left', validate='many_to_one', suffixes=('','_dup')
             )
-            # resolve accidental dup
             if 'Model_Prob_SharpAvg_dup' in df_summary_base.columns:
                 a = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
                 b = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg_dup'], errors='coerce')
@@ -2799,25 +2783,16 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         else:
             df_summary_base['Model_Prob_SharpAvg'] = np.nan
         
-        # Final safety: if still missing, create it
-        if 'Model_Prob_SharpAvg' not in df_summary_base.columns:
-            df_summary_base['Model_Prob_SharpAvg'] = np.nan
+        # 4) Use sharp-avg if present, else keep row-level
+        df_summary_base['Model Prob'] = pd.to_numeric(
+            df_summary_base.get('Model_Prob_SharpAvg', np.nan), errors='coerce'
+        ).where(lambda s: s.notna(), df_summary_base['Model Prob'])
         
-        # Collapse duplicates if any and coerce numeric
-        mp_cols = [i for i, c in enumerate(df_summary_base.columns) if c == 'Model_Prob_SharpAvg']
-        if len(mp_cols) > 1:
-            vals = df_summary_base.iloc[:, mp_cols].apply(pd.to_numeric, errors='coerce').mean(axis=1)
-            keep, drop = mp_cols[0], mp_cols[1:]
-            df_summary_base.iloc[:, keep] = vals
-            df_summary_base.drop(columns=df_summary_base.columns[drop], inplace=True)
-        else:
-            df_summary_base['Model_Prob_SharpAvg'] = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
-        
-        # Assign & tier
-        df_summary_base['Model Prob'] = df_summary_base['Model_Prob_SharpAvg']
+        # 5) Tiering
         df_summary_base['Confidence Tier'] = df_summary_base['Model Prob'].apply(tier_from_prob)
         df_summary_base['Model_Confidence_Tier'] = df_summary_base['Confidence Tier']
         
+                
 
         
         # === 4) STEP 3: safely hydrate Sharp/Rec/First_Line_Value via skinny merge (avoid row-order fillna) ===
