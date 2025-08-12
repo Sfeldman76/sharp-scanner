@@ -352,6 +352,14 @@ def build_game_key(df: pd.DataFrame) -> pd.DataFrame:
         df['Game_Key'] = synthetic_game_key
 
     return df
+# === Tiers from probability (unified) ===
+def tier_from_prob(p: float) -> str:
+    if pd.isna(p): return "⚠️ Missing"
+    if p >= 0.90: return "🔥 Steam"
+    if p >= 0.75: return "🔥 Strong Indication"
+    if p >= 0.60: return "⭐ Lean"
+    return "✅ Coinflip"
+
 
     
 def normalize_team(t):
@@ -2726,157 +2734,59 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         
         # Define summary columns
         summary_cols = [
-            'Matchup', 'Market', 'Game_Start', 'Outcome',
-            'Rec Line', 'Sharp Line', 'Rec Move', 'Sharp Move',
-            'Model Prob', 'Confidence Tier',
-            'Confidence Trend', 'Line/Model Direction', 'Tier Δ', 'Why Model Likes It',
-            'Game_Key',  # ✅ already there
-            'Snapshot_Timestamp', 'Timing_Stage', 'Timing_Opportunity_Score'   # ✅ add this line
+            'Matchup','Market','Game_Start','Outcome',
+            'Rec Line','Sharp Line','Rec Move','Sharp Move',
+            'Model Prob','Confidence Tier',
+            'Confidence Trend','Confidence Spark','Line/Model Direction','Tier Δ','Why Model Likes It',
+            'Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score'
         ]
+
         
         # Create df_summary_base
-        df_summary_base = df_pre.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
-        # === Use sharp books only to compute final Model Prob per Game × Market × Outcome
-        group_cols = ['Game_Key', 'Market', 'Outcome']
-
+        # === PATCH: sharp-book average model prob & tier ===
         df_sharp = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)]
+        
         model_prob_map = (
             df_sharp
-            .groupby(['Game_Key', 'Market', 'Outcome'])['Model Prob']
-            .mean()
-            .reset_index()
-        )
-
-        
-        df_summary_base = df_summary_base.drop(columns=['Model Prob'], errors='ignore')
-        df_summary_base = df_summary_base.merge(model_prob_map, on=['Game_Key', 'Market', 'Outcome'], how='left')
-
-        df_summary_base['Sharp Line'] = df_summary_base['Sharp Line'].fillna(df_pre['Sharp Line'])
-        df_summary_base['Rec Line'] = df_summary_base['Rec Line'].fillna(df_pre['Rec Line'])
-        # Ensure required columns exist
-        for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
-            if col not in df_summary_base.columns:
-                df_summary_base[col] = np.nan
-                     
-        # Line movement calculations
-        # === Calculate line movement on df_summary_base
-        move_start = time.time()
-        if 'First_Line_Value' in df_summary_base.columns:
-            if 'Sharp Line' in df_summary_base.columns:
-                df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
-            if 'Rec Line' in df_summary_base.columns:
-                df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
-        
-        # 🧪 Force numeric types
-        for col in ['Sharp Line', 'Rec Line', 'First_Line_Value']:
-            if col in df_summary_base.columns:
-                df_summary_base[col] = pd.to_numeric(df_summary_base[col], errors='coerce')
-        
-        # Recalculate Sharp/Rec Move just to be safe
-        df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
-        df_summary_base['Rec Move'] = (df_summary_base['Rec Line'] - df_summary_base['First_Line_Value']).round(2)
-        
-        st.info(f"📊 Movement calculations completed in {time.time() - move_start:.2f}s")
-
-        if 'Model_Sharp_Win_Prob' in df_summary_base.columns and 'Model Prob' not in df_summary_base.columns:
-            df_summary_base['Model Prob'] = df_summary_base['Model_Sharp_Win_Prob']
-        
-        if 'Model_Confidence_Tier' in df_summary_base.columns and 'Confidence Tier' not in df_summary_base.columns:
-            df_summary_base['Confidence Tier'] = df_summary_base['Model_Confidence_Tier']
-
-        df_summary_base.drop(columns=[col for col in df_summary_base.columns if col.endswith('_x')], inplace=True)
-        df_summary_base.columns = [col.replace('_y', '') if col.endswith('_y') else col for col in df_summary_base.columns]
-        # Remove true duplicate column names (keep the first occurrence)
-        df_summary_base = df_summary_base.loc[:, ~df_summary_base.columns.duplicated()]
-        # === Merge team features into df_summary_base
-        if team_feature_map is not None and not team_feature_map.empty:
-            df_summary_base['Team'] = df_summary_base['Outcome'].str.lower().str.strip()
-            df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
-       # Compute on df_pre, then build a skinny frame for merging
-        df_pre = compute_small_book_liquidity_features(df_pre)  # <-- use your existing function name
-        
-        sb_cols = [
-            'Game_Key','Market','Outcome',
-            'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
-            'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag'
-        ]
-        
-        sb_skinny = (
-            df_pre[sb_cols]
-            .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
+              .groupby(['Game_Key','Market','Outcome'])['Model Prob']
+              .mean()
+              .reset_index()
+              .rename(columns={'Model Prob':'Model_Prob_SharpAvg'})
         )
         
-        df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
-
-
-       
-
-        st.subheader("🧪 Debug: `df_summary_base` Columns + Sample")
-        #st.write(f"🔢 Rows: {len(df_summary_base)}")
-        st.write("📋 Columns:", df_summary_base.columns.tolist())
+        # Filter to sharp books
+        diag_source = diag_source[diag_source['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
         
-        #st.dataframe(df_summary_base.head(10))
-       
-        # === Compute diagnostics from df_pre (upcoming + scored)
-        # === Step 1: Use only SHARP_BOOKS for diagnostics
-        diag_source = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
-        
-        # === Step 2: Compute diagnostics across all sharp book rows (NO deduplication yet)
         if diag_source.empty:
             st.warning("⚠️ No sharp book rows available for diagnostics.")
-            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
+            for col in ['Tier Δ','Line/Model Direction','Why Model Likes It']:
                 df_summary_base[col] = "⚠️ Missing"
-                
         else:
-            # === Step 1: Run diagnostics
-            diagnostics_df = compute_diagnostics_vectorized(diag_source)        
-            # Ensure alias exists for trend extraction
-            if 'Model_Sharp_Win_Prob' in df_all_snapshots.columns and 'Model Prob' not in df_all_snapshots.columns:
-                df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
-            
-            # Step 1: Build and merge trend history (keeping full history for analysis)
-            
-            trend_history = (
-                df_all_snapshots
-                .sort_values('Snapshot_Timestamp')
-                .groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])['Model Prob']
-                .apply(list)
-                .reset_index(name='Prob_Trend_List')
-            )
-
-            diagnostics_df = diagnostics_df.merge(
-                trend_history,
-                on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'],
-                how='left'
-            )
-            # Step 2: Clip and apply sparkline (for visualization purposes)
-            MAX_SPARK_POINTS = 36
-            
-            # Clip the Prob_Trend_List to only the last MAX_SPARK_POINTS points for sparkline generation
-            diagnostics_df['Prob_Trend_List'] = diagnostics_df['Prob_Trend_List'].apply(
-                lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst
-            )
-            
-            # Generate a sparkline based on the clipped trend list
-            diagnostics_df['Confidence Spark'] = diagnostics_df['Prob_Trend_List'].apply(create_sparkline)
-            
-            # Optionally, display full line history for debugging or review:
-            #diagnostics_df[['Game_Key', 'Market', 'Outcome', 'Prob_Trend_List']].head()  # View the full trend history for some rows
-
-            
-            # Step 3: Deduplicate and merge into summary base
-            df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
-            df_summary_base = (
-                df_summary_base
-                .sort_values(['Book_Is_Sharp', 'Snapshot_Timestamp'], ascending=[False, False])
-                .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='first')
-            )
-            
+            # === Normalize keys BEFORE building rep and merging ===
+            for df_ in (df_summary_base, diag_source):
+                for k in ['Game_Key','Market','Outcome','Bookmaker']:
+                    df_[k] = df_[k].astype(str).str.strip().str.lower()
+        
+            diagnostics_df = compute_diagnostics_vectorized(diag_source)  # per-book diagnostics
+        
+            # Representative (G,M,O,Bookmaker) from the summary (already deduped earlier)
+            rep = df_summary_base[['Game_Key','Market','Outcome','Bookmaker']].drop_duplicates()
+        
+            diagnostics_pick = diagnostics_df.merge(
+                rep, on=['Game_Key','Market','Outcome','Bookmaker'], how='inner'
+            )[['Game_Key','Market','Outcome','Bookmaker',
+               'Tier Δ','Line/Model Direction','Why Model Likes It']]
+        
             df_summary_base = df_summary_base.merge(
-                diagnostics_df,
-                on=['Game_Key', 'Market', 'Outcome'],
+                diagnostics_pick,
+                on=['Game_Key','Market','Outcome','Bookmaker'],
                 how='left'
             )
+        
+            for col in ['Tier Δ','Line/Model Direction','Why Model Likes It']:
+                df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
+
+         
             
                     
             # === Step 5: Fallback fill
