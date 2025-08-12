@@ -2747,69 +2747,80 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
               .copy()
         )
         
-      # === 3) Sharp-book average Model Prob & Tier (aggregation; fixed order) ===
-
-        # 0) Ensure 'Model Prob' exists on df_summary_base (alias if needed)
+      # === 3) Sharp-book average Model Prob & Tier (safe) ===
+        
+        # Ensure 'Model Prob' exists
         if 'Model Prob' not in df_summary_base.columns:
             if 'Model_Sharp_Win_Prob' in df_summary_base.columns:
                 df_summary_base['Model Prob'] = df_summary_base['Model_Sharp_Win_Prob']
             else:
-                df_summary_base['Model Prob'] = np.nan  # fallback
+                df_summary_base['Model Prob'] = np.nan
         
-        # 1) Normalize bookmaker for filtering
-        df_summary_base['Bookmaker'] = df_summary_base['Bookmaker'].astype(str).str.strip().str.lower()
+        # Normalize keys
+        for k in ['Bookmaker','Market','Outcome']:
+            df_summary_base[k] = df_summary_base[k].astype(str).str.strip().str.lower()
         
-        # 2) Filter sharp rows
-        df_sharp = df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)]
+        # Lowercase the set once (do at import ideally)
+        SHARP_BOOKS = {b.lower() for b in SHARP_BOOKS}
         
-        # 3) Build sharp-average map WITHOUT dropping 'Model Prob' yet
-        if df_sharp.empty:
-            df_summary_base['Model_Prob_SharpAvg'] = np.nan
-        else:
+        # Filter sharp rows
+        df_sharp = df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)].copy()
+        
+        # Build map if we have sharp rows
+        if not df_sharp.empty:
+            # (re)normalize keys on the subframe just in case
+            for k in ['Market','Outcome']:
+                df_sharp[k] = df_sharp[k].astype(str).str.strip().str.lower()
+        
             model_prob_map = (
                 df_sharp
-                  .groupby(['Game_Key','Market','Outcome'], as_index=False)['Model Prob']
-                  .mean()
-                  .rename(columns={'Model Prob':'Model_Prob_SharpAvg'})
+                .groupby(['Game_Key','Market','Outcome'], as_index=False)['Model Prob']
+                .mean()
+                .rename(columns={'Model Prob':'Model_Prob_SharpAvg'})
             )
+        else:
+            model_prob_map = pd.DataFrame(columns=['Game_Key','Market','Outcome','Model_Prob_SharpAvg'])
         
-            # clear any stale 'Model_Prob_SharpAvg' (but DO NOT drop 'Model Prob' here)
-            df_summary_base = df_summary_base.drop(columns=['Model_Prob_SharpAvg'], errors='ignore')
+        # Remove any stale column
+        df_summary_base = df_summary_base.drop(columns=['Model_Prob_SharpAvg'], errors='ignore')
         
+        # Merge only if the map has rows; otherwise create the column explicitly
+        if not model_prob_map.empty:
             df_summary_base = df_summary_base.merge(
                 model_prob_map,
                 on=['Game_Key','Market','Outcome'],
                 how='left',
-                validate='many_to_one'
+                validate='many_to_one',
+                suffixes=('','_dup')
             )
-        # --- collapse any duplicate 'Model_Prob_SharpAvg' columns into one Series ---
+            # resolve accidental dup
+            if 'Model_Prob_SharpAvg_dup' in df_summary_base.columns:
+                a = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
+                b = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg_dup'], errors='coerce')
+                df_summary_base['Model_Prob_SharpAvg'] = a.where(a.notna(), b)
+                df_summary_base.drop(columns=['Model_Prob_SharpAvg_dup'], inplace=True)
+        else:
+            df_summary_base['Model_Prob_SharpAvg'] = np.nan
+        
+        # Final safety: if still missing, create it
+        if 'Model_Prob_SharpAvg' not in df_summary_base.columns:
+            df_summary_base['Model_Prob_SharpAvg'] = np.nan
+        
+        # Collapse duplicates if any and coerce numeric
         mp_cols = [i for i, c in enumerate(df_summary_base.columns) if c == 'Model_Prob_SharpAvg']
         if len(mp_cols) > 1:
-            # row-wise mean of all dup cols (coerce to numeric first)
-            mp_vals = (
-                df_summary_base.iloc[:, mp_cols]
-                .apply(pd.to_numeric, errors='coerce')
-                .mean(axis=1)
-            )
-            keep_idx, drop_idx = mp_cols[0], mp_cols[1:]
-            df_summary_base.iloc[:, keep_idx] = mp_vals
-            df_summary_base.drop(columns=df_summary_base.columns[drop_idx], inplace=True)
-        elif len(mp_cols) == 1:
-            # ensure the single column is numeric-friendly
-            df_summary_base['Model_Prob_SharpAvg'] = pd.to_numeric(
-                df_summary_base['Model_Prob_SharpAvg'], errors='coerce'
-            )
+            vals = df_summary_base.iloc[:, mp_cols].apply(pd.to_numeric, errors='coerce').mean(axis=1)
+            keep, drop = mp_cols[0], mp_cols[1:]
+            df_summary_base.iloc[:, keep] = vals
+            df_summary_base.drop(columns=df_summary_base.columns[drop], inplace=True)
         else:
-            # column missing entirely (shouldn't happen, but be defensive)
-            df_summary_base['Model_Prob_SharpAvg'] = np.nan
-
-        # 4) Now it's safe to assign
-        df_summary_base['Model Prob'] = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
+            df_summary_base['Model_Prob_SharpAvg'] = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
         
-        # 5) Recompute tier from the aggregated prob
+        # Assign & tier
+        df_summary_base['Model Prob'] = df_summary_base['Model_Prob_SharpAvg']
         df_summary_base['Confidence Tier'] = df_summary_base['Model Prob'].apply(tier_from_prob)
         df_summary_base['Model_Confidence_Tier'] = df_summary_base['Confidence Tier']
-
+        
 
         
         # === 4) STEP 3: safely hydrate Sharp/Rec/First_Line_Value via skinny merge (avoid row-order fillna) ===
