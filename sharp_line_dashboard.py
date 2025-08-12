@@ -2781,18 +2781,41 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 df_summary_base['Model_Prob_SharpAvg'] = a.where(a.notna(), b)
                 df_summary_base.drop(columns=['Model_Prob_SharpAvg_dup'], inplace=True)
         else:
-            df_summary_base['Model_Prob_SharpAvg'] = np.nan
+                    df_summary_base['Model_Prob_SharpAvg'] = np.nan
+        # --- Helper: safely fetch a column as a 1-D Series, even if duplicated or missing
+        def _safe_series(df, col, default=np.nan):
+            if col in df.columns:
+                idxs = [i for i, c in enumerate(df.columns) if c == col]
+                if len(idxs) == 1:
+                    s = df.iloc[:, idxs[0]]
+                else:
+                    # multiple columns with the same name → coerce numeric then take first non-null across dups
+                    s = (
+                        df.iloc[:, idxs]
+                          .apply(pd.to_numeric, errors='coerce')
+                          .bfill(axis=1)
+                          .iloc[:, 0]
+                    )
+            else:
+                s = pd.Series(default, index=df.index)
+            return pd.to_numeric(s, errors='coerce')
         
-        # 4) Use sharp-avg if present, else keep row-level
-        df_summary_base['Model Prob'] = pd.to_numeric(
-            df_summary_base.get('Model_Prob_SharpAvg', np.nan), errors='coerce'
-        ).where(lambda s: s.notna(), df_summary_base['Model Prob'])
+        # --- Build "sharp avg" series and base series safely
+        sharp_avg = _safe_series(df_summary_base, 'Model_Prob_SharpAvg', default=np.nan)
+        base_prob = _safe_series(df_summary_base, 'Model Prob', default=np.nan)
         
-        # 5) Tiering
+        # Prefer sharp_avg when available; otherwise keep existing/base
+        df_summary_base['Model Prob'] = sharp_avg.combine_first(base_prob)
+        
+        # Tiering stays the same
         df_summary_base['Confidence Tier'] = df_summary_base['Model Prob'].apply(tier_from_prob)
         df_summary_base['Model_Confidence_Tier'] = df_summary_base['Confidence Tier']
-        
-                
+        st.write(
+            "DEBUG: types",
+            type(df_summary_base.get('Model_Prob_SharpAvg', None)),
+            df_summary_base.columns.tolist().count('Model_Prob_SharpAvg')
+        )
+
 
         
         # === 4) STEP 3: safely hydrate Sharp/Rec/First_Line_Value via skinny merge (avoid row-order fillna) ===
