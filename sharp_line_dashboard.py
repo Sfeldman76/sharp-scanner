@@ -2782,7 +2782,27 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 how='left',
                 validate='many_to_one'
             )
-        
+        # --- collapse any duplicate 'Model_Prob_SharpAvg' columns into one Series ---
+        mp_cols = [i for i, c in enumerate(df_summary_base.columns) if c == 'Model_Prob_SharpAvg']
+        if len(mp_cols) > 1:
+            # row-wise mean of all dup cols (coerce to numeric first)
+            mp_vals = (
+                df_summary_base.iloc[:, mp_cols]
+                .apply(pd.to_numeric, errors='coerce')
+                .mean(axis=1)
+            )
+            keep_idx, drop_idx = mp_cols[0], mp_cols[1:]
+            df_summary_base.iloc[:, keep_idx] = mp_vals
+            df_summary_base.drop(columns=df_summary_base.columns[drop_idx], inplace=True)
+        elif len(mp_cols) == 1:
+            # ensure the single column is numeric-friendly
+            df_summary_base['Model_Prob_SharpAvg'] = pd.to_numeric(
+                df_summary_base['Model_Prob_SharpAvg'], errors='coerce'
+            )
+        else:
+            # column missing entirely (shouldn't happen, but be defensive)
+            df_summary_base['Model_Prob_SharpAvg'] = np.nan
+
         # 4) Now it's safe to assign
         df_summary_base['Model Prob'] = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
         
