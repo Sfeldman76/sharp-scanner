@@ -2732,29 +2732,123 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         df_pre = df_pre.merge(rec_consensus, on=['Game_Key', 'Market', 'Outcome'], how='left')
         # Fill Sharp/Rec Line for missing rows (consensus lines)
         
-        # Define summary columns
-        summary_cols = [
-            'Matchup','Market','Game_Start','Outcome',
-            'Rec Line','Sharp Line','Rec Move','Sharp Move',
-            'Model Prob','Confidence Tier',
-            'Confidence Trend','Confidence Spark','Line/Model Direction','Tier Δ','Why Model Likes It',
-            'Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score'
-        ]
-
+              
+            # === 0) Rename for display (you already did above) ===
+        # df_pre.rename({...}, inplace=True)
         
-        # Create df_summary_base
-        # === PATCH: sharp-book average model prob & tier ===
-        df_sharp = df_summary_base[df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS)]
+        # === 1) Consensus lines (you already built Sharp/Rec Line on df_pre) ===
+        # sharp_consensus / rec_consensus merges already done above on df_pre
         
-        model_prob_map = (
-            df_sharp
-              .groupby(['Game_Key','Market','Outcome'])['Model Prob']
-              .mean()
-              .reset_index()
-              .rename(columns={'Model Prob':'Model_Prob_SharpAvg'})
+        # === 2) Create df_summary_base as latest-per-book rows ===
+        df_summary_base = (
+            df_pre
+              .sort_values('Snapshot_Timestamp')
+              .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
+              .copy()
         )
         
-        # Filter to sharp books
+        # === 3) Sharp-book average Model Prob & Tier (aggregation) ===
+        df_sharp = df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)]
+        if df_sharp.empty:
+            df_summary_base['Model_Prob_SharpAvg'] = np.nan
+        else:
+            model_prob_map = (
+                df_sharp.groupby(['Game_Key','Market','Outcome'])['Model Prob']
+                .mean().reset_index().rename(columns={'Model Prob':'Model_Prob_SharpAvg'})
+            )
+            df_summary_base = df_summary_base.drop(columns=['Model Prob'], errors='ignore')
+            df_summary_base = df_summary_base.merge(model_prob_map, on=['Game_Key','Market','Outcome'], how='left')
+        
+        df_summary_base['Model Prob'] = df_summary_base['Model_Prob_SharpAvg']
+        df_summary_base['Confidence Tier'] = df_summary_base['Model Prob'].apply(tier_from_prob)
+
+        df_summary_base['Model_Confidence_Tier'] = df_summary_base['Confidence Tier']
+        
+        # === 4) STEP 3: safely hydrate Sharp/Rec/First_Line_Value via skinny merge (avoid row-order fillna) ===
+        skinny_lines = (
+            df_pre[['Game_Key','Market','Outcome','Sharp Line','Rec Line','First_Line_Value']]
+            .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
+        )
+        df_summary_base = df_summary_base.merge(
+            skinny_lines, on=['Game_Key','Market','Outcome'], how='left', suffixes=('','_src')
+        )
+        for c in ['Sharp Line','Rec Line','First_Line_Value']:
+            src = f'{c}_src'
+            if src in df_summary_base.columns:
+                df_summary_base[c] = df_summary_base[c].where(df_summary_base[c].notna(), df_summary_base[src])
+        df_summary_base.drop(columns=[c for c in df_summary_base.columns if c.endswith('_src')], inplace=True)
+        
+        # === 5) Movement calcs (use numeric) ===
+        for col in ['Sharp Line','Rec Line','First_Line_Value']:
+            if col in df_summary_base.columns:
+                df_summary_base[col] = pd.to_numeric(df_summary_base[col], errors='coerce')
+        df_summary_base['Sharp Move'] = (df_summary_base['Sharp Line'] - df_summary_base['First_Line_Value']).round(2)
+        df_summary_base['Rec Move']   = (df_summary_base['Rec Line']  - df_summary_base['First_Line_Value']).round(2)
+        
+        # === 6) Aggregated sharp-only trend + spark (from df_all_snapshots) ===
+        if 'Model Prob' not in df_all_snapshots.columns and 'Model_Sharp_Win_Prob' in df_all_snapshots.columns:
+            df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
+        
+        snap_sharp = df_all_snapshots[df_all_snapshots['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
+        
+        first_prob_map = (
+            snap_sharp
+              .sort_values('Snapshot_Timestamp')
+              .groupby(['Game_Key','Market','Outcome'])['Model Prob']
+              .first().reset_index()
+              .rename(columns={'Model Prob':'First_Sharp_Prob_Agg'})
+        )
+        df_summary_base = df_summary_base.merge(first_prob_map, on=['Game_Key','Market','Outcome'], how='left')
+        
+        _prob_now   = df_summary_base['Model Prob']
+        _prob_start = df_summary_base['First_Sharp_Prob_Agg']
+        df_summary_base['Confidence Trend'] = np.where(
+            _prob_now.isna() | _prob_start.isna(),
+            "⚠️ Missing",
+            np.where(
+                (_prob_now - _prob_start) >= 0.04,
+                "📈 Trending Up: " + (_prob_start*100).round(1).astype(str) + "% → " + (_prob_now*100).round(1).astype(str) + "%",
+                np.where(
+                    (_prob_now - _prob_start) <= -0.04,
+                    "📉 Trending Down: " + (_prob_start*100).round(1).astype(str) + "% → " + (_prob_now*100).round(1).astype(str) + "%",
+                    "↔ Stable: " + (_prob_start*100).round(1).astype(str) + "% → " + (_prob_now*100).round(1).astype(str) + "%"
+                )
+            )
+        )
+        
+        trend_history_sharp = (
+            snap_sharp
+              .sort_values('Snapshot_Timestamp')
+              .groupby(['Game_Key','Market','Outcome','Snapshot_Timestamp'])['Model Prob']
+              .mean()                              # avg across sharp books per timestamp
+              .groupby(level=[0,1,2]).apply(list)  # collect to list per (G,M,O)
+              .reset_index(name='Prob_Trend_List_Agg')
+        )
+        df_summary_base = df_summary_base.merge(
+            trend_history_sharp, on=['Game_Key','Market','Outcome'], how='left'
+        )
+        MAX_SPARK_POINTS = 36
+        df_summary_base['Confidence Spark'] = (
+            df_summary_base['Prob_Trend_List_Agg']
+              .apply(lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst)
+              .apply(create_sparkline)
+        )
+        
+        # === 7) STEP 4: select representative book row (sharp-first, latest) ===
+        df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
+        df_summary_base = (
+            df_summary_base
+            .sort_values(['Book_Is_Sharp','Snapshot_Timestamp'], ascending=[False, False])
+            .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='first')
+            .drop(columns=['Book_Is_Sharp'])
+        )
+        
+        # === 8) STEP 5: per-book diagnostics built on latest-per-book sharp rows from df_pre, then attach ===
+        diag_source = (
+            df_pre
+              .sort_values('Snapshot_Timestamp')
+              .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
+        )
         diag_source = diag_source[diag_source['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
         
         if diag_source.empty:
@@ -2762,16 +2856,14 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             for col in ['Tier Δ','Line/Model Direction','Why Model Likes It']:
                 df_summary_base[col] = "⚠️ Missing"
         else:
-            # === Normalize keys BEFORE building rep and merging ===
+            # normalize keys before merge
             for df_ in (df_summary_base, diag_source):
                 for k in ['Game_Key','Market','Outcome','Bookmaker']:
                     df_[k] = df_[k].astype(str).str.strip().str.lower()
         
             diagnostics_df = compute_diagnostics_vectorized(diag_source)  # per-book diagnostics
         
-            # Representative (G,M,O,Bookmaker) from the summary (already deduped earlier)
             rep = df_summary_base[['Game_Key','Market','Outcome','Bookmaker']].drop_duplicates()
-        
             diagnostics_pick = diagnostics_df.merge(
                 rep, on=['Game_Key','Market','Outcome','Bookmaker'], how='inner'
             )[['Game_Key','Market','Outcome','Bookmaker',
@@ -2782,44 +2874,46 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 on=['Game_Key','Market','Outcome','Bookmaker'],
                 how='left'
             )
-        
             for col in ['Tier Δ','Line/Model Direction','Why Model Likes It']:
                 df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
-
-         
-            
-                    
-            # === Step 5: Fallback fill
-            for col in ['Confidence Trend', 'Tier Δ', 'Line/Model Direction', 'Why Model Likes It', 'Confidence Spark']:
-                df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
-            
-            #st.write("🧪 Columns in filtered_df after diagnostics merge:")
-            #st.write(df_summary_base.columns.tolist())
-                    
-     
         
-        #st.markdown("### 🧪 Summary Grouped Debug View")
+        # === 9) (Optional) merge team features and small-book liquidity AFTER the dedupe ===
+        if team_feature_map is not None and not team_feature_map.empty:
+            df_summary_base['Team'] = df_summary_base['Outcome'].astype(str).str.strip().str.lower()
+            df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
         
-        # Print column list
-        #st.code(f"🧩 Columns in summary_after sharp diag:\n{summary_grouped.columns.tolist()}")
-        # === 6. Final Summary Table ===
-
-        # Define the core columns we want to extract
-
-        # Define the core columns we want to extract — match these to the renamed names
+        df_pre = compute_small_book_liquidity_features(df_pre)
+        sb_cols = [
+            'Game_Key','Market','Outcome',
+            'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
+            'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag'
+        ]
+        sb_skinny = (
+            df_pre[sb_cols]
+            .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
+        )
+        df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
         
-        summary_df = df_summary_base[[col for col in summary_cols if col in df_summary_base.columns]].copy()
-
+        # === 10) Build summary_df with selected columns ===
+        summary_cols = [
+            'Matchup','Market','Game_Start','Outcome',
+            'Rec Line','Sharp Line','Rec Move','Sharp Move',
+            'Model Prob','Confidence Tier',
+            'Confidence Trend','Confidence Spark','Line/Model Direction','Tier Δ','Why Model Likes It',
+            'Game_Key','Snapshot_Timestamp','Timing_Stage','Timing_Opportunity_Score'
+        ]
+        summary_df = df_summary_base[[c for c in summary_cols if c in df_summary_base.columns]].copy()
         
-        # Convert and format datetime columns
+        # time/formatting
         summary_df['Game_Start'] = pd.to_datetime(summary_df['Game_Start'], errors='coerce', utc=True)
         summary_df = summary_df[summary_df['Game_Start'].notna()]
         summary_df['Date + Time (EST)'] = summary_df['Game_Start'].dt.tz_convert('US/Eastern').dt.strftime('%Y-%m-%d %I:%M %p')
         summary_df['Event_Date_Only'] = summary_df['Game_Start'].dt.date.astype(str)
         
-        # Clean column suffixes and duplicates if any remain
+        # cleanup
         summary_df.columns = summary_df.columns.str.replace(r'_x$|_y$|_scored$', '', regex=True)
         summary_df = summary_df.loc[:, ~summary_df.columns.duplicated()]
+
         
         # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
         # === 🔍 Diagnostic: Check for duplicate Game × Market × Outcome
@@ -2849,85 +2943,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         if selected_date != "All":
             filtered_df = filtered_df[filtered_df['Event_Date_Only'] == selected_date]
         
-        # --- guard diagnostics_df ---
-        if diagnostics_df is None or diagnostics_df.empty:
-            diagnostics_df = pd.DataFrame()
-        
-        # 1) Alias 'Model Prob Snapshot'
-        if 'Model Prob Snapshot' not in diagnostics_df.columns:
-            if 'Model Prob' in diagnostics_df.columns:
-                diagnostics_df['Model Prob Snapshot'] = diagnostics_df['Model Prob']
-            elif 'Model_Sharp_Win_Prob' in diagnostics_df.columns:
-                diagnostics_df['Model Prob Snapshot'] = diagnostics_df['Model_Sharp_Win_Prob']
-            else:
-                diagnostics_df['Model Prob Snapshot'] = np.nan
-        
-        # 2) Ensure optional columns exist
-        for col in ['Model_Confidence_Tier','Timing_Stage','Timing_Opportunity_Score','Confidence Spark']:
-            if col not in diagnostics_df.columns:
-                diagnostics_df[col] = np.nan
-        
-        # 2a) Keep score numeric if present
-        diagnostics_df['Timing_Opportunity_Score'] = pd.to_numeric(
-            diagnostics_df['Timing_Opportunity_Score'], errors='coerce'
-        )
-        
-        # 3) Create shadow normalized keys (don’t mutate display columns)
-        for df_ in (diagnostics_df, filtered_df):
-            for c in ['Game_Key','Market','Outcome']:
-                df_[f'{c}_norm'] = df_[c].astype(str).str.strip().str.lower()
-        
-        # 4) Dedup base
-        filtered_df = (
-            filtered_df
-            .sort_values('Snapshot_Timestamp', ascending=False)
-            .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='first')
-        )
-        
-        # 5) Build diagnostics_dedup safely
-        select_cols = [
-            'Game_Key','Market','Outcome',
-            'Confidence Trend','Tier Δ','Line/Model Direction','Why Model Likes It',
-            'Model Prob Snapshot','Model_Confidence_Tier','Timing_Stage','Timing_Opportunity_Score','Confidence Spark',
-            # include the norm keys for join
-            'Game_Key_norm','Market_norm','Outcome_norm'
-        ]
-        
-        missing = [c for c in select_cols if c not in diagnostics_df.columns]
-        for c in missing:  # should be none due to defaults, but just in case
-            diagnostics_df[c] = np.nan
-        
-        diagnostics_dedup = (
-            diagnostics_df
-            .drop_duplicates(subset=['Game_Key_norm','Market_norm','Outcome_norm'], keep='last')
-            .loc[:, select_cols]
-            .rename(columns={
-                'Model Prob Snapshot': 'Model Prob',
-                'Model_Confidence_Tier': 'Confidence Tier'
-            })
-        )
-        
-        # 🔻 drop any old diagnostics in filtered_df to avoid _x/_y
-        diagnostic_cols = [
-            'Model Prob','Confidence Tier',
-            'Confidence Trend','Tier Δ','Line/Model Direction','Why Model Likes It',
-            'Timing_Stage','Timing_Opportunity_Score','Confidence Spark'
-        ]
-        filtered_df = filtered_df.drop(columns=[c for c in diagnostic_cols if c in filtered_df.columns], errors='ignore')
-        
-        # 🔑 create norm keys in filtered_df for join
-        # (already created above)
-        
-        # ✅ Merge on the shadow keys, keep originals for display
-        filtered_df = filtered_df.merge(
-            diagnostics_dedup.drop(columns=['Game_Key','Market','Outcome']),  # avoid overwriting display cols
-            left_on=['Game_Key_norm','Market_norm','Outcome_norm'],
-            right_on=['Game_Key_norm','Market_norm','Outcome_norm'],
-            how='left'
-        )
-        
-        # (optional) drop the *_norm helper columns after merge
-        filtered_df = filtered_df.drop(columns=['Game_Key_norm','Market_norm','Outcome_norm'], errors='ignore')
+
 
       
         #st.write("🧪 Columns ibefore soummary group:")
