@@ -2747,22 +2747,56 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
               .copy()
         )
         
-        # === 3) Sharp-book average Model Prob & Tier (aggregation) ===
+        # === 3) Sharp-book average Model Prob & Tier (aggregation; robust) ===
+        
+        # Ensure Bookmaker is normalized before filtering
+        df_summary_base['Bookmaker'] = df_summary_base['Bookmaker'].astype(str).str.strip().str.lower()
+        
+        # Clean any stale columns from prior runs
+        df_summary_base = df_summary_base.drop(columns=['Model_Prob_SharpAvg', 'Model Prob'], errors='ignore')
+        
+        # Filter to sharp books (SHARP_BOOKS should already be lowercase)
         df_sharp = df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)]
+        
         if df_sharp.empty:
+            # No sharp rows: create the column so downstream code is happy
             df_summary_base['Model_Prob_SharpAvg'] = np.nan
         else:
+            # Build unique per (G,M,O) map
             model_prob_map = (
-                df_sharp.groupby(['Game_Key','Market','Outcome'])['Model Prob']
-                .mean().reset_index().rename(columns={'Model Prob':'Model_Prob_SharpAvg'})
+                df_sharp
+                  .groupby(['Game_Key','Market','Outcome'], as_index=False)['Model Prob']
+                  .mean()
+                  .rename(columns={'Model Prob':'Model_Prob_SharpAvg'})
             )
-            df_summary_base = df_summary_base.drop(columns=['Model Prob'], errors='ignore')
-            df_summary_base = df_summary_base.merge(model_prob_map, on=['Game_Key','Market','Outcome'], how='left')
         
+            # Merge with validation to catch accidental fan-out
+            df_summary_base = df_summary_base.merge(
+                model_prob_map,
+                on=['Game_Key','Market','Outcome'],
+                how='left',
+                validate='many_to_one',
+                suffixes=('', '_dup')  # guard against accidental dup col names
+            )
+        
+            # If a duplicate snuck in, collapse it
+            if 'Model_Prob_SharpAvg_dup' in df_summary_base.columns:
+                # prefer non-null between the two, or take mean if both present
+                a = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
+                b = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg_dup'], errors='coerce')
+                df_summary_base['Model_Prob_SharpAvg'] = a.where(a.notna(), b)
+                df_summary_base.drop(columns=['Model_Prob_SharpAvg_dup'], inplace=True)
+        
+        # Make sure it's numeric
+        df_summary_base['Model_Prob_SharpAvg'] = pd.to_numeric(df_summary_base['Model_Prob_SharpAvg'], errors='coerce')
+        
+        # Final assignment (now guaranteed to be a Series, not a DataFrame)
         df_summary_base['Model Prob'] = df_summary_base['Model_Prob_SharpAvg']
+        
+        # Recompute tier strictly from aggregated prob (handles NaN)
         df_summary_base['Confidence Tier'] = df_summary_base['Model Prob'].apply(tier_from_prob)
-
         df_summary_base['Model_Confidence_Tier'] = df_summary_base['Confidence Tier']
+
         
         # === 4) STEP 3: safely hydrate Sharp/Rec/First_Line_Value via skinny merge (avoid row-order fillna) ===
         skinny_lines = (
