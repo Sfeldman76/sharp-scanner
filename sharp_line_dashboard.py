@@ -2858,53 +2858,73 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         df_summary_base['Rec Move']   = (df_summary_base['Rec Line']  - df_summary_base['First_Line_Value']).round(2)
         
         # === 6) Aggregated sharp-only trend + spark (from df_all_snapshots) ===
+        # === 6) Aggregated sharp-only trend + spark (from df_all_snapshots) ===
+        # Ensure we have a consistent prob column in snapshots
         if 'Model Prob' not in df_all_snapshots.columns and 'Model_Sharp_Win_Prob' in df_all_snapshots.columns:
-            df_all_snapshots['Model Prob'] = df_all_snapshots['Model_Sharp_Win_Prob']
+            df_all_snapshots['Model Prob'] = pd.to_numeric(df_all_snapshots['Model_Sharp_Win_Prob'], errors='coerce')
+        else:
+            df_all_snapshots['Model Prob'] = pd.to_numeric(df_all_snapshots.get('Model Prob'), errors='coerce')
         
+        # Sharp books only
         snap_sharp = df_all_snapshots[df_all_snapshots['Bookmaker'].str.lower().isin(SHARP_BOOKS)].copy()
+        snap_sharp['Snapshot_Timestamp'] = pd.to_datetime(snap_sharp['Snapshot_Timestamp'], errors='coerce', utc=True)
         
-        first_prob_map = (
+        # --- Single source of truth: per-timestamp sharp-book AVERAGE ---
+        sharp_ts_avg = (
             snap_sharp
+              .dropna(subset=['Snapshot_Timestamp'])
               .sort_values('Snapshot_Timestamp')
-              .groupby(['Game_Key','Market','Outcome'])['Model Prob']
-              .first().reset_index()
+              .groupby(['Game_Key','Market','Outcome','Snapshot_Timestamp'], as_index=False)['Model Prob']
+              .mean()  # avg across sharp books at each timestamp
+        )
+        
+        # First sharp prob (from the same averaged series)
+        first_prob_map = (
+            sharp_ts_avg
+              .groupby(['Game_Key','Market','Outcome'], as_index=False)['Model Prob']
+              .first()
               .rename(columns={'Model Prob':'First_Sharp_Prob_Agg'})
         )
-        df_summary_base = df_summary_base.merge(first_prob_map, on=['Game_Key','Market','Outcome'], how='left')
         
-        _prob_now   = df_summary_base['Model Prob']
-        _prob_start = df_summary_base['First_Sharp_Prob_Agg']
-        df_summary_base['Confidence Trend'] = np.where(
-            _prob_now.isna() | _prob_start.isna(),
-            "⚠️ Missing",
-            np.where(
-                (_prob_now - _prob_start) >= 0.04,
-                "📈 Trending Up: " + (_prob_start*100).round(1).astype(str) + "% → " + (_prob_now*100).round(1).astype(str) + "%",
-                np.where(
-                    (_prob_now - _prob_start) <= -0.04,
-                    "📉 Trending Down: " + (_prob_start*100).round(1).astype(str) + "% → " + (_prob_now*100).round(1).astype(str) + "%",
-                    "↔ Stable: " + (_prob_start*100).round(1).astype(str) + "% → " + (_prob_now*100).round(1).astype(str) + "%"
-                )
-            )
-        )
-        
+        # Full trend list (from the same averaged series)
         trend_history_sharp = (
-            snap_sharp
-              .sort_values('Snapshot_Timestamp')
-              .groupby(['Game_Key','Market','Outcome','Snapshot_Timestamp'])['Model Prob']
-              .mean()                              # avg across sharp books per timestamp
-              .groupby(level=[0,1,2]).apply(list)  # collect to list per (G,M,O)
+            sharp_ts_avg
+              .groupby(['Game_Key','Market','Outcome'])['Model Prob']
+              .apply(list)
               .reset_index(name='Prob_Trend_List_Agg')
         )
-        df_summary_base = df_summary_base.merge(
-            trend_history_sharp, on=['Game_Key','Market','Outcome'], how='left'
-        )
+        
+        # Merge onto summary
+        df_summary_base = df_summary_base.merge(first_prob_map, on=['Game_Key','Market','Outcome'], how='left')
+        df_summary_base = df_summary_base.merge(trend_history_sharp, on=['Game_Key','Market','Outcome'], how='left')
+        
+        # Confidence Trend from the SAME series as the sparkline (first→current)
+        def _trend_text_from_list(lst, current):
+            if not isinstance(lst, list) or len(lst) == 0 or pd.isna(current):
+                return "⚠️ Missing"
+            start = lst[0]
+            if pd.isna(start):
+                return "⚠️ Missing"
+            if current == start:
+                return f"↔ Stable: {start:.1%} → {current:.1%}"
+            arrow = "📈 Trending Up" if current > start else "📉 Trending Down"
+            return f"{arrow}: {start:.1%} → {current:.1%}"
+        
+        # Current prob (already set earlier to sharp-avg-or-base)
+        _prob_now = pd.to_numeric(df_summary_base['Model Prob'], errors='coerce')
+        
+        df_summary_base['Confidence Trend'] = [
+            _trend_text_from_list(lst, cur) for lst, cur in zip(df_summary_base['Prob_Trend_List_Agg'], _prob_now)
+        ]
+        
+        # Confidence Spark using your existing function on the SAME history
         MAX_SPARK_POINTS = 36
         df_summary_base['Confidence Spark'] = (
             df_summary_base['Prob_Trend_List_Agg']
               .apply(lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst)
               .apply(create_sparkline)
         )
+
         
         # === 7) STEP 4: select representative book row (sharp-first, latest) ===
         df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
