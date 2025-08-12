@@ -2687,17 +2687,24 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # === Step 5: Merge firsts into pre-game picks
         df_pre = df_pre.merge(df_first_cols, on=merge_keys, how='left')
         
-        # === Step 6: Resolve _x/_y conflicts
-        for col in ['First_Model_Prob', 'First_Line_Value', 'First_Tier']:
+       # === Step 6: Resolve _x/_y conflicts (include First_Sharp_Prob)
+        for col in ['First_Sharp_Prob', 'First_Model_Prob', 'First_Line_Value', 'First_Tier']:
             y_col = f"{col}_y"
             x_col = f"{col}_x"
             if y_col in df_pre.columns:
+                # prefer the merged (right) side
                 df_pre[col] = df_pre[y_col]
                 df_pre.drop(columns=[y_col], inplace=True)
             if x_col in df_pre.columns:
                 df_pre.drop(columns=[x_col], inplace=True)
         
         df_pre.drop(columns=['_merge'], errors='ignore', inplace=True)
+
+        # Backfill First_Sharp_Prob from First_Model_Prob if missing
+        first_sharp = pd.to_numeric(df_pre.get('First_Sharp_Prob', np.nan), errors='coerce')
+        first_model = pd.to_numeric(df_pre.get('First_Model_Prob', np.nan), errors='coerce')
+        df_pre['First_Sharp_Prob'] = first_sharp.combine_first(first_model)
+
 
         
         # === Optional: Normalize again (safety for downstream groupby)
