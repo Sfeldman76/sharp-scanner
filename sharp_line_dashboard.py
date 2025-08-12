@@ -2832,11 +2832,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # Tiering stays the same
         df_summary_base['Confidence Tier'] = df_summary_base['Model Prob'].apply(tier_from_prob)
         df_summary_base['Model_Confidence_Tier'] = df_summary_base['Confidence Tier']
-        st.write(
-            "DEBUG: types",
-            type(df_summary_base.get('Model_Prob_SharpAvg', None)),
-            df_summary_base.columns.tolist().count('Model_Prob_SharpAvg')
-        )
+     
 
 
         st.write("📋 Columns in df_summary_base_end:", df_summary_base.columns.tolist())
@@ -2942,8 +2938,11 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             rep = df_summary_base[['Game_Key','Market','Outcome','Bookmaker']].drop_duplicates()
             diagnostics_pick = diagnostics_df.merge(
                 rep, on=['Game_Key','Market','Outcome','Bookmaker'], how='inner'
-            )[['Game_Key','Market','Outcome','Bookmaker',
-               'Tier Δ','Line/Model Direction','Why Model Likes It']]
+            )[[
+                'Game_Key','Market','Outcome','Bookmaker',
+                'Tier Δ','Line/Model Direction','Why Model Likes It',
+                'Timing_Opportunity_Score','Timing_Stage'  # <-- add these
+            ]]
         
             df_summary_base = df_summary_base.merge(
                 diagnostics_pick,
@@ -2969,6 +2968,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
         )
         df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
+        #st.write( df_summary_base.columns.tolist())
         
         # === 10) Build summary_df with selected columns ===
         summary_cols = [
