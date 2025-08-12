@@ -2759,10 +2759,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # Normalize keys
         for k in ['Bookmaker','Market','Outcome']:
             df_summary_base[k] = df_summary_base[k].astype(str).str.strip().str.lower()
-        
-        # Lowercase the set once (do at import ideally)
-        SHARP_BOOKS = {b.lower() for b in SHARP_BOOKS}
-        
+             
         # Filter sharp rows
         df_sharp = df_summary_base[df_summary_base['Bookmaker'].isin(SHARP_BOOKS)].copy()
         
