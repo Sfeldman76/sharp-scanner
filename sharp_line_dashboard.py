@@ -1871,15 +1871,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
 
 
+        book_reliability_map = build_book_reliability_map(df_bt, prior_strength=200.0)
 
 
         # === Save ensemble (choose one or both)
         trained_models[market] = {
             "model": model_auc,
             "calibrator": cal_auc,
-            "team_feature_map": team_feature_map  # ✅ include this here for later use
+            "team_feature_map": team_feature_map,
+            "book_reliability_map": book_reliability_map  # ✅ include for in-memory use
         }
-        save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET, team_feature_map=team_feature_map)
+
+        save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET, team_feature_map=team_feature_map,book_reliability_map=book_reliability_map)
         from scipy.stats import entropy
         
        
@@ -1936,6 +1939,12 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
         "logloss": logloss_val
     }
 
+
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.calibration import CalibratedClassifierCV
+import numpy as np
+import pandas as pd
+
 def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
 
@@ -1943,7 +1952,7 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
     query = f"""
         SELECT *
         FROM `sharplogger.sharp_data.sharp_scores_full`
-        WHERE Sport = '{sport.upper()}'
+        WHERE UPPER(Sport) = '{sport.upper()}'
           AND Scored = TRUE
           AND SHARP_HIT_BOOL IS NOT NULL
           AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
@@ -1953,66 +1962,93 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
         st.warning("⚠️ No historical sharp picks available.")
         return
 
-    # Define markets
-    for market in ['spreads', 'totals', 'h2h']:
+    # Normalize types/casing used below
+    df = df.copy()
+    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
+    df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(int)
+
+    # If Model_Sharp_Win_Prob is missing, create a neutral column
+    if 'Model_Sharp_Win_Prob' not in df.columns:
+        df['Model_Sharp_Win_Prob'] = 0.0
+    else:
+        df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce').fillna(0.0)
+
+    markets = ['spreads', 'totals', 'h2h']
+    for market in markets:
         df_market = df[df['Market'] == market].copy()
         if df_market.empty:
             st.warning(f"⚠️ No rows for market: {market}")
             continue
 
-        # Create label
-        threshold = df_market['Abs_Line_Move_From_Opening'].quantile(0.80)
-        odds_threshold = df_market['Abs_Odds_Move_From_Opening'].quantile(0.80)
+        # Ensure numeric for movement columns (they exist in your schema)
+        for c in ['Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening']:
+            if c not in df_market.columns:
+                df_market[c] = 0.0
+            df_market[c] = pd.to_numeric(df_market[c], errors='coerce').fillna(0.0)
+
+        # Label: “good timing” when we hit + (both moves not already extreme) OR the model was strong
+        mv_thresh  = df_market['Abs_Line_Move_From_Opening'].quantile(0.80)
+        odd_thresh = df_market['Abs_Odds_Move_From_Opening'].quantile(0.80)
         df_market['TIMING_OPPORTUNITY_LABEL'] = (
-        (df_market['SHARP_HIT_BOOL'] == 1) &
+            (df_market['SHARP_HIT_BOOL'] == 1) &
             (
-                ((df_market['Abs_Line_Move_From_Opening'] < threshold) &
-                 (df_market['Abs_Odds_Move_From_Opening'] < odds_threshold))
+                ((df_market['Abs_Line_Move_From_Opening'] < mv_thresh) &
+                 (df_market['Abs_Odds_Move_From_Opening'] < odd_thresh))
                 |
-                (df_market['Model_Sharp_Win_Prob'] > 0.6)
+                (df_market['Model_Sharp_Win_Prob'] > 0.60)
             )
         ).astype(int)
-        
-        features = [
-            'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
-        ] + [
-            f'SharpMove_Magnitude_{b}' for b in [
-                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
-            ]
-        ] + [
-            f'OddsMove_Magnitude_{b}' for b in [
-                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
-            ]
-        ]
 
-        X = df_market[features].fillna(0)
+        # Feature list (present in your schema)
+        base_feats = [
+            'Abs_Line_Move_From_Opening',
+            'Abs_Odds_Move_From_Opening',
+            'Late_Game_Steam_Flag'
+        ]
+        sharp_blocks = [
+            'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+            'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+            'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+            'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
+        ]
+        timing_feats = [f'SharpMove_Magnitude_{b}' for b in sharp_blocks]
+        odds_feats   = [f'OddsMove_Magnitude_{b}' for b in sharp_blocks]
+
+        # Keep only features that actually exist
+        feature_cols = [c for c in base_feats + timing_feats + odds_feats if c in df_market.columns]
+        if not feature_cols:
+            st.warning(f"⚠️ No usable features for {market} — skipping.")
+            continue
+
+        X = df_market[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
         y = df_market['TIMING_OPPORTUNITY_LABEL']
+
+        # Safety: enough samples & both classes present & enough per-class for cv=5
         if y.nunique() < 2:
             st.warning(f"⚠️ Not enough variation in label for {market} — skipping.")
             continue
+        n_min_class = min((y == 0).sum(), (y == 1).sum())
+        if len(y) < 50 or n_min_class < 5:
+            st.warning(f"⚠️ Not enough samples for robust CV (n={len(y)}, min_class={n_min_class}) — skipping {market}.")
+            continue
 
-        model = GradientBoostingClassifier()
-        calibrated = CalibratedClassifierCV(model, method='isotonic', cv=5)
+        # Train calibrated model
+        base = GradientBoostingClassifier()
+        calibrated = CalibratedClassifierCV(base, method='isotonic', cv=5)
         calibrated.fit(X, y)
 
-        # ✅ Save market-specific model
+        # Save the timing model; it does NOT need book_reliability_map
         save_model_to_gcs(
-            model=calibrated,
-            calibrator=None,
+            model=calibrated,           # store under "model" slot
+            calibrator=None,            # no separate calibrator object
             sport=sport,
-            market=f"timing_{market}",  # 👈 now market is defined
+            market=f"timing_{market}",  # namespaced market
             bucket_name=GCS_BUCKET,
-            team_feature_map=None
+            team_feature_map=None,      # not used here
+            book_reliability_map=None   # keep explicit to avoid NameError
         )
         st.success(f"✅ Timing model saved for {market.upper()}")
-        
-        
+
     
 def read_market_weights_from_bigquery():
     try:
@@ -2419,9 +2455,12 @@ from io import BytesIO
 import pickle
 import logging
 
-def save_model_to_gcs(model, calibrator, sport, market, team_feature_map=None, bucket_name="sharp-models"):
+def save_model_to_gcs(model, calibrator, sport, market, 
+                      team_feature_map=None, 
+                      book_reliability_map=None, 
+                      bucket_name="sharp-models"):
     """
-    Save a trained model, calibrator, and optional team_feature_map to Google Cloud Storage.
+    Save a trained model, calibrator, and optional feature maps to Google Cloud Storage.
 
     Parameters:
     - model: Trained XGBoost or sklearn model
@@ -2429,6 +2468,7 @@ def save_model_to_gcs(model, calibrator, sport, market, team_feature_map=None, b
     - sport (str): e.g., "nfl"
     - market (str): e.g., "spreads"
     - team_feature_map (pd.DataFrame or None): Optional team-level stats used in scoring
+    - book_reliability_map (dict or pd.DataFrame or None): Optional bookmaker reliability scores
     - bucket_name (str): GCS bucket name
     """
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
@@ -2447,6 +2487,9 @@ def save_model_to_gcs(model, calibrator, sport, market, team_feature_map=None, b
         if team_feature_map is not None:
             payload["team_feature_map"] = team_feature_map
 
+        if book_reliability_map is not None:
+            payload["book_reliability_map"] = book_reliability_map
+
         # Serialize to bytes
         buffer = BytesIO()
         pickle.dump(payload, buffer)
@@ -2455,7 +2498,12 @@ def save_model_to_gcs(model, calibrator, sport, market, team_feature_map=None, b
         # Upload to GCS
         blob.upload_from_file(buffer, content_type='application/octet-stream')
 
-        print(f"✅ Model + calibrator{' + team features' if team_feature_map is not None else ''} saved to GCS: gs://{bucket_name}/{filename}")
+        print(
+            f"✅ Model + calibrator"
+            f"{' + team features' if team_feature_map is not None else ''}"
+            f"{' + book reliability map' if book_reliability_map is not None else ''} "
+            f"saved to GCS: gs://{bucket_name}/{filename}"
+        )
 
     except Exception as e:
         logging.error(f"❌ Failed to save model to GCS: {e}", exc_info=True)
