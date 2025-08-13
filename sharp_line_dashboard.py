@@ -2499,33 +2499,72 @@ def _as_num_seq(x):
     # Coerce to numeric and drop NaNs
     return pd.to_numeric(pd.Series(seq), errors='coerce').dropna().tolist()
 # === Global utility for creating a sparkline with the full trend history
-def create_sparkline(probs):
-    if not probs or len(probs) < 2 or all(pd.isna(probs)):
+# === Global utility for creating a sparkline with the full trend history
+
+def create_sparkline_html_safe(probs):
+    # normalize to numeric list
+    if probs is None or (isinstance(probs, (float, int, np.floating, np.integer)) and pd.isna(probs)):
+        vals = []
+    elif isinstance(probs, (list, tuple, np.ndarray, pd.Series)):
+        vals = pd.to_numeric(pd.Series(list(probs)), errors='coerce').dropna().tolist()
+    elif isinstance(probs, str):
+        s = probs.strip()
+        parsed = None
+        if s.startswith('[') and s.endswith(']'):
+            try:
+                parsed = json.loads(s)
+            except Exception:
+                parsed = None
+        if parsed is None:
+            try:
+                parsed = [float(tok) for tok in re.split(r'[,\s]+', s) if tok]
+            except Exception:
+                parsed = []
+        vals = pd.to_numeric(pd.Series(parsed), errors='coerce').dropna().tolist()
+    else:
+        try:
+            vals = [float(probs)]
+        except Exception:
+            vals = []
+
+    if len(vals) < 2:
         return "—"
 
-    # Filter out NaN values
-    probs = [p for p in probs if pd.notna(p)]
-    if len(probs) == 0:
-        return "—"
-    
-    # Prepare label for hover
-    percent_labels = [f"{round(p * 100, 1)}%" for p in probs]
-    tooltip = " → ".join(percent_labels)
-
-    # Characters: use a compact set of horizontal bars
+    # tooltip + spark
+    labels = [f"{round(p * 100, 1)}%" for p in vals]
+    tooltip = html.escape(" → ".join(labels), quote=True)
     chars = "⎽⎼⎻⎺"
-    scaled = np.interp(probs, (min(probs), max(probs)), (0, len(chars) - 1))
-    
-    # Generate the sparkline by scaling the probabilities
-    spark = ''.join(chars[int(round(i))] for i in scaled)
-
-    # Wrap with <span> and tooltip for display
-    html = f"<span title='{tooltip}' style='cursor: help;'>{spark}</span>"
-
-    return html
+    lo, hi = min(vals), max(vals)
+    if lo == hi:
+        spark = chars[len(chars)//2] * len(vals)
+    else:
+        scaled = np.interp(vals, (lo, hi), (0, len(chars) - 1))
+        spark = ''.join(chars[int(round(i))] for i in scaled)
+    return f'<span title="{tooltip}" style="cursor: help;">{spark}</span>'
 
 
+# --- helper to normalize a history cell into a numeric list
+def _normalize_history(x):
+    if x is None or (isinstance(x, (float, int, np.floating, np.integer)) and pd.isna(x)):
+        return []
+    if isinstance(x, (list, tuple, np.ndarray, pd.Series)):
+        return pd.to_numeric(pd.Series(list(x)), errors='coerce').dropna().tolist()
+    if isinstance(x, str):
+        s = x.strip()
+        try:
+            if s.startswith('[') and s.endswith(']'):
+                parsed = json.loads(s)
+            else:
+                parsed = [float(tok) for tok in re.split(r'[,\s]+', s) if tok]
+        except Exception:
+            parsed = []
+        return pd.to_numeric(pd.Series(parsed), errors='coerce').dropna().tolist()
+    try:
+        return [float(x)]
+    except Exception:
+        return []
 
+   
 
 from google.cloud import storage
 from io import BytesIO
@@ -3099,6 +3138,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         df_summary_base = df_summary_base.merge(trend_history_sharp, on=['Game_Key','Market','Outcome'], how='left')
         
         # Confidence Trend from the SAME series as the sparkline (first→current)
+        # --- trend text helper (expects a list already)
         def _trend_text_from_list(lst, current):
             if not isinstance(lst, list) or len(lst) == 0 or pd.isna(current):
                 return "⚠️ Missing"
@@ -3110,21 +3150,26 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             arrow = "📈 Trending Up" if current > start else "📉 Trending Down"
             return f"{arrow}: {start:.1%} → {current:.1%}"
         
-        # Current prob (already set earlier to sharp-avg-or-base)
+        # ===== Use ONE dataframe consistently (df_summary_base) =====
+        # Normalize the history column USED BELOW
+        hist_col = "Prob_Trend_List_Agg"   # <- this is the column you actually use for the spark and trend
+        df_summary_base[hist_col] = df_summary_base[hist_col].apply(_normalize_history)
+        
+        # Current prob (already set earlier)
         _prob_now = pd.to_numeric(df_summary_base['Model Prob'], errors='coerce')
         
+        # Confidence Trend (no len() on floats anywhere)
         df_summary_base['Confidence Trend'] = [
-            _trend_text_from_list(lst, cur) for lst, cur in zip(df_summary_base['Prob_Trend_List_Agg'], _prob_now)
+            _trend_text_from_list(lst, cur) for lst, cur in zip(df_summary_base[hist_col], _prob_now)
         ]
         
-        # Confidence Spark using your existing function on the SAME history
+        # Confidence Spark using the SAME normalized history + safe sparkline
         MAX_SPARK_POINTS = 36
         df_summary_base['Confidence Spark'] = (
-            df_summary_base['Prob_Trend_List_Agg']
-              .apply(lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else lst)
-              .apply(create_sparkline)
+            df_summary_base[hist_col]
+              .apply(lambda lst: lst[-MAX_SPARK_POINTS:] if isinstance(lst, list) else [])
+              .apply(create_sparkline_html_safe)
         )
-
         
         # === 7) STEP 4: select representative book row (sharp-first, latest) ===
         df_summary_base['Book_Is_Sharp'] = df_summary_base['Bookmaker'].str.lower().isin(SHARP_BOOKS).astype(int)
