@@ -102,7 +102,7 @@ from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 from scipy.stats import entropy
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
-
+from html import escape
 
 import logging
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
