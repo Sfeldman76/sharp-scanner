@@ -2532,7 +2532,7 @@ def create_sparkline_html_safe(probs):
 
     # tooltip + spark
     labels = [f"{round(p * 100, 1)}%" for p in vals]
-    tooltip = html.escape(" → ".join(labels), quote=True)
+    tooltip = escape(" → ".join(labels), quote=True)
     chars = "⎽⎼⎻⎺"
     lo, hi = min(vals), max(vals)
     if lo == hi:
