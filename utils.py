@@ -1803,11 +1803,40 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         try:
             model = bundle.get('model')
             iso = bundle.get('calibrator')
-            team_feature_map = bundle.get('team_feature_map')
-
-            if model is None or iso is None:
-                logger.warning(f"⚠️ Skipping {market_type.upper()} — model or calibrator missing")
-                continue
+           # === Pull once, outside loop
+            team_feature_map = None
+            book_reliability_map = None
+            
+            for bundle in trained_models.values():
+                if team_feature_map is None:
+                    team_feature_map = bundle.get('team_feature_map')
+                if book_reliability_map is None:
+                    book_reliability_map = bundle.get('book_reliability_map')
+                if team_feature_map is not None and book_reliability_map is not None:
+                    break
+            
+            # === Merge team features
+            if team_feature_map is not None and not team_feature_map.empty:
+                logger.info("📊 Team Historical Performance Metrics:")
+                logger.info(f"\n{team_feature_map.head(40).to_string(index=False)}")
+            else:
+                logger.warning("⚠️ team_feature_map is empty or missing.")
+            
+            # === Merge book reliability features
+            if book_reliability_map is not None and not book_reliability_map.empty:
+                logger.info("📊 Bookmaker Reliability Metrics:")
+                logger.info(f"\n{book_reliability_map.head(40).to_string(index=False)}")
+                df = df.merge(
+                    book_reliability_map,
+                    on=['Sport', 'Market', 'Bookmaker'],
+                    how='left'
+                )
+            else:
+                logger.warning("⚠️ book_reliability_map is empty or missing.")
+                df["Book_Reliability_Score"] = 0.50
+                df["Book_Reliability_Lift"] = 0.00
+                df["Book_Reliability_x_Sharp"] = 0.0
+                df["Book_Reliability_x_Magnitude"] = 0.0
 
             df_market = df[df['Market'] == market_type].copy()
             if df_market.empty:
@@ -3459,6 +3488,7 @@ def detect_cross_market_sharp_support(df_moves, SHARP_BOOKS):
 
     return df
 
+
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
     try:
@@ -3468,15 +3498,27 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         content = blob.download_as_bytes()
         data = pickle.loads(content)
 
-        print(f"✅ Loaded model + calibrator from GCS: gs://{bucket_name}/{filename}")
+        print(f"✅ Loaded model artifact from GCS: gs://{bucket_name}/{filename}")
+
+        # Normalize optional payloads to DataFrames
+        tfm = data.get("team_feature_map", pd.DataFrame())
+        brm = data.get("book_reliability_map", pd.DataFrame())
+
+        if not isinstance(tfm, pd.DataFrame) and tfm is not None:
+            tfm = pd.DataFrame(tfm)
+        if not isinstance(brm, pd.DataFrame) and brm is not None:
+            brm = pd.DataFrame(brm)
+
         return {
             "model": data.get("model"),
             "calibrator": data.get("calibrator"),
-            "team_feature_map": data.get("team_feature_map", pd.DataFrame())  # ✅ Optional, default empty
+            "team_feature_map": tfm,                 # ✅ optional
+            "book_reliability_map": brm              # ✅ optional
         }
     except Exception as e:
         logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
         return None
+
 
 def read_recent_sharp_moves(hours=120, table=BQ_FULL_TABLE):
     try:
