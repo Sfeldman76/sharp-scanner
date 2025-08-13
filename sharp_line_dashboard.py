@@ -714,12 +714,7 @@ def add_book_reliability_features(
     out['Book_Reliability_Score'] = post_mean
     out['Book_Reliability_Lift']  = post_lift
 
-    # These interactions are safe, but not needed for the saved map;
-    # better to compute them at apply-time using live row values:
-    # out['Book_Reliability_x_Sharp']     = out['Book_Reliability_Score'] * out.get('Is_Sharp_Book', 0).astype(float)
-    # out['Book_Reliability_x_Magnitude'] = out['Book_Reliability_Score'] * out.get('Sharp_Line_Magnitude', 0).astype(float)
-
-    return out
+      return out
 
 
 def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) -> pd.DataFrame:
@@ -1297,9 +1292,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Line_Moved_Away_And_Hit'] = (
             (df_market['Line_Moved_Away_From_Team'] == 1) & (df_market['SHARP_HIT_BOOL'] == 1)
         ).astype(int)
+        df_market['Book_Reliability_x_Sharp']     = df_market['Book_Reliability_Score'] * df_market['Is_Sharp_Book']
+        df_market['Book_Reliability_x_Magnitude'] = df_market['Book_Reliability_Score'] * df_market['Sharp_Line_Magnitude']
+    
+        df_market['Book_Reliability_x_PROB_SHIFT] = df_market['Book_Reliability_Score'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift']    
         
-
-   
         features = [
         
             # 🔹 Core sharp signals
