@@ -774,9 +774,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    
     df_bt = add_book_reliability_features(df_bt, label_col="SHARP_HIT_BOOL", prior_strength=200.0)
     with st.expander("📚 Per-book reliability (training window)"):
-        st.write(   # <- this line must be indented
+        st.write(
             df_bt.groupby('Bookmaker', as_index=False)['Book_Reliability_Score']
-            ...
+                .mean()
+                .sort_values('Book_Reliability_Score', ascending=False)
+                .head(10)
         )
 
     # Latest snapshot per market/game/outcome
