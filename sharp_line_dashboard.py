@@ -1304,10 +1304,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = [
         
             # 🔹 Core sharp signals
-            'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT'
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT',
             'Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
-        ,
+        
             # 🔹 Market response
             'Sharp_Line_Magnitude', #'Is_Home_Team_Bet',
             'Team_Implied_Prob_Gap_Home', 'Team_Implied_Prob_Gap_Away',
