@@ -1296,14 +1296,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Book_Reliability_x_Magnitude'] = df_market['Book_Reliability_Score'] * df_market['Sharp_Line_Magnitude']
     
         df_market['Book_Reliability_x_PROB_SHIFT'] = df_market['Book_Reliability_Score'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift']    
+        df_market['Book_lift_x_Sharp']     = df_market['Book_Reliability_Lift'] * df_market['Is_Sharp_Book']
+        df_market['Book_lift_x_Magnitude'] = df_market['Book_Reliability_Lift'] * df_market['Sharp_Line_Magnitude']
+    
+        df_market['Book_lift_x_PROB_SHIFT'] = df_market['Book_Reliability_Lift'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift'] 
         
         features = [
         
             # 🔹 Core sharp signals
-            'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT'
             'Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
-        
+        ,
             # 🔹 Market response
             'Sharp_Line_Magnitude', #'Is_Home_Team_Bet',
             'Team_Implied_Prob_Gap_Home', 'Team_Implied_Prob_Gap_Away',
@@ -2466,7 +2470,34 @@ def compute_diagnostics_vectorized(df):
 
     
     return diagnostics_df
-
+def _as_num_seq(x):
+    """Coerce x into a clean numeric list (drop NaNs). Handles scalars, lists, arrays, and stringified lists/CSV."""
+    if x is None:
+        return []
+    # If it's already a non-string list-like, use it directly
+    if is_list_like(x) and not isinstance(x, (str, bytes, dict)):
+        seq = list(x)
+    else:
+        # Try to parse strings like "[0.1, 0.2]" or "0.1,0.2"
+        if isinstance(x, str):
+            s = x.strip()
+            parsed = None
+            if s.startswith('[') and s.endswith(']'):
+                try:
+                    parsed = json.loads(s)
+                except Exception:
+                    parsed = None
+            if parsed is None:
+                try:
+                    parsed = [float(tok) for tok in re.split(r'[,\s]+', s) if tok]
+                except Exception:
+                    parsed = []
+            seq = parsed
+        else:
+            # Scalar (float/int/np.float)
+            seq = [x]
+    # Coerce to numeric and drop NaNs
+    return pd.to_numeric(pd.Series(seq), errors='coerce').dropna().tolist()
 # === Global utility for creating a sparkline with the full trend history
 def create_sparkline(probs):
     if not probs or len(probs) < 2 or all(pd.isna(probs)):
