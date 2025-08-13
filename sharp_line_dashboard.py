@@ -1295,7 +1295,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Book_Reliability_x_Sharp']     = df_market['Book_Reliability_Score'] * df_market['Is_Sharp_Book']
         df_market['Book_Reliability_x_Magnitude'] = df_market['Book_Reliability_Score'] * df_market['Sharp_Line_Magnitude']
     
-        df_market['Book_Reliability_x_PROB_SHIFT] = df_market['Book_Reliability_Score'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift']    
+        df_market['Book_Reliability_x_PROB_SHIFT'] = df_market['Book_Reliability_Score'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift']    
         
         features = [
         
@@ -1352,7 +1352,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Book_Reliability_Score',
             'Book_Reliability_Lift',
             'Book_Reliability_x_Sharp',
-            'Book_Reliability_x_Magnitude',
+            'Book_Reliability_x_Magnitude','Book_Reliability_x_PROB_SHIFT',
     
         ]
         hybrid_timing_features = [
