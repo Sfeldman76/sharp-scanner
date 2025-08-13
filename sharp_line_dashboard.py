@@ -702,44 +702,7 @@ def add_book_reliability_features(
     out['Book_Reliability_x_Sharp']     = out['Book_Reliability_Score'] * out.get('Is_Sharp_Book', 0).astype(float)
     out['Book_Reliability_x_Magnitude'] = out['Book_Reliability_Score'] * out.get('Sharp_Line_Magnitude', 0).astype(float)
     return out
-def add_book_flag_activity(df_market: pd.DataFrame,
-                           flag_cols: list,
-                           time_col: str = 'Game_Start') -> pd.DataFrame:
-    """
-    Leak-safe: for each (Sport, Market, Bookmaker), compute cumulative (as-of) counts & rates
-    for each flag in flag_cols, excluding the current row.
 
-    Adds columns:
-      - Book_FlagCount__<flag>
-      - Book_FlagRate__<flag>
-
-    Assumes:
-      - Bookmaker normalized/lower-case
-      - time_col exists and is datetime
-      - flags are 0/1 (we coerce and fill)
-    """
-    out = df_market.copy()
-    # Normalize essentials
-    out['Sport'] = out['Sport'].astype(str).str.upper()
-    out['Market'] = out['Market'].astype(str).str.lower().str.strip()
-    out['Bookmaker'] = out['Bookmaker'].astype(str).str.lower().str.strip()
-    out[time_col] = pd.to_datetime(out[time_col], errors='coerce', utc=True)
-    out = out.sort_values(['Sport','Market','Bookmaker', time_col], kind='mergesort')
-
-    g = out.groupby(['Sport','Market','Bookmaker'], sort=False)
-    prior_trials = g.cumcount()  # number of past rows for this book (as-of)
-
-    for f in flag_cols:
-        # coerce to 0/1
-        out[f] = pd.to_numeric(out.get(f, 0), errors='coerce').fillna(0).astype(int)
-        # cumulative sum excluding current row
-        prior_count = g[f].cumsum() - out[f]
-        rate = np.where(prior_trials > 0, prior_count / np.maximum(1, prior_trials), 0.0)
-
-        out[f'Book_FlagCount__{f}'] = prior_count.astype(float)
-        out[f'Book_FlagRate__{f}']  = rate
-
-    return out
     
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
@@ -811,12 +774,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    
     df_bt = add_book_reliability_features(df_bt, label_col="SHARP_HIT_BOOL", prior_strength=200.0)
     with st.expander("📚 Per-book reliability (training window)"):
-    st.write(
-        df_bt.groupby('Bookmaker', as_index=False)['Book_Reliability_Score']
-            .mean()
-            .sort_values('Book_Reliability_Score', ascending=False)
-            .head(10)
-    )
+        st.write(   # <- this line must be indented
+            df_bt.groupby('Bookmaker', as_index=False)['Book_Reliability_Score']
+            ...
+        )
+
     # Latest snapshot per market/game/outcome
     # === Get latest snapshot per Game_Key + Market + Outcome ===
     df_latest = (
