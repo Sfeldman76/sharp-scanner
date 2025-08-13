@@ -1770,74 +1770,86 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
     team_feature_map = None
+    book_reliability_map = None
+    
     for bundle in trained_models.values():
-        team_feature_map = bundle.get('team_feature_map')
-        if team_feature_map is not None:
-            break  # Use the first one found
+        if team_feature_map is None:
+            team_feature_map = bundle.get('team_feature_map')
+        if book_reliability_map is None:
+            book_reliability_map = bundle.get('book_reliability_map')
+        if team_feature_map is not None and book_reliability_map is not None:
+            break
+    
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
     logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
+    
     # === Cross-Market Odds Pivot
     odds_pivot = (
-        df
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
-        .pivot_table(index='Game_Key', columns='Market', values='Odds_Price')
-        .rename(columns={
-            'spreads': 'Spread_Odds',
-            'totals': 'Total_Odds',
-            'h2h': 'H2H_Odds'
-        })
-        .reset_index()
+        df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
+          .pivot_table(index='Game_Key', columns='Market', values='Odds_Price')
+          .rename(columns={'spreads': 'Spread_Odds', 'totals': 'Total_Odds', 'h2h': 'H2H_Odds'})
+          .reset_index()
     )
     df = df.merge(odds_pivot, on='Game_Key', how='left')
-
-   
     
+    # === Normalize keys for joins (safe no-ops if already normalized)
+    if 'Bookmaker' not in df.columns and 'Book' in df.columns:
+        df['Bookmaker'] = df['Book']
+    df['Sport'] = df['Sport'].astype(str).str.upper()
+    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
+    df['Bookmaker'] = df['Bookmaker'].astype(str).str.lower().str.strip()
+    
+    # === Team features (log-only here; merge if you actually need per-row team stats)
     if team_feature_map is not None and not team_feature_map.empty:
         logger.info("📊 Team Historical Performance Metrics (Hit Rate and Avg Model Prob):")
-        sample_log = team_feature_map.head(40).to_string(index=False)
-        logger.info(f"\n{sample_log}")
+        logger.info(f"\n{team_feature_map.head(40).to_string(index=False)}")
     else:
         logger.warning("⚠️ team_feature_map is empty or missing.")
     
+    # === Book reliability features
+    if book_reliability_map is not None and not book_reliability_map.empty:
+        bm = book_reliability_map.copy()
+        bm['Sport'] = bm['Sport'].astype(str).str.upper()
+        bm['Market'] = bm['Market'].astype(str).str.lower().str.strip()
+        bm['Bookmaker'] = bm['Bookmaker'].astype(str).str.lower().str.strip()
+    
+        logger.info("📊 Bookmaker Reliability Metrics:")
+        logger.info(f"\n{bm.head(40).to_string(index=False)}")
+    
+        df = df.merge(
+            bm[['Sport','Market','Bookmaker','Book_Reliability_Score','Book_Reliability_Lift']],
+            on=['Sport','Market','Bookmaker'],
+            how='left',
+            validate='m:1'
+        )
+    else:
+        logger.warning("⚠️ book_reliability_map is empty or missing.")
+        df['Book_Reliability_Score'] = np.nan
+        df['Book_Reliability_Lift'] = np.nan
+    
+    # === Reliability fallbacks + interactions expected by the model
+    df['Book_Reliability_Score'] = pd.to_numeric(df['Book_Reliability_Score'], errors='coerce').fillna(0.50).clip(0.01, 0.99)
+    df['Book_Reliability_Lift']  = pd.to_numeric(df['Book_Reliability_Lift'],  errors='coerce').fillna(0.00)
+    
+    # Interactions: x Magnitude and x Sharp (match training features)
+    mag = (pd.to_numeric(df.get('Sharp_Line_Magnitude'), errors='coerce')
+           if 'Sharp_Line_Magnitude' in df.columns else
+           pd.to_numeric(df.get('Abs_Line_Move_From_Opening', 0), errors='coerce'))
+    df['Book_Reliability_x_Magnitude'] = df['Book_Reliability_Score'] * mag.fillna(0.0)
+    
+    is_sharp_book = pd.to_numeric(df.get('Is_Sharp_Book', 0), errors='coerce').fillna(0.0)
+    df['Book_Reliability_x_Sharp'] = df['Book_Reliability_Score'] * is_sharp_book
+    
+    # === Now loop markets just for scoring
     for market_type, bundle in trained_models.items():
         try:
             model = bundle.get('model')
-            iso = bundle.get('calibrator')
-           # === Pull once, outside loop
-            team_feature_map = None
-            book_reliability_map = None
-            
-            for bundle in trained_models.values():
-                if team_feature_map is None:
-                    team_feature_map = bundle.get('team_feature_map')
-                if book_reliability_map is None:
-                    book_reliability_map = bundle.get('book_reliability_map')
-                if team_feature_map is not None and book_reliability_map is not None:
-                    break
-            
-            # === Merge team features
-            if team_feature_map is not None and not team_feature_map.empty:
-                logger.info("📊 Team Historical Performance Metrics:")
-                logger.info(f"\n{team_feature_map.head(40).to_string(index=False)}")
-            else:
-                logger.warning("⚠️ team_feature_map is empty or missing.")
-            
-            # === Merge book reliability features
-            if book_reliability_map is not None and not book_reliability_map.empty:
-                logger.info("📊 Bookmaker Reliability Metrics:")
-                logger.info(f"\n{book_reliability_map.head(40).to_string(index=False)}")
-                df = df.merge(
-                    book_reliability_map,
-                    on=['Sport', 'Market', 'Bookmaker'],
-                    how='left'
-                )
-            else:
-                logger.warning("⚠️ book_reliability_map is empty or missing.")
-                df["Book_Reliability_Score"] = 0.50
-                df["Book_Reliability_Lift"] = 0.00
-                df["Book_Reliability_x_Sharp"] = 0.0
-                df["Book_Reliability_x_Magnitude"] = 0.0
-
+            iso   = bundle.get('calibrator')
+    
+            if model is None or iso is None:
+                logger.warning(f"⚠️ Skipping {market_type.upper()} — model or calibrator missing")
+                continue
+    
             df_market = df[df['Market'] == market_type].copy()
             if df_market.empty:
                 logger.warning(f"⚠️ No rows to score for {market_type.upper()}")
