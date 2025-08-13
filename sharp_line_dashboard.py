@@ -656,34 +656,48 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
 def add_book_reliability_features(
     df: pd.DataFrame,
     label_col: str = "SHARP_HIT_BOOL",
-    prior_strength: float = 200.0  # virtual samples for Beta prior
+    prior_strength: float = 200.0
 ) -> pd.DataFrame:
     """
-    Leak-safe: for each (Sport, Market, Bookmaker) row, uses ONLY prior rows
-    (cumulative counts shifted by 1) to compute a posterior hit rate.
-    Requires columns: Sport (UPPER), Market (lower), Bookmaker (lower), Game_Start (UTC), label_col.
+    Leak-safe per-row features:
+      Book_Reliability_Score: Beta-Binomial posterior mean for this (Sport, Market, Bookmaker)
+      Book_Reliability_Lift : log-odds of that mean vs 50/50
+
+    Uses ONLY prior rows ("as of" via cumulative counts shifted by 1).
+    Requires: Sport (UPPER), Market (lower), Bookmaker (lower), time col (Game_Start or Snapshot_Timestamp), label_col.
     """
     out = df.copy()
 
-    # Normalize keys & types
+    # --- Normalize keys & types
     out['Sport'] = out['Sport'].astype(str).str.upper()
     out['Market'] = out['Market'].astype(str).str.lower().str.strip()
+    if 'Bookmaker' not in out.columns and 'Book' in out.columns:
+        out['Bookmaker'] = out['Book']
     out['Bookmaker'] = out['Bookmaker'].astype(str).str.lower().str.strip()
-    out['Game_Start'] = pd.to_datetime(out['Game_Start'], errors='coerce', utc=True)
+
+    # Time column with safe fallback
+    if 'Game_Start' in out.columns and pd.api.types.is_datetime64_any_dtype(out['Game_Start']):
+        out['Game_Start'] = pd.to_datetime(out['Game_Start'], errors='coerce', utc=True)
+    else:
+        # Fallback to snapshot if Game_Start missing
+        out['Game_Start'] = pd.to_datetime(out.get('Snapshot_Timestamp'), errors='coerce', utc=True)
+
+    # Label
     out[label_col] = pd.to_numeric(out[label_col], errors='coerce').fillna(0).astype(int)
 
-    # Sort for cumulative "as-of" math
-    out = out.sort_values(['Sport','Market','Bookmaker','Game_Start'], kind='mergesort')
+    # --- Sort for "as-of" math
+    out = out.sort_values(['Sport', 'Market', 'Bookmaker', 'Game_Start'], kind='mergesort')
 
-    g_smb = out.groupby(['Sport','Market','Bookmaker'], sort=False)
-    cum_trials = g_smb.cumcount()                       # prior trials for this book
-    cum_hits   = g_smb[label_col].cumsum() - out[label_col]  # prior hits (exclude current row)
+    # Book-level cumulative (exclude current row)
+    g_smb = out.groupby(['Sport', 'Market', 'Bookmaker'], sort=False)
+    cum_trials = g_smb.cumcount()
+    cum_hits   = g_smb[label_col].cumsum() - out[label_col]
 
-    g_sm = out.groupby(['Sport','Market'], sort=False)
+    # Sport/market global prior (exclude current row)
+    g_sm = out.groupby(['Sport', 'Market'], sort=False)
     cum_trials_sm = g_sm.cumcount()
     cum_hits_sm   = g_sm[label_col].cumsum() - out[label_col]
 
-    # Global (sport,market) prior center per row (as-of)
     p_global_asof = np.where(
         cum_trials_sm > 0,
         (cum_hits_sm / np.maximum(cum_trials_sm, 1)).astype(float),
@@ -695,13 +709,48 @@ def add_book_reliability_features(
 
     post_mean = (cum_hits + alpha0) / (np.maximum(cum_trials, 0) + alpha0 + beta0)
     post_mean = np.clip(post_mean, 0.01, 0.99)
-    post_lift = np.log(post_mean / (1 - post_mean))  # log-odds vs 50/50
+    post_lift = np.log(post_mean / (1 - post_mean))
 
     out['Book_Reliability_Score'] = post_mean
     out['Book_Reliability_Lift']  = post_lift
-    out['Book_Reliability_x_Sharp']     = out['Book_Reliability_Score'] * out.get('Is_Sharp_Book', 0).astype(float)
-    out['Book_Reliability_x_Magnitude'] = out['Book_Reliability_Score'] * out.get('Sharp_Line_Magnitude', 0).astype(float)
+
+    # These interactions are safe, but not needed for the saved map;
+    # better to compute them at apply-time using live row values:
+    # out['Book_Reliability_x_Sharp']     = out['Book_Reliability_Score'] * out.get('Is_Sharp_Book', 0).astype(float)
+    # out['Book_Reliability_x_Magnitude'] = out['Book_Reliability_Score'] * out.get('Sharp_Line_Magnitude', 0).astype(float)
+
     return out
+
+
+def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) -> pd.DataFrame:
+    """
+    Returns a slim mapping keyed by (Sport, Market, Bookmaker):
+      - Book_Reliability_Score
+      - Book_Reliability_Lift
+
+    Compute row-level interactions later, during live apply.
+    """
+    df_rel = add_book_reliability_features(
+        df, label_col="SHARP_HIT_BOOL", prior_strength=prior_strength
+    )
+
+    mapping = (
+        df_rel
+        .groupby(['Sport', 'Market', 'Bookmaker'], as_index=False)
+        .agg({
+            'Book_Reliability_Score': 'mean',
+            'Book_Reliability_Lift':  'mean',
+            # Optional diagnostics you can keep if useful:
+            # 'Sharp_Line_Magnitude': 'mean'
+        })
+    )
+
+    # Keep keys normalized
+    mapping['Sport'] = mapping['Sport'].astype(str).str.upper()
+    mapping['Market'] = mapping['Market'].astype(str).str.lower().str.strip()
+    mapping['Bookmaker'] = mapping['Bookmaker'].astype(str).str.lower().str.strip()
+
+    return mapping
 
     
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
