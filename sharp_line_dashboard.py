@@ -778,7 +778,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_bt.groupby('Bookmaker', as_index=False)['Book_Reliability_Score']
                 .mean()
                 .sort_values('Book_Reliability_Score', ascending=False)
-                .head(10)
+                .head(30)
         )
 
     # Latest snapshot per market/game/outcome
@@ -1249,26 +1249,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Line_Moved_Away_From_Team'] == 1) & (df_market['SHARP_HIT_BOOL'] == 1)
         ).astype(int)
         
-        flag_cols = [
-            'Sharp_Move_Signal',
-            'Sharp_Limit_Jump',
-            'Market_Leader',
-            'LimitUp_NoMove_Flag',
-            'Is_Reinforced_MultiMarket',
-            'SharpMove_Resistance_Break',
-            'Potential_Overmove_Flag',
-            'Potential_Overmove_Total_Pct_Flag',
-            'Potential_Odds_Overmove_Flag',
-            'CrossMarket_Prob_Gap_Exists',
-            'Mispricing_Flag',
-            'Value_Reversal_Flag',
-            'Odds_Reversal_Flag',
-            'SmallBook_Heavy_Liquidity_Flag',
-            'SmallBook_Limit_Skew_Flag',
-        ]
-        flag_cols = [c for c in flag_cols if c in df_market.columns]
-        
-        df_market = add_book_flag_activity(df_market, flag_cols, time_col='Game_Start')
+
+   
         features = [
         
             # 🔹 Core sharp signals
