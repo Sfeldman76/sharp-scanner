@@ -714,7 +714,7 @@ def add_book_reliability_features(
     out['Book_Reliability_Score'] = post_mean
     out['Book_Reliability_Lift']  = post_lift
 
-      return out
+    return out
 
 
 def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) -> pd.DataFrame:
