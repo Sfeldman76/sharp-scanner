@@ -1602,6 +1602,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0)
     df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
     df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
+
+
+          
     def compute_value_reversal(df, market_col='Market'):
         is_spread = df[market_col].str.lower().str.contains('spread')
         is_total = df[market_col].str.lower().str.contains('total')
@@ -1831,15 +1834,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Book_Reliability_Score'] = pd.to_numeric(df['Book_Reliability_Score'], errors='coerce').fillna(0.50).clip(0.01, 0.99)
     df['Book_Reliability_Lift']  = pd.to_numeric(df['Book_Reliability_Lift'],  errors='coerce').fillna(0.00)
     
-    # Interactions: x Magnitude and x Sharp (match training features)
-    mag = (pd.to_numeric(df.get('Sharp_Line_Magnitude'), errors='coerce')
-           if 'Sharp_Line_Magnitude' in df.columns else
-           pd.to_numeric(df.get('Abs_Line_Move_From_Opening', 0), errors='coerce'))
-    df['Book_Reliability_x_Magnitude'] = df['Book_Reliability_Score'] * mag.fillna(0.0)
-    
-    is_sharp_book = pd.to_numeric(df.get('Is_Sharp_Book', 0), errors='coerce').fillna(0.0)
-    df['Book_Reliability_x_Sharp'] = df['Book_Reliability_Score'] * is_sharp_book
-    
     # === Now loop markets just for scoring
     for market_type, bundle in trained_models.items():
         try:
@@ -2066,6 +2060,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Spread_vs_H2H_ProbGap'] = df_canon['Spread_Implied_Prob'] - df_canon['H2H_Implied_Prob']
             df_canon['Total_vs_H2H_ProbGap'] = df_canon['Total_Implied_Prob'] - df_canon['H2H_Implied_Prob']
             df_canon['Total_vs_Spread_ProbGap'] = df_canon['Total_Implied_Prob'] - df_canon['Spread_Implied_Prob']
+            df_canon['Book_Reliability_x_Sharp'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']
+            df_canon['Book_Reliability_x_Magnitude'] = df_canon['Book_Reliability_Score'] * df_canon['Sharp_Line_Magnitude']
+            df_canon['Book_Reliability_x_PROB_SHIFT'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']* df_canon['Implied_Prob_Shift']
             
             df_canon['CrossMarket_Prob_Gap_Exists'] = (
                 (df_canon['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
@@ -2388,9 +2385,12 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Team_Implied_Prob_Gap_Home'].abs(),
                 df_inverse['Team_Implied_Prob_Gap_Away'].abs()
             )
-            
+                  
             df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
             df_inverse = add_line_and_crossmarket_features(df_inverse)
+            df_inverse['Book_Reliability_x_Sharp'] = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book']
+            df_inverse['Book_Reliability_x_Magnitude'] = df_inverse['Book_Reliability_Score'] * df_inverse['Sharp_Line_Magnitude']
+            df_inverse['Book_Reliability_x_PROB_SHIFT'] = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book']* df_inverse['Implied_Prob_Shift']
             #df_inverse = compute_small_book_liquidity_features(df_inverse)
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
