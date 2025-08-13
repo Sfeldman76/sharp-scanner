@@ -653,7 +653,93 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
 
     return out
 
+def add_book_reliability_features(
+    df: pd.DataFrame,
+    label_col: str = "SHARP_HIT_BOOL",
+    prior_strength: float = 200.0  # virtual samples for Beta prior
+) -> pd.DataFrame:
+    """
+    Leak-safe: for each (Sport, Market, Bookmaker) row, uses ONLY prior rows
+    (cumulative counts shifted by 1) to compute a posterior hit rate.
+    Requires columns: Sport (UPPER), Market (lower), Bookmaker (lower), Game_Start (UTC), label_col.
+    """
+    out = df.copy()
 
+    # Normalize keys & types
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+    out['Market'] = out['Market'].astype(str).str.lower().str.strip()
+    out['Bookmaker'] = out['Bookmaker'].astype(str).str.lower().str.strip()
+    out['Game_Start'] = pd.to_datetime(out['Game_Start'], errors='coerce', utc=True)
+    out[label_col] = pd.to_numeric(out[label_col], errors='coerce').fillna(0).astype(int)
+
+    # Sort for cumulative "as-of" math
+    out = out.sort_values(['Sport','Market','Bookmaker','Game_Start'], kind='mergesort')
+
+    g_smb = out.groupby(['Sport','Market','Bookmaker'], sort=False)
+    cum_trials = g_smb.cumcount()                       # prior trials for this book
+    cum_hits   = g_smb[label_col].cumsum() - out[label_col]  # prior hits (exclude current row)
+
+    g_sm = out.groupby(['Sport','Market'], sort=False)
+    cum_trials_sm = g_sm.cumcount()
+    cum_hits_sm   = g_sm[label_col].cumsum() - out[label_col]
+
+    # Global (sport,market) prior center per row (as-of)
+    p_global_asof = np.where(
+        cum_trials_sm > 0,
+        (cum_hits_sm / np.maximum(cum_trials_sm, 1)).astype(float),
+        0.5
+    )
+
+    alpha0 = prior_strength * p_global_asof
+    beta0  = prior_strength * (1.0 - p_global_asof)
+
+    post_mean = (cum_hits + alpha0) / (np.maximum(cum_trials, 0) + alpha0 + beta0)
+    post_mean = np.clip(post_mean, 0.01, 0.99)
+    post_lift = np.log(post_mean / (1 - post_mean))  # log-odds vs 50/50
+
+    out['Book_Reliability_Score'] = post_mean
+    out['Book_Reliability_Lift']  = post_lift
+    out['Book_Reliability_x_Sharp']     = out['Book_Reliability_Score'] * out.get('Is_Sharp_Book', 0).astype(float)
+    out['Book_Reliability_x_Magnitude'] = out['Book_Reliability_Score'] * out.get('Sharp_Line_Magnitude', 0).astype(float)
+    return out
+def add_book_flag_activity(df_market: pd.DataFrame,
+                           flag_cols: list,
+                           time_col: str = 'Game_Start') -> pd.DataFrame:
+    """
+    Leak-safe: for each (Sport, Market, Bookmaker), compute cumulative (as-of) counts & rates
+    for each flag in flag_cols, excluding the current row.
+
+    Adds columns:
+      - Book_FlagCount__<flag>
+      - Book_FlagRate__<flag>
+
+    Assumes:
+      - Bookmaker normalized/lower-case
+      - time_col exists and is datetime
+      - flags are 0/1 (we coerce and fill)
+    """
+    out = df_market.copy()
+    # Normalize essentials
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+    out['Market'] = out['Market'].astype(str).str.lower().str.strip()
+    out['Bookmaker'] = out['Bookmaker'].astype(str).str.lower().str.strip()
+    out[time_col] = pd.to_datetime(out[time_col], errors='coerce', utc=True)
+    out = out.sort_values(['Sport','Market','Bookmaker', time_col], kind='mergesort')
+
+    g = out.groupby(['Sport','Market','Bookmaker'], sort=False)
+    prior_trials = g.cumcount()  # number of past rows for this book (as-of)
+
+    for f in flag_cols:
+        # coerce to 0/1
+        out[f] = pd.to_numeric(out.get(f, 0), errors='coerce').fillna(0).astype(int)
+        # cumulative sum excluding current row
+        prior_count = g[f].cumsum() - out[f]
+        rate = np.where(prior_trials > 0, prior_count / np.maximum(1, prior_trials), 0.0)
+
+        out[f'Book_FlagCount__{f}'] = prior_count.astype(float)
+        out[f'Book_FlagRate__{f}']  = rate
+
+    return out
     
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
@@ -694,8 +780,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Normalize keys
     df_bt['Game_Key'] = df_bt['Game_Key'].astype(str).str.strip().str.lower()
     df_bt['Market'] = df_bt['Market'].astype(str).str.lower().str.strip()
-    df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'])
+    df_bt['Sport'] = df_bt['Sport'].astype(str).str.upper()
     
+    df_bt['Bookmaker'] = df_bt['Bookmaker'].astype(str).str.lower().str.strip()
+   
+    # ✅ Timestamps (UTC)
+    df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'], errors='coerce', utc=True)
+    # Use true Game_Start if present; else fall back to Snapshot_Timestamp for ordering
+    if 'Game_Start' in df_bt.columns:
+        df_bt['Game_Start'] = pd.to_datetime(df_bt['Game_Start'], errors='coerce', utc=True)
+    else:
+        df_bt['Game_Start'] = df_bt['Snapshot_Timestamp']
+    
+    # ✅ Make sure helper won't choke if these are missing
+    if 'Is_Sharp_Book' not in df_bt.columns:
+        df_bt['Is_Sharp_Book'] = df_bt['Bookmaker'].isin(SHARP_BOOKS).astype(int)
+    if 'Sharp_Line_Magnitude' not in df_bt.columns:
+        df_bt['Sharp_Line_Magnitude'] = pd.to_numeric(df_bt.get('Line_Delta', 0), errors='coerce').abs().fillna(0)
+    # === Get latest snapshot per Game_Key + Market + Outcome (avoid multi-snapshot double counting) ===
+    dedup_cols = [
+        'Game_Key','Market','Outcome','Bookmaker','Value',
+        'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Time_Score','Sharp_Limit_Total',
+        'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag'
+    ]
+    df_bt = (
+        df_bt.sort_values('Snapshot_Timestamp')
+             .drop_duplicates(subset=dedup_cols, keep='last')
+    )
+
+   
+    df_bt = add_book_reliability_features(df_bt, label_col="SHARP_HIT_BOOL", prior_strength=200.0)
+    with st.expander("📚 Per-book reliability (training window)"):
+    st.write(
+        df_bt.groupby('Bookmaker', as_index=False)['Book_Reliability_Score']
+            .mean()
+            .sort_values('Book_Reliability_Score', ascending=False)
+            .head(10)
+    )
     # Latest snapshot per market/game/outcome
     # === Get latest snapshot per Game_Key + Market + Outcome ===
     df_latest = (
@@ -1049,6 +1170,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Total_vs_Spread_ProbGap'].abs() > 0.05)
         ).astype(int)
 
+        
          # Absolute line move
         SPORT_ALIAS = {
             'MLB': 'MLB',
@@ -1163,23 +1285,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Line_Moved_Away_From_Team'] == 1) & (df_market['SHARP_HIT_BOOL'] == 1)
         ).astype(int)
         
-            # === Resistance Flag Debug
-        with st.expander(f"📊 Resistance Flag Debug – {market.upper()}"):
-            st.write("Value Counts:")
-            st.write(df_market['Was_Line_Resistance_Broken'].value_counts(dropna=False))
-    
-            st.write("Sample Resistance Breaks:")
-            st.dataframe(
-                df_market[df_market['Was_Line_Resistance_Broken'] == 1][
-                    ['Game_Key', 'Market', 'Outcome', 'First_Line_Value', 'Value', 'Was_Line_Resistance_Broken']
-                ].head(10)
-            )
-    
-            if df_market['Was_Line_Resistance_Broken'].sum() == 0:
-                st.warning("⚠️ No line resistance breaks detected.")
-            else:
-                st.success("✅ Resistance break logic is populating correctly.")
-        # === 🧠 Add new features to training
+        flag_cols = [
+            'Sharp_Move_Signal',
+            'Sharp_Limit_Jump',
+            'Market_Leader',
+            'LimitUp_NoMove_Flag',
+            'Is_Reinforced_MultiMarket',
+            'SharpMove_Resistance_Break',
+            'Potential_Overmove_Flag',
+            'Potential_Overmove_Total_Pct_Flag',
+            'Potential_Odds_Overmove_Flag',
+            'CrossMarket_Prob_Gap_Exists',
+            'Mispricing_Flag',
+            'Value_Reversal_Flag',
+            'Odds_Reversal_Flag',
+            'SmallBook_Heavy_Liquidity_Flag',
+            'SmallBook_Limit_Skew_Flag',
+        ]
+        flag_cols = [c for c in flag_cols if c in df_market.columns]
+        
+        df_market = add_book_flag_activity(df_market, flag_cols, time_col='Game_Start')
         features = [
         
             # 🔹 Core sharp signals
@@ -1232,6 +1357,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag',
             'SmallBook_Limit_Skew_Flag',
+            'Book_Reliability_Score',
+            'Book_Reliability_Lift',
+            'Book_Reliability_x_Sharp',
+            'Book_Reliability_x_Magnitude',
     
         ]
         hybrid_timing_features = [
