@@ -2063,7 +2063,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Book_Reliability_x_Sharp'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']
             df_canon['Book_Reliability_x_Magnitude'] = df_canon['Book_Reliability_Score'] * df_canon['Sharp_Line_Magnitude']
             df_canon['Book_Reliability_x_PROB_SHIFT'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']* df_canon['Implied_Prob_Shift']
-            
+            df_canon['Book_lift_x_Sharp']     = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book']
+            df_canon['Book_lift_x_Magnitude'] = df_canon['Book_Reliability_Lift'] * df_canon['Sharp_Line_Magnitude']
+    
+            df_canon['Book_lift_x_PROB_SHIFT'] = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book'] * df_canon['Implied_Prob_Shift'] 
+        
             df_canon['CrossMarket_Prob_Gap_Exists'] = (
                 (df_canon['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
                 (df_canon['Total_vs_Spread_ProbGap'].abs() > 0.05)
@@ -2391,6 +2395,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse['Book_Reliability_x_Sharp'] = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book']
             df_inverse['Book_Reliability_x_Magnitude'] = df_inverse['Book_Reliability_Score'] * df_inverse['Sharp_Line_Magnitude']
             df_inverse['Book_Reliability_x_PROB_SHIFT'] = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book']* df_inverse['Implied_Prob_Shift']
+            df_inverse['Book_lift_x_Sharp']     = df_inverse['Book_Reliability_Lift'] * df_inverse['Is_Sharp_Book']
+            df_inverse['Book_lift_x_Magnitude'] = df_inverse['Book_Reliability_Lift'] * df_inverse['Sharp_Line_Magnitude']
+    
+            df_inverse['Book_lift_x_PROB_SHIFT'] = df_inverse['Book_Reliability_Lift'] * df_inverse['Is_Sharp_Book'] * df_inverse['Implied_Prob_Shift'] 
+        
             #df_inverse = compute_small_book_liquidity_features(df_inverse)
             # Bucketed tier for diagnostics or categorical modeling
             df_inverse['Minutes_To_Game_Tier'] = pd.cut(
