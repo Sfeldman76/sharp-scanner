@@ -49,7 +49,8 @@ from utils import (
     fallback_flip_inverse_rows,
     get_opening_snapshot,
     add_time_context_flags,
-    update_power_ratings
+    update_power_ratings,
+    normalize_sport
 )
 
 def detect_and_save_all_sports():
