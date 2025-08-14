@@ -4049,13 +4049,27 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
         logging.info(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         logging.exception(f"❌ Failed to upload to {table}")
-
+def normalize_sport(sport_key: str) -> str:
+    s = str(sport_key).strip().lower()
+    mapping = {
+        # Odds API style keys
+        "baseball_mlb": "MLB",
+        "americanfootball_nfl": "NFL",
+        "americanfootball_ncaaf": "NCAAF",
+        "basketball_nba": "NBA",
+        "basketball_wnba": "WNBA",
+        "canadianfootball_cfl": "CFL",
+        # Friendly aliases just in case
+        "mlb": "MLB", "nfl": "NFL", "ncaaf": "NCAAF",
+        "nba": "NBA", "wnba": "WNBA", "cfl": "CFL",
+    }
+    return mapping.get(s, s.upper() or "MLB")
   
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
     track_feature_evolution = False
-
+    sport = normalize_sport(sport_key)
     # === 1. Fetch completed games ===
     try:
         url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
@@ -4108,7 +4122,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 'Score_Home_Score': scores[home],
                 'Score_Away_Score': scores[away],
                 'Source': 'oddsapi',
-                'Inserted_Timestamp': pd.Timestamp.utcnow()
+                'Inserted_Timestamp': pd.Timestamp.utcnow(),
+                'Sport': sport,      
             })
         else:
             logging.warning(f"⚠️ Skipped due to missing scores: {raw_home} vs {raw_away} | "
