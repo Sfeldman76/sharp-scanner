@@ -1017,8 +1017,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     df_power = fetch_power_ratings_from_bq(
         bq_client=bq_client,
         sport=sport,
-        lookback_days=400,
-        table=RATINGS_HISTORY_TABLE
+        lookback_days=400
     )
     # ✅ Timestamps (UTC)
     df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'], errors='coerce', utc=True)
