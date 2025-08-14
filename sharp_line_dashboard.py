@@ -115,9 +115,12 @@ BQ_FULL_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
 MARKET_WEIGHTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.market_weights"
 LINE_HISTORY_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.line_history_master"
 SNAPSHOTS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.odds_snapshot_log"
-POWER_RATINGS_TABLE = "`sharplogger.model_data.power_ratings`"  # e.g. project.dataset.table
+
+RATINGS_HISTORY_TABLE = "sharplogger.sharp_data.ratings_history"  # <- fully qualified
+
 GCS_BUCKET = "sharp-models"
 import os, json
+
 
 
 
@@ -410,11 +413,12 @@ def get_recent_history():
 
 
 
-POWER_RATINGS_TABLE_DEFAULT = "sharplogger.sharp_data.ratings_history"  # or ratings_current
+
+
+
 
 def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
-    # ✅ Force a default if not already set
-    table = POWER_RATINGS_TABLE or "sharplogger.sharp_data.ratings_history"
+    table = RATINGS_HISTORY_TABLE  # explicit, non-empty
 
     query = f"""
         WITH raw AS (
@@ -451,6 +455,29 @@ def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400)
         ),
     )
     df_power = job.to_dataframe()
+
+    # Return typed empty frame if nothing came back
+    if df_power.empty:
+        return pd.DataFrame(columns=["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"])
+
+    # Normalize for attach_power_ratings_asof()
+    def _normalize_team(x: str) -> str:
+        x = str(x).lower().strip()
+        x = x.replace(".", "").replace("&", "and")
+        return x
+
+    df_power["Sport"] = df_power["Sport"].astype(str).str.upper()
+    df_power["Team_Norm"] = df_power["Team_Raw"].apply(_normalize_team)
+    df_power["AsOf"] = pd.to_datetime(df_power["AsOfTS"], errors="coerce", utc=True)
+
+    keep = ["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]
+    df_power = (
+        df_power[keep]
+        .dropna(subset=["AsOf"])
+        .sort_values(["Sport","Team_Norm","AsOf"])
+        .reset_index(drop=True)
+    )
+    return df_power
 
 
 def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
@@ -987,7 +1014,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     df_bt['Sport'] = df_bt['Sport'].astype(str).str.upper()
     
     df_bt['Bookmaker'] = df_bt['Bookmaker'].astype(str).str.lower().str.strip()
-   
+    df_power = fetch_power_ratings_from_bq(
+        bq_client=bq_client,
+        sport=sport,
+        lookback_days=400,
+        table=RATINGS_HISTORY_TABLE,   # <- prevents the “empty identifier” error
+    
     # ✅ Timestamps (UTC)
     df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'], errors='coerce', utc=True)
     # Use true Game_Start if present; else fall back to Snapshot_Timestamp for ordering
