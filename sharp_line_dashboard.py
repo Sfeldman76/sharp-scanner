@@ -410,6 +410,38 @@ def get_recent_history():
     st.write("📦 Using cached sharp history (get_recent_history)")
     return read_recent_sharp_moves_cached(hours=72)
 
+def _norm_team(s: pd.Series) -> pd.Series:
+    return (s.astype(str).str.lower().str.strip()
+              .str.replace(".", "", regex=False)
+              .str.replace("&", "and", regex=False))
+
+def _prep_for_asof_left(df: pd.DataFrame, by_keys: list[str], on_key: str) -> pd.DataFrame:
+    # drop rows where any join keys are missing
+    df = df.dropna(subset=by_keys + [on_key]).copy()
+    # enforce dtypes
+    for bk in by_keys:
+        df[bk] = df[bk].astype(str)
+    df[on_key] = pd.to_datetime(df[on_key], utc=True, errors='coerce')
+    df = df.dropna(subset=[on_key])
+    # strict group-wise sort by keys
+    df = df.sort_values(by_keys + [on_key], kind='mergesort').reset_index(drop=True)
+    # sanity: ensure sorted within each group
+    if not df.groupby(by_keys, sort=False)[on_key].apply(lambda s: s.is_monotonic_increasing).all():
+        # enforce again group-wise just in case
+        df = (df.groupby(by_keys, sort=False, group_keys=True)
+                .apply(lambda g: g.sort_values(on_key, kind='mergesort'))
+                .reset_index(drop=True))
+    return df
+
+def _prep_for_asof_right(df: pd.DataFrame, by_keys: list[str], on_key: str) -> pd.DataFrame:
+    df = df.dropna(subset=by_keys + [on_key]).copy()
+    for bk in by_keys:
+        df[bk] = df[bk].astype(str)
+    df[on_key] = pd.to_datetime(df[on_key], utc=True, errors='coerce')
+    df = df.dropna(subset=[on_key])
+    df = df.sort_values(by_keys + [on_key], kind='mergesort').reset_index(drop=True)
+    return df
+
 def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
     table = RATINGS_HISTORY_TABLE  # explicit, non-empty
 
@@ -544,80 +576,66 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
     dm['Market'] = dm['Market'].astype(str).str.lower().str.strip()
 
     # Outcome_Norm fallback, then normalize teams
-    if 'Outcome_Norm' not in dm.columns:
-        dm['Outcome_Norm'] = dm.get('Outcome', '').astype(str)
-    dm['Outcome_Norm']   = dm['Outcome_Norm'].astype(str).apply(normalize_team)
-    dm['Home_Team_Norm'] = dm['Home_Team_Norm'].astype(str).apply(normalize_team)
-    dm['Away_Team_Norm'] = dm['Away_Team_Norm'].astype(str).apply(normalize_team)
-
+    # normalize team strings consistently
+    dm['Sport'] = dm['Sport'].astype(str).str.upper()
+    dm['Outcome_Norm']   = _norm_team(dm['Outcome_Norm'] if 'Outcome_Norm' in dm else dm.get('Outcome', ''))
+    dm['Home_Team_Norm'] = _norm_team(dm['Home_Team_Norm'])
+    dm['Away_Team_Norm'] = _norm_team(dm['Away_Team_Norm'])
+    
+    # choose the timestamp column and coerce
     ts_col = 'Snapshot_Timestamp' if 'Snapshot_Timestamp' in dm.columns else 'Game_Start'
-    dm[ts_col] = pd.to_datetime(dm[ts_col], errors='coerce', utc=True)
-
-    # --- Ratings table: clean, normalize, sort, drop NaT
+    dm[ts_col] = pd.to_datetime(dm[ts_col], utc=True, errors='coerce')
+    
+    # ratings (right side)
     pr = df_power.copy()
     pr['Sport']     = pr['Sport'].astype(str).str.upper()
-    pr['Team_Norm'] = pr['Team_Norm'].astype(str).apply(normalize_team)
-    pr = pr.dropna(subset=['AsOf']).rename(columns={'AsOf': 'AsOfTS'})
-    pr['AsOfTS'] = pd.to_datetime(pr['AsOfTS'], errors='coerce', utc=True)
-    pr = pr.dropna(subset=['AsOfTS'])
-    pr = pr.sort_values(['Sport', 'Team_Norm', 'AsOfTS'], kind='mergesort')
-
-    # --- Team markets only
-    mask_team_markets = dm['Market'].isin(['spreads', 'h2h'])
+    pr['Team_Norm'] = _norm_team(pr['Team_Norm'])
+    pr = pr.dropna(subset=['AsOf']).rename(columns={'AsOf':'AsOfTS'})
+    pr = _prep_for_asof_right(pr, by_keys=['Sport','Team_Norm'], on_key='AsOfTS')
+    
+    # team markets only
+    mask_team_markets = dm['Market'].isin(['spreads','h2h'])
     dm.loc[mask_team_markets, 'Team'] = dm.loc[mask_team_markets, 'Outcome_Norm']
     dm.loc[mask_team_markets, 'Opp']  = np.where(
         dm.loc[mask_team_markets, 'Team'] == dm.loc[mask_team_markets, 'Home_Team_Norm'],
         dm.loc[mask_team_markets, 'Away_Team_Norm'],
         dm.loc[mask_team_markets, 'Home_Team_Norm']
     )
-
-    # Drop NaT on left before merge_asof
+    
     left_mask = mask_team_markets & dm[ts_col].notna()
-
-    # Build left (team) & (opp) sides, strictly sorted on by+on keys
-    left_team = (
-        dm.loc[left_mask, ['Sport', 'Team', ts_col, 'Game_Key', 'Market', 'Outcome']]
-          .rename(columns={'Team': 'Team_Norm'})
-          .sort_values(['Sport', 'Team_Norm', ts_col], kind='mergesort')
-    )
-    left_opp = (
-        dm.loc[left_mask, ['Sport', 'Opp', ts_col, 'Game_Key', 'Market', 'Outcome']]
-          .rename(columns={'Opp': 'Team_Norm'})
-          .sort_values(['Sport', 'Team_Norm', ts_col], kind='mergesort')
-    )
-
-    # Early exit if nothing to match; still guarantee all needed cols
+    
+    # LEFT (team)
+    left_team = (dm.loc[left_mask, ['Sport','Team',ts_col,'Game_Key','Market','Outcome']]
+                   .rename(columns={'Team':'Team_Norm'}))
+    left_team = _prep_for_asof_left(left_team, by_keys=['Sport','Team_Norm'], on_key=ts_col)
+    
+    # LEFT (opp)
+    left_opp = (dm.loc[left_mask, ['Sport','Opp',ts_col,'Game_Key','Market','Outcome']]
+                  .rename(columns={'Opp':'Team_Norm'}))
+    left_opp = _prep_for_asof_left(left_opp, by_keys=['Sport','Team_Norm'], on_key=ts_col)
+    
+    # bail out cleanly if either side empty
     if left_team.empty or pr.empty:
         for c in needed:
-            if c not in dm.columns:
-                dm[c] = np.nan
+            if c not in dm.columns: dm[c] = np.nan
         return dm
-
-    # --- merge_asof joins
+    
+    # --- merge_asof (guaranteed sorted) ---
     team_rat = pd.merge_asof(
         left_team, pr,
-        by=['Sport', 'Team_Norm'],
+        by=['Sport','Team_Norm'],
         left_on=ts_col, right_on='AsOfTS',
         direction='backward',
         allow_exact_matches=True
-    ).rename(columns={
-        'Power_Rating': 'PR_Team_Rating',
-        'PR_Off': 'PR_Team_Off',
-        'PR_Def': 'PR_Team_Def'
-    })
-
+    ).rename(columns={'Power_Rating':'PR_Team_Rating','PR_Off':'PR_Team_Off','PR_Def':'PR_Team_Def'})
+    
     opp_rat = pd.merge_asof(
         left_opp, pr,
-        by=['Sport', 'Team_Norm'],
+        by=['Sport','Team_Norm'],
         left_on=ts_col, right_on='AsOfTS',
         direction='backward',
         allow_exact_matches=True
-    ).rename(columns={
-        'Power_Rating': 'PR_Opp_Rating',
-        'PR_Off': 'PR_Opp_Off',
-        'PR_Def': 'PR_Opp_Def'
-    })
-
+    ).rename(columns={'Power_Rating':'PR_Opp_Rating','PR_Off':'PR_Opp_Off','PR_Def':'PR_Opp_Def'})
     # Merge matched ratings back onto full dm
     dm = dm.merge(
         team_rat[['Game_Key', 'Market', 'Outcome', 'PR_Team_Rating', 'PR_Team_Off', 'PR_Team_Def']],
@@ -681,6 +699,8 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
         dm['PR_Prob_Gap_vs_Market'] = (dm['PR_Prob_From_Rating'] - dm['H2H_Implied_Prob']).where(dm['Market'] == 'h2h')
 
     return dm
+
+
 def read_latest_snapshot_from_bigquery(hours=2):
     try:
         client = bq_client
