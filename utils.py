@@ -4347,7 +4347,8 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             "Source": "oddsapi",
             "Sport": sport,
             # 🔑 Canonical Merge_Key_Short: teams + str(Commence_Hour) (includes +00:00)
-            "Merge_Key_Short": f"{home}_{away}_{str(commence_hour)}",
+            "Merge_Key_Short": merge_key,
+
         })
 
     if not score_rows:
@@ -4355,16 +4356,29 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         return pd.DataFrame()
 
     df_scores = pd.DataFrame(score_rows)
-
+    df_scores = df_scores[df_scores['Merge_Key_Short'].notna()].copy()
+    
     # Ensure types/casing are stable
-    df_scores["Merge_Key_Short"]   = df_scores["Merge_Key_Short"].astype(str).str.strip().str.lower()
-    df_scores["Score_Home_Score"]  = pd.to_numeric(df_scores["Score_Home_Score"], errors="coerce")
-    df_scores["Score_Away_Score"]  = pd.to_numeric(df_scores["Score_Away_Score"], errors="coerce")
+    # 0) drop rows with null keys BEFORE string ops (avoid making "nan")
+    df_scores = df_scores[df_scores['Merge_Key_Short'].notna()].copy()
+    
+    # 1) normalize the key (matches master if you used build_merge_key for construction)
+    df_scores['Merge_Key_Short'] = df_scores['Merge_Key_Short'].str.strip().str.lower()
+    
+    # 2) coerce scores to numeric
+    df_scores['Score_Home_Score'] = pd.to_numeric(df_scores['Score_Home_Score'], errors='coerce')
+    df_scores['Score_Away_Score'] = pd.to_numeric(df_scores['Score_Away_Score'], errors='coerce')
+    
+    # 3) make sure Inserted_Timestamp is real datetimes for sorting
+    df_scores['Inserted_Timestamp'] = pd.to_datetime(df_scores['Inserted_Timestamp'], utc=True, errors='coerce')
+    
+    # 4) stable latest-per-game dedup, then require non-null scores
     df_scores = (
-        df_scores.sort_values("Inserted_Timestamp")
-                 .drop_duplicates(subset="Merge_Key_Short", keep="last")
-                 .dropna(subset=["Score_Home_Score", "Score_Away_Score"])
+        df_scores.sort_values('Inserted_Timestamp')
+                 .drop_duplicates(subset='Merge_Key_Short', keep='last')
+                 .dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
     )
+
 
     # === 3. Upload scores to `game_scores_final` ===
     # === 3. Upload scores to `game_scores_final` ===
