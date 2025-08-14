@@ -54,37 +54,44 @@ from utils import (
 )
 
 def detect_and_save_all_sports():
-    ratings_need_update = False  # ← track if any sport wrote new finals
+    # 1) ✅ Load ratings first (your preference)
+    try:
+        logging.info("🟢 Pre-pass: updating power ratings BEFORE detection …")
+        pre_summary = update_power_ratings()
+        logging.info(f"📊 Pre-pass ratings summary: {pre_summary}")
+    except Exception as e:
+        logging.error(f"❌ Pre-pass ratings update failed: {e}", exc_info=True)
+
+    ratings_need_update = False
 
     for sport_label in ["NBA", "MLB", "WNBA", "CFL", "NFL", "NCAAF"]:
         try:
-            sport_key = SPORTS[sport_label]
-            logging.info(f"🔍 Running sharp detection for {sport_label}...")
+            sport_key = SPORTS[sport_label]  # e.g., "basketball_nba" (⚠️ not the label)
+            logging.info(f"🔍 Running sharp detection for {sport_label}…")
 
             timestamp = pd.Timestamp.utcnow()
             current = fetch_live_odds(sport_key, API_KEY)
             logging.info(f"📥 Odds pulled: {len(current)} games")
 
             if not current:
-                logging.warning(f"⚠️ No odds data available for {sport_label}, skipping...")
+                logging.warning(f"⚠️ No odds for {sport_label}, skipping…")
                 continue
 
             previous = read_latest_snapshot_from_bigquery()
             logging.info(f"📦 Previous snapshot loaded: {len(previous)} games")
 
             market_weights = load_market_weights_from_bq()
-
             trained_models = {
-                market: load_model_from_gcs(sport_label, market)
-                for market in ['spreads', 'totals', 'h2h']
+                m: load_model_from_gcs(sport_label, m) for m in ["spreads", "totals", "h2h"]
             }
             trained_models = {k: v for k, v in trained_models.items() if v}
             logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys())}")
 
+            # Use the API sport_key here
             df_moves, df_snap_unused, df_audit = detect_sharp_moves(
                 current=current,
                 previous=previous,
-                sport_key=sport_label,
+                sport_key=sport_key,
                 SHARP_BOOKS=SHARP_BOOKS,
                 REC_BOOKS=REC_BOOKS,
                 BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
@@ -92,7 +99,7 @@ def detect_and_save_all_sports():
                 weights=market_weights
             )
 
-            # --- Scores/backtest (this is what produces finals) ---
+            # --- Backtest (writes to sharp_scores_full) ---
             try:
                 backtest_days = 3
                 df_backtest = fetch_scores_and_backtest(
@@ -107,21 +114,34 @@ def detect_and_save_all_sports():
 
                 if df_backtest is not None and not df_backtest.empty:
                     write_to_bigquery(df_backtest, table="sharp_data.sharp_scores_full")
-                    ratings_need_update = True   # ← we added finals; refresh ratings later
+                    ratings_need_update = True
                 else:
-                    logging.warning(f"⚠️ No backtest rows returned for {sport_label} — skipping BigQuery write.")
+                    logging.warning(f"⚠️ No backtest rows for {sport_label} — skip write.")
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
-            # ... your snapshot/build_game_key block unchanged ...
+            # --- Save completed game scores to game_scores_final (ensure Sport present) ---
+            try:
+                completed_rows = build_completed_game_rows(current, sport_key)  # includes 'Sport'
+                if completed_rows is not None and not completed_rows.empty:
+                    write_to_bigquery(completed_rows, table="sharp_data.game_scores_final")
+                    ratings_need_update = True
+            except Exception as e:
+                logging.error(f"❌ Writing game_scores_final failed for {sport_label}: {e}", exc_info=True)
+
+            # … any snapshot/build_game_key work …
 
         except Exception as e:
             logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
 
-    # --- After ALL sports: refresh ratings once (not inside the loop) ---
+    # 2) ✅ Post-pass: only if we actually saved new finals anywhere
+    if ratings_need_update:
+        try:
+            logging.info("🟢 Post-pass: updating power ratings AFTER detection …")
+            post_summary = update_power_ratings()  # NaT-safe version
+            logging.info(f"📈 Post-pass ratings summary: {post_summary}")
+        except Exception as e:
+            logging.error(f"❌ Post-pass ratings update failed: {e}", exc_info=True)
+    else:
+        logging.info("ℹ️ No new finals written; skipping post-pass ratings update.")
 
-    try:
-        summary = update_power_ratings()   # ✅ CALL the function
-        logging.info(f"🧮 Ratings update: {summary}")
-    except Exception as e:
-        logging.error(f"❌ Failed to update power ratings: {e}", exc_info=True)
