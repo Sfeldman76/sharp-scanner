@@ -118,12 +118,9 @@ def detect_and_save_all_sports():
             logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
 
     # --- After ALL sports: refresh ratings once (not inside the loop) ---
+
     try:
-        if ratings_need_update:
-            summary = update_power_ratings()   # ✅ CALL the function
-            logging.info(f"🧮 Ratings update: {summary}")
-        else:
-            logging.info("ℹ️ No new finals written; skipping ratings update.")
+        summary = update_power_ratings()   # ✅ CALL the function
+        logging.info(f"🧮 Ratings update: {summary}")
     except Exception as e:
         logging.error(f"❌ Failed to update power ratings: {e}", exc_info=True)
-
