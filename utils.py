@@ -136,41 +136,28 @@ def update_power_ratings(
       - MLB  -> Poisson/Skellam-style attack+defense rating (no MOV)
       - NFL  -> Elo with MOV boost + K-decay
       - NBA  -> Elo with MOV boost + K-decay
+    """
+    # ---------------- CONFIG (baseball / football / basketball only) ----------------
+    SPORT_ALIASES = {
+        "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
+        "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
+        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
+        "NBA":   ["NBA", "BASKETBALL_NBA"],
+        "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
+        "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
+    }
 
-    Behavior:
-      - If no history exists for a sport, FULL BACKSTILL from first game.
-      - Else, processes ONLY games with Game_Start > last Updated_At for that sport.
-      - If there are **no new finals since last update**, skip that sport.
-      - Seeds from ratings_current -> ratings_history latest -> 1500.
+    def get_aliases(canon: str) -> list[str]:
+        return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
 
-    Writes:
-      - Append to ratings_history
-      - Upsert ratings_current
-
-Returns a small dict summary.
-"""
-# ---------------- CONFIG (baseball / football / basketball only) ----------------
-   SPORT_ALIASES = {
-       "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
-       "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
-       "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
-       "NBA":   ["NBA", "BASKETBALL_NBA"],
-       "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
-       "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
-   }
-   
-   def get_aliases(canon: str) -> list[str]:
-       return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
-   
-       SPORT_CFG = {
-           "MLB":    dict(model="poisson", K_start=None, K_late=None, HFA=18.0, mov_cap=None),
-           "NFL":    dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),
-           "NCAAF":  dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),          
-           "NBA":    dict(model="elo", K_start=18.0, K_late=10.0, HFA=55.0, mov_cap=25.0),
-           "WNBA":   dict(model="elo", K_start=18.0, K_late=10.0, HFA=45.0, mov_cap=25.0),
-           "CFL":    dict(model="elo", K_start=20.0, K_late=12.0, HFA=18.0, mov_cap=30.0),
-           
-       }
+    SPORT_CFG = {
+        "MLB":    dict(model="poisson", K_start=None, K_late=None, HFA=18.0, mov_cap=None),
+        "NFL":    dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),
+        "NCAAF":  dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),
+        "NBA":    dict(model="elo", K_start=18.0, K_late=10.0, HFA=55.0, mov_cap=25.0),
+        "WNBA":   dict(model="elo", K_start=18.0, K_late=10.0, HFA=45.0, mov_cap=25.0),
+        "CFL":    dict(model="elo", K_start=20.0, K_late=12.0, HFA=18.0, mov_cap=30.0),
+    }
       
 
     def elo_expected(delta, hfa=20.0):
