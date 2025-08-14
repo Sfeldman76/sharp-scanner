@@ -4310,59 +4310,60 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info("✅ Completed games: %d", len(completed_games))
 
     # === 2. Extract valid score rows ===
-    score_rows = []
-    for game in completed_games:
-        gid = str(game.get("id","")).strip()  # OddsAPI id
-        raw_home = game.get("home_team","")
-        raw_away = game.get("away_team","")
-        home = normalize_team(raw_home)
-        away = normalize_team(raw_away)
-    
-        # Parse start WITHOUT rounding drift unless your master uses the same op
-        game_start_raw = pd.to_datetime(game.get("commence_time"), utc=True)
-        # ⚠️ Use the SAME transform your df_master uses when building keys:
-        game_start = game_start_raw  # if df_master uses floor("h"), keep it, but ensure both sides match
-    
-        # build key EXACTLY like your master; add provider id as a fallback suffix to avoid collisions
-        merge_key = build_merge_key(home, away, game_start)
-        if gid:
-            merge_key = f"{merge_key}|oddsapi:{gid}"
-    
-        # collapse provider scores into a dict {team_norm: numeric}
-        by_team = {}
-        for s in (game.get("scores") or []):
-            nm = normalize_team(s.get("name",""))
-            val = s.get("score")
-            try:
-                by_team[nm] = float(str(val).replace(",","").strip())
-            except Exception:
-                pass
-    
-        # Defensive: both teams must be present and numeric
-        if home not in by_team or away not in by_team:
-            logging.warning("⚠️ Skip: team name mismatch home=%s away=%s | present=%s | game_id=%s",
-                            home, away, list(by_team.keys()), gid)
-            continue
-    
-        # Done: append clean row
-        score_rows.append({
-            "Merge_Key_Short": str(merge_key).strip().lower(),
-            "Home_Team": home, "Away_Team": away,
-            "Game_Start": game_start,
-            "Score_Home_Score": int(by_team[home]),
-            "Score_Away_Score": int(by_team[away]),
-            "Source": "oddsapi",
-            "Inserted_Timestamp": pd.Timestamp.utcnow(),
-            "Sport": sport,
-            "Provider_Game_Id": gid,
-        })
-
-
-    df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
-    df_scores = df_scores.drop_duplicates(subset=['Merge_Key_Short'])
-    df_scores['Score_Home_Score'] = pd.to_numeric(df_scores['Score_Home_Score'], errors='coerce')
-    df_scores['Score_Away_Score'] = pd.to_numeric(df_scores['Score_Away_Score'], errors='coerce')
-    df_scores = df_scores.dropna(subset=['Score_Home_Score', 'Score_Away_Score'])
+   # --- build df_scores (canonicalized to match build_game_key) ---
+   score_rows = []
+   for game in completed_games:
+       raw_home = game.get("home_team", "")
+       raw_away = game.get("away_team", "")
+       # Use the SAME normalization (lower+strip)
+       home = normalize_team(raw_home).strip().lower()
+       away = normalize_team(raw_away).strip().lower()
+   
+       # Floor to hour in UTC; string will include +00:00 when cast to str
+       commence_hour = pd.to_datetime(game.get("commence_time"), utc=True).floor("h")
+   
+       # Collapse provider scores to numeric
+       by_team = {}
+       for s in (game.get("scores") or []):
+           nm  = normalize_team(s.get("name","")).strip().lower()
+           val = s.get("score")
+           try:
+               by_team[nm] = float(str(val).replace(",","").strip())
+           except Exception:
+               pass
+   
+       if home not in by_team or away not in by_team:
+           logging.warning("⚠️ Skip: name mismatch home=%s away=%s present=%s",
+                           home, away, list(by_team.keys()))
+           continue
+   
+       score_rows.append({
+           "Home_Team": home,
+           "Away_Team": away,
+           "Game_Start": commence_hour,  # keep tz-aware
+           "Score_Home_Score": int(by_team[home]),
+           "Score_Away_Score": int(by_team[away]),
+           "Inserted_Timestamp": pd.Timestamp.utcnow(),
+           "Source": "oddsapi",
+           "Sport": sport,
+           # 🔑 Canonical Merge_Key_Short: teams + str(Commence_Hour) (includes +00:00)
+           "Merge_Key_Short": f"{home}_{away}_{str(commence_hour)}",
+       })
+   
+   if not score_rows:
+       logging.warning("⚠️ After validation, zero usable completed games.")
+       return pd.DataFrame()
+   
+   df_scores = pd.DataFrame(score_rows)
+   
+   # Ensure types/casing are stable
+   df_scores["Merge_Key_Short"]   = df_scores["Merge_Key_Short"].astype(str).str.strip().str.lower()
+   df_scores["Score_Home_Score"]  = pd.to_numeric(df_scores["Score_Home_Score"], errors="coerce")
+   df_scores["Score_Away_Score"]  = pd.to_numeric(df_scores["Score_Away_Score"], errors="coerce")
+   df_scores = (df_scores.sort_values("Inserted_Timestamp")
+                         .drop_duplicates(subset="Merge_Key_Short", keep="last")
+                         .dropna(subset=["Score_Home_Score","Score_Away_Score"]))
+   
 
     # === 3. Upload scores to `game_scores_final` ===
     # === 3. Upload scores to `game_scores_final` ===
