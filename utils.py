@@ -150,6 +150,18 @@ def update_power_ratings(
     Returns a small dict summary.
     """
     # ---------------- CONFIG (baseball / football / basketball only) ----------------
+    SPORT_ALIASES = {
+        "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
+        "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
+        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
+        "NBA":   ["NBA", "BASKETBALL_NBA"],
+        "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
+        "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
+    }
+
+def get_aliases(canon: str) -> list[str]:
+    return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
+
     SPORT_CFG = {
         "MLB":    dict(model="poisson", K_start=None, K_late=None, HFA=18.0, mov_cap=None),
         "NFL":    dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),
@@ -224,11 +236,20 @@ def update_power_ratings(
         bq.query(f"DROP TABLE `{stage}`").result()
 
     def fetch_sports_present(bq):
-        return bq.query(f"""
-            SELECT DISTINCT COALESCE(CAST(Sport AS STRING), '{default_sport}') AS Sport
+        rows = bq.query(f"""
+            SELECT DISTINCT UPPER(CAST(Sport AS STRING)) AS s
             FROM `{project_table_scores}`
             WHERE Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-        """).to_dataframe().Sport.tolist()
+        """).to_dataframe()
+    
+        present = set()
+        if not rows.empty:
+            seen = {str(s).upper() for s in rows.s.dropna().tolist()}
+            for canon in SPORT_CFG.keys():
+                aliases = set(get_aliases(canon))
+                if seen & aliases:
+                    present.add(canon)
+        return sorted(present)
 
     def get_last_ts(bq, sport: str):
         df = bq.query(
@@ -261,60 +282,54 @@ def update_power_ratings(
         return None
 
     def has_new_finals_since(bq, sport: str, last_ts):
-        # Normalize NaT/None → None
+        aliases = get_aliases(sport)
         if last_ts is None or (isinstance(last_ts, pd.Timestamp) and pd.isna(last_ts)):
             sql = f"""
               SELECT COUNT(*) AS n
               FROM `{project_table_scores}`
-              WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
+              WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
                 AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
               LIMIT 1
             """
-            params = [bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+            params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
         else:
-            # Make sure it’s UTC and a python datetime for the BigQuery param
             if isinstance(last_ts, pd.Timestamp):
-                if last_ts.tzinfo is None:
-                    last_ts = last_ts.tz_localize("UTC")
-                else:
-                    last_ts = last_ts.tz_convert("UTC")
-                cutoff = last_ts.to_pydatetime()
+                cutoff = (last_ts.tz_localize("UTC") if last_ts.tzinfo is None else last_ts.tz_convert("UTC")).to_pydatetime()
             elif isinstance(last_ts, dt.datetime):
                 cutoff = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=dt.timezone.utc)
             else:
-                # Fallback: treat as no cutoff
                 cutoff = None
     
             if cutoff is None:
                 sql = f"""
                   SELECT COUNT(*) AS n
                   FROM `{project_table_scores}`
-                  WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
+                  WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
                     AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
                   LIMIT 1
                 """
-                params = [bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+                params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
             else:
                 sql = f"""
                   SELECT COUNT(*) AS n
                   FROM `{project_table_scores}`
-                  WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
+                  WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
                     AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
                     AND TIMESTAMP(Game_Start) > @cutoff
                   LIMIT 1
                 """
                 params = [
-                    bigquery.ScalarQueryParameter("sport", "STRING", sport),
+                    bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases),
                     bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff),
                 ]
     
-        n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)) \
-               .to_dataframe().n.iloc[0]
+        n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe().n.iloc[0]
         return n > 0
 
 
+
     def load_games(bq, sport: str, cutoff=None):
-        # Normalize cutoff like above
+        aliases = get_aliases(sport)
         cutoff_param = None
         if cutoff is not None and not (isinstance(cutoff, pd.Timestamp) and pd.isna(cutoff)):
             if isinstance(cutoff, pd.Timestamp):
@@ -323,41 +338,36 @@ def update_power_ratings(
             elif isinstance(cutoff, dt.datetime):
                 cutoff_param = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=dt.timezone.utc)
     
+        base_sql = f"""
+        SELECT
+          CASE
+            WHEN UPPER(CAST(Sport AS STRING)) IN ('BASEBALL_MLB','BASEBALL-MLB','BASEBALL','MLB') THEN 'MLB'
+            WHEN UPPER(CAST(Sport AS STRING)) IN ('AMERICANFOOTBALL_NFL','FOOTBALL_NFL','NFL') THEN 'NFL'
+            WHEN UPPER(CAST(Sport AS STRING)) IN ('BASKETBALL_NBA','NBA') THEN 'NBA'
+            WHEN UPPER(CAST(Sport AS STRING)) IN ('BASKETBALL_WNBA','WNBA') THEN 'WNBA'
+            WHEN UPPER(CAST(Sport AS STRING)) IN ('CFL','CANADIANFOOTBALL','CANADIAN_FOOTBALL') THEN 'CFL'
+            ELSE COALESCE(CAST(Sport AS STRING), '{default_sport}')
+          END AS Sport,
+          Home_Team, Away_Team,
+          TIMESTAMP(Game_Start) AS Game_Start,
+          SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
+          SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score,
+          TIMESTAMP(Inserted_Timestamp) AS Snapshot_TS
+        FROM `{project_table_scores}`
+        WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
+          AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
+        """
         if cutoff_param is None:
-            sql = f"""
-            SELECT
-              COALESCE(CAST(Sport AS STRING), '{default_sport}') AS Sport,
-              Home_Team, Away_Team,
-              TIMESTAMP(Game_Start) AS Game_Start,
-              SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
-              SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score,
-              TIMESTAMP(Inserted_Timestamp) AS Snapshot_TS
-            FROM `{project_table_scores}`
-            WHERE (COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport)
-              AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-            ORDER BY Game_Start
-            """
-            params = [bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+            sql = base_sql + "\nORDER BY Game_Start"
+            params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
         else:
-            sql = f"""
-            SELECT
-              COALESCE(CAST(Sport AS STRING), '{default_sport}') AS Sport,
-              Home_Team, Away_Team,
-              TIMESTAMP(Game_Start) AS Game_Start,
-              SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
-              SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score,
-              TIMESTAMP(Inserted_Timestamp) AS Snapshot_TS
-            FROM `{project_table_scores}`
-            WHERE (COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport)
-              AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-              AND TIMESTAMP(Game_Start) > @cutoff
-            ORDER BY Game_Start
-            """
+            sql = base_sql + "\n  AND TIMESTAMP(Game_Start) > @cutoff\nORDER BY Game_Start"
             params = [
-                bigquery.ScalarQueryParameter("sport", "STRING", sport),
+                bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases),
                 bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_param),
             ]
         return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+
 
 
     # ---------------- MAIN WORK ----------------
@@ -435,9 +445,7 @@ def update_power_ratings(
 
 
 
-            for team, rating in ratings.items():
-                current_rows_all.append(dict(Sport=sport, Team=team, Rating=float(rating),
-                                             Method="elo_mov", Updated_At=utc_now))
+  
 
         elif cfg["model"] == "poisson":
             # MLB: Poisson/Skellam-style attack+defense rating
