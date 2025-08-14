@@ -1018,8 +1018,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         bq_client=bq_client,
         sport=sport,
         lookback_days=400,
-        table=RATINGS_HISTORY_TABLE,   # <- prevents the “empty identifier” error
-    
+        table=RATINGS_HISTORY_TABLE
+    )
     # ✅ Timestamps (UTC)
     df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'], errors='coerce', utc=True)
     # Use true Game_Start if present; else fall back to Snapshot_Timestamp for ordering
