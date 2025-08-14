@@ -4369,73 +4369,66 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
     # === 3. Upload scores to `game_scores_final` ===
     # === 3. Upload scores to `game_scores_final` ===
+    # === 3) Write finals to game_scores_final (canonical schema) ===
     try:
-        # Safe fallback
-        if 'df_scores_needed' not in locals() or not isinstance(df_scores_needed, pd.DataFrame):
-            df_scores_needed = pd.DataFrame()
+        # Canonicalize keys and types to match BQ schema
+        schema_cols = [
+            'Merge_Key_Short','Home_Team','Away_Team','Game_Start',
+            'Score_Home_Score','Score_Away_Score','Source','Inserted_Timestamp','Sport'
+        ]
     
-        existing_keys = bq_client.query("""
-            SELECT DISTINCT Merge_Key_Short FROM `sharplogger.sharp_data.game_scores_final`
+        out = df_scores.copy()
+    
+        # Normalize key + strings
+        out['Merge_Key_Short'] = out['Merge_Key_Short'].astype(str).str.strip().str.lower()
+        out['Home_Team']       = out['Home_Team'].astype(str)
+        out['Away_Team']       = out['Away_Team'].astype(str)
+        out['Source']          = out['Source'].astype(str)
+        out['Sport']           = out['Sport'].astype(str)
+    
+        # Timestamps as UTC
+        out['Game_Start']         = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
+        out['Inserted_Timestamp'] = pd.to_datetime(out['Inserted_Timestamp'], utc=True, errors='coerce')
+    
+        # Scores as FLOAT (BQ schema)
+        out['Score_Home_Score'] = pd.to_numeric(out['Score_Home_Score'], errors='coerce').astype(float)
+        out['Score_Away_Score'] = pd.to_numeric(out['Score_Away_Score'], errors='coerce').astype(float)
+    
+        # Keep only schema columns (create if missing)
+        for c in schema_cols:
+            if c not in out.columns:
+                out[c] = pd.NA
+        out = out[schema_cols]
+    
+        # Drop any rows missing critical fields
+        out = out.dropna(subset=['Merge_Key_Short','Game_Start','Score_Home_Score','Score_Away_Score'])
+    
+        # Fetch existing keys in the same normalized form
+        existing = bq_client.query("""
+            SELECT DISTINCT LOWER(TRIM(CAST(Merge_Key_Short AS STRING))) AS mks
+            FROM `sharplogger.sharp_data.game_scores_final`
         """).to_dataframe()
-        existing_keys = set(existing_keys['Merge_Key_Short'].dropna())
+        existing_keys = set(existing['mks'].dropna())
     
-        new_scores = df_scores[~df_scores['Merge_Key_Short'].isin(existing_keys)].copy()
-        blocked = df_scores[df_scores['Merge_Key_Short'].isin(existing_keys)]
+        to_write = out[~out['Merge_Key_Short'].isin(existing_keys)].copy()
     
-        logging.info(f"⛔ Skipped (already in table): {len(blocked)}")
-        if not blocked.empty:
-            logging.info("🧪 Sample skipped keys:\n" +
-                blocked[['Merge_Key_Short','Home_Team','Away_Team','Game_Start']].head().to_string(index=False))
+        logging.info("⛳ Finals total (clean): %d | Already in table: %d | New to write: %d",
+                     len(out), len(out) - len(to_write), len(to_write))
     
-        # === df_scores_needed diagnostics
-        if not score_rows:
-            logging.warning("⚠️ After validation, zero usable completed games (team mismatch or non-numeric scores).")
-            # Optional: log a couple of raw items for diagnosis
-            dbg = [g for g in completed_games[:3]]
-            logging.warning("🔬 Sample raw completed payloads:\n%s", json.dumps(dbg, default=str)[:2000])
-            return pd.DataFrame()
-        
-        df_scores = pd.DataFrame(score_rows)
-        if df_scores.empty or df_scores[['Score_Home_Score','Score_Away_Score']].isnull().any().any():
-            logging.warning("⚠️ df_scores empty or has null numeric scores after coercion.")
-            return pd.DataFrame()
-
-    
-        logging.info(f"🧪 df_scores_needed shape: {df_scores_needed.shape}")
-        logging.info("🧪 df_scores_needed head:\n" + df_scores_needed.head().to_string(index=False))
-    
-        if 'Merge_Key_Short' in df_scores_needed.columns and df_scores_needed['Merge_Key_Short'].isnull().any():
-            logging.warning("⚠️ At least one row in df_scores_needed has a NULL Merge_Key_Short")
-        elif 'Merge_Key_Short' not in df_scores_needed.columns:
-            logging.warning("⚠️ 'Merge_Key_Short' column missing from df_scores_needed")
-    
-        if {'Home_Team','Away_Team'}.issubset(df_scores_needed.columns):
-            if df_scores_needed[['Home_Team','Away_Team']].isnull().any().any():
-                logging.warning("⚠️ At least one row has missing team names")
+        if not to_write.empty:
+            to_gbq(
+                to_write,  # already in schema order/types
+                'sharp_data.game_scores_final',
+                project_id=GCP_PROJECT_ID,
+                if_exists='append'
+            )
+            logging.info("✅ Wrote %d rows to sharp_data.game_scores_final", len(to_write))
         else:
-            logging.warning("⚠️ Missing 'Home_Team' or 'Away_Team' columns in df_scores_needed")
-    
-        empty_rows = df_scores_needed[df_scores_needed.isnull().all(axis=1)]
-        if not empty_rows.empty:
-            logging.warning("⚠️ Found completely empty rows in df_scores_needed:\n" + empty_rows.to_string(index=False))
-    
-        try:
-            sample = df_scores_needed[['Merge_Key_Short','Home_Team','Away_Team','Game_Start']].head(5)
-        except KeyError:
-            sample = df_scores_needed.head(5)
-        logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
+            logging.info("ℹ️ No new rows to write to sharp_data.game_scores_final")
     
     except Exception:
-        logging.exception("❌ Failed to upload game scores")
-        return pd.DataFrame()
-    
-        # Detect keys that are neither new nor already in BigQuery
-        all_found_keys = set(new_scores['Merge_Key_Short']) | existing_keys
-        missing_keys = set(df_scores['Merge_Key_Short']) - all_found_keys
-        if missing_keys:
-            logging.warning(f"⚠️ These keys were neither uploaded nor matched in BigQuery:")
-            logging.warning(list(missing_keys)[:5])
-    
+        logging.exception("❌ Failed to upload game scores to game_scores_final")
+
         # === Upload if valid
         if new_scores.empty:
             logging.info("ℹ️ No new scores to upload to game_scores_final")
