@@ -150,14 +150,14 @@ def update_power_ratings(
     Returns a small dict summary.
     """
     # ---------------- CONFIG (baseball / football / basketball only) ----------------
-    SPORT_ALIASES = {
-        "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
-        "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
-        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
-        "NBA":   ["NBA", "BASKETBALL_NBA"],
-        "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
-        "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
-    }
+SPORT_ALIASES = {
+    "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
+    "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
+    "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
+    "NBA":   ["NBA", "BASKETBALL_NBA"],
+    "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
+    "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
+}
 
 def get_aliases(canon: str) -> list[str]:
     return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
@@ -326,7 +326,47 @@ def get_aliases(canon: str) -> list[str]:
         n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe().n.iloc[0]
         return n > 0
 
+    def sports_present_in_history(bq: bigquery.Client) -> list[str]:
+        q = f"SELECT DISTINCT UPPER(Sport) AS s FROM `{table_history}`"
+        df = bq.query(q).to_dataframe()
+        return df.s.dropna().str.upper().tolist()
 
+    def fill_missing_current_from_history(bq: bigquery.Client, sports: list[str] | None = None):
+        """
+        Ensure every (Sport, Team, Method) that exists in history also exists in current.
+        Only inserts when missing; DOES NOT overwrite existing current rows.
+        """
+        if not sports:
+            # default to all canonical sports we know how to manage AND that exist in history
+            hist = set(sports_present_in_history(bq))
+            sports = sorted(hist & set(SPORT_CFG.keys()))
+    
+        for sport in sports:
+            sql = f"""
+            MERGE `{table_current}` T
+            USING (
+              WITH latest AS (
+                SELECT
+                  Sport, Team, Method, Rating, Updated_At,
+                  ROW_NUMBER() OVER (PARTITION BY Sport, Team, Method ORDER BY Updated_At DESC) AS rn
+                FROM `{table_history}`
+                WHERE Sport = @sport
+              )
+              SELECT Sport, Team, Method, Rating, Updated_At
+              FROM latest
+              WHERE rn = 1
+            ) S
+            ON T.Sport = S.Sport AND T.Team = S.Team AND T.Method = S.Method
+            WHEN NOT MATCHED THEN
+              INSERT (Sport, Team, Method, Rating, Updated_At)
+              VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
+            """
+            bq.query(
+                sql,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+                ),
+            ).result()
 
     def load_games(bq, sport: str, cutoff=None):
         aliases = get_aliases(sport)
@@ -367,6 +407,53 @@ def get_aliases(canon: str) -> list[str]:
                 bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_param),
             ]
         return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+    def sync_current_from_history(bq: bigquery.Client, sports: list[str]):
+           """
+           Upsert ratings_current to the latest snapshot per (Sport, Team, Method)
+           from ratings_history for the provided canonical sport names.
+           """
+           if not sports:
+               return
+       
+           # Use a parameterized MERGE selecting the latest per (Sport, Team, Method)
+           # We do it sport-by-sport to keep params simple.
+           for sport in sports:
+               # canonical sport name (we write canonical keys into history/current)
+               sql = f"""
+               MERGE `{table_current}` T
+               USING (
+                 WITH latest AS (
+                   SELECT
+                     Sport,
+                     Team,
+                     Method,
+                     Rating,
+                     Updated_At,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY Sport, Team, Method
+                       ORDER BY Updated_At DESC
+                     ) AS rn
+                   FROM `{table_history}`
+                   WHERE Sport = @sport
+                 )
+                 SELECT Sport, Team, Method, Rating, Updated_At
+                 FROM latest
+                 WHERE rn = 1
+               ) S
+               ON T.Sport = S.Sport AND T.Team = S.Team AND T.Method = S.Method
+               WHEN MATCHED THEN UPDATE SET
+                 T.Rating = S.Rating,
+                 T.Updated_At = S.Updated_At
+               WHEN NOT MATCHED THEN
+                 INSERT (Sport, Team, Method, Rating, Updated_At)
+                 VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
+               """
+               bq.query(
+                   sql,
+                   job_config=bigquery.QueryJobConfig(
+                       query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+                   ),
+               ).result()
 
 
 
@@ -550,8 +637,16 @@ def get_aliases(canon: str) -> list[str]:
         else:
             continue
 
+
+    # Upsert current across all sports (no-op if empty)
     # Upsert current across all sports (no-op if empty)
     upsert_current(bq, current_rows_all)
+    
+    # 🔁 (optional) keep these if you still want current to reflect latest history for processed sports
+    sync_current_from_history(bq, sports)
+    
+    # ✅ Always ensure *missing* teams in current are backfilled from history for all known sports
+    fill_missing_current_from_history(bq)  # no args → uses all canonical sports present in history
 
     return {
         "message": ("Update complete." if updated_sports else "No new finals; ratings unchanged."),
