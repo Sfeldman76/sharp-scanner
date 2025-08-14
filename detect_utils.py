@@ -120,16 +120,6 @@ def detect_and_save_all_sports():
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
-            # --- Save completed game scores to game_scores_final (ensure Sport present) ---
-            try:
-                completed_rows = build_completed_game_rows(current, sport_key)  # includes 'Sport'
-                if completed_rows is not None and not completed_rows.empty:
-                    write_to_bigquery(completed_rows, table="sharp_data.game_scores_final")
-                    ratings_need_update = True
-            except Exception as e:
-                logging.error(f"❌ Writing game_scores_final failed for {sport_label}: {e}", exc_info=True)
-
-            # … any snapshot/build_game_key work …
 
         except Exception as e:
             logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
