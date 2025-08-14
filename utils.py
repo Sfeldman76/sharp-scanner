@@ -230,19 +230,47 @@ def update_power_ratings(
         """).to_dataframe().Sport.tolist()
 
     def get_last_ts(bq, sport: str):
-        df = bq.query(f"""
-          SELECT MAX(`Updated_At`) AS last_ts
-          FROM `{table_history}`
-          WHERE Sport = @sport
-        """, job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
-        )).to_dataframe()
-        return df.last_ts.iloc[0] if not df.empty else None
+        df = bq.query(
+            f"""
+            SELECT MAX(`Updated_At`) AS last_ts
+            FROM `{table_history}`
+            WHERE Sport = @sport
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+            ),
+        ).to_dataframe()
+    
+        if df.empty:
+            return None
+    
+        ts = df.last_ts.iloc[0]
+        # Convert NaT/NaN/None → None
+        try:
+            import pandas as pd
+            if ts is None or (hasattr(pd, "isna") and pd.isna(ts)):
+                return None
+            # If it's a pandas Timestamp, convert to python datetime (aware, UTC)
+            if hasattr(ts, "to_pydatetime"):
+                ts = ts.to_pydatetime()
+        except Exception:
+            pass
+        return ts
+
 
     def has_new_finals_since(bq, sport: str, last_ts):
         """Fast check: are there any new completed games for this sport since last_ts?"""
+    
+        # If last_ts came back as NaT/None, treat as no cutoff (backfill case)
+        try:
+            import pandas as pd
+            if last_ts is None or (hasattr(pd, "isna") and pd.isna(last_ts)):
+                last_ts = None
+        except Exception:
+            if last_ts is None:
+                pass
+    
         if last_ts is None:
-            # No history yet → treat as backfill needed if any finals exist at all
             sql = f"""
               SELECT COUNT(*) AS n
               FROM `{project_table_scores}`
@@ -252,6 +280,13 @@ def update_power_ratings(
             """
             params = [bigquery.ScalarQueryParameter("sport", "STRING", sport)]
         else:
+            # Ensure python datetime (UTC)
+            if hasattr(last_ts, "tzinfo") and last_ts.tzinfo is None:
+                # treat as UTC if naive; you can also localize if needed
+                last_ts = last_ts.replace(tzinfo=datetime.timezone.utc)
+            elif hasattr(last_ts, "astimezone"):
+                last_ts = last_ts.astimezone(datetime.timezone.utc)
+    
             sql = f"""
               SELECT COUNT(*) AS n
               FROM `{project_table_scores}`
@@ -264,10 +299,26 @@ def update_power_ratings(
                 bigquery.ScalarQueryParameter("sport", "STRING", sport),
                 bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", last_ts),
             ]
-        n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe().n.iloc[0]
+    
+        n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)) \
+               .to_dataframe().n.iloc[0]
         return n > 0
 
+
     def load_games(bq, sport: str, cutoff=None):
+        # Normalize cutoff like above
+        try:
+            import pandas as pd, datetime as _dt
+            if cutoff is None or (hasattr(pd, "isna") and pd.isna(cutoff)):
+                cutoff = None
+            else:
+                if hasattr(cutoff, "tzinfo") and cutoff.tzinfo is None:
+                    cutoff = cutoff.replace(tzinfo=_dt.timezone.utc)
+                elif hasattr(cutoff, "astimezone"):
+                    cutoff = cutoff.astimezone(_dt.timezone.utc)
+        except Exception:
+            pass
+    
         if cutoff is None:
             sql = f"""
             SELECT
