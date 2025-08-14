@@ -410,8 +410,66 @@ def get_recent_history():
     st.write("📦 Using cached sharp history (get_recent_history)")
     return read_recent_sharp_moves_cached(hours=72)
 
+from google.cloud import bigquery
+import pandas as pd
 
 
+
+def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
+    table = RATINGS_HISTORY_TABLE  # explicit, non-empty
+
+    query = f"""
+        WITH raw AS (
+          SELECT
+            UPPER(Sport) AS Sport,
+            CAST(Team AS STRING) AS Team_Raw,
+            TIMESTAMP(Updated_At) AS AsOfTS,
+            CAST(Rating AS FLOAT64) AS Power_Rating,
+            CAST(NULL AS FLOAT64) AS PR_Off,
+            CAST(NULL AS FLOAT64) AS PR_Def
+          FROM `{table}`
+          WHERE UPPER(Sport) = @sport
+            AND Updated_At IS NOT NULL
+        )
+        SELECT *
+        FROM raw
+        WHERE AsOfTS >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+        ORDER BY Sport, Team_Raw, AsOfTS
+    """
+
+    job = bq_client.query(
+        query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
+                bigquery.ScalarQueryParameter("lookback_days", "INT64", lookback_days),
+            ]
+        ),
+    )
+    df_power = job.to_dataframe()
+
+    # Typed empty frame keeps downstream merges stable
+    if df_power.empty:
+        return pd.DataFrame(columns=["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"])
+
+    # Normalize for attach_power_ratings_asof()
+    def _normalize_team(x: str) -> str:
+        x = str(x).lower().strip()
+        x = x.replace(".", "").replace("&", "and")
+        return x
+
+    df_power["Sport"] = df_power["Sport"].astype(str).str.upper()
+    df_power["Team_Norm"] = df_power["Team_Raw"].apply(_normalize_team)
+    df_power["AsOf"] = pd.to_datetime(df_power["AsOfTS"], errors="coerce", utc=True)
+
+    keep = ["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]
+    df_power = (
+        df_power[keep]
+        .dropna(subset=["AsOf"])
+        .sort_values(["Sport","Team_Norm","AsOf"])
+        .reset_index(drop=True)
+    )
+    return df_power
 
 
 
