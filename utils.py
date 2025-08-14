@@ -19,7 +19,8 @@ import logging
 from pandas_gbq import to_gbq
 import traceback
 import pickle  # ✅ Add this at the top of your script
-          
+import datetime as dt
+       
 import sys
 from xgboost import XGBClassifier
 from sklearn.isotonic import IsotonicRegression
@@ -245,32 +246,23 @@ def update_power_ratings(
             return None
     
         ts = df.last_ts.iloc[0]
-        # Convert NaT/NaN/None → None
-        try:
-            import pandas as pd
-            if ts is None or (hasattr(pd, "isna") and pd.isna(ts)):
-                return None
-            # If it's a pandas Timestamp, convert to python datetime (aware, UTC)
-            if hasattr(ts, "to_pydatetime"):
-                ts = ts.to_pydatetime()
-        except Exception:
-            pass
-        return ts
-
+        if ts is None or (hasattr(pd, "isna") and pd.isna(ts)):
+            return None
+        # Ensure tz-aware UTC and return a pandas Timestamp (we’ll convert later if needed)
+        if isinstance(ts, pd.Timestamp):
+            if ts.tzinfo is None:
+                ts = ts.tz_localize("UTC")
+            else:
+                ts = ts.tz_convert("UTC")
+            return ts
+        # python datetime
+        if isinstance(ts, dt.datetime):
+            return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
+        return None
 
     def has_new_finals_since(bq, sport: str, last_ts):
-        """Fast check: are there any new completed games for this sport since last_ts?"""
-    
-        # If last_ts came back as NaT/None, treat as no cutoff (backfill case)
-        try:
-            import pandas as pd
-            if last_ts is None or (hasattr(pd, "isna") and pd.isna(last_ts)):
-                last_ts = None
-        except Exception:
-            if last_ts is None:
-                pass
-    
-        if last_ts is None:
+        # Normalize NaT/None → None
+        if last_ts is None or (isinstance(last_ts, pd.Timestamp) and pd.isna(last_ts)):
             sql = f"""
               SELECT COUNT(*) AS n
               FROM `{project_table_scores}`
@@ -280,25 +272,41 @@ def update_power_ratings(
             """
             params = [bigquery.ScalarQueryParameter("sport", "STRING", sport)]
         else:
-            # Ensure python datetime (UTC)
-            if hasattr(last_ts, "tzinfo") and last_ts.tzinfo is None:
-                # treat as UTC if naive; you can also localize if needed
-                last_ts = last_ts.replace(tzinfo=datetime.timezone.utc)
-            elif hasattr(last_ts, "astimezone"):
-                last_ts = last_ts.astimezone(datetime.timezone.utc)
+            # Make sure it’s UTC and a python datetime for the BigQuery param
+            if isinstance(last_ts, pd.Timestamp):
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize("UTC")
+                else:
+                    last_ts = last_ts.tz_convert("UTC")
+                cutoff = last_ts.to_pydatetime()
+            elif isinstance(last_ts, dt.datetime):
+                cutoff = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=dt.timezone.utc)
+            else:
+                # Fallback: treat as no cutoff
+                cutoff = None
     
-            sql = f"""
-              SELECT COUNT(*) AS n
-              FROM `{project_table_scores}`
-              WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
-                AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-                AND TIMESTAMP(Game_Start) > @cutoff
-              LIMIT 1
-            """
-            params = [
-                bigquery.ScalarQueryParameter("sport", "STRING", sport),
-                bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", last_ts),
-            ]
+            if cutoff is None:
+                sql = f"""
+                  SELECT COUNT(*) AS n
+                  FROM `{project_table_scores}`
+                  WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
+                    AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
+                  LIMIT 1
+                """
+                params = [bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+            else:
+                sql = f"""
+                  SELECT COUNT(*) AS n
+                  FROM `{project_table_scores}`
+                  WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
+                    AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
+                    AND TIMESTAMP(Game_Start) > @cutoff
+                  LIMIT 1
+                """
+                params = [
+                    bigquery.ScalarQueryParameter("sport", "STRING", sport),
+                    bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff),
+                ]
     
         n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)) \
                .to_dataframe().n.iloc[0]
@@ -307,19 +315,15 @@ def update_power_ratings(
 
     def load_games(bq, sport: str, cutoff=None):
         # Normalize cutoff like above
-        try:
-            import pandas as pd, datetime as _dt
-            if cutoff is None or (hasattr(pd, "isna") and pd.isna(cutoff)):
-                cutoff = None
-            else:
-                if hasattr(cutoff, "tzinfo") and cutoff.tzinfo is None:
-                    cutoff = cutoff.replace(tzinfo=_dt.timezone.utc)
-                elif hasattr(cutoff, "astimezone"):
-                    cutoff = cutoff.astimezone(_dt.timezone.utc)
-        except Exception:
-            pass
+        cutoff_param = None
+        if cutoff is not None and not (isinstance(cutoff, pd.Timestamp) and pd.isna(cutoff)):
+            if isinstance(cutoff, pd.Timestamp):
+                cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+                cutoff_param = cutoff.to_pydatetime()
+            elif isinstance(cutoff, dt.datetime):
+                cutoff_param = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=dt.timezone.utc)
     
-        if cutoff is None:
+        if cutoff_param is None:
             sql = f"""
             SELECT
               COALESCE(CAST(Sport AS STRING), '{default_sport}') AS Sport,
@@ -351,9 +355,10 @@ def update_power_ratings(
             """
             params = [
                 bigquery.ScalarQueryParameter("sport", "STRING", sport),
-                bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff),
+                bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_param),
             ]
         return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+
 
     # ---------------- MAIN WORK ----------------
     bq = bigquery.Client()
