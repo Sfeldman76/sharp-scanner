@@ -415,7 +415,21 @@ def update_power_ratings(
                 history_rows_all.extend(history_rows)
                 updated_sports.append(sport)
 
-            utc_now = pd.Timestamp.utcnow(tz="UTC")
+
+            
+            # ✅ define utc_now and use it
+            utc_now = pd.Timestamp.now(tz="UTC")
+            for team, rating in ratings.items():
+                current_rows_all.append({
+                    'Sport': sport,
+                    'Team': team,
+                    'Rating': float(rating),
+                    'Method': 'elo_mov',
+                    'Updated_At': utc_now,
+                })
+
+
+
             for team, rating in ratings.items():
                 current_rows_all.append(dict(Sport=sport, Team=team, Rating=float(rating),
                                              Method="elo_mov", Updated_At=utc_now))
@@ -464,15 +478,34 @@ def update_power_ratings(
             history_rows = []
             ratings = {}
 
+            # inside the MLB ("poisson") branch, replace team_rating() with this safe version
             def team_rating(team):
-                g = GP.get(team, 0)
+                # games played by this team
+                g = int(GP.get(team, 0))
                 if g == 0:
                     return 1500.0
-                total_games = max(sum(GP.values()), 1)
-                league_gf_per_team_game = (sum(GF.values()) / total_games) if total_games > 0 else 0.0
-                league_gf_per_team_game = max(league_gf_per_team_game, 1e-6)
-                atk = np.log((GF[team] / g) / league_gf_per_team_game)
-                dfn = -np.log((GA[team] / g) / league_gf_per_team_game)
+            
+                # league totals
+                total_team_games = int(sum(GP.values()))  # sum of team game counts
+                gf_league = float(sum(GF.values()))
+                eps = 1e-6
+            
+                # league goals per team-game (avoid div-by-zero)
+                league_rate = gf_league / max(total_team_games, 1)
+                league_rate = max(league_rate, eps)
+            
+                # team for/against rates (avoid div-by-zero)
+                rate_for = float(GF.get(team, 0.0)) / max(g, 1)
+                rate_against = float(GA.get(team, 0.0)) / max(g, 1)
+            
+                # clamp ratios to eps to keep log well-defined
+                atk_ratio = max(rate_for / league_rate, eps)
+                dfn_ratio = max(rate_against / league_rate, eps)
+            
+                atk = np.log(atk_ratio)
+                dfn = -np.log(dfn_ratio)
+            
+                rating_scale = 400.0
                 return 1500.0 + rating_scale * (atk + dfn)
 
             tag = "backfill" if last_ts is None else "incremental"
@@ -497,7 +530,7 @@ def update_power_ratings(
                 history_rows_all.extend(history_rows)
                 updated_sports.append(sport)
 
-            utc_now = pd.Timestamp.utcnow(tz="UTC")
+            utc_now = pd.Timestamp.now(tz="UTC")
             for team, rating in ratings.items():
                 current_rows_all.append(dict(Sport=sport, Team=team, Rating=float(rating),
                                              Method="poisson", Updated_At=utc_now))
