@@ -680,41 +680,28 @@ def compute_line_hash(row, window='1H'):
 def fetch_power_ratings_from_bq(bq: bigquery.Client, sport: str) -> pd.DataFrame:
     """
     Load latest team power ratings from sharplogger.sharp_data.ratings_current for a given sport.
-    Normalizes to: ['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def'].
-    Works whether the table has columns (Rating) or (Power_Rating), and with/without PR_Off/PR_Def.
+    Normalizes to: ['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def','AsOfTS'].
+    Works whether the table has columns (Rating) or (Power_Rating).
     """
+    import logging
+    import pandas as pd
+
     params = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())]
     )
 
-    # First try: table has Power_Rating and optional PR_Off/PR_Def
-    sql_try_power = """
+    sql_current = """
         SELECT
             UPPER(Sport) AS Sport,
             CAST(Team AS STRING) AS Team_Raw,
-            CAST(Power_Rating AS FLOAT64) AS Power_Rating,
-            SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
-            SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
-        FROM `sharplogger.sharp_data.ratings_current`
-        WHERE UPPER(Sport) = @sport
-    """
-
-    # Fallback: table has Rating, and likely no PR_Off/PR_Def
-    sql_fallback_rating = """
-        SELECT
-            UPPER(Sport) AS Sport,
-            CAST(Team AS STRING) AS Team_Raw,
-            CAST(Rating AS FLOAT64) AS Power_Rating,
+            COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
             CAST(NULL AS FLOAT64) AS PR_Off,
             CAST(NULL AS FLOAT64) AS PR_Def
         FROM `sharplogger.sharp_data.ratings_current`
         WHERE UPPER(Sport) = @sport
     """
 
-    try:
-        df = bq.query(sql_try_power, job_config=params).to_dataframe(create_bqstorage_client=True)
-    except Exception:
-        df = bq.query(sql_fallback_rating, job_config=params).to_dataframe(create_bqstorage_client=True)
+    df = bq.query(sql_current, job_config=params).to_dataframe(create_bqstorage_client=True)
 
     if df.empty:
         logging.warning("⚠️ ratings_current empty for sport=%s", sport)
@@ -723,15 +710,18 @@ def fetch_power_ratings_from_bq(bq: bigquery.Client, sport: str) -> pd.DataFrame
     # normalize
     df['Sport'] = df['Sport'].astype(str).str.upper()
     df['Team_Raw'] = df['Team_Raw'].astype(str).str.strip().str.lower()
-    return df
+    df['AsOfTS'] = pd.NaT  # no time component for current ratings
+
+    return df[['Sport', 'Team_Raw', 'Power_Rating', 'PR_Off', 'PR_Def', 'AsOfTS']]
+
+
 
 def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataFrame:
     """
-    Adds Home/Away power ratings and diffs based on ratings_history when available,
-    otherwise falls back to ratings_current.
+    Attach *current* Home/Away power ratings (no time slicing) and diffs.
 
     Requires df columns: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm'].
-    Returns df with:
+    Produces:
       Home_Power_Rating, Home_PR_Off, Home_PR_Def,
       Away_Power_Rating, Away_PR_Off, Away_PR_Def,
       Power_Rating_Diff, PR_Off_Diff, PR_Def_Diff
@@ -740,111 +730,79 @@ def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataF
     import pandas as pd
     import logging
 
-    # ---------- Guards ----------
     required = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm']
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise KeyError(f"enrich_with_power_ratings() missing required columns: {missing}")
 
     out = df.copy()
+
+    # Normalize keys
     out['Sport'] = out['Sport'].astype(str).str.upper()
     out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
     out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
     out['Game_Start'] = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
 
-    if out['Game_Start'].isna().all():
-        if 'Snapshot_Timestamp' in out.columns:
-            out['Game_Start'] = pd.to_datetime(out['Snapshot_Timestamp'], utc=True, errors='coerce')
-        else:
-            logging.warning("⚠️ No valid Game_Start; skipping power rating enrichment.")
+    # If Game_Start is entirely missing, we still proceed (since current-only join doesn’t need time)
+    if out['Game_Start'].isna().all() and 'Snapshot_Timestamp' in out.columns:
+        out['Game_Start'] = pd.to_datetime(out['Snapshot_Timestamp'], utc=True, errors='coerce')
+
+    # Helper: merge a single-sport block with current ratings
+    def _merge_one_sport(block: pd.DataFrame) -> pd.DataFrame:
+        sport = block['Sport'].iloc[0] if not block['Sport'].empty else 'MLB'
+        ratings = fetch_power_ratings_from_bq(bq, sport=sport)  # current-only
+
+        if ratings is None or ratings.empty:
+            logging.warning("⚠️ No ratings_current rows for sport=%s; filling NAs.", sport)
             for c in ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
-                      'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
-                      'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff']:
-                out[c] = np.nan
-            return out
+                      'Away_Power_Rating','Away_PR_Off','Away_PR_Def']:
+                block[c] = np.nan
+            return block
 
-    # ---------- Determine sport window (for nicer logging only) ----------
-    sport = out['Sport'].dropna().astype(str).str.upper().mode().iloc[0] if not out['Sport'].dropna().empty else 'MLB'
-
-    # ---------- Load ratings (history -> preferred; fallback -> current) ----------
-    ratings = _fetch_power_ratings_any(bq, sport)
-
-    if ratings.empty:
-        logging.warning("⚠️ No ratings found for %s; filling NA columns.", sport)
-        for c in ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
-                  'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
-                  'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff']:
-            out[c] = np.nan
-        return out
-
-    # If we have AsOfTS (history available), do point-in-time asof merges; else do plain left joins.
-    has_time = 'AsOfTS' in ratings.columns and ratings['AsOfTS'].notna().any()
-
-    if has_time:
-        # ---- HOME asof ----
-        home_r = (ratings.rename(columns={'Team_Raw':'Home_Team_Norm',
-                                          'Power_Rating':'Home_Power_Rating',
-                                          'PR_Off':'Home_PR_Off',
-                                          'PR_Def':'Home_PR_Def'})
-                          .sort_values(['Home_Team_Norm','AsOfTS']))
-        out = out.sort_values(['Home_Team_Norm','Game_Start'])
-        out = pd.merge_asof(
-            out,
-            home_r.sort_values('AsOfTS'),
-            left_on='Game_Start',
-            right_on='AsOfTS',
-            by='Home_Team_Norm',
-            direction='backward'
+        # Keep only what we need & dedupe per team
+        base = (
+            ratings[['Team_Raw', 'Power_Rating', 'PR_Off', 'PR_Def']]
+            .drop_duplicates(subset=['Team_Raw'], keep='last')
+            .copy()
         )
 
-        # ---- AWAY asof ----
-        away_r = (ratings.rename(columns={'Team_Raw':'Away_Team_Norm',
-                                          'Power_Rating':'Away_Power_Rating',
-                                          'PR_Off':'Away_PR_Off',
-                                          'PR_Def':'Away_PR_Def'})
-                          .sort_values(['Away_Team_Norm','AsOfTS']))
-        out = out.sort_values(['Away_Team_Norm','Game_Start'])
-        out = pd.merge_asof(
-            out,
-            away_r.sort_values('AsOfTS'),
-            left_on='Game_Start',
-            right_on='AsOfTS',
-            by='Away_Team_Norm',
-            direction='backward'
-        )
-
-        # Clean temp cols that merge_asof might leave
-        for tmp in ['AsOfTS_x','AsOfTS_y','Sport_x','Sport_y']:
-            if tmp in out.columns:
-                del out[tmp]
-    else:
-        # No time series; ratings_current-style join by team only
-        base = ratings[['Team_Raw','Power_Rating','PR_Off','PR_Def']].drop_duplicates('Team_Raw')
-
-        # HOME
+        # HOME join
         home_map = base.rename(columns={
-            'Team_Raw':'Home_Team_Norm',
-            'Power_Rating':'Home_Power_Rating',
-            'PR_Off':'Home_PR_Off',
-            'PR_Def':'Home_PR_Def',
+            'Team_Raw': 'Home_Team_Norm',
+            'Power_Rating': 'Home_Power_Rating',
+            'PR_Off': 'Home_PR_Off',
+            'PR_Def': 'Home_PR_Def',
         })
-        out = out.merge(home_map, on='Home_Team_Norm', how='left')
+        block = block.merge(home_map, on='Home_Team_Norm', how='left')
 
-        # AWAY
+        # AWAY join
         away_map = base.rename(columns={
-            'Team_Raw':'Away_Team_Norm',
-            'Power_Rating':'Away_Power_Rating',
-            'PR_Off':'Away_PR_Off',
-            'PR_Def':'Away_PR_Def',
+            'Team_Raw': 'Away_Team_Norm',
+            'Power_Rating': 'Away_Power_Rating',
+            'PR_Off': 'Away_PR_Off',
+            'PR_Def': 'Away_PR_Def',
         })
-        out = out.merge(away_map, on='Away_Team_Norm', how='left')
+        block = block.merge(away_map, on='Away_Team_Norm', how='left')
 
-    # ---------- Diffs ----------
+        return block
+
+    # Split-apply-combine by sport (handles mixed-sport frames cleanly)
+    blocks = []
+    for sp in out['Sport'].dropna().unique():
+        sub = out[out['Sport'] == sp].copy()
+        blocks.append(_merge_one_sport(sub))
+    # If Sport is all NaN (unlikely), just try once with a default
+    if not blocks and len(out):
+        blocks.append(_merge_one_sport(out))
+
+    out = pd.concat(blocks, ignore_index=True) if blocks else out
+
+    # Diffs
     out['Power_Rating_Diff'] = out['Home_Power_Rating'] - out['Away_Power_Rating']
     out['PR_Off_Diff']       = out['Home_PR_Off']       - out['Away_PR_Off']
     out['PR_Def_Diff']       = out['Home_PR_Def']       - out['Away_PR_Def']
 
-    # ---------- Ensure numeric ----------
+    # Ensure numeric
     num_cols = ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
                 'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
                 'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff']
@@ -854,86 +812,6 @@ def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataF
     out[num_cols] = out[num_cols].apply(pd.to_numeric, errors='coerce')
 
     return out
-
-
-def _fetch_power_ratings_any(bq: bigquery.Client, sport: str) -> pd.DataFrame:
-    """
-    Try ratings_history (with AsOf) first for time-aware merges.
-    Fallback to ratings_current (no AsOf).
-    Normalizes to columns:
-      ['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def','AsOfTS']
-    """
-    import pandas as pd
-    import logging
-
-    # --- Try HISTORY ---
-    sql_hist = """
-        SELECT
-            UPPER(Sport) AS Sport,
-            CAST(Team AS STRING) AS Team_Raw,
-            -- Coalesce DATE/TIMESTAMP AsOf -> TIMESTAMP
-            TIMESTAMP(
-              CASE
-                WHEN AsOf IS NULL THEN NULL
-                WHEN REGEXP_CONTAINS(CAST(AsOf AS STRING), r'^\\d{4}-\\d{2}-\\d{2}$')
-                  THEN CONCAT(CAST(AsOf AS STRING), ' 23:59:59')
-                ELSE CAST(AsOf AS STRING)
-              END
-            ) AS AsOfTS,
-            -- Support both 'Power_Rating' and 'Rating' column names
-            COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
-            SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
-            SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
-        FROM `sharplogger.sharp_data.ratings_history`
-        WHERE UPPER(Sport) = @sport
-    """
-    try:
-        df_hist = bq.query(
-            sql_hist,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())]
-            ),
-        ).to_dataframe(create_bqstorage_client=True)
-    except Exception as e:
-        logging.debug(f"ratings_history query failed for {sport}: {e}")
-        df_hist = pd.DataFrame()
-
-    if not df_hist.empty and df_hist['Power_Rating'].notna().any():
-        df_hist['Sport'] = df_hist['Sport'].astype(str).str.upper()
-        df_hist['Team_Raw'] = df_hist['Team_Raw'].astype(str).str.strip().str.lower()
-        # Keep only rows with a valid timestamp for true asof behavior
-        if 'AsOfTS' in df_hist.columns:
-            df_hist['AsOfTS'] = pd.to_datetime(df_hist['AsOfTS'], utc=True, errors='coerce')
-        return df_hist[['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def','AsOfTS']]
-
-    # --- Fallback: CURRENT ---
-    sql_curr = """
-        SELECT
-            UPPER(Sport) AS Sport,
-            CAST(Team AS STRING) AS Team_Raw,
-            -- ratings_current typically has 'Rating'; also support 'Power_Rating'
-            COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
-            CAST(NULL AS FLOAT64) AS PR_Off,
-            CAST(NULL AS FLOAT64) AS PR_Def
-        FROM `sharplogger.sharp_data.ratings_current`
-        WHERE UPPER(Sport) = @sport
-    """
-    df_curr = bq.query(
-        sql_curr,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())]
-        ),
-    ).to_dataframe(create_bqstorage_client=True)
-
-    if df_curr.empty:
-        logging.warning("⚠️ ratings_current empty for sport=%s", sport)
-        return df_curr
-
-    df_curr['Sport'] = df_curr['Sport'].astype(str).str.upper()
-    df_curr['Team_Raw'] = df_curr['Team_Raw'].astype(str).str.strip().str.lower()
-    df_curr['AsOfTS'] = pd.NaT  # no time component in current
-    return df_curr[['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def','AsOfTS']]
-       
 def log_memory(msg=""):
     process = psutil.Process(os.getpid())
     mem = process.memory_info()
