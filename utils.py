@@ -4241,6 +4241,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
         logging.info(f"✅ Uploaded {len(df)} rows to {table}")
     except Exception as e:
         logging.exception(f"❌ Failed to upload to {table}")
+
 def normalize_sport(sport_key: str) -> str:
     s = str(sport_key).strip().lower()
     mapping = {
@@ -4281,45 +4282,80 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         return pd.DataFrame()
 
     # === Normalize completion logic to include score-present games ===
-    def is_completed(game):
+    def is_completed(game: dict) -> bool:
+        if not game.get("completed", False):
+            return False
         scores = game.get("scores")
-        if not isinstance(scores, list):
-            logging.warning(f"⚠️ Game missing or invalid 'scores': {game}")
-            return False  # definitely incomplete
-        return game.get("completed", False) and all(s.get("score") is not None for s in scores)
-
+        if not isinstance(scores, list) or len(scores) < 2:
+            return False
+    
+        # Normalize names and keep the last entry per team (some feeds repeat updates)
+        by_team = {}
+        for s in scores:
+            if not isinstance(s, dict): 
+                continue
+            nm = normalize_team(s.get("name",""))
+            val = s.get("score")
+            if val is None:
+                continue
+            try:
+                by_team[nm] = float(str(val).replace(",","").strip())
+            except Exception:
+                return False  # non-numeric
+    
+        # Need exactly 2 distinct teams with numeric scores
+        return len(by_team) >= 2 and all(v is not None for v in by_team.values())
+    
     completed_games = [g for g in games if is_completed(g)]
-    logging.info(f"✅ Completed games: {len(completed_games)}")
+    logging.info("✅ Completed games: %d", len(completed_games))
 
     # === 2. Extract valid score rows ===
     score_rows = []
     for game in completed_games:
-        raw_home = game.get("home_team", "")
-        raw_away = game.get("away_team", "")
+        gid = str(game.get("id","")).strip()  # OddsAPI id
+        raw_home = game.get("home_team","")
+        raw_away = game.get("away_team","")
         home = normalize_team(raw_home)
         away = normalize_team(raw_away)
-
+    
+        # Parse start WITHOUT rounding drift unless your master uses the same op
         game_start_raw = pd.to_datetime(game.get("commence_time"), utc=True)
-        game_start = game_start_raw.floor("h")  # ✅ Use rounded time consistently
+        # ⚠️ Use the SAME transform your df_master uses when building keys:
+        game_start = game_start_raw  # if df_master uses floor("h"), keep it, but ensure both sides match
+    
+        # build key EXACTLY like your master; add provider id as a fallback suffix to avoid collisions
         merge_key = build_merge_key(home, away, game_start)
-
-        # ✅ Normalize score names too
-        scores = {normalize_team(s.get("name", "")): s.get("score") for s in game.get("scores", [])}
-        if home in scores and away in scores:
-            score_rows.append({
-                'Merge_Key_Short': merge_key,
-                'Home_Team': home,
-                'Away_Team': away,
-                'Game_Start': game_start,
-                'Score_Home_Score': scores[home],
-                'Score_Away_Score': scores[away],
-                'Source': 'oddsapi',
-                'Inserted_Timestamp': pd.Timestamp.utcnow(),
-                'Sport': sport,      
-            })
-        else:
-            logging.warning(f"⚠️ Skipped due to missing scores: {raw_home} vs {raw_away} | "
-                            f"Home in scores: {home in scores}, Away in scores: {away in scores}")
+        if gid:
+            merge_key = f"{merge_key}|oddsapi:{gid}"
+    
+        # collapse provider scores into a dict {team_norm: numeric}
+        by_team = {}
+        for s in (game.get("scores") or []):
+            nm = normalize_team(s.get("name",""))
+            val = s.get("score")
+            try:
+                by_team[nm] = float(str(val).replace(",","").strip())
+            except Exception:
+                pass
+    
+        # Defensive: both teams must be present and numeric
+        if home not in by_team or away not in by_team:
+            logging.warning("⚠️ Skip: team name mismatch home=%s away=%s | present=%s | game_id=%s",
+                            home, away, list(by_team.keys()), gid)
+            continue
+    
+        # Done: append clean row
+        score_rows.append({
+            "Merge_Key_Short": str(merge_key).strip().lower(),
+            "Home_Team": home, "Away_Team": away,
+            "Game_Start": game_start,
+            "Score_Home_Score": int(by_team[home]),
+            "Score_Away_Score": int(by_team[away]),
+            "Source": "oddsapi",
+            "Inserted_Timestamp": pd.Timestamp.utcnow(),
+            "Sport": sport,
+            "Provider_Game_Id": gid,
+        })
 
 
     df_scores = pd.DataFrame(score_rows).dropna(subset=['Merge_Key_Short', 'Game_Start'])
@@ -4349,10 +4385,18 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
                 blocked[['Merge_Key_Short','Home_Team','Away_Team','Game_Start']].head().to_string(index=False))
     
         # === df_scores_needed diagnostics
-        if df_scores_needed.empty or df_scores_needed.shape[1] == 0:
-            logging.warning("⚠️ df_scores_needed is empty or has no columns.")
-            logging.info("ℹ️ No unscored completed games in window. Exiting backtest early.")
+        if not score_rows:
+            logging.warning("⚠️ After validation, zero usable completed games (team mismatch or non-numeric scores).")
+            # Optional: log a couple of raw items for diagnosis
+            dbg = [g for g in completed_games[:3]]
+            logging.warning("🔬 Sample raw completed payloads:\n%s", json.dumps(dbg, default=str)[:2000])
             return pd.DataFrame()
+        
+        df_scores = pd.DataFrame(score_rows)
+        if df_scores.empty or df_scores[['Score_Home_Score','Score_Away_Score']].isnull().any().any():
+            logging.warning("⚠️ df_scores empty or has null numeric scores after coercion.")
+            return pd.DataFrame()
+
     
         logging.info(f"🧪 df_scores_needed shape: {df_scores_needed.shape}")
         logging.info("🧪 df_scores_needed head:\n" + df_scores_needed.head().to_string(index=False))
