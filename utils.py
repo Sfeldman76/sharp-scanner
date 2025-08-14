@@ -677,21 +677,242 @@ def compute_line_hash(row, window='1H'):
     except Exception as e:
         return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
 
-#def compute_line_hash(row):
-    #try:
-        #key_fields = [
-            #str(row.get('Game_Key', '')).strip().lower(),
-            #str(row.get('Bookmaker', '')).strip().lower(),
-            #str(row.get('Market', '')).strip().lower(),
-            #str(row.get('Outcome', '')).strip().lower(),
-            #str(row.get('Value', '')).strip(),
-            #str(row.get('Odds_Price', '')).strip(),
-            #str(row.get('Limit', '')).strip(),
-        #]
-        #key = "|".join(key_fields)
-        #return hashlib.md5(key.encode()).hexdigest()
-    #except Exception as e:
-        #return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
+
+def fetch_power_ratings_from_bq(bq: bigquery.Client, sport: str) -> pd.DataFrame:
+    """
+    Load latest team power ratings from ratings_current for a given sport.
+    Returns: ['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def']
+    """
+    sql = """
+        SELECT
+            UPPER(Sport) AS Sport,
+            CAST(Team AS STRING) AS Team_Raw,
+            CAST(Power_Rating AS FLOAT64) AS Power_Rating,
+            SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
+            SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+        FROM `sharplogger.sharp_data.ratings_current`
+        WHERE UPPER(Sport) = @sport
+    """
+    job = bq.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())]
+        ),
+    )
+    df = job.to_dataframe(create_bqstorage_client=True)
+    if df.empty:
+        logging.warning("⚠️ ratings_current empty for sport=%s", sport)
+        return df
+    df['Sport'] = df['Sport'].astype(str).str.upper()
+    df['Team_Raw'] = df['Team_Raw'].astype(str).str.strip().str.lower()
+    return df
+
+
+def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataFrame:
+    """
+    Adds Home/Away power ratings and diffs using ratings_current (latest only).
+    Requires df columns: ['Sport','Home_Team_Norm','Away_Team_Norm'].
+    Produces:
+      Home_Power_Rating, Home_PR_Off, Home_PR_Def,
+      Away_Power_Rating, Away_PR_Off, Away_PR_Def,
+      Power_Rating_Diff, PR_Off_Diff, PR_Def_Diff
+    """
+    # --- guards & normalize keys ---
+    required = ['Sport','Home_Team_Norm','Away_Team_Norm']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise KeyError(f"enrich_with_power_ratings() missing required columns: {missing}")
+
+    out = df.copy()
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+    out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
+    out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
+
+    # identify sport to fetch (mode() if mixed, still fine for per-sport calls)
+    if out['Sport'].dropna().empty:
+        sport = 'MLB'
+    else:
+        sport = out['Sport'].mode().iloc[0]
+
+    ratings = fetch_power_ratings_from_bq(bq, sport=sport)
+
+    # Pre-create all output columns to guarantee presence
+    add_cols = [
+        'Home_Power_Rating','Home_PR_Off','Home_PR_Def',
+        'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
+        'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff'
+    ]
+    for c in add_cols:
+        if c not in out.columns:
+            out[c] = np.nan
+
+    if ratings.empty:
+        # Nothing to merge; return with NA columns present
+        return out
+
+    # --- build two slim maps and merge (straight join; no asof needed) ---
+    home_map = (ratings[['Team_Raw','Power_Rating','PR_Off','PR_Def']]
+                .rename(columns={
+                    'Team_Raw':'Home_Team_Norm',
+                    'Power_Rating':'Home_Power_Rating',
+                    'PR_Off':'Home_PR_Off',
+                    'PR_Def':'Home_PR_Def'
+                }))
+
+    away_map = (ratings[['Team_Raw','Power_Rating','PR_Off','PR_Def']]
+                .rename(columns={
+                    'Team_Raw':'Away_Team_Norm',
+                    'Power_Rating':'Away_Power_Rating',
+                    'PR_Off':'Away_PR_Off',
+                    'PR_Def':'Away_PR_Def'
+                }))
+
+    out = out.merge(home_map, on='Home_Team_Norm', how='left')
+    out = out.merge(away_map, on='Away_Team_Norm', how='left')
+
+    # --- diffs & numeric safety ---
+    out['Power_Rating_Diff'] = pd.to_numeric(out['Home_Power_Rating'], errors='coerce') - \
+                               pd.to_numeric(out['Away_Power_Rating'], errors='coerce')
+    out['PR_Off_Diff']       = pd.to_numeric(out['Home_PR_Off'], errors='coerce') - \
+                               pd.to_numeric(out['Away_PR_Off'], errors='coerce')
+    out['PR_Def_Diff']       = pd.to_numeric(out['Home_PR_Def'], errors='coerce') - \
+                               pd.to_numeric(out['Away_PR_Def'], errors='coerce')
+
+    return out
+    
+def fetch_power_ratings_from_bq(bq: bigquery.Client, sport: str) -> pd.DataFrame:
+    """
+    Load the latest team power ratings for a sport from ratings_current.
+    Returns: ['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def']
+    """
+    sql = """
+        SELECT
+            UPPER(Sport) AS Sport,
+            CAST(Team AS STRING) AS Team_Raw,
+            CAST(Power_Rating AS FLOAT64) AS Power_Rating,
+            SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
+            SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+        FROM `sharplogger.sharp_data.ratings_current`
+        WHERE UPPER(Sport) = @sport
+    """
+    job = bq.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())
+            ]
+        ),
+    )
+    df = job.to_dataframe(create_bqstorage_client=True)
+
+    if df.empty:
+        logging.warning("⚠️ No ratings returned for sport=%s from ratings_current", sport)
+        return df
+
+    # normalize
+    df['Sport'] = df['Sport'].astype(str).str.upper()
+    df['Team_Raw'] = df['Team_Raw'].astype(str).str.strip().str.lower()
+    return df
+
+
+def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataFrame:
+    """
+    Adds Home/Away power ratings and diffs based on ratings_history.
+    Requires df columns: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm'].
+    Returns df with: Home_Power_Rating, Home_PR_Off, Home_PR_Def,
+                     Away_Power_Rating, Away_PR_Off, Away_PR_Def,
+                     Power_Rating_Diff, PR_Off_Diff, PR_Def_Diff
+    """
+    import numpy as np
+
+    # quick guards
+    required = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise KeyError(f"enrich_with_power_ratings() missing required columns: {missing}")
+
+    # normalize
+    out = df.copy()
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+    out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
+    out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
+    out['Game_Start'] = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
+
+    if out['Game_Start'].isna().all():
+        # If you only have Snapshot_Timestamp, fall back to that
+        if 'Snapshot_Timestamp' in out.columns:
+            out['Game_Start'] = pd.to_datetime(out['Snapshot_Timestamp'], utc=True, errors='coerce')
+        else:
+            logging.warning("⚠️ No valid Game_Start; skipping power rating enrichment.")
+            for c in ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
+                      'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
+                      'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff']:
+                out[c] = np.nan
+            return out
+
+    # figure sport window
+    sport = out['Sport'].dropna().astype(str).str.upper().mode().iloc[0] if not out['Sport'].dropna().empty else 'MLB'
+    min_ts = out['Game_Start'].min()
+    max_ts = out['Game_Start'].max()
+
+    ratings = fetch_power_ratings_from_bq(bq, sport=sport, min_game_ts=min_ts, max_game_ts=max_ts)
+    if ratings.empty:
+        logging.warning("⚠️ Ratings empty for %s; filling NA columns.", sport)
+        for c in ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
+                  'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
+                  'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff']:
+            out[c] = np.nan
+        return out
+
+    # home merge (asof by Home_Team_Norm)
+    home_r = (ratings.rename(columns={'Team_Raw':'Home_Team_Norm',
+                                      'Power_Rating':'Home_Power_Rating',
+                                      'PR_Off':'Home_PR_Off',
+                                      'PR_Def':'Home_PR_Def'})
+                      .sort_values(['Home_Team_Norm','AsOfTS']))
+    out = out.sort_values(['Home_Team_Norm','Game_Start'])
+    out = pd.merge_asof(
+        out,
+        home_r.sort_values('AsOfTS'),
+        left_on='Game_Start',
+        right_on='AsOfTS',
+        by='Home_Team_Norm',
+        direction='backward'
+    )
+
+    # away merge (asof by Away_Team_Norm)
+    away_r = (ratings.rename(columns={'Team_Raw':'Away_Team_Norm',
+                                      'Power_Rating':'Away_Power_Rating',
+                                      'PR_Off':'Away_PR_Off',
+                                      'PR_Def':'Away_PR_Def'})
+                      .sort_values(['Away_Team_Norm','AsOfTS']))
+    out = out.sort_values(['Away_Team_Norm','Game_Start'])
+    out = pd.merge_asof(
+        out,
+        away_r.sort_values('AsOfTS'),
+        left_on='Game_Start',
+        right_on='AsOfTS',
+        by='Away_Team_Norm',
+        direction='backward'
+    )
+
+    # clean temp columns
+    for tmp in ['AsOfTS_x','AsOfTS_y','Sport_y','Sport_x']:
+        if tmp in out.columns:
+            del out[tmp]
+
+    # diffs
+    out['Power_Rating_Diff'] = out['Home_Power_Rating'] - out['Away_Power_Rating']
+    out['PR_Off_Diff']       = out['Home_PR_Off']       - out['Away_PR_Off']
+    out['PR_Def_Diff']       = out['Home_PR_Def']       - out['Away_PR_Def']
+
+    # ensure numeric (avoid object sneaking in)
+    num_cols = ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
+                'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
+                'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff']
+    out[num_cols] = out[num_cols].apply(pd.to_numeric, errors='coerce')
+
+    return out
 
 
 def log_memory(msg=""):
@@ -2087,6 +2308,17 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Min_Odds'] = df['Min_Odds'].fillna(df['Odds_Price'])
     # Extremes safety nets (fill only if still missing)
     
+    # 📍 === NEW: Power ratings enrichment ===
+    try:
+        from google.cloud import bigquery
+        bq = bigquery.Client()
+        df = enrich_with_power_ratings(df, bq)
+        logger.info("📈 Power ratings merged — cols now include Home_/Away_ and Diff fields")
+    except Exception as e:
+        logger.error("❌ Power ratings enrichment failed: %s", e, exc_info=True)
+        
+    # 📍 === END NEW ===
+
     try:
         logger.info("🧪 Sample of enriched df after merge:")
         logger.info(df[[
