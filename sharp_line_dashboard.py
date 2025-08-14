@@ -104,7 +104,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from html import escape
 
+import re
 import logging
+
+
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
 BQ_TABLE = "sharp_moves_master" # ✅ your table name
@@ -406,15 +409,18 @@ def get_recent_history():
 
 
 
-from google.cloud import bigquery
+
+POWER_RATINGS_TABLE_DEFAULT = "sharplogger.sharp_data.ratings_history"  # or ratings_current
 
 def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
+    # ✅ Force a default if not already set
+    table = POWER_RATINGS_TABLE or "sharplogger.sharp_data.ratings_history"
+
     query = f"""
         WITH raw AS (
           SELECT
             UPPER(Sport) AS Sport,
             CAST(Team AS STRING) AS Team_Raw,
-            -- Normalize AsOf to TIMESTAMP (UTC). Accepts DATE/STRING/TIMESTAMP.
             TIMESTAMP(
               CASE
                 WHEN AsOf IS NULL THEN CURRENT_TIMESTAMP()
@@ -426,7 +432,7 @@ def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400)
             CAST(Power_Rating AS FLOAT64) AS Power_Rating,
             SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
             SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
-          FROM `{POWER_RATINGS_TABLE}`
+          FROM `{table}`
           WHERE UPPER(Sport) = @sport
         )
         SELECT *
@@ -434,6 +440,7 @@ def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400)
         WHERE AsOfTS >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
         ORDER BY Sport, Team_Raw, AsOfTS
     """
+
     job = bq_client.query(
         query,
         job_config=bigquery.QueryJobConfig(
@@ -445,26 +452,6 @@ def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400)
     )
     df_power = job.to_dataframe()
 
-    if df_power.empty:
-        logging.warning("⚠️ No power ratings returned for %s", sport)
-        # Return typed empty frame to keep downstream merges stable
-        return pd.DataFrame(columns=["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"])
-
-    df_power["Sport"] = df_power["Sport"].astype(str).str.upper()
-    df_power["Team_Norm"] = df_power["Team_Raw"].apply(normalize_team)
-    df_power["AsOf"] = pd.to_datetime(df_power["AsOfTS"], errors="coerce", utc=True)
-
-    keep = ["Sport","Team_Norm","AsOf","Power_Rating"]
-    if "PR_Off" in df_power.columns: keep.append("PR_Off")
-    if "PR_Def" in df_power.columns: keep.append("PR_Def")
-
-    df_power = (
-        df_power[keep]
-        .dropna(subset=["AsOf"])
-        .sort_values(["Sport","Team_Norm","AsOf"])
-        .reset_index(drop=True)
-    )
-    return df_power
 
 def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
     if df_market is None or df_market.empty or df_power is None or df_power.empty:
