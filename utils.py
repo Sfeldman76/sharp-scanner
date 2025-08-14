@@ -2480,27 +2480,90 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_full_market[obj_left] = df_full_market[obj_left].apply(pd.to_numeric, errors='coerce').fillna(0.0)
             
             # === Score only canonical rows ===
+        
+            
             X_full = df_full_market.loc[df_full_market['Was_Canonical'], feature_cols]
+            if X_full.empty:
+                logger.warning("⚠️ No canonical rows to score for %s", market_type)
+                for c, val in [
+                    ('Model_Sharp_Win_Prob', np.nan),
+                    ('Model_Confidence',    np.nan),
+                    ('Scored_By_Model',     False),
+                    ('Scoring_Market',      pd.Series(dtype='object')),
+                ]:
+                    if c not in df_full_market.columns:
+                        df_full_market[c] = val
+            else:
+                obj_in_X = X_full.select_dtypes(include='object').columns.tolist()
+                if obj_in_X:
+                    logger.error("❌ Object columns in X_full: %s", obj_in_X)
+                    X_full[obj_in_X] = X_full[obj_in_X].apply(pd.to_numeric, errors='coerce').fillna(0.0)
             
-            # One more guard on X_full
-            obj_in_X = X_full.select_dtypes(include='object').columns.tolist()
-            if obj_in_X:
-                logger.error("❌ Object columns in X_full: %s", obj_in_X)
-                X_full[obj_in_X] = X_full[obj_in_X].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+                preds = trained_models[market_type]['calibrator'].predict_proba(X_full)[:, 1]
+                df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Sharp_Win_Prob'] = preds
+                df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Confidence']    = preds
+                df_full_market.loc[df_full_market['Was_Canonical'], 'Scored_By_Model']     = True
+                df_full_market.loc[df_full_market['Was_Canonical'], 'Scoring_Market']      = market_type
             
-            preds = trained_models[market_type]['calibrator'].predict_proba(X_full)[:, 1]
-            
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Sharp_Win_Prob'] = preds
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Confidence']    = preds
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Scored_By_Model']     = True
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Was_Canonical']       = True
-            df_full_market.loc[df_full_market['Was_Canonical'], 'Scoring_Market']      = market_type
+                # optional defrag after batch inserts
+                df_full_market = df_full_market.copy()
+
                         
                         # Optional: trigger defragmentation  df_canon = df_canon.copy()
+            # ===== pull predictions into your already-enriched df_canon (no overwrite) =====
+            pred_cols = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
+
+            # Preferred: Line_Hash join
+            if 'Line_Hash' in df_canon.columns and df_canon['Line_Hash'].notna().any():
+                df_canon['Line_Hash'] = df_canon['Line_Hash'].astype(str)
+                right = (
+                    df_full_market.loc[df_full_market['Was_Canonical'], ['Line_Hash'] + pred_cols]
+                                  .assign(Line_Hash=lambda d: d['Line_Hash'].astype(str))
+                                  .drop_duplicates('Line_Hash')
+                )
+                df_canon = (
+                    df_canon
+                    .drop(columns=[c for c in pred_cols if c in df_canon], errors='ignore')
+                    .merge(right, on='Line_Hash', how='left', validate='many_to_one')
+                )
+            else:
+                # Fallback composite key
+                for k in ['Bookmaker','Market','Outcome']:
+                    if k in df_canon.columns:
+                        df_canon[k] = df_canon[k].astype(str).str.lower().str.strip()
+                for k in ['Value','Odds_Price']:
+                    if k in df_canon.columns:
+                        df_canon[k] = pd.to_numeric(df_canon[k], errors='coerce')
+            
+                join_keys = [c for c in ['Game_Key','Market','Outcome','Bookmaker','Value','Odds_Price'] if c in df_canon.columns]
+                if not join_keys:
+                    logger.error("❌ No usable join keys on df_canon to merge predictions")
+                else:
+                    right = df_full_market.loc[df_full_market['Was_Canonical'], join_keys + pred_cols].copy()
+                    # normalize RHS keys the same way
+                    for k in ['Bookmaker','Market','Outcome']:
+                        if k in right.columns:
+                            right[k] = right[k].astype(str).str.lower().str.strip()
+                    for k in ['Value','Odds_Price']:
+                        if k in right.columns:
+                            right[k] = pd.to_numeric(right[k], errors='coerce')
+            
+                    right = right.drop_duplicates(join_keys)
+            
+                    df_canon = (
+                        df_canon
+                        .drop(columns=[c for c in pred_cols if c in df_canon], errors='ignore')
+                        .merge(right, on=join_keys, how='left', validate='many_to_one')
+                    )
+
+            
+            missing_after = [c for c in pred_cols if c not in df_canon.columns]
+            if missing_after:
+                logger.warning("Pred columns missing on df_canon after merge: %s", missing_after)
 
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
             #df_canon = df_full_market[df_full_market['Was_Canonical'] == True].copy()
-            df_canon = df_canon if 'df_canon' in locals() and not df_canon.empty else df_full_market.loc[df_full_market['Was_Canonical']].copy()
+            #df_canon = df_canon if 'df_canon' in locals() and not df_canon.empty else df_full_market.loc[df_full_market['Was_Canonical']].copy()
             df_inverse = df_full_market[df_full_market['Was_Canonical'] == False].copy()
 
             logger.info(f"🧪 Inverse rows found for {market_type.upper()}: {len(df_inverse)}")
