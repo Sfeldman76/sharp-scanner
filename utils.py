@@ -121,24 +121,8 @@ def normalize_book_name(bookmaker: str, book: str) -> str:
 
     return bookmaker
 
-import pandas as pd
-import numpy as np
-from google.cloud import bigquery
 
-# ---------------- CONFIG ----------------
-DEFAULT_SPORT = "MLB"  # used if your scores table lacks a Sport column
-SPORT_CFG = {
-    "MLB":    dict(model="poisson", K_start=None, K_late=None, HFA=18.0, mov_cap=None),
-    "NFL":    dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),
-    "NBA":    dict(model="elo", K_start=18.0, K_late=10.0, HFA=55.0, mov_cap=25.0),
-    "WNBA":   dict(model="elo", K_start=18.0, K_late=10.0, HFA=45.0, mov_cap=25.0),
-    "NHL":    dict(model="poisson", HFA=10.0),
-    "CFL":    dict(model="elo", K_start=20.0, K_late=12.0, HFA=18.0, mov_cap=30.0),
-    "SOCCER": dict(model="poisson", HFA=10.0),
-}
-import pandas as pd
-import numpy as np
-from google.cloud import bigquery
+
 
 def update_power_ratings(
     project_table_scores="sharplogger.sharp_data.game_scores_final",
@@ -153,8 +137,9 @@ def update_power_ratings(
       - NBA  -> Elo with MOV boost + K-decay
 
     Behavior:
-      - If no history exists for a sport, FULL BACKFILL from first game.
+      - If no history exists for a sport, FULL BACKSTILL from first game.
       - Else, processes ONLY games with Game_Start > last Updated_At for that sport.
+      - If there are **no new finals since last update**, skip that sport.
       - Seeds from ratings_current -> ratings_history latest -> 1500.
 
     Writes:
@@ -163,17 +148,18 @@ def update_power_ratings(
 
     Returns a small dict summary.
     """
-    # ---------------- CONFIG (only baseball / football / basketball) ----------------
-    SPORT_CFG = {
+    # ---------------- CONFIG (baseball / football / basketball only) ----------------
+        SPORT_CFG = {
         "MLB":    dict(model="poisson", K_start=None, K_late=None, HFA=18.0, mov_cap=None),
         "NFL":    dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),
+        "NCAAF":  dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),          
         "NBA":    dict(model="elo", K_start=18.0, K_late=10.0, HFA=55.0, mov_cap=25.0),
         "WNBA":   dict(model="elo", K_start=18.0, K_late=10.0, HFA=45.0, mov_cap=25.0),
-        "NHL":    dict(model="poisson", HFA=10.0),
         "CFL":    dict(model="elo", K_start=20.0, K_late=12.0, HFA=18.0, mov_cap=30.0),
-        "SOCCER": dict(model="poisson", HFA=10.0),
+        
     }
-    # ---------------- HELPERS ----------------
+   
+
     def elo_expected(delta, hfa=20.0):
         return 1.0 / (1.0 + 10.0 ** (-(delta + hfa) / 400.0))
 
@@ -253,6 +239,34 @@ def update_power_ratings(
         )).to_dataframe()
         return df.last_ts.iloc[0] if not df.empty else None
 
+    def has_new_finals_since(bq, sport: str, last_ts):
+        """Fast check: are there any new completed games for this sport since last_ts?"""
+        if last_ts is None:
+            # No history yet → treat as backfill needed if any finals exist at all
+            sql = f"""
+              SELECT COUNT(*) AS n
+              FROM `{project_table_scores}`
+              WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
+                AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
+              LIMIT 1
+            """
+            params = [bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+        else:
+            sql = f"""
+              SELECT COUNT(*) AS n
+              FROM `{project_table_scores}`
+              WHERE COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport
+                AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
+                AND TIMESTAMP(Game_Start) > @cutoff
+              LIMIT 1
+            """
+            params = [
+                bigquery.ScalarQueryParameter("sport", "STRING", sport),
+                bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", last_ts),
+            ]
+        n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe().n.iloc[0]
+        return n > 0
+
     def load_games(bq, sport: str, cutoff=None):
         if cutoff is None:
             sql = f"""
@@ -292,19 +306,24 @@ def update_power_ratings(
 
     # ---------------- MAIN WORK ----------------
     bq = bigquery.Client()
-    sports = fetch_sports_present(bq)
+    sports_available = fetch_sports_present(bq)
+    # Only process sports we support in SPORT_CFG
+    sports = [s for s in sports_available if s.upper() in SPORT_CFG]
     if not sports:
-        return {"message": "No finalized games found.", "history_rows": 0, "current_rows": 0}
+        return {"message": "No finalized games found for supported sports.", "history_rows": 0, "current_rows": 0}
 
     history_rows_all, current_rows_all = [], []
+    updated_sports = []
 
     for sport in sports:
-        cfg = SPORT_CFG.get(sport.upper())
-        if cfg is None:
-            # Skip unknown sports silently (we only support MLB/NFL/NBA)
-            continue
-
+        cfg = SPORT_CFG[sport.upper()]
         last_ts = get_last_ts(bq, sport)
+
+        # 🚦 NEW: quick skip if nothing new since last update for this sport
+        if not has_new_finals_since(bq, sport, last_ts):
+            # No finals at all (first run) or no new finals since cutoff
+            # If last_ts is None but there are also no finals, skip entirely.
+            continue
 
         if cfg["model"] == "elo":
             # NFL / NBA: Elo with MOV & K decay
@@ -343,6 +362,7 @@ def update_power_ratings(
             if history_rows:
                 bq.load_table_from_dataframe(pd.DataFrame(history_rows), table_history).result()
                 history_rows_all.extend(history_rows)
+                updated_sports.append(sport)
 
             utc_now = pd.Timestamp.utcnow(tz="UTC")
             for team, rating in ratings.items():
@@ -424,21 +444,21 @@ def update_power_ratings(
             if history_rows:
                 bq.load_table_from_dataframe(pd.DataFrame(history_rows), table_history).result()
                 history_rows_all.extend(history_rows)
+                updated_sports.append(sport)
 
             utc_now = pd.Timestamp.utcnow(tz="UTC")
             for team, rating in ratings.items():
                 current_rows_all.append(dict(Sport=sport, Team=team, Rating=float(rating),
                                              Method="poisson", Updated_At=utc_now))
         else:
-            # Shouldn't happen with the given SPORT_CFG
             continue
 
-    # Upsert current across all sports
+    # Upsert current across all sports (no-op if empty)
     upsert_current(bq, current_rows_all)
 
     return {
-        "message": "Update complete.",
-        "sports_processed": sorted([s for s in sports if s.upper() in SPORT_CFG]),
+        "message": ("Update complete." if updated_sports else "No new finals; ratings unchanged."),
+        "sports_processed": sorted(updated_sports),
         "history_rows": len(history_rows_all),
         "current_rows": len(current_rows_all),
     }
