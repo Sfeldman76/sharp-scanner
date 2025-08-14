@@ -2063,7 +2063,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Book_Reliability_x_Sharp'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']
             df_canon['Book_Reliability_x_Magnitude'] = df_canon['Book_Reliability_Score'] * df_canon['Sharp_Line_Magnitude']
             df_canon['Book_Reliability_x_PROB_SHIFT'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']* df_canon['Implied_Prob_Shift']
-            df_canon['Book_lift_x_Sharp']     = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book']
+            df_canon['Book_lift_x_Sharp'] = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book']
             df_canon['Book_lift_x_Magnitude'] = df_canon['Book_Reliability_Lift'] * df_canon['Sharp_Line_Magnitude']
     
             df_canon['Book_lift_x_PROB_SHIFT'] = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book'] * df_canon['Implied_Prob_Shift'] 
@@ -2178,8 +2178,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                         # Optional: trigger defragmentation  df_canon = df_canon.copy()
 
             logger.info(f"📋 canon after all processes row columns after enrichment: {sorted(df_canon.columns.tolist())}")
-            df_canon = df_full_market[df_full_market['Was_Canonical'] == True].copy()
-
+            #df_canon = df_full_market[df_full_market['Was_Canonical'] == True].copy()
+            df_canon = df_canon if 'df_canon' in locals() and not df_canon.empty else df_full_market.loc[df_full_market['Was_Canonical']].copy()
             df_inverse = df_full_market[df_full_market['Was_Canonical'] == False].copy()
 
             logger.info(f"🧪 Inverse rows found for {market_type.upper()}: {len(df_inverse)}")
