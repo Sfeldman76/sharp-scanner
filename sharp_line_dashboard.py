@@ -410,30 +410,22 @@ def get_recent_history():
     st.write("📦 Using cached sharp history (get_recent_history)")
     return read_recent_sharp_moves_cached(hours=72)
 
-from google.cloud import bigquery
-import pandas as pd
-
-
-
 def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
     table = RATINGS_HISTORY_TABLE  # explicit, non-empty
 
+    # Uses only columns that exist in your schema
     query = f"""
-        WITH raw AS (
-          SELECT
-            UPPER(Sport) AS Sport,
-            CAST(Team AS STRING) AS Team_Raw,
-            TIMESTAMP(Updated_At) AS AsOfTS,
-            CAST(Rating AS FLOAT64) AS Power_Rating,
-            CAST(NULL AS FLOAT64) AS PR_Off,
-            CAST(NULL AS FLOAT64) AS PR_Def
-          FROM `{table}`
-          WHERE UPPER(Sport) = @sport
-            AND Updated_At IS NOT NULL
-        )
-        SELECT *
-        FROM raw
-        WHERE AsOfTS >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+        SELECT
+          UPPER(Sport) AS Sport,
+          CAST(Team AS STRING) AS Team_Raw,
+          TIMESTAMP(Updated_At) AS AsOfTS,
+          CAST(Rating AS FLOAT64) AS Power_Rating,
+          CAST(NULL AS FLOAT64) AS PR_Off,
+          CAST(NULL AS FLOAT64) AS PR_Def
+        FROM `{table}`
+        WHERE UPPER(Sport) = @sport
+          AND Updated_At IS NOT NULL
+          AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
         ORDER BY Sport, Team_Raw, AsOfTS
     """
 
@@ -448,8 +440,8 @@ def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400)
     )
     df_power = job.to_dataframe()
 
-    # Typed empty frame keeps downstream merges stable
     if df_power.empty:
+        # Keep downstream merges stable
         return pd.DataFrame(columns=["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"])
 
     # Normalize for attach_power_ratings_asof()
@@ -473,33 +465,22 @@ def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400)
 
 
 
-
-
 def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
     table = RATINGS_HISTORY_TABLE  # explicit, non-empty
 
+    # Uses only columns that exist in your schema
     query = f"""
-        WITH raw AS (
-          SELECT
-            UPPER(Sport) AS Sport,
-            CAST(Team AS STRING) AS Team_Raw,
-            TIMESTAMP(
-              CASE
-                WHEN AsOf IS NULL THEN CURRENT_TIMESTAMP()
-                WHEN REGEXP_CONTAINS(CAST(AsOf AS STRING), r'^\\d{{4}}-\\d{{2}}-\\d{{2}}$')
-                  THEN CONCAT(CAST(AsOf AS STRING), ' 23:59:59')
-                ELSE CAST(AsOf AS STRING)
-              END
-            ) AS AsOfTS,
-            CAST(Power_Rating AS FLOAT64) AS Power_Rating,
-            SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
-            SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
-          FROM `{table}`
-          WHERE UPPER(Sport) = @sport
-        )
-        SELECT *
-        FROM raw
-        WHERE AsOfTS >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+        SELECT
+          UPPER(Sport) AS Sport,
+          CAST(Team AS STRING) AS Team_Raw,
+          TIMESTAMP(Updated_At) AS AsOfTS,
+          CAST(Rating AS FLOAT64) AS Power_Rating,
+          CAST(NULL AS FLOAT64) AS PR_Off,
+          CAST(NULL AS FLOAT64) AS PR_Def
+        FROM `{table}`
+        WHERE UPPER(Sport) = @sport
+          AND Updated_At IS NOT NULL
+          AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
         ORDER BY Sport, Team_Raw, AsOfTS
     """
 
@@ -514,8 +495,8 @@ def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400)
     )
     df_power = job.to_dataframe()
 
-    # Return typed empty frame if nothing came back
     if df_power.empty:
+        # Keep downstream merges stable
         return pd.DataFrame(columns=["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"])
 
     # Normalize for attach_power_ratings_asof()
@@ -1501,7 +1482,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # === Percent Move (Totals only)
         df_market['Pct_Line_Move_From_Opening'] = np.where(
-            (df_market['Market_Norm'] == 'total') & (df_market['First_Line_Value'].abs() > 0),
+            (df_market['Market_Norm'] == 'totals') & (df_market['First_Line_Value'].abs() > 0),
             df_market['Abs_Line_Move_From_Opening'] / df_market['First_Line_Value'].abs(),
             np.nan
         )
@@ -1552,7 +1533,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Totals: Z ≥ 2 for % move
         df_market['Potential_Overmove_Total_Pct_Flag'] = np.where(
-            (df_market['Market_Norm'] == 'total') &
+            (df_market['Market_Norm'] == 'totals') &
             (df_market['Line_Moved_Toward_Team'] == 1) &
             (df_market['Pct_Line_Move_Z'] >= 2) &
             (df_market['Disable_Line_Move_Features'] == 0),
