@@ -4319,7 +4319,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
 
         # Floor to hour in UTC; string will include +00:00 when cast to str
         commence_hour = pd.to_datetime(game.get("commence_time"), utc=True).floor("h")
-
+        merge_key = build_merge_key(home, away, commence_hour)
         # Collapse provider scores to numeric
         by_team = {}
         for s in (game.get("scores") or []):
