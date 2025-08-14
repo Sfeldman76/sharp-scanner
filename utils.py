@@ -149,7 +149,7 @@ def update_power_ratings(
     Returns a small dict summary.
     """
     # ---------------- CONFIG (baseball / football / basketball only) ----------------
-        SPORT_CFG = {
+    SPORT_CFG = {
         "MLB":    dict(model="poisson", K_start=None, K_late=None, HFA=18.0, mov_cap=None),
         "NFL":    dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),
         "NCAAF":  dict(model="elo", K_start=22.0, K_late=12.0, HFA=22.0, mov_cap=24.0),          
