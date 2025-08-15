@@ -2527,6 +2527,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # after base enrichment (Implied_Prob, Open_* fills, odds pivot, reliability merge, etc.)
     df = compute_small_book_liquidity_features(df)
     df = add_line_and_crossmarket_features(df)
+    
+    # ===== Team features (old way: per-market, merge onto canon) =====
+    if team_feature_map is not None and hasattr(team_feature_map, 'empty') and not team_feature_map.empty:
+        df['Team'] = df['Outcome_Norm'].astype(str).str.strip().str.lower()
+        df= df.merge(team_feature_map, on='Team', how='left')
+        df.drop(columns=['Team'], inplace=True, errors='ignore')
+
     def _ensure_model_placeholders(frame, market_name):
         cols_defaults = {
             'Model_Sharp_Win_Prob': np.nan,
@@ -2630,12 +2637,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         # Dedup canon by keys
         dedup_keys = ['Game_Key', 'Market', 'Bookmaker', 'Outcome']
         df_canon = df_canon.drop_duplicates(subset=dedup_keys)
-
-        # ===== Team features (old way: per-market, merge onto canon) =====
-        if team_feature_map is not None and hasattr(team_feature_map, 'empty') and not team_feature_map.empty:
-            df_canon['Team'] = df_canon['Outcome_Norm'].astype(str).str.strip().str.lower()
-            df_canon = df_canon.merge(team_feature_map, on='Team', how='left')
-            df_canon.drop(columns=['Team'], inplace=True, errors='ignore')
 
         # ===== Canon feature engineering (your logic) =====
         df_canon['Line_Move_Magnitude'] = pd.to_numeric(df_canon['Line_Delta'], errors='coerce').abs()
