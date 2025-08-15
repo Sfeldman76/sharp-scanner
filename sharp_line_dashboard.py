@@ -441,6 +441,34 @@ def _prep_for_asof_right(df: pd.DataFrame, by_keys: list[str], on_key: str) -> p
     df = df.dropna(subset=[on_key])
     df = df.sort_values(by_keys + [on_key], kind='mergesort').reset_index(drop=True)
     return df
+    
+def _groupwise_asof(left: pd.DataFrame, right: pd.DataFrame,
+                    by: list[str], left_on: str, right_on: str) -> pd.DataFrame:
+    """Run merge_asof per-group to avoid global-sort pitfalls."""
+    out = []
+    # Pre-index right by groups for fast slicing
+    right_groups = {k: v.sort_values(right_on, kind='mergesort')
+                    for k, v in right.groupby(by, sort=False)}
+    for k, g in left.groupby(by, sort=False):
+        # k is a tuple when len(by)>1; normalize to tuple
+        key = k if isinstance(k, tuple) else (k,)
+        r = right_groups.get(key)
+        gl = g.sort_values(left_on, kind='mergesort')
+        if r is None or r.empty:
+            # No ratings for this group → return NaNs for PR columns
+            merged = gl.copy()
+            for col in ['Power_Rating','PR_Off','PR_Def', right_on]:
+                if col not in merged.columns:
+                    merged[col] = np.nan
+        else:
+            merged = pd.merge_asof(
+                gl, r,
+                left_on=left_on, right_on=right_on,
+                direction='backward', allow_exact_matches=True
+            )
+        out.append(merged)
+    return pd.concat(out, ignore_index=True)
+
 
 def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
     table = RATINGS_HISTORY_TABLE  # explicit, non-empty
@@ -621,20 +649,17 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
         return dm
     
     # --- merge_asof (guaranteed sorted) ---
-    team_rat = pd.merge_asof(
+    # --- merge_asof (group-wise, guaranteed sorted) ---
+    team_rat = _groupwise_asof(
         left_team, pr,
         by=['Sport','Team_Norm'],
-        left_on=ts_col, right_on='AsOfTS',
-        direction='backward',
-        allow_exact_matches=True
+        left_on=ts_col, right_on='AsOfTS'
     ).rename(columns={'Power_Rating':'PR_Team_Rating','PR_Off':'PR_Team_Off','PR_Def':'PR_Team_Def'})
     
-    opp_rat = pd.merge_asof(
+    opp_rat = _groupwise_asof(
         left_opp, pr,
         by=['Sport','Team_Norm'],
-        left_on=ts_col, right_on='AsOfTS',
-        direction='backward',
-        allow_exact_matches=True
+        left_on=ts_col, right_on='AsOfTS'
     ).rename(columns={'Power_Rating':'PR_Opp_Rating','PR_Off':'PR_Opp_Off','PR_Def':'PR_Opp_Def'})
     # Merge matched ratings back onto full dm
     dm = dm.merge(
