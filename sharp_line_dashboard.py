@@ -974,18 +974,21 @@ def fetch_ratings_window_cached(
     pad_start_iso = pd.to_datetime(pad_start_ts, utc=True).isoformat()
     pad_end_iso   = pd.to_datetime(pad_end_ts,   utc=True).isoformat()
 
+    # history query — use Updated_At, not AsOf
     q_hist = f"""
       SELECT
         UPPER(Sport) AS Sport,
         LOWER(TRIM(Team)) AS Team_Norm,
-        TIMESTAMP(AsOf) AS AsOfTS,
+        TIMESTAMP(Updated_At) AS AsOfTS,
         CAST(Rating AS FLOAT64) AS Power_Rating,
         SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
         SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
       FROM `{table_history}`
       WHERE UPPER(Sport) = '{sport_up}'
-        AND TIMESTAMP(AsOf) BETWEEN TIMESTAMP('{pad_start_iso}') AND TIMESTAMP('{pad_end_iso}')
+        AND TIMESTAMP(Updated_At) BETWEEN TIMESTAMP('{pad_start_iso}') AND TIMESTAMP('{pad_end_iso}')
     """
+    
+    # current query — also use Updated_At
     q_curr = f"""
       SELECT
         UPPER(Sport) AS Sport,
@@ -1004,7 +1007,7 @@ def fetch_ratings_window_cached(
     for fr in (r_hist, r_curr):
         if fr is not None and not fr.empty:
             fr['Sport'] = fr['Sport'].astype(str).str.upper()
-            fr['Team_Norm'] = fr['Team_Norm'].astype(str).str.strip().str.lower()
+            fr['Team_Norm'] = fr['Team_Norm'].astype(str).str.strip().str.lower()  # <- .str.strip()
 
     ratings_all = pd.concat([r_hist, r_curr], ignore_index=True)
     if not ratings_all.empty:
