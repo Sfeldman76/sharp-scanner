@@ -394,6 +394,7 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
 # ✅ Cached wrapper for diagnostics and line movement history
 # Smart getter — use cache unless forced to reload
 
+
 @st.cache_data(ttl=600)
 def read_recent_sharp_moves_cached(hours=72, table=BQ_FULL_TABLE):
     return read_recent_sharp_moves(hours=hours, table=table)
@@ -469,114 +470,75 @@ def _groupwise_asof(left: pd.DataFrame, right: pd.DataFrame,
         out.append(merged)
     return pd.concat(out, ignore_index=True)
 
+@st.cache_resource
+def get_bq_client() -> bigquery.Client:
+    return bigquery.Client()  
 
-def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
-    table = RATINGS_HISTORY_TABLE  # explicit, non-empty
 
-    # Uses only columns that exist in your schema
-    query = f"""
-        SELECT
-          UPPER(Sport) AS Sport,
-          CAST(Team AS STRING) AS Team_Raw,
-          TIMESTAMP(Updated_At) AS AsOfTS,
-          CAST(Rating AS FLOAT64) AS Power_Rating,
-          CAST(NULL AS FLOAT64) AS PR_Off,
-          CAST(NULL AS FLOAT64) AS PR_Def
-        FROM `{table}`
-        WHERE UPPER(Sport) = @sport
-          AND Updated_At IS NOT NULL
-          AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
-        ORDER BY Sport, Team_Raw, AsOfTS
-    """
+@st.cache_data(ttl=900, max_entries=64, show_spinner=False)  # 15 min cache
+def fetch_power_ratings_from_bq_cached(
+    sport: str,
+    lookback_days: int = 400,
+    source: str = "history"  # "history" or "current"
+) -> pd.DataFrame:
+    bq = get_bq_client()
 
-    job = bq_client.query(
-        query,
-        job_config=bigquery.QueryJobConfig(
+    if source == "history":
+        # your history query (using Updated_At -> AsOfTS)
+        sql = """
+            SELECT
+              UPPER(Sport) AS Sport,
+              CAST(Team AS STRING) AS Team_Raw,
+              TIMESTAMP(Updated_At) AS AsOfTS,
+              COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
+              SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
+              SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+            FROM `sharplogger.sharp_data.ratings_history`
+            WHERE UPPER(Sport) = @sport
+              AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+        """
+        cfg = bigquery.QueryJobConfig(
+            use_query_cache=True,
             query_parameters=[
                 bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
                 bigquery.ScalarQueryParameter("lookback_days", "INT64", lookback_days),
-            ]
-        ),
-    )
-    df_power = job.to_dataframe()
+            ],
+        )
+    else:
+        # current snapshot (no AsOfTS)
+        sql = """
+            SELECT
+              UPPER(Sport) AS Sport,
+              CAST(Team AS STRING) AS Team_Raw,
+              COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
+              CAST(NULL AS FLOAT64) AS PR_Off,
+              CAST(NULL AS FLOAT64) AS PR_Def,
+              CAST(NULL AS TIMESTAMP) AS AsOfTS
+            FROM `sharplogger.sharp_data.ratings_current`
+            WHERE UPPER(Sport) = @sport
+        """
+        cfg = bigquery.QueryJobConfig(
+            use_query_cache=True,
+            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
+        )
 
-    if df_power.empty:
-        # Keep downstream merges stable
-        return pd.DataFrame(columns=["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"])
+    df = bq.query(sql, job_config=cfg).to_dataframe()
+    if df.empty:
+        return df
 
-    # Normalize for attach_power_ratings_asof()
-    def _normalize_team(x: str) -> str:
-        x = str(x).lower().strip()
-        x = x.replace(".", "").replace("&", "and")
-        return x
+    # normalize exactly once here
+    def _norm_team(x: str) -> str:
+        return str(x).lower().strip().replace(".", "").replace("&", "and")
 
-    df_power["Sport"] = df_power["Sport"].astype(str).str.upper()
-    df_power["Team_Norm"] = df_power["Team_Raw"].apply(_normalize_team)
-    df_power["AsOf"] = pd.to_datetime(df_power["AsOfTS"], errors="coerce", utc=True)
+    df["Sport"] = df["Sport"].astype(str).str.upper()
+    df["Team_Norm"] = df["Team_Raw"].astype(str).map(_norm_team)
+    if "AsOfTS" in df.columns:
+        df["AsOf"] = pd.to_datetime(df["AsOfTS"], utc=True, errors="coerce")
+    else:
+        df["AsOf"] = pd.NaT
 
-    keep = ["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]
-    df_power = (
-        df_power[keep]
-        .dropna(subset=["AsOf"])
-        .sort_values(["Sport","Team_Norm","AsOf"])
-        .reset_index(drop=True)
-    )
-    return df_power
+    return df[["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]]
 
-
-
-def fetch_power_ratings_from_bq(bq_client, sport: str, lookback_days: int = 400) -> pd.DataFrame:
-    table = RATINGS_HISTORY_TABLE  # explicit, non-empty
-
-    # Uses only columns that exist in your schema
-    query = f"""
-        SELECT
-          UPPER(Sport) AS Sport,
-          CAST(Team AS STRING) AS Team_Raw,
-          TIMESTAMP(Updated_At) AS AsOfTS,
-          CAST(Rating AS FLOAT64) AS Power_Rating,
-          CAST(NULL AS FLOAT64) AS PR_Off,
-          CAST(NULL AS FLOAT64) AS PR_Def
-        FROM `{table}`
-        WHERE UPPER(Sport) = @sport
-          AND Updated_At IS NOT NULL
-          AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
-        ORDER BY Sport, Team_Raw, AsOfTS
-    """
-
-    job = bq_client.query(
-        query,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
-                bigquery.ScalarQueryParameter("lookback_days", "INT64", lookback_days),
-            ]
-        ),
-    )
-    df_power = job.to_dataframe()
-
-    if df_power.empty:
-        # Keep downstream merges stable
-        return pd.DataFrame(columns=["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"])
-
-    # Normalize for attach_power_ratings_asof()
-    def _normalize_team(x: str) -> str:
-        x = str(x).lower().strip()
-        x = x.replace(".", "").replace("&", "and")
-        return x
-
-    df_power["Sport"] = df_power["Sport"].astype(str).str.upper()
-    df_power["Team_Norm"] = df_power["Team_Raw"].apply(_normalize_team)
-    df_power["AsOf"] = pd.to_datetime(df_power["AsOfTS"], errors="coerce", utc=True)
-
-    keep = ["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]
-    df_power = (
-        df_power[keep]
-        .dropna(subset=["AsOf"])
-        .sort_values(["Sport","Team_Norm","AsOf"])
-        .reset_index(drop=True)
-    )
-    return df_power
 
 def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
     # --- Early exit: keep downstream stable with guaranteed columns
@@ -1628,11 +1590,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Book_lift_x_PROB_SHIFT'] = df_market['Book_Reliability_Lift'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift'] 
 
         # 0) Fetch once per sport
-        df_power = fetch_power_ratings_from_bq(bq_client, sport, lookback_days=400)
-        
-      
+        df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
+        if df_power.empty:
+            df_power = fetch_power_ratings_from_bq_cached(sport, source="current")
+        # then:
         df_market = attach_power_ratings_asof(df_market, df_power)
-
+                
+      
+        
        
         
                 
