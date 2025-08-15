@@ -2260,7 +2260,116 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
     df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
 
-    # (keep your compute_value_reversal / compute_odds_reversal definitions here if you call them later)
+    def compute_value_reversal(df: pd.DataFrame, market_col: str = 'Market') -> pd.DataFrame:
+        """
+        Flag when the current value reverses the opening direction and tags extremes.
+        Creates/overwrites: Value_Reversal_Flag (0/1)
+        """
+        # Market flags (safe)
+        m = df[market_col].astype(str).str.lower().str.strip()
+        is_spread = m.str.contains('spread', na=False)
+        is_total  = m.str.contains('total',  na=False)
+        is_h2h    = m.str.contains('h2h',    na=False)
+    
+        # Ensure needed columns exist & numeric
+        for col in ['Open_Value','Value','Max_Value','Min_Value','Outcome_Norm']:
+            if col not in df.columns:
+                df[col] = np.nan
+        v_open = pd.to_numeric(df['Open_Value'], errors='coerce')
+        v_now  = pd.to_numeric(df['Value'], errors='coerce')
+        v_max  = pd.to_numeric(df['Max_Value'], errors='coerce')
+        v_min  = pd.to_numeric(df['Min_Value'], errors='coerce')
+        outcome_norm = df['Outcome_Norm'].astype(str).str.lower().str.strip()
+    
+        # Build flag
+        spread_flag = (
+            ((v_open < 0) & (v_now > v_open) & (v_now.eq(v_max))) |
+            ((v_open > 0) & (v_now < v_open) & (v_now.eq(v_min)))
+        ).astype('Int64')
+    
+        total_flag = (
+            ((outcome_norm == 'over')  & (v_now > v_open) & (v_now.eq(v_max))) |
+            ((outcome_norm == 'under') & (v_now < v_open) & (v_now.eq(v_min)))
+        ).astype('Int64')
+    
+        h2h_flag = (
+            ((v_now > v_open) & v_now.eq(v_max)) |
+            ((v_now < v_open) & v_now.eq(v_min))
+        ).astype('Int64')
+    
+        df['Value_Reversal_Flag'] = np.where(
+            is_spread, spread_flag,
+            np.where(is_total, total_flag,
+                     np.where(is_h2h, h2h_flag, 0))
+        ).astype(int)
+    
+        return df
+    
+    
+    def compute_odds_reversal(df: pd.DataFrame, prob_threshold: float = 0.05) -> pd.DataFrame:
+        """
+        Flag when implied probability reverses relative to first/open, with special H2H logic.
+        Creates/overwrites: Odds_Reversal_Flag (0/1), Abs_Odds_Prob_Move
+        Requires implied_prob(odds) helper.
+        """
+        # Market flags
+        m = df['Market'].astype(str).str.lower().str.strip() if 'Market' in df.columns else ''
+        is_spread = m.str.contains('spread', na=False) if isinstance(m, pd.Series) else False
+        is_total  = m.str.contains('total',  na=False) if isinstance(m, pd.Series) else False
+        is_h2h    = m.str.contains('h2h',    na=False) if isinstance(m, pd.Series) else False
+    
+        # Ensure required columns exist
+        if 'Implied_Prob' not in df.columns:
+            df['Implied_Prob'] = pd.to_numeric(df.get('Odds_Price', np.nan), errors='coerce').apply(implied_prob)
+        if 'First_Imp_Prob' not in df.columns:
+            base = df['Open_Odds'] if 'Open_Odds' in df.columns else df.get('Odds_Price', np.nan)
+            if isinstance(base, pd.Series):
+                df['First_Imp_Prob'] = pd.to_numeric(base, errors='coerce').apply(implied_prob)
+            else:
+                df['First_Imp_Prob'] = df['Implied_Prob']
+    
+        if 'Min_Odds' not in df.columns:
+            df['Min_Odds'] = df.get('Odds_Price', np.nan)
+        if 'Max_Odds' not in df.columns:
+            df['Max_Odds'] = df.get('Odds_Price', np.nan)
+    
+        # Convert to probabilities
+        min_prob = pd.to_numeric(df['Min_Odds'], errors='coerce').apply(implied_prob)
+        max_prob = pd.to_numeric(df['Max_Odds'], errors='coerce').apply(implied_prob)
+    
+        # H2H reversal
+        valid = (
+            df['First_Imp_Prob'].notna() &
+            df['Implied_Prob'].notna() &
+            min_prob.notna() & max_prob.notna()
+        )
+        h2h_flag = np.zeros(len(df), dtype=int)
+        if valid.any():
+            v = valid.values if isinstance(valid, pd.Series) else valid
+            first = df.loc[valid, 'First_Imp_Prob'].values
+            curr  = df.loc[valid, 'Implied_Prob'].values
+            minp  = min_prob.loc[valid].values
+            maxp  = max_prob.loc[valid].values
+            h2h_flag_valid = (
+                ((first > minp) & (curr <= (minp + 1e-5))) |
+                ((first < maxp) & (curr >= (maxp - 1e-5)))
+            ).astype(int)
+            h2h_flag[valid] = h2h_flag_valid
+    
+        # Spread/Totals: absolute probability shift
+        if 'Implied_Prob_Shift' not in df.columns:
+            df['Implied_Prob_Shift'] = df['Implied_Prob'] - df['First_Imp_Prob']
+        abs_shift = df['Implied_Prob_Shift'].abs()
+        st_flag = (abs_shift >= prob_threshold).astype(int)
+    
+        df['Odds_Reversal_Flag'] = np.where(
+            is_h2h, h2h_flag,
+            np.where(is_spread | is_total, st_flag, 0)
+        ).astype(int)
+        df['Abs_Odds_Prob_Move'] = pd.to_numeric(abs_shift, errors='coerce').fillna(0.0)
+    
+        return df
+
 
     # If Time missing, derive from Snapshot_Timestamp for Sharp_Timing
     if 'Time' not in df.columns or df['Time'].isna().all():
@@ -2360,8 +2469,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 if team_feature_map is not None and book_reliability_map is not None:
                     break
 
-    logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
-    logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
 
     # === Cross-Market Odds Pivot
     odds_pivot = (
@@ -2444,6 +2551,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     )
     df['Has_Model'] = df['Market'].isin(model_markets).astype(int)
 
+    logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
+    logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
     for mkt in markets_present:
         # Slice frame for this market; keep original indices for writeback
         mask = (df['Market'] == mkt)
@@ -2858,14 +2967,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             ).dt.total_seconds() / 60.0
             df_inverse['Late_Game_Steam_Flag'] = (df_inverse['Minutes_To_Game'] <= 60).astype(int)
             df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
-        
+             
             # Ensure team columns exist before gaps
             for col in ['Team_Past_Avg_Model_Prob','Team_Past_Avg_Model_Prob_Home','Team_Past_Avg_Model_Prob_Away']:
                 if col not in df_inverse.columns:
                     df_inverse[col] = 0.0
-        
-            df_inverse['Mispricing_Gap'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
-            df_inverse['Abs_Mispricing_Gap'] = df_inverse['Mispricing_Gap'].abs()
+         
+            df_inverse['Market_Mispricing'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
+            df_inverse['Abs_Mispricing_Gap'] = df_inverse[['Market_Mispricing'].abs()
             df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
             df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
             df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
@@ -2875,7 +2984,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Team_Implied_Prob_Gap_Away'].abs()
             )
             df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
-        
+            # Reversal diagnostics
+            df_inverse = compute_value_reversal(df_inverse)
+            df_inverse = compute_odds_reversal(df_inverse)
+
             df_inverse = add_line_and_crossmarket_features(df_inverse)
             # Guarantee reliability cols
             for col in ['Book_Reliability_Score','Book_Reliability_Lift']:
@@ -2955,14 +3067,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # Drop columns that will be recomputed to avoid _x/_y suffixes
             cols_to_refresh = [
                 'Odds_Shift','Line_Delta','Implied_Prob_Shift',
-                'Value_Reversal_Flag','Odds_Reversal_Flag',
+             
                 'Is_Home_Team_Bet','Is_Favorite_Bet','Delta','Direction_Aligned',
                 'Line_Move_Magnitude','Line_Magnitude_Abs',
                 'Net_Line_Move_From_Opening','Abs_Line_Move_From_Opening',
                 'Net_Odds_Move_From_Opening','Abs_Odds_Move_From_Opening',
                 'Team_Past_Hit_Rate','Team_Past_Hit_Rate_Home','Team_Past_Hit_Rate_Away',
                 'Team_Past_Avg_Model_Prob','Team_Past_Avg_Model_Prob_Home','Team_Past_Avg_Model_Prob_Away',
-                'Market_Implied_Prob','Mispricing_Gap','Abs_Mispricing_Gap','Mispricing_Flag',
+                'Market_Implied_Prob','Mispricing_Flag',
                 'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
                 'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home','Avg_Recent_Cover_Streak_Away',
                 'Rate_On_Cover_Streak','Rate_On_Cover_Streak_Home','Rate_On_Cover_Streak_Away',
@@ -3045,8 +3157,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # Mispricing & team gaps
             for col in ['Team_Past_Avg_Model_Prob','Team_Past_Avg_Model_Prob_Home','Team_Past_Avg_Model_Prob_Away']:
                 if col not in df_inverse.columns: df_inverse[col] = 0.0
-            df_inverse['Mispricing_Gap']       = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
-            df_inverse['Abs_Mispricing_Gap']   = df_inverse['Mispricing_Gap'].abs()
+         
             df_inverse['Mispricing_Flag']      = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
             df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
             df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
@@ -3061,9 +3172,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_inverse = add_line_and_crossmarket_features(df_inverse)
             df_inverse = compute_small_book_liquidity_features(df_inverse)
         
-            # Reversal diagnostics (uses the helper funcs you defined earlier)
-            df_inverse = compute_value_reversal(df_inverse)
-            df_inverse = compute_odds_reversal(df_inverse)
         
             logger.info(f"🔁 Refreshed Open/Extreme alignment for {len(df_inverse)} inverse rows.")
         
