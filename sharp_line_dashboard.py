@@ -539,9 +539,7 @@ def fetch_power_ratings_from_bq_cached(
 
     return df[["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]]
 
-
 def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
-    # --- Early exit: keep downstream stable with guaranteed columns
     needed = [
         'PR_Team_Rating','PR_Team_Off','PR_Team_Def',
         'PR_Opp_Rating','PR_Opp_Off','PR_Opp_Def',
@@ -552,8 +550,7 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
     if df_market is None or df_market.empty or df_power is None or df_power.empty:
         dm = (df_market.copy() if df_market is not None else pd.DataFrame())
         for c in needed:
-            if c not in dm.columns:
-                dm[c] = np.nan
+            if c not in dm.columns: dm[c] = np.nan
         return dm
 
     dm = df_market.copy()
@@ -565,24 +562,26 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
     dm['Sport']  = dm['Sport'].astype(str).str.upper()
     dm['Market'] = dm['Market'].astype(str).str.lower().str.strip()
 
-    # Outcome_Norm fallback, then normalize teams
-    # normalize team strings consistently
-    dm['Sport'] = dm['Sport'].astype(str).str.upper()
-    dm['Outcome_Norm']   = _norm_team(dm['Outcome_Norm'] if 'Outcome_Norm' in dm else dm.get('Outcome', ''))
-    dm['Home_Team_Norm'] = _norm_team(dm['Home_Team_Norm'])
-    dm['Away_Team_Norm'] = _norm_team(dm['Away_Team_Norm'])
-    
-    # choose the timestamp column and coerce
+    # Normalize teams (vectorized)
+    if 'Outcome_Norm' in dm:
+        dm['Outcome_Norm'] = dm['Outcome_Norm'].astype(str).map(_norm_team)
+    else:
+        dm['Outcome_Norm'] = dm.get('Outcome', '').astype(str).map(_norm_team)
+    dm['Home_Team_Norm'] = dm['Home_Team_Norm'].astype(str).map(_norm_team)
+    dm['Away_Team_Norm'] = dm['Away_Team_Norm'].astype(str).map(_norm_team)
+
+    # choose time column
     ts_col = 'Snapshot_Timestamp' if 'Snapshot_Timestamp' in dm.columns else 'Game_Start'
     dm[ts_col] = pd.to_datetime(dm[ts_col], utc=True, errors='coerce')
-    
-    # ratings (right side)
+
+    # --- ratings (right side)
     pr = df_power.copy()
     pr['Sport']     = pr['Sport'].astype(str).str.upper()
-    pr['Team_Norm'] = _norm_team(pr['Team_Norm'])
+    pr['Team_Norm'] = pr['Team_Norm'].astype(str).map(_norm_team)
     pr = pr.dropna(subset=['AsOf']).rename(columns={'AsOf':'AsOfTS'})
-    pr = _prep_for_asof_right(pr, by_keys=['Sport','Team_Norm'], on_key='AsOfTS')
-    
+    pr['AsOfTS'] = pd.to_datetime(pr['AsOfTS'], utc=True, errors='coerce')
+    pr = pr.dropna(subset=['AsOfTS'])
+
     # team markets only
     mask_team_markets = dm['Market'].isin(['spreads','h2h'])
     dm.loc[mask_team_markets, 'Team'] = dm.loc[mask_team_markets, 'Outcome_Norm']
@@ -591,99 +590,91 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
         dm.loc[mask_team_markets, 'Away_Team_Norm'],
         dm.loc[mask_team_markets, 'Home_Team_Norm']
     )
-    
+
     left_mask = mask_team_markets & dm[ts_col].notna()
-    
-    # LEFT (team)
-    left_team = (dm.loc[left_mask, ['Sport','Team',ts_col,'Game_Key','Market','Outcome']]
-                   .rename(columns={'Team':'Team_Norm'}))
-    left_team = _prep_for_asof_left(left_team, by_keys=['Sport','Team_Norm'], on_key=ts_col)
-    
-    # LEFT (opp)
-    left_opp = (dm.loc[left_mask, ['Sport','Opp',ts_col,'Game_Key','Market','Outcome']]
-                  .rename(columns={'Opp':'Team_Norm'}))
-    left_opp = _prep_for_asof_left(left_opp, by_keys=['Sport','Team_Norm'], on_key=ts_col)
-    
-    # bail out cleanly if either side empty
+
+    left_team = dm.loc[left_mask, ['Sport','Team',ts_col,'Game_Key','Market','Outcome']].rename(columns={'Team':'Team_Norm'})
+    left_opp  = dm.loc[left_mask, ['Sport','Opp', ts_col,'Game_Key','Market','Outcome']].rename(columns={'Opp':'Team_Norm'})
+
+    # prep left sides for asof (sort within keys)
+    left_team = left_team.sort_values(['Sport','Team_Norm', ts_col], kind='mergesort')
+    left_opp  = left_opp .sort_values(['Sport','Team_Norm', ts_col], kind='mergesort')
+
+    # bail early if no left rows
     if left_team.empty or pr.empty:
         for c in needed:
             if c not in dm.columns: dm[c] = np.nan
         return dm
-    
-    # --- merge_asof (guaranteed sorted) ---
-    # --- merge_asof (group-wise, guaranteed sorted) ---
-    team_rat = _groupwise_asof(
-        left_team, pr,
-        by=['Sport','Team_Norm'],
-        left_on=ts_col, right_on='AsOfTS'
-    ).rename(columns={'Power_Rating':'PR_Team_Rating','PR_Off':'PR_Team_Off','PR_Def':'PR_Team_Def'})
-    
-    opp_rat = _groupwise_asof(
-        left_opp, pr,
-        by=['Sport','Team_Norm'],
-        left_on=ts_col, right_on='AsOfTS'
-    ).rename(columns={'Power_Rating':'PR_Opp_Rating','PR_Off':'PR_Opp_Off','PR_Def':'PR_Opp_Def'})
-    # Merge matched ratings back onto full dm
+
+    # prefilter pr to needed teams
+    needed_teams = pd.Index(pd.concat([left_team['Team_Norm'], left_opp['Team_Norm']]).unique())
+    pr = pr[pr['Team_Norm'].isin(needed_teams)]
+    if pr.empty:
+        for c in needed:
+            if c not in dm.columns: dm[c] = np.nan
+        return dm
+
+    # FAST PATH: single merge_asof by group keys
+    try:
+        pr_sorted = pr.sort_values(['Sport','Team_Norm','AsOfTS'], kind='mergesort')
+
+        team_rat = pd.merge_asof(
+            left_team, pr_sorted,
+            by=['Sport','Team_Norm'],
+            left_on=ts_col, right_on='AsOfTS',
+            direction='backward', allow_exact_matches=True
+        )
+        opp_rat = pd.merge_asof(
+            left_opp, pr_sorted,
+            by=['Sport','Team_Norm'],
+            left_on=ts_col, right_on='AsOfTS',
+            direction='backward', allow_exact_matches=True
+        )
+    except ValueError:
+        # SAFE FALLBACK: group-wise join
+        team_rat = _groupwise_asof(left_team, pr, by=['Sport','Team_Norm'], left_on=ts_col, right_on='AsOfTS')
+        opp_rat  = _groupwise_asof(left_opp,  pr, by=['Sport','Team_Norm'], left_on=ts_col, right_on='AsOfTS')
+
+    # rename & merge back
+    team_rat = team_rat.rename(columns={'Power_Rating':'PR_Team_Rating','PR_Off':'PR_Team_Off','PR_Def':'PR_Team_Def'})
+    opp_rat  = opp_rat .rename(columns={'Power_Rating':'PR_Opp_Rating', 'PR_Off':'PR_Opp_Off', 'PR_Def':'PR_Opp_Def'})
+
     dm = dm.merge(
-        team_rat[['Game_Key', 'Market', 'Outcome', 'PR_Team_Rating', 'PR_Team_Off', 'PR_Team_Def']],
-        on=['Game_Key', 'Market', 'Outcome'], how='left'
+        team_rat[['Game_Key','Market','Outcome','PR_Team_Rating','PR_Team_Off','PR_Team_Def']],
+        on=['Game_Key','Market','Outcome'], how='left'
     ).merge(
-        opp_rat[['Game_Key', 'Market', 'Outcome', 'PR_Opp_Rating', 'PR_Opp_Off', 'PR_Opp_Def']],
-        on=['Game_Key', 'Market', 'Outcome'], how='left'
+        opp_rat[['Game_Key','Market','Outcome','PR_Opp_Rating','PR_Opp_Off','PR_Opp_Def']],
+        on=['Game_Key','Market','Outcome'], how='left'
     )
 
-    # Guarantees (in case some columns didn't appear due to empty matches)
+    # guarantees
     for c in ['PR_Team_Rating','PR_Team_Off','PR_Team_Def','PR_Opp_Rating','PR_Opp_Off','PR_Opp_Def']:
-        if c not in dm.columns:
-            dm[c] = np.nan
+        if c not in dm.columns: dm[c] = np.nan
 
-    # --- Derived features
+    # derived
     dm['PR_Rating_Diff']     = dm['PR_Team_Rating'] - dm['PR_Opp_Rating']
     dm['PR_Abs_Rating_Diff'] = dm['PR_Rating_Diff'].abs()
-
     if {'PR_Team_Off','PR_Opp_Off','PR_Team_Def','PR_Opp_Def'}.issubset(dm.columns):
         dm['PR_Total_Est'] = (dm['PR_Team_Off'] + dm['PR_Opp_Off']) - (dm['PR_Team_Def'] + dm['PR_Opp_Def'])
     else:
         dm['PR_Total_Est'] = np.nan
 
-    # Ensure Value numeric before alpha fit
     dm['Value'] = pd.to_numeric(dm.get('Value'), errors='coerce')
-
-    fit = dm[(dm['Market'] == 'spreads') & dm['Value'].notna() & dm['PR_Rating_Diff'].notna()]
-    if not fit.empty and (fit['PR_Rating_Diff']**2).sum() > 0:
-        alpha = float((fit['PR_Rating_Diff'] * fit['Value']).sum() / (fit['PR_Rating_Diff']**2).sum())
-    else:
-        alpha = 0.0
-
+    fit = dm[(dm['Market']=='spreads') & dm['Value'].notna() & dm['PR_Rating_Diff'].notna()]
+    alpha = float((fit['PR_Rating_Diff']*fit['Value']).sum() / (fit['PR_Rating_Diff']**2).sum()) if not fit.empty and (fit['PR_Rating_Diff']**2).sum()>0 else 0.0
     dm['PR_Spread_Est']      = alpha * dm['PR_Rating_Diff']
-    dm['PR_Spread_Residual'] = (dm['Value'] - dm['PR_Spread_Est']).where(dm['Market'] == 'spreads')
+    dm['PR_Spread_Residual'] = (dm['Value'] - dm['PR_Spread_Est']).where(dm['Market']=='spreads')
 
     dm['PR_Agrees_With_Favorite'] = np.where(
-        (dm['Market'] == 'spreads') & dm['Value'].notna() & dm['PR_Rating_Diff'].notna(),
+        (dm['Market']=='spreads') & dm['Value'].notna() & dm['PR_Rating_Diff'].notna(),
         (((dm['PR_Rating_Diff'] < 0) & (dm['Value'] < 0)) | ((dm['PR_Rating_Diff'] > 0) & (dm['Value'] > 0))).astype(int),
         np.nan
     )
 
-    # --- Prob proxy (optional)
-    beta, intercept = 0.0, 0.0
-    if 'H2H_Odds' in dm.columns:
-        try:
-            from sklearn.linear_model import LogisticRegression
-            dm['H2H_Odds'] = pd.to_numeric(dm['H2H_Odds'], errors='coerce')
-            tmp = dm.loc[mask_team_markets, ['PR_Rating_Diff', 'H2H_Odds']].dropna()
-            if not tmp.empty:
-                implied = tmp['H2H_Odds'].apply(implied_prob)
-                Xb = tmp[['PR_Rating_Diff']].astype(float).values
-                yb = (implied.values > 0.5).astype(int)
-                lr = LogisticRegression(max_iter=1000)
-                lr.fit(Xb, yb)
-                beta, intercept = float(lr.coef_[0][0]), float(lr.intercept_[0])
-        except Exception:
-            beta, intercept = 0.0, 0.0
-
-    dm['PR_Prob_From_Rating'] = 1.0 / (1.0 + np.exp(-(intercept + beta * dm['PR_Rating_Diff'].fillna(0))))
+    # keep proxy simple here; fit/caching elsewhere if needed
+    dm['PR_Prob_From_Rating'] = 0.5
     if 'H2H_Implied_Prob' in dm.columns:
-        dm['PR_Prob_Gap_vs_Market'] = (dm['PR_Prob_From_Rating'] - dm['H2H_Implied_Prob']).where(dm['Market'] == 'h2h')
+        dm['PR_Prob_Gap_vs_Market'] = (dm['PR_Prob_From_Rating'] - dm['H2H_Implied_Prob']).where(dm['Market']=='h2h')
 
     return dm
 
