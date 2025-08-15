@@ -944,19 +944,15 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
     mapping['Sport'] = mapping['Sport'].astype(str).str.upper()
     mapping['Market'] = mapping['Market'].astype(str).str.lower().str.strip()
     mapping['Bookmaker'] = mapping['Bookmaker'].astype(str).str.lower().str.strip()
-
-
     
     return mapping
 
-
-
-@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
-
-
-
 # Tiny in-memory cache
 _RATINGS_WINDOW_CACHE = {}
+
+def _datekey(ts) -> str:
+    return pd.to_datetime(ts, utc=True).isoformat()
+
 def fetch_ratings_window_cached(
     bq,
     sport: str,
