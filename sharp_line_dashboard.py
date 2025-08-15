@@ -553,149 +553,6 @@ def fetch_power_ratings_from_bq_cached(
     # normalize exactly once here
 # --- ONE canonical normalizer (handles Series OR scalar) ---
 
-def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
-    needed = [
-        'PR_Team_Rating','PR_Team_Off','PR_Team_Def',
-        'PR_Opp_Rating','PR_Opp_Off','PR_Opp_Def',
-        'PR_Rating_Diff','PR_Abs_Rating_Diff',
-        'PR_Total_Est','PR_Spread_Est','PR_Spread_Residual',
-        'PR_Agrees_With_Favorite','PR_Prob_From_Rating','PR_Prob_Gap_vs_Market'
-    ]
-    if df_market is None or df_market.empty or df_power is None or df_power.empty:
-        dm = (df_market.copy() if df_market is not None else pd.DataFrame())
-        for c in needed:
-            if c not in dm.columns: dm[c] = np.nan
-        return dm
-
-    dm = df_market.copy()
-
-    # --- Keys & timestamps on market side
-    if 'Sport' not in dm.columns:  dm['Sport'] = ''
-    if 'Market' not in dm.columns: dm['Market'] = dm.get('Market_Norm', '')
-
-    dm['Sport']  = dm['Sport'].astype(str).str.upper()
-    dm['Market'] = dm['Market'].astype(str).str.lower().str.strip()
-
-    # Normalize teams (vectorized)
-    # inside attach_power_ratings_asof
-    if 'Outcome_Norm' in dm.columns:
-        dm['Outcome_Norm'] = norm_team(dm['Outcome_Norm'])
-    else:
-        dm['Outcome_Norm'] = norm_team(dm['Outcome'] if 'Outcome' in dm.columns else pd.Series('', index=dm.index))
-    
-    dm['Home_Team_Norm'] = norm_team(dm['Home_Team_Norm'])
-    dm['Away_Team_Norm'] = norm_team(dm['Away_Team_Norm'])
-    
-   
-    # choose time column
-    ts_col = 'Snapshot_Timestamp' if 'Snapshot_Timestamp' in dm.columns else 'Game_Start'
-    dm[ts_col] = pd.to_datetime(dm[ts_col], utc=True, errors='coerce')
-
-    # --- ratings (right side)
-   # ratings (right side)
-    pr = df_power.copy()
-    pr['Sport']     = pr['Sport'].astype(str).str.upper()
-    pr['Team_Norm'] = norm_team(pr['Team_Norm'])   #
-
-    pr = pr.dropna(subset=['AsOf']).rename(columns={'AsOf':'AsOfTS'})
-    pr['AsOfTS'] = pd.to_datetime(pr['AsOfTS'], utc=True, errors='coerce')
-    pr = pr.dropna(subset=['AsOfTS'])
-
-    # team markets only
-    mask_team_markets = dm['Market'].isin(['spreads','h2h'])
-    dm.loc[mask_team_markets, 'Team'] = dm.loc[mask_team_markets, 'Outcome_Norm']
-    dm.loc[mask_team_markets, 'Opp']  = np.where(
-        dm.loc[mask_team_markets, 'Team'] == dm.loc[mask_team_markets, 'Home_Team_Norm'],
-        dm.loc[mask_team_markets, 'Away_Team_Norm'],
-        dm.loc[mask_team_markets, 'Home_Team_Norm']
-    )
-
-    left_mask = mask_team_markets & dm[ts_col].notna()
-
-    left_team = dm.loc[left_mask, ['Sport','Team',ts_col,'Game_Key','Market','Outcome']].rename(columns={'Team':'Team_Norm'})
-    left_opp  = dm.loc[left_mask, ['Sport','Opp', ts_col,'Game_Key','Market','Outcome']].rename(columns={'Opp':'Team_Norm'})
-
-    # prep left sides for asof (sort within keys)
-    left_team = left_team.sort_values(['Sport','Team_Norm', ts_col], kind='mergesort')
-    left_opp  = left_opp .sort_values(['Sport','Team_Norm', ts_col], kind='mergesort')
-
-    # bail early if no left rows
-    if left_team.empty or pr.empty:
-        for c in needed:
-            if c not in dm.columns: dm[c] = np.nan
-        return dm
-
-    # prefilter pr to needed teams
-    needed_teams = pd.Index(pd.concat([left_team['Team_Norm'], left_opp['Team_Norm']]).unique())
-    pr = pr[pr['Team_Norm'].isin(needed_teams)]
-    if pr.empty:
-        for c in needed:
-            if c not in dm.columns: dm[c] = np.nan
-        return dm
-
-    # FAST PATH: single merge_asof by group keys
-    try:
-        pr_sorted = pr.sort_values(['Sport','Team_Norm','AsOfTS'], kind='mergesort')
-
-        team_rat = pd.merge_asof(
-            left_team, pr_sorted,
-            by=['Sport','Team_Norm'],
-            left_on=ts_col, right_on='AsOfTS',
-            direction='backward', allow_exact_matches=True
-        )
-        opp_rat = pd.merge_asof(
-            left_opp, pr_sorted,
-            by=['Sport','Team_Norm'],
-            left_on=ts_col, right_on='AsOfTS',
-            direction='backward', allow_exact_matches=True
-        )
-    except ValueError:
-        # SAFE FALLBACK: group-wise join
-        team_rat = _groupwise_asof(left_team, pr, by=['Sport','Team_Norm'], left_on=ts_col, right_on='AsOfTS')
-        opp_rat  = _groupwise_asof(left_opp,  pr, by=['Sport','Team_Norm'], left_on=ts_col, right_on='AsOfTS')
-
-    # rename & merge back
-    team_rat = team_rat.rename(columns={'Power_Rating':'PR_Team_Rating','PR_Off':'PR_Team_Off','PR_Def':'PR_Team_Def'})
-    opp_rat  = opp_rat .rename(columns={'Power_Rating':'PR_Opp_Rating', 'PR_Off':'PR_Opp_Off', 'PR_Def':'PR_Opp_Def'})
-
-    dm = dm.merge(
-        team_rat[['Game_Key','Market','Outcome','PR_Team_Rating','PR_Team_Off','PR_Team_Def']],
-        on=['Game_Key','Market','Outcome'], how='left'
-    ).merge(
-        opp_rat[['Game_Key','Market','Outcome','PR_Opp_Rating','PR_Opp_Off','PR_Opp_Def']],
-        on=['Game_Key','Market','Outcome'], how='left'
-    )
-
-    # guarantees
-    for c in ['PR_Team_Rating','PR_Team_Off','PR_Team_Def','PR_Opp_Rating','PR_Opp_Off','PR_Opp_Def']:
-        if c not in dm.columns: dm[c] = np.nan
-
-    # derived
-    dm['PR_Rating_Diff']     = dm['PR_Team_Rating'] - dm['PR_Opp_Rating']
-    dm['PR_Abs_Rating_Diff'] = dm['PR_Rating_Diff'].abs()
-    if {'PR_Team_Off','PR_Opp_Off','PR_Team_Def','PR_Opp_Def'}.issubset(dm.columns):
-        dm['PR_Total_Est'] = (dm['PR_Team_Off'] + dm['PR_Opp_Off']) - (dm['PR_Team_Def'] + dm['PR_Opp_Def'])
-    else:
-        dm['PR_Total_Est'] = np.nan
-
-    dm['Value'] = pd.to_numeric(dm.get('Value'), errors='coerce')
-    fit = dm[(dm['Market']=='spreads') & dm['Value'].notna() & dm['PR_Rating_Diff'].notna()]
-    alpha = float((fit['PR_Rating_Diff']*fit['Value']).sum() / (fit['PR_Rating_Diff']**2).sum()) if not fit.empty and (fit['PR_Rating_Diff']**2).sum()>0 else 0.0
-    dm['PR_Spread_Est']      = alpha * dm['PR_Rating_Diff']
-    dm['PR_Spread_Residual'] = (dm['Value'] - dm['PR_Spread_Est']).where(dm['Market']=='spreads')
-
-    dm['PR_Agrees_With_Favorite'] = np.where(
-        (dm['Market']=='spreads') & dm['Value'].notna() & dm['PR_Rating_Diff'].notna(),
-        (((dm['PR_Rating_Diff'] < 0) & (dm['Value'] < 0)) | ((dm['PR_Rating_Diff'] > 0) & (dm['Value'] > 0))).astype(int),
-        np.nan
-    )
-
-    # keep proxy simple here; fit/caching elsewhere if needed
-    dm['PR_Prob_From_Rating'] = 0.5
-    if 'H2H_Implied_Prob' in dm.columns:
-        dm['PR_Prob_Gap_vs_Market'] = (dm['PR_Prob_From_Rating'] - dm['H2H_Implied_Prob']).where(dm['Market']=='h2h')
-
-    return dm
 
 
 def read_latest_snapshot_from_bigquery(hours=2):
@@ -1039,7 +896,70 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
     mapping['Market'] = mapping['Market'].astype(str).str.lower().str.strip()
     mapping['Bookmaker'] = mapping['Bookmaker'].astype(str).str.lower().str.strip()
 
+
+    
     return mapping
+
+
+@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
+def build_per_game_power(sport: str, df_bt: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
+    games = (
+        df_bt.sort_values('Snapshot_Timestamp')
+             .drop_duplicates(subset=['Game_Key'], keep='last')
+             [['Game_Key','Sport','Home_Team_Norm','Away_Team_Norm','Game_Start','Snapshot_Timestamp']]
+             .copy()
+    )
+    games['Sport'] = games['Sport'].astype(str).str.upper()
+    games['Home_Team_Norm'] = norm_team(games['Home_Team_Norm'])
+    games['Away_Team_Norm'] = norm_team(games['Away_Team_Norm'])
+    games['Game_Start'] = pd.to_datetime(games['Game_Start'], utc=True, errors='coerce')
+    games['ts'] = games['Game_Start'].fillna(pd.to_datetime(games['Snapshot_Timestamp'], utc=True, errors='coerce'))
+
+    # long-form sides
+    home = games[['Game_Key','Sport','Home_Team_Norm','ts']].rename(columns={'Home_Team_Norm':'Team_Norm'})
+    home['Side'] = 'home'
+    away = games[['Game_Key','Sport','Away_Team_Norm','ts']].rename(columns={'Away_Team_Norm':'Team_Norm'})
+    away['Side'] = 'away'
+    teams = pd.concat([home, away], ignore_index=True)
+
+    # prep ratings (requires AsOf)
+    pr = df_power.copy()
+    pr['Sport'] = pr['Sport'].astype(str).str.upper()
+    pr['Team_Norm'] = norm_team(pr['Team_Norm'])
+    pr = pr.rename(columns={'AsOf':'AsOfTS'})
+    pr['AsOfTS'] = pd.to_datetime(pr['AsOfTS'], utc=True, errors='coerce')
+    pr = pr.dropna(subset=['AsOfTS'])
+
+    teams = teams.sort_values(['Sport','Team_Norm','ts'], kind='mergesort')
+    pr    = pr.sort_values(['Sport','Team_Norm','AsOfTS'], kind='mergesort')
+
+    enriched = pd.merge_asof(
+        teams, pr,
+        by=['Sport','Team_Norm'],
+        left_on='ts', right_on='AsOfTS',
+        direction='backward', allow_exact_matches=True
+    )[['Game_Key','Side','Power_Rating','PR_Off','PR_Def']]
+
+    # pivot + flatten
+    per_game = (
+        enriched.pivot(index='Game_Key', columns='Side', values=['Power_Rating','PR_Off','PR_Def'])
+                 .rename(columns={
+                     ('Power_Rating','home'): 'Home_Power_Rating',
+                     ('Power_Rating','away'): 'Away_Power_Rating',
+                     ('PR_Off','home'):        'Home_PR_Off',
+                     ('PR_Off','away'):        'Away_PR_Off',
+                     ('PR_Def','home'):        'Home_PR_Def',
+                     ('PR_Def','away'):        'Away_PR_Def',
+                 })
+                 .reset_index()
+    )
+
+    # diffs (game-level)
+    per_game['PR_Rating_Diff_game'] = per_game['Home_Power_Rating'] - per_game['Away_Power_Rating']
+    per_game['PR_Off_Diff_game']    = per_game['Home_PR_Off'] - per_game['Away_PR_Off']
+    per_game['PR_Def_Diff_game']    = per_game['Home_PR_Def'] - per_game['Away_PR_Def']
+    return per_game
 
     
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
@@ -1126,7 +1046,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
     )
+    # ratings once per sport (cached fetch you already have)
+    df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
+    if df_power.empty:
+        df_power = fetch_power_ratings_from_bq_cached(sport, source="current")
     
+    per_game = build_per_game_power(sport, df_bt, df_power)
+
+
     # === Pivot line values (e.g., -3.5, 210.5, etc.)
     value_pivot = df_latest.pivot_table(
         index='Game_Key',
@@ -1596,15 +1523,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Book_lift_x_PROB_SHIFT'] = df_market['Book_Reliability_Lift'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift'] 
         
         # 0) Fetch once per sport
-        df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
-        if df_power.empty:
-            df_power = fetch_power_ratings_from_bq_cached(sport, source="current")
-        df_market = attach_power_ratings_asof(df_market, df_power)
-                
-      
+        df_market = df_market.merge(per_game, on='Game_Key', how='left')
+
+                   
+        # ensure normalized for comparison
+        df_market['Outcome_Norm']   = norm_team(df_market['Outcome_Norm'])
+        df_market['Home_Team_Norm'] = norm_team(df_market['Home_Team_Norm'])
+        df_market['Away_Team_Norm'] = norm_team(df_market['Away_Team_Norm'])
         
-       
+        is_home_bet = (df_market['Outcome_Norm'] == df_market['Home_Team_Norm'])
         
+        df_market['PR_Team_Rating'] = np.where(is_home_bet, df_market['Home_Power_Rating'], df_market['Away_Power_Rating'])
+        df_market['PR_Opp_Rating']  = np.where(is_home_bet, df_market['Away_Power_Rating'], df_market['Home_Power_Rating'])
+        df_market['PR_Team_Off']    = np.where(is_home_bet, df_market['Home_PR_Off'], df_market['Away_PR_Off'])
+        df_market['PR_Team_Def']    = np.where(is_home_bet, df_market['Home_PR_Def'], df_market['Away_PR_Def'])
+        df_market['PR_Opp_Off']     = np.where(is_home_bet, df_market['Away_PR_Off'], df_market['Home_PR_Off'])
+        df_market['PR_Opp_Def']     = np.where(is_home_bet, df_market['Away_PR_Def'], df_market['Home_PR_Def'])
+        
+        df_market['PR_Rating_Diff']     = df_market['PR_Team_Rating'] - df_market['PR_Opp_Rating']
+        df_market['PR_Abs_Rating_Diff'] = df_market['PR_Rating_Diff'].abs()
+        df_market['PR_Total_Est']       = (df_market['PR_Team_Off'] + df_market['PR_Opp_Off']
+                                           - df_market['PR_Team_Def'] - df_market['PR_Opp_Def'])
+
+ 
                 
         features = [
         
