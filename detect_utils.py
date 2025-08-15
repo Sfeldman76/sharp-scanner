@@ -55,13 +55,7 @@ from utils import (
 
 def detect_and_save_all_sports():
     # 1) ✅ Load ratings first (your preference)
-    try:
-        logging.info("🟢 Pre-pass: updating power ratings BEFORE detection …")
-        pre_summary = update_power_ratings()
-        logging.info(f"📊 Pre-pass ratings summary: {pre_summary}")
-    except Exception as e:
-        logging.error(f"❌ Pre-pass ratings update failed: {e}", exc_info=True)
-
+    
     ratings_need_update = False
 
     for sport_label in ["NBA", "MLB", "WNBA", "CFL", "NFL", "NCAAF"]:
