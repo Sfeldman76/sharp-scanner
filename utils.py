@@ -2421,8 +2421,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         ).astype(float)
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
-    team_feature_map = None
-    book_reliability_map = None
+   # --- Restore: simple map lookup from trained_models bundles ---
+ 
     
     for bundle in trained_models.values():
         if team_feature_map is None:
@@ -2434,7 +2434,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
     logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
-    
+
     # === Cross-Market Odds Pivot
     odds_pivot = (
         df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
