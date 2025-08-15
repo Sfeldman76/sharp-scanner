@@ -2121,17 +2121,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     total_start = time.time()
 
     
-    # If you use team/book maps from trained_models, guard this access
-    team_feature_map = None
-    book_reliability_map = None
-    if HAS_MODELS:
-        for bundle in trained_models.values():
-            if team_feature_map is None:
-                team_feature_map = bundle.get('team_feature_map')
-            if book_reliability_map is None:
-                book_reliability_map = bundle.get('book_reliability_map')
-            if team_feature_map is not None and book_reliability_map is not None:
-                break
     # ---- Base normalization (does not touch open/extreme columns) ----
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
