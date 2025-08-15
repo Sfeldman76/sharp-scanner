@@ -2120,7 +2120,42 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     scored_all = []
     total_start = time.time()
 
+    if trained_models is None:
+        trained_models = {}
+    HAS_MODELS = isinstance(trained_models, dict) and len(trained_models) > 0
 
+    def _ensure_model_placeholders(frame, market_col='Market', set_market_name=None):
+        """Make sure model-output columns exist and are safely filled."""
+        if 'Model_Sharp_Win_Prob' not in frame.columns:
+            frame['Model_Sharp_Win_Prob'] = np.nan
+        if 'Model_Confidence' not in frame.columns:
+            frame['Model_Confidence']    = np.nan
+        if 'Scored_By_Model' not in frame.columns:
+            frame['Scored_By_Model']     = False
+        if 'Scoring_Market' not in frame.columns:
+            frame['Scoring_Market']      = np.nan
+        # Always set Scoring_Market to the row's market (or a provided constant)
+        if set_market_name is not None:
+            frame['Scoring_Market'] = set_market_name
+        else:
+            if market_col in frame.columns:
+                frame['Scoring_Market'] = frame[market_col].astype(str).str.lower().str.strip()
+        return frame
+
+    # Make sure placeholders exist for the whole df from the start
+    df = _ensure_model_placeholders(df)
+
+    # If you use team/book maps from trained_models, guard this access
+    team_feature_map = None
+    book_reliability_map = None
+    if HAS_MODELS:
+        for bundle in trained_models.values():
+            if team_feature_map is None:
+                team_feature_map = bundle.get('team_feature_map')
+            if book_reliability_map is None:
+                book_reliability_map = bundle.get('book_reliability_map')
+            if team_feature_map is not None and book_reliability_map is not None:
+                break
     # ---- Base normalization (does not touch open/extreme columns) ----
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
@@ -2768,75 +2803,108 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_canon[col] = 0.0
             
             # === Build the feature list exactly as used in training ===
-            feature_cols = None
-            # Prefer a saved feature list from training if you have it
-            if 'feature_cols' in trained_models[market_type]:
-                feature_cols = trained_models[market_type]['feature_cols']
-            else:
-                # Fallbacks: sklearn stores feature_names_in_ ; xgb Booster may have feature_names
-                feature_cols = getattr(trained_models[market_type]['model'], 'feature_names_in_', None)
-                if feature_cols is None:
-                    booster = trained_models[market_type]['model'].get_booster()
-                    feature_cols = booster.feature_names or []  # may still be None → []
+            # --- feature list from the bundle (safe) ---
             
-            feature_cols = list(feature_cols)  # ensure list
+            def _ensure_model_placeholders(frame, market_name):
+                cols_defaults = {
+                    'Model_Sharp_Win_Prob': np.nan,
+                    'Model_Confidence':     np.nan,
+                    'Scored_By_Model':      False,
+                    'Scoring_Market':       market_name,
+                }
+                for c, v in cols_defaults.items():
+                    if c not in frame.columns:
+                        frame[c] = v
+                frame['Scoring_Market'] = frame['Scoring_Market'].fillna(market_name)
+                return frame
+            # --- compute once above ---
+            markets_present = (
+                df['Market'].dropna().astype(str).str.lower().str.strip().unique().tolist()
+                if 'Market' in df.columns else []
+            )
+            HAS_MODELS = isinstance(trained_models, dict) and len(trained_models) > 0
+            model_markets = set(trained_models.keys()) if HAS_MODELS else set()
+            df['Has_Model'] = df['Market'].isin(model_markets).astype(int)
+
+                      
+            for mkt in markets_present:
+                mask = (df['Market'] == mkt)
+                df_m = df.loc[mask].copy()
             
-            # Ensure all model features exist in df_full_market
-            missing_cols = [c for c in feature_cols if c not in df_full_market.columns]
-            if missing_cols:
-                df_full_market[missing_cols] = 0.0
+                bundle = trained_models.get(mkt) if HAS_MODELS else None
+                model = bundle.get('model') if bundle else None
+                iso   = bundle.get('calibrator') if bundle else None
             
-            # Coerce *only* the model features to numeric/bool-compatible dtypes
-            for c in feature_cols:
-                if c in df_full_market.columns:
-                    # convert common stringy booleans
-                    if df_full_market[c].dtype == object:
-                        df_full_market[c] = (
-                            df_full_market[c]
+                # No model? stamp placeholders and continue
+                if model is None or iso is None:
+                    tmp = _ensure_model_placeholders(df_m, mkt)
+                    for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
+                        df.loc[mask, col] = tmp[col].values
+                    continue
+            
+                # ---- build the per-market frame you already have logic for ----
+                # Start from df_m and construct df_full_market_m + Was_Canonical exactly as you do now.
+                # Example (you already have this logic above; reuse it here):
+                df_full_market_m = df_m.copy()
+                # ensure Was_Canonical is present/boolean
+                if 'Was_Canonical' not in df_full_market_m.columns:
+                    df_full_market_m['Was_Canonical'] = False  # or compute your canonical logic here
+            
+                # --- feature list from the bundle
+                if 'feature_cols' in bundle and bundle['feature_cols']:
+                    feature_cols = list(bundle['feature_cols'])
+                else:
+                    feature_cols = list(getattr(model, 'feature_names_in_', []) or [])
+                    if not feature_cols:
+                        booster = getattr(model, 'get_booster', lambda: None)()
+                        feature_cols = list(getattr(booster, 'feature_names', []) or [])
+            
+                # ensure missing model features exist
+                miss = [c for c in feature_cols if c not in df_full_market_m.columns]
+                if miss:
+                    df_full_market_m[miss] = 0.0
+            
+                # coerce only model features
+                for c in feature_cols:
+                    if df_full_market_m[c].dtype == object:
+                        df_full_market_m[c] = (
+                            df_full_market_m[c]
                             .replace({'True': 1, 'False': 0, True: 1, False: 0, '': np.nan, 'none': np.nan, 'None': np.nan})
                         )
-                    df_full_market[c] = pd.to_numeric(df_full_market[c], errors='coerce')
+                    df_full_market_m[c] = pd.to_numeric(df_full_market_m[c], errors='coerce')
+                df_full_market_m[feature_cols] = (
+                    df_full_market_m[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                )
             
-            # Replace +/-inf and fill NaNs (match training policy!)
-            df_full_market[feature_cols] = df_full_market[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                # build X after canonical flag is set
+                X_full = df_full_market_m.loc[df_full_market_m['Was_Canonical'], feature_cols]
             
-            # (Optional) sanity check before modeling
-            obj_left = df_full_market[feature_cols].select_dtypes(include=['object']).columns.tolist()
-            if obj_left:
-                logger.warning("⚠️ Object dtypes remain in features: %s", obj_left)
-                # hard-coerce as last resort
-                df_full_market[obj_left] = df_full_market[obj_left].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+                if X_full.empty:
+                    logger.info(f"ℹ️ {mkt.upper()} has no canonical rows — stamping placeholders.")
+                    df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
+                else:
+                    try:
+                        # last object cleanup if any
+                        obj_in_X = X_full.select_dtypes(include='object').columns.tolist()
+                        if obj_in_X:
+                            logger.warning("⚠️ Object columns in X_full: %s", obj_in_X)
+                            X_full[obj_in_X] = X_full[obj_in_X].apply(pd.to_numeric, errors='coerce').fillna(0.0)
             
-            # === Score only canonical rows ===
-        
+                        preds = iso.predict_proba(X_full)[:, 1]
+                        idx_can = df_full_market_m.loc[df_full_market_m['Was_Canonical']].index
+                        df_full_market_m.loc[idx_can, 'Model_Sharp_Win_Prob'] = preds
+                        df_full_market_m.loc[idx_can, 'Model_Confidence']     = preds
+                        df_full_market_m.loc[idx_can, 'Scored_By_Model']      = True
+                        df_full_market_m.loc[idx_can, 'Scoring_Market']       = mkt
+                        df_full_market_m = df_full_market_m.copy()
+                    except Exception as e:
+                        logger.error(f"❌ Scoring failed for {mkt.upper()} — using placeholders. Error: {e}")
+                        df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
             
-            X_full = df_full_market.loc[df_full_market['Was_Canonical'], feature_cols]
-            if X_full.empty:
-                logger.warning("⚠️ No canonical rows to score for %s", market_type)
-                for c, val in [
-                    ('Model_Sharp_Win_Prob', np.nan),
-                    ('Model_Confidence',    np.nan),
-                    ('Scored_By_Model',     False),
-                    ('Scoring_Market',      pd.Series(dtype='object')),
-                ]:
-                    if c not in df_full_market.columns:
-                        df_full_market[c] = val
-            else:
-                obj_in_X = X_full.select_dtypes(include='object').columns.tolist()
-                if obj_in_X:
-                    logger.error("❌ Object columns in X_full: %s", obj_in_X)
-                    X_full[obj_in_X] = X_full[obj_in_X].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-            
-                preds = trained_models[market_type]['calibrator'].predict_proba(X_full)[:, 1]
-                df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Sharp_Win_Prob'] = preds
-                df_full_market.loc[df_full_market['Was_Canonical'], 'Model_Confidence']    = preds
-                df_full_market.loc[df_full_market['Was_Canonical'], 'Scored_By_Model']     = True
-                df_full_market.loc[df_full_market['Was_Canonical'], 'Scoring_Market']      = market_type
-            
-                # optional defrag after batch inserts
-                df_full_market = df_full_market.copy()
-
-                        
+                # write predictions back to df for this market slice (only model cols)
+                for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
+                    df.loc[df_full_market_m.index, col] = df_full_market_m[col].values
+                                        
                         # Optional: trigger defragmentation  df_canon = df_canon.copy()
             # ===== pull predictions into your already-enriched df_canon (no overwrite) =====
             pred_cols = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
