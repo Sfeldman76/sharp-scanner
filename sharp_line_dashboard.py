@@ -502,47 +502,69 @@ def tmr(label):
 
 
 @st.cache_data(ttl=900, max_entries=64, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=64, show_spinner=False)
 def fetch_power_ratings_from_bq_cached(
     sport: str,
-    lookback_days: int = 400,
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
-    source: str = "history",
-    **_kwargs, 
+    source: str = "history",            # "history" or "current"
+    lookback_days: int = 400,           # fallback knob if you want it
 ) -> pd.DataFrame:
     """
-    History only: last row per (Sport, Team, DATE) within [start_ts-3d, end_ts+3d].
-    Falls back to current if empty.
+    Returns ratings for a sport in [start_ts-3d, end_ts+3d] (UTC), with
+    one row per (Sport, Team, Date) using the *latest* Updated_At that day.
+    History preferred (time-aware); falls back to current snapshot if empty.
+    Columns: Sport, Team_Norm, AsOf, Power_Rating, PR_Off, PR_Def
     """
     bq = get_bq_client()
 
-    # pad the window a bit so asof has something to match
-    pad_start = (pd.to_datetime(start_ts, utc=True) - pd.Timedelta(days=3)).isoformat()
-    pad_end   = (pd.to_datetime(end_ts,   utc=True) + pd.Timedelta(days=3)).isoformat()
+    # pad so asof has something to match
+    start_pad = pd.to_datetime(start_ts, utc=True) - pd.Timedelta(days=3)
+    end_pad   = pd.to_datetime(end_ts,   utc=True) + pd.Timedelta(days=3)
 
-    bq = get_bq_client()
+    params_hist = bigquery.QueryJobConfig(
+        use_query_cache=True,
+        query_parameters=[
+            bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
+            bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", start_pad.to_pydatetime()),
+            bigquery.ScalarQueryParameter("end_ts", "TIMESTAMP", end_pad.to_pydatetime()),
+        ],
+    )
 
     if source == "history":
+        # time-aware, last snapshot per team per calendar day
         sql = """
-            SELECT
-              UPPER(Sport) AS Sport,
-              CAST(Team AS STRING) AS Team_Raw,
-              TIMESTAMP(Updated_At) AS AsOfTS,
-              CAST(Rating AS FLOAT64) AS Power_Rating,
-              CAST(NULL AS FLOAT64) AS PR_Off,
-              CAST(NULL AS FLOAT64) AS PR_Def
-            FROM `sharplogger.sharp_data.ratings_history`
-            WHERE UPPER(Sport) = @sport
-              AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+            WITH base AS (
+              SELECT
+                UPPER(Sport) AS Sport,
+                CAST(Team AS STRING) AS Team_Raw,
+                TIMESTAMP(Updated_At) AS AsOfTS,
+                CAST(Rating AS FLOAT64) AS Power_Rating,
+                CAST(NULL AS FLOAT64) AS PR_Off,
+                CAST(NULL AS FLOAT64) AS PR_Def
+              FROM `sharplogger.sharp_data.ratings_history`
+              WHERE UPPER(Sport) = @sport
+                AND Updated_At BETWEEN @start_ts AND @end_ts
+            ),
+            dedup AS (
+              SELECT *,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY Sport, Team_Raw, DATE(AsOfTS)
+                       ORDER BY AsOfTS DESC
+                     ) AS rn
+              FROM base
+            )
+            SELECT Sport, Team_Raw, AsOfTS, Power_Rating, PR_Off, PR_Def
+            FROM dedup
+            WHERE rn = 1
         """
-        cfg = bigquery.QueryJobConfig(
-            use_query_cache=True,
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
-                bigquery.ScalarQueryParameter("lookback_days", "INT64", lookback_days),
-            ],
-        )
+        df = bq.query(sql, job_config=params_hist).to_dataframe()
     else:
+        # current snapshot; no time awareness (still filter sport)
+        params_curr = bigquery.QueryJobConfig(
+            use_query_cache=True,
+            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
+        )
         sql = """
             SELECT
               UPPER(Sport) AS Sport,
@@ -554,23 +576,18 @@ def fetch_power_ratings_from_bq_cached(
             FROM `sharplogger.sharp_data.ratings_current`
             WHERE UPPER(Sport) = @sport
         """
-        cfg = bigquery.QueryJobConfig(
-            use_query_cache=True,
-            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
-        )
+        df = bq.query(sql, job_config=params_curr).to_dataframe()
 
-    df = bq.query(sql, job_config=cfg).to_dataframe()
     if df.empty:
         return df
 
+   
 
-    # normalize once
     df["Sport"] = df["Sport"].astype(str).str.upper()
     df["Team_Norm"] = norm_team(df["Team_Raw"])
-    df["AsOfTS"] = pd.to_datetime(df["AsOfTS"], utc=True, errors="coerce")
-    df.rename(columns={"AsOfTS":"AsOf"}, inplace=True)
-    # keep just what we need
-    return df[["Sport","Team_Norm","AsOf","Power_Rating"]]
+    df["AsOf"] = pd.to_datetime(df["AsOfTS"], utc=True, errors="coerce")
+
+    return df[["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]]
 
     # normalize exactly once here
 # --- ONE canonical normalizer (handles Series OR scalar) ---
@@ -923,8 +940,7 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
     return mapping
 
 
-@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
-@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
+
 @st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 def build_per_game_power(sport: str, df_bt: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
     # latest snapshot per game (to get teams + a timestamp)
@@ -1108,10 +1124,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     max_ts = pd.to_datetime(df_bt['Game_Start'], utc=True, errors='coerce').max()
     if pd.isna(max_ts):
         max_ts = pd.to_datetime(df_bt['Snapshot_Timestamp'], utc=True, errors='coerce').max()
+    
     with tmr("fetch power (cached)"):
-        df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
+        # derive the exact window of games in this training batch
+        start_ts = pd.to_datetime(
+            df_bt["Game_Start"].min() if "Game_Start" in df_bt.columns else df_bt["Snapshot_Timestamp"].min(),
+            utc=True
+        )
+        end_ts = pd.to_datetime(
+            df_bt["Game_Start"].max() if "Game_Start" in df_bt.columns else df_bt["Snapshot_Timestamp"].max(),
+            utc=True
+        )
+    
+        # time-aware history first (one row per team/day, no leakage)
+        df_power = fetch_power_ratings_from_bq_cached(
+            sport=sport,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            source="history",
+        )
+
+        # fallback to current snapshot if history returned nothing
         if df_power.empty:
-            df_power = fetch_power_ratings_from_bq_cached(sport, source="current")
+            df_power = fetch_power_ratings_from_bq_cached(
+                sport=sport,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                source="current",
+            )
     with tmr("build per_game power"):
         per_game = build_per_game_power(sport, df_bt, df_power)
 
