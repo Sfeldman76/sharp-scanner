@@ -1703,7 +1703,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
     
         
-        features += pr_features
+        
         hybrid_timing_features = [
             
             f'SharpMove_Magnitude_{b}' for b in [
