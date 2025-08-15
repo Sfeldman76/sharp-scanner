@@ -511,7 +511,7 @@ def tmr(label):
     st.write(f"⏱ {label}: {dt:.2f}s")
 
 
-@st.cache_data(ttl=900, max_entries=64, show_spinner=False)
+
 @st.cache_data(ttl=900, max_entries=64, show_spinner=False)
 def fetch_power_ratings_from_bq_cached(
     sport: str,
@@ -953,24 +953,27 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
 
 @st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 
+
+
+# Tiny in-memory cache
+_RATINGS_WINDOW_CACHE = {}
 def fetch_ratings_window_cached(
+    bq,
     sport: str,
     pad_start_ts,
     pad_end_ts,
-    table_history="sharplogger.sharp_data.ratings_history",
-    table_current="sharplogger.sharp_data.ratings_current",
+    table_history: str = "sharplogger.sharp_data.ratings_history",
+    table_current: str = "sharplogger.sharp_data.ratings_current",
 ):
     """
-    Returns a single DataFrame with columns:
+    Returns a DataFrame with columns:
       ['Sport','Team_Norm','AsOfTS','Power_Rating','PR_Off','PR_Def']
-    Cached per (sport, window, tables) for the session.
+    Cached per (sport, window, tables).
     """
-  
-
     sport_up = str(sport).upper().strip()
     k = (table_history, table_current, sport_up, _datekey(pad_start_ts), _datekey(pad_end_ts))
     if k in _RATINGS_WINDOW_CACHE:
-        return _RATINGS_WINDOW_CACHE[k]
+        return _RATINGS_WINDOW_CACHE[k].copy()
 
     pad_start_iso = pd.to_datetime(pad_start_ts, utc=True).isoformat()
     pad_end_iso   = pd.to_datetime(pad_end_ts,   utc=True).isoformat()
@@ -1002,44 +1005,39 @@ def fetch_ratings_window_cached(
     r_hist = bq.query(q_hist).to_dataframe()
     r_curr = bq.query(q_curr).to_dataframe()
 
-    # normalize
     for fr in (r_hist, r_curr):
         if fr is not None and not fr.empty:
             fr['Sport'] = fr['Sport'].astype(str).str.upper()
-            fr['Team_Norm'] = fr['Team_Norm'].astype(str).strip().str.lower()
+            fr['Team_Norm'] = fr['Team_Norm'].astype(str).str.strip().str.lower()
 
-    import pandas as pd
     ratings_all = pd.concat([r_hist, r_curr], ignore_index=True)
     if not ratings_all.empty:
         ratings_all = ratings_all.dropna(subset=['Sport','Team_Norm','AsOfTS']).copy()
         ratings_all = ratings_all.sort_values(['Sport','Team_Norm','AsOfTS'])
 
     _RATINGS_WINDOW_CACHE[k] = ratings_all
-    return ratings_all
-
-def clear_ratings_cache():
-    _RATINGS_WINDOW_CACHE.clear()
+    return ratings_all.copy()
 
 def enrich_power_no_gaps_fast(
-    df: "pd.DataFrame",
-    sport_aliases={"MLB": ["MLB", "BASEBALL_MLB"]},
-    table_history="sharplogger.sharp_data.ratings_history",
-    table_current="sharplogger.sharp_data.ratings_current",
-    pad_days: int = 14,     # 👈 tighter than 31
-    grace_days: int = 30,   # forward-asof max distance you’ll accept
-):
+    df: pd.DataFrame,
+    bq,
+    sport_aliases: dict,
+    table_history: str = "sharplogger.sharp_data.ratings_history",
+    table_current: str = "sharplogger.sharp_data.ratings_current",
+    pad_days: int = 14,
+    grace_days: int = 30,
+) -> pd.DataFrame:
 
     if df.empty:
         return df
 
     out = df.copy()
-    # normalize input keys
     out['Sport'] = out['Sport'].astype(str).str.upper()
     out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
     out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
     out['Game_Start'] = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
 
-    # canon sport map
+    # Canonicalize sports
     canon_map = {}
     for k, v in sport_aliases.items():
         if isinstance(v, list):
@@ -1048,32 +1046,33 @@ def enrich_power_no_gaps_fast(
             canon_map[str(k).upper()] = str(v).upper()
     out['Sport'] = out['Sport'].map(lambda s: canon_map.get(s, s))
 
-    # long requests
+    # Long form
     req = pd.concat([
         out[['Sport','Game_Start','Home_Team_Norm']].rename(columns={'Home_Team_Norm':'Team_Norm'}).assign(Side='Home'),
         out[['Sport','Game_Start','Away_Team_Norm']].rename(columns={'Away_Team_Norm':'Team_Norm'}).assign(Side='Away'),
     ], ignore_index=True).sort_values(['Sport','Team_Norm','Game_Start'])
 
-    # tight window (± pad_days)
+    # Window
     gmin, gmax = req['Game_Start'].min(), req['Game_Start'].max()
     pad = pd.Timedelta(days=pad_days)
     pad_start, pad_end = gmin - pad, gmax + pad
 
-    # fetch (cached per sport+window)
+    # Fetch ratings (cached per sport)
+    # NOTE: training runs per sport; if you ever batch mixed sports, split by sport first.
+    sport_canon = out['Sport'].iloc[0]
     ratings_all = fetch_ratings_window_cached(
         bq=bq,
-        sport=out['Sport'].iloc[0],  # single-sport batches recommended; if mixed, split by sport first
+        sport=sport_canon,
         pad_start_ts=pad_start,
         pad_end_ts=pad_end,
         table_history=table_history,
         table_current=table_current,
     )
 
-    # if nothing, seed & return
     if ratings_all is None or ratings_all.empty:
         return _seed_all_from_baseline(out)
 
-    # two-pass asof
+    # Asof merges
     req_sorted = req.sort_values(['Sport','Team_Norm','Game_Start'])
     right_sorted = ratings_all.sort_values(['Sport','Team_Norm','AsOfTS'])
 
@@ -1090,7 +1089,6 @@ def enrich_power_no_gaps_fast(
         direction='forward', allow_exact_matches=True
     )
 
-    # coalesce with grace
     bw = back[['Sport','Team_Norm','Game_Start','Side','Power_Rating','PR_Off','PR_Def','AsOfTS']].rename(
         columns={'Power_Rating':'BW_PR','PR_Off':'BW_PR_Off','PR_Def':'BW_PR_Def','AsOfTS':'BW_AsOfTS'}
     )
@@ -1108,7 +1106,7 @@ def enrich_power_no_gaps_fast(
     too_far = used_forward & ((join['FW_AsOfTS'] - join['Game_Start']).abs() > grace)
     join.loc[too_far, ['PR','PR_Off','PR_Def']] = np.nan
 
-    # fallback to latest current (fast in-memory)
+    # Fallback: latest current per team
     curr_latest = (
         right_sorted[right_sorted['AsOfTS'].notna()]
         .sort_values(['Sport','Team_Norm','AsOfTS'])
@@ -1120,20 +1118,14 @@ def enrich_power_no_gaps_fast(
     for base, cur in (('PR','CURR_PR'), ('PR_Off','CURR_PR_Off'), ('PR_Def','CURR_PR_Def')):
         join[base] = join[base].where(join[base].notna(), join[cur])
 
-    # final safety baseline
-    baselines = (
-        ratings_all.groupby('Sport', observed=True)['Power_Rating'].mean().to_dict()
-        if not ratings_all.empty else {}
-    )
-    def sport_baseline(s): return baselines.get(s, 1500.0)
+    # Baseline
+    baselines = ratings_all.groupby('Sport', observed=True)['Power_Rating'].mean().to_dict()
     nan_mask = join['PR'].isna()
     if nan_mask.any():
-        join.loc[nan_mask, 'PR'] = join.loc[nan_mask, 'Sport'].map(sport_baseline).astype(float)
-        # PR_Off/PR_Def can stay NaN (or set to 0 if you prefer)
+        join.loc[nan_mask, 'PR'] = join.loc[nan_mask, 'Sport'].map(lambda s: baselines.get(s, 1500.0)).astype(float)
 
-    # pivot back and merge into original
-    wide = (join.pivot_table(index=['Sport','Game_Start'], columns='Side',
-                             values=['PR','PR_Off','PR_Def'])
+    # Pivot back
+    wide = (join.pivot_table(index=['Sport','Game_Start'], columns='Side', values=['PR','PR_Off','PR_Def'])
                   .reset_index())
     wide.columns = ['Sport','Game_Start',
                     'Away_Power_Rating','Home_Power_Rating',
@@ -1145,8 +1137,9 @@ def enrich_power_no_gaps_fast(
     out['PR_Off_Diff'] = out['Home_PR_Off'] - out['Away_PR_Off']
     out['PR_Def_Diff'] = out['Home_PR_Def'] - out['Away_PR_Def']
     return out
+def _datekey(ts) -> str:
+    return pd.to_datetime(ts, utc=True).isoformat()
 
-    
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
     SPORT_DAYS_BACK = {
@@ -1244,14 +1237,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
     )
      
-    df_bt = enrich_power_no_gaps_fast(       
-        table_history="sharplogger.sharp_data.ratings_history",
-        table_current="sharplogger.sharp_data.ratings_current",
+    df_bt = enrich_power_no_gaps_fast(
+        df=df_bt,
+        bq=bq_client,  # <-- pass your already created client
         sport_aliases=SPORT_ALIASES,
-        grace_days=21,   # ok to tune
-        pad_days=14,     # tighter window, faster
+        table_history=RATINGS_HISTORY_TABLE,
+        table_current="sharplogger.sharp_data.ratings_current",
+        grace_days=21,
+        pad_days=14
     )
-
 
 
     # === Pivot line values (e.g., -3.5, 210.5, etc.)
