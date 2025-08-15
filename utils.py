@@ -2120,31 +2120,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     scored_all = []
     total_start = time.time()
 
-    if trained_models is None:
-        trained_models = {}
-    HAS_MODELS = isinstance(trained_models, dict) and len(trained_models) > 0
-
-    def _ensure_model_placeholders(frame, market_col='Market', set_market_name=None):
-        """Make sure model-output columns exist and are safely filled."""
-        if 'Model_Sharp_Win_Prob' not in frame.columns:
-            frame['Model_Sharp_Win_Prob'] = np.nan
-        if 'Model_Confidence' not in frame.columns:
-            frame['Model_Confidence']    = np.nan
-        if 'Scored_By_Model' not in frame.columns:
-            frame['Scored_By_Model']     = False
-        if 'Scoring_Market' not in frame.columns:
-            frame['Scoring_Market']      = np.nan
-        # Always set Scoring_Market to the row's market (or a provided constant)
-        if set_market_name is not None:
-            frame['Scoring_Market'] = set_market_name
-        else:
-            if market_col in frame.columns:
-                frame['Scoring_Market'] = frame[market_col].astype(str).str.lower().str.strip()
-        return frame
-
-    # Make sure placeholders exist for the whole df from the start
-    df = _ensure_model_placeholders(df)
-
+    
     # If you use team/book maps from trained_models, guard this access
     team_feature_map = None
     book_reliability_map = None
