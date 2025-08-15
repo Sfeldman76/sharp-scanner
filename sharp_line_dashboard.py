@@ -504,8 +504,11 @@ def tmr(label):
 @st.cache_data(ttl=900, max_entries=64, show_spinner=False)
 def fetch_power_ratings_from_bq_cached(
     sport: str,
+    lookback_days: int = 400,
     start_ts: pd.Timestamp,
     end_ts: pd.Timestamp,
+    source: str = "history",
+    **_kwargs, 
 ) -> pd.DataFrame:
     """
     History only: last row per (Sport, Team, DATE) within [start_ts-3d, end_ts+3d].
@@ -517,64 +520,49 @@ def fetch_power_ratings_from_bq_cached(
     pad_start = (pd.to_datetime(start_ts, utc=True) - pd.Timedelta(days=3)).isoformat()
     pad_end   = (pd.to_datetime(end_ts,   utc=True) + pd.Timedelta(days=3)).isoformat()
 
-    sql_hist = """
-    WITH base AS (
-      SELECT
-        UPPER(Sport) AS Sport,
-        CAST(Team AS STRING) AS Team_Raw,
-        TIMESTAMP(Updated_At) AS AsOfTS,
-        CAST(Rating AS FLOAT64) AS Power_Rating,
-        DATE(Updated_At) AS d
-      FROM `sharplogger.sharp_data.ratings_history`
-      WHERE UPPER(Sport) = @sport
-        AND Updated_At BETWEEN @start_ts AND @end_ts
-    ),
-    daily_last AS (
-      SELECT AS VALUE x FROM (
-        SELECT
-          Sport, Team_Raw, AsOfTS, Power_Rating, d,
-          ROW_NUMBER() OVER (
-            PARTITION BY Sport, Team_Raw, d
-            ORDER BY AsOfTS DESC
-          ) AS rn
-        FROM base
-      ) x
-      WHERE rn = 1
-    )
-    SELECT Sport, Team_Raw, AsOfTS, Power_Rating
-    FROM daily_last
-    ORDER BY Sport, Team_Raw, AsOfTS;
-    """
-    cfg = bigquery.QueryJobConfig(
-        use_query_cache=True,
-        query_parameters=[
-            bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
-            bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", pad_start),
-            bigquery.ScalarQueryParameter("end_ts",   "TIMESTAMP", pad_end),
-        ],
-    )
-    df = bq.query(sql_hist, job_config=cfg).to_dataframe()
+    bq = get_bq_client()
 
-    if df.empty:
-        # fallback: current
-        df = bq.query(
-            """
+    if source == "history":
+        sql = """
+            SELECT
+              UPPER(Sport) AS Sport,
+              CAST(Team AS STRING) AS Team_Raw,
+              TIMESTAMP(Updated_At) AS AsOfTS,
+              CAST(Rating AS FLOAT64) AS Power_Rating,
+              CAST(NULL AS FLOAT64) AS PR_Off,
+              CAST(NULL AS FLOAT64) AS PR_Def
+            FROM `sharplogger.sharp_data.ratings_history`
+            WHERE UPPER(Sport) = @sport
+              AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
+        """
+        cfg = bigquery.QueryJobConfig(
+            use_query_cache=True,
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
+                bigquery.ScalarQueryParameter("lookback_days", "INT64", lookback_days),
+            ],
+        )
+    else:
+        sql = """
             SELECT
               UPPER(Sport) AS Sport,
               CAST(Team AS STRING) AS Team_Raw,
               CAST(Rating AS FLOAT64) AS Power_Rating,
-              CAST(NULL AS TIMESTAMP) AS AsOfTS
+              CAST(NULL AS FLOAT64) AS PR_Off,
+              CAST(NULL AS FLOAT64) AS PR_Def,
+              TIMESTAMP(Updated_At) AS AsOfTS
             FROM `sharplogger.sharp_data.ratings_current`
             WHERE UPPER(Sport) = @sport
-            """,
-            job_config=bigquery.QueryJobConfig(
-                use_query_cache=True,
-                query_parameters=[bigquery.ScalarQueryParameter("sport","STRING",sport.upper())],
-            )
-        ).to_dataframe()
+        """
+        cfg = bigquery.QueryJobConfig(
+            use_query_cache=True,
+            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
+        )
 
+    df = bq.query(sql, job_config=cfg).to_dataframe()
     if df.empty:
         return df
+
 
     # normalize once
     df["Sport"] = df["Sport"].astype(str).str.upper()
