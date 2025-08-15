@@ -1071,20 +1071,44 @@ def enrich_power_no_gaps_fast(
     if ratings_all is None or ratings_all.empty:
         return _seed_all_from_baseline(out)
 
-    # --- PREP: coerce + groupwise sort (uses your helpers) ---
+        # --- PREP: coerce + groupwise sort (uses your helpers) ---
+    # --- PREP (coerce + sort) ---
     by_keys = ['Sport', 'Team_Norm']
-
+    
+    # Coerce dtypes
     ratings_all['AsOfTS'] = pd.to_datetime(ratings_all['AsOfTS'], utc=True, errors='coerce')
     req['Game_Start']     = pd.to_datetime(req['Game_Start'],     utc=True, errors='coerce')
-
     for c in by_keys:
         ratings_all[c] = ratings_all[c].astype(str)
         req[c]         = req[c].astype(str)
-
+    
+    # ⚠️ If you fetched only for one sport, restrict requests to that sport
+    req = req[req['Sport'] == sport_canon].copy()
+    
+    # Groupwise clean
     req_pre   = _prep_for_asof_left (req,         by_keys=by_keys, on_key='Game_Start')
     right_pre = _prep_for_asof_right(ratings_all, by_keys=by_keys, on_key='AsOfTS')
-
-    # --- ASOF joins (both sides sorted by by_keys + time) ---
+    
+    # ✅ Final global sort exactly as pandas expects (lexsort by by_keys then time)
+    req_pre   = req_pre.sort_values(by_keys + ['Game_Start'], kind='mergesort').reset_index(drop=True)
+    right_pre = right_pre.sort_values(by_keys + ['AsOfTS'],    kind='mergesort').reset_index(drop=True)
+    
+    # 🔍 Assert sanity BEFORE merge_asof
+    assert req_pre['Game_Start'].notna().all(), "NaT values found in req_pre['Game_Start']"
+    assert right_pre['AsOfTS'].notna().all(), "NaT values found in right_pre['AsOfTS']"
+    assert req_pre.equals(req_pre.sort_values(by_keys + ['Game_Start'], kind='mergesort')), "req_pre not fully sorted"
+    assert right_pre.equals(right_pre.sort_values(by_keys + ['AsOfTS'], kind='mergesort')), "right_pre not fully sorted"
+    
+    #
+    # Sanity (will raise if not sorted)
+    if not req_pre.equals(req_pre.sort_values(by_keys + ['Game_Start'])):
+        bad = (req_pre
+               .sort_values(by_keys + ['Game_Start'], kind='mergesort')
+               .reset_index(drop=True))
+        # optional: log a few offending rows per group
+        print("⚠️ Left not sorted; sample:", bad.head(10).to_string())
+    
+    # --- ASOF joins ---
     back = pd.merge_asof(
         left=req_pre, right=right_pre,
         left_on='Game_Start', right_on='AsOfTS',
