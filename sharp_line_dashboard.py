@@ -411,10 +411,6 @@ def get_recent_history():
     st.write("📦 Using cached sharp history (get_recent_history)")
     return read_recent_sharp_moves_cached(hours=72)
 
-def _norm_team(s: pd.Series) -> pd.Series:
-    return (s.astype(str).str.lower().str.strip()
-              .str.replace(".", "", regex=False)
-              .str.replace("&", "and", regex=False))
 
 def _prep_for_asof_left(df: pd.DataFrame, by_keys: list[str], on_key: str) -> pd.DataFrame:
     # drop rows where any join keys are missing
@@ -596,9 +592,11 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
     dm[ts_col] = pd.to_datetime(dm[ts_col], utc=True, errors='coerce')
 
     # --- ratings (right side)
+   # ratings (right side)
     pr = df_power.copy()
     pr['Sport']     = pr['Sport'].astype(str).str.upper()
-    pr['Team_Norm'] = pr['Team_Norm'].astype(str).map(_norm_team)
+    pr['Team_Norm'] = norm_team(pr['Team_Norm'])   #
+
     pr = pr.dropna(subset=['AsOf']).rename(columns={'AsOf':'AsOfTS'})
     pr['AsOfTS'] = pd.to_datetime(pr['AsOfTS'], utc=True, errors='coerce')
     pr = pr.dropna(subset=['AsOfTS'])
