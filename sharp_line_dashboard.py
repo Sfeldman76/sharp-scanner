@@ -1,3 +1,4 @@
+
 import streamlit as st
 import time
 from streamlit_autorefresh import st_autorefresh
@@ -221,6 +222,15 @@ component_fields = OrderedDict({
     'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
 })
 
+SPORT_ALIASES = {
+    "MLB": ["MLB", "BASEBALL_MLB"],
+    "NBA": ["NBA", "BASKETBALL_NBA"],
+    "NFL": ["NFL", "FOOTBALL_NFL"],
+    "WNBA": ["WNBA", "BASKETBALL_WNBA"],
+    "CFL": ["CFL", "FOOTBALL_CFL"],
+    "NCAAF": ["NCAAF", "FOOTBALL_NCAAF"],
+    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB"],
+}
 
 
 def implied_prob(odds):
