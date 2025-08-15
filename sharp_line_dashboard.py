@@ -590,8 +590,7 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
     dm['Home_Team_Norm'] = norm_team(dm['Home_Team_Norm'])
     dm['Away_Team_Norm'] = norm_team(dm['Away_Team_Norm'])
     
-    pr['Sport']     = pr['Sport'].astype(str).str.upper()
-    pr['Team_Norm'] = norm_team(pr['Team_Norm'])
+   
     # choose time column
     ts_col = 'Snapshot_Timestamp' if 'Snapshot_Timestamp' in dm.columns else 'Game_Start'
     dm[ts_col] = pd.to_datetime(dm[ts_col], utc=True, errors='coerce')
