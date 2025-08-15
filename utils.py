@@ -677,44 +677,44 @@ def compute_line_hash(row, window='1H'):
     except Exception as e:
         return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
 
-def fetch_power_ratings_from_bq(bq: bigquery.Client, sport: str) -> pd.DataFrame:
+def fetch_power_ratings_from_bq(bq, sport: str, lookback_days: int = 400) -> pd.DataFrame:
     """
-    Load latest team power ratings from sharplogger.sharp_data.ratings_current for a given sport.
-    Normalizes to: ['Sport','Team_Raw','Power_Rating','PR_Off','PR_Def','AsOfTS'].
-    Works whether the table has columns (Rating) or (Power_Rating).
+    Load team power ratings for a given sport from BigQuery (current-only, per your schema).
+    Outputs canonical columns:
+      ['Sport','Team_Norm','AsOfTS','Power_Rating','PR_Off','PR_Def']
+    PR_Off/PR_Def are NULL since not in ratings_current.
     """
-    import logging
+    from google.cloud import bigquery
     import pandas as pd
-
-    params = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())]
-    )
 
     sql_current = """
         SELECT
-            UPPER(Sport) AS Sport,
-            CAST(Team AS STRING) AS Team_Raw,
-            COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
-            CAST(NULL AS FLOAT64) AS PR_Off,
-            CAST(NULL AS FLOAT64) AS PR_Def
+          UPPER(Sport) AS Sport,
+          -- normalize team now; we'll still re-normalize in Python before merge
+          LOWER(TRIM(CAST(Team AS STRING))) AS Team_Norm,
+          TIMESTAMP(IFNULL(Updated_At, CURRENT_TIMESTAMP())) AS AsOfTS,
+          CAST(Rating AS FLOAT64) AS Power_Rating,
+          CAST(NULL AS FLOAT64) AS PR_Off,
+          CAST(NULL AS FLOAT64) AS PR_Def
         FROM `sharplogger.sharp_data.ratings_current`
         WHERE UPPER(Sport) = @sport
+          AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
     """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
+            bigquery.ScalarQueryParameter("lookback_days", "INT64", int(lookback_days)),
+        ]
+    )
+    df = bq.query(sql_current, job_config=job_config).to_dataframe(create_bqstorage_client=True)
 
-    df = bq.query(sql_current, job_config=params).to_dataframe(create_bqstorage_client=True)
+    # Final normalization / guards
+    if not df.empty:
+        df["Sport"] = df["Sport"].astype(str).str.upper()
+        df["Team_Norm"] = df["Team_Norm"].astype(str).str.strip().str.lower()
+        df = df.sort_values(["Team_Norm", "AsOfTS"]).drop_duplicates(["Team_Norm"], keep="last")
 
-    if df.empty:
-        logging.warning("⚠️ ratings_current empty for sport=%s", sport)
-        return df
-
-    # normalize
-    df['Sport'] = df['Sport'].astype(str).str.upper()
-    df['Team_Raw'] = df['Team_Raw'].astype(str).str.strip().str.lower()
-    df['AsOfTS'] = pd.NaT  # no time component for current ratings
-
-    return df[['Sport', 'Team_Raw', 'Power_Rating', 'PR_Off', 'PR_Def', 'AsOfTS']]
-
-
+    return df
 
 def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataFrame:
     """
