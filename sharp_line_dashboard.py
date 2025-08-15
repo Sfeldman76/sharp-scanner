@@ -954,7 +954,6 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
 @st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 
 def fetch_ratings_window_cached(
-    bq,
     sport: str,
     pad_start_ts,
     pad_end_ts,
@@ -1023,7 +1022,6 @@ def clear_ratings_cache():
 
 def enrich_power_no_gaps_fast(
     df: "pd.DataFrame",
-    bq,
     sport_aliases={"MLB": ["MLB", "BASEBALL_MLB"]},
     table_history="sharplogger.sharp_data.ratings_history",
     table_current="sharplogger.sharp_data.ratings_current",
@@ -1246,9 +1244,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
     )
      
-    df_bt = enrich_power_no_gaps_fast(
-        df=df_bt,
-       
+    df_bt = enrich_power_no_gaps_fast(       
         table_history="sharplogger.sharp_data.ratings_history",
         table_current="sharplogger.sharp_data.ratings_current",
         sport_aliases=SPORT_ALIASES,
