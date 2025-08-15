@@ -981,8 +981,8 @@ def fetch_ratings_window_cached(
         LOWER(TRIM(Team)) AS Team_Norm,
         TIMESTAMP(Updated_At) AS AsOfTS,
         CAST(Rating AS FLOAT64) AS Power_Rating,
-        SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
-        SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+        CAST(NULL AS FLOAT64) AS PR_Off,
+        CAST(NULL AS FLOAT64) AS PR_Def
       FROM `{table_history}`
       WHERE UPPER(Sport) = '{sport_up}'
         AND TIMESTAMP(Updated_At) BETWEEN TIMESTAMP('{pad_start_iso}') AND TIMESTAMP('{pad_end_iso}')
@@ -995,8 +995,8 @@ def fetch_ratings_window_cached(
         LOWER(TRIM(Team)) AS Team_Norm,
         TIMESTAMP(Updated_At) AS AsOfTS,
         CAST(Rating AS FLOAT64) AS Power_Rating,
-        SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
-        SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+        CAST(NULL AS FLOAT64) AS PR_Off,
+        CAST(NULL AS FLOAT64) AS PR_Def
       FROM `{table_current}`
       WHERE UPPER(Sport) = '{sport_up}'
     """
