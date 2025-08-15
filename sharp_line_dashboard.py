@@ -80,7 +80,7 @@ import pandas_gbq  # ✅ Required for setting .context.project / .context.creden
 from google.cloud import storage
 from google.cloud import bigquery
 from pandas_gbq import to_gbq
-
+import time, contextlib
 import google.api_core.exceptions
 from google.cloud import bigquery_storage_v1
 import pyarrow as pa
@@ -490,6 +490,16 @@ def norm_team(x):
     )
 
     return out if ret_series else out.iloc[0]
+
+
+
+@contextlib.contextmanager
+def tmr(label):
+    t0 = time.perf_counter()
+    yield
+    dt = time.perf_counter() - t0
+    st.write(f"⏱ {label}: {dt:.2f}s")
+
 
 @st.cache_data(ttl=900, max_entries=64, show_spinner=False)
 def fetch_power_ratings_from_bq_cached(
@@ -962,8 +972,10 @@ def build_per_game_power(sport: str, df_bt: pd.DataFrame, df_power: pd.DataFrame
     pr = pr.dropna(subset=['AsOfTS'])
 
     # PERF: keep only teams we actually need
-    needed_teams = teams['Team_Norm'].unique()
-    pr = pr[pr['Team_Norm'].isin(needed_teams)]
+    # inside build_per_game_power
+    needed = teams['Team_Norm'].unique()
+    pr = pr[pr['Team_Norm'].isin(needed)]
+
 
     # sort once for asof
     teams = teams.sort_values(['Sport','Team_Norm','ts'], kind='mergesort')
@@ -1053,6 +1065,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_bt['Game_Start'] = pd.to_datetime(df_bt['Game_Start'], errors='coerce', utc=True)
     else:
         df_bt['Game_Start'] = df_bt['Snapshot_Timestamp']
+    for c in ['Sport', 'Market', 'Bookmaker', 'Outcome', 'Game_Key']:
+        if c in df_bt.columns:
+            df_bt[c] = df_bt[c].astype('category')
+
     
     # ✅ Make sure helper won't choke if these are missing
     if 'Is_Sharp_Book' not in df_bt.columns:
@@ -1071,14 +1087,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     )
 
    
-    df_bt = add_book_reliability_features(df_bt, label_col="SHARP_HIT_BOOL", prior_strength=200.0)
-    with st.expander("📚 Per-sport, market & book reliability (training window)"):
-        st.write(
-            df_bt.groupby(['Sport', 'Market', 'Bookmaker'], as_index=False)['Book_Reliability_Score']
-                .mean()
-                .sort_values(['Sport', 'Market', 'Book_Reliability_Score'], ascending=[True, True, False])
-                .head(100)  # adjust for how many rows you want to see
-        )
+   
+    with tmr("reliability features"):
+        df_bt = add_book_reliability_features(df_bt, label_col="SHARP_HIT_BOOL", prior_strength=200.0)
+
+
+    with tmr("pre-agg reliability"):
+        rel = (df_bt
+               .groupby(['Sport','Market','Bookmaker'], observed=True)['Book_Reliability_Score']
+               .mean()
+               .reset_index())
+    # Optionally only keep top-N per (Sport, Market)
+    rel = (rel
+           .sort_values(['Sport','Market','Book_Reliability_Score'], ascending=[True, True, False])
+           .groupby(['Sport','Market'], observed=True)
+           .head(10)
+           .reset_index(drop=True))
 
     # Latest snapshot per market/game/outcome
     # === Get latest snapshot per Game_Key + Market + Outcome ===
@@ -1096,9 +1120,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     max_ts = pd.to_datetime(df_bt['Game_Start'], utc=True, errors='coerce').max()
     if pd.isna(max_ts):
         max_ts = pd.to_datetime(df_bt['Snapshot_Timestamp'], utc=True, errors='coerce').max()
+    with tmr("fetch power (cached)"):
+        df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
+        if df_power.empty:
+            df_power = fetch_power_ratings_from_bq_cached(sport, source="current"
+    with tmr("build per_game power"):
+        per_game = build_per_game_power(sport, df_bt, df_power)
+
+    ts_min = pd.to_datetime(df_bt['Game_Start'].min(), utc=True, errors='coerce')
+    ts_max = pd.to_datetime(df_bt['Game_Start'].max(), utc=True, errors='coerce')
     
-    df_power = fetch_power_ratings_from_bq_cached(sport, start_ts=min_ts, end_ts=max_ts)
-    per_game = build_per_game_power(sport, df_bt, df_power)
+    # Trim to [ts_min - 31d, ts_max] to guarantee a prior rating exists
+    pad = pd.Timedelta(days=31)
+    df_power = df_power[(df_power['AsOf'] >= ts_min - pad) & (df_power['AsOf'] <= ts_max)]
 
 
 
