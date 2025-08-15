@@ -1123,7 +1123,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     with tmr("fetch power (cached)"):
         df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
         if df_power.empty:
-            df_power = fetch_power_ratings_from_bq_cached(sport, source="current"
+            df_power = fetch_power_ratings_from_bq_cached(sport, source="current")
     with tmr("build per_game power"):
         per_game = build_per_game_power(sport, df_bt, df_power)
 
