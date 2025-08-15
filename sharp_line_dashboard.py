@@ -491,64 +491,88 @@ def norm_team(x):
 
     return out if ret_series else out.iloc[0]
 
-@st.cache_data(ttl=900, max_entries=64, show_spinner=False)  # 15 min cache
+@st.cache_data(ttl=900, max_entries=64, show_spinner=False)
 def fetch_power_ratings_from_bq_cached(
     sport: str,
-    lookback_days: int = 400,
-    source: str = "history"  # "history" or "current"
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
 ) -> pd.DataFrame:
+    """
+    History only: last row per (Sport, Team, DATE) within [start_ts-3d, end_ts+3d].
+    Falls back to current if empty.
+    """
     bq = get_bq_client()
 
-    if source == "history":
-        sql = """
+    # pad the window a bit so asof has something to match
+    pad_start = (pd.to_datetime(start_ts, utc=True) - pd.Timedelta(days=3)).isoformat()
+    pad_end   = (pd.to_datetime(end_ts,   utc=True) + pd.Timedelta(days=3)).isoformat()
+
+    sql_hist = """
+    WITH base AS (
+      SELECT
+        UPPER(Sport) AS Sport,
+        CAST(Team AS STRING) AS Team_Raw,
+        TIMESTAMP(Updated_At) AS AsOfTS,
+        CAST(Rating AS FLOAT64) AS Power_Rating,
+        DATE(Updated_At) AS d
+      FROM `sharplogger.sharp_data.ratings_history`
+      WHERE UPPER(Sport) = @sport
+        AND Updated_At BETWEEN @start_ts AND @end_ts
+    ),
+    daily_last AS (
+      SELECT AS VALUE x FROM (
+        SELECT
+          Sport, Team_Raw, AsOfTS, Power_Rating, d,
+          ROW_NUMBER() OVER (
+            PARTITION BY Sport, Team_Raw, d
+            ORDER BY AsOfTS DESC
+          ) AS rn
+        FROM base
+      ) x
+      WHERE rn = 1
+    )
+    SELECT Sport, Team_Raw, AsOfTS, Power_Rating
+    FROM daily_last
+    ORDER BY Sport, Team_Raw, AsOfTS;
+    """
+    cfg = bigquery.QueryJobConfig(
+        use_query_cache=True,
+        query_parameters=[
+            bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
+            bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", pad_start),
+            bigquery.ScalarQueryParameter("end_ts",   "TIMESTAMP", pad_end),
+        ],
+    )
+    df = bq.query(sql_hist, job_config=cfg).to_dataframe()
+
+    if df.empty:
+        # fallback: current
+        df = bq.query(
+            """
             SELECT
               UPPER(Sport) AS Sport,
               CAST(Team AS STRING) AS Team_Raw,
-              TIMESTAMP(Updated_At) AS AsOfTS,
               CAST(Rating AS FLOAT64) AS Power_Rating,
-              CAST(NULL AS FLOAT64) AS PR_Off,
-              CAST(NULL AS FLOAT64) AS PR_Def
-            FROM `sharplogger.sharp_data.ratings_history`
-            WHERE UPPER(Sport) = @sport
-              AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
-        """
-        cfg = bigquery.QueryJobConfig(
-            use_query_cache=True,
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
-                bigquery.ScalarQueryParameter("lookback_days", "INT64", lookback_days),
-            ],
-        )
-    else:
-        # If ratings_current lacks Updated_At, replace TIMESTAMP(Updated_At) with CAST(NULL AS TIMESTAMP) AS AsOfTS
-        sql = """
-            SELECT
-              UPPER(Sport) AS Sport,
-              CAST(Team AS STRING) AS Team_Raw,
-              CAST(Rating AS FLOAT64) AS Power_Rating,
-              CAST(NULL AS FLOAT64) AS PR_Off,
-              CAST(NULL AS FLOAT64) AS PR_Def,
-              TIMESTAMP(Updated_At) AS AsOfTS
+              CAST(NULL AS TIMESTAMP) AS AsOfTS
             FROM `sharplogger.sharp_data.ratings_current`
             WHERE UPPER(Sport) = @sport
-        """
-        cfg = bigquery.QueryJobConfig(
-            use_query_cache=True,
-            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
-        )
+            """,
+            job_config=bigquery.QueryJobConfig(
+                use_query_cache=True,
+                query_parameters=[bigquery.ScalarQueryParameter("sport","STRING",sport.upper())],
+            )
+        ).to_dataframe()
 
-    # 1) run the query
-    df = bq.query(sql, job_config=cfg).to_dataframe()
     if df.empty:
         return df
 
-    # 2) normalize
+    # normalize once
     df["Sport"] = df["Sport"].astype(str).str.upper()
-    df["Team_Norm"] = norm_team(df["Team_Raw"])  # norm_team handles Series/scalars
-    df["AsOf"] = pd.to_datetime(df.get("AsOfTS"), utc=True, errors="coerce") if "AsOfTS" in df.columns else pd.NaT
-
-    # 3) keep expected columns
-    return df[["Sport", "Team_Norm", "AsOf", "Power_Rating", "PR_Off", "PR_Def"]]
+    df["Team_Norm"] = norm_team(df["Team_Raw"])
+    df["AsOfTS"] = pd.to_datetime(df["AsOfTS"], utc=True, errors="coerce")
+    df.rename(columns={"AsOfTS":"AsOf"}, inplace=True)
+    # keep just what we need
+    return df[["Sport","Team_Norm","AsOf","Power_Rating"]]
 
     # normalize exactly once here
 # --- ONE canonical normalizer (handles Series OR scalar) ---
@@ -903,13 +927,17 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
 
 @st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 @st.cache_data(ttl=900, max_entries=32, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 def build_per_game_power(sport: str, df_bt: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
+    # latest snapshot per game (to get teams + a timestamp)
     games = (
         df_bt.sort_values('Snapshot_Timestamp')
              .drop_duplicates(subset=['Game_Key'], keep='last')
              [['Game_Key','Sport','Home_Team_Norm','Away_Team_Norm','Game_Start','Snapshot_Timestamp']]
              .copy()
     )
+
+    # normalize games
     games['Sport'] = games['Sport'].astype(str).str.upper()
     games['Home_Team_Norm'] = norm_team(games['Home_Team_Norm'])
     games['Away_Team_Norm'] = norm_team(games['Away_Team_Norm'])
@@ -923,17 +951,25 @@ def build_per_game_power(sport: str, df_bt: pd.DataFrame, df_power: pd.DataFrame
     away['Side'] = 'away'
     teams = pd.concat([home, away], ignore_index=True)
 
-    # prep ratings (requires AsOf)
+    # prep ratings (df_power produced by your cached fetch; it has 'AsOf')
     pr = df_power.copy()
     pr['Sport'] = pr['Sport'].astype(str).str.upper()
     pr['Team_Norm'] = norm_team(pr['Team_Norm'])
-    pr = pr.rename(columns={'AsOf':'AsOfTS'})
+    # unify time column to AsOfTS
+    if 'AsOfTS' not in pr.columns and 'AsOf' in pr.columns:
+        pr = pr.rename(columns={'AsOf':'AsOfTS'})
     pr['AsOfTS'] = pd.to_datetime(pr['AsOfTS'], utc=True, errors='coerce')
     pr = pr.dropna(subset=['AsOfTS'])
 
+    # PERF: keep only teams we actually need
+    needed_teams = teams['Team_Norm'].unique()
+    pr = pr[pr['Team_Norm'].isin(needed_teams)]
+
+    # sort once for asof
     teams = teams.sort_values(['Sport','Team_Norm','ts'], kind='mergesort')
     pr    = pr.sort_values(['Sport','Team_Norm','AsOfTS'], kind='mergesort')
 
+    # single PIT-safe asof join (backward ⇒ AsOfTS <= ts)
     enriched = pd.merge_asof(
         teams, pr,
         by=['Sport','Team_Norm'],
@@ -942,24 +978,29 @@ def build_per_game_power(sport: str, df_bt: pd.DataFrame, df_power: pd.DataFrame
     )[['Game_Key','Side','Power_Rating','PR_Off','PR_Def']]
 
     # pivot + flatten
-    per_game = (
-        enriched.pivot(index='Game_Key', columns='Side', values=['Power_Rating','PR_Off','PR_Def'])
-                 .rename(columns={
-                     ('Power_Rating','home'): 'Home_Power_Rating',
-                     ('Power_Rating','away'): 'Away_Power_Rating',
-                     ('PR_Off','home'):        'Home_PR_Off',
-                     ('PR_Off','away'):        'Away_PR_Off',
-                     ('PR_Def','home'):        'Home_PR_Def',
-                     ('PR_Def','away'):        'Away_PR_Def',
-                 })
-                 .reset_index()
-    )
+    per_game = enriched.pivot(index='Game_Key', columns='Side', values=['Power_Rating','PR_Off','PR_Def'])
+    # ensure missing blocks exist (e.g., if PR_Off/PR_Def absent)
+    for top in ['Power_Rating','PR_Off','PR_Def']:
+        for side in ['home','away']:
+            if (top, side) not in per_game.columns:
+                per_game[(top, side)] = pd.NA
 
-    # diffs (game-level)
+    per_game = per_game.rename(columns={
+        ('Power_Rating','home'): 'Home_Power_Rating',
+        ('Power_Rating','away'): 'Away_Power_Rating',
+        ('PR_Off','home'):        'Home_PR_Off',
+        ('PR_Off','away'):        'Away_PR_Off',
+        ('PR_Def','home'):        'Home_PR_Def',
+        ('PR_Def','away'):        'Away_PR_Def',
+    }).reset_index()
+
+    # handy diffs
     per_game['PR_Rating_Diff_game'] = per_game['Home_Power_Rating'] - per_game['Away_Power_Rating']
     per_game['PR_Off_Diff_game']    = per_game['Home_PR_Off'] - per_game['Away_PR_Off']
     per_game['PR_Def_Diff_game']    = per_game['Home_PR_Def'] - per_game['Away_PR_Def']
+
     return per_game
+
 
     
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
@@ -1047,11 +1088,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
     )
     # ratings once per sport (cached fetch you already have)
-    df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
-    if df_power.empty:
-        df_power = fetch_power_ratings_from_bq_cached(sport, source="current")
+  
+    # after df_bt is loaded/filtered
+    min_ts = pd.to_datetime(df_bt['Game_Start'], utc=True, errors='coerce').min()
+    if pd.isna(min_ts):
+        min_ts = pd.to_datetime(df_bt['Snapshot_Timestamp'], utc=True, errors='coerce').min()
+    max_ts = pd.to_datetime(df_bt['Game_Start'], utc=True, errors='coerce').max()
+    if pd.isna(max_ts):
+        max_ts = pd.to_datetime(df_bt['Snapshot_Timestamp'], utc=True, errors='coerce').max()
     
+    df_power = fetch_power_ratings_from_bq_cached(sport, start_ts=min_ts, end_ts=max_ts)
     per_game = build_per_game_power(sport, df_bt, df_power)
+
+
 
 
     # === Pivot line values (e.g., -3.5, 210.5, etc.)
