@@ -1238,10 +1238,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
      
     df_bt = enrich_power_no_gaps_fast(
         df=df_bt,
-        bq=bq,
+       
         table_history="sharplogger.sharp_data.ratings_history",
         table_current="sharplogger.sharp_data.ratings_current",
-        sport_aliases={"MLB": ["MLB", "BASEBALL_MLB"]},
+        sport_aliases=SPORT_ALIASES,
         grace_days=21,   # ok to tune
         pad_days=14,     # tighter window, faster
     )
