@@ -2764,30 +2764,33 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
         # ===== MODEL SCORING =====
         # Get feature list
-        feature_cols = None
-        if bundle and 'feature_cols' in bundle and bundle['feature_cols']:
+        # Get feature list (safe)
+        # Get feature list (safe)
+        feature_cols = []
+        
+        if bundle and isinstance(bundle.get('feature_cols'), (list, tuple)) and bundle['feature_cols']:
             feature_cols = list(bundle['feature_cols'])
         elif model is not None:
-            feature_cols = list(getattr(model, 'feature_names_in_', []) or [])
-            if not feature_cols:
+            feat_in = getattr(model, 'feature_names_in_', None)   # may be a NumPy array
+            if feat_in is not None:
+                feature_cols = list(feat_in)
+            else:
                 booster = getattr(model, 'get_booster', lambda: None)()
-                feature_cols = list(getattr(booster, 'feature_names', []) or [])
-    
-        # Ensure df_full_market_m has the model features
-        if feature_cols:
-            miss = [c for c in feature_cols if c not in df_full_market_m.columns]
-            if miss:
-                df_full_market_m[miss] = 0.0
-            for c in feature_cols:
-                if df_full_market_m[c].dtype == object:
-                    df_full_market_m[c] = (
-                        df_full_market_m[c]
-                        .replace({'True':1,'False':0, True:1, False:0, '':np.nan, 'none':np.nan, 'None':np.nan})
-                    )
-                df_full_market_m[c] = pd.to_numeric(df_full_market_m[c], errors='coerce')
-            df_full_market_m[feature_cols] = df_full_market_m[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        else:
-            logger.info(f"ℹ️ No feature list for {mkt.upper()} — will stamp placeholders.")
+                names = getattr(booster, 'feature_names', None)   # usually a list or None
+                feature_cols = list(names) if names is not None else []
+        
+        # normalize & dedupe just in case
+        feature_cols = [str(c) for c in feature_cols]
+        feature_cols = list(dict.fromkeys(feature_cols))  # preserve order, remove dupes
+        
+        if not feature_cols:
+            logger.info(f"ℹ️ No feature list for {mkt.upper()} — stamping placeholders.")
+            df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
+            for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
+                df.loc[df_full_market_m.index, col] = df_full_market_m[col].values
+            continue
+
+
     
         # Prepare X on canonical rows
         if 'Was_Canonical' not in df_full_market_m.columns:
