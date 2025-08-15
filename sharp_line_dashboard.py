@@ -490,9 +490,9 @@ def fetch_power_ratings_from_bq_cached(
               UPPER(Sport) AS Sport,
               CAST(Team AS STRING) AS Team_Raw,
               TIMESTAMP(Updated_At) AS AsOfTS,
-              COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
-              SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
-              SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+              CAST(Rating AS FLOAT64) AS Power_Rating,
+              CAST(NULL AS FLOAT64) AS PR_Off,
+              CAST(NULL AS FLOAT64) AS PR_Def
             FROM `sharplogger.sharp_data.ratings_history`
             WHERE UPPER(Sport) = @sport
               AND Updated_At >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
@@ -510,10 +510,10 @@ def fetch_power_ratings_from_bq_cached(
             SELECT
               UPPER(Sport) AS Sport,
               CAST(Team AS STRING) AS Team_Raw,
-              COALESCE(CAST(Power_Rating AS FLOAT64), CAST(Rating AS FLOAT64)) AS Power_Rating,
+              CAST(Rating AS FLOAT64) AS Power_Rating,
               CAST(NULL AS FLOAT64) AS PR_Off,
               CAST(NULL AS FLOAT64) AS PR_Def,
-              CAST(NULL AS TIMESTAMP) AS AsOfTS
+              TIMESTAMP(Updated_At) AS AsOfTS
             FROM `sharplogger.sharp_data.ratings_current`
             WHERE UPPER(Sport) = @sport
         """
