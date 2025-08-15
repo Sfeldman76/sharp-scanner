@@ -1017,6 +1017,7 @@ def fetch_ratings_window_cached(
     _RATINGS_WINDOW_CACHE[k] = ratings_all
     return ratings_all.copy()
 
+
 def enrich_power_no_gaps_fast(
     df: pd.DataFrame,
     bq,
@@ -1040,16 +1041,17 @@ def enrich_power_no_gaps_fast(
     canon_map = {}
     for k, v in sport_aliases.items():
         if isinstance(v, list):
-            for a in v: canon_map[str(a).upper()] = str(k).upper()
+            for a in v:
+                canon_map[str(a).upper()] = str(k).upper()
         else:
             canon_map[str(k).upper()] = str(v).upper()
     out['Sport'] = out['Sport'].map(lambda s: canon_map.get(s, s))
 
-    # Long form
+    # Requests (long form)
     req = pd.concat([
-        out[['Sport','Game_Start','Home_Team_Norm']].rename(columns={'Home_Team_Norm':'Team_Norm'}).assign(Side='Home'),
-        out[['Sport','Game_Start','Away_Team_Norm']].rename(columns={'Away_Team_Norm':'Team_Norm'}).assign(Side='Away'),
-    ], ignore_index=True).sort_values(['Sport','Team_Norm','Game_Start'])
+        out[['Sport', 'Game_Start', 'Home_Team_Norm']].rename(columns={'Home_Team_Norm': 'Team_Norm'}).assign(Side='Home'),
+        out[['Sport', 'Game_Start', 'Away_Team_Norm']].rename(columns={'Away_Team_Norm': 'Team_Norm'}).assign(Side='Away'),
+    ], ignore_index=True)
 
     # Window
     gmin, gmax = req['Game_Start'].min(), req['Game_Start'].max()
@@ -1057,7 +1059,6 @@ def enrich_power_no_gaps_fast(
     pad_start, pad_end = gmin - pad, gmax + pad
 
     # Fetch ratings (cached per sport)
-    # NOTE: training runs per sport; if you ever batch mixed sports, split by sport first.
     sport_canon = out['Sport'].iloc[0]
     ratings_all = fetch_ratings_window_cached(
         bq=bq,
@@ -1067,25 +1068,32 @@ def enrich_power_no_gaps_fast(
         table_history=table_history,
         table_current=table_current,
     )
-
     if ratings_all is None or ratings_all.empty:
         return _seed_all_from_baseline(out)
 
-    # Asof merges
-    req_sorted = req.sort_values(['Sport','Team_Norm','Game_Start'])
-    right_sorted = ratings_all.sort_values(['Sport','Team_Norm','AsOfTS'])
+    # --- PREP: coerce + groupwise sort (uses your helpers) ---
+    by_keys = ['Sport', 'Team_Norm']
 
+    ratings_all['AsOfTS'] = pd.to_datetime(ratings_all['AsOfTS'], utc=True, errors='coerce')
+    req['Game_Start']     = pd.to_datetime(req['Game_Start'],     utc=True, errors='coerce')
+
+    for c in by_keys:
+        ratings_all[c] = ratings_all[c].astype(str)
+        req[c]         = req[c].astype(str)
+
+    req_pre   = _prep_for_asof_left (req,         by_keys=by_keys, on_key='Game_Start')
+    right_pre = _prep_for_asof_right(ratings_all, by_keys=by_keys, on_key='AsOfTS')
+
+    # --- ASOF joins (both sides sorted by by_keys + time) ---
     back = pd.merge_asof(
-        left=req_sorted, right=right_sorted,
+        left=req_pre, right=right_pre,
         left_on='Game_Start', right_on='AsOfTS',
-        by=['Sport','Team_Norm'],
-        direction='backward', allow_exact_matches=True
+        by=by_keys, direction='backward', allow_exact_matches=True
     )
     fwd = pd.merge_asof(
-        left=req_sorted, right=right_sorted,
+        left=req_pre, right=right_pre,
         left_on='Game_Start', right_on='AsOfTS',
-        by=['Sport','Team_Norm'],
-        direction='forward', allow_exact_matches=True
+        by=by_keys, direction='forward', allow_exact_matches=True
     )
 
     bw = back[['Sport','Team_Norm','Game_Start','Side','Power_Rating','PR_Off','PR_Def','AsOfTS']].rename(
@@ -1096,6 +1104,7 @@ def enrich_power_no_gaps_fast(
     )
     join = bw.merge(fw, on=['Sport','Team_Norm','Game_Start','Side'], how='left')
 
+    # Coalesce + grace
     join['PR']     = join['BW_PR'].where(join['BW_PR'].notna(), join['FW_PR'])
     join['PR_Off'] = join['BW_PR_Off'].where(join['BW_PR_Off'].notna(), join['FW_PR_Off'])
     join['PR_Def'] = join['BW_PR_Def'].where(join['BW_PR_Def'].notna(), join['FW_PR_Def'])
@@ -1105,9 +1114,9 @@ def enrich_power_no_gaps_fast(
     too_far = used_forward & ((join['FW_AsOfTS'] - join['Game_Start']).abs() > grace)
     join.loc[too_far, ['PR','PR_Off','PR_Def']] = np.nan
 
-    # Fallback: latest current per team
+    # Fallback: latest current per team (use prepped right frame)
     curr_latest = (
-        right_sorted[right_sorted['AsOfTS'].notna()]
+        right_pre
         .sort_values(['Sport','Team_Norm','AsOfTS'])
         .drop_duplicates(['Sport','Team_Norm'], keep='last')
         [['Sport','Team_Norm','Power_Rating','PR_Off','PR_Def']]
@@ -1117,7 +1126,7 @@ def enrich_power_no_gaps_fast(
     for base, cur in (('PR','CURR_PR'), ('PR_Off','CURR_PR_Off'), ('PR_Def','CURR_PR_Def')):
         join[base] = join[base].where(join[base].notna(), join[cur])
 
-    # Baseline
+    # Baseline per sport if still missing
     baselines = ratings_all.groupby('Sport', observed=True)['Power_Rating'].mean().to_dict()
     nan_mask = join['PR'].isna()
     if nan_mask.any():
@@ -1136,6 +1145,8 @@ def enrich_power_no_gaps_fast(
     out['PR_Off_Diff'] = out['Home_PR_Off'] - out['Away_PR_Off']
     out['PR_Def_Diff'] = out['Home_PR_Def'] - out['Away_PR_Def']
     return out
+
+
 def _datekey(ts) -> str:
     return pd.to_datetime(ts, utc=True).isoformat()
 
