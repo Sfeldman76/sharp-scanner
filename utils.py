@@ -2422,7 +2422,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
     df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
     df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
-
+    
     # === Confidence scores and tiers
     try:
         if weights:
@@ -2524,7 +2524,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Book_Reliability_Lift'] = np.nan
 
     # === Now loop markets just for scoring (robust to missing models) ===
-
+    # after base enrichment (Implied_Prob, Open_* fills, odds pivot, reliability merge, etc.)
+    df = compute_small_book_liquidity_features(df)
+    df = add_line_and_crossmarket_features(df)
     def _ensure_model_placeholders(frame, market_name):
         cols_defaults = {
             'Model_Sharp_Win_Prob': np.nan,
@@ -2772,9 +2774,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         ).astype(int)
 
         # Your existing extras
-        df_canon = add_line_and_crossmarket_features(df_canon)
-        df_canon = compute_small_book_liquidity_features(df_canon)
-
+       
+       
         # Numeric timing columns
         hybrid_timing_cols = [
             'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
@@ -2974,7 +2975,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_inverse[col] = 0.0
          
             df_inverse['Market_Mispricing'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
-            df_inverse['Abs_Mispricing_Gap'] = df_inverse[['Market_Mispricing'].abs()
+            df_inverse['Abs_Mispricing_Gap'] = df_inverse['Market_Mispricing'].abs()
             df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
             df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
             df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
