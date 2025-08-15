@@ -2732,75 +2732,56 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         # Get feature list (safe)
         # Get feature list (safe)
         feature_cols = []
-        
         if bundle and isinstance(bundle.get('feature_cols'), (list, tuple)) and bundle['feature_cols']:
             feature_cols = list(bundle['feature_cols'])
         elif model is not None:
-            feat_in = getattr(model, 'feature_names_in_', None)   # may be a NumPy array
+            feat_in = getattr(model, 'feature_names_in_', None)
             if feat_in is not None:
                 feature_cols = list(feat_in)
             else:
                 booster = getattr(model, 'get_booster', lambda: None)()
-                names = getattr(booster, 'feature_names', None)   # usually a list or None
+                names = getattr(booster, 'feature_names', None)
                 feature_cols = list(names) if names is not None else []
         
-        # normalize & dedupe just in case
         feature_cols = [str(c) for c in feature_cols]
-        feature_cols = list(dict.fromkeys(feature_cols))  # preserve order, remove dupes
+        feature_cols = list(dict.fromkeys(feature_cols))  # de-dupe, keep order
         
-        if not feature_cols:
-            logger.info(f"ℹ️ No feature list for {mkt.upper()} — stamping placeholders.")
-            df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
-            for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
-                df.loc[df_full_market_m.index, col] = df_full_market_m[col].values
-            continue
-
-
-    
-        # Prepare X on canonical rows
-        if 'Was_Canonical' not in df_full_market_m.columns:
-            df_full_market_m['Was_Canonical'] = False  # if not already set by your upstream logic
-    
-        if model is None or iso is None or not feature_cols:
-            # stamp placeholders for all rows of this market slice
-            df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
+        if not feature_cols or model is None or iso is None:
+            logger.info(f"ℹ️ No usable model/feature list for {mkt.upper()} — stamping placeholders on canon.")
+            df_canon = _ensure_model_placeholders(df_canon, mkt)
         else:
-            # 🔍 DEBUG: log available columns before filtering for feature_cols
-            logger.info("📊 Columns in df_full_market_m before scoring for %s: %s",
-                        mkt.upper(), df_full_market_m.columns.tolist())
-            logger.info("📏 Shape: %s", df_full_market_m.shape)
-    
-            missing_feats = [c for c in feature_cols if c not in df_full_market_m.columns]
-            if missing_feats:
-                logger.warning("⚠️ Missing features for %s: %s", mkt.upper(), missing_feats)
-    
-            extra_feats = [c for c in df_full_market_m.columns if c not in feature_cols]
-            if extra_feats:
-                logger.info("ℹ️ Extra columns (not in model) for %s: %s", mkt.upper(), extra_feats)
-    
-            # Now select only the columns the model needs
-            X_full = df_full_market_m.loc[df_full_market_m['Was_Canonical'], feature_cols]
-            
-            if X_full.empty:
-                logger.info(f"ℹ️ {mkt.upper()} has no canonical rows — stamping placeholders.")
-                df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
-            else:
-                obj_in_X = X_full.select_dtypes(include='object').columns.tolist()
-                if obj_in_X:
-                    logger.warning("⚠️ Object columns in X_full: %s", obj_in_X)
-                    X_full[obj_in_X] = X_full[obj_in_X].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-                try:
-                    preds = iso.predict_proba(X_full)[:, 1]
-                    idx_can = df_full_market_m.loc[df_full_market_m['Was_Canonical']].index
-                    df_full_market_m.loc[idx_can, 'Model_Sharp_Win_Prob'] = preds
-                    df_full_market_m.loc[idx_can, 'Model_Confidence']     = preds
-                    df_full_market_m.loc[idx_can, 'Scored_By_Model']      = True
-                    df_full_market_m.loc[idx_can, 'Scoring_Market']       = mkt
-                    df_full_market_m = df_full_market_m.copy()
-                except Exception as e:
-                    logger.error(f"❌ Scoring failed for {mkt.upper()} — using placeholders. Error: {e}")
-                    df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
-    
+            # 2) Ensure every model feature exists on df_canon (fill with 0.0 if missing)
+            miss = [c for c in feature_cols if c not in df_canon.columns]
+            if miss:
+                for c in miss:
+                    df_canon[c] = 0.0
+        
+            # 3) Coerce only model features (don’t touch others)
+            for c in feature_cols:
+                if df_canon[c].dtype == object:
+                    df_canon[c] = (
+                        df_canon[c]
+                        .replace({'True':1,'False':0,True:1,False:0,'':np.nan,'none':np.nan,'None':np.nan})
+                    )
+                df_canon[c] = pd.to_numeric(df_canon[c], errors='coerce')
+            df_canon[feature_cols] = df_canon[feature_cols].replace([np.inf,-np.inf], np.nan).fillna(0.0)
+        
+            # 4) Score canon rows directly
+            try:
+                X_can = df_canon.loc[:, feature_cols]
+                if X_can.empty:
+                    logger.info(f"ℹ️ {mkt.upper()} has empty X_can — stamping placeholders on canon.")
+                    df_canon = _ensure_model_placeholders(df_canon, mkt)
+                else:
+                    preds = iso.predict_proba(X_can)[:, 1]
+                    df_canon['Model_Sharp_Win_Prob'] = preds
+                    df_canon['Model_Confidence']     = preds
+                    df_canon['Scored_By_Model']      = True
+                    df_canon['Scoring_Market']       = mkt
+            except Exception as e:
+                logger.error(f"❌ Scoring failed for {mkt.upper()} — using placeholders on canon. Error: {e}")
+                df_canon = _ensure_model_placeholders(df_canon, mkt)
+        
         # ===== Pull predictions into df_canon (by Line_Hash or composite) =====
         pred_cols = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
         if 'Line_Hash' in df_canon.columns and df_canon['Line_Hash'].notna().any() and 'Line_Hash' in df_full_market_m.columns:
