@@ -2674,8 +2674,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df_canon['Odds_Reversal_Flag'] = df_canon['Odds_Reversal_Flag'].fillna(0).astype(int)
     
         df_canon['Market_Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
-        df_canon['Mispricing_Gap'] = df_canon['Team_Past_Avg_Model_Prob'] - df_canon['Market_Implied_Prob']
-        df_canon['Abs_Mispricing_Gap'] = df_canon['Mispricing_Gap'].abs()
+        df_canon['Market_Mispricing'] = df_canon['Team_Past_Avg_Model_Prob'] - df_canon['Market_Implied_Prob']
+        df_canon['Abs_Market_Mispricing'] = df_canon['Market_Mispricing'].abs()
         df_canon['Team_Implied_Prob_Gap_Home'] = df_canon['Team_Past_Avg_Model_Prob_Home'] - df_canon['Market_Implied_Prob']
         df_canon['Team_Implied_Prob_Gap_Away'] = df_canon['Team_Past_Avg_Model_Prob_Away'] - df_canon['Market_Implied_Prob']
         df_canon['Abs_Team_Implied_Prob_Gap'] = np.where(
@@ -2776,7 +2776,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             # stamp placeholders for all rows of this market slice
             df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
         else:
+            # 🔍 DEBUG: log available columns before filtering for feature_cols
+            logger.info("📊 Columns in df_full_market_m before scoring for %s: %s",
+                        mkt.upper(), df_full_market_m.columns.tolist())
+            logger.info("📏 Shape: %s", df_full_market_m.shape)
+    
+            missing_feats = [c for c in feature_cols if c not in df_full_market_m.columns]
+            if missing_feats:
+                logger.warning("⚠️ Missing features for %s: %s", mkt.upper(), missing_feats)
+    
+            extra_feats = [c for c in df_full_market_m.columns if c not in feature_cols]
+            if extra_feats:
+                logger.info("ℹ️ Extra columns (not in model) for %s: %s", mkt.upper(), extra_feats)
+    
+            # Now select only the columns the model needs
             X_full = df_full_market_m.loc[df_full_market_m['Was_Canonical'], feature_cols]
+            
             if X_full.empty:
                 logger.info(f"ℹ️ {mkt.upper()} has no canonical rows — stamping placeholders.")
                 df_full_market_m = _ensure_model_placeholders(df_full_market_m, mkt)
