@@ -942,81 +942,201 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
 
 
 @st.cache_data(ttl=900, max_entries=32, show_spinner=False)
-def build_per_game_power(sport: str, df_bt: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
-    # latest snapshot per game (to get teams + a timestamp)
-    games = (
-        df_bt.sort_values('Snapshot_Timestamp')
-             .drop_duplicates(subset=['Game_Key'], keep='last')
-             [['Game_Key','Sport','Home_Team_Norm','Away_Team_Norm','Game_Start','Snapshot_Timestamp']]
-             .copy()
+
+def fetch_ratings_window_cached(
+    bq,
+    sport: str,
+    pad_start_ts,
+    pad_end_ts,
+    table_history="sharplogger.sharp_data.ratings_history",
+    table_current="sharplogger.sharp_data.ratings_current",
+):
+    """
+    Returns a single DataFrame with columns:
+      ['Sport','Team_Norm','AsOfTS','Power_Rating','PR_Off','PR_Def']
+    Cached per (sport, window, tables) for the session.
+    """
+  
+
+    sport_up = str(sport).upper().strip()
+    k = (table_history, table_current, sport_up, _datekey(pad_start_ts), _datekey(pad_end_ts))
+    if k in _RATINGS_WINDOW_CACHE:
+        return _RATINGS_WINDOW_CACHE[k]
+
+    pad_start_iso = pd.to_datetime(pad_start_ts, utc=True).isoformat()
+    pad_end_iso   = pd.to_datetime(pad_end_ts,   utc=True).isoformat()
+
+    q_hist = f"""
+      SELECT
+        UPPER(Sport) AS Sport,
+        LOWER(TRIM(Team)) AS Team_Norm,
+        TIMESTAMP(AsOf) AS AsOfTS,
+        CAST(Rating AS FLOAT64) AS Power_Rating,
+        SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
+        SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+      FROM `{table_history}`
+      WHERE UPPER(Sport) = '{sport_up}'
+        AND TIMESTAMP(AsOf) BETWEEN TIMESTAMP('{pad_start_iso}') AND TIMESTAMP('{pad_end_iso}')
+    """
+    q_curr = f"""
+      SELECT
+        UPPER(Sport) AS Sport,
+        LOWER(TRIM(Team)) AS Team_Norm,
+        TIMESTAMP(Updated_At) AS AsOfTS,
+        CAST(Rating AS FLOAT64) AS Power_Rating,
+        SAFE_CAST(PR_Off AS FLOAT64) AS PR_Off,
+        SAFE_CAST(PR_Def AS FLOAT64) AS PR_Def
+      FROM `{table_current}`
+      WHERE UPPER(Sport) = '{sport_up}'
+    """
+
+    r_hist = bq.query(q_hist).to_dataframe()
+    r_curr = bq.query(q_curr).to_dataframe()
+
+    # normalize
+    for fr in (r_hist, r_curr):
+        if fr is not None and not fr.empty:
+            fr['Sport'] = fr['Sport'].astype(str).str.upper()
+            fr['Team_Norm'] = fr['Team_Norm'].astype(str).strip().str.lower()
+
+    import pandas as pd
+    ratings_all = pd.concat([r_hist, r_curr], ignore_index=True)
+    if not ratings_all.empty:
+        ratings_all = ratings_all.dropna(subset=['Sport','Team_Norm','AsOfTS']).copy()
+        ratings_all = ratings_all.sort_values(['Sport','Team_Norm','AsOfTS'])
+
+    _RATINGS_WINDOW_CACHE[k] = ratings_all
+    return ratings_all
+
+def clear_ratings_cache():
+    _RATINGS_WINDOW_CACHE.clear()
+
+def enrich_power_no_gaps_fast(
+    df: "pd.DataFrame",
+    bq,
+    sport_aliases={"MLB": ["MLB", "BASEBALL_MLB"]},
+    table_history="sharplogger.sharp_data.ratings_history",
+    table_current="sharplogger.sharp_data.ratings_current",
+    pad_days: int = 14,     # 👈 tighter than 31
+    grace_days: int = 30,   # forward-asof max distance you’ll accept
+):
+
+    if df.empty:
+        return df
+
+    out = df.copy()
+    # normalize input keys
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+    out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
+    out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
+    out['Game_Start'] = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
+
+    # canon sport map
+    canon_map = {}
+    for k, v in sport_aliases.items():
+        if isinstance(v, list):
+            for a in v: canon_map[str(a).upper()] = str(k).upper()
+        else:
+            canon_map[str(k).upper()] = str(v).upper()
+    out['Sport'] = out['Sport'].map(lambda s: canon_map.get(s, s))
+
+    # long requests
+    req = pd.concat([
+        out[['Sport','Game_Start','Home_Team_Norm']].rename(columns={'Home_Team_Norm':'Team_Norm'}).assign(Side='Home'),
+        out[['Sport','Game_Start','Away_Team_Norm']].rename(columns={'Away_Team_Norm':'Team_Norm'}).assign(Side='Away'),
+    ], ignore_index=True).sort_values(['Sport','Team_Norm','Game_Start'])
+
+    # tight window (± pad_days)
+    gmin, gmax = req['Game_Start'].min(), req['Game_Start'].max()
+    pad = pd.Timedelta(days=pad_days)
+    pad_start, pad_end = gmin - pad, gmax + pad
+
+    # fetch (cached per sport+window)
+    ratings_all = fetch_ratings_window_cached(
+        bq=bq,
+        sport=out['Sport'].iloc[0],  # single-sport batches recommended; if mixed, split by sport first
+        pad_start_ts=pad_start,
+        pad_end_ts=pad_end,
+        table_history=table_history,
+        table_current=table_current,
     )
 
-    # normalize games
-    games['Sport'] = games['Sport'].astype(str).str.upper()
-    games['Home_Team_Norm'] = norm_team(games['Home_Team_Norm'])
-    games['Away_Team_Norm'] = norm_team(games['Away_Team_Norm'])
-    games['Game_Start'] = pd.to_datetime(games['Game_Start'], utc=True, errors='coerce')
-    games['ts'] = games['Game_Start'].fillna(pd.to_datetime(games['Snapshot_Timestamp'], utc=True, errors='coerce'))
+    # if nothing, seed & return
+    if ratings_all is None or ratings_all.empty:
+        return _seed_all_from_baseline(out)
 
-    # long-form sides
-    home = games[['Game_Key','Sport','Home_Team_Norm','ts']].rename(columns={'Home_Team_Norm':'Team_Norm'})
-    home['Side'] = 'home'
-    away = games[['Game_Key','Sport','Away_Team_Norm','ts']].rename(columns={'Away_Team_Norm':'Team_Norm'})
-    away['Side'] = 'away'
-    teams = pd.concat([home, away], ignore_index=True)
+    # two-pass asof
+    req_sorted = req.sort_values(['Sport','Team_Norm','Game_Start'])
+    right_sorted = ratings_all.sort_values(['Sport','Team_Norm','AsOfTS'])
 
-    # prep ratings (df_power produced by your cached fetch; it has 'AsOf')
-    pr = df_power.copy()
-    pr['Sport'] = pr['Sport'].astype(str).str.upper()
-    pr['Team_Norm'] = norm_team(pr['Team_Norm'])
-    # unify time column to AsOfTS
-    if 'AsOfTS' not in pr.columns and 'AsOf' in pr.columns:
-        pr = pr.rename(columns={'AsOf':'AsOfTS'})
-    pr['AsOfTS'] = pd.to_datetime(pr['AsOfTS'], utc=True, errors='coerce')
-    pr = pr.dropna(subset=['AsOfTS'])
-
-    # PERF: keep only teams we actually need
-    # inside build_per_game_power
-    needed = teams['Team_Norm'].unique()
-    pr = pr[pr['Team_Norm'].isin(needed)]
-
-
-    # sort once for asof
-    teams = teams.sort_values(['Sport','Team_Norm','ts'], kind='mergesort')
-    pr    = pr.sort_values(['Sport','Team_Norm','AsOfTS'], kind='mergesort')
-
-    # single PIT-safe asof join (backward ⇒ AsOfTS <= ts)
-    enriched = pd.merge_asof(
-        teams, pr,
+    back = pd.merge_asof(
+        left=req_sorted, right=right_sorted,
+        left_on='Game_Start', right_on='AsOfTS',
         by=['Sport','Team_Norm'],
-        left_on='ts', right_on='AsOfTS',
         direction='backward', allow_exact_matches=True
-    )[['Game_Key','Side','Power_Rating','PR_Off','PR_Def']]
+    )
+    fwd = pd.merge_asof(
+        left=req_sorted, right=right_sorted,
+        left_on='Game_Start', right_on='AsOfTS',
+        by=['Sport','Team_Norm'],
+        direction='forward', allow_exact_matches=True
+    )
 
-    # pivot + flatten
-    per_game = enriched.pivot(index='Game_Key', columns='Side', values=['Power_Rating','PR_Off','PR_Def'])
-    # ensure missing blocks exist (e.g., if PR_Off/PR_Def absent)
-    for top in ['Power_Rating','PR_Off','PR_Def']:
-        for side in ['home','away']:
-            if (top, side) not in per_game.columns:
-                per_game[(top, side)] = pd.NA
+    # coalesce with grace
+    bw = back[['Sport','Team_Norm','Game_Start','Side','Power_Rating','PR_Off','PR_Def','AsOfTS']].rename(
+        columns={'Power_Rating':'BW_PR','PR_Off':'BW_PR_Off','PR_Def':'BW_PR_Def','AsOfTS':'BW_AsOfTS'}
+    )
+    fw = fwd[['Sport','Team_Norm','Game_Start','Side','Power_Rating','PR_Off','PR_Def','AsOfTS']].rename(
+        columns={'Power_Rating':'FW_PR','PR_Off':'FW_PR_Off','PR_Def':'FW_PR_Def','AsOfTS':'FW_AsOfTS'}
+    )
+    join = bw.merge(fw, on=['Sport','Team_Norm','Game_Start','Side'], how='left')
 
-    per_game = per_game.rename(columns={
-        ('Power_Rating','home'): 'Home_Power_Rating',
-        ('Power_Rating','away'): 'Away_Power_Rating',
-        ('PR_Off','home'):        'Home_PR_Off',
-        ('PR_Off','away'):        'Away_PR_Off',
-        ('PR_Def','home'):        'Home_PR_Def',
-        ('PR_Def','away'):        'Away_PR_Def',
-    }).reset_index()
+    join['PR']     = join['BW_PR'].where(join['BW_PR'].notna(), join['FW_PR'])
+    join['PR_Off'] = join['BW_PR_Off'].where(join['BW_PR_Off'].notna(), join['FW_PR_Off'])
+    join['PR_Def'] = join['BW_PR_Def'].where(join['BW_PR_Def'].notna(), join['FW_PR_Def'])
 
-    # handy diffs
-    per_game['PR_Rating_Diff_game'] = per_game['Home_Power_Rating'] - per_game['Away_Power_Rating']
-    per_game['PR_Off_Diff_game']    = per_game['Home_PR_Off'] - per_game['Away_PR_Off']
-    per_game['PR_Def_Diff_game']    = per_game['Home_PR_Def'] - per_game['Away_PR_Def']
+    grace = pd.Timedelta(days=grace_days)
+    used_forward = join['BW_PR'].isna() & join['FW_PR'].notna()
+    too_far = used_forward & ((join['FW_AsOfTS'] - join['Game_Start']).abs() > grace)
+    join.loc[too_far, ['PR','PR_Off','PR_Def']] = np.nan
 
-    return per_game
+    # fallback to latest current (fast in-memory)
+    curr_latest = (
+        right_sorted[right_sorted['AsOfTS'].notna()]
+        .sort_values(['Sport','Team_Norm','AsOfTS'])
+        .drop_duplicates(['Sport','Team_Norm'], keep='last')
+        [['Sport','Team_Norm','Power_Rating','PR_Off','PR_Def']]
+        .rename(columns={'Power_Rating':'CURR_PR','PR_Off':'CURR_PR_Off','PR_Def':'CURR_PR_Def'})
+    )
+    join = join.merge(curr_latest, on=['Sport','Team_Norm'], how='left')
+    for base, cur in (('PR','CURR_PR'), ('PR_Off','CURR_PR_Off'), ('PR_Def','CURR_PR_Def')):
+        join[base] = join[base].where(join[base].notna(), join[cur])
 
+    # final safety baseline
+    baselines = (
+        ratings_all.groupby('Sport', observed=True)['Power_Rating'].mean().to_dict()
+        if not ratings_all.empty else {}
+    )
+    def sport_baseline(s): return baselines.get(s, 1500.0)
+    nan_mask = join['PR'].isna()
+    if nan_mask.any():
+        join.loc[nan_mask, 'PR'] = join.loc[nan_mask, 'Sport'].map(sport_baseline).astype(float)
+        # PR_Off/PR_Def can stay NaN (or set to 0 if you prefer)
+
+    # pivot back and merge into original
+    wide = (join.pivot_table(index=['Sport','Game_Start'], columns='Side',
+                             values=['PR','PR_Off','PR_Def'])
+                  .reset_index())
+    wide.columns = ['Sport','Game_Start',
+                    'Away_Power_Rating','Home_Power_Rating',
+                    'Away_PR_Off','Home_PR_Off',
+                    'Away_PR_Def','Home_PR_Def']
+
+    out = out.merge(wide, on=['Sport','Game_Start'], how='left')
+    out['Power_Rating_Diff'] = out['Home_Power_Rating'] - out['Away_Power_Rating']
+    out['PR_Off_Diff'] = out['Home_PR_Off'] - out['Away_PR_Off']
+    out['PR_Def_Diff'] = out['Home_PR_Def'] - out['Away_PR_Def']
+    return out
 
     
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
@@ -1115,52 +1235,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         .sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'], keep='last')
     )
-    # ratings once per sport (cached fetch you already have)
-  
-    # after df_bt is loaded/filtered
-    min_ts = pd.to_datetime(df_bt['Game_Start'], utc=True, errors='coerce').min()
-    if pd.isna(min_ts):
-        min_ts = pd.to_datetime(df_bt['Snapshot_Timestamp'], utc=True, errors='coerce').min()
-    max_ts = pd.to_datetime(df_bt['Game_Start'], utc=True, errors='coerce').max()
-    if pd.isna(max_ts):
-        max_ts = pd.to_datetime(df_bt['Snapshot_Timestamp'], utc=True, errors='coerce').max()
-    
-    with tmr("fetch power (cached)"):
-        # derive the exact window of games in this training batch
-        start_ts = pd.to_datetime(
-            df_bt["Game_Start"].min() if "Game_Start" in df_bt.columns else df_bt["Snapshot_Timestamp"].min(),
-            utc=True
-        )
-        end_ts = pd.to_datetime(
-            df_bt["Game_Start"].max() if "Game_Start" in df_bt.columns else df_bt["Snapshot_Timestamp"].max(),
-            utc=True
-        )
-    
-        # time-aware history first (one row per team/day, no leakage)
-        df_power = fetch_power_ratings_from_bq_cached(
-            sport=sport,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            source="history",
-        )
-
-        # fallback to current snapshot if history returned nothing
-        if df_power.empty:
-            df_power = fetch_power_ratings_from_bq_cached(
-                sport=sport,
-                start_ts=start_ts,
-                end_ts=end_ts,
-                source="current",
-            )
-    with tmr("build per_game power"):
-        per_game = build_per_game_power(sport, df_bt, df_power)
-
-    ts_min = pd.to_datetime(df_bt['Game_Start'].min(), utc=True, errors='coerce')
-    ts_max = pd.to_datetime(df_bt['Game_Start'].max(), utc=True, errors='coerce')
-    
-    # Trim to [ts_min - 31d, ts_max] to guarantee a prior rating exists
-    pad = pd.Timedelta(days=31)
-    df_power = df_power[(df_power['AsOf'] >= ts_min - pad) & (df_power['AsOf'] <= ts_max)]
+     
+    df_bt = enrich_power_no_gaps_fast(
+        df_bt,
+        bq,
+        sport_aliases={"MLB": ["MLB", "BASEBALL_MLB"]},
+        pad_days=14,      # tighter window = faster BQ scan
+        grace_days=30,    # forward match allowance
+    )
 
 
 
