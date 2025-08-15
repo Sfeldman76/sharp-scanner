@@ -2113,6 +2113,141 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
         out['Is_PrimeTime'] = 0
     return out
 
+# ---------- MODEL READINESS TELEMETRY ----------
+MODEL_META_COLS = {
+    # stable IDs for grouping/cv and de-dupe
+    'Game_Key':              'str',
+    'Team_Key':              'str',  # Home_Away_Time_Market_Outcome
+    'Game_Start':            'datetime64[ns, UTC]',
+    'Snapshot_Timestamp':    'datetime64[ns, UTC]',
+    'Sport':                 'str',
+    'Market':                'str',
+    'Outcome_Norm':          'str',
+    'Bookmaker':             'str',
+    'Was_Canonical':         'bool',
+    # helpful partitioning
+    'Event_Date':            'datetime64[ns]',
+    'Commence_Hour':         'datetime64[ns, UTC]',
+}
+
+# features you already engineer (extend as needed)
+MODEL_FEATURE_CANDS = [
+    # prices / probs
+    'Odds_Price','Implied_Prob','Odds_Shift','Implied_Prob_Shift','Implied_Prob_Shift_Z',
+    'Open_Odds','Open_Value','First_Imp_Prob',
+    # line movement
+    'Value','Line_Delta','Delta','Line_Move_Magnitude','Line_Magnitude_Abs',
+    'Net_Line_Move_From_Opening','Abs_Line_Move_From_Opening',
+    'Abs_Line_Move_Z','Pct_Line_Move_From_Opening','Pct_Line_Move_Z',
+    # context flags
+    'Is_Home_Team_Bet','Is_Favorite_Bet','Direction_Aligned','Late_Game_Steam_Flag',
+    'LimitUp_NoMove_Flag','High_Limit_Flag','Is_Sharp_Book','Market_Leader',
+    'Is_Reinforced_MultiMarket','Was_Line_Resistance_Broken','Line_Resistance_Crossed_Count',
+    # cross-market
+    'Spread_Odds','H2H_Odds','Total_Odds',
+    'Spread_Implied_Prob','H2H_Implied_Prob','Total_Implied_Prob',
+    'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
+    'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
+    'CrossMarket_Prob_Gap_Exists',
+    # limits / liquidity
+    'Sharp_Limit_Jump','Sharp_Limit_Total','SmallBook_Total_Limit','SmallBook_Max_Limit',
+    'SmallBook_Min_Limit','SmallBook_Limit_Count','SmallBook_Limit_Skew',
+    'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
+    # book reliability (default to 0 if missing)
+    'Book_Reliability_Score','Book_Reliability_Lift',
+    # timing bins
+    'SharpMove_Timing_Magnitude','Odds_Move_Magnitude',
+    'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
+    'SharpMove_Magnitude_Overnight_LateGame','SharpMove_Magnitude_Overnight_Urgent',
+    'SharpMove_Magnitude_Early_VeryEarly','SharpMove_Magnitude_Early_MidRange',
+    'SharpMove_Magnitude_Early_LateGame','SharpMove_Magnitude_Early_Urgent',
+    'SharpMove_Magnitude_Midday_VeryEarly','SharpMove_Magnitude_Midday_MidRange',
+    'SharpMove_Magnitude_Midday_LateGame','SharpMove_Magnitude_Midday_Urgent',
+    'SharpMove_Magnitude_Late_VeryEarly','SharpMove_Magnitude_Late_MidRange',
+    'SharpMove_Magnitude_Late_LateGame','SharpMove_Magnitude_Late_Urgent',
+    'OddsMove_Magnitude_Overnight_VeryEarly','OddsMove_Magnitude_Overnight_MidRange',
+    'OddsMove_Magnitude_Overnight_LateGame','OddsMove_Magnitude_Overnight_Urgent',
+    'OddsMove_Magnitude_Early_VeryEarly','OddsMove_Magnitude_Early_MidRange',
+    'OddsMove_Magnitude_Early_LateGame','OddsMove_Magnitude_Early_Urgent',
+    'OddsMove_Magnitude_Midday_VeryEarly','OddsMove_Magnitude_Midday_MidRange',
+    'OddsMove_Magnitude_Midday_LateGame','OddsMove_Magnitude_Midday_Urgent',
+    'OddsMove_Magnitude_Late_VeryEarly','OddsMove_Magnitude_Late_MidRange',
+    'OddsMove_Magnitude_Late_LateGame','OddsMove_Magnitude_Late_Urgent',
+]
+
+# targets / outcomes (nullable until results post)
+MODEL_TARGET_COLS = {
+    'Final_Result_Won':     'float64',  # 1/0 when known; NaN until known
+    'Closed_Line':          'float64',  # if you capture closing line later
+    'Closed_Odds':          'float64',
+    'Covered_Spread':       'float64',  # spreads only
+    'Total_Result_Over':    'float64',  # totals only
+}
+
+# scaffolding / diagnostics
+MODEL_SCORING_PLACEHOLDERS = {
+    'Model_Sharp_Win_Prob': np.nan,
+    'Model_Confidence':     np.nan,
+    'Scored_By_Model':      False,
+    'Scoring_Market':       None,   # will fill with Market
+}
+
+
+def build_model_readiness_buffer(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return a frame that is always safe to persist for training later."""
+    df_buf = frame.copy()
+
+    # 0) ensure scoring placeholders (works even when you had no model)
+    for col, default in MODEL_SCORING_PLACEHOLDERS.items():
+        if col not in df_buf.columns:
+            df_buf[col] = default
+    if 'Scoring_Market' in df_buf.columns:
+        df_buf['Scoring_Market'] = df_buf['Scoring_Market'].fillna(df_buf.get('Market'))
+
+    # 1) ensure meta columns exist (don’t upcast strings unnecessarily)
+    for col, dtype in MODEL_META_COLS.items():
+        if col not in df_buf.columns:
+            df_buf[col] = pd.NA
+        # only coerce datetimes explicitly
+        if dtype.startswith('datetime64') and not pd.api.types.is_datetime64_any_dtype(df_buf[col]):
+            df_buf[col] = pd.to_datetime(df_buf[col], utc='UTC' in dtype, errors='coerce')
+
+    # 2) ensure all candidate features exist & are numeric
+    for col in MODEL_FEATURE_CANDS:
+        if col not in df_buf.columns:
+            df_buf[col] = 0.0
+        df_buf[col] = pd.to_numeric(df_buf[col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    # 3) reliability defaults if maps were missing
+    for col in ['Book_Reliability_Score','Book_Reliability_Lift']:
+        if col not in df_buf.columns:
+            df_buf[col] = 0.0
+
+    # 4) target columns (nullable until finals land)
+    for col, dtype in MODEL_TARGET_COLS.items():
+        if col not in df_buf.columns:
+            df_buf[col] = np.nan
+        # keep as float (nullable); don’t cast to int
+
+    # 5) convenience partitions
+    if 'Minutes_To_Game' not in df_buf.columns:
+        df_buf['Minutes_To_Game'] = (
+            pd.to_datetime(df_buf.get('Game_Start'), utc=True, errors='coerce')
+            - pd.to_datetime(df_buf.get('Snapshot_Timestamp'), utc=True, errors='coerce')
+        ).dt.total_seconds() / 60
+
+    # 6) minimal unique key to prevent dupes when upserting
+    if 'Training_Unique_Key' not in df_buf.columns:
+        df_buf['Training_Unique_Key'] = (
+            df_buf['Game_Key'].astype(str) + '|' +
+            df_buf['Bookmaker'].astype(str) + '|' +
+            df_buf['Market'].astype(str) + '|' +
+            df_buf['Outcome_Norm'].astype(str) + '|' +
+            df_buf['Snapshot_Timestamp'].astype(str)
+        )
+
+    return df_buf
+
 
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     import json  # used below
@@ -3390,11 +3525,31 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             logger.info(f"🧹 Removed {pre_filter - len(df_final)} unscored UNDER rows (no OVER available)")
     
             logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
+            # 9) Remove unscored UNDER rows with no OVER source
+            pre_filter = len(df_final)
+            df_final = df_final[~(
+                (df_final['Market'] == 'totals') &
+                (df_final['Outcome_Norm'] == 'under') &
+                (df_final['Was_Canonical'] == False) &
+                (df_final['Model_Sharp_Win_Prob'].isna())
+            )]
+            logger.info(f"🧹 Removed {pre_filter - len(df_final)} unscored UNDER rows (no OVER available)")
+            
+            # >>> HERE — wrap before returning
+            df_final = build_model_readiness_buffer(df_final)
+            
+            logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
             return df_final
+                           
+           
     
+        #else:
+            #logger.warning("⚠️ No market types scored — returning empty DataFrame.")
         else:
-            logger.warning("⚠️ No market types scored — returning empty DataFrame.")
-            return pd.DataFrame()
+            logger.warning("⚠️ No market types scored — building model-readiness buffer from enriched snapshots.")
+            df_fallback = build_model_readiness_buffer(df)  # use the enriched `df` you logged earlier
+            return df_fallback
+            #return pd.DataFrame()
     
     except Exception as e:
         logger.error("❌ Exception during final aggregation")
