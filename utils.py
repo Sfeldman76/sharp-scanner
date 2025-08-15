@@ -2206,13 +2206,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # Extremes safety nets (fill only if still missing)
     
     # 📍 === NEW: Power ratings enrichment ===
-    try:
-        from google.cloud import bigquery
-        bq = bigquery.Client()
-        df = enrich_with_power_ratings(df, bq)
-        logger.info("📈 Power ratings merged — cols now include Home_/Away_ and Diff fields")
-    except Exception as e:
-        logger.error("❌ Power ratings enrichment failed: %s", e, exc_info=True)
+    #try:
+       
+        #bq = bigquery.Client()
+        #df = enrich_with_power_ratings(df, bq)
+        #logger.info("📈 Power ratings merged — cols now include Home_/Away_ and Diff fields")
+    #except Exception as e:
+        #logger.error("❌ Power ratings enrichment failed: %s", e, exc_info=True)
         
     # 📍 === END NEW ===
 
