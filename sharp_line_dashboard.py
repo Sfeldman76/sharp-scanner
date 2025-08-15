@@ -1074,11 +1074,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     df_bt['Sport'] = df_bt['Sport'].astype(str).str.upper()
     
     df_bt['Bookmaker'] = df_bt['Bookmaker'].astype(str).str.lower().str.strip()
-    df_power = fetch_power_ratings_from_bq(
-        bq_client=bq_client,
-        sport=sport,
-        lookback_days=400
-    )
+    
     # ✅ Timestamps (UTC)
     df_bt['Snapshot_Timestamp'] = pd.to_datetime(df_bt['Snapshot_Timestamp'], errors='coerce', utc=True)
     # Use true Game_Start if present; else fall back to Snapshot_Timestamp for ordering
@@ -1588,12 +1584,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Book_lift_x_Magnitude'] = df_market['Book_Reliability_Lift'] * df_market['Sharp_Line_Magnitude']
     
         df_market['Book_lift_x_PROB_SHIFT'] = df_market['Book_Reliability_Lift'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift'] 
-
+        
         # 0) Fetch once per sport
         df_power = fetch_power_ratings_from_bq_cached(sport, lookback_days=400, source="history")
         if df_power.empty:
             df_power = fetch_power_ratings_from_bq_cached(sport, source="current")
-        # then:
         df_market = attach_power_ratings_asof(df_market, df_power)
                 
       
