@@ -474,6 +474,26 @@ def _groupwise_asof(left: pd.DataFrame, right: pd.DataFrame,
 def get_bq_client() -> bigquery.Client:
     return bigquery.Client()  
 
+def norm_team(x):
+    import pandas as pd
+    if isinstance(x, pd.Series):
+        s = x
+        ret_series = True
+    else:
+        s = pd.Series(x)
+        ret_series = False
+
+    out = (
+        s.astype(str)
+         .str.lower()
+         .str.strip()
+         .str.replace(r'\s+', ' ', regex=True)
+         .str.replace('.', '', regex=False)
+         .str.replace('&', 'and', regex=False)
+         .str.replace('-', ' ', regex=False)
+    )
+
+    return out if ret_series else out.iloc[0]
 
 @st.cache_data(ttl=900, max_entries=64, show_spinner=False)  # 15 min cache
 def fetch_power_ratings_from_bq_cached(
@@ -484,7 +504,6 @@ def fetch_power_ratings_from_bq_cached(
     bq = get_bq_client()
 
     if source == "history":
-        # your history query (using Updated_At -> AsOfTS)
         sql = """
             SELECT
               UPPER(Sport) AS Sport,
@@ -505,7 +524,7 @@ def fetch_power_ratings_from_bq_cached(
             ],
         )
     else:
-        # current snapshot (no AsOfTS)
+        # If ratings_current lacks Updated_At, replace TIMESTAMP(Updated_At) with CAST(NULL AS TIMESTAMP) AS AsOfTS
         sql = """
             SELECT
               UPPER(Sport) AS Sport,
@@ -522,22 +541,21 @@ def fetch_power_ratings_from_bq_cached(
             query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
         )
 
+    # 1) run the query
     df = bq.query(sql, job_config=cfg).to_dataframe()
     if df.empty:
         return df
 
-    # normalize exactly once here
-    def _norm_team(x: str) -> str:
-        return str(x).lower().strip().replace(".", "").replace("&", "and")
-
+    # 2) normalize
     df["Sport"] = df["Sport"].astype(str).str.upper()
-    df["Team_Norm"] = df["Team_Raw"].astype(str).map(_norm_team)
-    if "AsOfTS" in df.columns:
-        df["AsOf"] = pd.to_datetime(df["AsOfTS"], utc=True, errors="coerce")
-    else:
-        df["AsOf"] = pd.NaT
+    df["Team_Norm"] = norm_team(df["Team_Raw"])  # norm_team handles Series/scalars
+    df["AsOf"] = pd.to_datetime(df.get("AsOfTS"), utc=True, errors="coerce") if "AsOfTS" in df.columns else pd.NaT
 
-    return df[["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]]
+    # 3) keep expected columns
+    return df[["Sport", "Team_Norm", "AsOf", "Power_Rating", "PR_Off", "PR_Def"]]
+
+    # normalize exactly once here
+# --- ONE canonical normalizer (handles Series OR scalar) ---
 
 def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -> pd.DataFrame:
     needed = [
@@ -563,13 +581,17 @@ def attach_power_ratings_asof(df_market: pd.DataFrame, df_power: pd.DataFrame) -
     dm['Market'] = dm['Market'].astype(str).str.lower().str.strip()
 
     # Normalize teams (vectorized)
-    if 'Outcome_Norm' in dm:
-        dm['Outcome_Norm'] = dm['Outcome_Norm'].astype(str).map(_norm_team)
+    # inside attach_power_ratings_asof
+    if 'Outcome_Norm' in dm.columns:
+        dm['Outcome_Norm'] = norm_team(dm['Outcome_Norm'])
     else:
-        dm['Outcome_Norm'] = dm.get('Outcome', '').astype(str).map(_norm_team)
-    dm['Home_Team_Norm'] = dm['Home_Team_Norm'].astype(str).map(_norm_team)
-    dm['Away_Team_Norm'] = dm['Away_Team_Norm'].astype(str).map(_norm_team)
-
+        dm['Outcome_Norm'] = norm_team(dm['Outcome'] if 'Outcome' in dm.columns else pd.Series('', index=dm.index))
+    
+    dm['Home_Team_Norm'] = norm_team(dm['Home_Team_Norm'])
+    dm['Away_Team_Norm'] = norm_team(dm['Away_Team_Norm'])
+    
+    pr['Sport']     = pr['Sport'].astype(str).str.upper()
+    pr['Team_Norm'] = norm_team(pr['Team_Norm'])
     # choose time column
     ts_col = 'Snapshot_Timestamp' if 'Snapshot_Timestamp' in dm.columns else 'Game_Start'
     dm[ts_col] = pd.to_datetime(dm[ts_col], utc=True, errors='coerce')
