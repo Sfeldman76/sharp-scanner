@@ -1511,40 +1511,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # df_spreads is your historical spread rows (per outcome/book/snapshot)
     # must include: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
     # Build the spread-rows input from your working frame
+    # Build the spread-rows input from your working frame
+    # === Build training input for spread rows from df_bt (deduped base) ===
     df_spreads = (
-        df_market  # <- replace with whatever your training DF is called
+        df_bt[df_bt['Market'] == 'spreads']  # training focuses on spreads here
         [[
             'Sport','Game_Start','Home_Team_Norm','Away_Team_Norm',
-            'Outcome_Norm','Value'
-         ]]
-        .dropna(subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'])
+            'Outcome'  # will normalize to Outcome_Norm next
+           ,'Value'
+        ]]
         .copy()
     )
-    
-    # Optional: normalize types
+    df_spreads['Outcome_Norm'] = df_spreads['Outcome'].astype(str).str.lower().str.strip()
+    df_spreads.drop(columns=['Outcome'], inplace=True)
+    df_spreads = df_spreads.dropna(
+        subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
+    )
     df_spreads['Sport'] = df_spreads['Sport'].astype(str).str.upper()
-    df_spreads['Outcome_Norm'] = df_spreads['Outcome_Norm'].astype(str).str.lower().str.strip()
-
-
+    
+    # === TRAINING-SAFE enrichment & grading (historical/as-of) ===
     df_train = enrich_and_grade_for_training(
         df_spread_rows=df_spreads,
         bq=bq_client,
-        sport_aliases=SPORT_ALIASES,          # your existing alias dict
+        sport_aliases=SPORT_ALIASES,
         value_col="Value",
         outcome_col="Outcome_Norm",
         pad_days=10,
-        allow_forward_hours=0.0,              # strict backward-only for training
+        allow_forward_hours=0.0,  # strict backward-only
         table_history="sharplogger.sharp_data.ratings_history",
         project=PROJECT_ID,
     )
-    df_fc = enrich_and_grade_for_training(
-        df_spread_rows=df_market,  # same schema you’re using below
-        bq=bq, sport_aliases=sport_aliases,
-        value_col="Value", outcome_col="Outcome_Norm",
-        pad_days=10, allow_forward_hours=0.0,
-        table_history="sharplogger.sharp_data.ratings_history",
-        project=project,
-    )
+    
 
     # === Pivot line values (e.g., -3.5, 210.5, etc.)
     value_pivot = df_latest.pivot_table(
@@ -1625,6 +1622,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ✅ Use existing SHARP_HIT_BOOL as-is (already precomputed)
         df_market = df_market[df_market['SHARP_HIT_BOOL'].isin([0, 1])]
+        if market == "spreads":
+            df_fc = enrich_and_grade_for_training(
+                df_spread_rows=df_market[[
+                    'Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'
+                ]].dropna(),
+                bq=bq_client,                       # use the same client you used above
+                sport_aliases=SPORT_ALIASES,
+                value_col="Value",
+                outcome_col="Outcome_Norm",
+                pad_days=10,
+                allow_forward_hours=0.0,
+                table_history="sharplogger.sharp_data.ratings_history",
+                project=PROJECT_ID,
+            )
+    
+            # keep the columns you need and merge back to df_market
+            keep = [
+                'Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm',
+                'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+                'Model_Expected_Margin_Abs','Sigma_Pts',
+                'Market_Favorite_Team','Model_Favorite_Team'
+            ]
+            df_market = df_market.merge(df_fc[keep],
+                                        on=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm'],
+                                        how='left')
+    
+            # engineered spread features used by the model
+            df_market['k']        = df_market['Outcome_Market_Spread'].abs()
+            df_market['mu_abs']   = df_market['Model_Expected_Margin_Abs']
+            df_market['edge_pts'] = df_market['mu_abs'] - df_market['k']
+            df_market['z']        = (df_market['k'] - df_market['mu_abs']) / df_market['Sigma_Pts'].replace(0, np.nan)
+            df_market['is_market_fav_team'] = (df_market['Outcome_Market_Spread'] < 0).astype('int8')
+            df_market['is_home_team']       = (df_market['Outcome_Norm'] == df_market['Home_Team_Norm']).astype('int8')
+            df_market['model_fav_vs_market_fav_agree'] = (
+                df_market['Model_Favorite_Team'] == df_market['Market_Favorite_Team']
+            ).astype('int8')
+            df_market['edge_x_k'] = df_market['edge_pts'] * df_market['k']
+            df_market['mu_x_k']   = df_market['mu_abs']  * df_market['k']
+            df_market['z'] = df_market['z'].clip(-6, 6)
+
+
         def label_team_role(row):
             market = row['Market']
             value = row['Value']
