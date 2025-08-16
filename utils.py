@@ -2679,7 +2679,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         (df['Limit'] >= 2500) &
         (df['Value'] == df['Open_Value'])
     ).astype(int)
-        try:
+        
     
     # === Cross-market support (optional)
     df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
