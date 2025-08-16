@@ -1091,7 +1091,8 @@ def enrich_power_no_gaps_fast(
     # --- drop NA keys to keep merge_asof happy
     req = req.dropna(subset=['Sport','Team_Norm','Game_Start'])
     ratings_all = ratings_all.dropna(subset=['Sport','Team_Norm','AsOfTS'])
-
+    if 'PR_Off' not in ratings_all.columns: ratings_all['PR_Off'] = np.nan
+    if 'PR_Def' not in ratings_all.columns: ratings_all['PR_Def'] = np.nan
     by_keys = ['Sport','Team_Norm']
 
     # Build right-side groups sorted by AsOfTS (per-team)
@@ -1144,6 +1145,7 @@ def enrich_power_no_gaps_fast(
     join.loc[too_far, ['PR','PR_Off','PR_Def']] = np.nan
 
     # fallback: latest current per team
+    # --- fallback: latest current per team (unchanged) ---
     curr_latest = (
         ratings_all.sort_values(['Sport','Team_Norm','AsOfTS'], kind='mergesort')
                    .drop_duplicates(['Sport','Team_Norm'], keep='last')
@@ -1152,26 +1154,42 @@ def enrich_power_no_gaps_fast(
     )
     join = join.merge(curr_latest, on=['Sport','Team_Norm'], how='left')
     for base, cur in (('PR','CURR_PR'), ('PR_Off','CURR_PR_Off'), ('PR_Def','CURR_PR_Def')):
-        join[base] = join[base].where(join[base].notna(), join[cur])
-
-    # baseline per sport if still NA
+        if cur in join.columns:
+            join[base] = join[base].where(join[base].notna(), join[cur])
+    
+    # --- baseline per sport if still NA ---
     baselines = ratings_all.groupby('Sport', observed=True)['Power_Rating'].mean().to_dict()
     mask = join['PR'].isna()
     if mask.any():
         join.loc[mask, 'PR'] = join.loc[mask, 'Sport'].map(lambda s: baselines.get(s, 1500.0)).astype(float)
-
-    # pivot back to home/away and merge
-    wide = (join.pivot_table(index=['Sport','Game_Start'], columns='Side', values=['PR','PR_Off','PR_Def'])
-                 .reset_index())
-    wide.columns = ['Sport','Game_Start',
-                    'Away_Power_Rating','Home_Power_Rating',
-                    'Away_PR_Off','Home_PR_Off',
-                    'Away_PR_Def','Home_PR_Def']
-
-    out = out.merge(wide, on=['Sport','Game_Start'], how='left')
+    
+    # =============== MERGE BY SIDE INSTEAD OF PIVOT ===============
+    # Home side ratings
+    home = (join[join['Side'] == 'Home']
+            .rename(columns={'Team_Norm': 'Home_Team_Norm',
+                             'PR': 'Home_Power_Rating',
+                             'PR_Off': 'Home_PR_Off',
+                             'PR_Def': 'Home_PR_Def'})
+            [['Sport','Game_Start','Home_Team_Norm','Home_Power_Rating','Home_PR_Off','Home_PR_Def']])
+    
+    # Away side ratings
+    away = (join[join['Side'] == 'Away']
+            .rename(columns={'Team_Norm': 'Away_Team_Norm',
+                             'PR': 'Away_Power_Rating',
+                             'PR_Off': 'Away_PR_Off',
+                             'PR_Def': 'Away_PR_Def'})
+            [['Sport','Game_Start','Away_Team_Norm','Away_Power_Rating','Away_PR_Off','Away_PR_Def']])
+    
+    # Merge back to the original per-game rows using both team keys
+    out = out.merge(home, on=['Sport','Game_Start','Home_Team_Norm'], how='left')
+    out = out.merge(away, on=['Sport','Game_Start','Away_Team_Norm'], how='left')
+    
+    # Diffs (Off/Def may be absent -> handle gracefully)
     out['Power_Rating_Diff'] = out['Home_Power_Rating'] - out['Away_Power_Rating']
-    out['PR_Off_Diff'] = out['Home_PR_Off'] - out['Away_PR_Off']
-    out['PR_Def_Diff'] = out['Home_PR_Def'] - out['Away_PR_Def']
+    out['PR_Off_Diff'] = (out['Home_PR_Off'] - out['Away_PR_Off']
+                          if 'Home_PR_Off' in out.columns and 'Away_PR_Off' in out.columns else np.nan)
+    out['PR_Def_Diff'] = (out['Home_PR_Def'] - out['Away_PR_Def']
+                          if 'Home_PR_Def' in out.columns and 'Away_PR_Def' in out.columns else np.nan)
     return out
 
 
