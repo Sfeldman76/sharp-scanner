@@ -1891,6 +1891,8 @@ def add_line_and_crossmarket_features(df):
     ).astype(int)
 
     return df
+
+
 def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds market-aware small-book liquidity features.
@@ -2010,6 +2012,8 @@ def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshot
 
     df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
     return df
+
+
 def fallback_flip_inverse_rows(df_inverse: pd.DataFrame) -> pd.DataFrame:
     # Only flip if Value is missing
     missing_value_mask = df_inverse['Value'].isnull()
@@ -2113,6 +2117,129 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
         out['Is_PrimeTime'] = 0
     return out
 
+from google.cloud import bigquery
+import pandas as pd
+import numpy as np
+
+def fetch_latest_current_ratings_cached(
+    sport: str,
+    table_current: str = "sharplogger.sharp_data.ratings_current",
+    project: str = "sharplogger",
+) -> pd.DataFrame:
+    """
+    Returns the latest rating per team from ratings_current:
+      ['Sport','Team_Norm','Power_Rating']  (Power_Rating=float32)
+    """
+    bq = bigquery.Client(project=project)
+    sql = f"""
+      SELECT
+        UPPER(Sport) AS Sport,
+        LOWER(TRIM(Team)) AS Team_Norm,
+        CAST(Rating AS FLOAT64) AS Power_Rating
+      FROM `{table_current}`
+      WHERE UPPER(Sport) = @sport
+    """
+    df = bq.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            use_query_cache=True,
+            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
+        ),
+    ).to_dataframe()
+
+    if df.empty:
+        return df
+
+    df['Sport'] = df['Sport'].astype(str)
+    df['Team_Norm'] = (
+        df['Team_Norm'].astype(str).str.lower().str.strip()
+        .str.replace(r'\s+', ' ', regex=True)
+        .str.replace('.', '', regex=False)
+        .str.replace('&', 'and', regex=False)
+        .str.replace('-', ' ', regex=False)
+    )
+    df['Power_Rating'] = pd.to_numeric(df['Power_Rating'], errors='coerce').astype('float32')
+    df = df.dropna(subset=['Team_Norm', 'Power_Rating'])
+    
+    return df[['Sport','Team_Norm','Power_Rating']]
+def enrich_power_from_current(
+    df: pd.DataFrame,
+    sport_aliases: dict,
+    table_current: str = "sharplogger.sharp_data.ratings_current",
+    project: str = "sharplogger",
+    baseline: float = 1500.0,
+) -> pd.DataFrame:
+    """
+    Adds Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff using ratings_current only.
+    Requires df columns: ['Sport','Home_Team_Norm','Away_Team_Norm'].
+    """
+
+    if df.empty:
+        return df
+
+    out = df.copy()
+    # normalize inputs
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+
+    def norm_team_series(s: pd.Series) -> pd.Series:
+        return (s.astype(str).str.lower().str.strip()
+                .str.replace(r'\s+', ' ', regex=True)
+                .str.replace('.', '', regex=False)
+                .str.replace('&', 'and', regex=False)
+                .str.replace('-', ' ', regex=False))
+
+    out['Home_Team_Norm'] = norm_team_series(out['Home_Team_Norm'])
+    out['Away_Team_Norm'] = norm_team_series(out['Away_Team_Norm'])
+
+    # alias → canon
+    canon = {}
+    for k, v in sport_aliases.items():
+        if isinstance(v, list):
+            for a in v: canon[str(a).upper()] = str(k).upper()
+        else:
+            canon[str(k).upper()] = str(v).upper()
+    out['Sport'] = out['Sport'].map(lambda s: canon.get(s, s))
+
+    # assume one sport per call; if mixed, keep the first sport_canon seen
+    sport_canon = out['Sport'].iloc[0]
+    out = out[out['Sport'] == sport_canon].copy()
+    if out.empty:
+        return df  # return original if filtering removed everything
+
+    # fetch latest current ratings for this sport
+    ratings = fetch_latest_current_ratings_cached(
+        sport=sport_canon,
+        table_current=table_current,
+        project=project,
+    )
+
+    # build a dict for O(1) lookups
+    rating_map = dict(zip(ratings['Team_Norm'], ratings['Power_Rating'])) if not ratings.empty else {}
+
+    # map teams → ratings (float32), fill with baseline if missing
+    base = np.float32(baseline)
+    out['Home_Power_Rating'] = out['Home_Team_Norm'].map(rating_map).astype('float32')
+    out['Away_Power_Rating'] = out['Away_Team_Norm'].map(rating_map).astype('float32')
+
+    if out['Home_Power_Rating'].isna().any() or out['Away_Power_Rating'].isna().any():
+        # if anything missing, use sport mean if we have ratings, else baseline
+        sport_mean = np.float32(ratings['Power_Rating'].mean()) if not ratings.empty else base
+        out['Home_Power_Rating'] = out['Home_Power_Rating'].fillna(sport_mean).astype('float32')
+        out['Away_Power_Rating'] = out['Away_Power_Rating'].fillna(sport_mean).astype('float32')
+
+    out['Power_Rating_Diff'] = (out['Home_Power_Rating'] - out['Away_Power_Rating']).astype('float32')
+    return out
+
+
+SPORT_ALIASES = {
+    "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
+    "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
+    "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
+    "NBA":   ["NBA", "BASKETBALL_NBA", "BASKETBALL-NBA", "BASKETBALL"],
+    "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
+}
+
+
 # ---------- MODEL READINESS TELEMETRY ----------
 MODEL_META_COLS = {
     # stable IDs for grouping/cv and de-dupe
@@ -2129,6 +2256,8 @@ MODEL_META_COLS = {
     'Event_Date':            'datetime64[ns]',
     'Commence_Hour':         'datetime64[ns, UTC]',
 }
+
+
 
 # features you already engineer (extend as needed)
 MODEL_FEATURE_CANDS = [
@@ -2550,13 +2679,29 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         (df['Limit'] >= 2500) &
         (df['Value'] == df['Open_Value'])
     ).astype(int)
-
+        try:
+    
     # === Cross-market support (optional)
     df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
     df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
     df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
     df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
     df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
+    try:
+        df = enrich_power_from_current(
+            df,
+            sport_aliases=SPORT_ALIASES,
+            table_current="sharplogger.sharp_data.ratings_current",
+            project="sharplogger",
+            baseline=1500.0,
+        )
+    except Exception as e:
+        logger.warning("⚠️ Power rating enrichment (current) failed: %s", e, exc_info=True)
+        # ensure columns exist with safe defaults
+        df['Home_Power_Rating'] = np.float32(1500.0)
+        df['Away_Power_Rating'] = np.float32(1500.0)
+        df['Power_Rating_Diff'] = np.float32(0.0)
+
     
     # === Confidence scores and tiers
     try:
