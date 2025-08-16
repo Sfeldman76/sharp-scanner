@@ -1396,12 +1396,12 @@ def enrich_and_grade_for_training(
     )
 
     # 2) consensus market spread (k) and market favorite per game
-    g_cons = _prep_consensus_market_spread(df_spread_rows, value_col=value_col, outcome_col=outcome_col)
-
+    g_cons = prep_consensus_market_spread_lowmem(df_spread_rows, value_col=value_col, outcome_col=outcome_col)
+    
     # 3) favorite-centric grading at game level
     game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
     g_full = (base.merge(g_cons, on=game_key, how='left'))
-    g_fc   = _favorite_centric_from_powerdiff(g_full)
+    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
 
     # 4) project game-level favorite-centric numbers back to per-outcome rows
     keep_cols = game_key + [
