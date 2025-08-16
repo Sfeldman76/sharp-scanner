@@ -1184,7 +1184,234 @@ def enrich_power_for_training_lowmem(
 
     # restore original row order
     out = out.sort_values('index').drop(columns=['index']).reset_index(drop=True)
-    return out    
+    return out   
+import numpy as np
+import pandas as pd
+from math import erf, sqrt
+
+# --- tune per sport from your finals (placeholders) ---
+SPORT_SPREAD_CFG = {
+    "NFL":   dict(points_per_elo=25.0, HFA=1.6, sigma_pts=13.2),
+    "NCAAF": dict(points_per_elo=28.0, HFA=2.4, sigma_pts=16.0),
+    "NBA":   dict(points_per_elo=28.0, HFA=2.2, sigma_pts=11.5),
+    "WNBA":  dict(points_per_elo=28.0, HFA=2.0, sigma_pts=10.5),
+    "CFL":   dict(points_per_elo=26.0, HFA=1.8, sigma_pts=14.0),
+}
+
+def _phi(x):  # Normal CDF via erf (no scipy dependency)
+    return 0.5 * (1.0 + erf(x / sqrt(2)))
+
+def _prep_consensus_market_spread(df: pd.DataFrame,
+                                  value_col: str = "Value",
+                                  outcome_col: str = "Outcome_Norm") -> pd.DataFrame:
+    """
+    Build one consensus, market-anchored spread per game:
+      - Favorite_Market_Spread = -k (negative)
+      - Underdog_Market_Spread = +k (positive)
+      - Market_Favorite_Team / Market_Underdog_Team
+    Works even if rows are per-outcome/per-book; uses medians.
+    Requires: Sport, Home_Team_Norm, Away_Team_Norm, value_col, outcome_col
+    """
+    d = df.copy()
+    d['Sport'] = d['Sport'].astype(str).str.upper()
+
+    # median spread per (Sport, Home, Away, Outcome)
+    med = (d.groupby(['Sport','Home_Team_Norm','Away_Team_Norm', outcome_col], dropna=False)[value_col]
+             .median()
+             .reset_index())
+
+    # pick favorite = outcome with the *more negative* median spread
+    # get per-game winner (min by value)
+    idx = med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[value_col].idxmin()
+    fav_rows = med.loc[idx].rename(columns={
+        outcome_col: 'Market_Favorite_Team', value_col: 'FavMed'
+    })
+
+    # also get dog (the other team)
+    # build a 2-row table per game to find the opponent names quickly
+    sides = med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[outcome_col].agg(list).reset_index()
+    fav = fav_rows.merge(sides, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left')
+    fav['Market_Underdog_Team'] = fav.apply(lambda r: [t for t in r[outcome_col] if t != r['Market_Favorite_Team']][0]
+                                            if isinstance(r[outcome_col], list) and len(r[outcome_col]) == 2 else np.nan, axis=1)
+
+    # spread magnitude k from absolute median value across outcomes
+    # (robust if only one side is present)
+    k_df = (med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[value_col]
+              .apply(lambda s: float(np.nanmedian(np.abs(s.values))))
+              .reset_index(name='k'))
+
+    g = (fav[['Sport','Home_Team_Norm','Away_Team_Norm','Market_Favorite_Team','Market_Underdog_Team']]
+         .merge(k_df, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left'))
+
+    g['Favorite_Market_Spread'] = -g['k']
+    g['Underdog_Market_Spread'] = +g['k']
+    return g
+
+def _favorite_centric_from_powerdiff(df_games: pd.DataFrame) -> pd.DataFrame:
+    """
+    Given Power_Rating_Diff (Home - Away) and market favorite (+/-k),
+    compute favorite/dog model spreads, edges, and cover probabilities.
+    Requires: Sport, Home_Team_Norm, Away_Team_Norm,
+              Power_Rating_Diff, Favorite_Market_Spread, Underdog_Market_Spread,
+              Market_Favorite_Team, Market_Underdog_Team
+    """
+    out = df_games.copy()
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+
+    # expected margin (home - away), in points
+    def row_params(sport, pr_diff):
+        cfg = SPORT_SPREAD_CFG.get(sport)
+        if (cfg is None) or pd.isna(pr_diff):
+            return np.nan, np.nan
+        mu = (pr_diff + cfg['HFA']) / cfg['points_per_elo']
+        return mu, cfg['sigma_pts']
+
+    vals = out.apply(lambda r: row_params(r['Sport'], r['Power_Rating_Diff']), axis=1, result_type='expand')
+    out[['Model_Expected_Margin','Sigma_Pts']] = vals
+
+    # convert to favorite-centric (abs margin)
+    mu_abs = out['Model_Expected_Margin'].abs()
+    out['Model_Expected_Margin_Abs'] = mu_abs
+    out['Model_Fav_Spread'] = -mu_abs
+    out['Model_Dog_Spread'] = +mu_abs
+
+    # edges vs market (-k for fav, +k for dog)
+    out['Fav_Edge_Pts'] = out['Model_Fav_Spread'] - out['Favorite_Market_Spread']
+    out['Dog_Edge_Pts'] = out['Model_Dog_Spread'] - out['Underdog_Market_Spread']
+
+    # cover probabilities under Normal residuals:
+    # Fav covers if margin > k where margin ~ N(mu_abs, sigma)
+    k = out['Underdog_Market_Spread'].abs()
+    z = (k - mu_abs) / out['Sigma_Pts']
+    out['Fav_Cover_Prob'] = 1.0 - _phi(z)
+    out['Dog_Cover_Prob'] = _phi(z)
+
+    # also keep model-favorite for diagnostics
+    out['Model_Favorite_Team'] = np.where(out['Model_Expected_Margin'] >= 0,
+                                          out['Home_Team_Norm'], out['Away_Team_Norm'])
+    out['Model_Underdog_Team'] = np.where(out['Model_Expected_Margin'] >= 0,
+                                          out['Away_Team_Norm'], out['Home_Team_Norm'])
+    return out
+
+def enrich_and_grade_for_training(
+    df_spread_rows: pd.DataFrame,
+    bq,
+    sport_aliases: dict,
+    value_col: str = "Value",
+    outcome_col: str = "Outcome_Norm",
+    pad_days: int = 10,
+    allow_forward_hours: float = 0.0,
+    table_history: str = "sharplogger.sharp_data.ratings_history",
+    project: str = None,
+) -> pd.DataFrame:
+    """
+    TRAINING-SAFE pipeline:
+      1) Backward-asof ratings via your low-mem function (no leakage)
+      2) Consensus market spread per game, market-anchored favorite
+      3) Favorite-centric model spreads, edges, and cover probs
+    Input: per-outcome/per-book spread rows.
+    Output: per-outcome rows with favorite-centric numbers merged back.
+    """
+    if df_spread_rows.empty:
+        return df_spread_rows
+
+    # 1) leakage-safe ratings
+    base = enrich_power_for_training_lowmem(
+        df_spread_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+        bq=bq,
+        sport_aliases=sport_aliases,
+        table_history=table_history,
+        pad_days=pad_days,
+        allow_forward_hours=allow_forward_hours,
+        project=project,
+    )
+
+    # 2) consensus market spread (k) and market favorite per game
+    g_cons = _prep_consensus_market_spread(df_spread_rows, value_col=value_col, outcome_col=outcome_col)
+
+    # 3) favorite-centric grading at game level
+    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
+    g_full = (base.merge(g_cons, on=game_key, how='left'))
+    g_fc   = _favorite_centric_from_powerdiff(g_full)
+
+    # 4) project game-level favorite-centric numbers back to per-outcome rows
+    keep_cols = game_key + [
+        'Market_Favorite_Team','Market_Underdog_Team',
+        'Favorite_Market_Spread','Underdog_Market_Spread',
+        'Model_Favorite_Team','Model_Underdog_Team',
+        'Model_Fav_Spread','Model_Dog_Spread',
+        'Fav_Edge_Pts','Dog_Edge_Pts',
+        'Fav_Cover_Prob','Dog_Cover_Prob',
+        'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
+        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
+    ]
+    g_fc = g_fc[keep_cols].copy()
+
+    out = df_spread_rows.merge(g_fc, on=game_key, how='left')
+
+    # per-outcome mapping
+    is_fav = (out[outcome_col] == out['Market_Favorite_Team'])
+    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'], out['Model_Dog_Spread'])
+    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'], out['Underdog_Market_Spread'])
+    out['Outcome_Spread_Edge']   = np.where(is_fav, out['Fav_Edge_Pts'], out['Dog_Edge_Pts'])
+    out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'], out['Dog_Cover_Prob'])
+
+    return out
+
+import numpy as np
+import pandas as pd
+
+def build_spread_training_features(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    # Core magnitudes
+    out['k'] = out['Outcome_Market_Spread'].abs().astype(float)
+    out['mu_abs'] = out['Model_Expected_Margin_Abs'].astype(float)
+    out['edge_pts'] = (out['mu_abs'] - out['k']).astype(float)
+
+    # Standardized edge (protect against div-by-zero)
+    sigma = out['Sigma_Pts'].replace(0, np.nan)
+    out['z'] = (out['k'] - out['mu_abs']) / sigma
+
+    # Orientation flags
+    out['is_market_fav_team'] = (out['Outcome_Market_Spread'] < 0).astype('int8')
+    out['is_home_team'] = (out['Outcome_Norm'] == out['Home_Team_Norm']).astype('int8')
+
+    # Model vs market favorite agreement (project game-level labels first if needed)
+    if {'Model_Favorite_Team','Market_Favorite_Team'}.issubset(out.columns):
+        out['model_fav_vs_market_fav_agree'] = (
+            out['Model_Favorite_Team'] == out['Market_Favorite_Team']
+        ).astype('int8')
+    else:
+        out['model_fav_vs_market_fav_agree'] = np.nan  # optional if not joined
+
+    # Raw rating signals
+    out['Power_Rating_Diff'] = out['Power_Rating_Diff'].astype(float)
+
+    # Simple interactions (often helpful)
+    out['edge_x_k'] = out['edge_pts'] * out['k']
+    out['mu_x_k'] = out['mu_abs'] * out['k']
+
+    # Clip/clean
+    out['z'] = out['z'].clip(-6, 6)  # tame outliers
+    out.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # Select final feature set
+    features = [
+        'mu_abs', 'k', 'edge_pts', 'z',
+        'is_market_fav_team', 'is_home_team',
+        'model_fav_vs_market_fav_agree',
+        'Power_Rating_Diff',
+        'edge_x_k', 'mu_x_k',
+        # add timing/market extras if present & pre-game safe:
+        # 'Minutes_To_Game_Tier','Late_Game_Steam_Flag',
+        # 'Sigma_Pts','Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
+        # 'Was_Line_Resistance_Broken','Value_Reversal_Flag','Odds_Reversal_Flag',
+        # 'Book_Reliability_Score','Market_Leader',
+    ]
+    # keep only columns that exist
+    features = [c for c in features if c in out.columns]
+    return out[features]
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
     SPORT_DAYS_BACK = {
@@ -1295,6 +1522,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             st.exception(e)
             st.stop()
 
+    # df_spreads is your historical spread rows (per outcome/book/snapshot)
+    # must include: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
+    df_train = enrich_and_grade_for_training(
+        df_spread_rows=df_spreads,
+        bq=bq_client,
+        sport_aliases=SPORT_ALIASES,          # your existing alias dict
+        value_col="Value",
+        outcome_col="Outcome_Norm",
+        pad_days=10,
+        allow_forward_hours=0.0,              # strict backward-only for training
+        table_history="sharplogger.sharp_data.ratings_history",
+        project=PROJECT_ID,
+    )
 
     # === Pivot line values (e.g., -3.5, 210.5, etc.)
     value_pivot = df_latest.pivot_table(
@@ -1640,6 +1880,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
             (df_market['Total_vs_Spread_ProbGap'].abs() > 0.05)
         ).astype(int)
+        df_market = enrich_and_grade_for_training(df_spreads, bq, sport_aliases, ...)
 
         
          # Absolute line move
@@ -1845,11 +2086,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Book_Reliability_x_Magnitude','Book_Reliability_x_PROB_SHIFT',
             'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff','PR_Abs_Rating_Diff',
-            #'PR_Spread_Residual',
-            #'PR_Agrees_With_Favorite',
-            #'PR_Prob_From_Rating','PR_Prob_Gap_vs_Market'
-            
-    
+            'Outcome_Model_Spread',
+            'Outcome_Market_Spread',
+            'Outcome_Spread_Edge',
+            'Outcome_Cover_Prob',
+            'mu_abs', 'k', 'edge_pts', 'z',            
+            'model_fav_vs_market_fav_agree',            
+            'edge_x_k', 'mu_x_k',
+              
         ]
         
     
