@@ -1539,7 +1539,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         pad_days=10,
         allow_forward_hours=0.0,  # strict backward-only
         table_history="sharplogger.sharp_data.ratings_history",
-        project=PROJECT_ID,
+        project="sharplogger",
     )
     
 
@@ -1634,7 +1634,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 pad_days=10,
                 allow_forward_hours=0.0,
                 table_history="sharplogger.sharp_data.ratings_history",
-                project=PROJECT_ID,
+                project="sharplogger",
             )
     
             # keep the columns you need and merge back to df_market
