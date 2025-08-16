@@ -2239,6 +2239,101 @@ SPORT_ALIASES = {
     "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
 }
 
+SPORT_SPREAD_CFG = {
+    "NFL":   dict(points_per_elo=25.0, HFA=1.6, sigma_pts=13.2),
+    "NCAAF": dict(points_per_elo=28.0, HFA=2.4, sigma_pts=16.0),
+    "NBA":   dict(points_per_elo=28.0, HFA=2.2, sigma_pts=11.5),
+    "WNBA":  dict(points_per_elo=28.0, HFA=2.0, sigma_pts=10.5),
+    "CFL":   dict(points_per_elo=26.0, HFA=1.8, sigma_pts=14.0),
+}
+
+
+def _prep_consensus_market_spread_current(df, value_col="Value", outcome_col="Outcome_Norm"):
+    d = df.copy()
+    d['Sport'] = d['Sport'].astype(str).str.upper()
+
+    med = (d.groupby(['Sport','Home_Team_Norm','Away_Team_Norm', outcome_col], dropna=False)[value_col]
+             .median().reset_index())
+
+    # favorite = row with *more negative* spread
+    idx = med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[value_col].idxmin()
+    fav_rows = med.loc[idx].rename(columns={outcome_col:'Market_Favorite_Team', value_col:'FavMed'})
+
+    # opponent (dog)
+    sides = med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[outcome_col].agg(list).reset_index()
+    fav = fav_rows.merge(sides, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left')
+    fav['Market_Underdog_Team'] = fav.apply(
+        lambda r: [t for t in r[outcome_col] if t != r['Market_Favorite_Team']][0]
+        if isinstance(r[outcome_col], list) and len(r[outcome_col]) == 2 else np.nan, axis=1
+    )
+
+    # k = abs spread magnitude (robust if only one side present)
+    k_df = (med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[value_col]
+              .apply(lambda s: float(np.nanmedian(np.abs(s.values)))).reset_index(name='k'))
+
+    g = (fav[['Sport','Home_Team_Norm','Away_Team_Norm','Market_Favorite_Team','Market_Underdog_Team']]
+         .merge(k_df, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left'))
+    g['Favorite_Market_Spread']  = -g['k']
+    g['Underdog_Market_Spread']  = +g['k']
+    return g
+
+def _favorite_centric_current(df_games):
+    out = df_games.copy()
+    out['Sport'] = out['Sport'].astype(str).str.upper()
+
+    def row_params(sport, pr_diff):
+        cfg = SPORT_SPREAD_CFG.get(sport)
+        if (cfg is None) or pd.isna(pr_diff):
+            return np.nan, np.nan
+        mu = (pr_diff + cfg['HFA']) / cfg['points_per_elo']  # home−away margin in points
+        return mu, cfg['sigma_pts']
+
+    vals = out.apply(lambda r: row_params(r['Sport'], r['Power_Rating_Diff']), axis=1, result_type='expand')
+    out[['Model_Expected_Margin','Sigma_Pts']] = vals
+    mu_abs = out['Model_Expected_Margin'].abs()
+
+    out['Model_Expected_Margin_Abs'] = mu_abs
+    out['Model_Fav_Spread'] = -mu_abs
+    out['Model_Dog_Spread'] = +mu_abs
+
+    # diagnostics
+    out['Model_Favorite_Team']  = np.where(out['Model_Expected_Margin'] >= 0, out['Home_Team_Norm'], out['Away_Team_Norm'])
+    out['Model_Underdog_Team']  = np.where(out['Model_Expected_Margin'] >= 0, out['Away_Team_Norm'], out['Home_Team_Norm'])
+    return out
+
+def _attach_outcome_projection(df_outcomes, df_game_fc):
+    g = df_game_fc[
+        ['Sport','Home_Team_Norm','Away_Team_Norm',
+         'Favorite_Market_Spread','Underdog_Market_Spread','k',
+         'Model_Fav_Spread','Model_Dog_Spread',
+         'Model_Expected_Margin_Abs','Sigma_Pts',
+         'Market_Favorite_Team','Model_Favorite_Team']
+    ].copy()
+
+    out = df_outcomes.merge(g, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left')
+    is_fav = (out['Outcome_Norm'] == out['Market_Favorite_Team'])
+
+    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'], out['Model_Dog_Spread'])
+    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'], out['Underdog_Market_Spread'])
+    out['Outcome_Spread_Edge']   = out['Outcome_Model_Spread'] - out['Outcome_Market_Spread']
+
+    # engineered features (forward-safe)
+    out['k']        = out['Outcome_Market_Spread'].abs()
+    out['mu_abs']   = out['Model_Expected_Margin_Abs']
+    out['edge_pts'] = out['mu_abs'] - out['k']
+    out['z']        = (out['k'] - out['mu_abs']) / out['Sigma_Pts'].replace(0, np.nan)
+    out['is_market_fav_team'] = (out['Outcome_Market_Spread'] < 0).astype('int8')
+    out['is_home_team']       = (out['Outcome_Norm'] == out['Home_Team_Norm']).astype('int8')
+    out['model_fav_vs_market_fav_agree'] = (
+        out['Model_Favorite_Team'] == out['Market_Favorite_Team']
+    ).astype('int8')
+    out['edge_x_k'] = out['edge_pts'] * out['k']
+    out['mu_x_k']   = out['mu_abs']  * out['k']
+    out['z'] = out['z'].clip(-6, 6)
+    out.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return out
+
+
 
 # ---------- MODEL READINESS TELEMETRY ----------
 MODEL_META_COLS = {
@@ -2702,7 +2797,22 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Away_Power_Rating'] = np.float32(1500.0)
         df['Power_Rating_Diff'] = np.float32(0.0)
 
+  
+    # === NEW: favorite-centric grading (forward) ===
+    # (a) consensus k and market favorite at game-level
+    g_cons = _prep_consensus_market_spread_current(
+        df, value_col="Value", outcome_col="Outcome_Norm"
+    )
     
+    # (b) model expected margin from ratings diff
+    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
+    g_full = (df.drop_duplicates(subset=game_key)[game_key + ['Power_Rating_Diff']]
+                .merge(g_cons, on=game_key, how='left'))
+    g_fc = _favorite_centric_current(g_full)
+    
+    # (c) project to per-outcome rows + engineered features
+    df = _attach_outcome_projection(df, g_fc)
+  
     # === Confidence scores and tiers
     try:
         if weights:
