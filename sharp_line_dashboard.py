@@ -1016,62 +1016,68 @@ def fetch_training_ratings_window_cached(
 
 def enrich_power_for_training(
     df: pd.DataFrame,
-    bq,  # BigQuery client (not used inside fetch; you already have one elsewhere)
+    bq,  # kept for signature parity if you pass it elsewhere; not used here
     sport_aliases: dict,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 10,
-    allow_forward_hours: float = 0.0,   # keep 0 for strict leak-safety
-    project: str = None,                # pass your GCP project if needed
+    allow_forward_hours: float = 0.0,
+    project: str = None,
 ) -> pd.DataFrame:
     """
-    Leak-safe enrichment for TRAINING:
-      - HISTORY ONLY
-      - backward-asof only (optionally tiny forward grace)
+    TRAINING enrichment (leak-safe):
+      - ratings_history only
+      - backward-asof (optional tiny forward grace)
       - no 'current' fallback
+    Produces: Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
     """
-
     import gc
+    import numpy as np
+    import pandas as pd
 
     if df.empty:
         return df
 
+    # --- normalize inputs
     out = df.copy()
-    # normalize inputs
     out['Sport'] = out['Sport'].astype(str).str.upper()
     out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
     out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
     out['Game_Start'] = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
 
-    # alias→canon
+    # alias → canon
     canon = {}
     for k, v in sport_aliases.items():
         if isinstance(v, list):
-            for a in v: canon[str(a).upper()] = str(k).upper()
+            for a in v:
+                canon[str(a).upper()] = str(k).upper()
         else:
             canon[str(k).upper()] = str(v).upper()
     out['Sport'] = out['Sport'].map(lambda s: canon.get(s, s))
 
-    # one sport per call recommended
+    # recommend one sport per call
     sport_canon = out['Sport'].iloc[0]
     out = out[out['Sport'] == sport_canon].copy()
     if out.empty:
         return df
 
-    # long form (one row per side)
-    req = pd.concat([
-        out[['Sport','Game_Start','Home_Team_Norm']].rename(columns={'Home_Team_Norm':'Team_Norm'}).assign(Side='Home'),
-        out[['Sport','Game_Start','Away_Team_Norm']].rename(columns={'Away_Team_Norm':'Team_Norm'}).assign(Side='Away'),
-    ], ignore_index=True)
-
+    # long-form requests
+    req = pd.concat(
+        [
+            out[['Sport','Game_Start','Home_Team_Norm']].rename(columns={'Home_Team_Norm':'Team_Norm'}).assign(Side='Home'),
+            out[['Sport','Game_Start','Away_Team_Norm']].rename(columns={'Away_Team_Norm':'Team_Norm'}).assign(Side='Away'),
+        ],
+        ignore_index=True
+    )
     req['Team_Norm']  = req['Team_Norm'].astype(str).str.strip().str.lower()
     req['Game_Start'] = pd.to_datetime(req['Game_Start'], utc=True, errors='coerce')
 
-    # fetch window
+    # window for fetch (tight to save memory)
     gmin, gmax = req['Game_Start'].min(), req['Game_Start'].max()
     pad = pd.Timedelta(days=pad_days)
-    start_iso = _iso(gmin - pad)
-    end_iso   = _iso(gmax + pad)
+    start_iso = pd.to_datetime(gmin - pad, utc=True).isoformat()
+    end_iso   = pd.to_datetime(gmax + pad, utc=True).isoformat()
 
+    # === fetch ratings (history-only, cached) ===
     ratings = fetch_training_ratings_window_cached(
         sport=sport_canon,
         start_iso=start_iso,
@@ -1080,26 +1086,42 @@ def enrich_power_for_training(
         project=project,
     )
 
+    # If nothing, use a safe baseline (no leakage)
     if ratings.empty:
-        # Safe, leak-free baseline
         base = np.float32(1500.0)
         out['Home_Power_Rating'] = base
         out['Away_Power_Rating'] = base
         out['Power_Rating_Diff'] = np.float32(0.0)
         return out
 
-    # drop NA keys and stabilize dtypes
+    # --- same normalization on BOTH sides (AFTER fetch)
+    def norm_team(series: pd.Series) -> pd.Series:
+        return (series.astype(str).str.lower().str.strip()
+                .str.replace(r'\s+', ' ', regex=True)
+                .str.replace('.', '', regex=False)   # 'st. louis' -> 'st louis'
+                .str.replace('&', 'and', regex=False)
+                .str.replace('-', ' ', regex=False))
+
+    req['Team_Norm']      = norm_team(req['Team_Norm'])
+    ratings['Team_Norm']  = norm_team(ratings['Team_Norm'])
+
+    # keep join keys as plain strings (avoid categorical mismatch)
+    req['Sport']      = req['Sport'].astype(str)
+    req['Team_Norm']  = req['Team_Norm'].astype(str)
+    ratings['Sport']      = ratings['Sport'].astype(str)
+    ratings['Team_Norm']  = ratings['Team_Norm'].astype(str)
+
+    # drop NA keys
     req = req.dropna(subset=['Sport','Team_Norm','Game_Start'])
     ratings = ratings.dropna(subset=['Sport','Team_Norm','AsOfTS'])
     if req.empty or ratings.empty:
         return out
 
-    for c in ['Sport','Team_Norm','Side']:
-        req[c] = req[c].astype('category')
+    # sort for asof
+    left  = req.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
+    right = ratings.sort_values(['Sport','Team_Norm','AsOfTS'],  kind='mergesort')
 
-    # 1) backward-asof (strict)
-    left = req.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
-    right = ratings.sort_values(['Sport','Team_Norm','AsOfTS'], kind='mergesort')
+    # 1) strict backward-asof
     back = pd.merge_asof(
         left=left, right=right,
         left_on='Game_Start', right_on='AsOfTS',
@@ -1107,14 +1129,13 @@ def enrich_power_for_training(
         direction='backward', allow_exact_matches=True
     )
 
-    # 2) optional tiny forward grace (to tolerate ingestion lags)
+    # 2) optional tiny forward grace (ingestion lag tolerance)
     if allow_forward_hours > 0:
         need = back['Power_Rating'].isna()
         if need.any():
-            fsrc = left.loc[need, ['Sport','Team_Norm','Game_Start','Side']]
+            fsrc = left.loc[need, ['Sport','Team_Norm','Game_Start','Side']].sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
             fwd = pd.merge_asof(
-                left=fsrc.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort'),
-                right=right,
+                left=fsrc, right=right,
                 left_on='Game_Start', right_on='AsOfTS',
                 by=['Sport','Team_Norm'],
                 direction='forward', allow_exact_matches=True
@@ -1123,7 +1144,7 @@ def enrich_power_for_training(
             ok = (fwd['AsOfTS'] - fwd['Game_Start']).abs() <= grace
             back.loc[need & ok, 'Power_Rating'] = fwd.loc[ok, 'Power_Rating'].astype('float32').values
 
-    # 3) per-sport baseline if still missing
+    # baseline fill if still missing (no current fallback in training)
     sport_mean = float(ratings['Power_Rating'].mean()) if not ratings.empty else 1500.0
     m = back['Power_Rating'].isna()
     if m.any():
@@ -1142,11 +1163,19 @@ def enrich_power_for_training(
     out = out.merge(away, on=['Sport','Game_Start','Away_Team_Norm'], how='left')
     del away; gc.collect()
 
-    # diffs (float32)
-    out['Home_Power_Rating'] = out['Home_Power_Rating'].astype('float32')
-    out['Away_Power_Rating'] = out['Away_Power_Rating'].astype('float32')
+    # diffs
+    out['Home_Power_Rating'] = pd.to_numeric(out['Home_Power_Rating'], errors='coerce').astype('float32')
+    out['Away_Power_Rating'] = pd.to_numeric(out['Away_Power_Rating'], errors='coerce').astype('float32')
     out['Power_Rating_Diff'] = (out['Home_Power_Rating'] - out['Away_Power_Rating']).astype('float32')
+
+    # (optional) now that merges are done, shrink some columns
+    for c in ['Sport','Home_Team_Norm','Away_Team_Norm']:
+        if c in out.columns:
+            out[c] = out[c].astype('category')
+
     return out
+
+
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
     SPORT_DAYS_BACK = {
