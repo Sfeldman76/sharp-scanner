@@ -1115,17 +1115,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     )
      
     with st.spinner("Training…"):
-    try:
-        df_bt = enrich_power_for_training(
-            df=df_bt,
-            bq=get_bq(),
-            sport_aliases=SPORT_ALIASES,
-            pad_days=10,
-            allow_forward_hours=0.0
-        )
-    except Exception as e:
-        st.exception(e)
-        st.stop()
+        try:
+            df_bt = enrich_power_for_training(
+                df=df_bt,
+                bq=get_bq(),
+                sport_aliases=SPORT_ALIASES,
+                pad_days=10,
+                allow_forward_hours=0.0
+            )
+        except Exception as e:
+            st.exception(e)
+            st.stop()
 
 
     # === Pivot line values (e.g., -3.5, 210.5, etc.)
