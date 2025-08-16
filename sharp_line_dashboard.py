@@ -1727,7 +1727,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 'Market_Favorite_Team','Market_Underdog_Team',
                 'Favorite_Market_Spread','Underdog_Market_Spread','k'
             ]
-        
+            # Ensure `k` exists in g_fc (abs of either market spread)
+            if 'k' not in g_fc.columns:
+                fav_abs = pd.to_numeric(g_fc.get('Favorite_Market_Spread'), errors='coerce').abs()
+                dog_abs = pd.to_numeric(g_fc.get('Underdog_Market_Spread'), errors='coerce').abs()
+                g_fc['k'] = fav_abs.fillna(dog_abs).astype('float32')
             g_map = g_fc[keep_game + keep_market].drop_duplicates(subset=game_keys)
             df_market = df_market.merge(g_map, on=game_keys, how='left', copy=False)
         
