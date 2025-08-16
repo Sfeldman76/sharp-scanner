@@ -1121,16 +1121,34 @@ def enrich_power_for_training(
         else:                                   ratings[col] = ratings[col].astype(str)
 
     # drop NA keys
+    # Ensure tz-aware dtypes
+    req['Game_Start']    = pd.to_datetime(req['Game_Start'], utc=True, errors='coerce')
+    ratings['AsOfTS']    = pd.to_datetime(ratings['AsOfTS'], utc=True, errors='coerce')
+    
+    # Drop NaTs in join keys
     req     = req.dropna(subset=['Sport','Team_Norm','Game_Start'])
     ratings = ratings.dropna(subset=['Sport','Team_Norm','AsOfTS'])
-    if req.empty or ratings.empty:
-        return out
-
-    # sort for asof
-    left  = req.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
-    right = ratings.sort_values(['Sport','Team_Norm','AsOfTS'],  kind='mergesort')
-
-    # 1) strict backward-asof
+    
+    # 1) Global lexicographic sort: BY keys then time
+    left  = req.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort').reset_index(drop=True)
+    right = ratings.sort_values(['Sport','Team_Norm','AsOfTS'],  kind='mergesort').reset_index(drop=True)
+    
+    # 2) Groupwise monotonic check & repair (paranoid but safe)
+    if not left.groupby(['Sport','Team_Norm'], sort=False)['Game_Start'].apply(lambda s: s.is_monotonic_increasing).all():
+        left = (left.groupby(['Sport','Team_Norm'], sort=False, group_keys=False)
+                     .apply(lambda g: g.sort_values('Game_Start', kind='mergesort'))
+                     .reset_index(drop=True))
+    
+    if not right.groupby(['Sport','Team_Norm'], sort=False)['AsOfTS'].apply(lambda s: s.is_monotonic_increasing).all():
+        right = (right.groupby(['Sport','Team_Norm'], sort=False, group_keys=False)
+                      .apply(lambda g: g.sort_values('AsOfTS', kind='mergesort'))
+                      .reset_index(drop=True))
+    
+    # Optional: assert just before merge (will raise with clear message)
+    assert left.equals(left.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')), "left not fully sorted"
+    assert right.equals(right.sort_values(['Sport','Team_Norm','AsOfTS'],    kind='mergesort')), "right not fully sorted"
+    
+    # Now it’s safe:
     back = pd.merge_asof(
         left=left, right=right,
         left_on='Game_Start', right_on='AsOfTS',
