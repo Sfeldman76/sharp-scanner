@@ -1185,8 +1185,7 @@ def enrich_power_for_training_lowmem(
     # restore original row order
     out = out.sort_values('index').drop(columns=['index']).reset_index(drop=True)
     return out   
-import numpy as np
-import pandas as pd
+
 from math import erf, sqrt
 
 # --- tune per sport from your finals (placeholders) ---
@@ -1358,8 +1357,7 @@ def enrich_and_grade_for_training(
 
     return out
 
-import numpy as np
-import pandas as pd
+
 
 def build_spread_training_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -1396,22 +1394,10 @@ def build_spread_training_features(df: pd.DataFrame) -> pd.DataFrame:
     out['z'] = out['z'].clip(-6, 6)  # tame outliers
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
 
-    # Select final feature set
-    features = [
-        'mu_abs', 'k', 'edge_pts', 'z',
-        'is_market_fav_team', 'is_home_team',
-        'model_fav_vs_market_fav_agree',
-        'Power_Rating_Diff',
-        'edge_x_k', 'mu_x_k',
-        # add timing/market extras if present & pre-game safe:
-        # 'Minutes_To_Game_Tier','Late_Game_Steam_Flag',
-        # 'Sigma_Pts','Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
-        # 'Was_Line_Resistance_Broken','Value_Reversal_Flag','Odds_Reversal_Flag',
-        # 'Book_Reliability_Score','Market_Leader',
-    ]
-    # keep only columns that exist
-    features = [c for c in features if c in out.columns]
+
     return out[features]
+
+
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
     SPORT_DAYS_BACK = {
@@ -1534,6 +1520,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         allow_forward_hours=0.0,              # strict backward-only for training
         table_history="sharplogger.sharp_data.ratings_history",
         project=PROJECT_ID,
+    )
+    df_fc = enrich_and_grade_for_training(
+        df_spread_rows=df_market,  # same schema you’re using below
+        bq=bq, sport_aliases=sport_aliases,
+        value_col="Value", outcome_col="Outcome_Norm",
+        pad_days=10, allow_forward_hours=0.0,
+        table_history="sharplogger.sharp_data.ratings_history",
+        project=project,
     )
 
     # === Pivot line values (e.g., -3.5, 210.5, etc.)
@@ -2093,6 +2087,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'mu_abs', 'k', 'edge_pts', 'z',            
             'model_fav_vs_market_fav_agree',            
             'edge_x_k', 'mu_x_k',
+            'mu_abs', 'k', 'edge_pts', 'z',
+            
+            
+          
               
         ]
         
