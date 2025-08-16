@@ -1687,25 +1687,73 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # 2) Consensus market (one row per game)
             g_cons = prep_consensus_market_spread_lowmem(df_slice, value_col='Value', outcome_col='Outcome_Norm')
-        
-            # 3) Join in (already-enriched) rating diff (from your earlier lowmem as-of step on df_bt)
+            # Build maps from df_train (training-safe enrichment)
             game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
+            
+            pr_map = df_train[game_keys + ['Power_Rating_Diff']].drop_duplicates()
+            cons_map = df_train[game_keys + [
+                'Market_Favorite_Team','Market_Underdog_Team',
+                'Favorite_Market_Spread','Underdog_Market_Spread','k'
+            ]].drop_duplicates()
+            
+            # Construct g_full
             g_full = (
                 df_slice[game_keys].drop_duplicates()
-                .merge(df_bt[game_keys + ['Power_Rating_Diff']].drop_duplicates(), on=game_keys, how='left')
-                .merge(g_cons, on=game_keys, how='left')
+                .merge(pr_map, on=game_keys, how='left')
+                .merge(cons_map, on=game_keys, how='left')
             )
-        
-            # 4) Model margin & spreads (float32, tiny temps)
+            
+            # Then pass to favorite_centric_from_powerdiff_lowmem
             g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
+                    
+            # 4) Model margin & spreads (float32, tiny temps)
+           
         
-            # 5) Attach favorite-centric outputs back to per-outcome rows + engineered features
+            # 5) Project favorite-centric outputs back to per-outcome rows (inline)
+
+            game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
+            
             keep_market = game_keys + [
                 'Market_Favorite_Team','Market_Underdog_Team',
                 'Favorite_Market_Spread','Underdog_Market_Spread','k'
             ]
-            g_to_outcomes = g_fc.merge(g_cons[keep_market], on=game_keys, how='left')
-            df_market = attach_outcome_projection_lowmem(df_market, g_to_outcomes)
+            keep_game = game_keys + [
+                'Model_Fav_Spread','Model_Dog_Spread',
+                'Fav_Edge_Pts','Dog_Edge_Pts',
+                'Fav_Cover_Prob','Dog_Cover_Prob'
+            ]
+            
+            # Join model outputs with market summary
+            g_map = (
+                g_fc[keep_game]
+                .merge(g_cons[keep_market], on=game_keys, how='left')
+            )
+            
+            # Merge onto per-outcome rows
+            df_market = df_market.merge(g_map, on=game_keys, how='left', copy=False)
+            
+            # Which outcome is the market favorite?
+            is_fav = (
+                df_market['Outcome_Norm'].astype(str).values ==
+                df_market['Market_Favorite_Team'].astype(str).values
+            )
+            
+            # Per-outcome values
+            df_market['Outcome_Model_Spread']  = np.where(
+                is_fav, df_market['Model_Fav_Spread'].values, df_market['Model_Dog_Spread'].values
+            ).astype('float32')
+            
+            df_market['Outcome_Market_Spread'] = np.where(
+                is_fav, df_market['Favorite_Market_Spread'].values, df_market['Underdog_Market_Spread'].values
+            ).astype('float32')
+            
+            df_market['Outcome_Spread_Edge']   = np.where(
+                is_fav, df_market['Fav_Edge_Pts'].values, df_market['Dog_Edge_Pts'].values
+            ).astype('float32')
+            
+            df_market['Outcome_Cover_Prob']    = np.where(
+                is_fav, df_market['Fav_Cover_Prob'].values, df_market['Dog_Cover_Prob'].values
+            ).astype('float32')
            
           
         def label_team_role(row):
