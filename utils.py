@@ -2798,20 +2798,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df['Power_Rating_Diff'] = np.float32(0.0)
 
   
-    # === NEW: favorite-centric grading (forward) ===
-    # (a) consensus k and market favorite at game-level
-    g_cons = _prep_consensus_market_spread_current(
-        df, value_col="Value", outcome_col="Outcome_Norm"
-    )
     
-    # (b) model expected margin from ratings diff
-    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
-    g_full = (df.drop_duplicates(subset=game_key)[game_key + ['Power_Rating_Diff']]
-                .merge(g_cons, on=game_key, how='left'))
-    g_fc = _favorite_centric_current(g_full)
-    
-    # (c) project to per-outcome rows + engineered features
-    df = _attach_outcome_projection(df, g_fc)
   
     # === Confidence scores and tiers
     try:
