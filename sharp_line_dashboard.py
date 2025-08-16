@@ -1764,8 +1764,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
         df_market['Book_lift_x_PROB_SHIFT'] = df_market['Book_Reliability_Lift'] * df_market['Is_Sharp_Book'] * df_market['Implied_Prob_Shift'] 
         
-        # 0) Fetch once per sport
-        df_market = df_market.merge(per_game, on='Game_Key', how='left')
+       
 
                    
         # ensure normalized for comparison
