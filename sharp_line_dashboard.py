@@ -1510,6 +1510,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
     # df_spreads is your historical spread rows (per outcome/book/snapshot)
     # must include: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
+    # Build the spread-rows input from your working frame
+    df_spreads = (
+        df_market  # <- replace with whatever your training DF is called
+        [[
+            'Sport','Game_Start','Home_Team_Norm','Away_Team_Norm',
+            'Outcome_Norm','Value'
+         ]]
+        .dropna(subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'])
+        .copy()
+    )
+    
+    # Optional: normalize types
+    df_spreads['Sport'] = df_spreads['Sport'].astype(str).str.upper()
+    df_spreads['Outcome_Norm'] = df_spreads['Outcome_Norm'].astype(str).str.lower().str.strip()
+
+
     df_train = enrich_and_grade_for_training(
         df_spread_rows=df_spreads,
         bq=bq_client,
