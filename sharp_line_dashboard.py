@@ -1190,16 +1190,35 @@ def enrich_power_for_training_lowmem(
 import numpy as np
 import pandas as pd
 
-# --- fast Normal CDF (SciPy-free), vectorized, low-temp
+# --- fast Normal CDF (SciPy-free), vectorized, low-temp ---
 def _phi(x):
     """
-    Logistic approximation to Φ(x). 
-    Very close to Normal CDF for |x|≲4, no SciPy, vectorized, low-intermediate memory.
+    Approx to Φ(x) using Abramowitz–Stegun 7.1.26.
+    Vectorized, float32, stable for |x| up to ~8.
     """
+    import numpy as np
     x = np.asarray(x, dtype=np.float32)
-    return 1.0 / (1.0 + np.exp(-1.702 * x, dtype=np.float32))
+    # constants as float32
+    p = np.float32(0.2316419)
+    b1, b2, b3, b4, b5 = (np.float32(0.319381530),
+                          np.float32(-0.356563782),
+                          np.float32(1.781477937),
+                          np.float32(-1.821255978),
+                          np.float32(1.330274429))
+    # work on absolute x
+    ax = np.abs(x, dtype=np.float32)
+    t = 1.0 / (1.0 + p * ax)
+    t2 = t * t
+    t3 = t2 * t
+    t4 = t3 * t
+    t5 = t4 * t
+    # standard normal pdf
+    pdf = np.exp(-0.5 * ax * ax, dtype=np.float32) * np.float32(0.3989422804014327)  # 1/sqrt(2π)
+    poly = b1*t + b2*t2 + b3*t3 + b4*t4 + b5*t5
+    cdf_ax = 1.0 - (pdf * poly).astype(np.float32)
+    # reflect for negative x
+    return np.where(x >= 0, cdf_ax, 1.0 - cdf_ax).astype(np.float32)
 
-# Keep sport params float32 to minimize temps
 SPORT_SPREAD_CFG = {
     "NFL":   dict(points_per_elo=np.float32(25.0), HFA=np.float32(1.6), sigma_pts=np.float32(13.2)),
     "NCAAF": dict(points_per_elo=np.float32(28.0), HFA=np.float32(2.4), sigma_pts=np.float32(16.0)),
@@ -1208,17 +1227,16 @@ SPORT_SPREAD_CFG = {
     "CFL":   dict(points_per_elo=np.float32(26.0), HFA=np.float32(1.8), sigma_pts=np.float32(14.0)),
 }
 
-# --- 1) Collapse per-book spread rows to one line per game (favorite-centric), low-mem
 def prep_consensus_market_spread_lowmem(
     df_spreads: pd.DataFrame,
     value_col: str = "Value",
     outcome_col: str = "Outcome_Norm",
 ) -> pd.DataFrame:
-    # Work on a skinny view only
+    import numpy as np
+    import pandas as pd
     cols = ['Sport','Home_Team_Norm','Away_Team_Norm', outcome_col, value_col]
     d = df_spreads[cols].copy()
 
-    # Normalize dtypes, downcast to save RAM
     d['Sport'] = d['Sport'].astype(str).str.upper()
     for c in ['Home_Team_Norm','Away_Team_Norm', outcome_col]:
         d[c] = d[c].astype(str).str.lower().str.strip()
@@ -1226,21 +1244,19 @@ def prep_consensus_market_spread_lowmem(
 
     keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
 
-    # Median spread per outcome (keeps only what we need)
     m = (
         d.groupby(keys + [outcome_col], observed=True)[value_col]
          .median()
          .astype('float32')
          .reset_index(name='med')
     )
-
-    # Favorite = outcome with *more negative* median
+    # favorite = more negative median
     idx = m.groupby(keys, observed=True)['med'].idxmin()
     fav = m.loc[idx, keys + [outcome_col]].rename(columns={outcome_col: 'Market_Favorite_Team'})
 
-    # k = median(|spread|) per game; compute directly on absolute values to avoid extra cols
+    # k = median absolute spread per game
     k = (
-        d.assign(_abs=np.abs(d[value_col].values, dtype=np.float32))
+        d.assign(_abs=d[value_col].abs().astype('float32'))
          .groupby(keys, observed=True)['_abs']
          .median()
          .astype('float32')
@@ -1248,7 +1264,6 @@ def prep_consensus_market_spread_lowmem(
          .rename(columns={'_abs':'k'})
     )
 
-    # Attach underdog without list materialization
     base = d.drop_duplicates(subset=keys)[keys].copy()
     g = fav.merge(base, on=keys, how='left', copy=False)
     g['Market_Underdog_Team'] = np.where(
@@ -1256,111 +1271,76 @@ def prep_consensus_market_spread_lowmem(
         g['Away_Team_Norm'].values,
         g['Home_Team_Norm'].values
     )
-    # Attach k and canonical market spreads
     g = g.merge(k, on=keys, how='left', copy=False)
-    g['Favorite_Market_Spread']  = -g['k']
-    g['Underdog_Market_Spread']  =  g['k']
-    # Downcast
-    for c in ['k','Favorite_Market_Spread','Underdog_Market_Spread']:
-        g[c] = g[c].astype('float32')
+    g['Favorite_Market_Spread']  = -g['k'].astype('float32')
+    g['Underdog_Market_Spread']  =  g['k'].astype('float32')
     return g
 
-# --- 2) Convert rating diff → expected margin, low-mem
 def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFrame:
+    import numpy as np
+    import pandas as pd
     g = df_games.copy()
     g['Sport'] = g['Sport'].astype(str).str.upper()
 
-    # Pull params per row with minimal overhead
-    ppe = np.empty(len(g), dtype=np.float32)
-    hfa = np.empty(len(g), dtype=np.float32)
-    sigma = np.empty(len(g), dtype=np.float32)
+    # pull sport params row-wise
+    n = len(g)
+    ppe   = np.full(n, np.float32(27.0), dtype=np.float32)  # default
+    hfa   = np.zeros(n, dtype=np.float32)
+    sigma = np.full(n, np.float32(12.0), dtype=np.float32)
 
     sp = g['Sport'].values
-    for s in SPORT_SPREAD_CFG:
+    for s, cfg in SPORT_SPREAD_CFG.items():
         mask = (sp == s)
         if mask.any():
-            ppe[mask]  = SPORT_SPREAD_CFG[s]['points_per_elo']
-            hfa[mask]  = SPORT_SPREAD_CFG[s]['HFA']
-            sigma[mask]= SPORT_SPREAD_CFG[s]['sigma_pts']
+            ppe[mask]   = cfg['points_per_elo']
+            hfa[mask]   = cfg['HFA']
+            sigma[mask] = cfg['sigma_pts']
 
     pr_diff = pd.to_numeric(g['Power_Rating_Diff'], errors='coerce').fillna(0).astype('float32').values
-    mu = (pr_diff + hfa) / ppe  # expected home-away margin in points (float32)
+    # expected home - away margin in points
+    mu = (pr_diff + hfa) / ppe
+    mu = mu.astype(np.float32)
     mu_abs = np.abs(mu, dtype=np.float32)
 
-    g['Model_Expected_Margin']      = mu.astype('float32')
-    g['Model_Expected_Margin_Abs']  = mu_abs
-    g['Sigma_Pts']                  = sigma
-    g['Model_Fav_Spread'] = -mu_abs
-    g['Model_Dog_Spread'] =  mu_abs
-    # Diagnostics: model favorite label (as strings already in frame)
-    g['Model_Favorite_Team']  = np.where(mu >= 0, g['Home_Team_Norm'], g['Away_Team_Norm'])
-    g['Model_Underdog_Team']  = np.where(mu >= 0, g['Away_Team_Norm'], g['Home_Team_Norm'])
-    return g[['Sport','Home_Team_Norm','Away_Team_Norm',
-              'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
-              'Model_Fav_Spread','Model_Dog_Spread','Model_Favorite_Team','Model_Underdog_Team']]
+    # k (market absolute spread) must be present from consensus merge
+    k = pd.to_numeric(g.get('k', np.nan), errors='coerce').astype('float32').values
 
-# --- 3) Project game-level values to outcome rows + engineered features, low-mem
-def attach_outcome_projection_lowmem(df_outcomes: pd.DataFrame, df_game_fc: pd.DataFrame) -> pd.DataFrame:
-    keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
-    g = df_game_fc.merge(
-        df_outcomes[keys].drop_duplicates(), on=keys, how='right', copy=False
-    )
+    # edges at game level (favorite vs dog)
+    fav_edge = (mu_abs - k).astype('float32')
+    dog_edge = (k - mu_abs).astype('float32')
 
-    # Merge in minimal market fields
-    cols_needed = keys + [
-        'Market_Favorite_Team','Market_Underdog_Team',
-        'Favorite_Market_Spread','Underdog_Market_Spread','k',
-        'Model_Fav_Spread','Model_Dog_Spread',
-        'Model_Expected_Margin_Abs','Sigma_Pts','Model_Favorite_Team'
-    ]
-    # df_outcomes already has the market fields if you merged earlier; otherwise merge here:
-    g = g.merge(
-        df_outcomes[keys + ['Outcome_Norm']].drop_duplicates(), on=keys, how='left', copy=False
-    )
-    # Build is_fav mask via string compare (vectorized)
-    is_fav = (df_outcomes['Outcome_Norm'].astype(str).values ==
-              g['Market_Favorite_Team'].astype(str).values)
-
-    # Per-outcome spreads
-    out_model_spread  = np.where(is_fav, g['Model_Fav_Spread'].values,      g['Model_Dog_Spread'].values).astype('float32')
-    out_market_spread = np.where(is_fav, g['Favorite_Market_Spread'].values, g['Underdog_Market_Spread'].values).astype('float32')
-    out_edge          = (out_model_spread - out_market_spread).astype('float32')
-
-    # Engineered features (float32 + int8)
-    k   = np.abs(out_market_spread, dtype=np.float32)
-    mua = g['Model_Expected_Margin_Abs'].values.astype('float32')
-    sigma = g['Sigma_Pts'].values.astype('float32')
+    # cover probs for favorite side: P(margin > k)
     denom = sigma.copy()
     denom[denom == 0] = np.nan
-    z = (k - mua) / denom
-    z = np.clip(z, -6.0, 6.0).astype('float32')
+    z_cov = (k - mu_abs) / denom
+    fav_cover = (1.0 - _phi(z_cov)).astype('float32')
+    dog_cover = (1.0 - fav_cover).astype('float32')
 
-    is_market_fav_team = (out_market_spread < 0).astype('int8')
-    is_home_team = (df_outcomes['Outcome_Norm'].astype(str).values ==
-                    df_outcomes['Home_Team_Norm'].astype(str).values).astype('int8')
-    agree = (g['Model_Favorite_Team'].astype(str).values ==
-             g['Market_Favorite_Team'].astype(str).values).astype('int8')
+    g_out = pd.DataFrame({
+        'Sport': g['Sport'].astype(str).values,
+        'Home_Team_Norm': g['Home_Team_Norm'].astype(str).values,
+        'Away_Team_Norm': g['Away_Team_Norm'].astype(str).values,
+        'Model_Expected_Margin': mu,
+        'Model_Expected_Margin_Abs': mu_abs,
+        'Sigma_Pts': sigma.astype('float32'),
+        'Model_Fav_Spread': (-mu_abs).astype('float32'),
+        'Model_Dog_Spread': ( mu_abs).astype('float32'),
+        'Model_Favorite_Team': np.where(mu >= 0, g['Home_Team_Norm'].values, g['Away_Team_Norm'].values),
+        'Model_Underdog_Team': np.where(mu >= 0, g['Away_Team_Norm'].values, g['Home_Team_Norm'].values),
 
-    # Assemble result (avoid copying huge frames; return only what you need)
-    res = df_outcomes.copy()
-    res['Outcome_Model_Spread']  = out_model_spread
-    res['Outcome_Market_Spread'] = out_market_spread
-    res['Outcome_Spread_Edge']   = out_edge
-    res['k']        = k
-    res['mu_abs']   = mua
-    res['edge_pts'] = (mua - k).astype('float32')
-    res['z']        = z
-    res['is_market_fav_team'] = is_market_fav_team
-    res['is_home_team']       = is_home_team
-    res['model_fav_vs_market_fav_agree'] = agree
-    res['edge_x_k'] = (res['edge_pts'].values * k).astype('float32')
-    res['mu_x_k']   = (mua * k).astype('float32')
-    # Optional cover probs (cheap, approximate CDF)
-    # fav covers if margin > k where margin~N(mua, sigma)
-    z_cov = (k - mua) / denom
-    res['Fav_Cover_Prob'] = (1.0 - _phi(z_cov)).astype('float32')
-    res['Dog_Cover_Prob'] = (1.0 - res['Fav_Cover_Prob'].values).astype('float32')
-    return res
+        # market bits (already merged prior step)
+        'Market_Favorite_Team': g['Market_Favorite_Team'].values.astype(str),
+        'Market_Underdog_Team': g['Market_Underdog_Team'].values.astype(str),
+        'Favorite_Market_Spread': g['Favorite_Market_Spread'].astype('float32').values,
+        'Underdog_Market_Spread': g['Underdog_Market_Spread'].astype('float32').values,
+
+        # NEW: edges + cover probs at game level
+        'Fav_Edge_Pts': fav_edge,
+        'Dog_Edge_Pts': dog_edge,
+        'Fav_Cover_Prob': fav_cover,
+        'Dog_Cover_Prob': dog_cover,
+    })
+    return g_out
 
 def enrich_and_grade_for_training(
     df_spread_rows: pd.DataFrame,
@@ -1373,18 +1353,13 @@ def enrich_and_grade_for_training(
     table_history: str = "sharplogger.sharp_data.ratings_history",
     project: str = None,
 ) -> pd.DataFrame:
-    """
-    TRAINING-SAFE pipeline:
-      1) Backward-asof ratings via your low-mem function (no leakage)
-      2) Consensus market spread per game, market-anchored favorite
-      3) Favorite-centric model spreads, edges, and cover probs
-    Input: per-outcome/per-book spread rows.
-    Output: per-outcome rows with favorite-centric numbers merged back.
-    """
+    import numpy as np
+    import pandas as pd
+
     if df_spread_rows.empty:
         return df_spread_rows
 
-    # 1) leakage-safe ratings
+    # 1) leakage-safe ratings (your function)
     base = enrich_power_for_training_lowmem(
         df_spread_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
         bq=bq,
@@ -1395,15 +1370,21 @@ def enrich_and_grade_for_training(
         project=project,
     )
 
-    # 2) consensus market spread (k) and market favorite per game
+    # 2) consensus market spread (k) and favorite
     g_cons = prep_consensus_market_spread_lowmem(df_spread_rows, value_col=value_col, outcome_col=outcome_col)
-    
-    # 3) favorite-centric grading at game level
-    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
-    g_full = (base.merge(g_cons, on=game_key, how='left'))
-    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
 
-    # 4) project game-level favorite-centric numbers back to per-outcome rows
+    # 3) join → game-level favorite-centric grading (also computes edges & probs)
+    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
+    g_full = base.merge(g_cons, on=game_key, how='left')
+    g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
+
+    # ensure power rating cols exist even if base missed (avoid KeyError later)
+    for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
+        if c not in g_fc.columns and c in g_full.columns:
+            g_fc[c] = g_full[c].values
+        elif c not in g_fc.columns:
+            g_fc[c] = np.nan
+
     keep_cols = game_key + [
         'Market_Favorite_Team','Market_Underdog_Team',
         'Favorite_Market_Spread','Underdog_Market_Spread',
@@ -1414,21 +1395,22 @@ def enrich_and_grade_for_training(
         'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
         'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
     ]
+    # backfill any missing keep cols with NaN to avoid KeyError
+    for c in keep_cols:
+        if c not in g_fc.columns:
+            g_fc[c] = np.nan
     g_fc = g_fc[keep_cols].copy()
 
     out = df_spread_rows.merge(g_fc, on=game_key, how='left')
 
-    # per-outcome mapping
-    is_fav = (out[outcome_col] == out['Market_Favorite_Team'])
-    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'], out['Model_Dog_Spread'])
-    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'], out['Underdog_Market_Spread'])
-    out['Outcome_Spread_Edge']   = np.where(is_fav, out['Fav_Edge_Pts'], out['Dog_Edge_Pts'])
-    out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'], out['Dog_Cover_Prob'])
+    # per-outcome mapping (vectorized, robust to dtype)
+    is_fav = (out[outcome_col].astype(str).values == out['Market_Favorite_Team'].astype(str).values)
+    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'].values, out['Model_Dog_Spread'].values).astype('float32')
+    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'].values, out['Underdog_Market_Spread'].values).astype('float32')
+    out['Outcome_Spread_Edge']   = np.where(is_fav, out['Fav_Edge_Pts'].values, out['Dog_Edge_Pts'].values).astype('float32')
+    out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values, out['Dog_Cover_Prob'].values).astype('float32')
 
     return out
-
-
-
 def build_spread_training_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
