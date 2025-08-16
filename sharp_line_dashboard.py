@@ -819,18 +819,31 @@ def get_bq() -> bigquery.Client:
     return bigquery.Client(project="sharplogger")
 
 # --- PER-GROUP ASOF (no 'left keys must be sorted') ---
-def asof_join_by(left: pd.DataFrame, right: pd.DataFrame, by: list[str],
-                 left_on: str, right_on: str, direction: str = "backward") -> pd.DataFrame:
+def asof_join_by(left: pd.DataFrame,
+                 right: pd.DataFrame,
+                 by: list[str],
+                 left_on: str,
+                 right_on: str,
+                 direction: str = "backward") -> pd.DataFrame:
+    
+
+    # Ensure tz-aware datetimes
     left[left_on]   = pd.to_datetime(left[left_on],   utc=True, errors='coerce')
     right[right_on] = pd.to_datetime(right[right_on], utc=True, errors='coerce')
+
+    # Ensure join keys are plain strings
     for c in by:
         left[c]  = left[c].astype(str)
         right[c] = right[c].astype(str)
+
+    # Drop rows with missing join keys or times
     left  = left.dropna(subset=by + [left_on]).copy()
     right = right.dropna(subset=by + [right_on]).copy()
 
+    # Pre-sort right groups by time for speed
     right_groups = {k: g.sort_values(right_on, kind='mergesort')
                     for k, g in right.groupby(by, sort=False)}
+
     chunks = []
     for k, g_left in left.groupby(by, sort=False):
         g_left = g_left.sort_values(left_on, kind='mergesort')
@@ -838,14 +851,31 @@ def asof_join_by(left: pd.DataFrame, right: pd.DataFrame, by: list[str],
         if g_right is None or g_right.empty:
             tmp = g_left.copy()
             for c in ['Power_Rating', right_on]:
-                if c not in tmp.columns: tmp[c] = np.nan
-            chunks.append(tmp); continue
-        chunks.append(pd.merge_asof(
-            g_left, g_right, left_on=left_on, right_on=right_on,
-            direction=direction, allow_exact_matches=True
-        ))
-    return pd.concat(chunks, ignore_index=True) if chunks else left
+                if c not in tmp.columns:
+                    tmp[c] = np.nan
+            chunks.append(tmp)
+            continue
 
+        # ⬇️ Drop the 'by' columns from right to avoid _x/_y duplication
+        g_right_slim = g_right.drop(columns=[c for c in by if c in g_right.columns])
+
+        merged = pd.merge_asof(
+            g_left, g_right_slim,
+            left_on=left_on, right_on=right_on,
+            direction=direction, allow_exact_matches=True
+        )
+
+        # ⬇️ Fallback safety: if pandas still created _x/_y, normalize them
+        for c in by:
+            if f"{c}_x" in merged.columns:
+                merged.rename(columns={f"{c}_x": c}, inplace=True)
+            if f"{c}_y" in merged.columns:
+                merged.drop(columns=[f"{c}_y"], inplace=True, errors='ignore')
+
+        chunks.append(merged)
+
+    return pd.concat(chunks, ignore_index=True) if chunks else left
+                     
 def _iso(ts) -> str:
     return pd.to_datetime(ts, utc=True).isoformat()
 
