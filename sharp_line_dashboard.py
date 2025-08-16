@@ -1013,10 +1013,14 @@ def fetch_training_ratings_window_cached(
     df['Sport'] = df['Sport'].astype(str).str.upper().astype('category')
     df['Team_Norm'] = df['Team_Norm'].astype(str).str.strip().str.lower().astype('category')
     return df
+   # --- same normalization on BOTH sides (AFTER fetch)
+import gc
+
+from pandas.api.types import is_categorical_dtype
 
 def enrich_power_for_training(
     df: pd.DataFrame,
-    bq,  # kept for signature parity if you pass it elsewhere; not used here
+    bq,  # kept for signature parity; not used here
     sport_aliases: dict,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 10,
@@ -1030,10 +1034,7 @@ def enrich_power_for_training(
       - no 'current' fallback
     Produces: Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
     """
-    import gc
-    import numpy as np
-    import pandas as pd
-
+   
     if df.empty:
         return df
 
@@ -1063,8 +1064,12 @@ def enrich_power_for_training(
     # long-form requests
     req = pd.concat(
         [
-            out[['Sport','Game_Start','Home_Team_Norm']].rename(columns={'Home_Team_Norm':'Team_Norm'}).assign(Side='Home'),
-            out[['Sport','Game_Start','Away_Team_Norm']].rename(columns={'Away_Team_Norm':'Team_Norm'}).assign(Side='Away'),
+            out[['Sport','Game_Start','Home_Team_Norm']]
+              .rename(columns={'Home_Team_Norm':'Team_Norm'})
+              .assign(Side='Home'),
+            out[['Sport','Game_Start','Away_Team_Norm']]
+              .rename(columns={'Away_Team_Norm':'Team_Norm'})
+              .assign(Side='Away'),
         ],
         ignore_index=True
     )
@@ -1094,7 +1099,7 @@ def enrich_power_for_training(
         out['Power_Rating_Diff'] = np.float32(0.0)
         return out
 
-    # --- same normalization on BOTH sides (AFTER fetch)
+    # --- normalize BOTH sides consistently
     def norm_team(series: pd.Series) -> pd.Series:
         return (series.astype(str).str.lower().str.strip()
                 .str.replace(r'\s+', ' ', regex=True)
@@ -1105,14 +1110,18 @@ def enrich_power_for_training(
     req['Team_Norm']      = norm_team(req['Team_Norm'])
     ratings['Team_Norm']  = norm_team(ratings['Team_Norm'])
 
-    # keep join keys as plain strings (avoid categorical mismatch)
-    req['Sport']      = req['Sport'].astype(str)
-    req['Team_Norm']  = req['Team_Norm'].astype(str)
-    ratings['Sport']      = ratings['Sport'].astype(str)
-    ratings['Team_Norm']  = ratings['Team_Norm'].astype(str)
+    # ensure time type
+    ratings['AsOfTS'] = pd.to_datetime(ratings['AsOfTS'], utc=True, errors='coerce')
+
+    # --- FORCE join keys to plain strings (avoid categorical mismatch)
+    for col in ['Sport', 'Team_Norm']:
+        if is_categorical_dtype(req[col]):     req[col]     = req[col].astype(str)
+        else:                                   req[col]     = req[col].astype(str)
+        if is_categorical_dtype(ratings[col]): ratings[col] = ratings[col].astype(str)
+        else:                                   ratings[col] = ratings[col].astype(str)
 
     # drop NA keys
-    req = req.dropna(subset=['Sport','Team_Norm','Game_Start'])
+    req     = req.dropna(subset=['Sport','Team_Norm','Game_Start'])
     ratings = ratings.dropna(subset=['Sport','Team_Norm','AsOfTS'])
     if req.empty or ratings.empty:
         return out
@@ -1133,7 +1142,8 @@ def enrich_power_for_training(
     if allow_forward_hours > 0:
         need = back['Power_Rating'].isna()
         if need.any():
-            fsrc = left.loc[need, ['Sport','Team_Norm','Game_Start','Side']].sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
+            fsrc = left.loc[need, ['Sport','Team_Norm','Game_Start','Side']] \
+                       .sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
             fwd = pd.merge_asof(
                 left=fsrc, right=right,
                 left_on='Game_Start', right_on='AsOfTS',
@@ -1168,7 +1178,7 @@ def enrich_power_for_training(
     out['Away_Power_Rating'] = pd.to_numeric(out['Away_Power_Rating'], errors='coerce').astype('float32')
     out['Power_Rating_Diff'] = (out['Home_Power_Rating'] - out['Away_Power_Rating']).astype('float32')
 
-    # (optional) now that merges are done, shrink some columns
+    # (optional) shrink after merge
     for c in ['Sport','Home_Team_Norm','Away_Team_Norm']:
         if c in out.columns:
             out[c] = out[c].astype('category')
