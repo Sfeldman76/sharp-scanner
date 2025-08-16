@@ -1776,15 +1776,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         df_market['PR_Team_Rating'] = np.where(is_home_bet, df_market['Home_Power_Rating'], df_market['Away_Power_Rating'])
         df_market['PR_Opp_Rating']  = np.where(is_home_bet, df_market['Away_Power_Rating'], df_market['Home_Power_Rating'])
-        df_market['PR_Team_Off']    = np.where(is_home_bet, df_market['Home_PR_Off'], df_market['Away_PR_Off'])
-        df_market['PR_Team_Def']    = np.where(is_home_bet, df_market['Home_PR_Def'], df_market['Away_PR_Def'])
-        df_market['PR_Opp_Off']     = np.where(is_home_bet, df_market['Away_PR_Off'], df_market['Home_PR_Off'])
-        df_market['PR_Opp_Def']     = np.where(is_home_bet, df_market['Away_PR_Def'], df_market['Home_PR_Def'])
+        #df_market['PR_Team_Off']    = np.where(is_home_bet, df_market['Home_PR_Off'], df_market['Away_PR_Off'])
+        #df_market['PR_Team_Def']    = np.where(is_home_bet, df_market['Home_PR_Def'], df_market['Away_PR_Def'])
+        #df_market['PR_Opp_Off']     = np.where(is_home_bet, df_market['Away_PR_Off'], df_market['Home_PR_Off'])
+        #df_market['PR_Opp_Def']     = np.where(is_home_bet, df_market['Away_PR_Def'], df_market['Home_PR_Def'])
         
         df_market['PR_Rating_Diff']     = df_market['PR_Team_Rating'] - df_market['PR_Opp_Rating']
         df_market['PR_Abs_Rating_Diff'] = df_market['PR_Rating_Diff'].abs()
-        df_market['PR_Total_Est']       = (df_market['PR_Team_Off'] + df_market['PR_Opp_Off']
-                                           - df_market['PR_Team_Def'] - df_market['PR_Opp_Def'])
+        #df_market['PR_Total_Est']       = (df_market['PR_Team_Off'] + df_market['PR_Opp_Off'] - df_market['PR_Team_Def'] - df_market['PR_Opp_Def'])
 
  
                 
@@ -1846,9 +1845,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Book_Reliability_x_Magnitude','Book_Reliability_x_PROB_SHIFT',
             'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'PR_Spread_Est','PR_Spread_Residual',
-            'PR_Agrees_With_Favorite',
-            'PR_Prob_From_Rating','PR_Prob_Gap_vs_Market'
+            #'PR_Spread_Residual',
+            #'PR_Agrees_With_Favorite',
+            #'PR_Prob_From_Rating','PR_Prob_Gap_vs_Market'
             
     
         ]
