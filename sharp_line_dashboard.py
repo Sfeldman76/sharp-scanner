@@ -1197,10 +1197,13 @@ SPORT_SPREAD_CFG = {
     "CFL":   dict(points_per_elo=26.0, HFA=1.8, sigma_pts=14.0),
 }
 
+from scipy.special import erf
+
+
 def _phi(x):
-    """Vectorized Normal CDF via erf (safe for arrays/Series)."""
+    """Vectorized Normal CDF via erf (SciPy version)."""
     x_arr = np.asarray(x, dtype=np.float64)
-    return 0.5 * (1.0 + np.erf(x_arr / np.sqrt(2.0)))
+    return 0.5 * (1.0 + erf(x_arr / np.sqrt(2.0)))
 
 
 def _prep_consensus_market_spread(df: pd.DataFrame,
