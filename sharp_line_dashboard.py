@@ -422,59 +422,9 @@ def get_recent_history():
     return read_recent_sharp_moves_cached(hours=72)
 
 
-def _prep_for_asof_left(df: pd.DataFrame, by_keys: list[str], on_key: str) -> pd.DataFrame:
-    # drop rows where any join keys are missing
-    df = df.dropna(subset=by_keys + [on_key]).copy()
-    # enforce dtypes
-    for bk in by_keys:
-        df[bk] = df[bk].astype(str)
-    df[on_key] = pd.to_datetime(df[on_key], utc=True, errors='coerce')
-    df = df.dropna(subset=[on_key])
-    # strict group-wise sort by keys
-    df = df.sort_values(by_keys + [on_key], kind='mergesort').reset_index(drop=True)
-    # sanity: ensure sorted within each group
-    if not df.groupby(by_keys, sort=False)[on_key].apply(lambda s: s.is_monotonic_increasing).all():
-        # enforce again group-wise just in case
-        df = (df.groupby(by_keys, sort=False, group_keys=True)
-                .apply(lambda g: g.sort_values(on_key, kind='mergesort'))
-                .reset_index(drop=True))
-    return df
 
-def _prep_for_asof_right(df: pd.DataFrame, by_keys: list[str], on_key: str) -> pd.DataFrame:
-    df = df.dropna(subset=by_keys + [on_key]).copy()
-    for bk in by_keys:
-        df[bk] = df[bk].astype(str)
-    df[on_key] = pd.to_datetime(df[on_key], utc=True, errors='coerce')
-    df = df.dropna(subset=[on_key])
-    df = df.sort_values(by_keys + [on_key], kind='mergesort').reset_index(drop=True)
-    return df
-    
-def _groupwise_asof(left: pd.DataFrame, right: pd.DataFrame,
-                    by: list[str], left_on: str, right_on: str) -> pd.DataFrame:
-    """Run merge_asof per-group to avoid global-sort pitfalls."""
-    out = []
-    # Pre-index right by groups for fast slicing
-    right_groups = {k: v.sort_values(right_on, kind='mergesort')
-                    for k, v in right.groupby(by, sort=False)}
-    for k, g in left.groupby(by, sort=False):
-        # k is a tuple when len(by)>1; normalize to tuple
-        key = k if isinstance(k, tuple) else (k,)
-        r = right_groups.get(key)
-        gl = g.sort_values(left_on, kind='mergesort')
-        if r is None or r.empty:
-            # No ratings for this group → return NaNs for PR columns
-            merged = gl.copy()
-            for col in ['Power_Rating','PR_Off','PR_Def', right_on]:
-                if col not in merged.columns:
-                    merged[col] = np.nan
-        else:
-            merged = pd.merge_asof(
-                gl, r,
-                left_on=left_on, right_on=right_on,
-                direction='backward', allow_exact_matches=True
-            )
-        out.append(merged)
-    return pd.concat(out, ignore_index=True)
+
+
 
 @st.cache_resource
 def get_bq_client() -> bigquery.Client:
@@ -510,97 +460,6 @@ def tmr(label):
     dt = time.perf_counter() - t0
     st.write(f"⏱ {label}: {dt:.2f}s")
 
-
-
-@st.cache_data(ttl=900, max_entries=64, show_spinner=False)
-def fetch_power_ratings_from_bq_cached(
-    sport: str,
-    start_ts: pd.Timestamp,
-    end_ts: pd.Timestamp,
-    source: str = "history",            # "history" or "current"
-    lookback_days: int = 400,           # fallback knob if you want it
-) -> pd.DataFrame:
-    """
-    Returns ratings for a sport in [start_ts-3d, end_ts+3d] (UTC), with
-    one row per (Sport, Team, Date) using the *latest* Updated_At that day.
-    History preferred (time-aware); falls back to current snapshot if empty.
-    Columns: Sport, Team_Norm, AsOf, Power_Rating, PR_Off, PR_Def
-    """
-    bq = get_bq_client()
-
-    # pad so asof has something to match
-    start_pad = pd.to_datetime(start_ts, utc=True) - pd.Timedelta(days=3)
-    end_pad   = pd.to_datetime(end_ts,   utc=True) + pd.Timedelta(days=3)
-
-    params_hist = bigquery.QueryJobConfig(
-        use_query_cache=True,
-        query_parameters=[
-            bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
-            bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", start_pad.to_pydatetime()),
-            bigquery.ScalarQueryParameter("end_ts", "TIMESTAMP", end_pad.to_pydatetime()),
-        ],
-    )
-
-    if source == "history":
-        # time-aware, last snapshot per team per calendar day
-        sql = """
-            WITH base AS (
-              SELECT
-                UPPER(Sport) AS Sport,
-                CAST(Team AS STRING) AS Team_Raw,
-                TIMESTAMP(Updated_At) AS AsOfTS,
-                CAST(Rating AS FLOAT64) AS Power_Rating,
-                CAST(NULL AS FLOAT64) AS PR_Off,
-                CAST(NULL AS FLOAT64) AS PR_Def
-              FROM `sharplogger.sharp_data.ratings_history`
-              WHERE UPPER(Sport) = @sport
-                AND Updated_At BETWEEN @start_ts AND @end_ts
-            ),
-            dedup AS (
-              SELECT *,
-                     ROW_NUMBER() OVER (
-                       PARTITION BY Sport, Team_Raw, DATE(AsOfTS)
-                       ORDER BY AsOfTS DESC
-                     ) AS rn
-              FROM base
-            )
-            SELECT Sport, Team_Raw, AsOfTS, Power_Rating, PR_Off, PR_Def
-            FROM dedup
-            WHERE rn = 1
-        """
-        df = bq.query(sql, job_config=params_hist).to_dataframe()
-    else:
-        # current snapshot; no time awareness (still filter sport)
-        params_curr = bigquery.QueryJobConfig(
-            use_query_cache=True,
-            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
-        )
-        sql = """
-            SELECT
-              UPPER(Sport) AS Sport,
-              CAST(Team AS STRING) AS Team_Raw,
-              CAST(Rating AS FLOAT64) AS Power_Rating,
-              CAST(NULL AS FLOAT64) AS PR_Off,
-              CAST(NULL AS FLOAT64) AS PR_Def,
-              TIMESTAMP(Updated_At) AS AsOfTS
-            FROM `sharplogger.sharp_data.ratings_current`
-            WHERE UPPER(Sport) = @sport
-        """
-        df = bq.query(sql, job_config=params_curr).to_dataframe()
-
-    if df.empty:
-        return df
-
-   
-
-    df["Sport"] = df["Sport"].astype(str).str.upper()
-    df["Team_Norm"] = norm_team(df["Team_Raw"])
-    df["AsOf"] = pd.to_datetime(df["AsOfTS"], utc=True, errors="coerce")
-
-    return df[["Sport","Team_Norm","AsOf","Power_Rating","PR_Off","PR_Def"]]
-
-    # normalize exactly once here
-# --- ONE canonical normalizer (handles Series OR scalar) ---
 
 
 
@@ -946,7 +805,60 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
     mapping['Bookmaker'] = mapping['Bookmaker'].astype(str).str.lower().str.strip()
     
     return mapping
+def asof_join_by(left: pd.DataFrame,
+                 right: pd.DataFrame,
+                 by: list[str],
+                 left_on: str,
+                 right_on: str,
+                 direction: str = "backward") -> pd.DataFrame:
+    """
+    Safe per-group merge_asof:
+      - sorts each group by its time column
+      - never triggers the 'left keys must be sorted' ValueError
+    """
+    import pandas as pd
+    import numpy as np
 
+    # Ensure tz-aware datetimes
+    left[left_on]  = pd.to_datetime(left[left_on],  utc=True, errors='coerce')
+    right[right_on]= pd.to_datetime(right[right_on], utc=True, errors='coerce')
+
+    # Ensure join keys are plain strings
+    for c in by:
+        left[c]  = left[c].astype(str)
+        right[c] = right[c].astype(str)
+
+    # Drop rows with missing join keys or times
+    left  = left.dropna(subset=by + [left_on]).copy()
+    right = right.dropna(subset=by + [right_on]).copy()
+
+    # Pre-sort right groups by time for speed
+    right_groups = {
+        k: g.sort_values(right_on, kind='mergesort')
+        for k, g in right.groupby(by, sort=False)
+    }
+
+    chunks = []
+    for k, g_left in left.groupby(by, sort=False):
+        g_left = g_left.sort_values(left_on, kind='mergesort')
+        g_right = right_groups.get(k)
+        if g_right is None or g_right.empty:
+            tmp = g_left.copy()
+            # create missing columns expected from right
+            for c in ['Power_Rating', right_on]:
+                if c not in tmp.columns:
+                    tmp[c] = np.nan
+            chunks.append(tmp)
+            continue
+
+        merged = pd.merge_asof(
+            g_left, g_right,
+            left_on=left_on, right_on=right_on,
+            direction=direction, allow_exact_matches=True
+        )
+        chunks.append(merged)
+
+    return pd.concat(chunks, ignore_index=True) if chunks else left
 
 def _iso(ts) -> str:
     return pd.to_datetime(ts, utc=True).isoformat()
@@ -1130,48 +1042,40 @@ def enrich_power_for_training(
     ratings = ratings.dropna(subset=['Sport','Team_Norm','AsOfTS'])
     
     # 1) Global lexicographic sort: BY keys then time
-    left  = req.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort').reset_index(drop=True)
-    right = ratings.sort_values(['Sport','Team_Norm','AsOfTS'],  kind='mergesort').reset_index(drop=True)
+    # sort for asof  (old code)
+    # left  = req.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
+    # right = ratings.sort_values(['Sport','Team_Norm','AsOfTS'],  kind='mergesort')
+    # back = pd.merge_asof(...)
     
-    # 2) Groupwise monotonic check & repair (paranoid but safe)
-    if not left.groupby(['Sport','Team_Norm'], sort=False)['Game_Start'].apply(lambda s: s.is_monotonic_increasing).all():
-        left = (left.groupby(['Sport','Team_Norm'], sort=False, group_keys=False)
-                     .apply(lambda g: g.sort_values('Game_Start', kind='mergesort'))
-                     .reset_index(drop=True))
-    
-    if not right.groupby(['Sport','Team_Norm'], sort=False)['AsOfTS'].apply(lambda s: s.is_monotonic_increasing).all():
-        right = (right.groupby(['Sport','Team_Norm'], sort=False, group_keys=False)
-                      .apply(lambda g: g.sort_values('AsOfTS', kind='mergesort'))
-                      .reset_index(drop=True))
-    
-    # Optional: assert just before merge (will raise with clear message)
-    assert left.equals(left.sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')), "left not fully sorted"
-    assert right.equals(right.sort_values(['Sport','Team_Norm','AsOfTS'],    kind='mergesort')), "right not fully sorted"
-    
-    # Now it’s safe:
-    back = pd.merge_asof(
-        left=left, right=right,
-        left_on='Game_Start', right_on='AsOfTS',
-        by=['Sport','Team_Norm'],
-        direction='backward', allow_exact_matches=True
-    )
+    # NEW: per-group asof
+    by = ['Sport','Team_Norm']
 
-    # 2) optional tiny forward grace (ingestion lag tolerance)
+    # backward (leak-safe)
+    back = asof_join_by(
+        left=req,
+        right=ratings,
+        by=by,
+        left_on='Game_Start',
+        right_on='AsOfTS',
+        direction='backward'
+    )
+    
+    # optional tiny forward grace for ingestion lag
     if allow_forward_hours > 0:
         need = back['Power_Rating'].isna()
         if need.any():
-            fsrc = left.loc[need, ['Sport','Team_Norm','Game_Start','Side']] \
-                       .sort_values(['Sport','Team_Norm','Game_Start'], kind='mergesort')
-            fwd = pd.merge_asof(
-                left=fsrc, right=right,
-                left_on='Game_Start', right_on='AsOfTS',
-                by=['Sport','Team_Norm'],
-                direction='forward', allow_exact_matches=True
+            fsrc = back.loc[need, ['Sport','Team_Norm','Game_Start','Side']]
+            fwd = asof_join_by(
+                left=fsrc,
+                right=ratings,
+                by=by,
+                left_on='Game_Start',
+                right_on='AsOfTS',
+                direction='forward'
             )
             grace = pd.to_timedelta(allow_forward_hours, unit='h')
             ok = (fwd['AsOfTS'] - fwd['Game_Start']).abs() <= grace
             back.loc[need & ok, 'Power_Rating'] = fwd.loc[ok, 'Power_Rating'].astype('float32').values
-
     # baseline fill if still missing (no current fallback in training)
     sport_mean = float(ratings['Power_Rating'].mean()) if not ratings.empty else 1500.0
     m = back['Power_Rating'].isna()
