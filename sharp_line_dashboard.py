@@ -1691,9 +1691,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             pr_map = df_train[game_keys + ['Power_Rating_Diff']].drop_duplicates()
             cons_map = df_train[game_keys + [
                 'Market_Favorite_Team','Market_Underdog_Team',
-                'Favorite_Market_Spread','Underdog_Market_Spread','k'
+                'Favorite_Market_Spread','Underdog_Market_Spread'
             ]].drop_duplicates()
+            # Reconstruct k = |spread|
             
+            k1 = pd.to_numeric(cons_map['Favorite_Market_Spread'], errors='coerce').abs()
+            k2 = pd.to_numeric(cons_map['Underdog_Market_Spread'], errors='coerce').abs()
+            cons_map['k'] = k1.fillna(k2).astype('float32')
+
+
             # 3) Join maps to make game-level frame
             g_full = (
                 df_slice[game_keys].drop_duplicates()
