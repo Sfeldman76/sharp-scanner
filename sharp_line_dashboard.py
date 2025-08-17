@@ -2076,8 +2076,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market['Spread_vs_H2H_ProbGap'].abs() > 0.05) |
             (df_market['Total_vs_Spread_ProbGap'].abs() > 0.05)
         ).astype(int)
-        df_market = enrich_and_grade_for_training(df_spreads, bq, sport_aliases, ...)
-
+       
         
          # Absolute line move
         SPORT_ALIAS = {
