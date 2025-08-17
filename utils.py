@@ -3183,62 +3183,62 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 logger.info("ℹ️ No rows for market %s — skipping.", str(mkt).upper())
                 continue
 
-    # Resolve bundle if present
-    bundle = trained_models.get(mkt) if HAS_MODELS else None
-    model = bundle.get('model') if bundle else None
-    iso   = bundle.get('calibrator') if bundle else None
-
-    # ===== Build per-market frame & canonical split =====
-    df_m['Outcome'] = df_m['Outcome'].astype(str).str.lower().str.strip()
-    df_m['Outcome_Norm'] = df_m['Outcome']
-    df_m['Value'] = pd.to_numeric(df_m['Value'], errors='coerce')
-    df_m['Commence_Hour'] = pd.to_datetime(df_m['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-
-    if 'Odds_Price' in df_m.columns:
-        df_m['Odds_Price'] = pd.to_numeric(df_m['Odds_Price'], errors='coerce')
-    else:
-        df_m['Odds_Price'] = np.nan
-
-    df_m['Implied_Prob'] = df_m['Odds_Price'].apply(implied_prob)
-
-    sport_str = (str(df_m['Sport'].mode(dropna=True).iloc[0]).upper()
-                 if 'Sport' in df_m.columns and not df_m['Sport'].isna().all()
-                 else "GENERIC")
-    df_m = add_time_context_flags(df_m, sport=sport_str)
-
-    # Keys (guard missing cols if needed)
-    for c in ['Home_Team_Norm','Away_Team_Norm','Market']:
-        if c not in df_m.columns:
-            df_m[c] = ""
-
-    df_m['Game_Key'] = (
-        df_m['Home_Team_Norm'] + "_" +
-        df_m['Away_Team_Norm'] + "_" +
-        df_m['Commence_Hour'].astype(str) + "_" +
-        df_m['Market'] + "_" +
-        df_m['Outcome_Norm']
-    )
-    df_m['Game_Key_Base'] = (
-        df_m['Home_Team_Norm'] + "_" +
-        df_m['Away_Team_Norm'] + "_" +
-        df_m['Commence_Hour'].astype(str) + "_" +
-        df_m['Market']
-    )
-
-    sided_games_check = (
-        df_m.groupby(['Game_Key_Base'])['Outcome']
-            .nunique()
-            .reset_index(name='Num_Sides')
-    )
-    valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
-    df_m = df_m[df_m['Game_Key_Base'].isin(valid_games)].copy()
-
-    if df_m.empty:
-        logger.info(f"ℹ️ After 2-side filter, no rows for {mkt.upper()} — stamping placeholders.")
-        tmp = _ensure_model_placeholders(df.loc[mask].copy(), mkt)
-        for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
-            df.loc[mask, col] = tmp[col].values
-        continue
+        # Resolve bundle if present
+        bundle = trained_models.get(mkt) if HAS_MODELS else None
+        model = bundle.get('model') if bundle else None
+        iso   = bundle.get('calibrator') if bundle else None
+    
+        # ===== Build per-market frame & canonical split =====
+        df_m['Outcome'] = df_m['Outcome'].astype(str).str.lower().str.strip()
+        df_m['Outcome_Norm'] = df_m['Outcome']
+        df_m['Value'] = pd.to_numeric(df_m['Value'], errors='coerce')
+        df_m['Commence_Hour'] = pd.to_datetime(df_m['Game_Start'], utc=True, errors='coerce').dt.floor('h')
+    
+        if 'Odds_Price' in df_m.columns:
+            df_m['Odds_Price'] = pd.to_numeric(df_m['Odds_Price'], errors='coerce')
+        else:
+            df_m['Odds_Price'] = np.nan
+    
+        df_m['Implied_Prob'] = df_m['Odds_Price'].apply(implied_prob)
+    
+        sport_str = (str(df_m['Sport'].mode(dropna=True).iloc[0]).upper()
+                     if 'Sport' in df_m.columns and not df_m['Sport'].isna().all()
+                     else "GENERIC")
+        df_m = add_time_context_flags(df_m, sport=sport_str)
+    
+        # Keys (guard missing cols if needed)
+        for c in ['Home_Team_Norm','Away_Team_Norm','Market']:
+            if c not in df_m.columns:
+                df_m[c] = ""
+    
+        df_m['Game_Key'] = (
+            df_m['Home_Team_Norm'] + "_" +
+            df_m['Away_Team_Norm'] + "_" +
+            df_m['Commence_Hour'].astype(str) + "_" +
+            df_m['Market'] + "_" +
+            df_m['Outcome_Norm']
+        )
+        df_m['Game_Key_Base'] = (
+            df_m['Home_Team_Norm'] + "_" +
+            df_m['Away_Team_Norm'] + "_" +
+            df_m['Commence_Hour'].astype(str) + "_" +
+            df_m['Market']
+        )
+    
+        sided_games_check = (
+            df_m.groupby(['Game_Key_Base'])['Outcome']
+                .nunique()
+                .reset_index(name='Num_Sides')
+        )
+        valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
+        df_m = df_m[df_m['Game_Key_Base'].isin(valid_games)].copy()
+    
+        if df_m.empty:
+            logger.info(f"ℹ️ After 2-side filter, no rows for {mkt.upper()} — stamping placeholders.")
+            tmp = _ensure_model_placeholders(df.loc[mask].copy(), mkt)
+            for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
+                df.loc[mask, col] = tmp[col].values
+            continue
 
         # Canonical selection by market
         if mkt == "spreads":
