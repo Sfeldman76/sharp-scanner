@@ -52,6 +52,7 @@ from utils import (
     update_power_ratings,
     normalize_sport,
     build_model_readiness_buffer_ultra,
+    enrich_power_from_current_inplace
 )
 
 def detect_and_save_all_sports():
