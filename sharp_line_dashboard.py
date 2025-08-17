@@ -387,7 +387,7 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE):
     try:
         client = bq_client
         query = f"""
@@ -407,10 +407,10 @@ def read_recent_sharp_moves(hours=72, table=BQ_FULL_TABLE):
 
 
 @st.cache_data(ttl=600)
-def read_recent_sharp_moves_cached(hours=72, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves_cached(hours=24, table=BQ_FULL_TABLE):
     return read_recent_sharp_moves(hours=hours, table=table)
 
-def read_recent_sharp_moves_conditional(force_reload=False, hours=72, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves_conditional(force_reload=False, hours=24, table=BQ_FULL_TABLE):
     if force_reload:
         st.info("🔁 Reloading sharp moves from BigQuery...")
         return read_recent_sharp_moves(hours=hours, table=table)  # Uncached
@@ -420,7 +420,7 @@ def read_recent_sharp_moves_conditional(force_reload=False, hours=72, table=BQ_F
 @st.cache_data(ttl=600)
 def get_recent_history():
     st.write("📦 Using cached sharp history (get_recent_history)")
-    return read_recent_sharp_moves_cached(hours=72)
+    return read_recent_sharp_moves_cached(hours=24)
 
 
 
