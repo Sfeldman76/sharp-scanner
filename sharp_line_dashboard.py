@@ -1717,49 +1717,103 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 4) Model margin & spreads at game level
             g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
         
-            # 5) Project favorite-centric outputs back to per-outcome rows (inline)
-            keep_game = game_keys + [
-                'Model_Fav_Spread','Model_Dog_Spread',
-                'Fav_Edge_Pts','Dog_Edge_Pts',
-                'Fav_Cover_Prob','Dog_Cover_Prob'
-            ]
-            keep_market = game_keys + [
-                'Market_Favorite_Team','Market_Underdog_Team',
-                'Favorite_Market_Spread','Underdog_Market_Spread','k'
-            ]
-            # Ensure `k` exists in g_fc (abs of either market spread)
+            # 5) Project favorite-centric outputs back to per-outcome rows (memory-lean mapping)
+            
+            game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
+            
+            # --- Ensure market fields & k exist in g_fc (robust) ---
+            need_market = ['Market_Favorite_Team','Market_Underdog_Team',
+                           'Favorite_Market_Spread','Underdog_Market_Spread']
+            missing_mkt = [c for c in need_market if c not in g_fc.columns]
+            if missing_mkt:
+                g_fc = g_fc.merge(
+                    cons_map[game_keys + need_market].drop_duplicates(subset=game_keys),
+                    on=game_keys, how='left', copy=False
+                )
             if 'k' not in g_fc.columns:
                 fav_abs = pd.to_numeric(g_fc.get('Favorite_Market_Spread'), errors='coerce').abs()
                 dog_abs = pd.to_numeric(g_fc.get('Underdog_Market_Spread'), errors='coerce').abs()
                 g_fc['k'] = fav_abs.fillna(dog_abs).astype('float32')
-            g_map = g_fc[keep_game + keep_market].drop_duplicates(subset=game_keys)
-            df_market = df_market.merge(g_map, on=game_keys, how='left', copy=False)
-        
-            # Normalize strings for a safe compare
+            
+            # --- Build compact integer key using category codes (tiny memory) ---
+            for c in game_keys:
+                df_market[c] = df_market[c].astype('category')
+                g_fc[c]      = g_fc[c].astype('category')
+            
+            def _key_codes(df):
+                # bit-pack three int32 code columns; assumes each code range < 2**10 (~1024 unique)
+                return (df['Sport'].cat.codes.astype('int32') << 21) ^ \
+                       (df['Home_Team_Norm'].cat.codes.astype('int32') << 10) ^ \
+                        df['Away_Team_Norm'].cat.codes.astype('int32')
+            
+            df_market['gk'] = _key_codes(df_market)
+            g_fc['gk']      = _key_codes(g_fc)
+            
+            # --- Collapse g_fc to one row per game key deterministically ---
+            # (median for numeric, first for labels)
+            agg_funcs = {
+                'Model_Fav_Spread':'median', 'Model_Dog_Spread':'median',
+                'Fav_Edge_Pts':'median',     'Dog_Edge_Pts':'median',
+                'Fav_Cover_Prob':'median',   'Dog_Cover_Prob':'median',
+                'Favorite_Market_Spread':'median', 'Underdog_Market_Spread':'median', 'k':'median',
+                'Market_Favorite_Team':'first','Market_Underdog_Team':'first'
+            }
+            g_map = (g_fc.groupby('gk', observed=True)[list(agg_funcs.keys())]
+                          .agg(agg_funcs)
+                          .reset_index())
+            
+            # --- Map columns one-by-one (no wide merge spike) ---
+            def _map_col(target_df, source_df, key, col, dtype=None):
+                if col in source_df.columns:
+                    s = pd.Series(source_df[col].values, index=source_df[key].values)
+                    out = target_df[key].map(s)
+                    if dtype is not None:
+                        out = out.astype(dtype)
+                    target_df[col] = out
+            
+            for col, dt in [
+                ('Model_Fav_Spread','float32'), ('Model_Dog_Spread','float32'),
+                ('Fav_Edge_Pts','float32'),     ('Dog_Edge_Pts','float32'),
+                ('Fav_Cover_Prob','float32'),   ('Dog_Cover_Prob','float32'),
+                ('Favorite_Market_Spread','float32'), ('Underdog_Market_Spread','float32'),
+                ('k','float32')
+            ]:
+                _map_col(df_market, g_map, 'gk', col, dtype=dt)
+            
+            # label columns (strings) — keep as str
+            for col in ['Market_Favorite_Team','Market_Underdog_Team']:
+                _map_col(df_market, g_map, 'gk', col, dtype=None)
+            
+            # --- Compute per-outcome values ---
+            # normalize strings for comparison
             for c in ['Outcome_Norm','Market_Favorite_Team']:
                 df_market[c] = df_market[c].astype(str).str.lower().str.strip()
-        
+            
             is_fav = (df_market['Outcome_Norm'].values == df_market['Market_Favorite_Team'].values)
-        
+            
             df_market['Outcome_Model_Spread']  = np.where(
                 is_fav, df_market['Model_Fav_Spread'].values, df_market['Model_Dog_Spread'].values
             ).astype('float32')
-        
+            
             df_market['Outcome_Market_Spread'] = np.where(
                 is_fav, df_market['Favorite_Market_Spread'].values, df_market['Underdog_Market_Spread'].values
             ).astype('float32')
-        
+            
             df_market['Outcome_Spread_Edge']   = np.where(
                 is_fav, df_market['Fav_Edge_Pts'].values, df_market['Dog_Edge_Pts'].values
             ).astype('float32')
-        
+            
             df_market['Outcome_Cover_Prob']    = np.where(
                 is_fav, df_market['Fav_Cover_Prob'].values, df_market['Dog_Cover_Prob'].values
             ).astype('float32')
-        
-            # Optional: if you require both sides present
+            
+            # optional: if you only want games with both sides represented
             # df_market = df_market.dropna(subset=['k'])
-          
+            
+            # (optional) tidy up temporary key
+            # df_market.drop(columns=['gk'], inplace=True)
+
+
         def label_team_role(row):
             market = row['Market']
             value = row['Value']
