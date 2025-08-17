@@ -3129,6 +3129,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
         return frame  # mutates + returns for chaining
        
+        markets_present: list[str] = []
         
         HAS_MODELS = isinstance(trained_models, dict) and len(trained_models) > 0
         
