@@ -3124,34 +3124,57 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             frame['Scoring_Market'] = s
     
         return frame  # mutates + returns for chaining
-
-    HAS_MODELS = isinstance(trained_models, dict) and len(trained_models) > 0
-
-    if HAS_MODELS and 'Market' in df.columns:
-        # assume your trained_models keys are already normalized (e.g., lowercase)
-        model_markets = {k for k, v in trained_models.items()
-                         if isinstance(v, dict) and ('model' in v or 'calibrator' in v)}
-        # if df['Market'] is not normalized, do a one-time cheap normalization here:
-        m = df['Market']
-        if not pd.api.types.is_categorical_dtype(m):
-            # make it category once to shrink memory and speed .isin
-            m = m.astype('category')
-            df['Market'] = m
-        # If your keys are lowercase, you can map categories once:
-        # m = m.astype(str).str.lower()  # only if absolutely necessary—try to keep categories aligned instead
-    
-        df['Has_Model'] = df['Market'].isin(model_markets).astype('uint8', copy=False)
-    else:
-        df['Has_Model'] = np.uint8(0)
-    logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
-    logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
-    for mkt in markets_present:
-        # Slice frame for this market; keep original indices for writeback
-        mask = (df['Market'] == mkt)
-        df_m = df.loc[mask].copy()
-        if df_m.empty:
-            logger.info(f"ℹ️ No rows for market {mkt.upper()} — skipping.")
-            continue
+       
+        
+        HAS_MODELS = isinstance(trained_models, dict) and len(trained_models) > 0
+        
+        # 1) Build the set of model-backed markets (lowercased once)
+        model_markets_lower = set()
+        if HAS_MODELS:
+            for k, v in trained_models.items():
+                if isinstance(v, dict) and ('model' in v or 'calibrator' in v):
+                    model_markets_lower.add(str(k).strip().lower())
+        
+        # 2) Normalize df['Market'] once -> Market_norm (category)
+        if 'Market' in df.columns and len(df):
+            m = df['Market']
+            # cast to string only once; then lowercase+strip; store as category to shrink
+            if not pd.api.types.is_categorical_dtype(m):
+                m = m.astype('string')
+            market_norm = m.str.lower().str.strip()
+            df['Market_norm'] = market_norm.astype('category')
+        else:
+            df['Market_norm'] = pd.Categorical([])
+        
+        # 3) Has_Model as uint8 using Market_norm (single place)
+        if HAS_MODELS and df['Market_norm'].size:
+            df['Has_Model'] = df['Market_norm'].isin(model_markets_lower).astype('uint8', copy=False)
+        else:
+            df['Has_Model'] = np.uint8(0)
+        
+        logger.info("✅ Snapshot enrichment complete — rows: %d", len(df))
+        logger.info("📊 Columns present after enrichment: %s", df.columns.tolist())
+        
+        # 4) Determine markets present to score (from normalized categories)
+        if HAS_MODELS and df['Market_norm'].size:
+            markets_present = [mk for mk in df['Market_norm'].dropna().unique().tolist()
+                               if mk in model_markets_lower]
+        else:
+            markets_present = []
+        
+        if not markets_present:
+            logger.info("ℹ️ No eligible markets present with trained models; skipping scoring loop.")
+            # optionally return or build readiness buffer here
+            # return df
+        
+        # 5) Scoring loop uses Market_norm to avoid casing issues
+        for mkt in markets_present:
+            mask = (df['Market_norm'] == mkt)
+            df_m = df.loc[mask].copy()
+            if df_m.empty:
+                logger.info("ℹ️ No rows for market %s — skipping.", str(mkt).upper())
+                continue
+           
 
         # Resolve bundle if present
         bundle = trained_models.get(mkt) if HAS_MODELS else None
