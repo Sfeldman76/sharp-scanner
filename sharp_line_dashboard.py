@@ -3699,7 +3699,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             st.info(f"✅ Using cached sharp moves for {label}")
         else:
             with st.spinner(f"📥 Loading sharp moves for {label} from BigQuery..."):
-                df_moves_raw = read_recent_sharp_moves_conditional(force_reload=force_reload, hours=48)
+                df_moves_raw = read_recent_sharp_moves_conditional(force_reload=force_reload, hours=24)
                 st.session_state[detection_key] = df_moves_raw
                 st.success(f"✅ Loaded {len(df_moves_raw)} sharp move rows from BigQuery")
 
