@@ -20,7 +20,8 @@ from pandas_gbq import to_gbq
 import traceback
 import pickle  # ✅ Add this at the top of your script
 import datetime as dt
-       
+
+
 import sys
 from xgboost import XGBClassifier
 from sklearn.isotonic import IsotonicRegression
@@ -726,9 +727,7 @@ def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataF
       Away_Power_Rating, Away_PR_Off, Away_PR_Def,
       Power_Rating_Diff, PR_Off_Diff, PR_Def_Diff
     """
-    import numpy as np
-    import pandas as pd
-    import logging
+   
 
     required = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm']
     missing = [c for c in required if c not in df.columns]
@@ -2118,11 +2117,9 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
     return out
 
 from google.cloud import bigquery
-import pandas as pd
-import numpy as np
+
 from functools import lru_cache
-import numpy as np
-import pandas as pd
+
 from google.cloud import bigquery
 
 # Tiny, fast normalizer (no extra temporaries)
@@ -2376,8 +2373,7 @@ def enrich_power_from_current_inplace(
     In-place version: adds/overwrites Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff.
     Requires ['Sport','Home_Team_Norm','Away_Team_Norm'] normalized enough for mapping.
     """
-    import numpy as np
-    import pandas as pd
+   
 
     if df.empty:
         # still ensure columns exist
@@ -3960,7 +3956,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             mk = df_final['Market'].astype('string').fillna('')
             on = df_final['Outcome_Norm'].astype('string').fillna('')
             # np.char operations avoid multiple pandas allocations
-            import numpy as np
+            
             team_key = np.char.add(
                 np.char.add(np.char.add(np.char.add(np.char.add(ht.to_numpy(), '_'), at.to_numpy()), '_'), ch.to_numpy()),
                 np.char.add(np.char.add(np.char.add('_', mk.to_numpy()), '_'), on.to_numpy())
