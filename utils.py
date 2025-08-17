@@ -2531,9 +2531,9 @@ MODEL_SCORING_PLACEHOLDERS = {
     'Scoring_Market':       None,   # will fill with Market
 }
 # At top of utils.py
-from __future__ import annotations  # optional but safer; defers annotation eval
-from collections.abc import Callable  # or: from typing import Callable, Optional
-import pandas as pd
+
+from typing import Optional, Callable
+
 
 def build_model_readiness_buffer_ultra(
     df: pd.DataFrame,
@@ -2541,8 +2541,9 @@ def build_model_readiness_buffer_ultra(
     needed_cols=None,
     max_rows_per_market: int = 150_000,
     low_card_cat_threshold: int = 200,
-    emit: Callable[[pd.DataFrame], None] | None = None,  # 3.10+ syntax
+    emit: Optional[Callable[[pd.DataFrame], None]] = None,
 ) -> pd.DataFrame:
+    ...
     
     """
     Ultra-lean 'rows without score' buffer:
