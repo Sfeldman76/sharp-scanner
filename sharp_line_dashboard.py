@@ -1447,42 +1447,41 @@ def enrich_and_grade_for_training(
     out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values, out['Dog_Cover_Prob'].values).astype('float32')
 
     return out
+
+
 def build_spread_training_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
     # Core magnitudes
     out['k'] = out['Outcome_Market_Spread'].abs().astype(float)
-    out['mu_abs'] = out['Model_Expected_Margin_Abs'].astype(float)
+
+    # requires Model_Expected_Margin_Abs merged in step 5
+    out['mu_abs']   = out['Model_Expected_Margin_Abs'].astype(float)
     out['edge_pts'] = (out['mu_abs'] - out['k']).astype(float)
 
-    # Standardized edge (protect against div-by-zero)
-    sigma = out['Sigma_Pts'].replace(0, np.nan)
+    # Standardized edge (guard div by 0)
+    sigma = out['Sigma_Pts'].replace(0, np.nan).astype(float)
     out['z'] = (out['k'] - out['mu_abs']) / sigma
+    out['z'] = out['z'].clip(-6, 6)
 
-    # Orientation flags
+    # Optional per-outcome cover prob via your fast CDF
+    # fav covers if margin > k where margin ~ N(mu_abs, sigma)
+    # z_cov = (k - mu_abs)/sigma ; P(fav covers) = 1 - Φ(z_cov)
+    if '_phi' in globals():
+        z_cov = (out['k'] - out['mu_abs']) / sigma
+        out['Outcome_Cover_Prob'] = (1.0 - _phi(z_cov)).astype('float32')
+
+    # Orientation / flags / interactions
     out['is_market_fav_team'] = (out['Outcome_Market_Spread'] < 0).astype('int8')
-    out['is_home_team'] = (out['Outcome_Norm'] == out['Home_Team_Norm']).astype('int8')
-
-    # Model vs market favorite agreement (project game-level labels first if needed)
+    out['is_home_team']       = (out['Outcome_Norm'] == out['Home_Team_Norm']).astype('int8')
     if {'Model_Favorite_Team','Market_Favorite_Team'}.issubset(out.columns):
         out['model_fav_vs_market_fav_agree'] = (
             out['Model_Favorite_Team'] == out['Market_Favorite_Team']
         ).astype('int8')
-    else:
-        out['model_fav_vs_market_fav_agree'] = np.nan  # optional if not joined
-
-    # Raw rating signals
-    out['Power_Rating_Diff'] = out['Power_Rating_Diff'].astype(float)
-
-    # Simple interactions (often helpful)
     out['edge_x_k'] = out['edge_pts'] * out['k']
-    out['mu_x_k'] = out['mu_abs'] * out['k']
+    out['mu_x_k']   = out['mu_abs'] * out['k']
 
-    # Clip/clean
-    out['z'] = out['z'].clip(-6, 6)  # tame outliers
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-
     return out[features]
 
 
@@ -1776,22 +1775,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Only the columns we need from g_fc
             proj_cols = [
                 'Model_Fav_Spread','Model_Dog_Spread',
-                'Fav_Edge_Pts','Dog_Edge_Pts',
-                'Fav_Cover_Prob','Dog_Cover_Prob',
                 'Market_Favorite_Team','Market_Underdog_Team',
-                'Favorite_Market_Spread','Underdog_Market_Spread','k'
+                'Favorite_Market_Spread','Underdog_Market_Spread',
+                'Model_Expected_Margin_Abs','Sigma_Pts'
             ]
             g_map = g_fc[game_keys + proj_cols].drop_duplicates(subset=game_keys)
             
-            # Drop any overlapping columns on df_market to avoid duplicates
+            # Drop overlaps to avoid dup labels, then merge
             overlap = [c for c in proj_cols if c in df_market.columns]
             if overlap:
                 df_market.drop(columns=overlap, inplace=True, errors='ignore')
             
-            # Merge once (small right-hand side)
             df_market = df_market.merge(g_map, on=game_keys, how='left', copy=False)
             
-            # Compute per-outcome values
+            # Enforce unique labels once (belt & suspenders)
+            df_market = df_market.loc[:, ~df_market.columns.duplicated(keep='first')]
+            
+            # Compute per-outcome spreads from model/market ONLY (no engineered fields yet)
             for c in ['Outcome_Norm','Market_Favorite_Team']:
                 df_market[c] = df_market[c].astype(str).str.lower().str.strip()
             
@@ -1804,15 +1804,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_market['Outcome_Market_Spread'] = np.where(
                 is_fav, df_market['Favorite_Market_Spread'].values, df_market['Underdog_Market_Spread'].values
             ).astype('float32')
-            
-            df_market['Outcome_Spread_Edge']   = np.where(
-                is_fav, df_market['Fav_Edge_Pts'].values, df_market['Dog_Edge_Pts'].values
-            ).astype('float32')
-            
-            df_market['Outcome_Cover_Prob']    = np.where(
-                is_fav, df_market['Fav_Cover_Prob'].values, df_market['Dog_Cover_Prob'].values
-            ).astype('float32')
-            
             # optional: if you only want games with both sides represented
             # df_market = df_market.dropna(subset=['k'])
             
@@ -2230,8 +2221,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['PR_Abs_Rating_Diff'] = df_market['PR_Rating_Diff'].abs()
         #df_market['PR_Total_Est']       = (df_market['PR_Team_Off'] + df_market['PR_Opp_Off'] - df_market['PR_Team_Def'] - df_market['PR_Opp_Def'])
 
- 
-                
+       
         features = [
         
             # 🔹 Core sharp signals
@@ -2305,7 +2295,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         ]
         
     
-        
+         #ensure features list has unique names (order-preserving)
+        _seen = set()
+        features = [f for f in features if not (f in _seen or _seen.add(f))]
+        assert len(features) == len(set(features)), "Duplicate names in `features` list.
         
         hybrid_timing_features = [
             
