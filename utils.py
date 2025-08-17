@@ -2120,20 +2120,34 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
 from google.cloud import bigquery
 import pandas as pd
 import numpy as np
+from functools import lru_cache
+import numpy as np
+import pandas as pd
+from google.cloud import bigquery
 
+# Tiny, fast normalizer (no extra temporaries)
+def _norm_team_series(s: pd.Series) -> pd.Series:
+    s = s.astype(str).str.lower().str.strip()
+    s = s.str.replace(r'\s+', ' ', regex=True)\
+         .str.replace('.', '', regex=False)\
+         .str.replace('&', 'and', regex=False)\
+         .str.replace('-', ' ', regex=False)
+    return s
+
+@lru_cache(maxsize=16)
 def fetch_latest_current_ratings_cached(
     sport: str,
     table_current: str = "sharplogger.sharp_data.ratings_current",
     project: str = "sharplogger",
 ) -> pd.DataFrame:
     """
-    Returns the latest rating per team from ratings_current:
-      ['Sport','Team_Norm','Power_Rating']  (Power_Rating=float32)
+    Returns minimal, float32-dtyped ratings for one sport:
+      columns: ['Team_Norm','Power_Rating']  (float32)
+    NOTE: This is memoized per (sport, table_current, project).
     """
     bq = bigquery.Client(project=project)
     sql = f"""
       SELECT
-        UPPER(Sport) AS Sport,
         LOWER(TRIM(Team)) AS Team_Norm,
         CAST(Rating AS FLOAT64) AS Power_Rating
       FROM `{table_current}`
@@ -2145,23 +2159,21 @@ def fetch_latest_current_ratings_cached(
             use_query_cache=True,
             query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport.upper())],
         ),
-    ).to_dataframe()
+    ).to_dataframe()  # already streamed; small result set
 
     if df.empty:
-        return df
+        # Return a consistent empty frame with right dtypes
+        return pd.DataFrame({"Team_Norm": pd.Series([], dtype="object"),
+                             "Power_Rating": pd.Series([], dtype="float32")})
 
-    df['Sport'] = df['Sport'].astype(str)
-    df['Team_Norm'] = (
-        df['Team_Norm'].astype(str).str.lower().str.strip()
-        .str.replace(r'\s+', ' ', regex=True)
-        .str.replace('.', '', regex=False)
-        .str.replace('&', 'and', regex=False)
-        .str.replace('-', ' ', regex=False)
-    )
-    df['Power_Rating'] = pd.to_numeric(df['Power_Rating'], errors='coerce').astype('float32')
-    df = df.dropna(subset=['Team_Norm', 'Power_Rating'])
-    
-    return df[['Sport','Team_Norm','Power_Rating']]
+    # Normalize and downcast in-place
+    df["Team_Norm"] = _norm_team_series(df["Team_Norm"])
+    df["Power_Rating"] = pd.to_numeric(df["Power_Rating"], errors="coerce").astype("float32")
+    df = df.dropna(subset=["Team_Norm", "Power_Rating"])
+
+    # Keep only what we need, with tight dtypes
+    return df[["Team_Norm", "Power_Rating"]]
+
 def enrich_power_from_current(
     df: pd.DataFrame,
     sport_aliases: dict,
@@ -2172,64 +2184,84 @@ def enrich_power_from_current(
     """
     Adds Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff using ratings_current only.
     Requires df columns: ['Sport','Home_Team_Norm','Away_Team_Norm'].
+    Returns a new DataFrame only if we actually enrich; otherwise original df.
     """
-
     if df.empty:
         return df
 
-    out = df.copy()
-    # normalize inputs
-    out['Sport'] = out['Sport'].astype(str).str.upper()
+    # We avoid a full .copy() unless we know we’ll write new columns
+    out = df
 
-    def norm_team_series(s: pd.Series) -> pd.Series:
-        return (s.astype(str).str.lower().str.strip()
-                .str.replace(r'\s+', ' ', regex=True)
-                .str.replace('.', '', regex=False)
-                .str.replace('&', 'and', regex=False)
-                .str.replace('-', ' ', regex=False))
-
-    out['Home_Team_Norm'] = norm_team_series(out['Home_Team_Norm'])
-    out['Away_Team_Norm'] = norm_team_series(out['Away_Team_Norm'])
-
-    # alias → canon
-    canon = {}
+    # Normalize Sport once, then canon-map (no large temporaries)
+    sport_norm = out["Sport"].astype(str).str.upper()
+    # Build a compact alias->canon map
+    alias_to_canon = {}
     for k, v in sport_aliases.items():
-        if isinstance(v, list):
-            for a in v: canon[str(a).upper()] = str(k).upper()
+        canon = str(k).upper()
+        if isinstance(v, (list, tuple, set)):
+            for a in v: alias_to_canon[str(a).upper()] = canon
         else:
-            canon[str(k).upper()] = str(v).upper()
-    out['Sport'] = out['Sport'].map(lambda s: canon.get(s, s))
+            alias_to_canon[str(v).upper()] = canon
+        # also ensure key maps to itself
+        alias_to_canon[canon] = canon
+    sport_canon_series = sport_norm.map(lambda s: alias_to_canon.get(s, s))
 
-    # assume one sport per call; if mixed, keep the first sport_canon seen
-    sport_canon = out['Sport'].iloc[0]
-    out = out[out['Sport'] == sport_canon].copy()
-    if out.empty:
-        return df  # return original if filtering removed everything
+    # Assume (as in your pipeline) a single sport per batch; keep first canon
+    sport_canon = sport_canon_series.iloc[0]
+    mask_same_sport = (sport_canon_series == sport_canon)
+    if not mask_same_sport.all():
+        # Filter rows from other sports, but preserve original if that removes all
+        tmp = out.loc[mask_same_sport]
+        if tmp.empty:
+            return df
+        out = tmp
 
-    # fetch latest current ratings for this sport
+    # Normalize team keys (in place on the view)
+    out = out.copy()  # we’re about to add columns; safe to copy once here
+    out["Home_Team_Norm"] = _norm_team_series(out["Home_Team_Norm"])
+    out["Away_Team_Norm"] = _norm_team_series(out["Away_Team_Norm"])
+
+    # Fetch minimal ratings for this sport (memoized)
     ratings = fetch_latest_current_ratings_cached(
         sport=sport_canon,
         table_current=table_current,
         project=project,
     )
 
-    # build a dict for O(1) lookups
-    rating_map = dict(zip(ratings['Team_Norm'], ratings['Power_Rating'])) if not ratings.empty else {}
+    # Prepare a Series for O(1) lookups without building a big Python dict
+    if ratings.empty:
+        # No ratings: fill with baseline and compute diff
+        base32 = np.float32(baseline)
+        out["Home_Power_Rating"] = base32
+        out["Away_Power_Rating"] = base32
+        out["Power_Rating_Diff"] = np.float32(0.0)
+        return out
 
-    # map teams → ratings (float32), fill with baseline if missing
-    base = np.float32(baseline)
-    out['Home_Power_Rating'] = out['Home_Team_Norm'].map(rating_map).astype('float32')
-    out['Away_Power_Rating'] = out['Away_Team_Norm'].map(rating_map).astype('float32')
+    s_map = pd.Series(
+        ratings["Power_Rating"].to_numpy(copy=False),
+        index=ratings["Team_Norm"],
+        dtype="float32"
+    )
 
-    if out['Home_Power_Rating'].isna().any() or out['Away_Power_Rating'].isna().any():
-        # if anything missing, use sport mean if we have ratings, else baseline
-        sport_mean = np.float32(ratings['Power_Rating'].mean()) if not ratings.empty else base
-        out['Home_Power_Rating'] = out['Home_Power_Rating'].fillna(sport_mean).astype('float32')
-        out['Away_Power_Rating'] = out['Away_Power_Rating'].fillna(sport_mean).astype('float32')
+    # Map -> float32 arrays, then fast fill with sport mean
+    home = s_map.reindex(out["Home_Team_Norm"]).to_numpy(dtype="float32", copy=False)
+    away = s_map.reindex(out["Away_Team_Norm"]).to_numpy(dtype="float32", copy=False)
 
-    out['Power_Rating_Diff'] = (out['Home_Power_Rating'] - out['Away_Power_Rating']).astype('float32')
+    # Compute sport mean once (float32)
+    sport_mean = np.float32(s_map.mean(skipna=True)) if len(s_map) else np.float32(baseline)
+
+    # Fill NaNs in-place using np.nan_to_num (no extra Series allocations)
+    np.nan_to_num(home, copy=False, nan=sport_mean)
+    np.nan_to_num(away, copy=False, nan=sport_mean)
+
+    # Attach columns (no intermediate Series creation)
+    out["Home_Power_Rating"] = home
+    out["Away_Power_Rating"] = away
+
+    # Vectorized float32 diff
+    out["Power_Rating_Diff"] = (home - away).astype("float32", copy=False)
+
     return out
-
 
 SPORT_ALIASES = {
     "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
@@ -2333,6 +2365,89 @@ def _attach_outcome_projection(df_outcomes, df_game_fc):
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
     return out
 
+def enrich_power_from_current_inplace(
+    df: pd.DataFrame,
+    sport_aliases: dict,
+    table_current: str = "sharplogger.sharp_data.ratings_current",
+    project: str = "sharplogger",
+    baseline: float = 1500.0,
+) -> None:
+    """
+    In-place version: adds/overwrites Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff.
+    Requires ['Sport','Home_Team_Norm','Away_Team_Norm'] normalized enough for mapping.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if df.empty:
+        # still ensure columns exist
+        df["Home_Power_Rating"] = np.float32(baseline)
+        df["Away_Power_Rating"] = np.float32(baseline)
+        df["Power_Rating_Diff"] = np.float32(0.0)
+        return
+
+    # Canon sport (assume single sport batch is typical)
+    sport_canon = str(df["Sport"].iloc[0]).upper()
+
+    # Fetch minimal ratings (memoized)
+    ratings = fetch_latest_current_ratings_cached(
+        sport=sport_canon,
+        table_current=table_current,
+        project=project,
+    )
+
+    # Default fills
+    base32 = np.float32(baseline)
+
+    if ratings.empty:
+        df["Home_Power_Rating"] = base32
+        df["Away_Power_Rating"] = base32
+        df["Power_Rating_Diff"] = np.float32(0.0)
+        return
+
+    # Build mapping Series (no dict, no copies)
+    s_map = pd.Series(
+        ratings["Power_Rating"].to_numpy(copy=False),
+        index=ratings["Team_Norm"],
+        dtype="float32",
+    )
+
+    # Ensure team keys are normalized here (cheap and avoids another copy upstream)
+    def _norm(s: pd.Series) -> pd.Series:
+        s = s.astype(str).str.lower().str.strip()
+        s = s.str.replace(r"\s+", " ", regex=True)\
+             .str.replace(".", "", regex=False)\
+             .str.replace("&", "and", regex=False)\
+             .str.replace("-", " ", regex=False)
+        return s
+
+    if "Home_Team_Norm" in df.columns:
+        home_keys = _norm(df["Home_Team_Norm"])
+    else:
+        raise KeyError("Home_Team_Norm missing")
+
+    if "Away_Team_Norm" in df.columns:
+        away_keys = _norm(df["Away_Team_Norm"])
+    else:
+        raise KeyError("Away_Team_Norm missing")
+
+    # Vectorized lookups -> float32 arrays
+    home = s_map.reindex(home_keys).to_numpy(dtype="float32", copy=False)
+    away = s_map.reindex(away_keys).to_numpy(dtype="float32", copy=False)
+
+    # Single sport mean as fallback
+    sport_mean = np.float32(s_map.mean(skipna=True))
+
+    # Fill NaNs in place
+    np.nan_to_num(home, copy=False, nan=sport_mean)
+    np.nan_to_num(away, copy=False, nan=sport_mean)
+
+    # Attach columns without creating intermediates
+    df["Home_Power_Rating"] = home
+    df["Away_Power_Rating"] = away
+    df["Power_Rating_Diff"] = (home - away).astype("float32", copy=False)
+
+    return df
 
 
 # ---------- MODEL READINESS TELEMETRY ----------
@@ -2783,7 +2898,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
     df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
     try:
-        df = enrich_power_from_current(
+        enrich_power_from_current_inplace(
             df,
             sport_aliases=SPORT_ALIASES,
             table_current="sharplogger.sharp_data.ratings_current",
@@ -2792,10 +2907,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         )
     except Exception as e:
         logger.warning("⚠️ Power rating enrichment (current) failed: %s", e, exc_info=True)
-        # ensure columns exist with safe defaults
-        df['Home_Power_Rating'] = np.float32(1500.0)
-        df['Away_Power_Rating'] = np.float32(1500.0)
-        df['Power_Rating_Diff'] = np.float32(0.0)
+        df["Home_Power_Rating"] = np.float32(1500.0)
+        df["Away_Power_Rating"] = np.float32(1500.0)
+        df["Power_Rating_Diff"] = np.float32(0.0)
 
   
     
