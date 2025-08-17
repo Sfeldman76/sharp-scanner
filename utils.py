@@ -2530,6 +2530,10 @@ MODEL_SCORING_PLACEHOLDERS = {
     'Scored_By_Model':      False,
     'Scoring_Market':       None,   # will fill with Market
 }
+# At top of utils.py
+from __future__ import annotations  # optional but safer; defers annotation eval
+from collections.abc import Callable  # or: from typing import Callable, Optional
+import pandas as pd
 
 def build_model_readiness_buffer_ultra(
     df: pd.DataFrame,
@@ -2537,8 +2541,9 @@ def build_model_readiness_buffer_ultra(
     needed_cols=None,
     max_rows_per_market: int = 150_000,
     low_card_cat_threshold: int = 200,
-    emit: callable | None = None,   # optional: callback(chunk_df) to stream out
+    emit: Callable[[pd.DataFrame], None] | None = None,  # 3.10+ syntax
 ) -> pd.DataFrame:
+    
     """
     Ultra-lean 'rows without score' buffer:
 
@@ -2551,8 +2556,7 @@ def build_model_readiness_buffer_ultra(
     If 'emit' is provided, each per-market chunk is passed to emit(chunk_df),
     and an empty DataFrame is returned to avoid holding everything in memory.
     """
-    import numpy as np
-    import pandas as pd
+    
 
     if df is None or df.empty:
         return pd.DataFrame()
@@ -4008,7 +4012,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 max_rows_per_market=120_000,
                 emit=_emit_to_bq,   # streams; returns empty df (no big buffer in RAM)
             )
-            
+            from typing import Optional, Callable
+
+
             logger.info("✅ Scoring completed in %.2f seconds", time.time() - total_start)
             return df_final
            
