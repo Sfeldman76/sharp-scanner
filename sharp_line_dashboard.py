@@ -2287,7 +2287,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'mu_abs', 'k', 'edge_pts', 'z',            
             'model_fav_vs_market_fav_agree',            
             'edge_x_k', 'mu_x_k',
-            'mu_abs', 'k', 'edge_pts', 'z',
             
             
           
