@@ -2531,62 +2531,118 @@ MODEL_SCORING_PLACEHOLDERS = {
     'Scoring_Market':       None,   # will fill with Market
 }
 
+def build_model_readiness_buffer_ultra(
+    df: pd.DataFrame,
+    *,
+    needed_cols=None,
+    max_rows_per_market: int = 150_000,
+    low_card_cat_threshold: int = 200,
+    emit: callable | None = None,   # optional: callback(chunk_df) to stream out
+) -> pd.DataFrame:
+    """
+    Ultra-lean 'rows without score' buffer:
 
-def build_model_readiness_buffer(frame: pd.DataFrame) -> pd.DataFrame:
-    """Return a frame that is always safe to persist for training later."""
-    df_buf = frame.copy()
+    - Only projects required columns
+    - Per-market processing to cap peak memory
+    - NO global sorts; uses factorized group codes + idxmax on timestamp
+    - Downcasts numerics; shrinks strings to 'category' when low-card
+    - Optional 'emit' to stream chunks (returns empty df if emit is used)
 
-    # 0) ensure scoring placeholders (works even when you had no model)
-    for col, default in MODEL_SCORING_PLACEHOLDERS.items():
-        if col not in df_buf.columns:
-            df_buf[col] = default
-    if 'Scoring_Market' in df_buf.columns:
-        df_buf['Scoring_Market'] = df_buf['Scoring_Market'].fillna(df_buf.get('Market'))
+    If 'emit' is provided, each per-market chunk is passed to emit(chunk_df),
+    and an empty DataFrame is returned to avoid holding everything in memory.
+    """
+    import numpy as np
+    import pandas as pd
 
-    # 1) ensure meta columns exist (don’t upcast strings unnecessarily)
-    for col, dtype in MODEL_META_COLS.items():
-        if col not in df_buf.columns:
-            df_buf[col] = pd.NA
-        # only coerce datetimes explicitly
-        if dtype.startswith('datetime64') and not pd.api.types.is_datetime64_any_dtype(df_buf[col]):
-            df_buf[col] = pd.to_datetime(df_buf[col], utc='UTC' in dtype, errors='coerce')
+    if df is None or df.empty:
+        return pd.DataFrame()
 
-    # 2) ensure all candidate features exist & are numeric
-    for col in MODEL_FEATURE_CANDS:
-        if col not in df_buf.columns:
-            df_buf[col] = 0.0
-        df_buf[col] = pd.to_numeric(df_buf[col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # --- 0) Minimal projection early
+    default_cols = [
+        "Game_Key", "Market", "Bookmaker", "Outcome",
+        "Sport", "Snapshot_Timestamp", "Value", "Odds_Price",
+        # add/remove here as truly needed downstream
+    ]
+    cols = [c for c in (needed_cols or default_cols) if c in df.columns]
+    base = df.loc[:, cols]  # view where possible
 
-    # 3) reliability defaults if maps were missing
-    for col in ['Book_Reliability_Score','Book_Reliability_Lift']:
-        if col not in df_buf.columns:
-            df_buf[col] = 0.0
+    # --- 1) Filter to rows that need score (fast boolean masks, no copy)
+    mask = None
+    if "Model_Sharp_Win_Prob" in df.columns:
+        mask = df["Model_Sharp_Win_Prob"].isna()
+    if "Model_Ready" in df.columns:
+        m2 = ~df["Model_Ready"].astype(bool)
+        mask = m2 if mask is None else (mask | m2)
+    needs = base if mask is None else base[mask]
+    if needs.empty:
+        return pd.DataFrame(columns=cols)
 
-    # 4) target columns (nullable until finals land)
-    for col, dtype in MODEL_TARGET_COLS.items():
-        if col not in df_buf.columns:
-            df_buf[col] = np.nan
-        # keep as float (nullable); don’t cast to int
+    # Ensure timestamp is int64 ns (avoids datetime ops later)
+    if "Snapshot_Timestamp" in needs.columns:
+        ts = pd.to_datetime(needs["Snapshot_Timestamp"], errors="coerce")
+        needs = needs.copy()
+        needs["Snapshot_Timestamp"] = ts.view("int64")  # NaT -> NaN-int handled later
 
-    # 5) convenience partitions
-    if 'Minutes_To_Game' not in df_buf.columns:
-        df_buf['Minutes_To_Game'] = (
-            pd.to_datetime(df_buf.get('Game_Start'), utc=True, errors='coerce')
-            - pd.to_datetime(df_buf.get('Snapshot_Timestamp'), utc=True, errors='coerce')
-        ).dt.total_seconds() / 60
+    markets = needs["Market"].dropna().unique().tolist()
+    out_parts = [] if emit is None else None
 
-    # 6) minimal unique key to prevent dupes when upserting
-    if 'Training_Unique_Key' not in df_buf.columns:
-        df_buf['Training_Unique_Key'] = (
-            df_buf['Game_Key'].astype(str) + '|' +
-            df_buf['Bookmaker'].astype(str) + '|' +
-            df_buf['Market'].astype(str) + '|' +
-            df_buf['Outcome_Norm'].astype(str) + '|' +
-            df_buf['Snapshot_Timestamp'].astype(str)
-        )
+    for m in markets:
+        part = needs[needs["Market"] == m]
+        if part.empty:
+            continue
 
-    return df_buf
+        # --- 2) Dedup latest per (Game_Key, Market, Bookmaker, Outcome) WITHOUT sorting
+        # Build integer group codes from the key tuple
+        key_cols = [k for k in ["Game_Key", "Market", "Bookmaker", "Outcome"] if k in part.columns]
+        if not key_cols:
+            # No identity—just cap and continue
+            chunk = part
+        else:
+            # Factorize the multi-key -> group codes (no sort)
+            grp_codes, _ = pd.MultiIndex.from_frame(part[key_cols]).factorize(sort=False)
 
+            # Timestamp array (int64 ns), fill NaNs with very small sentinel so they don't win idxmax
+            t = part["Snapshot_Timestamp"].to_numpy("int64", copy=False)
+            if np.isnan(t).any():
+                # replace NaNs with min int64 + 1 (still lower than any real ts)
+                t = t.copy()
+                t[np.isnan(t)] = np.iinfo("int64").min + 1
+                t = t.astype("int64", copy=False)
+
+            # idxmax per group WITHOUT sorting the whole frame
+            # (uses pandas groupby on small int codes; cheap and stable)
+            idx = pd.Series(t).groupby(grp_codes, sort=False).idxmax().to_numpy()
+
+            # Take those rows
+            chunk = part.iloc[idx]
+
+        # --- 3) Hard cap most recent rows per market (by timestamp) (no full sort needed)
+        if len(chunk) > max_rows_per_market and "Snapshot_Timestamp" in chunk.columns:
+            # Use nlargest on int64 timestamp for recency
+            chunk = chunk.nlargest(max_rows_per_market, "Snapshot_Timestamp")
+
+        # --- 4) Downcast + shrink
+        for c in chunk.columns:
+            s = chunk[c]
+            if pd.api.types.is_float_dtype(s):
+                chunk[c] = pd.to_numeric(s, errors="coerce").astype("float32")
+            elif pd.api.types.is_integer_dtype(s) and c != "Snapshot_Timestamp":
+                chunk[c] = pd.to_numeric(s, errors="coerce", downcast="integer")
+            elif pd.api.types.is_object_dtype(s) and s.nunique(dropna=True) <= low_card_cat_threshold:
+                chunk[c] = s.astype("category")
+
+        # Keep timestamp as int64 ns for compactness; convert back later only if needed
+        if emit is not None:
+            emit(chunk.reset_index(drop=True))
+        else:
+            out_parts.append(chunk.reset_index(drop=True))
+
+    if emit is not None:
+        # We streamed chunks; nothing to keep in memory
+        return pd.DataFrame(columns=cols)
+
+    out = pd.concat(out_parts, axis=0, ignore_index=True) if out_parts else pd.DataFrame(columns=cols)
+    return out
 
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     import json  # used below
@@ -3025,32 +3081,67 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df= df.merge(team_feature_map, on='Team', how='left')
         df.drop(columns=['Team'], inplace=True, errors='ignore')
 
-    def _ensure_model_placeholders(frame, market_name):
-        cols_defaults = {
-            'Model_Sharp_Win_Prob': np.nan,
-            'Model_Confidence':     np.nan,
-            'Scored_By_Model':      False,
-            'Scoring_Market':       market_name,
-        }
-        for c, v in cols_defaults.items():
-            if c not in frame.columns:
-                frame[c] = v
-        frame['Scoring_Market'] = frame['Scoring_Market'].fillna(market_name)
-        return frame
+    def _ensure_model_placeholders(frame: pd.DataFrame, market_name: str) -> pd.DataFrame:
+        n = len(frame)
+    
+        # 1) Float placeholders as float32 (not float64)
+        if 'Model_Sharp_Win_Prob' not in frame.columns:
+            frame['Model_Sharp_Win_Prob'] = pd.Series(np.nan, index=frame.index, dtype='float32')
+        else:
+            # downcast if needed
+            if frame['Model_Sharp_Win_Prob'].dtype != 'float32':
+                frame['Model_Sharp_Win_Prob'] = pd.to_numeric(frame['Model_Sharp_Win_Prob'], errors='coerce').astype('float32')
+    
+        if 'Model_Confidence' not in frame.columns:
+            frame['Model_Confidence'] = pd.Series(np.nan, index=frame.index, dtype='float32')
+        else:
+            if frame['Model_Confidence'].dtype != 'float32':
+                frame['Model_Confidence'] = pd.to_numeric(frame['Model_Confidence'], errors='coerce').astype('float32')
+    
+        # 2) Flag as uint8 (or bool_). uint8 is compact and plays well with arithmetic.
+        if 'Scored_By_Model' not in frame.columns:
+            frame['Scored_By_Model'] = pd.Series(0, index=frame.index, dtype='uint8')
+        else:
+            # coerce to 0/1
+            frame['Scored_By_Model'] = frame['Scored_By_Model'].astype('uint8', copy=False)
+    
+        # 3) Scoring_Market as categorical with a single category; avoid .fillna()
+        if 'Scoring_Market' not in frame.columns:
+            frame['Scoring_Market'] = pd.Categorical([market_name]*n, categories=[market_name])
+        else:
+            s = frame['Scoring_Market']
+            # convert to category, add category if needed
+            if not pd.api.types.is_categorical_dtype(s):
+                s = s.astype('category')
+            if market_name not in s.cat.categories:
+                s = s.cat.add_categories([market_name])
+            # fill only NA slots in place (no full-column copy)
+            na_mask = s.isna()
+            if na_mask.any():
+                s = s.copy()               # cheap if few NAs; avoids whole-column reallocation
+                s[na_mask] = market_name
+            frame['Scoring_Market'] = s
+    
+        return frame  # mutates + returns for chaining
 
     HAS_MODELS = isinstance(trained_models, dict) and len(trained_models) > 0
-    # Only consider markets that actually have a bundle with a model
-    model_markets = set(
-        k for k, v in (trained_models.items() if isinstance(trained_models, dict) else [])
-        if isinstance(v, dict) and ('model' in v or 'calibrator' in v)
-    )
-    markets_present = (
-        [m for m in df['Market'].dropna().astype(str).str.lower().str.strip().unique().tolist()
-         if m in model_markets]
-        if 'Market' in df.columns else []
-    )
-    df['Has_Model'] = df['Market'].isin(model_markets).astype(int)
 
+    if HAS_MODELS and 'Market' in df.columns:
+        # assume your trained_models keys are already normalized (e.g., lowercase)
+        model_markets = {k for k, v in trained_models.items()
+                         if isinstance(v, dict) and ('model' in v or 'calibrator' in v)}
+        # if df['Market'] is not normalized, do a one-time cheap normalization here:
+        m = df['Market']
+        if not pd.api.types.is_categorical_dtype(m):
+            # make it category once to shrink memory and speed .isin
+            m = m.astype('category')
+            df['Market'] = m
+        # If your keys are lowercase, you can map categories once:
+        # m = m.astype(str).str.lower()  # only if absolutely necessary—try to keep categories aligned instead
+    
+        df['Has_Model'] = df['Market'].isin(model_markets).astype('uint8', copy=False)
+    else:
+        df['Has_Model'] = np.uint8(0)
     logger.info(f"✅ Snapshot enrichment complete — rows: {len(df)}")
     logger.info(f"📊 Columns present after enrichment: {df.columns.tolist()}")
     for mkt in markets_present:
@@ -3836,66 +3927,91 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             ).astype(int)
     
             # 6) Diagnostic for unscored rows
+            # 6) Diagnostic for unscored rows (cheap)
             try:
-                unscored_rows = df_final[df_final['Model_Sharp_Win_Prob'].isnull()]
-                if not unscored_rows.empty:
-                    logger.warning(f"⚠️ {len(unscored_rows)} rows were not scored (Model_Sharp_Win_Prob is null).")
-                    logger.warning(unscored_rows[['Game','Bookmaker','Market','Outcome','Was_Canonical']].head(40).to_string(index=False))
+                if 'Model_Sharp_Win_Prob' in df_final.columns:
+                    unscored_mask = df_final['Model_Sharp_Win_Prob'].isna()
+                    if unscored_mask.any():
+                        n = int(unscored_mask.sum())
+                        logger.warning("⚠️ %d rows were not scored (Model_Sharp_Win_Prob is null).", n)
+                        cols_dbg = [c for c in ['Game','Bookmaker','Market','Outcome','Was_Canonical'] if c in df_final.columns]
+                        if cols_dbg:
+                            logger.warning(df_final.loc[unscored_mask, cols_dbg].head(10).to_string(index=False))
             except Exception as e:
-                logger.error(f"❌ Failed to log unscored rows by market: {e}")
-    
-            # 7) Team_Key + placeholders
-            for col in ['Home_Team_Norm','Away_Team_Norm','Commence_Hour','Market','Outcome_Norm']:
+                logger.error("❌ Failed to log unscored rows by market: %s", e)
+            
+            # 7) Team_Key + placeholders (low-alloc)
+            for col, default in [
+                ('Home_Team_Norm',''), ('Away_Team_Norm',''),
+                ('Commence_Hour',''), ('Market',''), ('Outcome_Norm','')
+            ]:
                 if col not in df_final.columns:
-                    df_final[col] = ''
-            df_final['Team_Key'] = (
-                df_final['Home_Team_Norm'].astype(str) + "_" +
-                df_final['Away_Team_Norm'].astype(str) + "_" +
-                df_final['Commence_Hour'].astype(str) + "_" +
-                df_final['Market'].astype(str) + "_" +
-                df_final['Outcome_Norm'].astype(str)
+                    df_final[col] = default
+            
+            # Build Team_Key with minimal temporaries
+            ht = df_final['Home_Team_Norm'].astype('string').fillna('')
+            at = df_final['Away_Team_Norm'].astype('string').fillna('')
+            ch = df_final['Commence_Hour'].astype('string').fillna('')
+            mk = df_final['Market'].astype('string').fillna('')
+            on = df_final['Outcome_Norm'].astype('string').fillna('')
+            # np.char operations avoid multiple pandas allocations
+            import numpy as np
+            team_key = np.char.add(
+                np.char.add(np.char.add(np.char.add(np.char.add(ht.to_numpy(), '_'), at.to_numpy()), '_'), ch.to_numpy()),
+                np.char.add(np.char.add(np.char.add('_', mk.to_numpy()), '_'), on.to_numpy())
             )
+            df_final['Team_Key'] = pd.Series(team_key, index=df_final.index)
+            
             if 'Sharp_Prob_Shift' not in df_final.columns:
-                df_final['Sharp_Prob_Shift'] = 0.0  # to be computed later with history
-    
-            # 8) Extra debug (optional)
+                df_final['Sharp_Prob_Shift'] = np.float32(0.0)
+            
+            # 8) Extra debug (cheap key diff)
             try:
-                original_keys = set(df_final['Game_Key']) | set(df['Game_Key'])
-                unscored_keys = original_keys - set(df_final['Game_Key'])
-                if unscored_keys:
-                    logger.warning(f"⚠️ {len(unscored_keys)} Game_Keys were not scored by model")
-                    unscored_df = df[df['Game_Key'].isin(unscored_keys)]
-                    logger.warning("🧪 Sample unscored rows:")
-                    logger.warning(unscored_df[['Game','Bookmaker','Market','Outcome','Value']].head(5).to_string(index=False))
+                if 'Game_Key' in df_final.columns and 'Game_Key' in df.columns:
+                    final_keys = df_final['Game_Key'].astype('string').unique()
+                    orig_keys  = df['Game_Key'].astype('string').unique()
+                    missing_keys = np.setdiff1d(orig_keys, final_keys, assume_unique=False)
+                    if missing_keys.size:
+                        logger.warning("⚠️ %d Game_Keys were not scored by model", missing_keys.size)
+                        # sample a few rows safely
+                        sample = df[df['Game_Key'].isin(missing_keys)]
+                        cols_dbg2 = [c for c in ['Game','Bookmaker','Market','Outcome','Value'] if c in df.columns]
+                        if cols_dbg2 and not sample.empty:
+                            logger.warning("🧪 Sample unscored rows:")
+                            logger.warning(sample.loc[:, cols_dbg2].head(5).to_string(index=False))
             except Exception as debug_error:
-                logger.error(f"❌ Failed to log unscored rows: {debug_error}")
-    
-            # 9) Remove unscored UNDER rows with no OVER source
-            pre_filter = len(df_final)
-            df_final = df_final[~(
-                (df_final['Market'] == 'totals') &
-                (df_final['Outcome_Norm'] == 'under') &
-                (df_final['Was_Canonical'] == False) &
-                (df_final['Model_Sharp_Win_Prob'].isna())
-            )]
-            logger.info(f"🧹 Removed {pre_filter - len(df_final)} unscored UNDER rows (no OVER available)")
-    
-            logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
-            # 9) Remove unscored UNDER rows with no OVER source
-            pre_filter = len(df_final)
-            df_final = df_final[~(
-                (df_final['Market'] == 'totals') &
-                (df_final['Outcome_Norm'] == 'under') &
-                (df_final['Was_Canonical'] == False) &
-                (df_final['Model_Sharp_Win_Prob'].isna())
-            )]
-            logger.info(f"🧹 Removed {pre_filter - len(df_final)} unscored UNDER rows (no OVER available)")
+                logger.error("❌ Failed to log unscored rows: %s", debug_error)
             
-            # >>> HERE — wrap before returning
-            df_final = build_model_readiness_buffer(df_final)
+            # 9) Remove unscored UNDER rows with no OVER source (once)
+            if {'Market','Outcome_Norm','Was_Canonical','Model_Sharp_Win_Prob'}.issubset(df_final.columns):
+                pre = len(df_final)
+                df_final = df_final[~(
+                    (df_final['Market'] == 'totals') &
+                    (df_final['Outcome_Norm'] == 'under') &
+                    (~df_final['Was_Canonical'].astype(bool)) &
+                    (df_final['Model_Sharp_Win_Prob'].isna())
+                )]
+                if pre != len(df_final):
+                    logger.info("🧹 Removed %d unscored UNDER rows (no OVER available)", pre - len(df_final))
             
-            logger.info(f"✅ Scoring completed in {time.time() - total_start:.2f} seconds")
+            # >>> HERE — stream model-readiness buffer (ultra-lean)
+            def _emit_to_bq(chunk: pd.DataFrame):
+                # Only convert if needed (keep int64 ns if already datetime64 is not required)
+                if "Snapshot_Timestamp" in chunk.columns and not pd.api.types.is_datetime64_any_dtype(chunk['Snapshot_Timestamp']):
+                    # convert int64 ns -> datetime64[ns]
+                    chunk['Snapshot_Timestamp'] = pd.to_datetime(chunk['Snapshot_Timestamp'].astype('int64'), errors='coerce')
+                write_to_bigquery(chunk, table="sharp_data.model_readiness_buffer", if_exists="append")
+            
+            _ = build_model_readiness_buffer_ultra(
+                df,
+                needed_cols=["Game_Key","Market","Bookmaker","Outcome","Sport","Snapshot_Timestamp","Value","Odds_Price"],
+                max_rows_per_market=120_000,
+                emit=_emit_to_bq,   # streams; returns empty df (no big buffer in RAM)
+            )
+            
+            logger.info("✅ Scoring completed in %.2f seconds", time.time() - total_start)
             return df_final
+           
                            
            
     
