@@ -20,6 +20,8 @@ from pandas_gbq import to_gbq
 import traceback
 import pickle  # ✅ Add this at the top of your script
 import datetime as dt
+import sys, traceback, json  # safe local imports used in this block
+from typing import Optional, Callable
 
 
 import sys
@@ -677,7 +679,8 @@ def compute_line_hash(row, window='1H'):
 
     except Exception as e:
         return f"ERROR_HASH_{hashlib.md5(str(e).encode()).hexdigest()[:8]}"
-
+from google.cloud import bigquery
+import pandas as pd
 def fetch_power_ratings_from_bq(bq, sport: str, lookback_days: int = 400) -> pd.DataFrame:
     """
     Load team power ratings for a given sport from BigQuery (current-only, per your schema).
@@ -685,8 +688,7 @@ def fetch_power_ratings_from_bq(bq, sport: str, lookback_days: int = 400) -> pd.
       ['Sport','Team_Norm','AsOfTS','Power_Rating','PR_Off','PR_Def']
     PR_Off/PR_Def are NULL since not in ratings_current.
     """
-    from google.cloud import bigquery
-    import pandas as pd
+   
 
     sql_current = """
         SELECT
@@ -2645,8 +2647,10 @@ def build_model_readiness_buffer_ultra(
     out = pd.concat(out_parts, axis=0, ignore_index=True) if out_parts else pd.DataFrame(columns=cols)
     return out
 
+
+import json  #
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
-    import json  # used below
+     used below
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
     scored_all = []
     total_start = time.time()
@@ -3662,7 +3666,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         
         # === 🔁 Re-merge & refresh inverse rows (PER-MARKET) ===
         try:
-            import sys, traceback, json  # safe local imports used in this block
+            
         
             # Make sure First_Imp_Prob exists for recompute (it was dropped earlier)
             if 'First_Imp_Prob' not in df_inverse.columns:
@@ -3788,7 +3792,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             df.loc[df_inverse.index, inv_cols_present] = df_inverse[inv_cols_present].values
         
         except Exception as e:
-            import sys, traceback
+           
             exc_type, exc_value, exc_traceback = sys.exc_info()
             tb_lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
             logger.error("❌ Failed to refresh inverse rows after re-merge.")
@@ -4032,8 +4036,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 max_rows_per_market=120_000,
                 emit=_emit_to_bq,   # streams; returns empty df (no big buffer in RAM)
             )
-            from typing import Optional, Callable
-
+          
 
             logger.info("✅ Scoring completed in %.2f seconds", time.time() - total_start)
             return df_final
