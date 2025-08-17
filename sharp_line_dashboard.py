@@ -223,16 +223,22 @@ component_fields = OrderedDict({
     'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
 })
 
+
 SPORT_ALIASES = {
-    "MLB": ["MLB", "BASEBALL_MLB"],
-    "NBA": ["NBA", "BASKETBALL_NBA"],
-    "NFL": ["NFL", "FOOTBALL_NFL"],
-    "WNBA": ["WNBA", "BASKETBALL_WNBA"],
-    "CFL": ["CFL", "FOOTBALL_CFL"],
-    "NCAAF": ["NCAAF", "FOOTBALL_NCAAF"],
-    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB"],
+    "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
+    "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
+    "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
+    "NBA":   ["NBA", "BASKETBALL_NBA", "BASKETBALL-NBA"],
+    "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
+    "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIANFOOTBALL_CFL"],
+    # extend as needed
 }
 
+def _aliases_for(s: str | None) -> list[str]:
+    if not s:
+        return []
+    canon = str(s).upper().strip()
+    return SPORT_ALIASES.get(canon, [canon])
 
 def implied_prob(odds):
     try:
@@ -387,41 +393,66 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = None):
     try:
         client = bq_client
+        hours_int = int(hours)
+
+        # select only columns you actually use to cut bytes (optional but recommended)
+        cols = [
+            "Snapshot_Timestamp","Game_Key","Game_Start","Sport","Market","Outcome",
+            "Bookmaker","Book","Value","Odds_Price","Limit","Was_Canonical",
+            "Outcome_Norm","Team_Key","Merge_Key_Short","Commence_Hour"
+        ]
+        cols_select = ", ".join([f"`{c}`" for c in cols])
+
+        time_where = f"Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours_int} HOUR)"
+        aliases = _aliases_for(sport)
+        if aliases:
+            sports_in = ", ".join([f"'{a}'" for a in aliases])
+            sport_where = f"UPPER(TRIM(Sport)) IN ({sports_in})"
+            where_clause = f"{time_where} AND {sport_where}"
+        else:
+            where_clause = time_where
+
         query = f"""
-            SELECT * FROM `{table}`
-            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
+            SELECT {cols_select}
+            FROM `{table}`
+            WHERE {where_clause}
         """
         df = client.query(query).to_dataframe()
-        df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
-        print(f"✅ Loaded {len(df)} rows from BigQuery (last {hours}h)")
+
+        # keep your existing normalize/casts
+        if "Commence_Hour" in df.columns:
+            df["Commence_Hour"] = pd.to_datetime(df["Commence_Hour"], errors="coerce", utc=True)
+        if "Sport" in df.columns:
+            df["Sport_Norm"] = df["Sport"].astype(str).str.upper().str.strip()
+
+        print(f"✅ Loaded {len(df)} rows from BigQuery (last {hours_int}h"
+              + (f", sport={sport}" if sport else ", all sports") + ")")
         return df
     except Exception as e:
         print(f"❌ Failed to read from BigQuery: {e}")
         return pd.DataFrame()
-
 # ✅ Cached wrapper for diagnostics and line movement history
 # Smart getter — use cache unless forced to reload
 
 
 @st.cache_data(ttl=600)
-def read_recent_sharp_moves_cached(hours=24, table=BQ_FULL_TABLE):
-    return read_recent_sharp_moves(hours=hours, table=table)
+def read_recent_sharp_moves_cached(hours=24, table=BQ_FULL_TABLE, sport: str | None = None):
+    return read_recent_sharp_moves(hours=hours, table=table, sport=sport)
 
-def read_recent_sharp_moves_conditional(force_reload=False, hours=24, table=BQ_FULL_TABLE):
+def read_recent_sharp_moves_conditional(force_reload=False, hours=24, table=BQ_FULL_TABLE, sport: str | None = None):
     if force_reload:
         st.info("🔁 Reloading sharp moves from BigQuery...")
-        return read_recent_sharp_moves(hours=hours, table=table)  # Uncached
+        return read_recent_sharp_moves(hours=hours, table=table, sport=sport)  # uncached
     else:
-        return read_recent_sharp_moves_cached(hours=hours, table=table)  # Cached
+        return read_recent_sharp_moves_cached(hours=hours, table=table, sport=sport)  # cached
 
 @st.cache_data(ttl=600)
-def get_recent_history():
+def get_recent_history(hours=24, sport: str | None = None):
     st.write("📦 Using cached sharp history (get_recent_history)")
-    return read_recent_sharp_moves_cached(hours=24)
-
+    return read_recent_sharp_moves_cached(hours=hours, sport=sport)
 
 
 
@@ -3688,20 +3719,36 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             for outcome in market.get('outcomes', [])
         ])
 
-        df_all_snapshots = get_recent_history()
-
-        # === Load sharp moves from BigQuery (from Cloud Scheduler or live)
-       
-        detection_key = f"sharp_moves_{sport_key.lower()}"
+        
+        # sport-aware pulls
+        # === Sport-aware history + sharp moves (single source of truth) ===
+        HOURS = 24
+        df_all_snapshots = get_recent_history(hours=HOURS, sport=label)  # already sport-filtered
+        
+        # sport-scoped UI cache key (also scopes by hours + force flag)
+        detection_key = f"sharp_moves:{label.upper()}:{HOURS}"
+        
         if not force_reload and detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
-            st.info(f"✅ Using cached sharp moves for {label}")
+            st.info(f"✅ Using cached {label} sharp moves")
         else:
-            with st.spinner(f"📥 Loading sharp moves for {label} from BigQuery..."):
-                df_moves_raw = read_recent_sharp_moves_conditional(force_reload=force_reload, hours=24)
+            with st.spinner(f"📥 Loading {label} sharp moves from BigQuery..."):
+                df_moves_raw = read_recent_sharp_moves_conditional(
+                    force_reload=force_reload,
+                    hours=HOURS,
+                    sport=label  # or sport_key; the reader expands aliases
+                )
                 st.session_state[detection_key] = df_moves_raw
-                st.success(f"✅ Loaded {len(df_moves_raw)} sharp move rows from BigQuery")
-
+                st.success(f"✅ Loaded {len(df_moves_raw)} {label} sharp-move rows from BigQuery")
+        
+        # Guard and exit early if nothing to show
+        if df_moves_raw is None or df_moves_raw.empty:
+            st.warning(f"⚠️ No recent sharp moves for {label}.")
+            return pd.DataFrame()
+        
+        # 🔚 No need to re-filter by sport here — already scoped upstream.
+        # No need to re-filter by sport later; it’s already scoped.
+        
         # === Filter to current tab's sport
         df_moves_raw['Sport_Norm'] = df_moves_raw['Sport'].astype(str).str.upper().str.strip()
         df_moves_raw = df_moves_raw[df_moves_raw['Sport_Norm'] == label.upper()]
