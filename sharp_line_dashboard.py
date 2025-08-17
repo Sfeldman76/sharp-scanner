@@ -399,12 +399,12 @@ def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = N
         hours_int = int(hours)
 
         # select only columns you actually use to cut bytes (optional but recommended)
-        cols = [
-            "Snapshot_Timestamp","Game_Key","Game_Start","Sport","Market","Outcome",
-            "Bookmaker","Book","Value","Odds_Price","Limit","Was_Canonical",
-            "Outcome_Norm","Team_Key","Merge_Key_Short","Commence_Hour"
-        ]
-        cols_select = ", ".join([f"`{c}`" for c in cols])
+        #cols = [
+            #"Snapshot_Timestamp","Game_Key","Game_Start","Sport","Market","Outcome",
+            #"Bookmaker","Book","Value","Odds_Price","Limit","Was_Canonical",
+            #"Outcome_Norm","Team_Key","Merge_Key_Short","Commence_Hour"
+        #]
+        #cols_select = ", ".join([f"`{c}`" for c in cols])
 
         time_where = f"Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours_int} HOUR)"
         aliases = _aliases_for(sport)
