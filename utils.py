@@ -3227,7 +3227,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             tmp = _ensure_model_placeholders(df.loc[mask].copy(), mkt)
             for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
                 df.loc[mask, col] = tmp[col].values
-            continue
+            continue 
 
         # Canonical selection by market
         if mkt == "spreads":
