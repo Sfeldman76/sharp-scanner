@@ -50,7 +50,8 @@ from utils import (
     get_opening_snapshot,
     add_time_context_flags,
     update_power_ratings,
-    normalize_sport
+    normalize_sport,
+    build_model_readiness_buffer_ultra,
 )
 
 def detect_and_save_all_sports():
