@@ -104,7 +104,8 @@ from scipy.stats import entropy
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from html import escape
-
+from pandas.util import hash_pandas_object
+            
 import re
 import logging
 
@@ -1736,18 +1737,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 g_fc['k'] = fav_abs.fillna(dog_abs).astype('float32')
             
             # --- Build compact integer key using category codes (tiny memory) ---
+           
+            # Ensure join keys are normalized to the same dtype
             for c in game_keys:
                 df_market[c] = df_market[c].astype('category')
                 g_fc[c]      = g_fc[c].astype('category')
             
-            def _key_codes(df):
-                # bit-pack three int32 code columns; assumes each code range < 2**10 (~1024 unique)
-                return (df['Sport'].cat.codes.astype('int32') << 21) ^ \
-                       (df['Home_Team_Norm'].cat.codes.astype('int32') << 10) ^ \
-                        df['Away_Team_Norm'].cat.codes.astype('int32')
-            
-            df_market['gk'] = _key_codes(df_market)
-            g_fc['gk']      = _key_codes(g_fc)
+            df_market['gk'] = hash_pandas_object(df_market[game_keys], index=False).astype('uint64')
+            g_fc['gk']      = hash_pandas_object(g_fc[game_keys],      index=False).astype('uint64')
             
             # --- Collapse g_fc to one row per game key deterministically ---
             # (median for numeric, first for labels)
