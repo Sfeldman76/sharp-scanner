@@ -2273,7 +2273,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'SharpMove_Resistance_Break',
         
             # 🔹 Resistance feature
-            'Line_Resistance_Crossed_Count',  # ✅ newly added here
+            #'Line_Resistance_Crossed_Count',  # ✅ newly added here
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
@@ -2300,24 +2300,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 🧠 Cross-market alignment                       
             'Potential_Odds_Overmove_Flag',
             'Line_Moved_Toward_Team',
-            'Abs_Line_Move_Z',
+            #'Abs_Line_Move_Z',
             'Pct_Line_Move_Z', 
             'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag',
             'SmallBook_Limit_Skew_Flag',
-            'Book_Reliability_Score',
+            #'Book_Reliability_Score',
             'Book_Reliability_Lift',
             'Book_Reliability_x_Sharp',
-            'Book_Reliability_x_Magnitude','Book_Reliability_x_PROB_SHIFT',
+            'Book_Reliability_x_Magnitude',
+            'Book_Reliability_x_PROB_SHIFT',
             'PR_Team_Rating','PR_Opp_Rating',
-            'PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread',
-            'Outcome_Market_Spread',
+            'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
+            #'Outcome_Model_Spread',
+            #'Outcome_Market_Spread',
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
-            'mu_abs', 'k', 'edge_pts', 'z',            
+            #'mu_abs', 'k', 'edge_pts', 'z',            
             'model_fav_vs_market_fav_agree',            
-            'edge_x_k', 'mu_x_k',
+            #'edge_x_k', 'mu_x_k',
             
             
           
@@ -2370,7 +2371,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # add to features
         features += [
-            'Is_Weekend',
+            #'Is_Weekend',
             'Is_Night_Game',
             'Is_PrimeTime',      # if you kept it
             'DOW_Sin','DOW_Cos' # if you enabled cyclical
