@@ -776,7 +776,43 @@ def add_book_reliability_features(
 
     return out
 
+def sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
+    import numpy as np
+    import pandas as pd
+    from pandas.api.types import (
+        is_bool_dtype, is_numeric_dtype, is_categorical_dtype
+    )
 
+    out = X.copy()
+
+    # Flatten MultiIndex cols if any
+    if isinstance(out.columns, pd.MultiIndex):
+        out.columns = ['__'.join(map(str, t)).strip() for t in out.columns.to_list()]
+
+    # Drop duplicate columns (keep first)
+    dup_mask = out.columns.duplicated(keep='first')
+    if dup_mask.any():
+        # Optional: log which ones
+        # print("Dropping duplicate feature columns:", out.columns[dup_mask].tolist())
+        out = out.loc[:, ~dup_mask]
+
+    # Coerce types column-wise
+    for c in out.columns:
+        s = out[c]
+        if is_bool_dtype(s):
+            out[c] = s.astype('int8')
+        elif is_categorical_dtype(s):
+            out[c] = s.cat.codes.astype('int32')
+        elif is_numeric_dtype(s):
+            out[c] = pd.to_numeric(s, errors='coerce')
+        else:
+            # Try best-effort numeric; otherwise drop
+            out[c] = pd.to_numeric(s, errors='coerce')
+
+    # Replace infs, fill NaN, downcast
+    out = out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    out = out.astype('float32', copy=False)
+    return out
 def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) -> pd.DataFrame:
     """
     Returns a slim mapping keyed by (Sport, Market, Bookmaker):
@@ -1188,8 +1224,7 @@ def enrich_power_for_training_lowmem(
     out = out.sort_values('index').drop(columns=['index']).reset_index(drop=True)
     return out   
 
-import numpy as np
-import pandas as pd
+
 
 # --- fast Normal CDF (SciPy-free), vectorized, low-temp ---
 def _phi(x):
@@ -2382,8 +2417,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             pb.progress(int(round(idx / n_markets * 100)))
             continue
       
-        # === Check each fold for label balance
+        # === Check each fold for label 
+
+        # Before sanitization
+        st.subheader("🔍 Feature columns BEFORE sanitize")
+        st.text(str(list(X.columns)))
         
+        # Sanitize
+        X = sanitize_features(X)
+        
+        # After sanitization
+        st.subheader("✅ Feature columns AFTER sanitize")
+        st.text(str(list(X.columns)))
         
         
         # === Param grid (expanded)
