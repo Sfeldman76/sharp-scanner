@@ -2298,7 +2298,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
          #ensure features list has unique names (order-preserving)
         _seen = set()
         features = [f for f in features if not (f in _seen or _seen.add(f))]
-        assert len(features) == len(set(features)), "Duplicate names in `features` list.
+        assert len(features) == len(set(features)), "Duplicate names in `features` list."
         
         hybrid_timing_features = [
             
