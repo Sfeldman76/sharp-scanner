@@ -508,21 +508,24 @@ def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = N
 def read_recent_sharp_moves_cached(hours=24, table=BQ_FULL_TABLE, sport: str | None = None):
     return read_recent_sharp_moves(hours=hours, table=table, sport=sport)
 
-def read_recent_sharp_moves_conditional(*, force_reload: bool, hours: int, sport: str | None):
-    # Only time-filter in BQ. We'll sport-filter in Python.
-    q = """
-    SELECT *
-    FROM `sharplogger.sharp_data.sharp_moves_master`
-    WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
-    ORDER BY Snapshot_Timestamp DESC
+
+def read_recent_sharp_moves_conditional(force_reload=False, hours=24, sport=None):
+    query = """
+        SELECT *
+        FROM `sharplogger.sharp_data.sharp_moves_master`
+        WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+        ORDER BY Snapshot_Timestamp DESC
     """
-    job = bq.query(
-        q,
+    job = bq_client.query(
+        query,
         job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("hours", "INT64", hours)]
+            query_parameters=[
+                bigquery.ScalarQueryParameter("hours", "INT64", hours),
+            ]
         ),
     )
-    return job.to_dataframe()
+    df = job.to_dataframe()
+    return df
     
 @st.cache_data(ttl=600)
 def get_recent_history(hours=24, sport: str | None = None):
