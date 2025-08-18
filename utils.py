@@ -4168,8 +4168,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Team_Key': team_key,
                     })
 
-                    if mtype == "spreads":
-                        logging.info(f"✅ Final Spread Row for {label} @ {book_key} = {value}")
+                    #if mtype == "spreads":
+                        #logging.info(f"✅ Final Spread Row for {label} @ {book_key} = {value}")
 
     
 
@@ -4402,8 +4402,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
         df['Snapshot_Timestamp'] = now
         df['Event_Date'] = df['Game_Start'].dt.date
         df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
-        logging.info("🧪 Sample final spread rows before scoring:")
-        logging.info(df[df['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].head(50).to_string(index=False))
+        #logging.info("🧪 Sample final spread rows before scoring:")
+        #logging.info(df[df['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].head(50).to_string(index=False))
    
         df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
         # 📝 Log column list before scoring
