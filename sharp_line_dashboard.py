@@ -1911,7 +1911,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Avg_Recent_Cover_Streak_Away_Fav'] = _rolling_avg_shifted(df_market, 'Team', 'Cover_Fav_Away_Only', window_length)
 
         
-        )
+        
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(int(round(idx / n_markets * 100)))
