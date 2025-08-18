@@ -22,7 +22,7 @@ import pickle  # ✅ Add this at the top of your script
 import datetime as dt
 import sys, traceback, json  # safe local imports used in this block
 from typing import Optional, Callable
-
+from functools import lru_cache
 
 import sys
 from xgboost import XGBClassifier
@@ -32,6 +32,8 @@ from google.cloud import bigquery, storage
 import logging
 logging.basicConfig(level=logging.INFO)  # <- Must be INFO or DEBUG to show .info() logs
 logger = logging.getLogger(__name__)
+from __future__ import annotations
+import math
 
 import warnings
 from sklearn.exceptions import InconsistentVersionWarning
@@ -719,100 +721,7 @@ def fetch_power_ratings_from_bq(bq, sport: str, lookback_days: int = 400) -> pd.
 
     return df
 
-def enrich_with_power_ratings(df: pd.DataFrame, bq: bigquery.Client) -> pd.DataFrame:
-    """
-    Attach *current* Home/Away power ratings (no time slicing) and diffs.
 
-    Requires df columns: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm'].
-    Produces:
-      Home_Power_Rating, Home_PR_Off, Home_PR_Def,
-      Away_Power_Rating, Away_PR_Off, Away_PR_Def,
-      Power_Rating_Diff, PR_Off_Diff, PR_Def_Diff
-    """
-   
-
-    required = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise KeyError(f"enrich_with_power_ratings() missing required columns: {missing}")
-
-    out = df.copy()
-
-    # Normalize keys
-    out['Sport'] = out['Sport'].astype(str).str.upper()
-    out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
-    out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
-    out['Game_Start'] = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
-
-    # If Game_Start is entirely missing, we still proceed (since current-only join doesn’t need time)
-    if out['Game_Start'].isna().all() and 'Snapshot_Timestamp' in out.columns:
-        out['Game_Start'] = pd.to_datetime(out['Snapshot_Timestamp'], utc=True, errors='coerce')
-
-    # Helper: merge a single-sport block with current ratings
-    def _merge_one_sport(block: pd.DataFrame) -> pd.DataFrame:
-        sport = block['Sport'].iloc[0] if not block['Sport'].empty else 'MLB'
-        ratings = fetch_power_ratings_from_bq(bq, sport=sport)  # current-only
-
-        if ratings is None or ratings.empty:
-            logging.warning("⚠️ No ratings_current rows for sport=%s; filling NAs.", sport)
-            for c in ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
-                      'Away_Power_Rating','Away_PR_Off','Away_PR_Def']:
-                block[c] = np.nan
-            return block
-
-        # Keep only what we need & dedupe per team
-        base = (
-            ratings[['Team_Raw', 'Power_Rating', 'PR_Off', 'PR_Def']]
-            .drop_duplicates(subset=['Team_Raw'], keep='last')
-            .copy()
-        )
-
-        # HOME join
-        home_map = base.rename(columns={
-            'Team_Raw': 'Home_Team_Norm',
-            'Power_Rating': 'Home_Power_Rating',
-            'PR_Off': 'Home_PR_Off',
-            'PR_Def': 'Home_PR_Def',
-        })
-        block = block.merge(home_map, on='Home_Team_Norm', how='left')
-
-        # AWAY join
-        away_map = base.rename(columns={
-            'Team_Raw': 'Away_Team_Norm',
-            'Power_Rating': 'Away_Power_Rating',
-            'PR_Off': 'Away_PR_Off',
-            'PR_Def': 'Away_PR_Def',
-        })
-        block = block.merge(away_map, on='Away_Team_Norm', how='left')
-
-        return block
-
-    # Split-apply-combine by sport (handles mixed-sport frames cleanly)
-    blocks = []
-    for sp in out['Sport'].dropna().unique():
-        sub = out[out['Sport'] == sp].copy()
-        blocks.append(_merge_one_sport(sub))
-    # If Sport is all NaN (unlikely), just try once with a default
-    if not blocks and len(out):
-        blocks.append(_merge_one_sport(out))
-
-    out = pd.concat(blocks, ignore_index=True) if blocks else out
-
-    # Diffs
-    out['Power_Rating_Diff'] = out['Home_Power_Rating'] - out['Away_Power_Rating']
-    out['PR_Off_Diff']       = out['Home_PR_Off']       - out['Away_PR_Off']
-    out['PR_Def_Diff']       = out['Home_PR_Def']       - out['Away_PR_Def']
-
-    # Ensure numeric
-    num_cols = ['Home_Power_Rating','Home_PR_Off','Home_PR_Def',
-                'Away_Power_Rating','Away_PR_Off','Away_PR_Def',
-                'Power_Rating_Diff','PR_Off_Diff','PR_Def_Diff']
-    for c in num_cols:
-        if c not in out.columns:
-            out[c] = np.nan
-    out[num_cols] = out[num_cols].apply(pd.to_numeric, errors='coerce')
-
-    return out
 def log_memory(msg=""):
     process = psutil.Process(os.getpid())
     mem = process.memory_info()
@@ -865,9 +774,7 @@ def read_recent_sharp_master_cached(hours=120):
     df = read_recent_sharp_moves(hours=hours)  # this fetches from BigQuery
     sharp_moves_cache[cache_key] = df
     return df
-
-
-            
+        
 def fetch_live_odds(sport_key, api_key):
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
@@ -972,39 +879,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         logging.exception("❌ Failed to upload snapshot to GCS.")
 
-def read_latest_snapshot_from_bigquery(hours=24):
-    try:
-        query = f"""
-            SELECT * FROM `{SNAPSHOTS_TABLE}`
-            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
-        """
-        df = bq_client.query(query).to_dataframe()
 
-        # Restructure into grouped dict format expected by detect_sharp_moves
-        grouped = defaultdict(lambda: {"bookmakers": []})
-        for _, row in df.iterrows():
-            gid = row["Game_ID"]
-            entry = grouped[gid]
-            found_book = next((b for b in entry["bookmakers"] if b["key"] == row["Bookmaker"]), None)
-            if not found_book:
-                found_book = {"key": row["Bookmaker"], "markets": []}
-                entry["bookmakers"].append(found_book)
-            found_market = next((m for m in found_book["markets"] if m["key"] == row["Market"]), None)
-            if not found_market:
-                found_market = {"key": row["Market"], "outcomes": []}
-                found_book["markets"].append(found_market)
-            price = row["Value"] if row["Market"].lower() == "h2h" else row.get("Odds_Price", None)
-
-            found_market["outcomes"].append({
-                "name": row["Outcome"],
-                "point": row["Value"],
-                "price": price,
-                "bet_limit": row["Limit"]
-            })
-        return dict(grouped)
-    except Exception as e:
-        print(f"❌ Failed to load snapshot from BigQuery: {e}")
-        return {}
 
 
 
@@ -1241,15 +1116,6 @@ def normalize_book_key(raw_key, sharp_books, rec_books):
     return raw_key
 
 
-#def implied_prob(odds):
-    #try:
-        #odds = float(odds)
-        #if odds > 0:
-            #return 100 / (odds + 100)
-        #else:
-            #return abs(odds) / (abs(odds) + 100)
-    #except:
-        #return None
 
 def load_market_weights_from_bq():
     
@@ -2035,57 +1901,6 @@ def fallback_flip_inverse_rows(df_inverse: pd.DataFrame) -> pd.DataFrame:
     df_inverse.update(df_to_flip)
     return df_inverse
 
-def get_opening_snapshot(df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
-    """
-    Returns the first valid snapshot per (Game_Key, Market, Outcome, Bookmaker) with:
-    - Open_Value
-    - Open_Odds
-    - First_Imp_Prob
-    - Opening_Limit (optional, only if 'Limit' exists and is not null)
-    """
-    if df_all_snapshots.empty:
-        logging.warning("⚠️ df_all_snapshots is empty — returning empty opening snapshot")
-        return pd.DataFrame(columns=['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Open_Value', 'Open_Odds', 'First_Imp_Prob', 'Opening_Limit'])
-
-    required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Snapshot_Timestamp', 'Value', 'Odds_Price']
-    for col in required_cols:
-        if col not in df_all_snapshots.columns:
-            raise ValueError(f"Missing required column in df_all_snapshots: {col}")
-
-    merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-    df = df_all_snapshots.copy()
-    for col in merge_keys:
-        df[col] = df[col].astype(str).str.strip().str.lower()
-
-    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], errors='coerce', utc=True)
-    df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
-    df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
-    if 'Limit' in df.columns:
-        df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce')
-
-    # Compute Implied_Prob if missing
-    if 'Implied_Prob' not in df.columns:
-        df['Implied_Prob'] = np.nan
-    df['Implied_Prob'] = df['Implied_Prob'].fillna(df['Odds_Price'].apply(implied_prob))
-
-    # Drop bad rows
-    df = df.dropna(subset=['Snapshot_Timestamp', 'Value', 'Odds_Price'])
-
-    # === Get first snapshot per outcome
-    df_first = (
-        df.sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=merge_keys, keep='first')
-        [merge_keys + ['Value', 'Odds_Price', 'Implied_Prob'] + (['Limit'] if 'Limit' in df.columns else [])]
-    )
-
-    df_first = df_first.rename(columns={
-        'Value': 'Open_Value',
-        'Odds_Price': 'Open_Odds',
-        'Implied_Prob': 'First_Imp_Prob',
-        'Limit': 'Opening_Limit' if 'Limit' in df_first.columns else None
-    })
-
-    return df_first
 
 def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "America/New_York") -> pd.DataFrame:
     out = df.copy()
@@ -2118,11 +1933,10 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
         out['Is_PrimeTime'] = 0
     return out
 
-from google.cloud import bigquery
 
-from functools import lru_cache
 
-from google.cloud import bigquery
+
+
 
 # Tiny, fast normalizer (no extra temporaries)
 def _norm_team_series(s: pd.Series) -> pd.Series:
@@ -2173,102 +1987,6 @@ def fetch_latest_current_ratings_cached(
     # Keep only what we need, with tight dtypes
     return df[["Team_Norm", "Power_Rating"]]
 
-def enrich_power_from_current(
-    df: pd.DataFrame,
-    sport_aliases: dict,
-    table_current: str = "sharplogger.sharp_data.ratings_current",
-    project: str = "sharplogger",
-    baseline: float = 1500.0,
-) -> pd.DataFrame:
-    """
-    Adds Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff using ratings_current only.
-    Requires df columns: ['Sport','Home_Team_Norm','Away_Team_Norm'].
-    Returns a new DataFrame only if we actually enrich; otherwise original df.
-    """
-    if df.empty:
-        return df
-
-    # We avoid a full .copy() unless we know we’ll write new columns
-    out = df
-
-    # Normalize Sport once, then canon-map (no large temporaries)
-    sport_norm = out["Sport"].astype(str).str.upper()
-    # Build a compact alias->canon map
-    alias_to_canon = {}
-    for k, v in sport_aliases.items():
-        canon = str(k).upper()
-        if isinstance(v, (list, tuple, set)):
-            for a in v: alias_to_canon[str(a).upper()] = canon
-        else:
-            alias_to_canon[str(v).upper()] = canon
-        # also ensure key maps to itself
-        alias_to_canon[canon] = canon
-    sport_canon_series = sport_norm.map(lambda s: alias_to_canon.get(s, s))
-
-    # Assume (as in your pipeline) a single sport per batch; keep first canon
-    sport_canon = sport_canon_series.iloc[0]
-    mask_same_sport = (sport_canon_series == sport_canon)
-    if not mask_same_sport.all():
-        # Filter rows from other sports, but preserve original if that removes all
-        tmp = out.loc[mask_same_sport]
-        if tmp.empty:
-            return df
-        out = tmp
-
-    # Normalize team keys (in place on the view)
-    out = out.copy()  # we’re about to add columns; safe to copy once here
-    out["Home_Team_Norm"] = _norm_team_series(out["Home_Team_Norm"])
-    out["Away_Team_Norm"] = _norm_team_series(out["Away_Team_Norm"])
-
-    # Fetch minimal ratings for this sport (memoized)
-    ratings = fetch_latest_current_ratings_cached(
-        sport=sport_canon,
-        table_current=table_current,
-        project=project,
-    )
-
-    # Prepare a Series for O(1) lookups without building a big Python dict
-    if ratings.empty:
-        # No ratings: fill with baseline and compute diff
-        base32 = np.float32(baseline)
-        out["Home_Power_Rating"] = base32
-        out["Away_Power_Rating"] = base32
-        out["Power_Rating_Diff"] = np.float32(0.0)
-        return out
-
-    s_map = pd.Series(
-        ratings["Power_Rating"].to_numpy(copy=False),
-        index=ratings["Team_Norm"],
-        dtype="float32"
-    )
-
-    # Map -> float32 arrays, then fast fill with sport mean
-    home = s_map.reindex(out["Home_Team_Norm"]).to_numpy(dtype="float32", copy=False)
-    away = s_map.reindex(out["Away_Team_Norm"]).to_numpy(dtype="float32", copy=False)
-
-    # Compute sport mean once (float32)
-    sport_mean = np.float32(s_map.mean(skipna=True)) if len(s_map) else np.float32(baseline)
-
-    # Fill NaNs in-place using np.nan_to_num (no extra Series allocations)
-    np.nan_to_num(home, copy=False, nan=sport_mean)
-    np.nan_to_num(away, copy=False, nan=sport_mean)
-
-    # Attach columns (no intermediate Series creation)
-    out["Home_Power_Rating"] = home
-    out["Away_Power_Rating"] = away
-
-    # Vectorized float32 diff
-    out["Power_Rating_Diff"] = (home - away).astype("float32", copy=False)
-
-    return out
-
-SPORT_ALIASES = {
-    "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
-    "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
-    "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
-    "NBA":   ["NBA", "BASKETBALL_NBA", "BASKETBALL-NBA", "BASKETBALL"],
-    "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
-}
 
 SPORT_SPREAD_CFG = {
     "NFL":   dict(points_per_elo=25.0, HFA=1.6, sigma_pts=13.2),
@@ -2278,91 +1996,6 @@ SPORT_SPREAD_CFG = {
     "CFL":   dict(points_per_elo=26.0, HFA=1.8, sigma_pts=14.0),
 }
 
-
-def _prep_consensus_market_spread_current(df, value_col="Value", outcome_col="Outcome_Norm"):
-    d = df.copy()
-    d['Sport'] = d['Sport'].astype(str).str.upper()
-
-    med = (d.groupby(['Sport','Home_Team_Norm','Away_Team_Norm', outcome_col], dropna=False)[value_col]
-             .median().reset_index())
-
-    # favorite = row with *more negative* spread
-    idx = med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[value_col].idxmin()
-    fav_rows = med.loc[idx].rename(columns={outcome_col:'Market_Favorite_Team', value_col:'FavMed'})
-
-    # opponent (dog)
-    sides = med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[outcome_col].agg(list).reset_index()
-    fav = fav_rows.merge(sides, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left')
-    fav['Market_Underdog_Team'] = fav.apply(
-        lambda r: [t for t in r[outcome_col] if t != r['Market_Favorite_Team']][0]
-        if isinstance(r[outcome_col], list) and len(r[outcome_col]) == 2 else np.nan, axis=1
-    )
-
-    # k = abs spread magnitude (robust if only one side present)
-    k_df = (med.groupby(['Sport','Home_Team_Norm','Away_Team_Norm'])[value_col]
-              .apply(lambda s: float(np.nanmedian(np.abs(s.values)))).reset_index(name='k'))
-
-    g = (fav[['Sport','Home_Team_Norm','Away_Team_Norm','Market_Favorite_Team','Market_Underdog_Team']]
-         .merge(k_df, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left'))
-    g['Favorite_Market_Spread']  = -g['k']
-    g['Underdog_Market_Spread']  = +g['k']
-    return g
-
-def _favorite_centric_current(df_games):
-    out = df_games.copy()
-    out['Sport'] = out['Sport'].astype(str).str.upper()
-
-    def row_params(sport, pr_diff):
-        cfg = SPORT_SPREAD_CFG.get(sport)
-        if (cfg is None) or pd.isna(pr_diff):
-            return np.nan, np.nan
-        mu = (pr_diff + cfg['HFA']) / cfg['points_per_elo']  # home−away margin in points
-        return mu, cfg['sigma_pts']
-
-    vals = out.apply(lambda r: row_params(r['Sport'], r['Power_Rating_Diff']), axis=1, result_type='expand')
-    out[['Model_Expected_Margin','Sigma_Pts']] = vals
-    mu_abs = out['Model_Expected_Margin'].abs()
-
-    out['Model_Expected_Margin_Abs'] = mu_abs
-    out['Model_Fav_Spread'] = -mu_abs
-    out['Model_Dog_Spread'] = +mu_abs
-
-    # diagnostics
-    out['Model_Favorite_Team']  = np.where(out['Model_Expected_Margin'] >= 0, out['Home_Team_Norm'], out['Away_Team_Norm'])
-    out['Model_Underdog_Team']  = np.where(out['Model_Expected_Margin'] >= 0, out['Away_Team_Norm'], out['Home_Team_Norm'])
-    return out
-
-def _attach_outcome_projection(df_outcomes, df_game_fc):
-    g = df_game_fc[
-        ['Sport','Home_Team_Norm','Away_Team_Norm',
-         'Favorite_Market_Spread','Underdog_Market_Spread','k',
-         'Model_Fav_Spread','Model_Dog_Spread',
-         'Model_Expected_Margin_Abs','Sigma_Pts',
-         'Market_Favorite_Team','Model_Favorite_Team']
-    ].copy()
-
-    out = df_outcomes.merge(g, on=['Sport','Home_Team_Norm','Away_Team_Norm'], how='left')
-    is_fav = (out['Outcome_Norm'] == out['Market_Favorite_Team'])
-
-    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'], out['Model_Dog_Spread'])
-    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'], out['Underdog_Market_Spread'])
-    out['Outcome_Spread_Edge']   = out['Outcome_Model_Spread'] - out['Outcome_Market_Spread']
-
-    # engineered features (forward-safe)
-    out['k']        = out['Outcome_Market_Spread'].abs()
-    out['mu_abs']   = out['Model_Expected_Margin_Abs']
-    out['edge_pts'] = out['mu_abs'] - out['k']
-    out['z']        = (out['k'] - out['mu_abs']) / out['Sigma_Pts'].replace(0, np.nan)
-    out['is_market_fav_team'] = (out['Outcome_Market_Spread'] < 0).astype('int8')
-    out['is_home_team']       = (out['Outcome_Norm'] == out['Home_Team_Norm']).astype('int8')
-    out['model_fav_vs_market_fav_agree'] = (
-        out['Model_Favorite_Team'] == out['Market_Favorite_Team']
-    ).astype('int8')
-    out['edge_x_k'] = out['edge_pts'] * out['k']
-    out['mu_x_k']   = out['mu_abs']  * out['k']
-    out['z'] = out['z'].clip(-6, 6)
-    out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    return out
 
 def enrich_power_from_current_inplace(
     df: pd.DataFrame,
@@ -2446,15 +2079,6 @@ def enrich_power_from_current_inplace(
     df["Power_Rating_Diff"] = (home - away).astype("float32", copy=False)
 
     return df
-from __future__ import annotations
-import numpy as np
-import pandas as pd
-import logging
-import math
-
-# You already have this in your backend:
-# def enrich_power_from_current_inplace(df, sport_aliases, table_current="sharplogger.sharp_data.ratings_current", project="sharplogger", baseline=1500.0) -> None:
-#     ...
 
 # ---- math utils (Normal CDF; no scipy) ----
 def _phi(z: np.ndarray) -> np.ndarray:
