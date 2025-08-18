@@ -4609,7 +4609,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
             'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
             'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT', 'Scored', 'Snapshot_Timestamp',
-            'Sport', 'Value', 'First_Line_Value', 'First_Sharp_Prob',
+            'Sport', 'Value', 'First_Line_Value', 
             'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
             'Unique_Sharp_Books', 'Merge_Key_Short',
             'Line_Magnitude_Abs', 'Line_Move_Magnitude',
@@ -5444,7 +5444,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
         'Scored', 'Sport', 'Value', 'Merge_Key_Short',
-        'First_Line_Value', 'First_Sharp_Prob',
+        'First_Line_Value',
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag','Model_Sharp_Win_Prob',
@@ -5453,7 +5453,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
     float_cols_to_round = [
         'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
-        'First_Line_Value', 'First_Sharp_Prob', 'Line_Delta', 'Model_Prob_Diff'
+        'First_Line_Value', 'Line_Delta', 'Model_Prob_Diff'
     ]
 
   
