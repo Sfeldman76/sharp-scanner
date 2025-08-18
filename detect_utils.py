@@ -86,7 +86,7 @@ def detect_and_save_all_sports():
                 BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
                 trained_models=trained_models,
                 weights=market_weights,
-                sport_label=sport_label    # helps snapshot readers expand aliases cleanly
+                
             )
 
 
