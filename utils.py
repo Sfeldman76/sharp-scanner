@@ -4067,17 +4067,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_fallback = build_model_readiness_buffer(df)  # use the enriched `df` you logged earlier
                     return df_fallback
                     #return pd.DataFrame()
-            
-                       
-             except Exception:
-                logger.error("❌ Exception during final aggregation")
-                logger.error(traceback.format_exc())
-                return pd.DataFrame()
-        
-            # Should not reach here; guarantees we never return None
-                return df_empty    
-
-
+                except Exception:
+                    logger.error("❌ Exception during final aggregation")
+                    logger.error(traceback.format_exc())
+                    return pd.DataFrame()
         
 def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models=None, weights=None):   
     if not current:
