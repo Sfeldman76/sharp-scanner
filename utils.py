@@ -2984,7 +2984,32 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df= df.merge(team_feature_map, on='Team', how='left')
         df.drop(columns=['Team'], inplace=True, errors='ignore')
 
-       
+         # ---- Ensure Market_norm (and Outcome_Norm) exist before use ----
+    # Market_norm: lowercase/stripped market name, categorical
+    if 'Market_norm' not in df.columns:
+        if 'Market' in df.columns and not df.empty:
+            m = df['Market']
+            if not pd.api.types.is_categorical_dtype(m):
+                m = m.astype('string')
+            df['Market_norm'] = m.str.lower().str.strip().astype('category')
+        else:
+            # same-length categorical NA column (handles empty df too)
+            df['Market_norm'] = pd.Series(
+                pd.Categorical([None] * len(df)),
+                index=df.index
+            )
+    
+    # Outcome_Norm: safe normalized outcome for downstream keys
+    if 'Outcome_Norm' not in df.columns:
+        if 'Outcome' in df.columns and not df.empty:
+            df['Outcome_Norm'] = (
+                df['Outcome'].astype('string')
+                              .str.lower()
+                              .str.strip()
+            )
+        else:
+            df['Outcome_Norm'] = pd.Series(pd.Categorical([None] * len(df)), index=df.index)
+      
     # 4) Determine markets present to score (only those we actually have trained bundles for)
     if HAS_MODELS and not df.empty:
         markets_present = [
