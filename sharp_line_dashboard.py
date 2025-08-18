@@ -1353,7 +1353,7 @@ def add_favorite_context_flag(df: pd.DataFrame) -> pd.DataFrame:
     out['Is_Favorite_Context'] = fav_flag
     return out
 
-df_market = add_favorite_context_flag(df_market)
+
 
 
 
@@ -1554,7 +1554,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     for idx, market in enumerate(markets, start=1):
         status.write(f"🚧 Training model for `{market.upper()}`...")
         df_market = df_bt[df_bt['Market'] == market].copy()
-        df_market = compute_small_book_liquidity_features(df_market)  
+        df_market = compute_small_book_liquidity_features(df_market)
+        df_market = add_favorite_context_flag(df_market)
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
