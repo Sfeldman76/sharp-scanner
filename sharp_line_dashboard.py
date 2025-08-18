@@ -223,7 +223,14 @@ def _alias_lookup(s: str) -> str:
         if s in alts or s == canon:
             return canon
     return s
+def normalize_book_name(bookmaker: str, book: str) -> str:
+    book = book.lower().strip() if isinstance(book, str) else ""
+    bookmaker = bookmaker.lower().strip() if isinstance(bookmaker, str) else ""
 
+    if bookmaker == "betfair" and book.startswith("betfair_ex_"):
+        return book  # e.g., betfair_ex_uk
+
+    return bookmaker
 def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None) -> tuple[str, str]:
     """
     Returns (book_norm, bookmaker_norm).
