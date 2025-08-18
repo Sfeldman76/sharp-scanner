@@ -5199,36 +5199,35 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"After build_game_key - df_master columns: {df_master.columns.tolist()}")
     
     # === Track memory usage
+    # === Track memory usage
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
-    # === 1) Load recent master history (already includes openers)
+    # === 1) Load recent master history (with openers)
     df_all_snapshots = read_recent_sharp_master_cached(hours=120)
     log_memory("AFTER read_recent_sharp_master_cached")
     
-    # (Optional) Build latest-line view if you still use it downstream.
-    # Will no-op gracefully if process_chunk isn't defined.
+    # === (Optional) Latest-line view if you need it downstream.
+    df_all_snapshots_filtered = pd.DataFrame()
     try:
-        if callable(process_chunk):
-            df_all_snapshots_filtered = pd.concat(
-                [process_chunk(df_all_snapshots.iloc[start:start + 10000])
-                 for start in range(0, len(df_all_snapshots), 10000)],
-                ignore_index=True
-            )
+        # Only run if process_chunk exists and is callable
+        if "process_chunk" in globals() and callable(process_chunk):
+            parts = []
+            for start in range(0, len(df_all_snapshots), 10_000):
+                parts.append(process_chunk(df_all_snapshots.iloc[start:start + 10_000]))
+            if parts:
+                df_all_snapshots_filtered = pd.concat(parts, ignore_index=True)
             log_memory("AFTER building df_all_snapshots_filtered")
         else:
-            logging.info("ℹ️ process_chunk not callable; skipping df_all_snapshots_filtered build.")
-            df_all_snapshots_filtered = pd.DataFrame()
-    except NameError:
-        logging.info("ℹ️ process_chunk not defined; skipping df_all_snapshots_filtered build.")
-        df_all_snapshots_filtered = pd.DataFrame()
+            logging.info("ℹ️ process_chunk not available; skipping df_all_snapshots_filtered.")
+    except Exception as e:
+        logging.warning(f"⚠️ Skipping df_all_snapshots_filtered due to error: {e}")
     
-    # === 2) Build df_first directly from Open_* fields in master
-    #     (We only keep line/odds openers + implied prob. No First_Sharp_Prob.)
+    # === 2) Build df_first directly from Open_* in master
     need_cols = ["Game_Key","Market","Outcome","Bookmaker","Open_Value","Open_Odds"]
     missing = [c for c in need_cols if c not in df_all_snapshots.columns]
     if missing:
-        logging.warning(f"⚠️ Cannot build df_first from master — missing columns: {missing}")
+        logging.warning(f"⚠️ Cannot build df_first — missing columns: {missing}")
         df_first = pd.DataFrame(columns=[
             "Game_Key","Market","Outcome","Bookmaker",
             "First_Line_Value","First_Odds","First_Imp_Prob"
@@ -5236,102 +5235,71 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     else:
         df_first = (
             df_all_snapshots.loc[:, need_cols]
-            .dropna(subset=["Game_Key","Market","Outcome","Bookmaker"])  # guard bad keys
+            .dropna(subset=["Game_Key","Market","Outcome","Bookmaker"])
             .drop_duplicates(subset=["Game_Key","Market","Outcome","Bookmaker"], keep="first")
-            .rename(columns={
-                "Open_Value": "First_Line_Value",
-                "Open_Odds":  "First_Odds",
-            })
+            .rename(columns={"Open_Value":"First_Line_Value","Open_Odds":"First_Odds"})
             .reset_index(drop=True)
             .copy()
         )
-        # Compute implied prob from open odds
         df_first["First_Imp_Prob"] = df_first["First_Odds"].map(calc_implied_prob)
+        logging.info("📋 Sample df_first:\n" + df_first[["Game_Key","Market","Outcome","Bookmaker","First_Line_Value"]].head(10).to_string(index=False))
     
-        # Light sampling logs
-        logging.info("📋 Sample df_first (openers):\n" +
-                     df_first[["Game_Key","Market","Outcome","Bookmaker","First_Line_Value"]]
-                     .head(10).to_string(index=False))
-        logging.info("💰 Sample First_Odds + First_Imp_Prob:\n" +
-                     df_first[["First_Odds","First_Imp_Prob"]].dropna().head(5).to_string(index=False))
-        logging.info(f"🧪 df_first rows: {len(df_first)}; cols: {df_first.columns.tolist()}")
-    
-    # === 3) Normalize join keys for robust merge
+    # === 3) Normalize join keys
     key_cols = ["Game_Key","Market","Outcome","Bookmaker"]
-    for df in [df_master, df_first]:
-        for col in key_cols:
-            df[col] = df[col].astype(str).str.strip().str.lower()
+    for _df in (df_master, df_first):
+        for c in key_cols:
+            if c in _df.columns:
+                _df[c] = _df[c].astype(str).str.strip().str.lower()
+    for c in key_cols:
+        if c in df_first.columns: df_first[c] = df_first[c].astype("category")
+        if c in df_master.columns: df_master[c] = df_master[c].astype("category")
     
-    # Optional: downcast to category to save memory
-    for col in key_cols:
-        if col in df_first.columns:
-            df_first[col] = df_first[col].astype("category")
-        if col in df_master.columns:
-            df_master[col] = df_master[col].astype("category")
-    
-    # === 4) Prepare df_scores: reduce + deduplicate by latest Inserted_Timestamp if present
+    # === 4) Prepare scores (dedupe)
     df_scores = df_scores[["Merge_Key_Short","Score_Home_Score","Score_Away_Score"]].copy()
     df_scores["Merge_Key_Short"] = df_scores["Merge_Key_Short"].astype("category")
-    
     if "Inserted_Timestamp" in df_scores.columns:
-        df_scores = (
-            df_scores.sort_values("Inserted_Timestamp")
-                     .drop_duplicates(subset="Merge_Key_Short", keep="last")
-        )
+        df_scores = (df_scores.sort_values("Inserted_Timestamp")
+                               .drop_duplicates(subset="Merge_Key_Short", keep="last"))
     else:
         df_scores = df_scores.drop_duplicates(subset="Merge_Key_Short", keep="last")
     
-    # === 5) Diagnostics: check overlap before merge
-    common_keys = df_master[key_cols].drop_duplicates()
-    first_keys  = df_first[key_cols].drop_duplicates()
-    overlap = common_keys.merge(first_keys, on=key_cols, how="inner")
-    logging.info(f"🧪 Join key overlap: {len(overlap)} / {len(common_keys)} df_master rows match df_first")
+    # === 5) Diagnostics + merge
+    overlap = (df_master[key_cols].drop_duplicates()
+               .merge(df_first[key_cols].drop_duplicates(), on=key_cols, how="inner"))
+    logging.info(f"🧪 Join key overlap: {len(overlap)} / {df_master[key_cols].drop_duplicates().shape[0]}")
     
-    # === 6) Merge df_first (openers) into df_master
     df_master = df_master.merge(df_first, on=key_cols, how="left")
-    log_memory("AFTER merge with df_first (Open_*)")
+    log_memory("AFTER merge with df_first")
     
-    # === 7) Remove raw score columns to avoid conflicts, then merge deduped scores
+    # Remove any preexisting score cols to avoid suffix fights, then merge scores
     df_master.drop(columns=["Score_Home_Score","Score_Away_Score"], errors="ignore", inplace=True)
     df_master = df_master.merge(df_scores, on="Merge_Key_Short", how="inner")
     log_memory("AFTER merge with df_scores")
     
-    # === 8) Post-merge logging
-    logging.info("🧩 df_master columns after openers + scores merge:\n" + ", ".join(df_master.columns))
-    first_fields = ["First_Line_Value","First_Odds","First_Imp_Prob"]
-    sample_first = df_master[first_fields].dropna(how="all").head(5)
-    if not sample_first.empty:
-        logging.info("🔍 Sample First_* fields after merge:\n" + sample_first.to_string(index=False))
-    else:
-        logging.warning("⚠️ No non-null First_* values found — verify join keys or source openers.")
-    
-    # === 9) Finalize working df
+    # === 6) Finalize working df
     df = df_master
-    logging.info(f"✅ Final df columns before scoring: {df.columns.tolist()}")
-    log_memory("AFTER merge pipeline (openers + scores)")
+    logging.info(f"✅ Final df columns before scoring: {list(df.columns)}")
     logging.info(f"df shape after merge: {df.shape}")
     
-    # 🚨 Guard: stop now if no rows to process
     if df.empty:
         logging.warning("ℹ️ No rows after merge with scores — skipping backtest scoring.")
         return pd.DataFrame()
     
-    # === 10) Reassign Merge_Key_Short from df_master via Game_Key (if needed)
+    # Ensure Merge_Key_Short present via Game_Key map if needed
     if "Merge_Key_Short" in df_master.columns:
-        logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key (optimized)")
         key_map = (df_master.drop_duplicates(subset=["Game_Key"])
                             [["Game_Key","Merge_Key_Short"]]
                             .set_index("Game_Key")["Merge_Key_Short"]
                             .to_dict())
         df["Merge_Key_Short"] = df["Game_Key"].map(key_map)
     
-    null_count = df["Merge_Key_Short"].isnull().sum()
-    logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
+    logging.info(f"🧪 Final Merge_Key_Short nulls: {df['Merge_Key_Short'].isnull().sum()}")
     df["Sport"] = sport_label.upper()
     
-    # === Track memory usage before subsequent operations
+    # Memory before next step
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before next operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+
 
     def process_chunk_logic(df_chunk):
         df_chunk = df_chunk.copy()
