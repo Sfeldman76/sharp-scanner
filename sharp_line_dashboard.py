@@ -3862,7 +3862,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 break
 
       
-        
+        # --- right after you load df_moves_raw from BQ/cache:
+        df_raw_for_history = df_moves_raw.copy()  # keep a pristine copy for "first snapshot" work
                 
 
         # === Final cleanup
@@ -3871,7 +3872,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # === Load broader trend history for open line / tier comparison
         start = time.time()
        # Keep all rows for proper line open capture
-        df_history_all = get_recent_history()
+        df_history_all =  df_raw_for_history
         merge_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
 
         # === Build First Snapshot: keep *first* rows even if missing model prob
