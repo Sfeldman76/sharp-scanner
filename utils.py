@@ -3881,27 +3881,37 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
 def detect_sharp_moves(
     current,
-    previous=None,            # ← now optional
-    sport_key=None,           # e.g. "basketball_nba"
+    previous=None,                    # optional/ignored
+    sport_key=None,                   # e.g. "basketball_nba"
     SHARP_BOOKS=None,
     REC_BOOKS=None,
     BOOKMAKER_REGIONS=None,
     trained_models=None,
     weights=None,
-    history_hours: int = 120, # hours of history to pull from BQ; set to 0 to skip
-    
+    sport_label: str | None = None,   # e.g. "NBA"
+    history_hours: int = 120,         # 0/None to skip history
 ):
+    import logging
+    from datetime import datetime
+    import numpy as np
+    import pandas as pd
 
     if not current:
         logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     # ---------- 0) Basics ----------
-    df_scored    = pd.DataFrame()
-    summary_df   = pd.DataFrame()
+    df_scored     = pd.DataFrame()
+    summary_df    = pd.DataFrame()
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Normalize sport identifiers (both helpful later)
+    _sport_key   = (sport_key or "").strip().lower()      # "basketball_nba"
+    _sport_label = (sport_label or _sport_key).strip().upper()  # "NBA" (else upper of key)
 
+  
+
+    # ---------- 1) Build 'previous' lookup only if provided ----------
     # ---------- 1) Build 'previous' lookup only if provided ----------
     previous_odds_map = {}
     if isinstance(previous, list) and previous:
@@ -3914,47 +3924,44 @@ def detect_sharp_moves(
                     for outcome in market.get('outcomes', []):
                         label = normalize_label(outcome.get('name', ''))
                         price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
-                        previous_odds_map[(
-                            g.get('home_team'), g.get('away_team'), mtype, label, book_key
-                        )] = price
+                        previous_odds_map[(g.get('home_team'), g.get('away_team'), mtype, label, book_key)] = price
     elif isinstance(previous, dict) and previous:
-        # keep compatibility if you sometimes pass a dict already keyed how you expect
-        previous_odds_map = previous
-
+        previous_odds_map = previous  # already keyed
+       
     # ---------- 2) Pull recent history from BQ (for opens/extremes/reversals) ----------
+    df_all_snapshots = pd.DataFrame()
     df_history = pd.DataFrame()
+    old_val_map, old_odds_map = {}, {}
     if history_hours and history_hours > 0:
         try:
             df_history = read_recent_sharp_master_cached(hours=history_hours)
-            # Keep only rows we can key on
-            df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
-            df_history = df_history.sort_values('Snapshot_Timestamp')
+            if not df_history.empty:
+                # Keep only rows we can key on
+                df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
+                df_history = df_history.sort_values('Snapshot_Timestamp')
 
-            # normalize for joins
-            for col in ('Book', 'Bookmaker', 'Game', 'Market', 'Outcome'):
-                if col in df_history.columns:
-                    if col in ('Book', 'Bookmaker', 'Game', 'Outcome'):
+                # normalize for joins
+                for col in ('Book', 'Bookmaker', 'Game', 'Market', 'Outcome'):
+                    if col in df_history.columns:
                         df_history[col] = df_history[col].astype(str).str.lower().str.strip()
-                    else:
-                        df_history[col] = df_history[col].astype(str).str.strip().str.lower()
 
-            # old value/odds maps keyed by (Game, Market, Outcome, Book)
-            old_val_map = (
-                df_history
-                .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
-                .set_index(['Game', 'Market', 'Outcome', 'Book'])['Value']
-                .to_dict()
-            )
-            old_odds_map = (
-                df_history
-                .dropna(subset=['Odds_Price'])
-                .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
-                .set_index(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
-                .to_dict()
-            )
+                # old value/odds maps keyed by (Game, Market, Outcome, Book)
+                old_val_map = (
+                    df_history
+                    .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
+                    .set_index(['Game', 'Market', 'Outcome', 'Book'])['Value']
+                    .to_dict()
+                )
+                old_odds_map = (
+                    df_history
+                    .dropna(subset=['Odds_Price'])
+                    .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
+                    .set_index(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
+                    .to_dict()
+                )
         except Exception as e:
             logging.warning(f"⚠️ History fetch failed: {e}")
-            old_val_map, old_odds_map = {}, {}
+        
     else:
         old_val_map, old_odds_map = {}, {}
 
@@ -4022,23 +4029,8 @@ def detect_sharp_moves(
                         'Team_Key': team_key,
                     })
 
-    # === continue with your existing pipeline:
-    # - build canonical & inverse
-    # - merge opens/extremes, reversals, resistance, timing
-    # - compute implied probs + directional features
-    # - small book liquidity, cross-market features
-    # - apply_models(...) OR build_model_readiness_buffer(...)
-    # - build audit
-    #
-    # Return your usual 3-tuple
-    df_api = pd.DataFrame(rows)
-
-    # ... your existing enrichment & scoring (not shown) ...
-    # df_scored = apply_models(...) or build_model_readiness_buffer(df_api)
-    # df_audit  = build_audit_frame(...)
-
-    return df_scored, df_history, summary_df  # keep your original return shape
-
+  
+   
 
     df = pd.DataFrame(rows)
     if df.empty:
