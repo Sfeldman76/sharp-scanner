@@ -2652,8 +2652,10 @@ import json
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
    
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
+    df_empty = pd.DataFrame()
     scored_all = []
     total_start = time.time()
+    
 
     # ---- Base normalization (does not touch open/extreme columns) ----
     df = df.copy()
@@ -3863,214 +3865,217 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     )
                     
                     scored_all.append(df_scored)   
-                try:
-                    df_final = pd.DataFrame()
-                
-                    hybrid_line_cols = [
-                        f'SharpMove_Magnitude_{b}' for b in [
-                            'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-                            'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-                            'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-                            'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-                        ]
-                    ]
-                    hybrid_odds_cols = [
-                        f'OddsMove_Magnitude_{b}' for b in [
-                            'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-                            'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-                            'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-                            'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-                        ]
-                    ]
-                
-                    if scored_all:
-                        # 1) concat all markets
-                        df_final = pd.concat(scored_all, ignore_index=True)
-                
-                        logger.info(
-                            f"🧮 Final scored breakdown — total={len(df_final)}, "
-                            f"canonical={df_final['Was_Canonical'].sum()}, inverse={(~df_final['Was_Canonical']).sum()}"
-                        )
-                
-                        # 2) snapshot collapse (latest per book)
-                        df_final = (
-                            df_final.sort_values('Snapshot_Timestamp')
-                                    .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
-                        )
-                
-                        # 3) numeric coercions / default zeros for features used in counts
-                        cols_for_count = [
-                            'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Limit_Total','LimitUp_NoMove_Flag',
-                            'Market_Leader','Is_Reinforced_MultiMarket','Sharp_Line_Magnitude','SharpMove_Odds_Up',
-                            'SharpMove_Odds_Down','SharpMove_Odds_Mag','SharpMove_Resistance_Break','Late_Game_Steam_Flag',
-                            'Value_Reversal_Flag','Odds_Reversal_Flag','Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
-                            'Team_Past_Hit_Rate','Mispricing_Flag','Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
-                            'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home','Avg_Recent_Cover_Streak_Away',
-                            'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction','CrossMarket_Prob_Gap_Exists',
-                            'Potential_Overmove_Flag','Potential_Overmove_Total_Pct_Flag','Potential_Odds_Overmove_Flag',
-                            'Line_Moved_Toward_Team','Line_Moved_Away_From_Team','Line_Resistance_Crossed_Count',
-                            'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
-                            'SmallBook_Total_Limit'
-                        ] + hybrid_line_cols + hybrid_odds_cols
-                
-                        # Some columns may not exist depending on earlier paths; create them as 0 for counting
-                        for c in cols_for_count:
-                            if c not in df_final.columns:
-                                df_final[c] = 0
-                            df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0)
-                
-                        # 4) hybrid timing flags
-                        df_final['Hybrid_Line_Timing_Flag'] = (df_final[hybrid_line_cols].sum(axis=1) > 0).astype(int)
-                        df_final['Hybrid_Odds_Timing_Flag'] = (df_final[hybrid_odds_cols].sum(axis=1) > 0).astype(int)
-                
-                        # 5) signal count (kept; matches UI-style “why” tally)
-                        # Guard for Rec_Line_Magnitude which may not exist on some paths
-                        if 'Rec_Line_Magnitude' not in df_final.columns:
-                            df_final['Rec_Line_Magnitude'] = 0
-                
-                        df_final['Active_Signal_Count'] = (
-                            (df_final['Sharp_Move_Signal'] == 1).astype(int) +
-                            (df_final['Sharp_Limit_Jump'] == 1).astype(int) +
-                            (df_final['Sharp_Limit_Total'] > 10000).astype(int) +
-                            (df_final['LimitUp_NoMove_Flag'] == 1).astype(int) +
-                            (df_final['Market_Leader'] == 1).astype(int) +
-                            (df_final['Is_Reinforced_MultiMarket'] == 1).astype(int) +
-                            (df_final['Sharp_Line_Magnitude'] > 0.5).astype(int) +
-                            (df_final['Rec_Line_Magnitude'] > 0.5).astype(int) +
-                            (df_final['SharpMove_Odds_Up'] == 1).astype(int) +
-                            (df_final['SharpMove_Odds_Down'] == 1).astype(int) +
-                            (df_final['SharpMove_Odds_Mag'] > 5).astype(int) +
-                            (df_final['SharpMove_Resistance_Break'] == 1).astype(int) +
-                            (df_final['Late_Game_Steam_Flag'] == 1).astype(int) +
-                            (df_final['Value_Reversal_Flag'] == 1).astype(int) +
-                            (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
-                            (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
-                            (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
-                            df_final['Hybrid_Line_Timing_Flag'] +
-                            df_final['Hybrid_Odds_Timing_Flag'] +
-                            (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int) +
-                            df_final['Mispricing_Flag'].astype(int) +
-                            (df_final['Team_Implied_Prob_Gap_Home'] > 0.05).astype(int) +
-                            (df_final['Team_Implied_Prob_Gap_Away'] > 0.05).astype(int) +
-                            (df_final['Avg_Recent_Cover_Streak'] >= 2).astype(int) +
-                            (df_final['Avg_Recent_Cover_Streak_Home'] >= 2).astype(int) +
-                            (df_final['Avg_Recent_Cover_Streak_Away'] >= 2).astype(int) +
-                            df_final['Spread_vs_H2H_Aligned'].astype(int) +
-                            df_final['Total_vs_Spread_Contradiction'].astype(int) +
-                            df_final['CrossMarket_Prob_Gap_Exists'].astype(int) +
-                            (df_final['Potential_Overmove_Flag'] == 1).astype(int) +
-                            (df_final['Potential_Overmove_Total_Pct_Flag'] == 1).astype(int) +
-                            (df_final['Potential_Odds_Overmove_Flag'] == 1).astype(int) +
-                            (df_final['Line_Moved_Toward_Team'] == 1).astype(int) +
-                            (df_final['Line_Moved_Away_From_Team'] == 1).astype(int) +
-                            (df_final['Line_Resistance_Crossed_Count'] >= 1).astype(int) +
-                            (df_final['Abs_Line_Move_Z'] > 1).astype(int) +
-                            (df_final['Pct_Line_Move_Z'] > 1).astype(int) +
-                            (df_final['SmallBook_Heavy_Liquidity_Flag'] == 1).astype(int) +
-                            (df_final['SmallBook_Limit_Skew_Flag'] == 1).astype(int) +
-                            (df_final['SmallBook_Total_Limit'] > 500).astype(int)
-                        ).astype(int)
-                
-                        # 6) Diagnostic for unscored rows
-                        # 6) Diagnostic for unscored rows (cheap)
-                        try:
-                            if 'Model_Sharp_Win_Prob' in df_final.columns:
-                                unscored_mask = df_final['Model_Sharp_Win_Prob'].isna()
-                                if unscored_mask.any():
-                                    n = int(unscored_mask.sum())
-                                    logger.warning("⚠️ %d rows were not scored (Model_Sharp_Win_Prob is null).", n)
-                                    cols_dbg = [c for c in ['Game','Bookmaker','Market','Outcome','Was_Canonical'] if c in df_final.columns]
-                                    if cols_dbg:
-                                        logger.warning(df_final.loc[unscored_mask, cols_dbg].head(10).to_string(index=False))
-                        except Exception as e:
-                            logger.error("❌ Failed to log unscored rows by market: %s", e)
-                        
-                        # 7) Team_Key + placeholders (low-alloc)
-                        for col, default in [
-                            ('Home_Team_Norm',''), ('Away_Team_Norm',''),
-                            ('Commence_Hour',''), ('Market',''), ('Outcome_Norm','')
-                        ]:
-                            if col not in df_final.columns:
-                                df_final[col] = default
-                        
-                        # Build Team_Key with minimal temporaries
-                        ht = df_final['Home_Team_Norm'].astype('string').fillna('')
-                        at = df_final['Away_Team_Norm'].astype('string').fillna('')
-                        ch = df_final['Commence_Hour'].astype('string').fillna('')
-                        mk = df_final['Market'].astype('string').fillna('')
-                        on = df_final['Outcome_Norm'].astype('string').fillna('')
-                        # np.char operations avoid multiple pandas allocations
-                        
-                        team_key = np.char.add(
-                            np.char.add(np.char.add(np.char.add(np.char.add(ht.to_numpy(), '_'), at.to_numpy()), '_'), ch.to_numpy()),
-                            np.char.add(np.char.add(np.char.add('_', mk.to_numpy()), '_'), on.to_numpy())
-                        )
-                        df_final['Team_Key'] = pd.Series(team_key, index=df_final.index)
-                        
-                        if 'Sharp_Prob_Shift' not in df_final.columns:
-                            df_final['Sharp_Prob_Shift'] = np.float32(0.0)
-                        
-                        # 8) Extra debug (cheap key diff)
-                        try:
-                            if 'Game_Key' in df_final.columns and 'Game_Key' in df.columns:
-                                final_keys = df_final['Game_Key'].astype('string').unique()
-                                orig_keys  = df['Game_Key'].astype('string').unique()
-                                missing_keys = np.setdiff1d(orig_keys, final_keys, assume_unique=False)
-                                if missing_keys.size:
-                                    logger.warning("⚠️ %d Game_Keys were not scored by model", missing_keys.size)
-                                    # sample a few rows safely
-                                    sample = df[df['Game_Key'].isin(missing_keys)]
-                                    cols_dbg2 = [c for c in ['Game','Bookmaker','Market','Outcome','Value'] if c in df.columns]
-                                    if cols_dbg2 and not sample.empty:
-                                        logger.warning("🧪 Sample unscored rows:")
-                                        logger.warning(sample.loc[:, cols_dbg2].head(5).to_string(index=False))
-                        except Exception as debug_error:
-                            logger.error("❌ Failed to log unscored rows: %s", debug_error)
-                        
-                        # 9) Remove unscored UNDER rows with no OVER source (once)
-                        if {'Market','Outcome_Norm','Was_Canonical','Model_Sharp_Win_Prob'}.issubset(df_final.columns):
-                            pre = len(df_final)
-                            df_final = df_final[~(
-                                (df_final['Market'] == 'totals') &
-                                (df_final['Outcome_Norm'] == 'under') &
-                                (~df_final['Was_Canonical'].astype(bool)) &
-                                (df_final['Model_Sharp_Win_Prob'].isna())
-                            )]
-                            if pre != len(df_final):
-                                logger.info("🧹 Removed %d unscored UNDER rows (no OVER available)", pre - len(df_final))
-                        
-                        # >>> HERE — stream model-readiness buffer (ultra-lean)
-                        def _emit_to_bq(chunk: pd.DataFrame):
-                            # Only convert if needed (keep int64 ns if already datetime64 is not required)
-                            if "Snapshot_Timestamp" in chunk.columns and not pd.api.types.is_datetime64_any_dtype(chunk['Snapshot_Timestamp']):
-                                # convert int64 ns -> datetime64[ns]
-                                chunk['Snapshot_Timestamp'] = pd.to_datetime(chunk['Snapshot_Timestamp'].astype('int64'), errors='coerce')
-                            write_to_bigquery(chunk, table="sharp_data.model_readiness_buffer", if_exists="append")
-                        
-                        _ = build_model_readiness_buffer_ultra(
-                            df,
-                            needed_cols=["Game_Key","Market","Bookmaker","Outcome","Sport","Snapshot_Timestamp","Value","Odds_Price"],
-                            max_rows_per_market=120_000,
-                            emit=_emit_to_bq,   # streams; returns empty df (no big buffer in RAM)
-                        )
-                      
+            try:
+                df_final = pd.DataFrame()
             
-                        logger.info("✅ Scoring completed in %.2f seconds", time.time() - total_start)
-                        return df_final
-                                       
-                    #else:
-                        #logger.warning("⚠️ No market types scored — returning empty DataFrame.")
-                    else:
-                        logger.warning("⚠️ No market types scored — building model-readiness buffer from enriched snapshots.")
-                        df_fallback = build_model_readiness_buffer(df)  # use the enriched `df` you logged earlier
-                        return df_fallback
-                        #return pd.DataFrame()
-                
-                except Exception as e:
-                    logger.error("❌ Exception during final aggregation")
-                    logger.error(traceback.format_exc())
-                    return pd.DataFrame()            
+                hybrid_line_cols = [
+                    f'SharpMove_Magnitude_{b}' for b in [
+                        'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+                        'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+                        'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+                        'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
+                    ]
+                ]
+                hybrid_odds_cols = [
+                    f'OddsMove_Magnitude_{b}' for b in [
+                        'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+                        'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+                        'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+                        'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
+                    ]
+                ]
+            
+                if scored_all:
+                    # 1) concat all markets
+                    df_final = pd.concat(scored_all, ignore_index=True)
+            
+                    logger.info(
+                        f"🧮 Final scored breakdown — total={len(df_final)}, "
+                        f"canonical={df_final['Was_Canonical'].sum()}, inverse={(~df_final['Was_Canonical']).sum()}"
+                    )
+            
+                    # 2) snapshot collapse (latest per book)
+                    df_final = (
+                        df_final.sort_values('Snapshot_Timestamp')
+                                .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
+                    )
+            
+                    # 3) numeric coercions / default zeros for features used in counts
+                    cols_for_count = [
+                        'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Limit_Total','LimitUp_NoMove_Flag',
+                        'Market_Leader','Is_Reinforced_MultiMarket','Sharp_Line_Magnitude','SharpMove_Odds_Up',
+                        'SharpMove_Odds_Down','SharpMove_Odds_Mag','SharpMove_Resistance_Break','Late_Game_Steam_Flag',
+                        'Value_Reversal_Flag','Odds_Reversal_Flag','Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
+                        'Team_Past_Hit_Rate','Mispricing_Flag','Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
+                        'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home','Avg_Recent_Cover_Streak_Away',
+                        'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction','CrossMarket_Prob_Gap_Exists',
+                        'Potential_Overmove_Flag','Potential_Overmove_Total_Pct_Flag','Potential_Odds_Overmove_Flag',
+                        'Line_Moved_Toward_Team','Line_Moved_Away_From_Team','Line_Resistance_Crossed_Count',
+                        'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
+                        'SmallBook_Total_Limit'
+                    ] + hybrid_line_cols + hybrid_odds_cols
+            
+                    # Some columns may not exist depending on earlier paths; create them as 0 for counting
+                    for c in cols_for_count:
+                        if c not in df_final.columns:
+                            df_final[c] = 0
+                        df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0)
+            
+                    # 4) hybrid timing flags
+                    df_final['Hybrid_Line_Timing_Flag'] = (df_final[hybrid_line_cols].sum(axis=1) > 0).astype(int)
+                    df_final['Hybrid_Odds_Timing_Flag'] = (df_final[hybrid_odds_cols].sum(axis=1) > 0).astype(int)
+            
+                    # 5) signal count (kept; matches UI-style “why” tally)
+                    # Guard for Rec_Line_Magnitude which may not exist on some paths
+                    if 'Rec_Line_Magnitude' not in df_final.columns:
+                        df_final['Rec_Line_Magnitude'] = 0
+            
+                    df_final['Active_Signal_Count'] = (
+                        (df_final['Sharp_Move_Signal'] == 1).astype(int) +
+                        (df_final['Sharp_Limit_Jump'] == 1).astype(int) +
+                        (df_final['Sharp_Limit_Total'] > 10000).astype(int) +
+                        (df_final['LimitUp_NoMove_Flag'] == 1).astype(int) +
+                        (df_final['Market_Leader'] == 1).astype(int) +
+                        (df_final['Is_Reinforced_MultiMarket'] == 1).astype(int) +
+                        (df_final['Sharp_Line_Magnitude'] > 0.5).astype(int) +
+                        (df_final['Rec_Line_Magnitude'] > 0.5).astype(int) +
+                        (df_final['SharpMove_Odds_Up'] == 1).astype(int) +
+                        (df_final['SharpMove_Odds_Down'] == 1).astype(int) +
+                        (df_final['SharpMove_Odds_Mag'] > 5).astype(int) +
+                        (df_final['SharpMove_Resistance_Break'] == 1).astype(int) +
+                        (df_final['Late_Game_Steam_Flag'] == 1).astype(int) +
+                        (df_final['Value_Reversal_Flag'] == 1).astype(int) +
+                        (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
+                        (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
+                        (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
+                        df_final['Hybrid_Line_Timing_Flag'] +
+                        df_final['Hybrid_Odds_Timing_Flag'] +
+                        (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int) +
+                        df_final['Mispricing_Flag'].astype(int) +
+                        (df_final['Team_Implied_Prob_Gap_Home'] > 0.05).astype(int) +
+                        (df_final['Team_Implied_Prob_Gap_Away'] > 0.05).astype(int) +
+                        (df_final['Avg_Recent_Cover_Streak'] >= 2).astype(int) +
+                        (df_final['Avg_Recent_Cover_Streak_Home'] >= 2).astype(int) +
+                        (df_final['Avg_Recent_Cover_Streak_Away'] >= 2).astype(int) +
+                        df_final['Spread_vs_H2H_Aligned'].astype(int) +
+                        df_final['Total_vs_Spread_Contradiction'].astype(int) +
+                        df_final['CrossMarket_Prob_Gap_Exists'].astype(int) +
+                        (df_final['Potential_Overmove_Flag'] == 1).astype(int) +
+                        (df_final['Potential_Overmove_Total_Pct_Flag'] == 1).astype(int) +
+                        (df_final['Potential_Odds_Overmove_Flag'] == 1).astype(int) +
+                        (df_final['Line_Moved_Toward_Team'] == 1).astype(int) +
+                        (df_final['Line_Moved_Away_From_Team'] == 1).astype(int) +
+                        (df_final['Line_Resistance_Crossed_Count'] >= 1).astype(int) +
+                        (df_final['Abs_Line_Move_Z'] > 1).astype(int) +
+                        (df_final['Pct_Line_Move_Z'] > 1).astype(int) +
+                        (df_final['SmallBook_Heavy_Liquidity_Flag'] == 1).astype(int) +
+                        (df_final['SmallBook_Limit_Skew_Flag'] == 1).astype(int) +
+                        (df_final['SmallBook_Total_Limit'] > 500).astype(int)
+                    ).astype(int)
+            
+                    # 6) Diagnostic for unscored rows
+                    # 6) Diagnostic for unscored rows (cheap)
+                    try:
+                        if 'Model_Sharp_Win_Prob' in df_final.columns:
+                            unscored_mask = df_final['Model_Sharp_Win_Prob'].isna()
+                            if unscored_mask.any():
+                                n = int(unscored_mask.sum())
+                                logger.warning("⚠️ %d rows were not scored (Model_Sharp_Win_Prob is null).", n)
+                                cols_dbg = [c for c in ['Game','Bookmaker','Market','Outcome','Was_Canonical'] if c in df_final.columns]
+                                if cols_dbg:
+                                    logger.warning(df_final.loc[unscored_mask, cols_dbg].head(10).to_string(index=False))
+                    except Exception as e:
+                        logger.error("❌ Failed to log unscored rows by market: %s", e)
                     
+                    # 7) Team_Key + placeholders (low-alloc)
+                    for col, default in [
+                        ('Home_Team_Norm',''), ('Away_Team_Norm',''),
+                        ('Commence_Hour',''), ('Market',''), ('Outcome_Norm','')
+                    ]:
+                        if col not in df_final.columns:
+                            df_final[col] = default
+                    
+                    # Build Team_Key with minimal temporaries
+                    ht = df_final['Home_Team_Norm'].astype('string').fillna('')
+                    at = df_final['Away_Team_Norm'].astype('string').fillna('')
+                    ch = df_final['Commence_Hour'].astype('string').fillna('')
+                    mk = df_final['Market'].astype('string').fillna('')
+                    on = df_final['Outcome_Norm'].astype('string').fillna('')
+                    # np.char operations avoid multiple pandas allocations
+                    
+                    team_key = np.char.add(
+                        np.char.add(np.char.add(np.char.add(np.char.add(ht.to_numpy(), '_'), at.to_numpy()), '_'), ch.to_numpy()),
+                        np.char.add(np.char.add(np.char.add('_', mk.to_numpy()), '_'), on.to_numpy())
+                    )
+                    df_final['Team_Key'] = pd.Series(team_key, index=df_final.index)
+                    
+                    if 'Sharp_Prob_Shift' not in df_final.columns:
+                        df_final['Sharp_Prob_Shift'] = np.float32(0.0)
+                    
+                    # 8) Extra debug (cheap key diff)
+                    try:
+                        if 'Game_Key' in df_final.columns and 'Game_Key' in df.columns:
+                            final_keys = df_final['Game_Key'].astype('string').unique()
+                            orig_keys  = df['Game_Key'].astype('string').unique()
+                            missing_keys = np.setdiff1d(orig_keys, final_keys, assume_unique=False)
+                            if missing_keys.size:
+                                logger.warning("⚠️ %d Game_Keys were not scored by model", missing_keys.size)
+                                # sample a few rows safely
+                                sample = df[df['Game_Key'].isin(missing_keys)]
+                                cols_dbg2 = [c for c in ['Game','Bookmaker','Market','Outcome','Value'] if c in df.columns]
+                                if cols_dbg2 and not sample.empty:
+                                    logger.warning("🧪 Sample unscored rows:")
+                                    logger.warning(sample.loc[:, cols_dbg2].head(5).to_string(index=False))
+                    except Exception as debug_error:
+                        logger.error("❌ Failed to log unscored rows: %s", debug_error)
+                    
+                    # 9) Remove unscored UNDER rows with no OVER source (once)
+                    if {'Market','Outcome_Norm','Was_Canonical','Model_Sharp_Win_Prob'}.issubset(df_final.columns):
+                        pre = len(df_final)
+                        df_final = df_final[~(
+                            (df_final['Market'] == 'totals') &
+                            (df_final['Outcome_Norm'] == 'under') &
+                            (~df_final['Was_Canonical'].astype(bool)) &
+                            (df_final['Model_Sharp_Win_Prob'].isna())
+                        )]
+                        if pre != len(df_final):
+                            logger.info("🧹 Removed %d unscored UNDER rows (no OVER available)", pre - len(df_final))
+                    
+                    # >>> HERE — stream model-readiness buffer (ultra-lean)
+                    def _emit_to_bq(chunk: pd.DataFrame):
+                        # Only convert if needed (keep int64 ns if already datetime64 is not required)
+                        if "Snapshot_Timestamp" in chunk.columns and not pd.api.types.is_datetime64_any_dtype(chunk['Snapshot_Timestamp']):
+                            # convert int64 ns -> datetime64[ns]
+                            chunk['Snapshot_Timestamp'] = pd.to_datetime(chunk['Snapshot_Timestamp'].astype('int64'), errors='coerce')
+                        write_to_bigquery(chunk, table="sharp_data.model_readiness_buffer", if_exists="append")
+                    
+                    _ = build_model_readiness_buffer_ultra(
+                        df,
+                        needed_cols=["Game_Key","Market","Bookmaker","Outcome","Sport","Snapshot_Timestamp","Value","Odds_Price"],
+                        max_rows_per_market=120_000,
+                        emit=_emit_to_bq,   # streams; returns empty df (no big buffer in RAM)
+                    )
+                  
+        
+                    logger.info("✅ Scoring completed in %.2f seconds", time.time() - total_start)
+                    return df_final
+                                   
+                #else:
+                    #logger.warning("⚠️ No market types scored — returning empty DataFrame.")
+                else:
+                    logger.warning("⚠️ No market types scored — building model-readiness buffer from enriched snapshots.")
+                    df_fallback = build_model_readiness_buffer(df)  # use the enriched `df` you logged earlier
+                    return df_fallback
+                    #return pd.DataFrame()
+            
+                       
+             except Exception:
+                logger.error("❌ Exception during final aggregation")
+                logger.error(traceback.format_exc())
+                return pd.DataFrame()
+        
+            # Should not reach here; guarantees we never return None
+                return df_empty    
 
 
         
