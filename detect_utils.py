@@ -51,7 +51,6 @@ from utils import (
     add_time_context_flags,
     update_power_ratings,
     normalize_sport,
-    build_model_readiness_buffer_ultra,
     enrich_power_from_current_inplace
 )
 
