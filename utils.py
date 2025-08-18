@@ -3891,9 +3891,6 @@ def detect_sharp_moves(
     history_hours: int = 120, # hours of history to pull from BQ; set to 0 to skip
     
 ):
-    import logging
-    from datetime import datetime
-    import pandas as pd
 
     if not current:
         logging.warning("⚠️ No current odds data provided.")
@@ -3904,9 +3901,6 @@ def detect_sharp_moves(
     summary_df   = pd.DataFrame()
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Normalize sport info for downstream
-    _sport_key   = (sport_key or "").strip().lower()       # "basketball_nba"
-    _sport_label = (sport_label or _sport_key).strip().upper()  # "NBA" or "BASKETBALL_NBA"
 
     # ---------- 1) Build 'previous' lookup only if provided ----------
     previous_odds_map = {}
