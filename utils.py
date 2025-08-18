@@ -3298,6 +3298,8 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
             # ===== MODEL SCORING =====
             feature_cols = []
+            # ===== MODEL SCORING =====
+            feature_cols = []
             if bundle and isinstance(bundle.get('feature_cols'), (list, tuple)) and bundle['feature_cols']:
                 feature_cols = list(bundle['feature_cols'])
             elif model is not None:
@@ -3308,113 +3310,112 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     booster = getattr(model, 'get_booster', lambda: None)()
                     names = getattr(booster, 'feature_names', None)
                     feature_cols = list(names) if names is not None else []
-    
-            feature_cols = [str(c) for c in feature_cols]
-            feature_cols = list(dict.fromkeys(feature_cols))  # de-dupe, keep order
-           
+            
+            # ---- scoring (wrapped) ----
+            try:
+                feature_cols = [str(c) for c in feature_cols]
+                feature_cols = list(dict.fromkeys(feature_cols))  # de-dupe, keep order
             
                 # coerce only model features
                 for c in feature_cols:
-                    if df_canon[c].dtype == object:
-                        df_canon[c] = (
-                            df_canon[c]
-                            .replace({'True': 1, 'False': 0, True: 1, False: 0, '': np.nan, 'none': np.nan, 'None': np.nan})
-                        )
-                    df_canon[c] = pd.to_numeric(df_canon[c], errors='coerce')
-                df_canon[feature_cols] = df_canon[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                    if c in df_canon.columns:
+                        if df_canon[c].dtype == object:
+                            df_canon[c] = df_canon[c].replace({
+                                'True': 1, 'False': 0, True: 1, False: 0,
+                                '': np.nan, 'none': np.nan, 'None': np.nan
+                            })
+                        df_canon[c] = pd.to_numeric(df_canon[c], errors='coerce')
             
-                # ensure pred cols exist on canon
-                for col, default in [('Model_Sharp_Win_Prob', np.nan),
-                                     ('Model_Confidence',     np.nan),
-                                     ('Scored_By_Model',      False),
-                                     ('Scoring_Market',       mkt)]:
+                if feature_cols:
+                    # ensure all features exist, then clean
+                    df_canon[feature_cols] = (
+                        df_canon.reindex(columns=feature_cols)
+                                .replace([np.inf, -np.inf], np.nan)
+                                .fillna(0.0)
+                    )
+            
+                # ensure pred cols exist
+                for col, default in [
+                    ('Model_Sharp_Win_Prob', np.nan),
+                    ('Model_Confidence',     np.nan),
+                    ('Scored_By_Model',      False),
+                    ('Scoring_Market',       mkt),
+                ]:
                     if col not in df_canon.columns:
                         df_canon[col] = default
             
-               
-                try:
-                    # If no features, treat as unscored
-                    if not feature_cols:
-                        logger.info(f"ℹ️ {mkt.upper()} has no feature_cols — stamping unscored columns on canon.")
-                        for col, default in [
-                            ('Model_Sharp_Win_Prob', np.nan),
-                            ('Model_Confidence',     np.nan),
-                            ('Scored_By_Model',      False),
-                            ('Scoring_Market',       mkt),
-                        ]:
-                            if col not in df_canon.columns:
-                                df_canon[col] = default
-                            else:
-                                df_canon[col] = default
-                
-                    else:
-                        X_can = df_canon.loc[:, feature_cols]
-                        if X_can.empty:
-                            logger.info(f"ℹ️ {mkt.upper()} has empty X_can — stamping unscored columns on canon.")
-                            for col, default in [
-                                ('Model_Sharp_Win_Prob', np.nan),
-                                ('Model_Confidence',     np.nan),
-                                ('Scored_By_Model',      False),
-                                ('Scoring_Market',       mkt),
-                            ]:
-                                if col not in df_canon.columns:
-                                    df_canon[col] = default
-                                else:
-                                    df_canon[col] = default
-                        else:
-                            preds = None
-                
-                            # Prefer calibrated predictor if available
-                            if iso is not None:
-                                if hasattr(iso, "predict_proba"):
-                                    p = iso.predict_proba(X_can)
-                                    preds = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p)
-                                elif hasattr(iso, "predict"):
-                                    preds = np.asarray(iso.predict(X_can))
-                            # Fallback to raw model if calibrator not usable
-                            if preds is None and model is not None:
-                                if hasattr(model, "predict_proba"):
-                                    p = model.predict_proba(X_can)
-                                    preds = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p)
-                                elif hasattr(model, "predict"):
-                                    preds = np.asarray(model.predict(X_can))
-                
-                            if preds is None:
-                                logger.info(f"ℹ️ {mkt.upper()} has no usable predictor — stamping unscored columns on canon.")
-                                for col, default in [
-                                    ('Model_Sharp_Win_Prob', np.nan),
-                                    ('Model_Confidence',     np.nan),
-                                    ('Scored_By_Model',      False),
-                                    ('Scoring_Market',       mkt),
-                                ]:
-                                    if col not in df_canon.columns:
-                                        df_canon[col] = default
-                                    else:
-                                        df_canon[col] = default
-                            else:
-                                df_canon['Model_Sharp_Win_Prob'] = preds
-                                df_canon['Model_Confidence']     = preds
-                                df_canon['Scored_By_Model']      = True
-                                df_canon['Scoring_Market']       = mkt
-                
-                except Exception as e:
-                    logger.error(f"❌ Scoring failed for {mkt.upper()} — stamping unscored columns on canon. Error: {e}")
+                # predict or stamp unscored
+                if not feature_cols:
+                    logger.info(f"ℹ️ {mkt.upper()} has no feature_cols — stamping unscored columns on canon.")
                     for col, default in [
                         ('Model_Sharp_Win_Prob', np.nan),
                         ('Model_Confidence',     np.nan),
                         ('Scored_By_Model',      False),
                         ('Scoring_Market',       mkt),
                     ]:
-                        if col not in df_canon.columns:
+                        df_canon[col] = default
+                else:
+                    X_can = df_canon.loc[:, feature_cols]
+                    if X_can.empty:
+                        logger.info(f"ℹ️ {mkt.upper()} has empty X_can — stamping unscored columns on canon.")
+                        for col, default in [
+                            ('Model_Sharp_Win_Prob', np.nan),
+                            ('Model_Confidence',     np.nan),
+                            ('Scored_By_Model',      False),
+                            ('Scoring_Market',       mkt),
+                        ]:
                             df_canon[col] = default
+                    else:
+                        preds = None
+                        # prefer calibrator
+                        if iso is not None:
+                            if hasattr(iso, "predict_proba"):
+                                p = iso.predict_proba(X_can)
+                                preds = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p)
+                            elif hasattr(iso, "predict"):
+                                preds = np.asarray(iso.predict(X_can))
+                        # fallback to model
+                        if preds is None and model is not None:
+                            if hasattr(model, "predict_proba"):
+                                p = model.predict_proba(X_can)
+                                preds = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p)
+                            elif hasattr(model, "predict"):
+                                preds = np.asarray(model.predict(X_can))
+            
+                        if preds is None:
+                            logger.info(f"ℹ️ {mkt.upper()} has no usable predictor — stamping unscored columns on canon.")
+                            for col, default in [
+                                ('Model_Sharp_Win_Prob', np.nan),
+                                ('Model_Confidence',     np.nan),
+                                ('Scored_By_Model',      False),
+                                ('Scoring_Market',       mkt),
+                            ]:
+                                df_canon[col] = default
                         else:
-                            df_canon[col] = default
-                            
-            # If inverse is empty, you can skip the flip logic safely
+                            df_canon['Model_Sharp_Win_Prob'] = preds
+                            df_canon['Model_Confidence']     = preds
+                            df_canon['Scored_By_Model']      = True
+                            df_canon['Scoring_Market']       = mkt
+            
+            except Exception as e:
+                logger.error(f"❌ Scoring failed for {mkt.upper()} — stamping unscored columns on canon. Error: {e}")
+                for col, default in [
+                    ('Model_Sharp_Win_Prob', np.nan),
+                    ('Model_Confidence',     np.nan),
+                    ('Scored_By_Model',      False),
+                    ('Scoring_Market',       mkt),
+                ]:
+                    df_canon[col] = default
+            
+            # --- 2) Build INVERSE slice (always outside the try/except) ---
+            if 'Was_Canonical' in df_m.columns:
+                df_inverse = df_m.loc[df_m['Was_Canonical'] == False].copy()
+            else:
+                df_inverse = df_m.loc[~df_m.index.isin(df_canon.index)].copy()
+            
             if df_inverse.empty or df_canon.empty:
                 logger.info(f"ℹ️ No inverse flip possible for {mkt.upper()} (canon={len(df_canon)}, inverse={len(df_inverse)}).")
             else:
-                # --- 3) Flip canon preds onto inverse by Team_Key_Base + Bookmaker ---
                 # normalize for joins
                 for frame in (df_canon, df_inverse):
                     for col in ['Bookmaker','Home_Team_Norm','Away_Team_Norm','Market']:
@@ -3447,7 +3448,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 df_inverse['Was_Canonical']   = False
                 df_inverse['Scored_By_Model'] = True
                 df_inverse['Scoring_Market']  = mkt
-            
+                        
                 # Inverse feature engineering (kept as in your code)
                 df_inverse['Line_Move_Magnitude'] = pd.to_numeric(df_inverse['Line_Delta'], errors='coerce').abs()
                 df_inverse['Line_Magnitude_Abs']  = df_inverse['Line_Move_Magnitude']
