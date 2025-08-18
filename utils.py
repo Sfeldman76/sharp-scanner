@@ -4988,50 +4988,60 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         out['Score_Home_Score'] = pd.to_numeric(out['Score_Home_Score'], errors='coerce').astype(float)
         out['Score_Away_Score'] = pd.to_numeric(out['Score_Away_Score'], errors='coerce').astype(float)
     
-        # Keep only schema columns (create if missing)
-        for c in schema_cols:
-            if c not in out.columns:
-                out[c] = pd.NA
-        out = out[schema_cols]
-    
-        # Drop any rows missing critical fields
-        out = out.dropna(subset=['Merge_Key_Short','Game_Start','Score_Home_Score','Score_Away_Score'])
-    
-        # Fetch existing keys in the same normalized form
-        existing = bq_client.query("""
-            SELECT DISTINCT LOWER(TRIM(CAST(Merge_Key_Short AS STRING))) AS mks
-            FROM `sharplogger.sharp_data.game_scores_final`
-        """).to_dataframe()
-        existing_keys = set(existing['mks'].dropna())
-    
-        to_write = out[~out['Merge_Key_Short'].isin(existing_keys)].copy()
-    
-        logging.info("⛳ Finals total (clean): %d | Already in table: %d | New to write: %d",
-                     len(out), len(out) - len(to_write), len(to_write))
-    
-        if not to_write.empty:
-            to_gbq(
-                to_write,  # already in schema order/types
-                'sharp_data.game_scores_final',
-                project_id=GCP_PROJECT_ID,
-                if_exists='append'
+        # --- Write finals to sharp_data.game_scores_final (clean + early return) ---
+        try:
+            # Keep only schema columns (create if missing)
+            for c in schema_cols:
+                if c not in out.columns:
+                    out[c] = pd.NA
+            out = out[schema_cols]
+        
+            # Drop rows missing critical fields
+            out = out.dropna(subset=['Merge_Key_Short', 'Game_Start', 'Score_Home_Score', 'Score_Away_Score'])
+        
+            # Normalize Merge_Key_Short for consistent de-dup
+            out['mks_norm'] = (
+                out['Merge_Key_Short']
+                .astype(str)
+                .str.strip()
+                .str.lower()
             )
-            logging.info("✅ Wrote %d rows to sharp_data.game_scores_final", len(to_write))
-        else:
-            logging.info("ℹ️ No new rows to write to sharp_data.game_scores_final")
-    
-    except Exception:
-        logging.exception("❌ Failed to upload game scores to game_scores_final")
+        
+            # Fetch existing keys in the same normalized form
+            existing = bq_client.query("""
+                SELECT DISTINCT LOWER(TRIM(CAST(Merge_Key_Short AS STRING))) AS mks
+                FROM `sharplogger.sharp_data.game_scores_final`
+            """).to_dataframe()
+            existing_keys = set(existing['mks'].dropna())
+        
+            # Filter to only new finals
+            to_write = out[~out['mks_norm'].isin(existing_keys)].copy()
+            to_write = to_write.drop(columns=['mks_norm'], errors='ignore')
+        
+            logging.info(
+                "⛳ Finals total (clean): %d | Already in table: %d | New to write: %d",
+                len(out), len(out) - len(to_write), len(to_write)
+            )
+        
+            if not to_write.empty:
+                to_gbq(
+                    to_write,                          # already schema-aligned
+                    'sharp_data.game_scores_final',
+                    project_id=GCP_PROJECT_ID,
+                    if_exists='append'
+                )
+                logging.info("✅ Wrote %d rows to sharp_data.game_scores_final", len(to_write))
+            else:
+                logging.info("ℹ️ No new rows to write to sharp_data.game_scores_final")
+        
+            # 🔚 IMPORTANT: we are done with finals; return to avoid continuing into later pipelines
+            return True
+        
+        except Exception:
+            logging.exception("❌ Failed to upload game scores to game_scores_final")
+            # Decide whether to fail hard or continue; if this is terminal, return.
+            return False
 
-        # === Upload if valid
-        if new_scores.empty:
-            logging.info("ℹ️ No new scores to upload to game_scores_final")
-        else:
-            to_gbq(new_scores, 'sharp_data.game_scores_final', project_id=GCP_PROJECT_ID, if_exists='append')
-            logging.info(f"✅ Uploaded {len(new_scores)} new game scores")
-    
-    except Exception as e:
-        logging.exception("❌ Failed to upload game scores")
     
         # Dump a preview of the DataFrame
         try:
