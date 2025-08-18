@@ -128,6 +128,14 @@ def normalize_book_name(bookmaker: str, book: str) -> str:
     return bookmaker
 
 
+SPORT_ALIASES = {
+        "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
+        "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
+        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
+        "NBA":   ["NBA", "BASKETBALL_NBA"],
+        "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
+        "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
+    }
 
 
 def update_power_ratings(
@@ -142,16 +150,7 @@ def update_power_ratings(
       - NFL  -> Elo with MOV boost + K-decay
       - NBA  -> Elo with MOV boost + K-decay
     """
-    # ---------------- CONFIG (baseball / football / basketball only) ----------------
-    SPORT_ALIASES = {
-        "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
-        "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
-        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
-        "NBA":   ["NBA", "BASKETBALL_NBA"],
-        "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
-        "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
-    }
-
+   
     def get_aliases(canon: str) -> list[str]:
         return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
 
@@ -2760,9 +2759,6 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     if 'Outcome_Norm' not in df.columns:
         df['Outcome_Norm'] = df.get('Outcome', pd.Series(index=df.index, dtype='object')) \
                                 .astype('string').str.lower().str.strip()
-    
-    # === Power + grading for spreads ONLY (low BQ / low mem) ===
-    SPORT_ALIASES
    
     
     mask_spreads = df['Market'].astype(str).str.lower().eq('spreads')
