@@ -1070,7 +1070,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
         # Sharp logic fields
         'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
-        'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total', 'SharpBetScore',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'SharpBetScore',
         'Open_Value', 'Open_Book_Value', 'Opening_Limit', 'Limit_Jump',
         'Sharp_Timing', 'Limit_NonZero', 'Limit_Min', 'Market_Leader',
         'Is_Pinnacle', 'LimitUp_NoMove_Flag', 'SupportKey', 'CrossMarketSharpSupport',
@@ -3968,9 +3968,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
    
          
-            
-            if 'Sharp_Prob_Shift' not in df_final.columns:
-                df_final['Sharp_Prob_Shift'] = np.float32(0.0)
+       
             
             # 8) Extra debug (cheap key diff)
             try:
@@ -4749,7 +4747,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
     allowed_cols = {
         'sharp_data.sharp_scores_full': [
             'Game_Key', 'Bookmaker','Book', 'Market', 'Outcome', 'Limit', 'Ref_Sharp_Value',
-            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 
             'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
             'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
             'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
@@ -4838,7 +4836,45 @@ def normalize_sport(sport_key: str) -> str:
         "nba": "NBA", "wnba": "WNBA", "cfl": "CFL",
     }
     return mapping.get(s, s.upper() or "MLB")
-  
+
+
+import time, datetime as dt
+from typing import Optional
+
+_SCORED_KEYS_CACHE: dict[tuple[str, Optional[str]], tuple[float, set[str]]] = {}
+_SCORED_KEYS_TTL_SEC = 600  # 10 minutes
+
+def _bucket_ts(ts: dt.datetime, minutes=10) -> dt.datetime:
+    ts = ts.replace(second=0, microsecond=0)
+    return ts.replace(minute=(ts.minute // minutes) * minutes)
+
+def get_scored_keys_cached(bq_client, since_ts: dt.datetime, sport: Optional[str] = None) -> set[str]:
+    bucketed = _bucket_ts(since_ts, minutes=10)
+    sport_key = None if sport is None else str(sport).strip().upper()
+    cache_key = (bucketed.isoformat(), sport_key)
+
+    now = time.time()
+    rec = _SCORED_KEYS_CACHE.get(cache_key)
+    if rec and (now - rec[0] < _SCORED_KEYS_TTL_SEC):
+        return rec[1]
+
+    sql = """
+    SELECT DISTINCT Merge_Key_Short
+    FROM `sharplogger.sharp_data.sharp_scores_full`
+    WHERE Snapshot_Timestamp >= @since_ts
+    -- AND UPPER(Sport) = @sport
+    """
+    params = [bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", bucketed)]
+    # params.append(bigquery.ScalarQueryParameter("sport", "STRING", sport_key))
+
+    t0 = time.time()
+    df = bq_client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+    keys = set(df['Merge_Key_Short'].dropna().astype(str).str.strip().str.lower().unique())
+    _SCORED_KEYS_CACHE[cache_key] = (now, keys)
+    logger.info("⏱️ scored_keys BQ fetch took %.2fs (cached %d keys)", time.time() - t0, len(keys))
+    return keys
+
+
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
     sport_label = expected_label[0].upper() if expected_label else "NBA"
@@ -5135,35 +5171,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
+   
     two_weeks_ago = dt.datetime.utcnow() - dt.timedelta(days=5)
-
     if not track_feature_evolution:
-        sql = """
-        SELECT DISTINCT Merge_Key_Short
-        FROM `sharplogger.sharp_data.sharp_scores_full`
-        WHERE Snapshot_Timestamp >= @since_ts
-        -- Optional: tighten by sport if you only score one sport per run
-        -- AND UPPER(Sport) = @sport
-        """
-        
-        job = bq_client.query(
-            sql,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", two_weeks_ago),
-                    # bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()),
-                ],
-                priority=bigquery.QueryPriority.INTERACTIVE,
-                # optional: limit scan to protect from accidents
-                # maximum_bytes_billed=5 * 10**9,
-            ),
-        )
-        t0 = time.time()
-        scored_keys = job.to_dataframe()  # blocks here
-        logger.info("⏱️ scored_keys query took %.2fs, returned %d rows",
-                    time.time() - t0, len(scored_keys))
-        already_scored = set(scored_keys['Merge_Key_Short'].dropna())
+        already_scored = get_scored_keys_cached(bq_client, two_weeks_ago, sport_label)
         df_scores_needed = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
+    else:
+        df_scores_needed = df_scores.copy()
         logging.info(f"✅ Remaining unscored completed games: {len(df_scores_needed)}")
         
         if not df_scores_needed.empty:
@@ -5187,150 +5201,114 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Track memory usage
     process = psutil.Process(os.getpid())
     logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-        
-    # === 1. Load full snapshots
+    
+    # === 1) Load recent master history (already includes openers)
     df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    log_memory("AFTER read_recent_sharp_master_cached")
     
-    # === 2. Build df_first from raw history for opening lines
-    required_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'Value', 'Model_Sharp_Win_Prob']
-    missing = [col for col in required_cols if col not in df_all_snapshots.columns]
+    # (Optional) Build latest-line view if you still use it downstream.
+    # Will no-op gracefully if process_chunk isn't defined.
+    try:
+        if callable(process_chunk):
+            df_all_snapshots_filtered = pd.concat(
+                [process_chunk(df_all_snapshots.iloc[start:start + 10000])
+                 for start in range(0, len(df_all_snapshots), 10000)],
+                ignore_index=True
+            )
+            log_memory("AFTER building df_all_snapshots_filtered")
+        else:
+            logging.info("ℹ️ process_chunk not callable; skipping df_all_snapshots_filtered build.")
+            df_all_snapshots_filtered = pd.DataFrame()
+    except NameError:
+        logging.info("ℹ️ process_chunk not defined; skipping df_all_snapshots_filtered build.")
+        df_all_snapshots_filtered = pd.DataFrame()
     
+    # === 2) Build df_first directly from Open_* fields in master
+    #     (We only keep line/odds openers + implied prob. No First_Sharp_Prob.)
+    need_cols = ["Game_Key","Market","Outcome","Bookmaker","Open_Value","Open_Odds"]
+    missing = [c for c in need_cols if c not in df_all_snapshots.columns]
     if missing:
-        logging.warning(f"⚠️ Cannot compute df_first — missing columns: {missing}")
+        logging.warning(f"⚠️ Cannot build df_first from master — missing columns: {missing}")
         df_first = pd.DataFrame(columns=[
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'First_Line_Value', 'First_Sharp_Prob',
-            'First_Odds', 'First_Imp_Prob'
+            "Game_Key","Market","Outcome","Bookmaker",
+            "First_Line_Value","First_Odds","First_Imp_Prob"
         ])
     else:
         df_first = (
-            df_all_snapshots
-            .sort_values(by='Snapshot_Timestamp')
-            .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='first')
-            .loc[:, required_cols + ['Odds_Price', 'Implied_Prob']]
+            df_all_snapshots.loc[:, need_cols]
+            .dropna(subset=["Game_Key","Market","Outcome","Bookmaker"])  # guard bad keys
+            .drop_duplicates(subset=["Game_Key","Market","Outcome","Bookmaker"], keep="first")
             .rename(columns={
-                'Value': 'First_Line_Value',
-                'Model_Sharp_Win_Prob': 'First_Sharp_Prob',
-                'Odds_Price': 'First_Odds',
-                'Implied_Prob': 'First_Imp_Prob',
+                "Open_Value": "First_Line_Value",
+                "Open_Odds":  "First_Odds",
             })
+            .reset_index(drop=True)
+            .copy()
         )
-        for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-            df_first[col] = df_first[col].astype('category')
+        # Compute implied prob from open odds
+        df_first["First_Imp_Prob"] = df_first["First_Odds"].map(calc_implied_prob)
     
-        df_first = df_first.reset_index(drop=True).copy()
+        # Light sampling logs
+        logging.info("📋 Sample df_first (openers):\n" +
+                     df_first[["Game_Key","Market","Outcome","Bookmaker","First_Line_Value"]]
+                     .head(10).to_string(index=False))
+        logging.info("💰 Sample First_Odds + First_Imp_Prob:\n" +
+                     df_first[["First_Odds","First_Imp_Prob"]].dropna().head(5).to_string(index=False))
+        logging.info(f"🧪 df_first rows: {len(df_first)}; cols: {df_first.columns.tolist()}")
     
-        logging.info("📋 Sample df_first values:\n" +
-            df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker', 'First_Line_Value']].head(10).to_string(index=False))
-        logging.info("💰 Sample odds + implied:\n" +
-            df_first[['First_Odds', 'First_Imp_Prob']].dropna().head(5).to_string(index=False))
-        logging.info(f"🧪 df_first created with {len(df_first)} rows and columns: {df_first.columns.tolist()}")
-        logging.info(f"🧪 Unique Game_Key+Market+Outcome+Bookmaker combos: {df_first[['Game_Key', 'Market', 'Outcome', 'Bookmaker']].drop_duplicates().shape[0]}")
-        logging.info(f"📉 Null rates in df_first:\n{df_first[['First_Line_Value', 'First_Sharp_Prob']].isnull().mean().to_string()}")
-    
-        if df_first.empty:
-            raise RuntimeError("❌ df_first is empty — stopping early to avoid downstream issues.")
-    
-    # === 3. Build df_all_snapshots_filtered from process_chunk() → latest lines
-    df_all_snapshots_filtered = pd.concat([
-        process_chunk(df_all_snapshots.iloc[start:start + 10000])
-        for start in range(0, len(df_all_snapshots), 10000)
-    ], ignore_index=True)
-            
-    # === Prepare df_first: reduce + convert
-    df_first = df_first[[
-        'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-        'First_Line_Value', 'First_Sharp_Prob',
-        'First_Odds', 'First_Imp_Prob'
-    ]].copy()
-
-    
-    # Normalize key columns in both df_first and df_master
-    key_cols = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    # === 3) Normalize join keys for robust merge
+    key_cols = ["Game_Key","Market","Outcome","Bookmaker"]
     for df in [df_master, df_first]:
         for col in key_cols:
             df[col] = df[col].astype(str).str.strip().str.lower()
     
-    # Optional: convert to category for memory savings
+    # Optional: downcast to category to save memory
     for col in key_cols:
-        df_first[col] = df_first[col].astype('category')
-        df_master[col] = df_master[col].astype('category')
+        if col in df_first.columns:
+            df_first[col] = df_first[col].astype("category")
+        if col in df_master.columns:
+            df_master[col] = df_master[col].astype("category")
     
-    # === Prepare df_scores: reduce + deduplicate
-    df_scores = df_scores[['Merge_Key_Short', 'Score_Home_Score', 'Score_Away_Score']].copy()
-    df_scores['Merge_Key_Short'] = df_scores['Merge_Key_Short'].astype('category')
-  
-    if 'Inserted_Timestamp' in df_scores.columns:
+    # === 4) Prepare df_scores: reduce + deduplicate by latest Inserted_Timestamp if present
+    df_scores = df_scores[["Merge_Key_Short","Score_Home_Score","Score_Away_Score"]].copy()
+    df_scores["Merge_Key_Short"] = df_scores["Merge_Key_Short"].astype("category")
+    
+    if "Inserted_Timestamp" in df_scores.columns:
         df_scores = (
-            df_scores
-            .sort_values('Inserted_Timestamp')
-            .drop_duplicates(subset='Merge_Key_Short', keep='last')
+            df_scores.sort_values("Inserted_Timestamp")
+                     .drop_duplicates(subset="Merge_Key_Short", keep="last")
         )
     else:
-        df_scores = df_scores.drop_duplicates(subset='Merge_Key_Short', keep='last')
+        df_scores = df_scores.drop_duplicates(subset="Merge_Key_Short", keep="last")
     
-    # === Check join key overlap BEFORE merge
+    # === 5) Diagnostics: check overlap before merge
     common_keys = df_master[key_cols].drop_duplicates()
-    first_keys = df_first[key_cols].drop_duplicates()
-    overlap = common_keys.merge(first_keys, on=key_cols, how='inner')
+    first_keys  = df_first[key_cols].drop_duplicates()
+    overlap = common_keys.merge(first_keys, on=key_cols, how="inner")
     logging.info(f"🧪 Join key overlap: {len(overlap)} / {len(common_keys)} df_master rows match df_first")
     
-    # === 1. Merge df_first into df_master
-    df_master = df_master.merge(
-        df_first,
-        on=key_cols,
-        how='left'
-    )
-    log_memory("AFTER merge with df_first")
-    logging.info("🧪 Sample First_Sharp_Prob before scores:\n" + df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    # === 2. Save First_* columns
-   
+    # === 6) Merge df_first (openers) into df_master
+    df_master = df_master.merge(df_first, on=key_cols, how="left")
+    log_memory("AFTER merge with df_first (Open_*)")
     
-    # === 3. Drop Score_* to prevent conflict
-    df_master.drop(columns=['Score_Home_Score', 'Score_Away_Score'], errors='ignore', inplace=True)
+    # === 7) Remove raw score columns to avoid conflicts, then merge deduped scores
+    df_master.drop(columns=["Score_Home_Score","Score_Away_Score"], errors="ignore", inplace=True)
+    df_master = df_master.merge(df_scores, on="Merge_Key_Short", how="inner")
+    log_memory("AFTER merge with df_scores")
     
-    # === 4. Merge in game scores
-    df_master = df_master.merge(
-        df_scores,
-        on='Merge_Key_Short',
-        how='inner'
-    )
-
-    # === Log resulting columns after merging df_first into df_master
-    logging.info("🧩 Columns after merging df_first into df_master:")
-    logging.info("🧩 df_master columns:\n" + ", ".join(df_master.columns.tolist()))
-    
-    # Optional: log sample of First_* fields for verification
-    first_fields = ['First_Line_Value', 'First_Sharp_Prob', 'First_Odds', 'First_Imp_Prob']
-    sample_first = df_master[first_fields].dropna().head(5)
+    # === 8) Post-merge logging
+    logging.info("🧩 df_master columns after openers + scores merge:\n" + ", ".join(df_master.columns))
+    first_fields = ["First_Line_Value","First_Odds","First_Imp_Prob"]
+    sample_first = df_master[first_fields].dropna(how="all").head(5)
     if not sample_first.empty:
         logging.info("🔍 Sample First_* fields after merge:\n" + sample_first.to_string(index=False))
     else:
-        logging.warning("⚠️ No non-null First_* values found after merge — check join keys or source data.")
-
-    # === 5. Restore First_* if dropped during merge
-    if 'First_Sharp_Prob' not in df_master.columns or 'First_Line_Value' not in df_master.columns:
-        df_master = df_master.merge(first_cols, on=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], how='left')
+        logging.warning("⚠️ No non-null First_* values found — verify join keys or source openers.")
     
-    # === 6. Clean up suffixes
-    for col in ['First_Sharp_Prob', 'First_Line_Value']:
-        x_col, y_col = f"{col}_x", f"{col}_y"
-        if x_col in df_master.columns or y_col in df_master.columns:
-            df_master[col] = df_master.get(x_col).combine_first(df_master.get(y_col))
-    df_master.drop(columns=[col for col in df_master.columns if col.endswith('_x') or col.endswith('_y')], inplace=True)
-    
-    # === 7. Final safety + diagnostics
-    if 'First_Sharp_Prob' not in df_master.columns:
-        logging.error("❌ First_Sharp_Prob missing after final merges.")
-    else:
-        logging.info("✅ First_Sharp_Prob successfully preserved:")
-        logging.info(df_master[['First_Sharp_Prob']].dropna().head().to_string(index=False))
-    
-    # === 8. Final cleanup and return
-    # === 8. Final cleanup and return
+    # === 9) Finalize working df
     df = df_master
     logging.info(f"✅ Final df columns before scoring: {df.columns.tolist()}")
-    log_memory("AFTER merge with df_scores_needed")
+    log_memory("AFTER merge pipeline (openers + scores)")
     logging.info(f"df shape after merge: {df.shape}")
     
     # 🚨 Guard: stop now if no rows to process
@@ -5338,23 +5316,23 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.warning("ℹ️ No rows after merge with scores — skipping backtest scoring.")
         return pd.DataFrame()
     
-    # === Reassign Merge_Key_Short from df_master using Game_Key
-    if 'Merge_Key_Short' in df_master.columns:
+    # === 10) Reassign Merge_Key_Short from df_master via Game_Key (if needed)
+    if "Merge_Key_Short" in df_master.columns:
         logging.info("🧩 Reassigning Merge_Key_Short from df_master via Game_Key (optimized)")
-        key_map = df_master.drop_duplicates(subset=['Game_Key'])[['Game_Key', 'Merge_Key_Short']] \
-                           .set_index('Game_Key')['Merge_Key_Short'].to_dict()
-        df['Merge_Key_Short'] = df['Game_Key'].map(key_map)
+        key_map = (df_master.drop_duplicates(subset=["Game_Key"])
+                            [["Game_Key","Merge_Key_Short"]]
+                            .set_index("Game_Key")["Merge_Key_Short"]
+                            .to_dict())
+        df["Merge_Key_Short"] = df["Game_Key"].map(key_map)
     
-    # Final logging
-    null_count = df['Merge_Key_Short'].isnull().sum()
+    null_count = df["Merge_Key_Short"].isnull().sum()
     logging.info(f"🧪 Final Merge_Key_Short nulls: {null_count}")
-    df['Sport'] = sport_label.upper()
+    df["Sport"] = sport_label.upper()
     
-    # === Track memory usage before the operation
+    # === Track memory usage before subsequent operations
     process = psutil.Process(os.getpid())
-    logging.info(f"Memory before operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
-        
-    # Function to process DataFrame in smaller chunks
+    logging.info(f"Memory before next operation: {process.memory_info().rss / 1024 / 1024:.2f} MB")
+
     def process_chunk_logic(df_chunk):
         df_chunk = df_chunk.copy()
     
@@ -5476,13 +5454,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Final Output DataFrame ===
     score_cols = [
         'Game_Key', 'Bookmaker','Book', 'Market', 'Limit', 'Outcome', 'Ref_Sharp_Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 
         'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
         'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
         'True_Sharp_Confidence_Score', 'SHARP_HIT_BOOL', 'SHARP_COVER_RESULT',
         'Scored', 'Sport', 'Value', 'Merge_Key_Short',
-        'First_Line_Value', 'First_Sharp_Prob',
+        'First_Line_Value', 
         'Line_Delta', 'Model_Prob_Diff', 'Direction_Aligned',
         'Home_Team_Norm', 'Away_Team_Norm', 'Commence_Hour',
         'Line_Magnitude_Abs', 'High_Limit_Flag',
@@ -5563,7 +5541,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === Coerce and clean all fields BEFORE dedup and upload
     df_scores_out['Sharp_Move_Signal'] = pd.to_numeric(df_scores_out['Sharp_Move_Signal'], errors='coerce').astype('Int64')
     df_scores_out['Sharp_Limit_Jump'] = pd.to_numeric(df_scores_out['Sharp_Limit_Jump'], errors='coerce').astype('Int64')
-    df_scores_out['Sharp_Prob_Shift'] = pd.to_numeric(df_scores_out['Sharp_Prob_Shift'], errors='coerce').fillna(0.0).astype(float)
+   
     
     # === Debug unexpected boolean coercion errors before Parquet conversion
     for col in ['Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag', 'Scored']:
@@ -5626,7 +5604,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # Deduplication fingerprint columns
     dedup_fingerprint_cols = [
         'Game_Key', 'Bookmaker', 'Market', 'Outcome', 'Ref_Sharp_Value',
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Prob_Shift',
+        'Sharp_Move_Signal', 'Sharp_Limit_Jump',
         'Sharp_Time_Score', 'Sharp_Limit_Total', 'Is_Reinforced_MultiMarket',
         'Market_Leader', 'LimitUp_NoMove_Flag', 'SharpBetScore',
         'Unique_Sharp_Books', 'Enhanced_Sharp_Confidence_Score',
@@ -5640,7 +5618,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
     logging.info(f"🧪 Fingerprint dedup keys: {dedup_fingerprint_cols}")
     float_cols_to_round = [
-        'Sharp_Prob_Shift', 'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
+        'Sharp_Time_Score', 'Sharp_Limit_Total', 'Value',
         'First_Line_Value', 'First_Sharp_Prob', 'Line_Delta', 'Model_Prob_Diff'
     ]
 
@@ -5733,7 +5711,7 @@ def compute_and_write_market_weights(df):
     component_cols = [
         'Sharp_Move_Signal',
         'Sharp_Limit_Jump',
-        'Sharp_Prob_Shift',
+        
         'Sharp_Time_Score',
         'Sharp_Limit_Total'
     ]
@@ -5791,25 +5769,4 @@ def compute_and_write_market_weights(df):
 
     return market_weights
 
-def compute_sharp_prob_shift(df):
-    """
-    Computes the change in Model_Sharp_Win_Prob per Team_Key + Bookmaker across snapshots.
-    Adds column: Sharp_Prob_Shift
-    """
-    df = df.copy()
-
-    required = ['Team_Key', 'Bookmaker', 'Snapshot_Timestamp', 'Model_Sharp_Win_Prob']
-    if not all(col in df.columns for col in required):
-        df['Sharp_Prob_Shift'] = 0.0
-        return df
-
-    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
-    df = df.sort_values(['Team_Key', 'Bookmaker', 'Snapshot_Timestamp'])
-
-    df['Sharp_Prob_Shift'] = (
-        df.groupby(['Team_Key', 'Bookmaker'])['Model_Sharp_Win_Prob']
-        .transform(lambda x: x.diff().fillna(0))
-    )
-
-    return df
 
