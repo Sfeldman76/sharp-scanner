@@ -3879,88 +3879,137 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         logger.error(traceback.format_exc())
         return pd.DataFrame()
     
-def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, trained_models=None, weights=None):   
+def detect_sharp_moves(
+    current,
+    previous=None,            # ← now optional
+    sport_key=None,           # e.g. "basketball_nba"
+    SHARP_BOOKS=None,
+    REC_BOOKS=None,
+    BOOKMAKER_REGIONS=None,
+    trained_models=None,
+    weights=None,
+    history_hours: int = 120, # hours of history to pull from BQ; set to 0 to skip
+    
+):
+    import logging
+    from datetime import datetime
+    import pandas as pd
+
     if not current:
         logging.warning("⚠️ No current odds data provided.")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    df_scored = pd.DataFrame()
-    summary_df = pd.DataFrame()
+
+    # ---------- 0) Basics ----------
+    df_scored    = pd.DataFrame()
+    summary_df   = pd.DataFrame()
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    previous_map = {g['id']: g for g in previous} if isinstance(previous, list) else previous or {}
 
-    df_history = read_recent_sharp_master_cached(hours=120)
-    df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
-    df_history = df_history.sort_values('Snapshot_Timestamp')
-    df_history['Book'] = df_history['Book'].str.lower().str.strip()
-    df_history['Bookmaker'] = df_history['Bookmaker'].str.lower().str.strip()
-    df_history['Game'] = df_history['Game'].str.strip().str.lower()
+    # Normalize sport info for downstream
+    _sport_key   = (sport_key or "").strip().lower()       # "basketball_nba"
+    _sport_label = (sport_label or _sport_key).strip().upper()  # "NBA" or "BASKETBALL_NBA"
 
-    # Build old value/odds maps
-    old_val_map = (
-        df_history
-        .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
-        .set_index(['Game', 'Market', 'Outcome', 'Book'])['Value']
-        .to_dict()
-    )
-    old_odds_map = (
-        df_history
-        .dropna(subset=['Odds_Price'])
-        .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
-        .set_index(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
-        .to_dict()
-    )
-
-    rows = []
+    # ---------- 1) Build 'previous' lookup only if provided ----------
     previous_odds_map = {}
-    for g in previous_map.values():
-        for book in g.get('bookmakers', []):
-            book_key_raw = book.get('key', '').lower()
-            book_key = normalize_book_name(book_key_raw, book_key_raw)
-            for market in book.get('markets', []):
-                mtype = market.get('key')
-                for outcome in market.get('outcomes', []):
-                    label = normalize_label(outcome.get('name', ''))
-                    price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
-                    previous_odds_map[(g.get('home_team'), g.get('away_team'), mtype, label, book_key)] = price
+    if isinstance(previous, list) and previous:
+        for g in previous:
+            for book in g.get('bookmakers', []):
+                book_key_raw = (book.get('key', '') or '').lower()
+                book_key = normalize_book_name(book_key_raw, book_key_raw)
+                for market in book.get('markets', []):
+                    mtype = (market.get('key') or '').strip().lower()
+                    for outcome in market.get('outcomes', []):
+                        label = normalize_label(outcome.get('name', ''))
+                        price = outcome.get('point') if mtype != 'h2h' else outcome.get('price')
+                        previous_odds_map[(
+                            g.get('home_team'), g.get('away_team'), mtype, label, book_key
+                        )] = price
+    elif isinstance(previous, dict) and previous:
+        # keep compatibility if you sometimes pass a dict already keyed how you expect
+        previous_odds_map = previous
 
+    # ---------- 2) Pull recent history from BQ (for opens/extremes/reversals) ----------
+    df_history = pd.DataFrame()
+    if history_hours and history_hours > 0:
+        try:
+            df_history = read_recent_sharp_master_cached(hours=history_hours)
+            # Keep only rows we can key on
+            df_history = df_history.dropna(subset=['Game', 'Market', 'Outcome', 'Book', 'Value'])
+            df_history = df_history.sort_values('Snapshot_Timestamp')
+
+            # normalize for joins
+            for col in ('Book', 'Bookmaker', 'Game', 'Market', 'Outcome'):
+                if col in df_history.columns:
+                    if col in ('Book', 'Bookmaker', 'Game', 'Outcome'):
+                        df_history[col] = df_history[col].astype(str).str.lower().str.strip()
+                    else:
+                        df_history[col] = df_history[col].astype(str).str.strip().str.lower()
+
+            # old value/odds maps keyed by (Game, Market, Outcome, Book)
+            old_val_map = (
+                df_history
+                .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
+                .set_index(['Game', 'Market', 'Outcome', 'Book'])['Value']
+                .to_dict()
+            )
+            old_odds_map = (
+                df_history
+                .dropna(subset=['Odds_Price'])
+                .drop_duplicates(subset=['Game', 'Market', 'Outcome', 'Book'], keep='first')
+                .set_index(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
+                .to_dict()
+            )
+        except Exception as e:
+            logging.warning(f"⚠️ History fetch failed: {e}")
+            old_val_map, old_odds_map = {}, {}
+    else:
+        old_val_map, old_odds_map = {}, {}
+
+    # ---------- 3) Flatten CURRENT into rows ----------
+    rows = []
+    SHARP_REC_SET = set((SHARP_BOOKS or []) + (REC_BOOKS or []))  # assume lowercase
     for game in current:
-        home_team = game.get('home_team', '').strip().lower()
-        away_team = game.get('away_team', '').strip().lower()
-        
-
+        home_team = (game.get('home_team', '') or '').strip().lower()
+        away_team = (game.get('away_team', '') or '').strip().lower()
         if not home_team or not away_team:
             continue
 
-        game_name = f"{home_team.title()} vs {away_team.title()}".strip().lower()
-        event_time = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
-        game_hour = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
+        # canonical game name used in history keys
+        game_name   = f"{home_team.title()} vs {away_team.title()}".strip().lower()
+        event_time  = pd.to_datetime(game.get("commence_time"), utc=True, errors='coerce')
+        game_hour   = event_time.floor('h') if pd.notnull(event_time) else pd.NaT
 
         for book in game.get('bookmakers', []):
-            book_key_raw = book.get('key', '').lower()
-            book_key = normalize_book_name(book_key_raw, book_key_raw)
-            if book_key not in SHARP_BOOKS + REC_BOOKS:
+            book_key_raw = (book.get('key', '') or '').lower()
+            book_key     = normalize_book_name(book_key_raw, book_key_raw)  # your util
+            if SHARP_REC_SET and book_key not in SHARP_REC_SET:
                 continue
 
             for market in book.get('markets', []):
-                mtype = market.get('key', '').strip().lower()
-                if mtype not in ['spreads', 'totals', 'h2h']:
+                mtype = (market.get('key') or '').strip().lower()
+                if mtype not in ('spreads', 'totals', 'h2h'):
                     continue
+
                 for o in market.get('outcomes', []):
-                    label = normalize_label(o.get('name', ''))
-                    point = o.get('point')
+                    label      = normalize_label(o.get('name', ''))
+                    point      = o.get('point')
                     odds_price = o.get('price')
-                    value = odds_price if mtype == 'h2h' else point
-                    limit = o.get('bet_limit')
-                    #logger.info(f"🧪 API ROW [{mtype.upper()}] | Book: {book_key} | Outcome: {label} | Point: {point} | Odds: {odds_price} | Limit: {limit}")
+                    value      = odds_price if mtype == 'h2h' else point
+                    limit      = o.get('bet_limit')
 
                     game_key = f"{home_team}_{away_team}_{str(game_hour)}_{mtype}_{label}"
                     team_key = game_key
 
+                    # hydrate opens if available
+                    _hist_key = (game_name, mtype, label, book_key)
+                    old_val   = old_val_map.get(_hist_key)
+                    old_odds  = old_odds_map.get(_hist_key)
+
                     rows.append({
-                        'Sport': sport_key.upper(),
+                        'Sport': _sport_label,          # e.g., "NBA"
+                        'Sport_Key': _sport_key,        # e.g., "basketball_nba"
                         'Game_Key': game_key,
                         'Time': snapshot_time,
-                        'Game': game_name,
+                        'Game': game_name,              # lower, matches history normalization
                         'Game_Start': event_time,
                         'Market': mtype,
                         'Outcome': label,
@@ -3970,7 +4019,8 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Value': value,
                         'Odds_Price': odds_price,
                         'Limit': limit,
-                        'Old Value': None,
+                        'Old Value': old_val,           # ← from history (open/first seen)
+                        'Old_Odds': old_odds,           # ← from history
                         'Home_Team_Norm': home_team,
                         'Away_Team_Norm': away_team,
                         'Commence_Hour': game_hour,
@@ -3978,10 +4028,23 @@ def detect_sharp_moves(current, previous, sport_key, SHARP_BOOKS, REC_BOOKS, BOO
                         'Team_Key': team_key,
                     })
 
-                    #if mtype == "spreads":
-                        #logging.info(f"✅ Final Spread Row for {label} @ {book_key} = {value}")
+    # === continue with your existing pipeline:
+    # - build canonical & inverse
+    # - merge opens/extremes, reversals, resistance, timing
+    # - compute implied probs + directional features
+    # - small book liquidity, cross-market features
+    # - apply_models(...) OR build_model_readiness_buffer(...)
+    # - build audit
+    #
+    # Return your usual 3-tuple
+    df_api = pd.DataFrame(rows)
 
-    
+    # ... your existing enrichment & scoring (not shown) ...
+    # df_scored = apply_models(...) or build_model_readiness_buffer(df_api)
+    # df_audit  = build_audit_frame(...)
+
+    return df_scored, df_history, summary_df  # keep your original return shape
+
 
     df = pd.DataFrame(rows)
     if df.empty:
