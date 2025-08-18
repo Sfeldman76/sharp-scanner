@@ -2526,6 +2526,29 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     total_start = time.time()
     
 
+    trained_models = trained_models or {}
+    trained_models_lc = {
+        str(k).strip().lower(): v
+        for k, v in trained_models.items()
+        if isinstance(v, dict)
+    }
+
+    HAS_MODELS = any(
+        isinstance(v, dict) and ("model" in v or "calibrator" in v)
+        for v in _lc.values()
+    )
+    model_markets_lower = {
+        mk for mk, bundle in _lc.items()
+        if isinstance(bundle, dict) and ("model" in bundle or "calibrator" in bundle)
+    }
+    logger.info("📦 HAS_MODELS=%s; model markets: %s", HAS_MODELS, sorted(model_markets_lower))
+
+    
+    if df is None:
+        df = pd.DataFrame()
+    else:
+        df = df.copy()
+
     # ---- Base normalization (does not touch open/extreme columns) ----
     df = df.copy()
     df['Market'] = df['Market'].astype(str).str.lower().str.strip()
@@ -2879,11 +2902,11 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
 
-    # --- Restore: simple map lookup from trained_models bundles (do this BEFORE enrichment log) ---
+    # --- Restore: simple map lookup from  bundles (do this BEFORE enrichment log) ---
     team_feature_map = None
     book_reliability_map = None
-    if isinstance(trained_models, dict):
-        for bundle in trained_models.values():
+    if isinstance(trained_models_lc, dict):
+        for bundle in trained_models_lc.values():
             if isinstance(bundle, dict):
                 if team_feature_map is None:
                     team_feature_map = bundle.get('team_feature_map')
@@ -3041,7 +3064,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         df_m = df.loc[mask].copy()
     
         # Resolve bundle inside loop
-        bundle = trained_models.get(mkt) if HAS_MODELS else None
+        bundle = trained_models_lc.get(mkt) if HAS_MODELS else None
         model = bundle.get('model') if bundle else None
         iso   = bundle.get('calibrator') if bundle else None
     
