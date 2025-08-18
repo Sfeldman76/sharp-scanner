@@ -290,7 +290,7 @@ component_fields = OrderedDict({
     'Sharp_Move_Signal': 'Win Rate by Move Signal',
     'Sharp_Time_Score': 'Win Rate by Time Score',
     'Sharp_Limit_Jump': 'Win Rate by Limit Jump',
-    'Sharp_Prob_Shift': 'Win Rate by Prob Shift',
+   
     'Is_Reinforced_MultiMarket': 'Win Rate by Cross-Market Reinforcement',
     'Market_Leader': 'Win Rate by Market Leader',
     'LimitUp_NoMove_Flag': 'Win Rate by Limit↑ No Move'
@@ -1798,7 +1798,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             np.where(df_market['Line_Delta'] < 0, 0, -1)
         ).astype(int)
         df_market['Line_Value_Abs'] = df_market['Value'].abs()
-        df_market['Prob_Shift_Signed'] = df_market['Sharp_Prob_Shift'] * np.sign(df_market['Value'])
+       
         df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(df_market['Value'])
         
         
