@@ -32,7 +32,7 @@ from google.cloud import bigquery, storage
 import logging
 logging.basicConfig(level=logging.INFO)  # <- Must be INFO or DEBUG to show .info() logs
 logger = logging.getLogger(__name__)
-from __future__ import annotations
+
 import math
 
 import warnings
