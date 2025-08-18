@@ -361,14 +361,13 @@ def fetch_live_odds(sport_key):
 
 
    
-def read_from_bigquery(table_name):
-    from google.cloud import bigquery
-    try:
-        client = bigquery.Client()
-        return client.query(f"SELECT * FROM `{table_name}`").to_dataframe()
-    except Exception as e:
-        st.error(f"❌ Failed to load `{table_name}`: {e}")
-        return pd.DataFrame()
+#def read_from_bigquery(table_name):
+    #try:
+        #client = bigquery.Client()
+        #return client.query(f"SELECT * FROM `{table_name}`").to_dataframe()
+    #except Exception as e:
+        #st.error(f"❌ Failed to load `{table_name}`: {e}")
+        #return pd.DataFrame()
         
 def safe_to_gbq(df, table, replace=False):
     mode = 'replace' if replace else 'append'
@@ -596,50 +595,12 @@ def norm_team(x):
 
     return out if ret_series else out.iloc[0]
 
-
-
 @contextlib.contextmanager
 def tmr(label):
     t0 = time.perf_counter()
     yield
     dt = time.perf_counter() - t0
     st.write(f"⏱ {label}: {dt:.2f}s")
-
-
-
-
-def read_latest_snapshot_from_bigquery(hours=2):
-    try:
-        client = bq_client
-        query = f"""
-            SELECT * FROM `{SNAPSHOTS_TABLE}`
-            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
-        """
-        df = client.query(query).to_dataframe()
-        # Group back into the same format as before if needed
-        grouped = defaultdict(lambda: {"bookmakers": []})
-        for _, row in df.iterrows():
-            gid = row["Game_ID"]
-            entry = grouped[gid]
-            found_book = next((b for b in entry["bookmakers"] if b["key"] == row["Bookmaker"]), None)
-            if not found_book:
-                found_book = {"key": row["Bookmaker"], "markets": []}
-                entry["bookmakers"].append(found_book)
-            found_market = next((m for m in found_book["markets"] if m["key"] == row["Market"]), None)
-            if not found_market:
-                found_market = {"key": row["Market"], "outcomes": []}
-                found_book["markets"].append(found_market)
-            found_market["outcomes"].append({
-                "name": row["Outcome"],
-                "point": row["Value"],
-                "price": row["Value"] if row["Market"] == "h2h" else None,
-                "bet_limit": row["Limit"]
-            })
-        print(f"✅ Reconstructed {len(grouped)} snapshot games from BigQuery")
-        return dict(grouped)
-    except Exception as e:
-        print(f"❌ Failed to load snapshot from BigQuery: {e}")
-        return {}
 
 
 
@@ -686,65 +647,6 @@ def write_market_weights_to_bigquery(weights_dict):
         print(df.dtypes)
 
     
-def initialize_all_tables(df_snap, df_audit, market_weights_dict):
-    from google.cloud import bigquery
-
-    def table_needs_replacement(table_name):
-        try:
-            query = f"SELECT * FROM `{table_name}` LIMIT 1"
-            _ = bq_client.query(query).to_dataframe()
-            return False  # Table exists and has schema
-        except Exception as e:
-            print(f"⚠️ Table {table_name} likely missing or misconfigured: {e}")
-            return True
-
-    # === 1. Initialize line_history_master
-    if table_needs_replacement(LINE_HISTORY_TABLE):
-        if df_audit is not None and not df_audit.empty:
-            df = df_audit.copy()
-            df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-            if 'Time' in df.columns:
-                df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-            df = df.rename(columns=lambda x: x.rstrip('_x'))
-            df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
-            to_gbq(df, LINE_HISTORY_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
-            print(f"✅ Initialized {LINE_HISTORY_TABLE} with {len(df)} rows")
-        else:
-            print(f"⚠️ Skipping {LINE_HISTORY_TABLE} initialization — df_audit is empty")
-
-    # === 2. Initialize odds_snapshot_log
-    if table_needs_replacement(SNAPSHOTS_TABLE):
-        if df_snap is not None and not df_snap.empty:
-            df = df_snap.copy()
-            df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-            if 'Time' in df.columns:
-                df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-            df = df.rename(columns=lambda x: x.rstrip('_x'))
-            df = df.drop(columns=[col for col in df.columns if col.endswith('_y')], errors='ignore')
-            to_gbq(df, SNAPSHOTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
-            print(f"✅ Initialized {SNAPSHOTS_TABLE} with {len(df)} rows")
-        else:
-            print(f"⚠️ Skipping {SNAPSHOTS_TABLE} initialization — df_snap is empty")
-
-    # === 3. Initialize market_weights
-    if table_needs_replacement(MARKET_WEIGHTS_TABLE):
-        rows = []
-        for market, components in market_weights_dict.items():
-            for component, values in components.items():
-                for val_key, win_rate in values.items():
-                    rows.append({
-                        'Market': market,
-                        'Component': component,
-                        'Value': val_key,
-                        'Win_Rate': float(win_rate)
-                    })
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            to_gbq(df, MARKET_WEIGHTS_TABLE, project_id=GCP_PROJECT_ID, if_exists='replace')
-            print(f"✅ Initialized {MARKET_WEIGHTS_TABLE} with {len(df)} rows")
-        else:
-            print(f"⚠️ Skipping {MARKET_WEIGHTS_TABLE} initialization — no weight rows available")
-
 
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
 
@@ -999,63 +901,6 @@ import gc
 def get_bq() -> bigquery.Client:
     return bigquery.Client(project="sharplogger")
 
-# --- PER-GROUP ASOF (no 'left keys must be sorted') ---
-def asof_join_by(left: pd.DataFrame,
-                 right: pd.DataFrame,
-                 by: list[str],
-                 left_on: str,
-                 right_on: str,
-                 direction: str = "backward") -> pd.DataFrame:
-    
-
-    # Ensure tz-aware datetimes
-    left[left_on]   = pd.to_datetime(left[left_on],   utc=True, errors='coerce')
-    right[right_on] = pd.to_datetime(right[right_on], utc=True, errors='coerce')
-
-    # Ensure join keys are plain strings
-    for c in by:
-        left[c]  = left[c].astype(str)
-        right[c] = right[c].astype(str)
-
-    # Drop rows with missing join keys or times
-    left  = left.dropna(subset=by + [left_on]).copy()
-    right = right.dropna(subset=by + [right_on]).copy()
-
-    # Pre-sort right groups by time for speed
-    right_groups = {k: g.sort_values(right_on, kind='mergesort')
-                    for k, g in right.groupby(by, sort=False)}
-
-    chunks = []
-    for k, g_left in left.groupby(by, sort=False):
-        g_left = g_left.sort_values(left_on, kind='mergesort')
-        g_right = right_groups.get(k)
-        if g_right is None or g_right.empty:
-            tmp = g_left.copy()
-            for c in ['Power_Rating', right_on]:
-                if c not in tmp.columns:
-                    tmp[c] = np.nan
-            chunks.append(tmp)
-            continue
-
-        # ⬇️ Drop the 'by' columns from right to avoid _x/_y duplication
-        g_right_slim = g_right.drop(columns=[c for c in by if c in g_right.columns])
-
-        merged = pd.merge_asof(
-            g_left, g_right_slim,
-            left_on=left_on, right_on=right_on,
-            direction=direction, allow_exact_matches=True
-        )
-
-        # ⬇️ Fallback safety: if pandas still created _x/_y, normalize them
-        for c in by:
-            if f"{c}_x" in merged.columns:
-                merged.rename(columns={f"{c}_x": c}, inplace=True)
-            if f"{c}_y" in merged.columns:
-                merged.drop(columns=[f"{c}_y"], inplace=True, errors='ignore')
-
-        chunks.append(merged)
-
-    return pd.concat(chunks, ignore_index=True) if chunks else left
                      
 def _iso(ts) -> str:
     return pd.to_datetime(ts, utc=True).isoformat()
@@ -1114,119 +959,7 @@ def fetch_training_ratings_window_cached(
     return df
 
 # --- TRAINING ENRICHMENT (LEAK-SAFE) ---
-def enrich_power_for_training(
-    df: pd.DataFrame,
-    bq,                   # not used inside, kept for signature parity
-    sport_aliases: dict,
-    table_history: str = "sharplogger.sharp_data.ratings_history",
-    pad_days: int = 10,
-    allow_forward_hours: float = 0.0,
-    project: str = "sharplogger",
-) -> pd.DataFrame:
-    if df.empty: return df
 
-    out = df.copy()
-    out['Sport'] = out['Sport'].astype(str).str.upper()
-    out['Home_Team_Norm'] = out['Home_Team_Norm'].astype(str).str.strip().str.lower()
-    out['Away_Team_Norm'] = out['Away_Team_Norm'].astype(str).str.strip().str.lower()
-    out['Game_Start'] = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
-
-    canon = {}
-    for k, v in sport_aliases.items():
-        if isinstance(v, list):
-            for a in v: canon[str(a).upper()] = str(k).upper()
-        else:
-            canon[str(k).upper()] = str(v).upper()
-    out['Sport'] = out['Sport'].map(lambda s: canon.get(s, s))
-
-    sport_canon = out['Sport'].iloc[0]
-    out = out[out['Sport'] == sport_canon].copy()
-    if out.empty: return df
-
-    req = pd.concat(
-        [
-            out[['Sport','Game_Start','Home_Team_Norm']].rename(columns={'Home_Team_Norm':'Team_Norm'}).assign(Side='Home'),
-            out[['Sport','Game_Start','Away_Team_Norm']].rename(columns={'Away_Team_Norm':'Team_Norm'}).assign(Side='Away'),
-        ], ignore_index=True
-    )
-    req['Team_Norm']  = (req['Team_Norm'].astype(str).str.lower().str.strip()
-                         .str.replace(r'\s+', ' ', regex=True)
-                         .str.replace('.', '', regex=False)
-                         .str.replace('&', 'and', regex=False)
-                         .str.replace('-', ' ', regex=False))
-    req['Game_Start'] = pd.to_datetime(req['Game_Start'], utc=True, errors='coerce')
-
-    gmin, gmax = req['Game_Start'].min(), req['Game_Start'].max()
-    pad = pd.Timedelta(days=pad_days)
-    start_iso = pd.to_datetime(gmin - pad, utc=True).isoformat()
-    end_iso   = pd.to_datetime(gmax + pad, utc=True).isoformat()
-
-    ratings = fetch_training_ratings_window_cached(
-        sport=sport_canon, start_iso=start_iso, end_iso=end_iso,
-        table_history=table_history, project=project
-    )
-    if ratings.empty:
-        base = np.float32(1500.0)
-        out['Home_Power_Rating'] = base
-        out['Away_Power_Rating'] = base
-        out['Power_Rating_Diff'] = np.float32(0.0)
-        return out
-
-    # normalize ratings team the same way
-    ratings['Team_Norm'] = (ratings['Team_Norm'].astype(str).str.lower().str.strip()
-                            .str.replace(r'\s+', ' ', regex=True)
-                            .str.replace('.', '', regex=False)
-                            .str.replace('&', 'and', regex=False)
-                            .str.replace('-', ' ', regex=False))
-    ratings['Sport'] = ratings['Sport'].astype(str)
-
-    by = ['Sport','Team_Norm']
-    back = asof_join_by(
-        left=req, right=ratings, by=by,
-        left_on='Game_Start', right_on='AsOfTS', direction='backward'
-    )
-
-    if allow_forward_hours > 0:
-        need = back['Power_Rating'].isna()
-        if need.any():
-            fsrc = back.loc[need, ['Sport','Team_Norm','Game_Start','Side']]
-            fwd = asof_join_by(
-                left=fsrc, right=ratings, by=by,
-                left_on='Game_Start', right_on='AsOfTS', direction='forward'
-            )
-            grace = pd.to_timedelta(allow_forward_hours, unit='h')
-            ok = (fwd['AsOfTS'] - fwd['Game_Start']).abs() <= grace
-            back.loc[need & ok, 'Power_Rating'] = fwd.loc[ok, 'Power_Rating'].astype('float32').values
-
-    sport_mean = float(pd.to_numeric(ratings['Power_Rating'], errors='coerce').mean()) if not ratings.empty else 1500.0
-    m = back['Power_Rating'].isna()
-    if m.any(): back.loc[m, 'Power_Rating'] = np.float32(sport_mean)
-
-    # Home/Away once, then merge once
-    cols_needed = ['Sport','Game_Start','Team_Norm','Side','Power_Rating']
-    missing = set(cols_needed) - set(back.columns)
-    if missing:
-        st.error(f"asof (back) missing columns: {missing} | cols={list(back.columns)}")
-        st.stop()
-
-    home = (back.loc[back['Side']=='Home', ['Sport','Game_Start','Team_Norm','Power_Rating']]
-                 .rename(columns={'Team_Norm':'Home_Team_Norm','Power_Rating':'Home_Power_Rating'}))
-    away = (back.loc[back['Side']=='Away', ['Sport','Game_Start','Team_Norm','Power_Rating']]
-                 .rename(columns={'Team_Norm':'Away_Team_Norm','Power_Rating':'Away_Power_Rating'}))
-
-    # Check the left columns exist
-    for k in ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm']:
-        if k not in out.columns:
-            st.error(f"Missing expected column on left side: {k}")
-            st.stop()
-
-    out = out.merge(home, on=['Sport','Game_Start','Home_Team_Norm'], how='left')
-    out = out.merge(away, on=['Sport','Game_Start','Away_Team_Norm'], how='left')
-
-    out['Home_Power_Rating'] = pd.to_numeric(out['Home_Power_Rating'], errors='coerce').astype('float32')
-    out['Away_Power_Rating'] = pd.to_numeric(out['Away_Power_Rating'], errors='coerce').astype('float32')
-    out['Power_Rating_Diff'] = (out['Home_Power_Rating'] - out['Away_Power_Rating']).astype('float32')
-    return out
 
 def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
@@ -1593,40 +1326,6 @@ def enrich_and_grade_for_training(
     return out
 
 
-def build_spread_training_features(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-
-    # Core magnitudes
-    out['k'] = out['Outcome_Market_Spread'].abs().astype(float)
-
-    # requires Model_Expected_Margin_Abs merged in step 5
-    out['mu_abs']   = out['Model_Expected_Margin_Abs'].astype(float)
-    out['edge_pts'] = (out['mu_abs'] - out['k']).astype(float)
-
-    # Standardized edge (guard div by 0)
-    sigma = out['Sigma_Pts'].replace(0, np.nan).astype(float)
-    out['z'] = (out['k'] - out['mu_abs']) / sigma
-    out['z'] = out['z'].clip(-6, 6)
-
-    # Optional per-outcome cover prob via your fast CDF
-    # fav covers if margin > k where margin ~ N(mu_abs, sigma)
-    # z_cov = (k - mu_abs)/sigma ; P(fav covers) = 1 - Φ(z_cov)
-    if '_phi' in globals():
-        z_cov = (out['k'] - out['mu_abs']) / sigma
-        out['Outcome_Cover_Prob'] = (1.0 - _phi(z_cov)).astype('float32')
-
-    # Orientation / flags / interactions
-    out['is_market_fav_team'] = (out['Outcome_Market_Spread'] < 0).astype('int8')
-    out['is_home_team']       = (out['Outcome_Norm'] == out['Home_Team_Norm']).astype('int8')
-    if {'Model_Favorite_Team','Market_Favorite_Team'}.issubset(out.columns):
-        out['model_fav_vs_market_fav_agree'] = (
-            out['Model_Favorite_Team'] == out['Market_Favorite_Team']
-        ).astype('int8')
-    out['edge_x_k'] = out['edge_pts'] * out['k']
-    out['mu_x_k']   = out['mu_abs'] * out['k']
-
-    out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    return out[features]
 
 
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
