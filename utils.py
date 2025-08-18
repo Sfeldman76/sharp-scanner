@@ -4964,113 +4964,76 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 3. Upload scores to `game_scores_final` ===
     # === 3. Upload scores to `game_scores_final` ===
     # === 3) Write finals to game_scores_final (canonical schema) ===
+    # === 3) Write finals to game_scores_final (canonical schema) ===
     try:
-        # Canonicalize keys and types to match BQ schema
         schema_cols = [
             'Merge_Key_Short','Home_Team','Away_Team','Game_Start',
             'Score_Home_Score','Score_Away_Score','Source','Inserted_Timestamp','Sport'
         ]
     
-        out = df_scores.copy()
+        out = (df_scores if df_scores is not None else pd.DataFrame()).copy()
+        if out.empty:
+            logging.info("ℹ️ No df_scores rows available — skipping finals upload.")
+        else:
+            # Normalize core fields
+            out['Merge_Key_Short'] = out['Merge_Key_Short'].astype(str).str.strip().str.lower()
+            out['Home_Team']       = out['Home_Team'].astype(str)
+            out['Away_Team']       = out['Away_Team'].astype(str)
+            out['Source']          = out['Source'].astype(str)
+            out['Sport']           = out['Sport'].astype(str)
     
-        # Normalize key + strings
-        out['Merge_Key_Short'] = out['Merge_Key_Short'].astype(str).str.strip().str.lower()
-        out['Home_Team']       = out['Home_Team'].astype(str)
-        out['Away_Team']       = out['Away_Team'].astype(str)
-        out['Source']          = out['Source'].astype(str)
-        out['Sport']           = out['Sport'].astype(str)
+            # Timestamps → UTC
+            out['Game_Start']         = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
+            out['Inserted_Timestamp'] = pd.to_datetime(out['Inserted_Timestamp'], utc=True, errors='coerce')
     
-        # Timestamps as UTC
-        out['Game_Start']         = pd.to_datetime(out['Game_Start'], utc=True, errors='coerce')
-        out['Inserted_Timestamp'] = pd.to_datetime(out['Inserted_Timestamp'], utc=True, errors='coerce')
+            # Scores → float (BQ schema)
+            out['Score_Home_Score'] = pd.to_numeric(out['Score_Home_Score'], errors='coerce').astype(float)
+            out['Score_Away_Score'] = pd.to_numeric(out['Score_Away_Score'], errors='coerce').astype(float)
     
-        # Scores as FLOAT (BQ schema)
-        out['Score_Home_Score'] = pd.to_numeric(out['Score_Home_Score'], errors='coerce').astype(float)
-        out['Score_Away_Score'] = pd.to_numeric(out['Score_Away_Score'], errors='coerce').astype(float)
-    
-        # --- Write finals to sharp_data.game_scores_final (clean + early return) ---
-        try:
-            # Keep only schema columns (create if missing)
+            # Ensure schema columns exist and order
             for c in schema_cols:
                 if c not in out.columns:
                     out[c] = pd.NA
             out = out[schema_cols]
-        
+    
             # Drop rows missing critical fields
-            out = out.dropna(subset=['Merge_Key_Short', 'Game_Start', 'Score_Home_Score', 'Score_Away_Score'])
-        
-            # Normalize Merge_Key_Short for consistent de-dup
-            out['mks_norm'] = (
-                out['Merge_Key_Short']
-                .astype(str)
-                .str.strip()
-                .str.lower()
-            )
-        
-            # Fetch existing keys in the same normalized form
-            existing = bq_client.query("""
-                SELECT DISTINCT LOWER(TRIM(CAST(Merge_Key_Short AS STRING))) AS mks
-                FROM `sharplogger.sharp_data.game_scores_final`
-            """).to_dataframe()
-            existing_keys = set(existing['mks'].dropna())
-        
-            # Filter to only new finals
-            to_write = out[~out['mks_norm'].isin(existing_keys)].copy()
-            to_write = to_write.drop(columns=['mks_norm'], errors='ignore')
-        
-            logging.info(
-                "⛳ Finals total (clean): %d | Already in table: %d | New to write: %d",
-                len(out), len(out) - len(to_write), len(to_write)
-            )
-        
-            if not to_write.empty:
-                to_gbq(
-                    to_write,                          # already schema-aligned
-                    'sharp_data.game_scores_final',
-                    project_id=GCP_PROJECT_ID,
-                    if_exists='append'
-                )
-                logging.info("✅ Wrote %d rows to sharp_data.game_scores_final", len(to_write))
+            out = out.dropna(subset=['Merge_Key_Short','Game_Start','Score_Home_Score','Score_Away_Score'])
+            if out.empty:
+                logging.info("ℹ️ After cleaning, no complete finals rows to write.")
             else:
-                logging.info("ℹ️ No new rows to write to sharp_data.game_scores_final")
-        
-            # 🔚 IMPORTANT: we are done with finals; return to avoid continuing into later pipelines
-            return True
-        
-        except Exception:
-            logging.exception("❌ Failed to upload game scores to game_scores_final")
-            # Decide whether to fail hard or continue; if this is terminal, return.
-            return False
-
+                # Normalized key for de-dup
+                out['mks_norm'] = out['Merge_Key_Short'].astype(str).str.strip().str.lower()
     
-        # Dump a preview of the DataFrame
-        try:
-            logging.error("📋 Sample of new_scores DataFrame:")
-            logging.error(new_scores.head(5).to_string(index=False))
-        except Exception as preview_error:
-            logging.error(f"❌ Failed to log DataFrame preview: {preview_error}")
+                # Fetch existing keys (normalized the same way)
+                existing = bq_client.query("""
+                    SELECT DISTINCT LOWER(TRIM(CAST(Merge_Key_Short AS STRING))) AS mks
+                    FROM `sharplogger.sharp_data.game_scores_final`
+                """).to_dataframe()
+                existing_keys = set(existing['mks'].dropna().astype(str))
     
-        # Dump column dtypes
-        try:
-            logging.error("🧪 DataFrame dtypes:")
-            logging.error(new_scores.dtypes.to_string())
-        except Exception as dtypes_error:
-            logging.error(f"❌ Failed to log dtypes: {dtypes_error}")
+                # Only new rows
+                to_write = out.loc[~out['mks_norm'].isin(existing_keys), schema_cols].copy()
     
-        # Check for suspicious column content
-        for col in new_scores.columns:
-            try:
-                if new_scores[col].apply(lambda x: isinstance(x, dict)).any():
-                    logging.error(f"⚠️ Column {col} contains dicts")
-                elif new_scores[col].apply(lambda x: isinstance(x, list)).any():
-                    logging.error(f"⚠️ Column {col} contains lists")
-            except Exception as content_error:
-                logging.error(f"❌ Failed to inspect column '{col}': {content_error}")
-
-        return pd.DataFrame()  # Return empty DataFrame if missing
-
-
-    # Function to optimize and process in chunks
+                logging.info(
+                    "⛳ Finals total (clean): %d | Already in table: %d | New to write: %d",
+                    len(out), len(out) - len(to_write), len(to_write)
+                )
+    
+                if not to_write.empty:
+                    to_gbq(
+                        to_write,
+                        'sharp_data.game_scores_final',
+                        project_id=GCP_PROJECT_ID,
+                        if_exists='append'
+                    )
+                    logging.info("✅ Wrote %d rows to sharp_data.game_scores_final", len(to_write))
+                else:
+                    logging.info("ℹ️ No new rows to write to sharp_data.game_scores_final")
+    
+    except Exception:
+        logging.exception("❌ Failed to upload finals to game_scores_final")
+    
+        # Function to optimize and process in chunks
 
 
     # Function to process chunks of data (sorting and deduplication)
