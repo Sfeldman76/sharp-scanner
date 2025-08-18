@@ -7,7 +7,7 @@ from datetime import datetime
 from config import SPORTS, SHARP_BOOKS, REC_BOOKS, BOOKMAKER_REGIONS, API_KEY
 from utils import (
     fetch_live_odds,
-    read_latest_snapshot_from_bigquery,
+    #read_latest_snapshot_from_bigquery,
     #read_market_weights_from_bigquery,
     detect_sharp_moves,
     write_sharp_moves_to_master,
@@ -70,9 +70,6 @@ def detect_and_save_all_sports():
             if not current:
                 logging.warning(f"⚠️ No odds for {sport_label}, skipping…")
                 continue
-
-            previous = read_latest_snapshot_from_bigquery()
-            logging.info(f"📦 Previous snapshot loaded: {len(previous)} games")
 
             market_weights = load_market_weights_from_bq()
             trained_models = {
