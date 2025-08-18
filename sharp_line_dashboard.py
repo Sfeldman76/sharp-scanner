@@ -3758,35 +3758,49 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         if not live:
             st.warning("⚠️ No live odds returned.")
             return pd.DataFrame()
-
-       
-    
-
-       
-
+            
         df_snap = pd.DataFrame([
             {
                 'Game_ID': game.get('id'),
                 'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
                 'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
-                
-                # ✅ Normalized key used for Bookmaker column
-                'Bookmaker': normalize_book_name(book.get('key', ''), book.get('key', '')),
-                'Book': normalize_book_name(book.get('key', ''), book.get('key', '')),  # same as Bookmaker
         
-                'Market': market.get('key'),
+                # raw keys first; we'll normalize after
+                'Bookmaker': book.get('key', ''),
+                'Book': book.get('key', ''),
+        
+                'Market': (market.get('key') or '').lower(),
                 'Outcome': outcome.get('name'),
-                'Value': outcome.get('point') if market.get('key') != 'h2h' else outcome.get('price'),
+        
+                # keep price separate from line value
+                'Value': outcome.get('point') if (market.get('key') or '').lower() != 'h2h' else None,
+                'Odds_Price': outcome.get('price'),
+        
                 'Limit': outcome.get('bet_limit'),
                 'Snapshot_Timestamp': timestamp
             }
             for game in live
-            for book in game.get('bookmakers', [])
-            for market in book.get('markets', [])
-            for outcome in market.get('outcomes', [])
+            for book in game.get('bookmakers', []) or []
+            for market in book.get('markets', []) or []
+            for outcome in market.get('outcomes', []) or []
         ])
-
         
+        # === Normalize books + assign sharp/rec flags ===
+        # Use a single apply to produce both columns (avoids two passes)
+        if not df_snap.empty:
+            df_snap[['Book_Norm','Bookmaker_Norm']] = df_snap.apply(
+                lambda r: pd.Series(normalize_book_and_bookmaker(r['Book'], r['Bookmaker'])),
+                axis=1
+            )
+        
+            df_snap['Is_Sharp_Book']   = df_snap['Book_Norm'].isin(SHARP_BOOKS)
+            df_snap['Is_Rec_Book']     = df_snap['Book_Norm'].isin(REC_BOOKS)
+            df_snap['Is_Limit_Anchor'] = df_snap['Book_Norm'].isin(SHARP_BOOKS_FOR_LIMITS)
+        
+        # (Optional) enforce type consistency
+        for c in ['Game_ID','Game','Book','Bookmaker','Market','Outcome']:
+            if c in df_snap.columns:
+                df_snap[c] = df_snap[c].astype(str)
         # sport-aware pulls
         # === Sport-aware history + sharp moves (single source of truth) ===
         HOURS = 24
