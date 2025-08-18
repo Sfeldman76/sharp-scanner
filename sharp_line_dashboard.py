@@ -1332,6 +1332,29 @@ def enrich_and_grade_for_training(
 
     return out
 
+# --- 0) Build a unified favorite flag where totals use OVER as "favorite"
+def add_favorite_context_flag(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    mkt = out['Market'].astype(str).str.lower()
+
+    # Try Outcome_Norm first, fall back to Outcome/Label text if needed
+    # We consider any token 'over' as OVER, 'under' as UNDER
+    txt = (
+        out.get('Outcome_Norm', out.get('Outcome', out.get('Label', '')))
+           .astype(str).str.lower()
+    )
+    is_over = txt.str.contains(r'\bover\b', regex=True)
+
+    # Default to existing Is_Favorite_Bet except for totals
+    fav_flag = np.where(mkt.eq('totals'),
+                        is_over.astype(int),                 # totals: OVER=1, UNDER=0
+                        out.get('Is_Favorite_Bet', np.nan))  # spreads/h2h: keep your flag
+
+    out['Is_Favorite_Context'] = fav_flag
+    return out
+
+df_market = add_favorite_context_flag(df_market)
+
 
 
 
@@ -1696,54 +1719,66 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market = df_market.sort_values(['Team', 'Game_Key'])
         
         # === Step 1: Compute LOO Stats with Game_Key
-        def compute_loo_stats_by_game(df, home_filter=None):
+        def compute_loo_stats_by_game(df, home_filter=None, favorite_filter=None, col_suffix=""):
             df = df.copy()
+        
             if home_filter is not None:
                 df = df[df['Is_Home'] == home_filter]
-            
-            # Deduplicate: one row per (Game_Key, Team) to avoid explosion
+        
+            if favorite_filter is not None:
+                # Use the unified context flag (OVER for totals; Is_Favorite_Bet for others)
+                if 'Is_Favorite_Context' not in df.columns:
+                    return df[['Game_Key','Team']].drop_duplicates().assign(
+                        **{f'Team_Past_Avg_Model_Prob{col_suffix}': np.nan,
+                           f'Team_Past_Hit_Rate{col_suffix}': np.nan}
+                    )
+                df = df[df['Is_Favorite_Context'] == favorite_filter]
+        
+            if df.empty:
+                return pd.DataFrame(columns=['Game_Key','Team',
+                                             f'Team_Past_Avg_Model_Prob{col_suffix}',
+                                             f'Team_Past_Hit_Rate{col_suffix}'])
+        
+            # Deduplicate earliest snapshot per (Game_Key, Team)
+            sort_cols = [c for c in ['Team','Game_Start','Snapshot_Timestamp'] if c in df.columns]
+            if not sort_cols:
+                sort_cols = ['Team','Game_Key']
             df_dedup = (
-                df.sort_values('Snapshot_Timestamp')  # keep earliest per game
-                .drop_duplicates(subset=['Game_Key', 'Team'], keep='first')
+                df.sort_values(sort_cols)
+                  .drop_duplicates(subset=['Game_Key','Team'], keep='first')
+                  .sort_values(['Team'] + ([c for c in ['Game_Start','Snapshot_Timestamp'] if c in df.columns] or ['Game_Key']))
             )
         
-            # Sort to ensure shift aligns chronologically
-            df_dedup = df_dedup.sort_values(['Team', 'Game_Key'])
-        
-            # Shifted cumulative stats for leave-one-out
+            # Leave-one-out
             df_dedup['cum_model_prob'] = df_dedup.groupby('Team')['Model_Sharp_Win_Prob'].cumsum().shift(1)
-            df_dedup['cum_hit'] = df_dedup.groupby('Team')['SHARP_HIT_BOOL'].cumsum().shift(1)
-            df_dedup['cum_count'] = df_dedup.groupby('Team').cumcount()
+            df_dedup['cum_hit']        = df_dedup.groupby('Team')['SHARP_HIT_BOOL'].cumsum().shift(1)
+            df_dedup['cum_count']      = df_dedup.groupby('Team').cumcount()
         
-            df_dedup['Team_Past_Avg_Model_Prob'] = df_dedup['cum_model_prob'] / df_dedup['cum_count'].replace(0, np.nan)
-            df_dedup['Team_Past_Hit_Rate'] = df_dedup['cum_hit'] / df_dedup['cum_count'].replace(0, np.nan)
+            avg_col = f'Team_Past_Avg_Model_Prob{col_suffix}'
+            hit_col = f'Team_Past_Hit_Rate{col_suffix}'
+            df_dedup[avg_col] = df_dedup['cum_model_prob'] / df_dedup['cum_count'].replace(0, np.nan)
+            df_dedup[hit_col] = df_dedup['cum_hit'] / df_dedup['cum_count'].replace(0, np.nan)
         
-            return df_dedup[['Game_Key', 'Team', 'Team_Past_Avg_Model_Prob', 'Team_Past_Hit_Rate']]
+            return df_dedup[['Game_Key','Team', avg_col, hit_col]]
+
 
 
         # === Compute all 3 sets
         overall_stats = compute_loo_stats_by_game(df_market)
+        home_stats    = compute_loo_stats_by_game(df_market, home_filter=1, col_suffix="_Home")
+        away_stats    = compute_loo_stats_by_game(df_market, home_filter=0, col_suffix="_Away")
+        fav_overall = compute_loo_stats_by_game(df_market, favorite_filter=1, col_suffix="_Fav")
+        fav_home    = compute_loo_stats_by_game(df_market, home_filter=1, favorite_filter=1, col_suffix="_Home_Fav")
+        fav_away    = compute_loo_stats_by_game(df_market, home_filter=0, favorite_filter=1, col_suffix="_Away_Fav")
         
-        # Home-only
-        home_stats = compute_loo_stats_by_game(df_market, home_filter=1).rename(columns={
-            'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Home',
-            'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Home'
-        })
-        
-        # Away-only
-        away_stats = compute_loo_stats_by_game(df_market, home_filter=0).rename(columns={
-            'Team_Past_Avg_Model_Prob': 'Team_Past_Avg_Model_Prob_Away',
-            'Team_Past_Hit_Rate': 'Team_Past_Hit_Rate_Away'
-        })
-        
-        # === Merge back in
-        df_market = df_market.merge(overall_stats, on=['Game_Key', 'Team'], how='left')
-        df_market = df_market.merge(home_stats, on=['Game_Key', 'Team'], how='left')
-        df_market = df_market.merge(away_stats, on=['Game_Key', 'Team'], how='left')
+        df_market = df_market.merge(overall_stats, on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(home_stats,    on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(away_stats,    on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(fav_stats,     on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(dog_stats,     on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(fav_home,    on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(fav_away,    on=['Game_Key','Team'], how='left')
 
-        # Sort chronologically per team
-        # === Ensure data is sorted chronologically
-        df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
         
         # Define a dictionary to specify rolling window lengths per sport
         SPORT_COVER_WINDOW = {
@@ -1754,37 +1789,87 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'CFL': 4,  # Example: For NFL, 4 games
         }
         
-        # === Ensure data is sorted chronologically
+        # assumes: df_market already has Is_Favorite_Context (Fav=1; totals: OVER=1)
         df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
         
-        # === Cover Streak (Overall) - Sport-Specific Window Length
-        window_length = SPORT_COVER_WINDOW.get(df_market['Sport'].iloc[0], 4)  # Default to 4 if sport is not in the dict
+        # === Window (sport-specific)
+        window_length = SPORT_COVER_WINDOW.get(df_market['Sport'].iloc[0], 4)
         
+        # === Overall
         df_market['Team_Recent_Cover_Streak'] = (
             df_market.groupby('Team')['SHARP_HIT_BOOL']
-            .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
+                     .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
         )
         df_market['On_Cover_Streak'] = (df_market['Team_Recent_Cover_Streak'] >= 2).astype(int)
         
-        # === Cover Streak (Home Only) - Sport-Specific Window Length
+        # === Home
         df_market['Cover_Home_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 1)
-        
         df_market['Team_Recent_Cover_Streak_Home'] = (
             df_market.groupby('Team')['Cover_Home_Only']
-            .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
+                     .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
         )
         df_market['On_Cover_Streak_Home'] = (df_market['Team_Recent_Cover_Streak_Home'] >= 2).astype(int)
         
-        # === Cover Streak (Away Only) - Sport-Specific Window Length
+        # === Away
         df_market['Cover_Away_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Home'] == 0)
-        
         df_market['Team_Recent_Cover_Streak_Away'] = (
             df_market.groupby('Team')['Cover_Away_Only']
-            .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
+                     .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
         )
         df_market['On_Cover_Streak_Away'] = (df_market['Team_Recent_Cover_Streak_Away'] >= 2).astype(int)
+        
+        # === Fav (OVER for totals)
+        df_market['Cover_Fav_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Favorite_Context'] == 1)
+        df_market['Team_Recent_Cover_Streak_Fav'] = (
+            df_market.groupby('Team')['Cover_Fav_Only']
+                     .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
+        )
+        df_market['On_Cover_Streak_Fav'] = (df_market['Team_Recent_Cover_Streak_Fav'] >= 2).astype(int)
+        
+        # Fav @ Home
+        df_market['Cover_Fav_Home_Only'] = df_market['SHARP_HIT_BOOL'].where(
+            (df_market['Is_Favorite_Context'] == 1) & (df_market['Is_Home'] == 1)
+        )
+        df_market['Team_Recent_Cover_Streak_Home_Fav'] = (
+            df_market.groupby('Team')['Cover_Fav_Home_Only']
+                     .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
+        )
+        df_market['On_Cover_Streak_Home_Fav'] = (df_market['Team_Recent_Cover_Streak_Home_Fav'] >= 2).astype(int)
+        
+        # Fav @ Away
+        df_market['Cover_Fav_Away_Only'] = df_market['SHARP_HIT_BOOL'].where(
+            (df_market['Is_Favorite_Context'] == 1) & (df_market['Is_Home'] == 0)
+        )
+        df_market['Team_Recent_Cover_Streak_Away_Fav'] = (
+            df_market.groupby('Team')['Cover_Fav_Away_Only']
+                     .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
+        )
+        df_market['On_Cover_Streak_Away_Fav'] = (df_market['Team_Recent_Cover_Streak_Away_Fav'] >= 2).astype(int)
+        
+        # === Dog (optional; keep if you want symmetry / analysis)
+        df_market['Cover_Dog_Only'] = df_market['SHARP_HIT_BOOL'].where(df_market['Is_Favorite_Context'] == 0)
+        df_market['Team_Recent_Cover_Streak_Dog'] = (
+            df_market.groupby('Team')['Cover_Dog_Only']
+                     .transform(lambda x: x.shift().rolling(window=window_length, min_periods=1).sum())
+        )
+        df_market['On_Cover_Streak_Dog'] = (df_market['Team_Recent_Cover_Streak_Dog'] >= 2).astype(int)
+        
+        # === LOO rolling averages (match your Avg_Recent_* pattern)
+        def _rolling_avg_shifted(group_key, series, window):
+            s_shift = series.groupby(group_key).shift(1)
+            num = s_shift.groupby(group_key).rolling(window=window, min_periods=1).sum().reset_index(level=0, drop=True)
+            den = s_shift.groupby(group_key).rolling(window=window, min_periods=1).count().reset_index(level=0, drop=True)
+            return num / den
+        
+        df_market['Avg_Recent_Cover_Streak']         = _rolling_avg_shifted('Team', df_market['SHARP_HIT_BOOL'],      window_length)
+        df_market['Avg_Recent_Cover_Streak_Home']    = _rolling_avg_shifted('Team', df_market['Cover_Home_Only'],     window_length)
+        df_market['Avg_Recent_Cover_Streak_Away']    = _rolling_avg_shifted('Team', df_market['Cover_Away_Only'],     window_length)
+        df_market['Avg_Recent_Cover_Streak_Fav']     = _rolling_avg_shifted('Team', df_market['Cover_Fav_Only'],      window_length)
+        df_market['Avg_Recent_Cover_Streak_Home_Fav']= _rolling_avg_shifted('Team', df_market['Cover_Fav_Home_Only'], window_length)
+        df_market['Avg_Recent_Cover_Streak_Away_Fav']= _rolling_avg_shifted('Team', df_market['Cover_Fav_Away_Only'], window_length)
+        
 
-
+    
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(int(round(idx / n_markets * 100)))
@@ -2179,12 +2264,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Team_Past_Hit_Rate_Home',
             'Team_Past_Avg_Model_Prob_Away',
             'Team_Past_Hit_Rate_Away',
+            'Team_Past_Avg_Model_Prob_Fav',
+            'Team_Past_Hit_Rate_Fav',
+            'Team_Past_Avg_Model_Prob_Home_Fav',
+            'Team_Past_Hit_Rate_Home_Fav',
+            'Team_Past_Avg_Model_Prob_Away_Fav',
+            'Team_Past_Hit_Rate_Away_Fav',
         
             # 🔥 Recent cover streak stats (overall + home/away)
             'Avg_Recent_Cover_Streak',
             'Avg_Recent_Cover_Streak_Home',
             'Avg_Recent_Cover_Streak_Away',
-           
+            'Avg_Recent_Cover_Streak_Fav',
+            'Avg_Recent_Cover_Streak_Home_Fav',
+            'Avg_Recent_Cover_Streak_Away_Fav',  
+                   
         ]
         df_market = add_time_context_flags(df_market, sport=sport)
         
