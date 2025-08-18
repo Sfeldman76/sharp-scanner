@@ -2527,21 +2527,25 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
 
     trained_models = trained_models or {}
+
     trained_models_lc = {
         str(k).strip().lower(): v
         for k, v in trained_models.items()
         if isinstance(v, dict)
     }
-
+    
     HAS_MODELS = any(
         isinstance(v, dict) and ("model" in v or "calibrator" in v)
-        for v in _lc.values()
+        for v in trained_models_lc.values()
     )
+    
     model_markets_lower = {
-        mk for mk, bundle in _lc.items()
+        mk for mk, bundle in trained_models_lc.items()
         if isinstance(bundle, dict) and ("model" in bundle or "calibrator" in bundle)
     }
+    
     logger.info("📦 HAS_MODELS=%s; model markets: %s", HAS_MODELS, sorted(model_markets_lower))
+
 
     
     if df is None:
