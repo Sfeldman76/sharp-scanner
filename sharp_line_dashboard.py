@@ -3742,73 +3742,18 @@ def ensure_opposite_side_rows(df, scored_df):
 
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
-
     if st.session_state.get("pause_refresh", False):
         st.info("⏸️ Auto-refresh paused")
         return
 
-
-    timestamp = pd.Timestamp.utcnow()
-
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
 
-        # === Live odds snapshot
-        live = fetch_live_odds(sport_key)
-        if not live:
-            st.warning("⚠️ No live odds returned.")
-            return pd.DataFrame()
-            
-        df_snap = pd.DataFrame([
-            {
-                'Game_ID': game.get('id'),
-                'Game': f"{game.get('home_team')} vs {game.get('away_team')}",
-                'Game_Start': pd.to_datetime(game.get("commence_time"), utc=True),
-        
-                # raw keys first; we'll normalize after
-                'Bookmaker': book.get('key', ''),
-                'Book': book.get('key', ''),
-        
-                'Market': (market.get('key') or '').lower(),
-                'Outcome': outcome.get('name'),
-        
-                # keep price separate from line value
-                'Value': outcome.get('point') if (market.get('key') or '').lower() != 'h2h' else None,
-                'Odds_Price': outcome.get('price'),
-        
-                'Limit': outcome.get('bet_limit'),
-                'Snapshot_Timestamp': timestamp
-            }
-            for game in live
-            for book in game.get('bookmakers', []) or []
-            for market in book.get('markets', []) or []
-            for outcome in market.get('outcomes', []) or []
-        ])
-        
-        # === Normalize books + assign sharp/rec flags ===
-        # Use a single apply to produce both columns (avoids two passes)
-        if not df_snap.empty:
-            df_snap[['Book_Norm','Bookmaker_Norm']] = df_snap.apply(
-                lambda r: pd.Series(normalize_book_and_bookmaker(r['Book'], r['Bookmaker'])),
-                axis=1
-            )
-        
-            df_snap['Is_Sharp_Book']   = df_snap['Book_Norm'].isin(SHARP_BOOKS)
-            df_snap['Is_Rec_Book']     = df_snap['Book_Norm'].isin(REC_BOOKS)
-            df_snap['Is_Limit_Anchor'] = df_snap['Book_Norm'].isin(SHARP_BOOKS_FOR_LIMITS)
-        
-        # (Optional) enforce type consistency
-        for c in ['Game_ID','Game','Book','Bookmaker','Market','Outcome']:
-            if c in df_snap.columns:
-                df_snap[c] = df_snap[c].astype(str)
-        # sport-aware pulls
         # === Sport-aware history + sharp moves (single source of truth) ===
         HOURS = 24
-        df_all_snapshots = get_recent_history(hours=HOURS, sport=label)  # already sport-filtered
-        
-        # sport-scoped UI cache key (also scopes by hours + force flag)
+        df_all_snapshots = get_recent_history(hours=HOURS, sport=label)  # if downstream uses it
+
         detection_key = f"sharp_moves:{label.upper()}:{HOURS}"
-        
         if not force_reload and detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
             st.info(f"✅ Using cached {label} sharp moves")
@@ -3817,19 +3762,19 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 df_moves_raw = read_recent_sharp_moves_conditional(
                     force_reload=force_reload,
                     hours=HOURS,
-                    sport=label  # or sport_key; the reader expands aliases
+                    sport=label  # (or sport_key if your reader expects API key)
                 )
                 st.session_state[detection_key] = df_moves_raw
-                st.success(f"✅ Loaded {len(df_moves_raw)} {label} sharp-move rows from BigQuery")
-        
+                st.success(f"✅ Loaded {0 if df_moves_raw is None else len(df_moves_raw)} {label} sharp-move rows from BigQuery")
+
         # Guard and exit early if nothing to show
         if df_moves_raw is None or df_moves_raw.empty:
             st.warning(f"⚠️ No recent sharp moves for {label}.")
             return pd.DataFrame()
-        
-        # 🔚 No need to re-filter by sport here — already scoped upstream.
-        # No need to re-filter by sport later; it’s already scoped.
-        
+
+        # === Prepare moves for UI/scoring ===
+        df_moves = df_moves_raw.copy()
+
         # === Filter to current tab's sport
         df_moves_raw['Sport_Norm'] = df_moves_raw['Sport'].astype(str).str.upper().str.strip()
         df_moves_raw = df_moves_raw[df_moves_raw['Sport_Norm'] == label.upper()]
