@@ -163,14 +163,80 @@ SPORT_ALIAS_MAP = {
     "NCAAF": "americanfootball_ncaaf",
     "NCAAB": "basketball_ncaab",
 }
+# Sharp limit anchor(s)
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
-SHARP_BOOKS = SHARP_BOOKS_FOR_LIMITS + ['betus','mybookieag','smarkets','betfair_ex_eu','"betfair_ex_uk','betfair_ex_au','lowvig','betonlineag','matchbook']
 
+# Full sharp set (includes Betfair Exchange regions)
+SHARP_BOOKS = [
+    'pinnacle', 'betus', 'mybookieag', 'smarkets',
+    'betfair_ex_eu', 'betfair_ex_uk', 'betfair_ex_au',
+    'lowvig', 'betonlineag', 'matchbook'
+]
 
+# Recreational set (deduped)
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
-    'fanatics', 'espnbet', 'hardrockbet','sport888', 'fanatics', 'bovada', 'bet365', 'williamhillus', 'ballybet', 'bet365_au','betopenly']
+    'fanatics', 'espnbet', 'hardrockbet', '888sport',
+    'williamhillus', 'ballybet', 'bet365_au', 'betopenly'
+]
 
+_BOOK_ALIASES = {
+    # canonical : accepted raw keys
+    "pinnacle":     {"pinnacle", "pinny", "pinn"},
+    "betus":        {"betus"},
+    "mybookieag":   {"mybookieag", "mybookie"},
+    "smarkets":     {"smarkets"},
+    "lowvig":       {"lowvig"},
+    "betonlineag":  {"betonlineag", "betonline"},
+    "matchbook":    {"matchbook"},
+
+    # betfair exchange + regions
+    "betfair_ex_eu": {"betfair_ex_eu"},
+    "betfair_ex_uk": {"betfair_ex_uk"},
+    "betfair_ex_au": {"betfair_ex_au"},
+    "betfair":       {"betfair", "betfair_exchange", "betfair-exchange", "betfair exchange", "betfair_ex"},
+
+    # rec aliases
+    "betmgm":        {"betmgm", "mgm"},
+    "bet365":        {"bet365"},
+    "bet365_au":     {"bet365_au"},
+    "draftkings":    {"draftkings", "dk"},
+    "fanduel":       {"fanduel", "fd"},
+    "betrivers":     {"betrivers"},
+    "fanatics":      {"fanatics"},
+    "espnbet":       {"espnbet"},
+    "hardrockbet":   {"hardrockbet", "hardrock"},
+    "888sport":      {"888sport", "sport888", "888-sport", "888 sport"},
+    "williamhillus": {"williamhillus", "william_hill_us", "williamhill_us"},
+    "ballybet":      {"ballybet"},
+    "betopenly":     {"betopenly"},
+}
+
+def _canon(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace(" ", "_").replace("-", "_")
+    return s
+
+def _alias_lookup(s: str) -> str:
+    s = _canon(s)
+    for canon, alts in _BOOK_ALIASES.items():
+        if s in alts or s == canon:
+            return canon
+    return s
+
+def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None) -> tuple[str, str]:
+    """
+    Returns (book_norm, bookmaker_norm).
+    - Preserve regional Betfair Exchange keys exactly for BOTH (e.g., 'betfair_ex_uk').
+    - Otherwise map via aliases.
+    """
+    book_raw = _canon(book_key)
+    bm_raw   = _canon(bookmaker_key if bookmaker_key is not None else book_key)
+
+    if book_raw.startswith("betfair_ex_"):
+        return book_raw, book_raw
+
+    return _alias_lookup(book_raw), _alias_lookup(bm_raw)
 BOOKMAKER_REGIONS = {
     # 🔹 Sharp Books
     'pinnacle': 'eu',
@@ -3696,7 +3762,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
        
     
 
-        from utils import normalize_book_name
+       
 
         df_snap = pd.DataFrame([
             {
