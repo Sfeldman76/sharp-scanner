@@ -1606,7 +1606,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             missing_cons_cols = [c for c in cons_cols if c not in df_train.columns]
             if missing_cons_cols:
                 # Fallback (only if needed): compute consensus for current slice
-                g_cons_fallback = prep_consensus_market_spread_lowmem(df_slice, value_col='Value', outcome_col='Outcome_Norm')
+                g_cons_fallback = fad_lowmem(df_slice, value_col='Value', outcome_col='Outcome_Norm')
                 cons_map = g_cons_fallback[cons_cols].drop_duplicates(subset=game_keys)
             else:
                 cons_map = df_train[cons_cols].drop_duplicates(subset=game_keys)
@@ -1762,24 +1762,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             return df_dedup[['Game_Key','Team', avg_col, hit_col]]
 
-
-
         # === Compute all 3 sets
         overall_stats = compute_loo_stats_by_game(df_market)
         home_stats    = compute_loo_stats_by_game(df_market, home_filter=1, col_suffix="_Home")
         away_stats    = compute_loo_stats_by_game(df_market, home_filter=0, col_suffix="_Away")
+        
+        # Fav-context (Fav=1; totals=OVER)
         fav_overall = compute_loo_stats_by_game(df_market, favorite_filter=1, col_suffix="_Fav")
         fav_home    = compute_loo_stats_by_game(df_market, home_filter=1, favorite_filter=1, col_suffix="_Home_Fav")
         fav_away    = compute_loo_stats_by_game(df_market, home_filter=0, favorite_filter=1, col_suffix="_Away_Fav")
         
+        # === Merge back (use the vars you computed)
         df_market = df_market.merge(overall_stats, on=['Game_Key','Team'], how='left')
         df_market = df_market.merge(home_stats,    on=['Game_Key','Team'], how='left')
         df_market = df_market.merge(away_stats,    on=['Game_Key','Team'], how='left')
-        df_market = df_market.merge(fav_stats,     on=['Game_Key','Team'], how='left')
-        df_market = df_market.merge(dog_stats,     on=['Game_Key','Team'], how='left')
-        df_market = df_market.merge(fav_home,    on=['Game_Key','Team'], how='left')
-        df_market = df_market.merge(fav_away,    on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(fav_overall,   on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(fav_home,      on=['Game_Key','Team'], how='left')
+        df_market = df_market.merge(fav_away,      on=['Game_Key','Team'], how='left')
 
+      
         
         # Define a dictionary to specify rolling window lengths per sport
         SPORT_COVER_WINDOW = {
