@@ -4867,7 +4867,7 @@ def get_scored_keys_cached(bq_client, since_ts, sport_label=None):
     -- AND UPPER(Sport) = @sport
     """
     params = [bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", since_ts)]
-    if sport scoping:
+    #if sport scoping:
     params.append(bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()))
 
     t0 = time.time()
