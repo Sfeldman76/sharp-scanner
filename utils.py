@@ -4001,6 +4001,13 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 ch = df_final['Commence_Hour'].astype('string').fillna('')
                 mk = df_final['Market'].astype('string').fillna('')
                 on = df_final['Outcome_Norm'].astype('string').fillna('')
+                
+                df_final['Team_Key'] = (
+                    ht.str.cat(at, sep='_')
+                      .str.cat(ch, sep='_')
+                      .str.cat(mk, sep='_')
+                      .str.cat(on, sep='_')
+                )
                 # np.char operations avoid multiple pandas allocations
                 
                 team_key = np.char.add(
