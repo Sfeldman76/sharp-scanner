@@ -500,46 +500,76 @@ def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = N
     except Exception as e:
         print(f"❌ Failed to read from BigQuery: {e}")
         return pd.DataFrame()
+
+
 # ✅ Cached wrapper for diagnostics and line movement history
 # Smart getter — use cache unless forced to reload
 
+# Optional: restrict allowed tables if you truly want this configurable.
+DEFAULT_TABLE = "sharplogger.sharp_data.sharp_moves_master"
+ALLOWED_TABLES = {DEFAULT_TABLE}  # add more if needed
 
+bq_client = bigquery.Client()
 
+def _validate_table(table: str) -> str:
+    tbl = table or DEFAULT_TABLE
+    if tbl not in ALLOWED_TABLES:
+        # Fallback to default to avoid SQL injection via table name
+        tbl = DEFAULT_TABLE
+    return tbl
 
 @st.cache_data(ttl=600)
-def read_recent_sharp_moves_cached(hours=24, table="sharplogger.sharp_data.sharp_moves_master",
-                                   sport: str | None = None, _schema_ver: str = SCHEMA_VER):
-    # Use the working reader
-    return read_recent_sharp_moves_conditional(hours=hours, sport=sport)
+def read_recent_sharp_moves_cached(
+    hours: int = 24,
+    sport: str | None = None,
+    table: str = DEFAULT_TABLE,
+):
+    """Cached BigQuery reader for recent sharp moves."""
+    tbl = _validate_table(table)
 
-@st.cache_data(ttl=600)
-def get_recent_history(hours=24, sport: str | None = None, _schema_ver: str = SCHEMA_VER):
-    st.write("📦 Using cached sharp history (get_recent_history)")
-    return read_recent_sharp_moves_cached(hours=hours, sport=sport, _schema_ver=_schema_ver)
-
-def read_recent_sharp_moves_conditional(force_reload=False, hours=24, sport=None):
-    query = """
+    # Build query with optional sport filter. Table name must be literal in SQL.
+    sport_filter = "AND Sport = @sport" if sport else ""
+    query = f"""
         SELECT *
-        FROM `sharplogger.sharp_data.sharp_moves_master`
+        FROM `{tbl}`
         WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+        {sport_filter}
         ORDER BY Snapshot_Timestamp DESC
     """
+
+    params = [
+        bigquery.ScalarQueryParameter("hours", "INT64", hours),
+    ]
+    if sport:
+        params.append(bigquery.ScalarQueryParameter("sport", "STRING", sport))
+
     job = bq_client.query(
         query,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("hours", "INT64", hours),
-            ]
-        ),
+        job_config=bigquery.QueryJobConfig(query_parameters=params),
     )
     df = job.to_dataframe()
     return df
+
+@st.cache_data(ttl=600)
+def get_recent_history(hours: int = 24, sport: str | None = None):
+    st.write("📦 Using cached sharp history (get_recent_history)")
+    return read_recent_sharp_moves_cached(hours=hours, sport=sport, table=DEFAULT_TABLE)
+
+def read_recent_sharp_moves_conditional(
+    hours: int = 24,
+    sport: str | None = None,
+    force_reload: bool = False,
+    table: str = DEFAULT_TABLE,
+):
+    """Non-decorated wrapper that can optionally force a cache refresh."""
+    if force_reload:
+        # Clear only this function's cache, then re-run
+        read_recent_sharp_moves_cached.clear()
+    return read_recent_sharp_moves_cached(hours=hours, sport=sport, table=table)
+
+
+
     
-
-
-
-
-
 
 @st.cache_resource
 def get_bq_client() -> bigquery.Client:
