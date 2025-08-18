@@ -504,10 +504,18 @@ def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = N
 # Smart getter — use cache unless forced to reload
 
 
-@st.cache_data(ttl=600)
-def read_recent_sharp_moves_cached(hours=24, table=BQ_FULL_TABLE, sport: str | None = None):
-    return read_recent_sharp_moves(hours=hours, table=table, sport=sport)
 
+
+@st.cache_data(ttl=600)
+def read_recent_sharp_moves_cached(hours=24, table="sharplogger.sharp_data.sharp_moves_master",
+                                   sport: str | None = None, _schema_ver: str = SCHEMA_VER):
+    # Use the working reader
+    return read_recent_sharp_moves_conditional(hours=hours, sport=sport)
+
+@st.cache_data(ttl=600)
+def get_recent_history(hours=24, sport: str | None = None, _schema_ver: str = SCHEMA_VER):
+    st.write("📦 Using cached sharp history (get_recent_history)")
+    return read_recent_sharp_moves_cached(hours=hours, sport=sport, _schema_ver=_schema_ver)
 
 def read_recent_sharp_moves_conditional(force_reload=False, hours=24, sport=None):
     query = """
@@ -527,10 +535,7 @@ def read_recent_sharp_moves_conditional(force_reload=False, hours=24, sport=None
     df = job.to_dataframe()
     return df
     
-@st.cache_data(ttl=600)
-def get_recent_history(hours=24, sport: str | None = None):
-    st.write("📦 Using cached sharp history (get_recent_history)")
-    return read_recent_sharp_moves_cached(hours=hours, sport=sport)
+
 
 
 
