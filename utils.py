@@ -5135,15 +5135,33 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
     
     # === Filter out games already scored in sharp_scores_full
-   
+    two_weeks_ago = dt.datetime.utcnow() - dt.timedelta(days=5)
 
     if not track_feature_evolution:
-        scored_keys = bq_client.query("""
-            SELECT DISTINCT Merge_Key_Short
-            FROM `sharplogger.sharp_data.sharp_scores_full`
-            WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
-        """).to_dataframe()
-    
+        sql = """
+        SELECT DISTINCT Merge_Key_Short
+        FROM `sharplogger.sharp_data.sharp_scores_full`
+        WHERE Snapshot_Timestamp >= @since_ts
+        -- Optional: tighten by sport if you only score one sport per run
+        -- AND UPPER(Sport) = @sport
+        """
+        
+        job = bq_client.query(
+            sql,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", two_weeks_ago),
+                    # bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()),
+                ],
+                priority=bigquery.QueryPriority.INTERACTIVE,
+                # optional: limit scan to protect from accidents
+                # maximum_bytes_billed=5 * 10**9,
+            ),
+        )
+        t0 = time.time()
+        scored_keys = job.to_dataframe()  # blocks here
+        logger.info("⏱️ scored_keys query took %.2fs, returned %d rows",
+                    time.time() - t0, len(scored_keys))
         already_scored = set(scored_keys['Merge_Key_Short'].dropna())
         df_scores_needed = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
         logging.info(f"✅ Remaining unscored completed games: {len(df_scores_needed)}")
