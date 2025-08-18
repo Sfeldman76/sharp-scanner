@@ -46,7 +46,6 @@ from utils import (
     normalize_book_name,
     hydrate_inverse_rows_from_snapshot,
     fallback_flip_inverse_rows,
-    get_opening_snapshot,
     add_time_context_flags,
     update_power_ratings,
     normalize_sport,
