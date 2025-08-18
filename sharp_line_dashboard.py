@@ -3760,7 +3760,10 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # === Sport-aware history + sharp moves (single source of truth) ===
         HOURS = 24
         df_all_snapshots = get_recent_history(hours=HOURS, sport=label)  # if downstream uses it
-
+        if df_all_snapshots is not None:
+            st.write("📑 Columns in df_all_snapshots:", list(df_all_snapshots.columns))
+            st.write("🔢 Row count:", len(df_all_snapshots))
+        
         detection_key = f"sharp_moves:{label.upper()}:{HOURS}"
         if not force_reload and detection_key in st.session_state:
             df_moves_raw = st.session_state[detection_key]
@@ -3776,8 +3779,12 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 )
                 st.session_state[detection_key] = df_moves_raw
                 st.success(f"✅ Loaded {0 if df_moves_raw is None else len(df_moves_raw)} {label} sharp-move rows from BigQuery")
-
+        # After loading from BQ or cache
+        if df_moves_raw is not None:
+            st.write("📑 Columns in df_moves_raw:", list(df_moves_raw.columns))
+            st.write("🔢 Row count:", len(df_moves_raw))
         # Guard and exit early if nothing to show
+        
         if df_moves_raw is None or df_moves_raw.empty:
             st.warning(f"⚠️ No recent sharp moves for {label}.")
             return pd.DataFrame()
