@@ -5183,9 +5183,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         if not df_scores_needed.empty:
             sample = df_scores_needed[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head(5)
             logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
-    else:
-        df_scores_needed = df_scores.copy()
-        logging.info("📈 Time-series mode enabled: Skipping scored-key filter to allow resnapshots")
+   
         
     # Ensure Merge_Key_Short exists AFTER loading
     if 'Merge_Key_Short' not in df_master.columns:
