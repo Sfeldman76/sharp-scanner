@@ -4848,31 +4848,38 @@ def _bucket_ts(ts: dt.datetime, minutes=10) -> dt.datetime:
     ts = ts.replace(second=0, microsecond=0)
     return ts.replace(minute=(ts.minute // minutes) * minutes)
 
-def get_scored_keys_cached(bq_client, since_ts: dt.datetime, sport: Optional[str] = None) -> set[str]:
-    bucketed = _bucket_ts(since_ts, minutes=10)
-    sport_key = None if sport is None else str(sport).strip().upper()
-    cache_key = (bucketed.isoformat(), sport_key)
+# at top-level (module scope)
+from cachetools import TTLCache
+_scored_keys_cache = TTLCache(maxsize=16, ttl=300)  # 5 minutes
 
-    now = time.time()
-    rec = _SCORED_KEYS_CACHE.get(cache_key)
-    if rec and (now - rec[0] < _SCORED_KEYS_TTL_SEC):
-        return rec[1]
+def get_scored_keys_cached(bq_client, since_ts, sport_label=None):
+    key = (since_ts.replace(microsecond=0), sport_label and sport_label.upper())
+    if key in _scored_keys_cache:
+        rows = _scored_keys_cache[key]
+        logger.info("⏱️ scored_keys BQ fetch skipped (cache hit %d keys)", len(rows))
+        return rows
 
     sql = """
     SELECT DISTINCT Merge_Key_Short
     FROM `sharplogger.sharp_data.sharp_scores_full`
     WHERE Snapshot_Timestamp >= @since_ts
+    -- uncomment to scope by sport:
     -- AND UPPER(Sport) = @sport
     """
-    params = [bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", bucketed)]
-    # params.append(bigquery.ScalarQueryParameter("sport", "STRING", sport_key))
+    params = [bigquery.ScalarQueryParameter("since_ts", "TIMESTAMP", since_ts)]
+    if sport scoping:
+    params.append(bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()))
 
     t0 = time.time()
-    df = bq_client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
-    keys = set(df['Merge_Key_Short'].dropna().astype(str).str.strip().str.lower().unique())
-    _SCORED_KEYS_CACHE[cache_key] = (now, keys)
-    logger.info("⏱️ scored_keys BQ fetch took %.2fs (cached %d keys)", time.time() - t0, len(keys))
-    return keys
+    df = bq_client.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(query_parameters=params,
+                                           priority=bigquery.QueryPriority.INTERACTIVE)
+    ).to_dataframe()
+    logger.info("⏱️ scored_keys BQ fetch took %.2fs (fetched %d rows)", time.time() - t0, len(df))
+    vals = set(df['Merge_Key_Short'].dropna())
+    _scored_keys_cache[key] = vals
+    return vals
 
 
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
@@ -5167,24 +5174,28 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     
         return result_df
     # === 4. Load recent sharp picks
-    df_master = read_recent_sharp_master_cached(hours=120)
-    df_master = build_game_key(df_master)  # Ensure Merge_Key_Short is created
+   
     
     # === Filter out games already scored in sharp_scores_full
    
+    # === Filter out games already scored in sharp_scores_full (DO THIS FIRST) ===
     two_weeks_ago = dt.datetime.utcnow() - dt.timedelta(days=5)
+    
     if not track_feature_evolution:
         already_scored = get_scored_keys_cached(bq_client, two_weeks_ago, sport_label)
         df_scores_needed = df_scores[~df_scores['Merge_Key_Short'].isin(already_scored)]
+        logging.info("✅ Remaining unscored completed games: %d", len(df_scores_needed))
+        if df_scores_needed.empty:
+            logging.info("⏭️ Nothing to score — skipping snapshot loads.")
+            return pd.DataFrame()
     else:
         df_scores_needed = df_scores.copy()
-        logging.info(f"✅ Remaining unscored completed games: {len(df_scores_needed)}")
-        
-        if not df_scores_needed.empty:
-            sample = df_scores_needed[['Merge_Key_Short', 'Home_Team', 'Away_Team', 'Game_Start']].head(5)
-            logging.info("🕵️ Sample unscored game(s):\n" + sample.to_string(index=False))
-   
-        
+        logging.info("📈 Time-series mode enabled: Skipping scored-key filter to allow resnapshots")
+    
+    # Only now load snapshots / df_master / df_first, etc.
+    df_master = read_recent_sharp_master_cached(hours=24)
+    df_master = build_game_key(df_master)
+
     # Ensure Merge_Key_Short exists AFTER loading
     if 'Merge_Key_Short' not in df_master.columns:
         df_master = build_game_key(df_master)
@@ -5541,7 +5552,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Sport'] = df_scores_out['Sport'].fillna('').astype(str)
     df_scores_out['Unique_Sharp_Books'] = pd.to_numeric(df_scores_out['Unique_Sharp_Books'], errors='coerce').fillna(0).astype(int)
     df_scores_out['First_Line_Value'] = pd.to_numeric(df_scores_out['First_Line_Value'], errors='coerce')
-    df_scores_out['First_Sharp_Prob'] = pd.to_numeric(df_scores_out['First_Sharp_Prob'], errors='coerce')
+ 
     df_scores_out['Line_Delta'] = pd.to_numeric(df_scores_out['Line_Delta'], errors='coerce')
     df_scores_out['Model_Prob_Diff'] = pd.to_numeric(df_scores_out['Model_Prob_Diff'], errors='coerce')
     df_scores_out['Direction_Aligned'] = pd.to_numeric(df_scores_out['Direction_Aligned'], errors='coerce').fillna(0).round().astype('Int64')
