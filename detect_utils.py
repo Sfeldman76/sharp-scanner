@@ -80,14 +80,15 @@ def detect_and_save_all_sports():
             # Use the API sport_key here
             df_moves, df_snap_unused, df_audit = detect_sharp_moves(
                 current=current,
-                previous=previous,
                 sport_key=sport_key,
                 SHARP_BOOKS=SHARP_BOOKS,
                 REC_BOOKS=REC_BOOKS,
                 BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
                 trained_models=trained_models,
-                weights=market_weights
+                weights=market_weights,
+                sport_label=sport_label    # helps snapshot readers expand aliases cleanly
             )
+
 
             # --- Backtest (writes to sharp_scores_full) ---
             try:
