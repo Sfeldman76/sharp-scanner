@@ -80,6 +80,7 @@ def detect_and_save_all_sports():
             # Use the API sport_key here
             df_moves, df_snap_unused, df_audit = detect_sharp_moves(
                 current=current,
+                previous=None, 
                 sport_key=sport_key,
                 SHARP_BOOKS=SHARP_BOOKS,
                 REC_BOOKS=REC_BOOKS,
