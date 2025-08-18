@@ -1707,14 +1707,48 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     return 'unknown'
             else:
                 return 'unknown'
-            
-        df_market['Team_Bet_Role'] = df_market.apply(label_team_role, axis=1)
-        # Normalize team identifiers
-        df_market['Team'] = df_market['Outcome_Norm']
-        df_market['Is_Home'] = (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
-    
-        
+        # before any LOO/streak calcs
+        # --- Normalize inputs first
+        # -- keep only one Outcome_Norm normalization (this one)
+        df_market['Market']         = df_market['Market'].astype(str).str.lower().str.strip()
        
+        df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
+        df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
+        
+        is_totals = df_market['Market'].eq('totals')
+        
+        # Team & Is_Home set exactly once
+        df_market['Team'] = np.where(is_totals, df_market['Home_Team_Norm'], df_market['Outcome_Norm']).astype(str).str.lower().str.strip()
+        df_market['Is_Home'] = np.where(is_totals, 1, (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)).astype(int)
+        
+      
+        
+        # Robust window
+        
+        
+        is_totals = df_market['Market'].eq('totals')
+        is_spread_h2h = ~is_totals  # spreads or h2h
+        
+        # --- Define Team exactly once:
+        # spreads/h2h -> the actual team you’re betting (Outcome_Norm)
+        # totals      -> anchor to home team so per-team LOO/home/away make sense
+        df_market['Team'] = np.where(
+            is_totals,
+            df_market['Home_Team_Norm'],      # anchor totals to home team
+            df_market['Outcome_Norm']          # spreads/h2h: team name in Outcome_Norm
+        ).astype(str).str.lower().str.strip()
+        
+        # --- Define Is_Home exactly once:
+        # totals (anchored to home) => 1
+        # spreads/h2h => compare Team to Home_Team_Norm
+        df_market['Is_Home'] = np.where(
+            is_totals,
+            1,
+            (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
+        ).astype(int)
+    
+        # (optional) Keep your role labeler, but call it AFTER the fields above are set
+        df_market['Team_Bet_Role'] = df_market.apply(label_team_role, axis=1)
         
         # === Step 0: Sort once up front
         df_market = df_market.sort_values(['Team', 'Game_Key'])
@@ -1793,9 +1827,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # assumes: df_market already has Is_Favorite_Context (Fav=1; totals: OVER=1)
         df_market = df_market.sort_values(['Team', 'Snapshot_Timestamp'])
+        # Robust window
+        sport0 = (df_market['Sport'].dropna().astype(str).iloc[0] if df_market['Sport'].notna().any() else 'NFL')
+        window_length = SPORT_COVER_WINDOW.get(sport0, 4)
         
-        # === Window (sport-specific)
-        window_length = SPORT_COVER_WINDOW.get(df_market['Sport'].iloc[0], 4)
         
         # === Overall
         df_market['Team_Recent_Cover_Streak'] = (
@@ -1857,21 +1892,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['On_Cover_Streak_Dog'] = (df_market['Team_Recent_Cover_Streak_Dog'] >= 2).astype(int)
         
         # === LOO rolling averages (match your Avg_Recent_* pattern)
-        def _rolling_avg_shifted(group_key, series, window):
-            s_shift = series.groupby(group_key).shift(1)
-            num = s_shift.groupby(group_key).rolling(window=window, min_periods=1).sum().reset_index(level=0, drop=True)
-            den = s_shift.groupby(group_key).rolling(window=window, min_periods=1).count().reset_index(level=0, drop=True)
+        def _rolling_avg_shifted(df, group_key, value_col, window):
+            """
+            Leave-one-out rolling average over `window` items of df[value_col] grouped by df[group_key].
+            """
+            grp = df[group_key]
+            s   = df[value_col]
+            s_shift = s.groupby(grp).shift(1)  # LOO
+            num = s_shift.groupby(grp).rolling(window=window, min_periods=1).sum().reset_index(level=0, drop=True)
+            den = s_shift.groupby(grp).rolling(window=window, min_periods=1).count().reset_index(level=0, drop=True)
             return num / den
         
-        df_market['Avg_Recent_Cover_Streak']         = _rolling_avg_shifted('Team', df_market['SHARP_HIT_BOOL'],      window_length)
-        df_market['Avg_Recent_Cover_Streak_Home']    = _rolling_avg_shifted('Team', df_market['Cover_Home_Only'],     window_length)
-        df_market['Avg_Recent_Cover_Streak_Away']    = _rolling_avg_shifted('Team', df_market['Cover_Away_Only'],     window_length)
-        df_market['Avg_Recent_Cover_Streak_Fav']     = _rolling_avg_shifted('Team', df_market['Cover_Fav_Only'],      window_length)
-        df_market['Avg_Recent_Cover_Streak_Home_Fav']= _rolling_avg_shifted('Team', df_market['Cover_Fav_Home_Only'], window_length)
-        df_market['Avg_Recent_Cover_Streak_Away_Fav']= _rolling_avg_shifted('Team', df_market['Cover_Fav_Away_Only'], window_length)
-        
+        df_market['Avg_Recent_Cover_Streak']          = _rolling_avg_shifted(df_market, 'Team', 'SHARP_HIT_BOOL',      window_length)
+        df_market['Avg_Recent_Cover_Streak_Home']     = _rolling_avg_shifted(df_market, 'Team', 'Cover_Home_Only',     window_length)
+        df_market['Avg_Recent_Cover_Streak_Away']     = _rolling_avg_shifted(df_market, 'Team', 'Cover_Away_Only',     window_length)
+        df_market['Avg_Recent_Cover_Streak_Fav']      = _rolling_avg_shifted(df_market, 'Team', 'Cover_Fav_Only',      window_length)
+        df_market['Avg_Recent_Cover_Streak_Home_Fav'] = _rolling_avg_shifted(df_market, 'Team', 'Cover_Fav_Home_Only', window_length)
+        df_market['Avg_Recent_Cover_Streak_Away_Fav'] = _rolling_avg_shifted(df_market, 'Team', 'Cover_Fav_Away_Only', window_length)
 
-    
+        
+        )
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(int(round(idx / n_markets * 100)))
