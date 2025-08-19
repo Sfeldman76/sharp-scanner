@@ -2441,154 +2441,207 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     except Exception as e:
         logger.warning(f"⚠️ Failed to print preview: {e}")
 
-    # === Compute shifts
-    # Guard against NaNs before implied_prob
-    df['Odds_Shift'] = (
-        df['Odds_Price'].fillna(0).apply(implied_prob) -
-        df['Open_Odds'].fillna(0).apply(implied_prob)
-    ) * 100.0  # percent points
-
-    df['Implied_Prob_Shift'] = (
-        pd.to_numeric(df['Implied_Prob'], errors='coerce').fillna(0.0)
-        - pd.to_numeric(df['First_Imp_Prob'], errors='coerce').fillna(0.0)
-    )
-    # Line delta
-    df['Line_Delta'] = (
-        pd.to_numeric(df['Value'], errors='coerce').fillna(0.0)
-        - pd.to_numeric(df['Open_Value'], errors='coerce').fillna(0.0)
-    )
-
-    # === Enrich with resistance, timing, etc.
-    df = compute_line_resistance_flag(df, source='moves')
-    df = add_minutes_to_game(df)
-
-    # === Clean columns (ok to drop; downstream recomputes if needed)
+    # ---------- 0) Cast once up front ----------
+    odds_now   = pd.to_numeric(df['Odds_Price'], errors='coerce').astype('float64')
+    odds_open  = pd.to_numeric(df['Open_Odds'],  errors='coerce').astype('float64')
+    val_now    = pd.to_numeric(df['Value'],      errors='coerce').astype('float64')
+    val_open   = pd.to_numeric(df['Open_Value'], errors='coerce').astype('float64')
+    df['Limit'] = pd.to_numeric(df['Limit'],     errors='coerce').fillna(0.0).astype('float64')
+    
+    # ---------- 1) Vectorized implied prob (American odds) ----------
+    # Handles NaN; does not allocate extra Series; branch by mask once.
+    def implied_prob_vec_raw(o: np.ndarray) -> np.ndarray:
+        p = np.full(o.shape, np.nan, dtype='float64')
+        neg = o < 0
+        pos = ~neg & np.isfinite(o)
+        # p = |-o| / (|-o| + 100) for negative odds
+        oo = -o
+        p[neg] = oo[neg] / (oo[neg] + 100.0)
+        # p = 100 / (o + 100) for positive odds
+        p[pos] = 100.0 / (o[pos] + 100.0)
+        return p
+    
+    imp_now  = implied_prob_vec_raw(odds_now.values)
+    imp_open = implied_prob_vec_raw(odds_open.values)
+    
+    # Keep as Series aligned to df index (cheap view, no copy of data)
+    imp_now_s  = pd.Series(imp_now,  index=df.index)
+    imp_open_s = pd.Series(imp_open, index=df.index)
+    
+    # ---------- 2) Odds & implied-prob shifts ----------
+    df['Odds_Shift'] = (imp_now_s - imp_open_s) * 100.0
+    
+    if 'Implied_Prob' not in df.columns or df['Implied_Prob'].isna().all():
+        df['Implied_Prob'] = imp_now_s
+    else:
+        # Ensure numeric once; no need to re-calc
+        df['Implied_Prob'] = pd.to_numeric(df['Implied_Prob'], errors='coerce')
+    
+    if 'First_Imp_Prob' not in df.columns or df['First_Imp_Prob'].isna().all():
+        df['First_Imp_Prob'] = imp_open_s
+    else:
+        df['First_Imp_Prob'] = pd.to_numeric(df['First_Imp_Prob'], errors='coerce')
+    
+    df['Implied_Prob_Shift'] = (df['Implied_Prob'] - df['First_Imp_Prob'])
+    
+    # If you truly don't need First_Imp_Prob beyond this point, drop to save memory
     df.drop(columns=['First_Imp_Prob'], inplace=True, errors='ignore')
-
-    # === Delta and reversal flags
-    df['Delta'] = df['Value'] - df['Open_Value']
-    df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce').fillna(0.0)
-    df['Line_Magnitude_Abs'] = df['Line_Delta'].abs()
-    df['Line_Move_Magnitude'] = df['Line_Delta'].abs()
-
+    
+    # ---------- 3) Line deltas (single-pass) ----------
+    line_delta = (val_now - val_open)
+    df['Line_Delta']           = line_delta
+    df['Delta']                = line_delta           # alias
+    abs_delta                  = np.abs(line_delta.values)
+    df['Line_Magnitude_Abs']   = abs_delta
+    df['Line_Move_Magnitude']  = abs_delta
+    
+    # ---------- 4) Value reversal (vectorized, single cast) ----------
     def compute_value_reversal(df: pd.DataFrame, market_col: str = 'Market') -> pd.DataFrame:
-        """
-        Flag when the current value reverses the opening direction and tags extremes.
-        Creates/overwrites: Value_Reversal_Flag (0/1)
-        """
-        # Market flags (safe)
         m = df[market_col].astype(str).str.lower().str.strip()
-        is_spread = m.str.contains('spread', na=False)
-        is_total  = m.str.contains('total',  na=False)
-        is_h2h    = m.str.contains('h2h',    na=False)
+        is_spread = m.str.contains('spread', na=False).values
+        is_total  = m.str.contains('total',  na=False).values
+        is_h2h    = m.str_contains('h2h',    na=False).values if hasattr(m, "str_contains") else m.str.contains('h2h', na=False).values
     
-        # Ensure needed columns exist & numeric
-        for col in ['Open_Value','Value','Max_Value','Min_Value','Outcome_Norm']:
-            if col not in df.columns:
-                df[col] = np.nan
-        v_open = pd.to_numeric(df['Open_Value'], errors='coerce')
-        v_now  = pd.to_numeric(df['Value'], errors='coerce')
-        v_max  = pd.to_numeric(df['Max_Value'], errors='coerce')
-        v_min  = pd.to_numeric(df['Min_Value'], errors='coerce')
-        outcome_norm = df['Outcome_Norm'].astype(str).str.lower().str.strip()
+        v_open = pd.to_numeric(df.get('Open_Value'), errors='coerce').astype('float64').values
+        v_now  = pd.to_numeric(df.get('Value'),      errors='coerce').astype('float64').values
+        v_max  = pd.to_numeric(df.get('Max_Value'),  errors='coerce').astype('float64').values
+        v_min  = pd.to_numeric(df.get('Min_Value'),  errors='coerce').astype('float64').values
+        outcome_norm = df.get('Outcome_Norm', '').astype(str).str.lower().str.strip().values
     
-        # Build flag
+        # Spread: reversal if moved toward zero past open and sits at the extreme
         spread_flag = (
-            ((v_open < 0) & (v_now > v_open) & (v_now.eq(v_max))) |
-            ((v_open > 0) & (v_now < v_open) & (v_now.eq(v_min)))
-        ).astype('Int64')
+            ((v_open < 0) & (v_now >  v_open) & (v_now == v_max)) |
+            ((v_open > 0) & (v_now <  v_open) & (v_now == v_min))
+        )
     
+        # Totals: direction depends on over/under label
         total_flag = (
-            ((outcome_norm == 'over')  & (v_now > v_open) & (v_now.eq(v_max))) |
-            ((outcome_norm == 'under') & (v_now < v_open) & (v_now.eq(v_min)))
-        ).astype('Int64')
+            ((outcome_norm == 'over')  & (v_now > v_open) & (v_now == v_max)) |
+            ((outcome_norm == 'under') & (v_now < v_open) & (v_now == v_min))
+        )
     
+        # H2H: any move to current extreme opposite open
         h2h_flag = (
-            ((v_now > v_open) & v_now.eq(v_max)) |
-            ((v_now < v_open) & v_now.eq(v_min))
-        ).astype('Int64')
+            ((v_now > v_open) & (v_now == v_max)) |
+            ((v_now < v_open) & (v_now == v_min))
+        )
     
-        df['Value_Reversal_Flag'] = np.where(
-            is_spread, spread_flag,
-            np.where(is_total, total_flag,
-                     np.where(is_h2h, h2h_flag, 0))
-        ).astype(int)
-    
+        out = np.zeros(len(df), dtype='int8')
+        out[is_spread] = spread_flag[is_spread]
+        out[is_total]  = total_flag[is_total]
+        out[is_h2h]    = h2h_flag[is_h2h]
+        df['Value_Reversal_Flag'] = out.astype(int)
         return df
     
     
-    def compute_odds_reversal(df: pd.DataFrame, prob_threshold: float = 0.05) -> pd.DataFrame:
+     def compute_odds_reversal(df: pd.DataFrame, prob_threshold: float = 0.05) -> pd.DataFrame:
         """
-        Flag when implied probability reverses relative to first/open, with special H2H logic.
-        Creates/overwrites: Odds_Reversal_Flag (0/1), Abs_Odds_Prob_Move
-        Requires implied_prob(odds) helper.
+        Vectorized odds-reversal flags.
+        Writes: Odds_Reversal_Flag (0/1), Abs_Odds_Prob_Move (float)
         """
-        # Market flags
-        m = df['Market'].astype(str).str.lower().str.strip() if 'Market' in df.columns else ''
-        is_spread = m.str.contains('spread', na=False) if isinstance(m, pd.Series) else False
-        is_total  = m.str.contains('total',  na=False) if isinstance(m, pd.Series) else False
-        is_h2h    = m.str.contains('h2h',    na=False) if isinstance(m, pd.Series) else False
     
-        # Ensure required columns exist
-        if 'Implied_Prob' not in df.columns:
-            df['Implied_Prob'] = pd.to_numeric(df.get('Odds_Price', np.nan), errors='coerce').apply(implied_prob)
-        if 'First_Imp_Prob' not in df.columns:
-            base = df['Open_Odds'] if 'Open_Odds' in df.columns else df.get('Odds_Price', np.nan)
-            if isinstance(base, pd.Series):
-                df['First_Imp_Prob'] = pd.to_numeric(base, errors='coerce').apply(implied_prob)
-            else:
-                df['First_Imp_Prob'] = df['Implied_Prob']
+        # ---------- helpers ----------
+        def implied_prob_vec_raw(o: np.ndarray) -> np.ndarray:
+            # American odds -> implied prob, vectorized
+            p = np.full(o.shape, np.nan, dtype='float64')
+            neg = o < 0
+            pos = ~neg & np.isfinite(o)
+            oo = -o
+            p[neg] = oo[neg] / (oo[neg] + 100.0)
+            p[pos] = 100.0 / (o[pos] + 100.0)
+            return p
     
-        if 'Min_Odds' not in df.columns:
-            df['Min_Odds'] = df.get('Odds_Price', np.nan)
-        if 'Max_Odds' not in df.columns:
-            df['Max_Odds'] = df.get('Odds_Price', np.nan)
+        n = len(df)
+        if n == 0:
+            df['Odds_Reversal_Flag'] = np.array([], dtype=int)
+            df['Abs_Odds_Prob_Move'] = np.array([], dtype='float64')
+            return df
     
-        # Convert to probabilities
-        min_prob = pd.to_numeric(df['Min_Odds'], errors='coerce').apply(implied_prob)
-        max_prob = pd.to_numeric(df['Max_Odds'], errors='coerce').apply(implied_prob)
+        # ---------- market masks (once) ----------
+        m = df.get('Market')
+        if m is None:
+            is_spread = np.zeros(n, dtype=bool)
+            is_total  = np.zeros(n, dtype=bool)
+            is_h2h    = np.zeros(n, dtype=bool)
+        else:
+            m = m.astype(str).str.lower().str.strip()
+            is_spread = m.str.contains('spread', na=False).values
+            is_total  = m.str.contains('total',  na=False).values
+            is_h2h    = m.str.contains('h2h',    na=False).values
     
-        # H2H reversal
-        valid = (
-            df['First_Imp_Prob'].notna() &
-            df['Implied_Prob'].notna() &
-            min_prob.notna() & max_prob.notna()
-        )
-        h2h_flag = np.zeros(len(df), dtype=int)
+        # ---------- ensure key prob columns (cheap) ----------
+        # Implied_Prob (now)
+        if 'Implied_Prob' in df.columns and not df['Implied_Prob'].isna().all():
+            imp_now = pd.to_numeric(df['Implied_Prob'], errors='coerce').astype('float64').values
+        else:
+            odds_now = pd.to_numeric(df.get('Odds_Price'), errors='coerce').astype('float64').values
+            imp_now  = implied_prob_vec_raw(odds_now)
+            df['Implied_Prob'] = imp_now
+    
+        # First_Imp_Prob (open)
+        if 'First_Imp_Prob' in df.columns and not df['First_Imp_Prob'].isna().all():
+            imp_open = pd.to_numeric(df['First_Imp_Prob'], errors='coerce').astype('float64').values
+        else:
+            base_open = pd.to_numeric(df.get('Open_Odds', df.get('Odds_Price')), errors='coerce').astype('float64').values
+            imp_open  = implied_prob_vec_raw(base_open)
+            df['First_Imp_Prob'] = imp_open
+    
+        # Min/Max probs for H2H extremes
+        min_odds = pd.to_numeric(df.get('Min_Odds', df.get('Odds_Price')), errors='coerce').astype('float64').values
+        max_odds = pd.to_numeric(df.get('Max_Odds', df.get('Odds_Price')), errors='coerce').astype('float64').values
+        min_prob = implied_prob_vec_raw(min_odds)
+        max_prob = implied_prob_vec_raw(max_odds)
+    
+        # ---------- shifts ----------
+        if 'Implied_Prob_Shift' in df.columns:
+            abs_shift = pd.to_numeric(df['Implied_Prob_Shift'], errors='coerce').abs().astype('float64').values
+        else:
+            shift = (imp_now - imp_open)
+            abs_shift = np.abs(shift)
+            df['Implied_Prob_Shift'] = shift
+    
+        # ---------- flags ----------
+        # H2H: reverse if current hits/extremes opposite the open direction (with tiny epsilon)
+        eps = 1e-5
+        valid = np.isfinite(imp_open) & np.isfinite(imp_now) & np.isfinite(min_prob) & np.isfinite(max_prob)
+        h2h_flag = np.zeros(n, dtype=int)
         if valid.any():
-            v = valid.values if isinstance(valid, pd.Series) else valid
-            first = df.loc[valid, 'First_Imp_Prob'].values
-            curr  = df.loc[valid, 'Implied_Prob'].values
-            minp  = min_prob.loc[valid].values
-            maxp  = max_prob.loc[valid].values
-            h2h_flag_valid = (
-                ((first > minp) & (curr <= (minp + 1e-5))) |
-                ((first < maxp) & (curr >= (maxp - 1e-5)))
+            v = valid
+            first = imp_open[v]
+            curr  = imp_now[v]
+            minp  = min_prob[v]
+            maxp  = max_prob[v]
+            h2h_flag_v = (
+                ((first > minp) & (curr <= (minp + eps))) |
+                ((first < maxp) & (curr >= (maxp - eps)))
             ).astype(int)
-            h2h_flag[valid] = h2h_flag_valid
+            h2h_flag[v] = h2h_flag_v
     
-        # Spread/Totals: absolute probability shift
-        if 'Implied_Prob_Shift' not in df.columns:
-            df['Implied_Prob_Shift'] = df['Implied_Prob'] - df['First_Imp_Prob']
-        abs_shift = df['Implied_Prob_Shift'].abs()
-        st_flag = (abs_shift >= prob_threshold).astype(int)
+        # Spread/Totals: absolute prob shift threshold
+        st_flag = (abs_shift >= float(prob_threshold)).astype(int)
     
-        df['Odds_Reversal_Flag'] = np.where(
-            is_h2h, h2h_flag,
-            np.where(is_spread | is_total, st_flag, 0)
-        ).astype(int)
-        df['Abs_Odds_Prob_Move'] = pd.to_numeric(abs_shift, errors='coerce').fillna(0.0)
+        # Compose final flag
+        out = np.zeros(n, dtype=int)
+        # Order: assign by masks (last assignment wins if overlapping — they shouldn't)
+        out[is_spread | is_total] = st_flag[is_spread | is_total]
+        out[is_h2h] = h2h_flag[is_h2h]
+    
+        df['Odds_Reversal_Flag'] = out
+        df['Abs_Odds_Prob_Move'] = abs_shift
     
         return df
 
 
     # If Time missing, derive from Snapshot_Timestamp for Sharp_Timing
-    if 'Time' not in df.columns or df['Time'].isna().all():
-        df['Time'] = df['Snapshot_Timestamp']
-    df['Sharp_Timing'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour.apply(
-        lambda h: (1.0 if 0 <= h <= 5 else 0.9 if 6 <= h <= 11 else 0.5 if 12 <= h <= 15 else 0.2)
-        if pd.notnull(h) else 0.0
-    )
+    # earlier, ensure this once:
+    df['Time'] = pd.to_datetime(df.get('Time', df['Snapshot_Timestamp']),
+                                errors='coerce', utc=True)
+    
+    # later:
+    df['Sharp_Timing'] = df['Time'].dt.hour.map(
+        lambda h: 1.0 if 0 <= h <= 5 else 0.9 if 6 <= h <= 11 else 0.5 if 12 <= h <= 15 else 0.2
+    )  # this map is fine; it's fast enough
+
     df['Limit_NonZero'] = df['Limit'].where(df['Limit'] > 0)
     # Group keys must exist; your df includes 'Game' and 'Market'
     df['Limit_Max'] = df.groupby(['Game', 'Market'], dropna=False)['Limit_NonZero'].transform('max')
