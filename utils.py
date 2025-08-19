@@ -670,7 +670,7 @@ def compute_line_hash(row, window='1H'):
         # Always include floored snapshot hour
         ts = pd.to_datetime(row.get('Snapshot_Timestamp'), utc=True, errors='coerce')
         if pd.notna(ts):
-            ts_bucket = ts.floor(window)  # e.g., '1H', '15min'
+            ts_bucket = ts.floor(window)  # e.g., '1h', '15min'
             key_fields.append(str(ts_bucket))
         else:
             key_fields.append('')  # keep key length consistent
