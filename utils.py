@@ -2813,6 +2813,9 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     # === Now loop markets just for scoring (robust to missing models) ===
 
     # After base enrichment (Implied_Prob, Open_* fills, odds pivot, reliability merge, etc.)
+    # === Now loop markets just for scoring (robust to missing models) ===
+
+    # After base enrichment (Implied_Prob, Open_* fills, odds pivot, reliability merge, etc.)
     df = compute_small_book_liquidity_features(df)
     df = add_line_and_crossmarket_features(df)
     
@@ -2831,14 +2834,14 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         # 🔑 keep original row positions so we can realign later
         df_sp['__row__'] = df_sp.index
     
-        # Normalization (cheap, slice-only)
+        # Normalize (slice-only)
         df_sp['Sport']           = df_sp['Sport'].astype(str).str.upper().str.strip()
         df_sp['Home_Team_Norm']  = df_sp['Home_Team_Norm'].astype(str).str.lower().str.strip()
         df_sp['Away_Team_Norm']  = df_sp['Away_Team_Norm'].astype(str).str.lower().str.strip()
         df_sp['Outcome_Norm']    = df_sp['Outcome_Norm'].astype(str).str.lower().str.strip()
         df_sp['Value']           = pd.to_numeric(df_sp['Value'], errors='coerce').astype('float32')
     
-        # ⬇️ Enrich
+        # ⬇️ Enrich (produces all spread features)
         df_sp_enriched = enrich_and_grade_for_training(
             df_sp,
             sport_aliases=SPORT_ALIASES,
@@ -2848,22 +2851,26 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             project="sharplogger",
         )
     
-        # 🔁 Realign enriched rows back to original df rows
-        # (merge/ops inside enrichment likely dropped the original index)
+        # Ensure original row id on enriched frame
         if '__row__' not in df_sp_enriched.columns:
-            # if your enrich function dropped it, join it back by keys
             df_sp_enriched = df_sp[['__row__','Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm']].merge(
                 df_sp_enriched,
                 on=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm'],
                 how='left',
                 copy=False
             )
-        df_sp_enriched = df_sp_enriched.set_index('__row__')
     
-        # ✅ Columns to write back: ALL features the backend produced
-        write_cols = [c for c in df_sp_enriched.columns]
+        # Index to original rows
+        df_sp_enriched = (
+            df_sp_enriched.drop_duplicates(subset='__row__', keep='last')
+                          .set_index('__row__')
+        )
     
-        # Create any missing columns on df with sensible dtypes
+        # 🚫 Do not write back the base slice cols; only NEW features
+        base_cols = set(need) | {'__row__'}
+        write_cols = [c for c in df_sp_enriched.columns if c not in base_cols]
+    
+        # Create any missing columns on df with correct dtypes
         for c in write_cols:
             if c not in df.columns:
                 s = df_sp_enriched[c]
@@ -2874,34 +2881,35 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 else:
                     df[c] = pd.Series(pd.NA, index=df.index, dtype='string')
     
-        # 🎯 Write back using index alignment (no shape mismatch)
-        target_idx = df.index[mask_spreads]
-        df.loc[target_idx, write_cols] = df_sp_enriched.reindex(target_idx)[write_cols].to_numpy(copy=False)
+        # ✅ Assign by exact index (no boolean mask)
+        target_idx = df_sp_enriched.index
+        # Use update semantics to be extra safe with mixed dtypes
+        df.update(df_sp_enriched[write_cols], overwrite=True)
     
         # cleanup
         del df_sp_enriched, df_sp
-
-
-    # ===== Team features (old way: per-market, merge onto canon) =====
+        # import gc; gc.collect()
+    
+    # ===== Team features (per-market map → merge onto canon) =====
     if team_feature_map is not None and hasattr(team_feature_map, 'empty') and not team_feature_map.empty:
+        # make sure the map is 1-row per team to avoid row multiplication
+        tfm = team_feature_map.copy()
+        tfm['Team'] = tfm['Team'].astype(str).str.lower().str.strip()
+        tfm = tfm.drop_duplicates(subset=['Team'], keep='last')
+    
         df['Team'] = df['Outcome_Norm'].astype(str).str.strip().str.lower()
-        df= df.merge(team_feature_map, on='Team', how='left')
+        df = df.merge(tfm, on='Team', how='left')
         df.drop(columns=['Team'], inplace=True, errors='ignore')
-
-         # ---- Ensure Market_norm (and Outcome_Norm) exist before use ----
-    # Market_norm: lowercase/stripped market name, categorical
+    
+    # ---- Ensure Market_norm (and keep it compact) ----
     if 'Market_norm' not in df.columns:
         if 'Market' in df.columns and not df.empty:
-            m = df['Market']
-            if not pd.api.types.is_categorical_dtype(m):
-                m = m.astype('string')
+            m = df['Market'].astype('string')
             df['Market_norm'] = m.str.lower().str.strip().astype('category')
         else:
-            # same-length categorical NA column (handles empty df too)
-            df['Market_norm'] = pd.Series(
-                pd.Categorical([None] * len(df)),
-                index=df.index
-            )
+            df['Market_norm'] = pd.Series(pd.NA, index=df.index, dtype='category')
+         # ---- Ensure Market_norm (and Outcome_Norm) exist before use ----
+   
     
     # Outcome_Norm: safe normalized outcome for downstream keys
     if 'Outcome_Norm' not in df.columns:
