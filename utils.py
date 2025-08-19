@@ -4276,8 +4276,8 @@ def detect_sharp_moves(
 
             df_scored = df_scored.drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"])
 
-            logger.info("🔎 Sample scored spread rows:")
-            logger.info(df_scored[df_scored['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Was_Canonical']].head(30).to_string(index=False))
+            #logger.info("🔎 Sample scored spread rows:")
+            #logger.info(df_scored[df_scored['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Was_Canonical']].head(30).to_string(index=False))
 
             try:
                 write_sharp_moves_to_master(df_scored)                
