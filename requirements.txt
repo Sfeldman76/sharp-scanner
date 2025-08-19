@@ -27,5 +27,10 @@ google-cloud-bigquery
 google-cloud-bigquery-storage
 google-cloud-storage
 pandas-gbq
+# === NEW for Option B (Cloud Tasks) ===
+google-cloud-tasks
+
+# === Add if you use the gunicorn-based CMD ===
+gunicorn
 
 
