@@ -1860,8 +1860,54 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 is_fav, df_market['Favorite_Market_Spread'].values, df_market['Underdog_Market_Spread'].values
             ).astype('float32')
         
-            # Optional: require k present if you need both sides represented
-            # df_market = df_market.dropna(subset=['k'])
+            # --- Per-outcome engineered features (requires: k, Sigma_Pts, fav/dog spreads) ---
+            df_market['Outcome_Spread_Edge'] = (
+                pd.to_numeric(df_market['Outcome_Model_Spread'],  errors='coerce') -
+                pd.to_numeric(df_market['Outcome_Market_Spread'], errors='coerce')
+            ).astype('float32')
+            
+            # z = edge / k  (guard against zero/NaN k)
+            k = pd.to_numeric(df_market.get('k'), errors='coerce').astype('float32')
+            k = k.where(k > 0, np.nan)              # avoid div-by-0
+            df_market['z'] = (df_market['Outcome_Spread_Edge'] / k).astype('float32')
+            
+            # cover prob: Φ(z)
+            df_market['Outcome_Cover_Prob'] = _phi(df_market['z']).astype('float32')
+            
+            # magnitudes + interactions
+            df_market['edge_pts'] = df_market['Outcome_Spread_Edge'].astype('float32')
+            df_market['mu_abs']   = df_market['Outcome_Spread_Edge'].abs().astype('float32')
+            df_market['edge_x_k'] = (df_market['Outcome_Spread_Edge'] * k).astype('float32')
+            df_market['mu_x_k']   = (df_market['mu_abs'] * k).astype('float32')
+            
+            # agreement flag: does model mark THIS team as fav the same as market?
+            model_this_is_fav  = pd.to_numeric(df_market['Outcome_Model_Spread'],  errors='coerce') < 0
+            market_this_is_fav = df_market['Outcome_Norm'].astype(str).str.lower().eq(
+                df_market['Market_Favorite_Team'].astype(str).str.lower()
+            )
+            df_market['model_fav_vs_market_fav_agree'] = (model_this_is_fav == market_this_is_fav).astype('int8')
+            
+            # (Optional) quick health checks to catch why features “disappear”
+            # --- Streamlit KPIs / Debug ---
+            have_k   = float(df_market['k'].notna().mean()) if 'k' in df_market.columns else 0.0
+            have_sig = float(pd.to_numeric(df_market.get('Sigma_Pts'), errors='coerce').notna().mean()) if 'Sigma_Pts' in df_market.columns else 0.0
+            have_oms = float(df_market['Outcome_Model_Spread'].notna().mean()) if 'Outcome_Model_Spread' in df_market.columns else 0.0
+            have_oms_mkt = float(df_market['Outcome_Market_Spread'].notna().mean()) if 'Outcome_Market_Spread' in df_market.columns else 0.0
+            
+            st.write(
+                f"🧪 SPREADS enrich — rows: {len(df_market):,} | "
+                f"Outcome_Model_Spread: **{have_oms:.1%}** | "
+                f"Outcome_Market_Spread: **{have_oms_mkt:.1%}** | "
+                f"k: **{have_k:.1%}** | Sigma: **{have_sig:.1%}**"
+            )
+            
+            if have_oms < 1.0 or have_oms_mkt < 1.0:
+                with st.expander("⚠️ Debug: missing Outcome spreads"):
+                    st.dataframe(
+                        df_market[['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm']]
+                        .drop_duplicates().head(30),
+                        use_container_width=True
+        )
 
 
 
@@ -2274,7 +2320,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Outcome_Market_Spread',
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
-            'mu_abs', 'k', 'edge_pts', 'z',            
+            'mu_abs','edge_pts',         
             'model_fav_vs_market_fav_agree',            
             'edge_x_k', 'mu_x_k',
             
