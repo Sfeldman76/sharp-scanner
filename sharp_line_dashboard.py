@@ -1646,7 +1646,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
     df_bt_streaks = (dfb[['Game_Key','Team'] + streak_cols]
                      .drop_duplicates(subset=['Game_Key','Team'], keep='last'))
-    
+    # Combine LOO stats + streaks into one context frame
+    df_bt_context = (
+        pd.concat([df_bt_loostats, df_bt_streaks], axis=0, ignore_index=True)
+          .groupby(['Game_Key','Team'], as_index=False).last()
+    )
+
+    context_cols = [c for c in df_bt_context.columns if c not in ['Game_Key','Team']]
+
     before = len(df_bt)
     df_bt = df_bt.drop_duplicates(subset=dedup_cols, keep='last')
     after = len(df_bt)
@@ -1680,24 +1687,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Market']         = df_market['Market'].astype(str).str.lower().str.strip()
-    
-        # Define Team / Is_Home once, matching how df_bt_streaks was built
+        df_market['Game_Key']       = df_market['Game_Key'].astype(str).str.lower().str.strip()   # <- add this
+        
+        # --- Team / Is_Home (totals anchor to home)
         is_totals = df_market['Market'].eq('totals')
         df_market['Team'] = (
-            df_market['Outcome_Norm']
-            .where(~is_totals, df_market['Home_Team_Norm'])
-            .astype(str).str.strip()
-        )
-        df_market['Is_Home'] = np.where(
-            is_totals, 1, (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
-        ).astype(int)
-    
-        # ✅ Merge FULL-BASE streaks now that Team exists
-        df_market = df_market.merge(
-            df_bt_streaks[['Game_Key','Team'] + streak_cols],
-            on=['Game_Key','Team'], how='left'
-        )
-    
+            df_market['Outcome_Norm'].where(~is_totals, df_market['Home_Team_Norm'])
+        ).astype(str).str.strip().str.lower()
+        df_market['Is_Home'] = np.where(is_totals, 1, (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)).astype(int)
+        
+        # --- make sure context keys are normalized the same way
+        df_bt_context['Game_Key'] = df_bt_context['Game_Key'].astype(str).str.lower().str.strip()
+        df_bt_context['Team']     = df_bt_context['Team'].astype(str).str.lower().str.strip()
+        
+        # --- guard selected columns
+        keep_ctx = ['Game_Key','Team'] + [c for c in context_cols if c in df_bt_context.columns]
+        
+        # --- merge
+        before = len(df_market)
+        df_market = df_market.merge(df_bt_context[keep_ctx], on=['Game_Key','Team'], how='left')
+        hit = df_market['Team'].notna() & df_market[keep_ctx[2]].notna() if len(keep_ctx) > 2 else df_market['Team'].notna()
+        miss_rate = 1 - (hit.sum() / max(len(df_market), 1))
+
         # === Canonical side filtering ONLY (training subset)
         if market == "totals":
             df_market = df_market[df_market['Outcome_Norm'] == 'over']
