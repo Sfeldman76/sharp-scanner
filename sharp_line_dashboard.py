@@ -1561,7 +1561,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         return out
     
     df_bt_prepped = _prep_team_context(df_bt)
+    _prob_candidates = [
+        'Model_Sharp_Win_Prob',
+        'Model_Outcome_Prob',
+        'Model_Prob',
+        'Pred_Prob',
+    ]
+    prob_col = next((c for c in _prob_candidates if c in df_bt_prepped.columns), None)
     
+    if prob_col is None:
+        # keep pipeline alive; will produce NaNs in LOO averages (no leakage)
+        df_bt_prepped['Model_Sharp_Win_Prob'] = np.nan
+    else:
+        df_bt_prepped['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt_prepped[prob_col], errors='coerce')
+
+
     def compute_loo_stats_by_game(df, home_filter=None, favorite_filter=None, col_suffix=""):
         df = df.copy()
         if home_filter is not None:
