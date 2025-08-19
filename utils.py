@@ -2825,18 +2825,20 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     mask_spreads = df['Market'].astype(str).str.lower().eq('spreads')
     
     if mask_spreads.any():
-        # Work on *skinny* view (keeps RAM down)
         need = ['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value','Game_Start']
         df_sp = df.loc[mask_spreads, need].copy()
     
-        # Normalize keys (backend expects this)
+        # 🔑 keep original row positions so we can realign later
+        df_sp['__row__'] = df_sp.index
+    
+        # Normalization (cheap, slice-only)
         df_sp['Sport']           = df_sp['Sport'].astype(str).str.upper().str.strip()
         df_sp['Home_Team_Norm']  = df_sp['Home_Team_Norm'].astype(str).str.lower().str.strip()
         df_sp['Away_Team_Norm']  = df_sp['Away_Team_Norm'].astype(str).str.lower().str.strip()
         df_sp['Outcome_Norm']    = df_sp['Outcome_Norm'].astype(str).str.lower().str.strip()
         df_sp['Value']           = pd.to_numeric(df_sp['Value'], errors='coerce').astype('float32')
     
-        # Enrich spreads (produces ALL spread features)
+        # ⬇️ Enrich
         df_sp_enriched = enrich_and_grade_for_training(
             df_sp,
             sport_aliases=SPORT_ALIASES,
@@ -2846,45 +2848,38 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             project="sharplogger",
         )
     
-        # --- 1) Add ALL NEW columns that don't exist yet on df ---
-        # (This guarantees every backend feature appears in main df)
-     
-
-        def _init_col(df: pd.DataFrame, name: str, dtype: str):
-            """Create a new column with the right dtype and NA value, without copying the whole df."""
-            if name in df.columns:
-                return
-            if dtype == 'float32':
-                df[name] = pd.Series(np.nan, index=df.index, dtype='float32')
-            elif dtype == 'Int32':  # pandas nullable integer
-                df[name] = pd.Series(pd.NA, index=df.index, dtype='Int32')
-            elif dtype == 'string':
-                df[name] = pd.Series(pd.NA, index=df.index, dtype='string')
-            else:
-                # fallback: create as pandas' nullable string to avoid type errors
-                df[name] = pd.Series(pd.NA, index=df.index, dtype='string')
-        
-        # --- inside your block where you add ALL features from df_sp_enriched ---
-        new_cols = [c for c in df_sp_enriched.columns if c not in df.columns]
-        for c in new_cols:
-            s = df_sp_enriched[c]
-            if pd.api.types.is_float_dtype(s):
-                _init_col(df, c, 'float32')
-            elif pd.api.types.is_integer_dtype(s):
-                _init_col(df, c, 'Int32')       # uses pd.NA
-            else:
-                _init_col(df, c, 'string')
-
+        # 🔁 Realign enriched rows back to original df rows
+        # (merge/ops inside enrichment likely dropped the original index)
+        if '__row__' not in df_sp_enriched.columns:
+            # if your enrich function dropped it, join it back by keys
+            df_sp_enriched = df_sp[['__row__','Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm']].merge(
+                df_sp_enriched,
+                on=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm'],
+                how='left',
+                copy=False
+            )
+        df_sp_enriched = df_sp_enriched.set_index('__row__')
     
-        # --- 2) Overwrite overlapping feature columns for *spreads rows only* ---
-        # (If a column already exists in df and backend also produced it, we update spreads rows.)
-        overlap_cols = [c for c in df_sp_enriched.columns if c in df.columns]
-        # Write back in one shot (keeps memory down)
-        df.loc[mask_spreads, overlap_cols] = df_sp_enriched[overlap_cols].to_numpy(copy=False)
+        # ✅ Columns to write back: ALL features the backend produced
+        write_cols = [c for c in df_sp_enriched.columns]
     
-        # Clean up
+        # Create any missing columns on df with sensible dtypes
+        for c in write_cols:
+            if c not in df.columns:
+                s = df_sp_enriched[c]
+                if pd.api.types.is_float_dtype(s):
+                    df[c] = pd.Series(np.nan, index=df.index, dtype='float32')
+                elif pd.api.types.is_integer_dtype(s):
+                    df[c] = pd.Series(pd.NA, index=df.index, dtype='Int32')
+                else:
+                    df[c] = pd.Series(pd.NA, index=df.index, dtype='string')
+    
+        # 🎯 Write back using index alignment (no shape mismatch)
+        target_idx = df.index[mask_spreads]
+        df.loc[target_idx, write_cols] = df_sp_enriched.reindex(target_idx)[write_cols].to_numpy(copy=False)
+    
+        # cleanup
         del df_sp_enriched, df_sp
-     
 
 
     # ===== Team features (old way: per-market, merge onto canon) =====
