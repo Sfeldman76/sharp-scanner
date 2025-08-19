@@ -3770,7 +3770,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # ✅ Guard flag instead of early return
         render_sharp = len(trained_models) > 0
         if not render_sharp:
-            st.warning(f"⚠️ No models available for {label}. I’ll show live odds below.").")
+            st.warning(f"⚠️ No models available for {label}. I’ll show live odds below.")
         
         # Optional: extract a unified team_feature_map if needed
         team_feature_map = None
