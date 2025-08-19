@@ -1710,49 +1710,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # before any LOO/streak calcs
         # --- Normalize inputs first
         # -- keep only one Outcome_Norm normalization (this one)
+        # Normalize key text fields
+        # Normalize key text fields
         df_market['Market']         = df_market['Market'].astype(str).str.lower().str.strip()
-       
+        df_market['Outcome_Norm']   = df_market['Outcome'].astype(str).str.lower().str.strip()
         df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
         
+        # Totals flag
         is_totals = df_market['Market'].eq('totals')
         
-        # Team & Is_Home set exactly once
+        # Define Team exactly once
         df_market['Team'] = (
             df_market['Outcome_Norm']
-              .where(~is_totals, df_market['Home_Team_Norm'])
-              .astype(str)
-              .str.lower()
-              .str.strip()
+              .where(~is_totals, df_market['Home_Team_Norm'])  # totals -> anchor to home
+              .astype(str).str.lower().str.strip()
         )
-        df_market['Is_Home'] = np.where(is_totals, 1, (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)).astype(int)
         
-      
-        
-        # Robust window
-        
-        
-        is_totals = df_market['Market'].eq('totals')
-        is_spread_h2h = ~is_totals  # spreads or h2h
-        
-        # --- Define Team exactly once:
-        # spreads/h2h -> the actual team you’re betting (Outcome_Norm)
-        # totals      -> anchor to home team so per-team LOO/home/away make sense
-        df_market['Team'] = np.where(
-            is_totals,
-            df_market['Home_Team_Norm'],      # anchor totals to home team
-            df_market['Outcome_Norm']          # spreads/h2h: team name in Outcome_Norm
-        ).astype(str).str.lower().str.strip()
-        
-        # --- Define Is_Home exactly once:
-        # totals (anchored to home) => 1
-        # spreads/h2h => compare Team to Home_Team_Norm
+        # Define Is_Home exactly once
         df_market['Is_Home'] = np.where(
             is_totals,
             1,
             (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
         ).astype(int)
-    
+        
+        # Role labeler AFTER Team/Is_Home
+       
+                
+        
         # (optional) Keep your role labeler, but call it AFTER the fields above are set
         df_market['Team_Bet_Role'] = df_market.apply(label_team_role, axis=1)
         
