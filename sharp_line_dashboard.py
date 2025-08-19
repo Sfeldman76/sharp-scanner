@@ -2363,17 +2363,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
       
         # === Check each fold for label 
 
-        # Before sanitization
-        st.subheader("🔍 Feature columns BEFORE sanitize")
-        st.text(str(list(X.columns)))
-        
-        # Sanitize
-        X = sanitize_features(X)
-        
-        # After sanitization
-        st.subheader("✅ Feature columns AFTER sanitize")
-        st.text(str(list(X.columns)))
-        
+       
         
         # === Param grid (expanded)
         param_grid = {
@@ -3628,9 +3618,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # === Sport-aware history + sharp moves (single source of truth) ===
         HOURS = 24
         df_all_snapshots = get_recent_history(hours=HOURS, sport=label)  # if downstream uses it
-        if df_all_snapshots is not None:
-            st.write("📑 Columns in df_all_snapshots:", list(df_all_snapshots.columns))
-            st.write("🔢 Row count:", len(df_all_snapshots))
+        
         
         detection_key = f"sharp_moves:{label.upper()}:{HOURS}"
         if not force_reload and detection_key in st.session_state:
@@ -3647,12 +3635,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 )
                 st.session_state[detection_key] = df_moves_raw
                 st.success(f"✅ Loaded {0 if df_moves_raw is None else len(df_moves_raw)} {label} sharp-move rows from BigQuery")
-        # After loading from BQ or cache
-        if df_moves_raw is not None:
-            st.write("📑 Columns in df_moves_raw:", list(df_moves_raw.columns))
-            st.write("🔢 Row count:", len(df_moves_raw))
-        # Guard and exit early if nothing to show
-        
+      
         if df_moves_raw is None or df_moves_raw.empty:
             st.warning(f"⚠️ No recent sharp moves for {label}.")
             return pd.DataFrame()
@@ -3884,7 +3867,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
        
 
         # === Preview & column check
-        st.write("📋 Columns in df_pre:", df_pre.columns.tolist())
+        #st.write("📋 Columns in df_pre:", df_pre.columns.tolist())
         
         # === Compute consensus lines
         sharp_consensus = (
@@ -3937,7 +3920,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             )
         else:
             model_prob_map = pd.DataFrame(columns=['Game_Key','Market','Outcome','Model_Prob_SharpAvg'])
-        st.write("📋 Columns in df_summary_base_mid:", df_summary_base.columns.tolist())
+        #st.write("📋 Columns in df_summary_base_mid:", df_summary_base.columns.tolist())
         # 3) Merge sharp-avg (or create empty column)
         df_summary_base = df_summary_base.drop(columns=['Model_Prob_SharpAvg'], errors='ignore')
         if not model_prob_map.empty:
@@ -3983,7 +3966,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
      
 
 
-        st.write("📋 Columns in df_summary_base_end:", df_summary_base.columns.tolist())
+        #st.write("📋 Columns in df_summary_base_end:", df_summary_base.columns.tolist())
         # === 4) STEP 3: safely hydrate Sharp/Rec/First_Line_Value via skinny merge (avoid row-order fillna) ===
         skinny_lines = (
             df_pre[['Game_Key','Market','Outcome','Sharp Line','Rec Line','First_Line_Value']]
