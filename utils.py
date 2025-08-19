@@ -112,6 +112,17 @@ def calc_implied_prob(odds):
     except Exception:
         return None
 
+
+def implied_prob_vec_raw(arr: np.ndarray) -> np.ndarray:
+    p = np.full(arr.shape, np.nan, dtype='float64')
+    neg = arr < 0
+    pos = ~neg & np.isfinite(arr)
+    ao = -arr
+    p[neg] = ao[neg] / (ao[neg] + 100.0)
+    p[pos] = 100.0 / (arr[pos] + 100.0)
+    return p
+
+
 def ensure_columns(df, required_cols, fill_value=None):
     for col in required_cols:
         if col not in df.columns:
@@ -126,6 +137,24 @@ def normalize_book_name(bookmaker: str, book: str) -> str:
         return book  # e.g., betfair_ex_uk
 
     return bookmaker
+
+
+def _levels_to_jsonlike(x):
+    # NA/None -> "[]"
+    if x is None or (x is pd.NA) or pd.isna(x):
+        return "[]"
+    if isinstance(x, str):
+        return x
+    if isinstance(x, (list, tuple, set, np.ndarray)):
+        try:
+            return json.dumps(list(x))
+        except Exception:
+            return str(list(x))
+    try:
+        return json.dumps([x])
+    except Exception:
+        return str([x])
+
 
 
 SPORT_ALIASES = {
@@ -3088,25 +3117,60 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                 if col not in df_canon.columns:
                     df_canon[col] = np.nan
 
-            df_canon['Net_Line_Move_From_Opening'] = df_canon['Value'] - df_canon['Open_Value']
-            df_canon['Abs_Line_Move_From_Opening'] = df_canon['Net_Line_Move_From_Opening'].abs()
-            df_canon['Net_Odds_Move_From_Opening'] = (
-                df_canon['Odds_Price'].apply(implied_prob) - df_canon['Open_Odds'].apply(implied_prob)
-            ) * 100
-            df_canon['Abs_Odds_Move_From_Opening'] = df_canon['Net_Odds_Move_From_Opening'].abs()
-
-            df_canon['Line_Resistance_Crossed_Levels'] = df_canon.get('Line_Resistance_Crossed_Levels', '[]')
-            df_canon['Line_Resistance_Crossed_Count']  = df_canon.get('Line_Resistance_Crossed_Count', 0)
-            df_canon['Line_Resistance_Crossed_Levels'] = df_canon['Line_Resistance_Crossed_Levels'].apply(
-                lambda x: json.dumps(x) if isinstance(x, list) else str(x) if x else "[]"
-            )
-
-            df_canon['Minutes_To_Game'] = (
-                pd.to_datetime(df_canon['Game_Start'], utc=True) - pd.to_datetime(df_canon['Snapshot_Timestamp'], utc=True)
-            ).dt.total_seconds() / 60.0
-            df_canon['Late_Game_Steam_Flag'] = (df_canon['Minutes_To_Game'] <= 60).astype(int)
+            # --- helpers (vectorized American-odds -> prob) ---
+            d
+            val_now   = pd.to_numeric(df_canon['Value'],      errors='coerce').astype('float64')
+            val_open  = pd.to_numeric(df_canon['Open_Value'], errors='coerce').astype('float64')
+            odds_now  = pd.to_numeric(df_canon['Odds_Price'], errors='coerce').astype('float64')
+            odds_open = pd.to_numeric(df_canon['Open_Odds'],  errors='coerce').astype('float64')
+            
+            # --- line moves ---
+            net_line = val_now - val_open
+            df_canon['Net_Line_Move_From_Opening'] = net_line
+            df_canon['Abs_Line_Move_From_Opening'] = np.abs(net_line)
+            
+            # --- odds moves (vectorized; avoid .apply) ---
+            imp_now  = implied_prob_vec_raw(odds_now.values)
+            imp_open = implied_prob_vec_raw(odds_open.values)
+            net_odds = (imp_now - imp_open) * 100.0
+            df_canon['Net_Odds_Move_From_Opening'] = net_odds
+            df_canon['Abs_Odds_Move_From_Opening'] = np.abs(net_odds)
+            
+            # --- crossed levels column (NA-safe, no boolean NA) ---
+            col = 'Line_Resistance_Crossed_Levels'
+            if col not in df_canon.columns:
+                df_canon[col] = "[]"
+            else:
+                s = df_canon[col].astype('object')
+                # vectorized-ish: handle NA, listlikes, scalars without "if x" on pd.NA
+                na_mask    = s.isna()
+                list_mask  = s.map(lambda v: isinstance(v, (list, tuple, set, np.ndarray)))
+                str_mask   = s.map(lambda v: isinstance(v, str))
+                other_mask = ~(na_mask | list_mask | str_mask)
+            
+                s.loc[na_mask]   = "[]"
+                s.loc[list_mask] = s.loc[list_mask].map(lambda v: json.dumps(list(v)))
+                s.loc[other_mask]= s.loc[other_mask].map(lambda v: json.dumps([v]))
+                df_canon[col] = s.astype('string')
+            
+            # Count column: ensure numeric, fill NA
+            cnt_col = 'Line_Resistance_Crossed_Count'
+            if cnt_col not in df_canon.columns:
+                df_canon[cnt_col] = 0
+            else:
+                df_canon[cnt_col] = pd.to_numeric(df_canon[cnt_col], errors='coerce').fillna(0).astype('int64')
+            
+            # --- timing (parse once + compute) ---
+            ts_game   = pd.to_datetime(df_canon['Game_Start'],           utc=True, errors='coerce')
+            ts_snap   = pd.to_datetime(df_canon['Snapshot_Timestamp'],   utc=True, errors='coerce')
+            mins_to   = (ts_game - ts_snap).dt.total_seconds() / 60.0
+            df_canon['Minutes_To_Game'] = mins_to
+            
+            df_canon['Late_Game_Steam_Flag'] = (mins_to <= 60).astype('int8')
+            
             df_canon['Minutes_To_Game_Tier'] = pd.cut(
-                df_canon['Minutes_To_Game'], bins=[-1, 30, 60, 180, 360, 720, np.inf],
+                mins_to,
+                bins=[-1, 30, 60, 180, 360, 720, np.inf],
                 labels=['🚨 ≤30m','🔥 ≤1h','⚠️ ≤3h','⏳ ≤6h','📅 ≤12h','🕓 >12h']
             )
 
