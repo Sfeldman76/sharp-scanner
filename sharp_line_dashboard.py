@@ -1718,7 +1718,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         is_totals = df_market['Market'].eq('totals')
         
         # Team & Is_Home set exactly once
-        df_market['Team'] = np.where(is_totals, df_market['Home_Team_Norm'], df_market['Outcome_Norm']).astype(str).str.lower().str.strip()
+        df_market['Team'] = (
+            df_market['Outcome_Norm']
+              .where(~is_totals, df_market['Home_Team_Norm'])
+              .astype(str)
+              .str.lower()
+              .str.strip()
+        )
         df_market['Is_Home'] = np.where(is_totals, 1, (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)).astype(int)
         
       
