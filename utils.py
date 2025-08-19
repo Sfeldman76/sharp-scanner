@@ -2848,17 +2848,33 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
         # --- 1) Add ALL NEW columns that don't exist yet on df ---
         # (This guarantees every backend feature appears in main df)
+     
+
+        def _init_col(df: pd.DataFrame, name: str, dtype: str):
+            """Create a new column with the right dtype and NA value, without copying the whole df."""
+            if name in df.columns:
+                return
+            if dtype == 'float32':
+                df[name] = pd.Series(np.nan, index=df.index, dtype='float32')
+            elif dtype == 'Int32':  # pandas nullable integer
+                df[name] = pd.Series(pd.NA, index=df.index, dtype='Int32')
+            elif dtype == 'string':
+                df[name] = pd.Series(pd.NA, index=df.index, dtype='string')
+            else:
+                # fallback: create as pandas' nullable string to avoid type errors
+                df[name] = pd.Series(pd.NA, index=df.index, dtype='string')
+        
+        # --- inside your block where you add ALL features from df_sp_enriched ---
         new_cols = [c for c in df_sp_enriched.columns if c not in df.columns]
         for c in new_cols:
-            # choose compact dtype based on enriched dtype
             s = df_sp_enriched[c]
             if pd.api.types.is_float_dtype(s):
-                df[c] = np.nan.astype('float32')
+                _init_col(df, c, 'float32')
             elif pd.api.types.is_integer_dtype(s):
-                # nullable int to handle NaNs
-                df[c] = pd.Series(index=df.index, dtype='Int32')
+                _init_col(df, c, 'Int32')       # uses pd.NA
             else:
-                df[c] = pd.Series(index=df.index, dtype='string')
+                _init_col(df, c, 'string')
+
     
         # --- 2) Overwrite overlapping feature columns for *spreads rows only* ---
         # (If a column already exists in df and backend also produced it, we update spreads rows.)
@@ -2868,7 +2884,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
         # Clean up
         del df_sp_enriched, df_sp
-        # import gc; gc.collect()
+     
 
 
     # ===== Team features (old way: per-market, merge onto canon) =====
