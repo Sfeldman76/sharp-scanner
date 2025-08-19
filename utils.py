@@ -2534,7 +2534,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
         return df
     
     
-     def compute_odds_reversal(df: pd.DataFrame, prob_threshold: float = 0.05) -> pd.DataFrame:
+    def compute_odds_reversal(df: pd.DataFrame, prob_threshold: float = 0.05) -> pd.DataFrame:
         """
         Vectorized odds-reversal flags.
         Writes: Odds_Reversal_Flag (0/1), Abs_Odds_Prob_Move (float)
