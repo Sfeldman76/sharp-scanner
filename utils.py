@@ -3472,10 +3472,21 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             
                 df_inverse['Line_Resistance_Crossed_Levels'] = df_inverse.get('Line_Resistance_Crossed_Levels', '[]')
                 df_inverse['Line_Resistance_Crossed_Count']  = df_inverse.get('Line_Resistance_Crossed_Count', 0)
-                df_inverse['Line_Resistance_Crossed_Levels'] = df_inverse['Line_Resistance_Crossed_Levels'].apply(
-                    lambda x: json.dumps(x) if isinstance(x, list) else str(x) if x else "[]"
-                )
-            
+                col = 'Line_Resistance_Crossed_Levels'
+                if col not in df_inverse.columns:
+                    df_inverse[col] = "[]"
+                else:
+                    s = df_inverse[col].astype('object')
+                    # optional vectorized-ish speedup; otherwise: s = s.map(_levels_to_jsonlike)
+                    na_mask    = s.isna()
+                    list_mask  = s.map(lambda v: isinstance(v, (list, tuple, set, np.ndarray)))
+                    str_mask   = s.map(lambda v: isinstance(v, str))
+                    other_mask = ~(na_mask | list_mask | str_mask)
+                
+                    s.loc[na_mask]    = "[]"
+                    s.loc[list_mask]  = s.loc[list_mask].map(lambda v: json.dumps(list(v)))
+                    s.loc[other_mask] = s.loc[other_mask].map(lambda v: json.dumps([v]))
+                    df_inverse[col]   = s.astype('string')
                 df_inverse['Minutes_To_Game'] = (
                     pd.to_datetime(df_inverse['Game_Start'], utc=True) - pd.to_datetime(df_inverse['Snapshot_Timestamp'], utc=True)
                 ).dt.total_seconds() / 60.0
