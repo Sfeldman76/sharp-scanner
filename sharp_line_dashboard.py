@@ -1806,7 +1806,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 'Model_Expected_Margin_Abs','Sigma_Pts'
             ]
             g_map = g_fc[game_keys + proj_cols].drop_duplicates(subset=game_keys)
-            
+            have_spreads = df_market['Model_Fav_Spread'].notna().mean()
+            status.write(
+                f"🧪 SPREADS merge health — rows: {len(df_market):,} | "
+                f"have Model_Fav_Spread: **{have_spreads:.1%}** | "
+                f"have k: **{(df_market.get('k').notna().mean() if 'k' in df_market else 0):.1%}**"
+            )
+
             # Drop overlaps to avoid dup labels, then merge
             overlap = [c for c in proj_cols if c in df_market.columns]
             if overlap:
