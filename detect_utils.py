@@ -55,11 +55,12 @@ from utils import (
 def detect_and_save_all_sports():
     """
     Orchestrates sharp detection per sport with:
+      - pre-run power ratings update (fresh inputs),
       - single load of market weights (cached),
       - per-sport optional model loading (non-fatal if missing),
       - in-batch + cross-batch dedup handled by writer,
       - lease guard to avoid duplicate runs on restarts,
-      - backtest write + conditional power-rating update.
+      - backtest write + conditional power-rating update (post-pass).
     """
     ratings_need_update = False
     run_started_utc = pd.Timestamp.utcnow().floor('min')
@@ -71,6 +72,14 @@ def detect_and_save_all_sports():
             return
     except Exception as e:
         logging.warning(f"⚠️ Lease check failed (continuing defensively): {e}")
+
+    # ---- 0.1) Pre-run ratings update (moved to the beginning)
+    try:
+        logging.info("🟢 Pre-pass: updating power ratings BEFORE detection …")
+        pre_summary = update_power_ratings()  # should be NaT-safe / idempotent
+        logging.info(f"📈 Pre-pass ratings summary: {pre_summary}")
+    except Exception as e:
+        logging.error(f"❌ Pre-pass ratings update failed (continuing with best-known ratings): {e}", exc_info=True)
 
     # ---- 1) Cache shared resources
     try:
@@ -125,7 +134,7 @@ def detect_and_save_all_sports():
             try:
                 df_moves, df_snap_unused, df_audit = detect_sharp_moves(
                     current=current,
-                    previous=None,              # (optional) wire a cache here if you need deltas vs prior pull
+                    previous=None,
                     sport_key=sport_key,
                     SHARP_BOOKS=SHARP_BOOKS,
                     REC_BOOKS=REC_BOOKS,
@@ -133,23 +142,20 @@ def detect_and_save_all_sports():
                     trained_models=trained_models,   # may be partial or empty
                     weights=market_weights,
                 )
-               
             except Exception as e:
                 logging.error(f"❌ detect_sharp_moves failed for {sport_label}: {e}", exc_info=True)
                 continue
-            
+
             # ---- 5) Persist sharp moves (trust the hash; writer dedups)
             try:
                 if df_moves is not None and not df_moves.empty:
                     if 'Line_Hash' not in df_moves.columns:
                         logging.error(f"❌ Line_Hash missing for {sport_label}; not writing.")
                     else:
-                        # In-batch dedup (cheap guard)
                         before = len(df_moves)
                         df_moves = df_moves.drop_duplicates(subset=['Line_Hash'], keep='last')
                         if len(df_moves) < before:
                             logging.info(f"🧽 In-batch dedup: removed {before - len(df_moves)} dupe rows for {sport_label}")
-            
                         write_sharp_moves_to_master(df_moves, table='sharp_data.sharp_moves_master')
                 else:
                     logging.info(f"ℹ️ No sharp moves produced for {sport_label}.")
@@ -166,7 +172,7 @@ def detect_and_save_all_sports():
                     api_key=API_KEY,
                     trained_models=trained_models
                 )
-                if isinstance(df_backtest, tuple):  # you mentioned this
+                if isinstance(df_backtest, tuple):
                     df_backtest = df_backtest[0]
 
                 if df_backtest is not None and not df_backtest.empty:
@@ -179,14 +185,6 @@ def detect_and_save_all_sports():
 
         except Exception as e:
             logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
-
-    # ---- 7) Post-pass ratings update
-    if ratings_need_update:
-        try:
-            logging.info("🟢 Post-pass: updating power ratings AFTER detection …")
-            post_summary = update_power_ratings()  # NaT-safe version
-            logging.info(f"📈 Post-pass ratings summary: {post_summary}")
-        except Exception as e:
-            logging.error(f"❌ Post-pass ratings update failed: {e}", exc_info=True)
     else:
         logging.info("ℹ️ No new finals written; skipping post-pass ratings update.")
+
