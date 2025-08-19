@@ -684,7 +684,7 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-def compute_line_hash(row, window='1H'):
+def compute_line_hash(row, window='1h'):
     try:
         key_fields = [
             str(row.get('Game_Key', '')).strip().lower(),
