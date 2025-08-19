@@ -4383,12 +4383,10 @@ def detect_sharp_moves(
         df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
     
         if not df_scored.empty:
-         
-           
+     
             df_scored['Pre_Game'] = df_scored['Game_Start'] > now
             df_scored['Post_Game'] = ~df_scored['Pre_Game']
-         
-          
+   
             logger.info(f"✅ Final scored row count: total={len(df_scored)}, canonical={df_scored['Was_Canonical'].sum()}, inverse={(~df_scored['Was_Canonical']).sum()}")
 
             df_scored = df_scored.drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"])
@@ -4396,11 +4394,6 @@ def detect_sharp_moves(
             #logger.info("🔎 Sample scored spread rows:")
             #logger.info(df_scored[df_scored['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Was_Canonical']].head(30).to_string(index=False))
 
-            try:
-                write_sharp_moves_to_master(df_scored)                
-            except Exception as e:
-                logging.error(f"❌ Failed to write sharp moves to BigQuery: {e}", exc_info=True)
-    
             df = df_scored.copy()
             summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
         else:
@@ -4413,8 +4406,7 @@ def detect_sharp_moves(
         df = pd.DataFrame()
         summary_df = pd.DataFrame()
     
-    # ✅ Return same snapshot history as df_history for consistency
-    
+  
     return df_scored, df_all_snapshots, summary_df
 
 def compute_weighted_signal(row, market_weights):
