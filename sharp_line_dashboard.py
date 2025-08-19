@@ -1736,8 +1736,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             pb.progress(int(round(idx / n_markets * 100)))
             continue
         if market == "spreads":
-            # ---- SPREADS training block (leakage-safe, no helper calls, no recompute of g_cons) ----
-            game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
+            # ---- SPREADS training block (leakage-safe) ----
+            game_keys = ['Sport', 'Home_Team_Norm', 'Away_Team_Norm']
+        
+            # Normalize merge keys on BOTH sides (Sport=UPPER, teams=lower)
+            df_market['Sport'] = df_market['Sport'].astype(str).str.upper().str.strip()
+            df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
+            df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
+            if 'Sport' in df_train.columns:
+                df_train['Sport'] = df_train['Sport'].astype(str).str.upper().str.strip()
+            if 'Home_Team_Norm' in df_train.columns:
+                df_train['Home_Team_Norm'] = df_train['Home_Team_Norm'].astype(str).str.lower().str.strip()
+            if 'Away_Team_Norm' in df_train.columns:
+                df_train['Away_Team_Norm'] = df_train['Away_Team_Norm'].astype(str).str.lower().str.strip()
         
             # 1) Skinny slice for this snapshot (only needed cols)
             slice_cols = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
@@ -1757,8 +1768,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             ]
             missing_cons_cols = [c for c in cons_cols if c not in df_train.columns]
             if missing_cons_cols:
-                # Fallback (only if needed): compute consensus for current slice
-                g_cons_fallback = fad_lowmem(df_slice, value_col='Value', outcome_col='Outcome_Norm')
+                # ✅ FIX: proper fallback helper
+                g_cons_fallback = prep_consensus_market_spread_lowmem(df_slice, value_col='Value', outcome_col='Outcome_Norm')
                 cons_map = g_cons_fallback[cons_cols].drop_duplicates(subset=game_keys)
             else:
                 cons_map = df_train[cons_cols].drop_duplicates(subset=game_keys)
@@ -1778,11 +1789,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 4) Model margin & spreads at game level
             g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
         
-            # 5) Project favorite-centric outputs back to per-outcome rows (memory-lean mapping)
-            # 5) Project favorite-centric outputs back to per-outcome rows (simple, no dupes)
-            
-            game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
-            
             # Ensure market fields & k exist in g_fc (robust)
             need_market = ['Market_Favorite_Team','Market_Underdog_Team',
                            'Favorite_Market_Spread','Underdog_Market_Spread']
@@ -1792,55 +1798,71 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     cons_map[game_keys + need_market].drop_duplicates(subset=game_keys),
                     on=game_keys, how='left', copy=False
                 )
-            
+        
             if 'k' not in g_fc.columns:
                 fav_abs = pd.to_numeric(g_fc.get('Favorite_Market_Spread'), errors='coerce').abs()
                 dog_abs = pd.to_numeric(g_fc.get('Underdog_Market_Spread'), errors='coerce').abs()
                 g_fc['k'] = fav_abs.fillna(dog_abs).astype('float32')
-            
+        
+            # ✅ Guarantee the model spreads exist even if helper didn’t attach them
+            if 'Model_Fav_Spread' not in g_fc.columns or 'Model_Dog_Spread' not in g_fc.columns:
+                ema = pd.to_numeric(g_fc.get('Model_Expected_Margin_Abs'), errors='coerce').astype('float32')
+                g_fc['Model_Fav_Spread'] = (-ema).astype('float32')
+                g_fc['Model_Dog_Spread'] = ( ema).astype('float32')
+        
             # Only the columns we need from g_fc
             proj_cols = [
                 'Model_Fav_Spread','Model_Dog_Spread',
                 'Market_Favorite_Team','Market_Underdog_Team',
                 'Favorite_Market_Spread','Underdog_Market_Spread',
-                'Model_Expected_Margin_Abs','Sigma_Pts'
+                'Model_Expected_Margin_Abs','Sigma_Pts','k'
             ]
             g_map = g_fc[game_keys + proj_cols].drop_duplicates(subset=game_keys)
-            have_spreads = df_market['Model_Fav_Spread'].notna().mean()
-            status.write(
-                f"🧪 SPREADS merge health — rows: {len(df_market):,} | "
-                f"have Model_Fav_Spread: **{have_spreads:.1%}** | "
-                f"have k: **{(df_market.get('k').notna().mean() if 'k' in df_market else 0):.1%}**"
-            )
-
+        
             # Drop overlaps to avoid dup labels, then merge
             overlap = [c for c in proj_cols if c in df_market.columns]
             if overlap:
                 df_market.drop(columns=overlap, inplace=True, errors='ignore')
-            
+        
             df_market = df_market.merge(g_map, on=game_keys, how='left', copy=False)
-            
-            # Enforce unique labels once (belt & suspenders)
             df_market = df_market.loc[:, ~df_market.columns.duplicated(keep='first')]
-            
+        
+            # Streamlit KPIs (guarded)
+            if 'Model_Fav_Spread' in df_market.columns:
+                have_spreads = float(df_market['Model_Fav_Spread'].notna().mean())
+                have_k = float(df_market['k'].notna().mean()) if 'k' in df_market.columns else 0.0
+                status.write(
+                    f"🧪 SPREADS merge health — rows: {len(df_market):,} | "
+                    f"have Model_Fav_Spread: **{have_spreads:.1%}** | "
+                    f"have k: **{have_k:.1%}**"
+                )
+            else:
+                status.error("❌ SPREADS: `Model_Fav_Spread` missing after merge — showing debug keys below.")
+                with st.expander("Debug: spreads merge inputs"):
+                    st.write("Expected from g_map: Model_Fav_Spread, Model_Dog_Spread, Favorite/Underdog_Market_Spread, k")
+                    st.dataframe(
+                        df_market[['Sport','Home_Team_Norm','Away_Team_Norm']]
+                        .drop_duplicates().head(30),
+                        use_container_width=True
+                    )
+        
             # Compute per-outcome spreads from model/market ONLY (no engineered fields yet)
             for c in ['Outcome_Norm','Market_Favorite_Team']:
                 df_market[c] = df_market[c].astype(str).str.lower().str.strip()
-            
+        
             is_fav = (df_market['Outcome_Norm'].values == df_market['Market_Favorite_Team'].values)
-            
+        
             df_market['Outcome_Model_Spread']  = np.where(
                 is_fav, df_market['Model_Fav_Spread'].values, df_market['Model_Dog_Spread'].values
             ).astype('float32')
-            
+        
             df_market['Outcome_Market_Spread'] = np.where(
                 is_fav, df_market['Favorite_Market_Spread'].values, df_market['Underdog_Market_Spread'].values
             ).astype('float32')
-            # optional: if you only want games with both sides represented
+        
+            # Optional: require k present if you need both sides represented
             # df_market = df_market.dropna(subset=['k'])
-            
-            # (optional) tidy up temporary key
-            # df_market.drop(columns=['gk'], inplace=True)
+
 
 
         def label_team_role(row):
