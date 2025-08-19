@@ -133,23 +133,24 @@ def detect_and_save_all_sports():
                     trained_models=trained_models,   # may be partial or empty
                     weights=market_weights,
                 )
+               
             except Exception as e:
                 logging.error(f"❌ detect_sharp_moves failed for {sport_label}: {e}", exc_info=True)
                 continue
-
+            
             # ---- 5) Persist sharp moves (trust the hash; writer dedups)
             try:
                 if df_moves is not None and not df_moves.empty:
                     if 'Line_Hash' not in df_moves.columns:
                         logging.error(f"❌ Line_Hash missing for {sport_label}; not writing.")
                     else:
-                        # in-batch dedup (cheap guard)
+                        # In-batch dedup (cheap guard)
                         before = len(df_moves)
                         df_moves = df_moves.drop_duplicates(subset=['Line_Hash'], keep='last')
                         if len(df_moves) < before:
                             logging.info(f"🧽 In-batch dedup: removed {before - len(df_moves)} dupe rows for {sport_label}")
-
-                        write_sharp_moves_to_master(df_moves)  # your existing writer (does cross-batch dedup)
+            
+                        write_sharp_moves_to_master(df_moves, table='sharp_data.sharp_moves_master')
                 else:
                     logging.info(f"ℹ️ No sharp moves produced for {sport_label}.")
             except Exception as e:
