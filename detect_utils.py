@@ -53,45 +53,109 @@ from utils import (
 )
 
 def detect_and_save_all_sports():
-    # 1) ✅ Load ratings first (your preference)
-    
+    """
+    Orchestrates sharp detection per sport with:
+      - single load of market weights (cached),
+      - per-sport optional model loading (non-fatal if missing),
+      - in-batch + cross-batch dedup handled by writer,
+      - lease guard to avoid duplicate runs on restarts,
+      - backtest write + conditional power-rating update.
+    """
     ratings_need_update = False
+    run_started_utc = pd.Timestamp.utcnow().floor('min')
 
-    for sport_label in ["NBA", "MLB", "WNBA", "CFL", "NFL", "NCAAF"]:
+    # ---- 0) Global lease: if something restarted seconds later, bail quickly
+    try:
+        if not take_run_lease(resource="detect_all_sports", lease_ts=run_started_utc, ttl_minutes=5):
+            logging.info("🔒 Another run is active (lease). Exiting.")
+            return
+    except Exception as e:
+        logging.warning(f"⚠️ Lease check failed (continuing defensively): {e}")
+
+    # ---- 1) Cache shared resources
+    try:
+        market_weights = load_market_weights_from_bq()
+        logging.info("✅ Loaded market weights")
+    except Exception as e:
+        logging.error(f"❌ Could not load market weights — aborting all: {e}", exc_info=True)
+        return
+
+    sports_order = ["NBA", "MLB", "WNBA", "CFL", "NFL", "NCAAF"]
+
+    for sport_label in sports_order:
         try:
-            sport_key = SPORTS[sport_label]  # e.g., "basketball_nba" (⚠️ not the label)
+            sport_key = SPORTS[sport_label]  # e.g. "basketball_nba"
+        except KeyError:
+            logging.error(f"❌ Unknown sport label '{sport_label}' in SPORTS mapping; skipping.")
+            continue
+
+        try:
             logging.info(f"🔍 Running sharp detection for {sport_label}…")
-
             timestamp = pd.Timestamp.utcnow()
-            current = fetch_live_odds(sport_key, API_KEY)
-            logging.info(f"📥 Odds pulled: {len(current)} games")
 
-            if not current:
+            # ---- 2) Fetch live odds
+            try:
+                current = fetch_live_odds(sport_key, API_KEY)
+            except Exception as e:
+                logging.error(f"❌ fetch_live_odds failed for {sport_label}: {e}", exc_info=True)
+                continue
+
+            n_games = len(current) if hasattr(current, "__len__") else (current.shape[0] if hasattr(current, "shape") else 0)
+            logging.info(f"📥 Odds pulled: {n_games} games")
+            if not current or n_games == 0:
                 logging.warning(f"⚠️ No odds for {sport_label}, skipping…")
                 continue
 
-            market_weights = load_market_weights_from_bq()
-            trained_models = {
-                m: load_model_from_gcs(sport_label, m) for m in ["spreads", "totals", "h2h"]
-            }
-            trained_models = {k: v for k, v in trained_models.items() if v}
-            logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys())}")
+            # ---- 3) Load models (optional per market)
+            models_to_try = ["spreads", "totals", "h2h"]
+            trained_models = {}
+            for m in models_to_try:
+                try:
+                    model = load_model_from_gcs(sport_label, m)
+                    if model:
+                        trained_models[m] = model
+                except FileNotFoundError:
+                    logging.warning(f"⚠️ Model missing in GCS for {sport_label}-{m}; will skip model scoring for that market.")
+                except Exception as e:
+                    logging.warning(f"⚠️ Model load error for {sport_label}-{m}: {e}")
 
-            # Use the API sport_key here
-            df_moves, df_snap_unused, df_audit = detect_sharp_moves(
-                current=current,
-                previous=None, 
-                sport_key=sport_key,
-                SHARP_BOOKS=SHARP_BOOKS,
-                REC_BOOKS=REC_BOOKS,
-                BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
-                trained_models=trained_models,
-                weights=market_weights,
-                
-            )
+            logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys()) or 'none'}")
 
+            # ---- 4) Detect sharp moves (detect computes Line_Hash)
+            try:
+                df_moves, df_snap_unused, df_audit = detect_sharp_moves(
+                    current=current,
+                    previous=None,              # (optional) wire a cache here if you need deltas vs prior pull
+                    sport_key=sport_key,
+                    SHARP_BOOKS=SHARP_BOOKS,
+                    REC_BOOKS=REC_BOOKS,
+                    BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
+                    trained_models=trained_models,   # may be partial or empty
+                    weights=market_weights,
+                )
+            except Exception as e:
+                logging.error(f"❌ detect_sharp_moves failed for {sport_label}: {e}", exc_info=True)
+                continue
 
-            # --- Backtest (writes to sharp_scores_full) ---
+            # ---- 5) Persist sharp moves (trust the hash; writer dedups)
+            try:
+                if df_moves is not None and not df_moves.empty:
+                    if 'Line_Hash' not in df_moves.columns:
+                        logging.error(f"❌ Line_Hash missing for {sport_label}; not writing.")
+                    else:
+                        # in-batch dedup (cheap guard)
+                        before = len(df_moves)
+                        df_moves = df_moves.drop_duplicates(subset=['Line_Hash'], keep='last')
+                        if len(df_moves) < before:
+                            logging.info(f"🧽 In-batch dedup: removed {before - len(df_moves)} dupe rows for {sport_label}")
+
+                        write_sharp_moves_to_master(df_moves)  # your existing writer (does cross-batch dedup)
+                else:
+                    logging.info(f"ℹ️ No sharp moves produced for {sport_label}.")
+            except Exception as e:
+                logging.error(f"❌ Failed writing sharp moves for {sport_label}: {e}", exc_info=True)
+
+            # ---- 6) Backtest + write finals
             try:
                 backtest_days = 3
                 df_backtest = fetch_scores_and_backtest(
@@ -101,7 +165,7 @@ def detect_and_save_all_sports():
                     api_key=API_KEY,
                     trained_models=trained_models
                 )
-                if isinstance(df_backtest, tuple):
+                if isinstance(df_backtest, tuple):  # you mentioned this
                     df_backtest = df_backtest[0]
 
                 if df_backtest is not None and not df_backtest.empty:
@@ -112,11 +176,10 @@ def detect_and_save_all_sports():
             except Exception as e:
                 logging.error(f"❌ Backtest failed for {sport_label}: {e}", exc_info=True)
 
-
         except Exception as e:
             logging.error(f"❌ Unhandled error during {sport_label} detection: {e}", exc_info=True)
 
-    # 2) ✅ Post-pass: only if we actually saved new finals anywhere
+    # ---- 7) Post-pass ratings update
     if ratings_need_update:
         try:
             logging.info("🟢 Post-pass: updating power ratings AFTER detection …")
@@ -126,4 +189,3 @@ def detect_and_save_all_sports():
             logging.error(f"❌ Post-pass ratings update failed: {e}", exc_info=True)
     else:
         logging.info("ℹ️ No new finals written; skipping post-pass ratings update.")
-
