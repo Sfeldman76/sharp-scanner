@@ -3699,9 +3699,10 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 st.session_state[detection_key] = df_moves_raw
                 st.success(f"✅ Loaded {0 if df_moves_raw is None else len(df_moves_raw)} {label} sharp-move rows from BigQuery")
       
+        skip_grading = False
         if df_moves_raw is None or df_moves_raw.empty:
             st.warning(f"⚠️ No recent sharp moves for {label}.")
-            return pd.DataFrame()
+            skip_grading = True
             
         # === Prepare moves for UI/scoring ===
         df_moves = df_moves_raw.copy()
@@ -3759,13 +3760,17 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         # === Load models and team_feature_map from GCS
         market_list = ['spreads', 'totals', 'h2h']
         trained_models = {}
-        
         for market in market_list:
             model_bundle = load_model_from_gcs(label, market)
             if model_bundle:
                 trained_models[market] = model_bundle
             else:
                 st.warning(f"⚠️ No model found for {market.upper()} — skipping.")
+        
+        # ✅ Guard flag instead of early return
+        render_sharp = len(trained_models) > 0
+        if not render_sharp:
+            st.warning(f"⚠️ No models available for {label}. I’ll show live odds below.").")
         
         # Optional: extract a unified team_feature_map if needed
         team_feature_map = None
