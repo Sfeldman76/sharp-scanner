@@ -3118,7 +3118,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
                     df_canon[col] = np.nan
 
             # --- helpers (vectorized American-odds -> prob) ---
-            d
+            
             val_now   = pd.to_numeric(df_canon['Value'],      errors='coerce').astype('float64')
             val_open  = pd.to_numeric(df_canon['Open_Value'], errors='coerce').astype('float64')
             odds_now  = pd.to_numeric(df_canon['Odds_Price'], errors='coerce').astype('float64')
