@@ -404,7 +404,8 @@ def update_power_ratings(
                 ),
             ).result()
 
-    def load_games(bq, sport: str, cutoff=None):
+    def load_games(bq: bigquery.Client, sport: str, cutoff=None):
+       
         aliases = get_aliases(sport)
         cutoff_param = None
         if cutoff is not None and not (isinstance(cutoff, pd.Timestamp) and pd.isna(cutoff)):
@@ -448,7 +449,8 @@ def update_power_ratings(
 
 
     def sync_current_from_history(bq: bigquery.Client, sports: list[str]):
-           """
+       
+          """
            Upsert ratings_current to the latest snapshot per (Sport, Team, Method)
            from ratings_history for the provided canonical sport names.
            """
@@ -498,7 +500,7 @@ def update_power_ratings(
 
 
     # ---------------- MAIN WORK ----------------
-    bq = bigquery.Client()
+    
     sports_available = fetch_sports_present(bq)
     sports = [s for s in sports_available if s.upper() in SPORT_CFG]
     if not sports:
