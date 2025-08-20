@@ -2301,151 +2301,162 @@ def enrich_and_grade_for_training(
 
     return out
 
+def implied_prob_vec(odds):
+    # expects numpy/pandas array, returns float32 array
+    x = pd.to_numeric(odds, errors='coerce').to_numpy()
+    with np.errstate(divide='ignore', invalid='ignore'):
+        out = np.where(x >= 0, 100.0 / (x + 100.0), (-x) / (-x + 100.0))
+    return out.astype('float32', copy=False)
 
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
-   
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
-    df_empty = pd.DataFrame()
-    scored_all = []
     total_start = time.time()
-    
 
+    # ---------- models presence ----------
     trained_models = trained_models or {}
-
     trained_models_lc = {
         str(k).strip().lower(): v
         for k, v in trained_models.items()
         if isinstance(v, dict)
     }
-    
     HAS_MODELS = any(
         isinstance(v, dict) and ("model" in v or "calibrator" in v)
         for v in trained_models_lc.values()
     )
-    
     model_markets_lower = {
         mk for mk, bundle in trained_models_lc.items()
         if isinstance(bundle, dict) and ("model" in bundle or "calibrator" in bundle)
     }
-    
     logger.info("📦 HAS_MODELS=%s; model markets: %s", HAS_MODELS, sorted(model_markets_lower))
 
-
-    
-    if df is None:
+    # ---------- frame guard ----------
+    if df is None or len(df) == 0:
         df = pd.DataFrame()
-    else:
-        df = df.copy()
+        return df  # nothing to score
 
-    # ---- Base normalization (does not touch open/extreme columns) ----
-    df = df.copy()
-    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
-    # Ensure these are present & typed early
-    if 'Odds_Price' in df.columns:
-        df['Odds_Price'] = pd.to_numeric(df['Odds_Price'], errors='coerce')
-    if 'Value' in df.columns:
-        df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
-    if 'Limit' in df.columns:
-        df['Limit'] = pd.to_numeric(df['Limit'], errors='coerce')
-    else:
-        df['Limit'] = 0.0
+    # ⚠️ NO full copy here: rely on pandas Copy-on-Write to avoid surprises.
+    # Normalize minimal columns in-place.
+    if 'Market' in df.columns:
+        df['Market'] = df['Market'].astype('string').str.lower().str.strip()
 
-    df['Snapshot_Timestamp'] = pd.Timestamp.utcnow()
-    # Bookmaker might be missing; fall back to Book
+    # ensure presence/typing (do once, downcast)
+    for c in ('Odds_Price', 'Value', 'Limit'):
+        if c in df.columns:
+            # downcast floats; Limit default 0.0 if missing
+            df[c] = pd.to_numeric(df[c], errors='coerce').astype('float32')
+    if 'Limit' not in df.columns:
+        df['Limit'] = np.float32(0.0)
+
+    # Timestamp: a single scalar; avoid assigning per-row Python object repeatedly
+    snap_ts = pd.Timestamp.utcnow()
+    df['Snapshot_Timestamp'] = snap_ts
+
+    # 'Bookmaker' fallback + normalization
     if 'Bookmaker' not in df.columns and 'Book' in df.columns:
         df['Bookmaker'] = df['Book']
-    df['Is_Sharp_Book'] = df['Bookmaker'].astype(str).str.lower().str.strip().isin(SHARP_BOOKS).astype(int)
-
-    if 'Game_Start' in df.columns:
-        df['Event_Date'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.date
-    else:
-        df['Event_Date'] = pd.NaT
-
-    # Normalize keys used downstream
-    merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
-    for k in merge_keys:
-        if k in df.columns:
-            df[k] = df[k].astype(str).str.strip().str.lower()
-
-    # Also ensure 'Book' exists for merges that use it
-    if 'Book' not in df.columns and 'Bookmaker' in df.columns:
+    elif 'Bookmaker' in df.columns and 'Book' not in df.columns:
         df['Book'] = df['Bookmaker']
 
-    # ---- Sanity logs for inputs merged in detect() ----
-    have_cols = [c for c in ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob',
-                             'Max_Value','Min_Value','Max_Odds','Min_Odds'] if c in df.columns]
-    logger.info("🔎 Pre-scoring columns present: %s", sorted(have_cols))
+    if 'Bookmaker' in df.columns:
+        df['Bookmaker'] = df['Bookmaker'].astype('string').str.lower().str.strip()
 
-    # ---- Fallbacks (soft) if detect didn't fill something ----
-    # Implied prob for current row (used as fallback for First_Imp_Prob)
+    # Is_Sharp_Book → int8
+    if 'Bookmaker' in df.columns:
+        # assume SHARP_BOOKS is lowercased already; otherwise map/normalize once.
+        df['Is_Sharp_Book'] = df['Bookmaker'].isin(SHARP_BOOKS).astype('int8')
+    else:
+        df['Is_Sharp_Book'] = np.int8(0)
+
+    # Event date only if Game_Start exists (downcast to date, not full datetime per row)
+    if 'Game_Start' in df.columns:
+        gstart = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
+        df['Event_Date'] = gstart.dt.date  # object dtype but small; skip if unused
+
+    # Normalize merge keys (lower/strip) if present — do NOT rebuild entire cols
+    for k in ('Game_Key','Market','Outcome','Bookmaker'):
+        if k in df.columns:
+            df[k] = df[k].astype('string').str.strip().str.lower()
+
+    # Ensure 'Book' exists (already handled above)
+
+    # ---- Presence log (no heavy ops) ----
+    want_cols = ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob',
+                 'Max_Value','Min_Value','Max_Odds','Min_Odds']
+    have_cols = [c for c in want_cols if c in df.columns]
+    logger.info("🔎 Pre-scoring columns present: %s", have_cols)
+
+    # ---------- Implied_Prob (vectorized) ----------
     if 'Implied_Prob' not in df.columns and 'Odds_Price' in df.columns:
-        df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
+        df['Implied_Prob'] = implied_prob_vec(df['Odds_Price'])
+    elif 'Implied_Prob' in df.columns:
+        # ensure float32 to cut memory
+        df['Implied_Prob'] = pd.to_numeric(df['Implied_Prob'], errors='coerce').astype('float32')
 
-    # Open trio safety nets
-    if 'Open_Value' not in df.columns:
+    # ---------- Openers / Extremes (minimal passes, float32) ----------
+    # helper to coerce float32 quickly
+    def _f32(s): return pd.to_numeric(s, errors='coerce').astype('float32')
+
+    if 'Open_Value' in df.columns:
+        df['Open_Value'] = _f32(df['Open_Value'])
+        df['Open_Value'] = df['Open_Value'].where(~df['Open_Value'].isna(), df.get('Value'))
+    else:
         df['Open_Value'] = df.get('Value')
-    else:
-        df['Open_Value'] = df['Open_Value'].fillna(df.get('Value'))
 
-    if 'Open_Odds' not in df.columns:
+    if 'Open_Odds' in df.columns:
+        df['Open_Odds'] = _f32(df['Open_Odds'])
+        df['Open_Odds'] = df['Open_Odds'].where(~df['Open_Odds'].isna(), df.get('Odds_Price'))
+    else:
         df['Open_Odds'] = df.get('Odds_Price')
+
+    if 'Opening_Limit' in df.columns:
+        df['Opening_Limit'] = _f32(df['Opening_Limit']).replace(np.float32(0.0), np.float32(np.nan))
     else:
-        df['Open_Odds'] = df['Open_Odds'].fillna(df.get('Odds_Price'))
+        # keep NaN to avoid pretending we know opener limits
+        df['Opening_Limit'] = np.float32(np.nan)
 
-    if 'Opening_Limit' not in df.columns:
-        df['Opening_Limit'] = np.nan
-    df['Opening_Limit'] = pd.to_numeric(df['Opening_Limit'], errors='coerce').replace(0, np.nan)
-
-    # First_Imp_Prob from Open_Odds if missing
+    # First_Imp_Prob: prefer existing, else from Open_Odds, else from Implied_Prob
     if 'First_Imp_Prob' not in df.columns:
-        df['First_Imp_Prob'] = np.nan
+        df['First_Imp_Prob'] = np.float32(np.nan)
+    else:
+        df['First_Imp_Prob'] = _f32(df['First_Imp_Prob'])
+
     need_imp = df['First_Imp_Prob'].isna() & df['Open_Odds'].notna()
     if need_imp.any():
-        df.loc[need_imp, 'First_Imp_Prob'] = df.loc[need_imp, 'Open_Odds'].apply(implied_prob)
+        df.loc[need_imp, 'First_Imp_Prob'] = implied_prob_vec(df.loc[need_imp, 'Open_Odds'])
     if df['First_Imp_Prob'].isna().any() and 'Implied_Prob' in df.columns:
         df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(df['Implied_Prob'])
 
-    # Extremes safety nets
-    for col, fallback in [
-        ('Max_Value', 'Value'),
-        ('Min_Value', 'Value'),
-        ('Max_Odds', 'Odds_Price'),
-        ('Min_Odds', 'Odds_Price'),
-    ]:
-        if col not in df.columns:
-            df[col] = df.get(fallback)
+    # Extremes: single pass with where()
+    def _ensure_col(col, fb):
+        if col in df.columns:
+            df[col] = _f32(df[col]).where(~df[col].isna(), df.get(fb))
         else:
-            df[col] = df[col].fillna(df.get(fallback))
+            df[col] = df.get(fb)
+    _ensure_col('Max_Value',  'Value')
+    _ensure_col('Min_Value',  'Value')
+    _ensure_col('Max_Odds',   'Odds_Price')
+    _ensure_col('Min_Odds',   'Odds_Price')
 
-    # ---- Quick diagnostics ----
-    logger.info("📊 Missing Open_Value: %.2f%%", 100*df['Open_Value'].isna().mean())
-    logger.info("📊 Missing Open_Odds: %.2f%%", 100*df['Open_Odds'].isna().mean())
-    logger.info("📊 Missing First_Imp_Prob: %.2f%%", 100*df['First_Imp_Prob'].isna().mean())
-    logger.info("📊 Missing Opening_Limit: %.2f%%", 100*df['Opening_Limit'].isna().mean())
+    # ---------- Quick diagnostics (cheap) ----------
+    def _pct_nan(c):
+        return float(df[c].isna().mean() * 100.0) if c in df.columns else 100.0
+    logger.info("📊 Missing Open_Value: %.2f%%", _pct_nan('Open_Value'))
+    logger.info("📊 Missing Open_Odds: %.2f%%", _pct_nan('Open_Odds'))
+    logger.info("📊 Missing First_Imp_Prob: %.2f%%", _pct_nan('First_Imp_Prob'))
+    logger.info("📊 Missing Opening_Limit: %.2f%%", _pct_nan('Opening_Limit'))
 
-    # 🛡️ Ensure Implied_Prob exists in df for fallback to work (if still missing)
-    if 'Implied_Prob' not in df.columns:
-        df['Implied_Prob'] = df['Odds_Price'].apply(implied_prob)
-
-    # Final fills for openers/extremes
-    df['Open_Value'] = df['Open_Value'].fillna(df['Value'])
-    df['Open_Odds'] = df['Open_Odds'].fillna(df['Odds_Price'])
-    df['First_Imp_Prob'] = df['First_Imp_Prob'].fillna(df['Implied_Prob'])
-    df['Max_Value'] = df['Max_Value'].fillna(df['Value'])
-    df['Min_Value'] = df['Min_Value'].fillna(df['Value'])
-    df['Max_Odds'] = df['Max_Odds'].fillna(df['Odds_Price'])
-    df['Min_Odds'] = df['Min_Odds'].fillna(df['Odds_Price'])
-
+    # ---------- Lightweight preview (no sort/dedup over the whole frame) ----------
     try:
-        logger.info("🧪 Sample of enriched df after merge:")
-        logger.info(df[[
-            'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-            'Odds_Price', 'Value',
-            'Open_Odds', 'Open_Value', 'First_Imp_Prob',
-            'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds'
-        ]].drop_duplicates().sort_values('Game_Key').head().to_string(index=False))
+        cols = ['Game_Key','Market','Outcome','Bookmaker','Odds_Price','Value',
+                'Open_Odds','Open_Value','First_Imp_Prob','Max_Value','Min_Value','Max_Odds','Min_Odds']
+        # Select what exists (avoid KeyError) and slice a few rows
+        cols = [c for c in cols if c in df.columns]
+        logger.info("🧪 Sample of enriched df after merge:\n%s",
+                    df.loc[:10, cols].to_string(index=False))
     except Exception as e:
-        logger.warning(f"⚠️ Failed to print preview: {e}")
+        logger.warning("⚠️ Failed to print preview: %s", e)
+
+  
 
     # ---------- 0) Cast once up front ----------
     odds_now   = pd.to_numeric(df['Odds_Price'], errors='coerce').astype('float64')
