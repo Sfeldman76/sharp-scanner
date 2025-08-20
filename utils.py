@@ -1343,38 +1343,73 @@ def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, o
         **flattened_odds_buckets,
         'SharpBetScore': 0.0
     }
-def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
+def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame,
+                                        df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     """
     Applies compute_sharp_metrics() to each row in df using historical snapshots.
     Enriches df with sharp movement features like Sharp_Move_Signal, timing buckets, etc.
+    Safe against category dtype by casting to string for key ops.
     """
-    if df.empty or df_all_snapshots.empty:
+    if df is None or df.empty or df_all_snapshots is None or df_all_snapshots.empty:
         return df
 
     df = df.copy()
-    
-    # Ensure required fields exist
-    for col in ['Game_Key', 'Market', 'Outcome', 'Bookmaker']:
-        if col not in df.columns:
-            raise ValueError(f"Missing required column in df: {col}")
-    
-    # Normalize keys for consistency
-    df_all_snapshots = df_all_snapshots.copy()
-    df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], errors='coerce', utc=True)
-    df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], errors='coerce', utc=True).dt.floor('h')
-    df_all_snapshots['Team_Key'] = (
-        df_all_snapshots['Home_Team_Norm'] + "_" +
-        df_all_snapshots['Away_Team_Norm'] + "_" +
-        df_all_snapshots['Commence_Hour'].astype(str) + "_" +
-        df_all_snapshots['Market'] + "_" +
-        df_all_snapshots['Outcome']
+    snaps = df_all_snapshots.copy()
+
+    # ---- required cols in df ----
+    need_df = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    miss = [c for c in need_df if c not in df.columns]
+    if miss:
+        raise ValueError(f"Missing required column(s) in df: {miss}")
+
+    # ---- cast keys to string (avoid category + issues) ----
+    for c in ('Game_Key','Market','Outcome','Bookmaker'):
+        if c in df.columns:
+            df[c] = df[c].astype('string')
+        if c in snaps.columns:
+            snaps[c] = snaps[c].astype('string')
+
+    # ---- team norms as string (avoid numpy op add on category) ----
+    for c in ('Home_Team_Norm','Away_Team_Norm'):
+        if c in snaps.columns:
+            snaps[c] = snaps[c].astype('string')
+        if c in df.columns:
+            df[c] = df[c].astype('string')
+
+    # ---- timestamps normalized ----
+    if 'Snapshot_Timestamp' in snaps.columns:
+        snaps['Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
+    if 'Game_Start' in snaps.columns:
+        snaps['Game_Start'] = pd.to_datetime(snaps['Game_Start'], errors='coerce', utc=True)
+
+    # ---- optional hour bucket (only if useful for your metrics) ----
+    if 'Game_Start' in snaps.columns:
+        snaps['Commence_Hour'] = snaps['Game_Start'].dt.floor('h')
+    else:
+        snaps['Commence_Hour'] = pd.NaT
+
+    # ---- build a robust Team_Key using str.cat (na safe) ----
+    for c in ('Market','Outcome'):
+        if c in snaps.columns:
+            snaps[c] = snaps[c].astype('string')
+
+    snaps['Team_Key'] = (
+        snaps.get('Home_Team_Norm', pd.Series('', index=snaps.index, dtype='string')).str.cat(
+        snaps.get('Away_Team_Norm', pd.Series('', index=snaps.index, dtype='string')), sep='_', na_rep='')
+        .str.cat(snaps['Commence_Hour'].astype('string'), sep='_', na_rep='')
+        .str.cat(snaps.get('Market', ''), sep='_', na_rep='')
+        .str.cat(snaps.get('Outcome', ''), sep='_', na_rep='')
     )
 
-    # Index for faster access
-    snapshots_grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+    # ---- group snapshots for fast lookup ----
+    # (keys are strings now; no category math will be attempted)
+    group_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    for k in group_keys:
+        if k not in snaps.columns:
+            snaps[k] = pd.Series(pd.NA, index=snaps.index, dtype='string')
+    snapshots_grouped = snaps.groupby(group_keys, sort=False, observed=True)
 
     enriched_rows = []
-
     for idx, row in df.iterrows():
         gk = row['Game_Key']
         market = row['Market']
@@ -1383,7 +1418,6 @@ def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame, df_all_snapshots: pd.D
 
         try:
             group = snapshots_grouped.get_group((gk, market, outcome, book))
-
         except KeyError:
             default_metrics = {
                 'Sharp_Move_Signal': 0,
@@ -1400,48 +1434,36 @@ def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame, df_all_snapshots: pd.D
                 'Odds_Move_Magnitude': 0.0,
                 'SharpBetScore': 0.0,
                 **{f'SharpMove_Magnitude_{b}': 0.0 for b in [
-                    f'{tod}_{mtg}' for tod in ['Overnight', 'Early', 'Midday', 'Late']
-                                    for mtg in ['VeryEarly', 'MidRange', 'LateGame', 'Urgent']
+                    f'{tod}_{mtg}' for tod in ['Overnight','Early','Midday','Late']
+                                   for mtg in ['VeryEarly','MidRange','LateGame','Urgent']
                 ]},
                 **{f'OddsMove_Magnitude_{b}': 0.0 for b in [
-                    f'{tod}_{mtg}' for tod in ['Overnight', 'Early', 'Midday', 'Late']
-                                    for mtg in ['VeryEarly', 'MidRange', 'LateGame', 'Urgent']
-                ]}
+                    f'{tod}_{mtg}' for tod in ['Overnight','Early','Midday','Late']
+                                   for mtg in ['VeryEarly','MidRange','LateGame','Urgent']
+                ]},
             }
-            enriched_rows.append({**row, **default_metrics})
+            # keep original row columns
+            enriched = {**row.to_dict(), **default_metrics}
+            enriched_rows.append(enriched)
             continue
 
-          
+        # sorted by time once
+        if 'Snapshot_Timestamp' in group.columns:
+            group = group.sort_values('Snapshot_Timestamp')
 
-        group = group.sort_values('Snapshot_Timestamp')
+        # openers
+        game_start = group['Game_Start'].dropna().iloc[0] if 'Game_Start' in group and not group['Game_Start'].isna().all() else None
+        open_val   = group['Value'].dropna().iloc[0]      if 'Value' in group and not group['Value'].isna().all() else None
+        open_odds  = group['Odds_Price'].dropna().iloc[0] if 'Odds_Price' in group and not group['Odds_Price'].isna().all() else None
+        opening_limit = group['Limit'].dropna().iloc[0]   if 'Limit' in group and not group['Limit'].isna().all() else None
 
-        game_start = (
-            group['Game_Start'].dropna().iloc[0]
-            if 'Game_Start' in group and not group['Game_Start'].isnull().all()
-            else None
-        )
-        open_val = (
-            group['Value'].dropna().iloc[0]
-            if not group['Value'].isnull().all()
-            else None
-        )
-        open_odds = (
-            group['Odds_Price'].dropna().iloc[0]
-            if not group['Odds_Price'].isnull().all()
-            else None
-        )
-        opening_limit = (
-            group['Limit'].dropna().iloc[0]
-            if not group['Limit'].isnull().all()
-            else None
-        )
-
+        # entries tuple for metrics
         entries = list(zip(
-            group['Limit'],
-            group['Value'],
-            group['Snapshot_Timestamp'],
+            group.get('Limit', pd.Series(index=group.index, dtype='float32')),
+            group.get('Value', pd.Series(index=group.index, dtype='float32')),
+            group.get('Snapshot_Timestamp', pd.Series(index=group.index, dtype='datetime64[ns, UTC]')),
             [game_start] * len(group),
-            group['Odds_Price']
+            group.get('Odds_Price', pd.Series(index=group.index, dtype='float32')),
         ))
 
         metrics = compute_sharp_metrics(
@@ -1452,14 +1474,13 @@ def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame, df_all_snapshots: pd.D
             gk=gk,
             book=book,
             open_odds=open_odds,
-            opening_limit=opening_limit
+            opening_limit=opening_limit,
         )
 
-        enriched_rows.append({**row, **metrics})
+        enriched_rows.append({**row.to_dict(), **metrics})
 
-    df_enriched = pd.DataFrame(enriched_rows)
+    return pd.DataFrame(enriched_rows)
 
-    return df_enriched
     
 def compute_all_sharp_metrics(df_all_snapshots):
     results = []
