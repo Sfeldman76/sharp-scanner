@@ -76,7 +76,8 @@ def detect_and_save_all_sports():
     # ---- 0.1) Pre-run ratings update (moved to the beginning)
     try:
         logging.info("🟢 Pre-pass: updating power ratings BEFORE detection …")
-        pre_summary = update_power_ratings()  # should be NaT-safe / idempotent
+        bq = bigquery.Client()
+        pre_summary = update_power_ratings(bq)   # should be NaT-safe / idempotent
         logging.info(f"📈 Pre-pass ratings summary: {pre_summary}")
     except Exception as e:
         logging.error(f"❌ Pre-pass ratings update failed (continuing with best-known ratings): {e}", exc_info=True)
