@@ -2866,41 +2866,70 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()}")
         st.dataframe(calib_df)
-
-        team_feature_map = (
-            df_market.groupby('Team')
-            .agg({
-                # === Base performance features
-                'Model_Sharp_Win_Prob': 'mean',
-                'SHARP_HIT_BOOL': 'mean',
+        # Start with Game_Key/Team unique combos
+        # --- 0) one row per (Game_Key, Team) to merge everything onto
+        df_team_base = df_bt_prepped[['Game_Key','Team']].drop_duplicates()
         
-                # === Home/Away past hit rate and prob
+        # --- 1) LOO stats (already built above as df_bt_loostats)
+        df_team_base = df_team_base.merge(df_bt_loostats, on=['Game_Key','Team'], how='left')
+        
+        # --- 2) Streaks: ensure dfb has Game_Key, then merge
+        # If dfb doesn't already have Game_Key, add it from df_bt_prepped (safe merge)
+        if 'Game_Key' not in dfb.columns:
+            dfb = dfb.merge(
+                df_bt_prepped[['Game_Key','Team','Snapshot_Timestamp']].drop_duplicates(),
+                on=['Team','Snapshot_Timestamp'],
+                how='left'
+            )
+        
+        streak_cols = [
+            'Team_Recent_Cover_Streak','Team_Recent_Cover_Streak_Home','Team_Recent_Cover_Streak_Away',
+            'Team_Recent_Cover_Streak_Fav','Team_Recent_Cover_Streak_Home_Fav','Team_Recent_Cover_Streak_Away_Fav',
+            'On_Cover_Streak','On_Cover_Streak_Home','On_Cover_Streak_Away',
+            'On_Cover_Streak_Fav','On_Cover_Streak_Home_Fav','On_Cover_Streak_Away_Fav'
+        ]
+        
+        df_team_base = df_team_base.merge(
+            dfb[['Game_Key','Team'] + streak_cols].drop_duplicates(),
+            on=['Game_Key','Team'],
+            how='left'
+        )
+        
+        # --- 3) collapse to one row per Team (final team_feature_map)
+        team_feature_map = (
+            df_team_base.groupby('Team', as_index=False)
+            .agg({
+                # LOO stats
+                'Team_Past_Avg_Model_Prob': 'mean',
+                'Team_Past_Hit_Rate': 'mean',
                 'Team_Past_Avg_Model_Prob_Home': 'mean',
                 'Team_Past_Hit_Rate_Home': 'mean',
                 'Team_Past_Avg_Model_Prob_Away': 'mean',
                 'Team_Past_Hit_Rate_Away': 'mean',
+                'Team_Past_Avg_Model_Prob_Fav': 'mean',
+                'Team_Past_Hit_Rate_Fav': 'mean',
+                'Team_Past_Avg_Model_Prob_Home_Fav': 'mean',
+                'Team_Past_Hit_Rate_Home_Fav': 'mean',
+                'Team_Past_Avg_Model_Prob_Away_Fav': 'mean',
+                'Team_Past_Hit_Rate_Away_Fav': 'mean',
         
-                # === Recent cover streak features (overall + home/away)
+                # Streak metrics
                 'Team_Recent_Cover_Streak': 'mean',
-                'On_Cover_Streak': 'mean',
                 'Team_Recent_Cover_Streak_Home': 'mean',
-                'On_Cover_Streak_Home': 'mean',
                 'Team_Recent_Cover_Streak_Away': 'mean',
-                'On_Cover_Streak_Away': 'mean'
+                'Team_Recent_Cover_Streak_Fav': 'mean',
+                'Team_Recent_Cover_Streak_Home_Fav': 'mean',
+                'Team_Recent_Cover_Streak_Away_Fav': 'mean',
+                'On_Cover_Streak': 'mean',
+                'On_Cover_Streak_Home': 'mean',
+                'On_Cover_Streak_Away': 'mean',
+                'On_Cover_Streak_Fav': 'mean',
+                'On_Cover_Streak_Home_Fav': 'mean',
+                'On_Cover_Streak_Away_Fav': 'mean',
             })
-            .rename(columns={
-                'Model_Sharp_Win_Prob': 'Team_Past_Avg_Model_Prob',
-                'SHARP_HIT_BOOL': 'Team_Past_Hit_Rate',
-                'Team_Recent_Cover_Streak': 'Avg_Recent_Cover_Streak',
-                'On_Cover_Streak': 'Pct_On_Recent_Cover_Streak',
-                'Team_Recent_Cover_Streak_Home': 'Avg_Recent_Cover_Streak_Home',
-                'On_Cover_Streak_Home': 'Pct_On_Recent_Cover_Streak_Home',
-                'Team_Recent_Cover_Streak_Away': 'Avg_Recent_Cover_Streak_Away',
-                'On_Cover_Streak_Away': 'Pct_On_Recent_Cover_Streak_Away'
-            })
-            .reset_index()
         )
 
+        
 
         book_reliability_map = build_book_reliability_map(df_bt, prior_strength=200.0)
 
