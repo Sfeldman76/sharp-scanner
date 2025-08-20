@@ -136,6 +136,7 @@ def detect_and_save_all_sports():
                     current=current,
                     previous=None,
                     sport_key=sport_key,
+                    sport_label=sport_label,
                     SHARP_BOOKS=SHARP_BOOKS,
                     REC_BOOKS=REC_BOOKS,
                     BOOKMAKER_REGIONS=BOOKMAKER_REGIONS,
