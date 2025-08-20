@@ -4223,10 +4223,6 @@ def detect_sharp_moves(
     sport_label: str | None = None,   # e.g. "NBA"
     history_hours: int = 120,         # 0/None to skip history
 ):
-    import logging
-    from datetime import datetime
-    import numpy as np
-    import pandas as pd
 
     if not current:
         logging.warning("⚠️ No current odds data provided.")
@@ -4238,8 +4234,8 @@ def detect_sharp_moves(
     snapshot_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Normalize sport identifiers (both helpful later)
-    _sport_key   = (sport_key or "").strip().lower()      # "basketball_nba"
-    _sport_label = (sport_label or _sport_key).strip().upper()  # "NBA" (else upper of key)
+    _sport_key   = sport_key            # keep as passed (can be None)
+    _sport_label = sport_label  
 
   
 
@@ -4585,7 +4581,7 @@ def detect_sharp_moves(
 
     
   
-    return df_scored, df_all_snapshots, summary_df
+
 
 def compute_weighted_signal(row, market_weights):
     market = str(row.get('Market', '')).lower()
