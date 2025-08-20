@@ -2353,9 +2353,133 @@ def implied_prob_vec(odds):
     with np.errstate(divide='ignore', invalid='ignore'):
         out = np.where(x >= 0, 100.0 / (x + 100.0), (-x) / (-x + 100.0))
     return out.astype('float32', copy=False)
+# --- Memory helpers (near imports) ---
+import os, psutil, gc, time
+import numpy as np
+import pandas as pd
 
-def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
+_PROC = psutil.Process(os.getpid())
+
+def _fmt_mb(x: int | float) -> str:
+    try:
+        return f"{(float(x) / (1024**2)):.1f} MB"
+    except Exception:
+        return f"{x}"
+
+def _rss_bytes() -> int:
+    try:
+        return _PROC.memory_info().rss
+    except Exception:
+        return 0
+
+class MemSampler:
+    """
+    Lightweight periodic memory sampler:
+      - logs process RSS,
+      - lists top local pandas/numpy objects by size,
+      - can auto-gc when a threshold is exceeded.
+    """
+    def __init__(self, logger, interval_s: float = 5.0, topn: int = 8,
+                 deep_columns: bool = False, gc_threshold_mb: float | None = None):
+        self.logger = logger
+        self.interval_s = interval_s
+        self.topn = topn
+        self.deep_columns = deep_columns
+        self.gc_threshold = (gc_threshold_mb * 1024**2) if gc_threshold_mb else None
+        self.start_rss = _rss_bytes()
+        self.last_rss = self.start_rss
+        self.last_t = time.monotonic()
+
+    def _should_sample(self) -> bool:
+        return (time.monotonic() - self.last_t) >= self.interval_s
+
+    def maybe(self, tag: str, frame_locals: dict | None = None):
+        """Call at checkpoints; cheap if interval hasn’t elapsed."""
+        if not self._should_sample():
+            return
+        rss = _rss_bytes()
+        delta = rss - self.last_rss
+        since_start = rss - self.start_rss
+        self.logger.info(
+            "🧠 MEM[%s] RSS=%s (Δ=%s since last, ΣΔ=%s since start)",
+            tag, _fmt_mb(rss), _fmt_mb(delta), _fmt_mb(since_start)
+        )
+        self.last_rss = rss
+        self.last_t = time.monotonic()
+
+        # Top local objects (only pandas/numpy to keep it fast)
+        if frame_locals:
+            tops = []
+            for name, obj in frame_locals.items():
+                try:
+                    if isinstance(obj, pd.DataFrame):
+                        sz = obj.memory_usage(deep=False).sum()
+                    elif isinstance(obj, pd.Series):
+                        sz = obj.memory_usage(deep=False)
+                    elif isinstance(obj, np.ndarray):
+                        sz = obj.nbytes
+                    else:
+                        continue
+                    tops.append((int(sz), name, type(obj).__name__))
+                except Exception:
+                    continue
+            if tops:
+                tops.sort(reverse=True, key=lambda x: x[0])
+                tops = tops[: self.topn]
+                desc = ", ".join(f"{n}:{t}={_fmt_mb(sz)}" for sz, n, t in tops)
+                self.logger.info("🔎 Top locals (pandas/numpy): %s", desc)
+
+        # Optional emergency GC if we’re climbing
+        if self.gc_threshold and rss >= self.gc_threshold:
+            freed = gc.collect()
+            self.logger.warning("🧹 GC triggered at %s (freed objects=%s)", _fmt_mb(rss), freed)
+
+def log_df_top_columns(df: pd.DataFrame, logger, tag: str, topn: int = 12, deep: bool = False):
+    """One-off column-level breakdown for the main df."""
+    try:
+        mu = df.memory_usage(deep=deep).sort_values(ascending=False)
+        head = mu.head(topn)
+        total = mu.sum()
+        logger.info(
+            "📦 DF columns by memory [%s] (top %d, deep=%s): %s | total=%s",
+            tag, topn, deep,
+            ", ".join(f"{c}={_fmt_mb(int(b))}" for c, b in head.items()),
+            _fmt_mb(int(total)),
+        )
+    except Exception as e:
+        logger.warning("⚠️ Column memory breakdown failed [%s]: %s", tag, e)
+
+def apply_blended_sharp_score(
+    df,
+    trained_models,
+    df_all_snapshots=None,
+    weights=None,
+    *,
+    mem_profile: bool = True,          # ← turn on/off
+    mem_interval_s: float = 5.0,       # ← how often to log
+    mem_topn: int = 8,                 # ← how many heavy locals to list
+    mem_gc_threshold_mb: float | None = None,  # ← e.g., 3500 for 3.5 GB auto-GC
+    mem_log_df_columns: bool = False,  # ← one-off df column breakdown
+):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
+
+
+        # --- init sampler ---
+    ms = MemSampler(
+        logger,
+        interval_s=mem_interval_s,
+        topn=mem_topn,
+        deep_columns=False,
+        gc_threshold_mb=mem_gc_threshold_mb,
+    ) if mem_profile else None
+
+    def _mem(tag: str):
+        if ms:
+            # pass locals() so we can see big frames like df, odds_now, etc.
+            ms.maybe(tag, frame_locals=locals())
+
+    _mem("start")
+
     df_empty = pd.DataFrame()
     total_start = time.time()
     scored_all = []
@@ -2491,7 +2615,10 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     logger.info("📊 Missing Open_Odds: %.2f%%", _pct_nan('Open_Odds'))
     logger.info("📊 Missing First_Imp_Prob: %.2f%%", _pct_nan('First_Imp_Prob'))
     logger.info("📊 Missing Opening_Limit: %.2f%%", _pct_nan('Opening_Limit'))
-
+    
+    
+    
+    _mem("post-openers-extremes")
     # ---------- Lightweight preview (no sort/dedup over the whole frame) ----------
     try:
         cols = ['Game_Key','Market','Outcome','Bookmaker','Odds_Price','Value',
@@ -2695,7 +2822,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
     
         return df
 
-
+    _mem("post-line-reverals")
     # If Time missing, derive from Snapshot_Timestamp for Sharp_Timing
     # earlier, ensure this once:
     df['Time'] = pd.to_datetime(df.get('Time', df['Snapshot_Timestamp']),
@@ -2979,7 +3106,7 @@ def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights
             )
         else:
             df['Outcome_Norm'] = pd.Series(pd.Categorical([None] * len(df)), index=df.index)
-      
+    _mem("Precanon") 
     # 4) Determine markets present to score (only those we actually have trained bundles for)
     if HAS_MODELS and not df.empty:
         markets_present = [
