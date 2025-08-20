@@ -954,6 +954,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     
     # ✅ Now apply the filtering with normalized names
     df = df[df['Book'].isin(allowed_books)]
+    
 
 
     if 'Game_Key' not in df.columns or df['Game_Key'].isnull().all():
@@ -983,6 +984,32 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].where(df[col].notna(), None)
+    # enforce sport short form before upload
+    SPORT_KEY_TO_LABEL = {
+        "baseball_mlb": "MLB",
+        "basketball_nba": "NBA",
+        "football_nfl": "NFL",
+        "football_ncaaf": "NCAAF",
+        "basketball_wnba": "WNBA",
+        "canadianfootball_cfl": "CFL",
+        # extend if needed
+    }
+ 
+    if 'Sport' in df.columns:
+        # normalize only known long forms → short label
+        df['Sport'] = df['Sport'].astype(str).str.strip()
+        df['Sport'] = df['Sport'].replace(SPORT_KEY_TO_LABEL)  # maps keys like baseball_mlb → MLB
+        # also handle legacy uppercased values like BASEBALL_MLB
+        df['Sport'] = df['Sport'].str.upper().replace({
+            'BASEBALL_MLB': 'MLB',
+            'BASKETBALL_NBA': 'NBA',
+            'FOOTBALL_NFL': 'NFL',
+            'FOOTBALL_NCAAF': 'NCAAF',
+            'BASKETBALL_WNBA': 'WNBA',
+            'CANADIANFOOTBALL_CFL': 'CFL',
+        })
+        df['Sport'] = df['Sport'].astype('category')
+
     # Preview model columns
     model_cols = [
         'Model_Sharp_Win_Prob', 'Model_Confidence_Tier', 'SharpBetScore',
