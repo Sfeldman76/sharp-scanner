@@ -168,11 +168,14 @@ SPORT_ALIASES = {
 
 
 def update_power_ratings(
-    project_table_scores="sharplogger.sharp_data.game_scores_final",
-    table_history="sharplogger.sharp_data.ratings_history",
-    table_current="sharplogger.sharp_data.ratings_current",
-    default_sport="MLB",bq: bigquery.Client
-):
+    bq: bigquery.Client,
+    *,
+    project_table_scores: str = "sharplogger.sharp_data.game_scores_final",
+    table_history: str = "sharplogger.sharp_data.ratings_history",
+    table_current: str = "sharplogger.sharp_data.ratings_current",
+    default_sport: str = "MLB",
+) -> pd.DataFrame:
+    # TODO: build sql, params
     """
     Backfill-or-incremental team power ratings (scores-only), per sport:
       - MLB  -> Poisson/Skellam-style attack+defense rating (no MOV)
@@ -693,14 +696,18 @@ def update_power_ratings(
     
     # ✅ Always ensure *missing* teams in current are backfilled from history for all known sports
     fill_missing_current_from_history(bq)  # no args → uses all canonical sports present in history
+    
+    result_df = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
 
-    return {
+    summary = {
         "message": ("Update complete." if updated_sports else "No new finals; ratings unchanged."),
         "sports_processed": sorted(updated_sports),
-        "history_rows": len(history_rows_all),
-        "current_rows": len(current_rows_all),
+        "history_rows": int(len(history_rows_all)),
+        "current_rows": int(len(current_rows_all)),
+        "result_rows": int(len(result_df)),
     }
-
+    return result_df, summary
+    
 
 
 def normalize_team(t):
