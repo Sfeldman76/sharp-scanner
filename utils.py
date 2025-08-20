@@ -215,6 +215,23 @@ def stream_query_dfs(bq: bigquery.Client, sql: str, params=None, *, page_rows: i
         del df, tbl
         gc.collect()
 
+def to_utc_ts(x):
+    """
+    Return a pandas Timestamp in UTC.
+    - None/NaT -> NaT
+    - Naive -> tz_localize('UTC')
+    - Aware -> tz_convert('UTC')
+    """
+    if x is None or (hasattr(pd, "isna") and pd.isna(x)):
+        return pd.NaT
+    t = pd.to_datetime(x, errors="coerce")
+    if t is None or pd.isna(t):
+        return pd.NaT
+    # pandas Timestamp has .tz / .tzinfo depending on version; handle both
+    if getattr(t, "tzinfo", None) is None and getattr(t, "tz", None) is None:
+        return t.tz_localize("UTC")
+    else:
+        return t.tz_convert("UTC")
 SPORT_ALIASES = {
         "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
         "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
@@ -370,15 +387,14 @@ def update_power_ratings(
 
     def has_new_finals_since(sport: str, last_ts):
         aliases = get_aliases(sport)
+    
+        # Normalize last_ts once → UTC-aware pandas Timestamp or NaT
         cutoff_check = None
-        if last_ts is not None and not (isinstance(last_ts, pd.Timestamp) and pd.isna(last_ts)):
-            if isinstance(last_ts, pd.Timestamp):
-                lt = last_ts.tz_localize("UTC") if last_ts.tzinfo is None else last_ts.tz_convert("UTC")
-                cutoff_check = (lt - pd.Timedelta(days=BACKFILL_DAYS)).to_pydatetime()
-            elif isinstance(last_ts, dt.datetime):
-                lt = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=dt.timezone.utc)
-                cutoff_check = lt - dt.timedelta(days=BACKFILL_DAYS)
-
+        if last_ts is not None:
+            lt_utc = to_utc_ts(last_ts)  # <- the helper
+            if not pd.isna(lt_utc):
+                cutoff_check = (lt_utc - pd.Timedelta(days=BACKFILL_DAYS)).to_pydatetime()  # BigQuery wants a py datetime
+    
         sql = f"""
           SELECT COUNT(*) AS n
           FROM `{project_table_scores}`
@@ -387,10 +403,13 @@ def update_power_ratings(
             {'' if cutoff_check is None else 'AND TIMESTAMP(Inserted_Timestamp) >= @cutoff'}
           LIMIT 1
         """
+    
         params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
         if cutoff_check is not None:
             params.append(bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_check))
-        n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe().n.iloc[0]
+    
+        n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)) \
+               .to_dataframe().n.iloc[0]
         return n > 0
 
     def sports_present_in_history() -> list[str]:
@@ -459,11 +478,10 @@ def update_power_ratings(
 
     def load_games_stream(sport: str, aliases: list[str], cutoff=None, page_rows: int = 200_000):
         cutoff_param = None
-        if cutoff is not None and not (isinstance(cutoff, pd.Timestamp) and pd.isna(cutoff)):
-            if isinstance(cutoff, pd.Timestamp):
-                cutoff_param = (cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")).to_pydatetime()
-            elif isinstance(cutoff, dt.datetime):
-                cutoff_param = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=dt.timezone.utc)
+        if cutoff is not None and not pd.isna(cutoff):
+            cutoff_utc = to_utc_ts(cutoff)        # normalize once
+            if not pd.isna(cutoff_utc):
+                cutoff_param = cutoff_utc.to_pydatetime()  # BigQuery needs a Python datetime (UTC-aware)
 
         base_sql = f"""
         SELECT
@@ -526,7 +544,7 @@ def update_power_ratings(
             window_start = None
         else:
             if isinstance(last_ts, pd.Timestamp):
-                last_ts_utc = last_ts.tz_localize("UTC") if last_ts.tzinfo is None else last_ts.tz_convert("UTC")
+                last_ts_utc = to_utc_ts(last_ts)
                 window_start = last_ts_utc - pd.Timedelta(days=BACKFILL_DAYS)
             else:
                 lt = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=dt.timezone.utc)
@@ -541,19 +559,21 @@ def update_power_ratings(
         if cfg["model"] == "elo":
             # K-decay via global min/max start times (constant across chunks)
             cutoff_param = None
+            
             if window_start is not None:
-                cutoff_param = (window_start.tz_localize("UTC") if isinstance(window_start, pd.Timestamp) and window_start.tzinfo is None
-                                else window_start)
+                ws = to_utc_ts(window_start)
+                if not pd.isna(ws):
+                    cutoff_param = ws.to_pydatetime()  # BigQuery param wants a python datetime (UTC-aware)
                 if isinstance(cutoff_param, pd.Timestamp):
                     cutoff_param = cutoff_param.to_pydatetime()
             min_ts, max_ts = _get_game_time_bounds(aliases, cutoff_param)
+            min_ts = to_utc_ts(min_ts)
+            max_ts = to_utc_ts(max_ts)
             if pd.isna(min_ts) or pd.isna(max_ts):
                 continue
-            min_ts = pd.Timestamp(min_ts, tz="UTC")
-            max_ts = pd.Timestamp(max_ts, tz="UTC")
             span_sec = max((max_ts - min_ts).total_seconds(), 1.0)
             def k_for(ts) -> float:
-                t = pd.Timestamp(ts, tz="UTC")
+                t = x_utc = to_utc_ts(x)
                 prog = (t - min_ts).total_seconds() / span_sec
                 return cfg["K_late"] + (cfg["K_start"] - cfg["K_late"]) * (1.0 - prog)
 
