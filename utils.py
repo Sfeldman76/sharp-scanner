@@ -449,53 +449,54 @@ def update_power_ratings(
 
 
     def sync_current_from_history(bq: bigquery.Client, sports: list[str]):
-       
-          """
-           Upsert ratings_current to the latest snapshot per (Sport, Team, Method)
-           from ratings_history for the provided canonical sport names.
-           """
-           if not sports:
-               return
-       
-           # Use a parameterized MERGE selecting the latest per (Sport, Team, Method)
-           # We do it sport-by-sport to keep params simple.
-           for sport in sports:
-               # canonical sport name (we write canonical keys into history/current)
-               sql = f"""
-               MERGE `{table_current}` T
-               USING (
-                 WITH latest AS (
-                   SELECT
-                     Sport,
-                     Team,
-                     Method,
-                     Rating,
-                     Updated_At,
-                     ROW_NUMBER() OVER (
-                       PARTITION BY Sport, Team, Method
-                       ORDER BY Updated_At DESC
-                     ) AS rn
-                   FROM `{table_history}`
-                   WHERE Sport = @sport
-                 )
-                 SELECT Sport, Team, Method, Rating, Updated_At
-                 FROM latest
-                 WHERE rn = 1
-               ) S
-               ON T.Sport = S.Sport AND T.Team = S.Team AND T.Method = S.Method
-               WHEN MATCHED THEN UPDATE SET
-                 T.Rating = S.Rating,
-                 T.Updated_At = S.Updated_At
-               WHEN NOT MATCHED THEN
-                 INSERT (Sport, Team, Method, Rating, Updated_At)
-                 VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
-               """
-               bq.query(
-                   sql,
-                   job_config=bigquery.QueryJobConfig(
-                       query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
-                   ),
-               ).result()
+        """
+        Upsert ratings_current to the latest snapshot per (Sport, Team, Method)
+        from ratings_history for the provided canonical sport names.
+        """
+        if not sports:
+            return
+    
+        # Use a parameterized MERGE selecting the latest per (Sport, Team, Method)
+        # We do it sport-by-sport to keep params simple.
+        for sport in sports:
+            # canonical sport name (we write canonical keys into history/current)
+            sql = f"""
+            MERGE `{table_current}` T
+            USING (
+              WITH latest AS (
+                SELECT
+                  Sport,
+                  Team,
+                  Method,
+                  Rating,
+                  Updated_At,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY Sport, Team, Method
+                    ORDER BY Updated_At DESC
+                  ) AS rn
+                FROM `{table_history}`
+                WHERE Sport = @sport
+              )
+              SELECT Sport, Team, Method, Rating, Updated_At
+              FROM latest
+              WHERE rn = 1
+            ) S
+            ON T.Sport = S.Sport AND T.Team = S.Team AND T.Method = S.Method
+            WHEN MATCHED THEN UPDATE SET
+              T.Rating = S.Rating,
+              T.Updated_At = S.Updated_At
+            WHEN NOT MATCHED THEN
+              INSERT (Sport, Team, Method, Rating, Updated_At)
+              VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
+            """
+            bq.query(
+                sql,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("sport", "STRING", sport)
+                    ]
+                ),
+            ).result()
 
 
 
