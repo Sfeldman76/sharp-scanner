@@ -4194,262 +4194,204 @@ def detect_sharp_moves(
     if df.empty:
         logging.warning("⚠️ No sharp rows built.")
         return df, df_history, pd.DataFrame()
-    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
-    df['Outcome_Norm'] = df['Outcome_Norm'].astype(str).str.lower().str.strip()
-
-    df['Was_Canonical'] = False
-    df.loc[(df['Market'] == 'totals') & (df['Outcome_Norm'] == 'over'), 'Was_Canonical'] = True
-    df.loc[(df['Market'] == 'spreads') & (df['Value'] < 0), 'Was_Canonical'] = True
-    df.loc[(df['Market'] == 'h2h') & (df['Value'] < 0), 'Was_Canonical'] = True
     
+    # keep only columns we actually use below (add if needed)
+    _need_df = [
+        'Game_Key','Team_Key','Market','Outcome','Outcome_Norm','Bookmaker',
+        'Value','Odds_Price','Limit','Game_Start'
+    ]
+    _have = [c for c in _need_df if c in df.columns]
+    df = df[_have]
+    
+    norm_str = lambda s: s.astype('string').str.strip().str.lower()
+    for c in ('Market','Outcome','Outcome_Norm','Bookmaker','Game_Key'):
+        if c in df.columns:
+            df[c] = norm_str(df[c])
+    
+    # canonical flag (vectorized)
+    df['Was_Canonical'] = False
+    mkt = df['Market']
+    outn = df['Outcome_Norm']
+    val = pd.to_numeric(df.get('Value'), errors='coerce')
+    
+    df.loc[(mkt.eq('totals') & outn.eq('over')) |
+           (mkt.isin(('spreads','h2h')) & (val < 0)), 'Was_Canonical'] = True
+    
+    # convert hot strings → category (big memory win)
+    for c in ('Market','Outcome','Outcome_Norm','Bookmaker','Game_Key'):
+        if c in df.columns:
+            df[c] = df[c].astype('category')
+    
+    # numeric downcasts
+    for c in ('Value','Odds_Price','Limit'):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce', downcast='float')
+    if 'Game_Start' in df.columns:
+        df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
+    
+    # ─────────────────────────────────────────────────────────
+    # 1) Models (lazy load)
+    # ─────────────────────────────────────────────────────────
     if trained_models is None:
         trained_models = get_trained_models(sport_key)
-
     
-    try:
-        df_all_snapshots = read_recent_sharp_master_cached(hours=120)
-        df_all_snapshots['Bookmaker'] = df_all_snapshots['Bookmaker'].astype(str).str.strip().str.lower()
-        df_all_snapshots['Book'] = df_all_snapshots['Book'].astype(str).str.strip().str.lower()
-        df_all_snapshots['Game'] = df_all_snapshots['Game'].astype(str).str.strip().str.lower()
-        df_all_snapshots['Market'] = df_all_snapshots['Market'].astype(str).str.strip().str.lower()
-        df_all_snapshots['Outcome'] = df_all_snapshots['Outcome'].astype(str).str.strip().str.lower()
-        df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(df_all_snapshots['Snapshot_Timestamp'], errors='coerce', utc=True)
-        
-   
+    # ─────────────────────────────────────────────────────────
+    # 2) Read snapshots — skinny, normalized, categorized
+    # ─────────────────────────────────────────────────────────
+    # pull only columns used for joins/aggregations
+    snap_cols = [
+        'Game_Key','Market','Outcome','Bookmaker',
+        'Limit','Value','Odds_Price','Game_Start','Snapshot_Timestamp'
+    ]
+    df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    df_all_snapshots = df_all_snapshots[[c for c in snap_cols if c in df_all_snapshots.columns]]
     
-                # --- 3) Normalize keys (both sides) ---
-        merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
-        for k in merge_keys:
-            df[k] = df[k].astype(str).str.strip().str.lower()
-            df_all_snapshots[k] = df_all_snapshots[k].astype(str).str.strip().str.lower()
-
-        # --- 4) Ensure required snapshot columns & parse times ---
-        for c in ['Limit','Value','Odds_Price','Game_Start','Snapshot_Timestamp']:
-            if c not in df_all_snapshots.columns:
-                df_all_snapshots[c] = np.nan
+    # normalize once, then category
+    for c in ('Game_Key','Market','Outcome','Bookmaker'):
+        if c in df_all_snapshots.columns:
+            df_all_snapshots[c] = df_all_snapshots[c].astype('string').str.strip().str.lower().astype('category')
+    
+    # numeric downcasts
+    for c in ('Value','Odds_Price','Limit'):
+        if c in df_all_snapshots.columns:
+            df_all_snapshots[c] = pd.to_numeric(df_all_snapshots[c], errors='coerce', downcast='float')
+    
+    # timestamps
+    if 'Snapshot_Timestamp' in df_all_snapshots.columns:
         df_all_snapshots['Snapshot_Timestamp'] = pd.to_datetime(
             df_all_snapshots['Snapshot_Timestamp'], errors='coerce', utc=True
         )
+    if 'Game_Start' in df_all_snapshots.columns:
         df_all_snapshots['Game_Start'] = pd.to_datetime(
             df_all_snapshots['Game_Start'], errors='coerce', utc=True
         )
-
-        # --- 5) Open-trio via compute_sharp_metrics (per key+book) ---
-        snaps = (
-            df_all_snapshots.merge(df[merge_keys].drop_duplicates(), on=merge_keys, how='inner')
-                            .sort_values('Snapshot_Timestamp')
-        )
-        # spreads/totals → line extremes from Value
+    
+    # ─────────────────────────────────────────────────────────
+    # 3) Filter snapshots to only keys present in df (reduces memory)
+    # ─────────────────────────────────────────────────────────
+    merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
+    _keys = df[merge_keys].drop_duplicates()
+    snaps = df_all_snapshots.merge(_keys, on=merge_keys, how='inner')
+    
+    # ensure sorted once (stable, low mem)
+    if not snaps.empty and 'Snapshot_Timestamp' in snaps.columns:
+        snaps = snaps.sort_values('Snapshot_Timestamp', kind='mergesort')
+    
+    # ─────────────────────────────────────────────────────────
+    # 4) Extremes (vectorized)
+    # ─────────────────────────────────────────────────────────
+    # spreads/totals → extremes from Value
+    if not snaps.empty:
+        m_sp_to = snaps['Market'].isin(('spreads','totals'))
         ext_val = (
-            snaps[snaps['Market'].isin(['spreads','totals'])]
-              .dropna(subset=['Value'])
-              .groupby(merge_keys)['Value']
-              .agg(Max_Value='max', Min_Value='min')
+            snaps.loc[m_sp_to, merge_keys + ['Value']]
+                 .dropna(subset=['Value'])
+                 .groupby(merge_keys, observed=True)['Value']
+                 .agg(Max_Value='max', Min_Value='min')
         )
-        
-        # all markets → odds extremes from Odds_Price
+        # all markets → extremes from Odds_Price
         ext_odds = (
-            snaps.dropna(subset=['Odds_Price'])
-                 .groupby(merge_keys)['Odds_Price']
+            snaps.loc[:, merge_keys + ['Odds_Price']]
+                 .dropna(subset=['Odds_Price'])
+                 .groupby(merge_keys, observed=True)['Odds_Price']
                  .agg(Max_Odds='max', Min_Odds='min')
         )
-        
-        df_extremes = ext_val.join(ext_odds, how='outer').reset_index()
-       
-
-        # merge into df
-        for k in merge_keys:
-            df_extremes[k] = df_extremes[k].astype(str).str.strip().str.lower()
-        df = df.merge(df_extremes, on=merge_keys, how='left')
-        logger.info("📈 Extremes merged from history: Max/Min columns now present: %s",
-                    sorted(set(df.columns) & {'Max_Value','Min_Value','Max_Odds','Min_Odds'}))
-        if snaps.empty:
-            # Safe fallbacks so apply_blended_sharp_score still runs
-            df['Open_Value'] = df.get('Open_Value', df.get('Value'))
-            df['Open_Odds']  = df.get('Open_Odds',  df.get('Odds_Price'))
-            df['Opening_Limit'] = df.get('Opening_Limit', np.nan)
-            if 'First_Imp_Prob' not in df.columns:
-                df['First_Imp_Prob'] = np.nan
-        else:
-            def _entries_for_group(g):
-                # (limit, value, ts, game_start, odds)
-                return [
-                    (r.Limit, r.Value, r.Snapshot_Timestamp, r.Game_Start, r.Odds_Price)
-                    for r in g[['Limit','Value','Snapshot_Timestamp','Game_Start','Odds_Price']]
-                        .itertuples(index=False, name='Row')
-                ]
-
-            
-            def _compute_for_group(g):
-                # pull keys from the group name, not from a row
-                if isinstance(g.name, tuple):
-                    key_tuple = g.name
-                else:
-                    key_tuple = (g.name,)
-            
-                # map tuple positions back to names
-                idx = {name: pos for pos, name in enumerate(merge_keys)}
-                mtype = str(key_tuple[idx['Market']])
-                label = str(key_tuple[idx['Outcome']])
-                gk    = str(key_tuple[idx['Game_Key']])
-                book  = str(key_tuple[idx['Bookmaker']])
-            
-                res = compute_sharp_metrics(
-                    entries=_entries_for_group(g),
-                    open_val=None, open_odds=None, opening_limit=None,   # let function derive earliest
-                    mtype=mtype, label=label, gk=gk, book=book
-                )
-                return pd.Series({
-                    'Open_Value':    res.get('Open_Value'),
-                    'Open_Odds':     res.get('Open_Odds'),
-                    'Opening_Limit': res.get('Opening_Limit'),
-                })
-
-
-
-            try:
-                opens_df = snaps.groupby(merge_keys, as_index=False, sort=False) \
-                                .apply(_compute_for_group, include_groups=False)
-            except TypeError:
-                # pandas < 2.1
-                opens_df = snaps.groupby(merge_keys, as_index=False, sort=False) \
-                                .apply(_compute_for_group)
-            
-
-
-            # Normalize keys & types on the result, then merge
-            for k in merge_keys:
-                opens_df[k] = opens_df[k].astype(str).str.strip().str.lower()
-            for c in ['Open_Value','Open_Odds','Opening_Limit']:
-                opens_df[c] = pd.to_numeric(opens_df[c], errors='coerce')
-
-            df = df.drop(columns=[c for c in ['Open_Value','Open_Odds','Opening_Limit','First_Imp_Prob']
-                                  if c in df.columns], errors='ignore')
-            df = df.merge(opens_df, on=merge_keys, how='left')
-                        # --- Fallback: if Opening_Limit still null, use earliest non-null Limit from snapshots ---
-            # after df = df.merge(opens_df, on=merge_keys, how='left')
-
-        # --- Fallbacks for Opening_Limit (run after merge with opens_df) ---
-        if 'Limit' in df_all_snapshots.columns:
-            df_all_snapshots['Limit'] = pd.to_numeric(df_all_snapshots['Limit'], errors='coerce')
-        
-        if 'Opening_Limit' not in df.columns:
-            df['Opening_Limit'] = np.nan  # safety
-        
-        # Only try earliest-from-snapshots if we actually have snapshots
-        if not snaps.empty and df['Opening_Limit'].isna().any():
-            earliest_limit = (
-                snaps.dropna(subset=['Limit'])
-                     .sort_values('Snapshot_Timestamp')
-                     .groupby(merge_keys, as_index=False)
-                     .agg(Opening_Limit_Earliest=('Limit','first'))
-            )
-            for k in merge_keys:
-                earliest_limit[k] = earliest_limit[k].astype(str).str.strip().str.lower()
-        
-            df = df.merge(earliest_limit, on=merge_keys, how='left')
-            # fill only where missing; keep any already-present Opening_Limit
-            if 'Opening_Limit_Earliest' in df.columns:
-                df['Opening_Limit'] = df['Opening_Limit'].fillna(df['Opening_Limit_Earliest'])
-                df.drop(columns=['Opening_Limit_Earliest'], inplace=True)
-        
-        # Last resort: use current Limit if still missing
-        if {'Opening_Limit','Limit'}.issubset(df.columns):
-            need = df['Opening_Limit'].isna() & df['Limit'].notna()
-            if need.any():
-                df.loc[need, 'Opening_Limit'] = pd.to_numeric(df.loc[need, 'Limit'], errors='coerce')
-                           
-        # Compute First_Imp_Prob from Open_Odds if missing
+        df_extremes = ext_val.join(ext_odds, how='outer')
+        df = df.merge(df_extremes.reset_index(), on=merge_keys, how='left')
+    
+    # ─────────────────────────────────────────────────────────
+    # 5) Openers (vectorized “first non-null” rather than groupby.apply)
+    # ─────────────────────────────────────────────────────────
+    # take the first non-null by time for value/odds/limit per key
+    def _first_nonnull(g, col):
+        # g must be pre-sorted by Snapshot_Timestamp
+        s = g[col]
+        idx = s.first_valid_index()
+        return g.loc[idx, col] if idx is not None else np.nan
+    
+    opens_df = None
+    if not snaps.empty:
+        gb = snaps.groupby(merge_keys, sort=False, observed=True)
+        # build with dict comprehension to avoid multiple passes over big frames
+        open_val  = gb['Value'].first()       # after sort: first value (may be NaN)
+        open_odds = gb['Odds_Price'].first()
+        open_lim  = gb['Limit'].first()
+    
+        opens_df = pd.DataFrame({
+            'Open_Value': open_val,
+            'Open_Odds':  open_odds,
+            'Opening_Limit': open_lim,
+        }).reset_index()
+    
+        df = df.merge(opens_df, on=merge_keys, how='left')
+    
+    # Fallbacks (fill from current if still missing; keep narrow ops)
+    if 'Opening_Limit' in df.columns and 'Limit' in df.columns:
+        need = df['Opening_Limit'].isna() & df['Limit'].notna()
+        if need.any():
+            df.loc[need, 'Opening_Limit'] = df.loc[need, 'Limit']
+    
+    # First implied prob from open odds (vectorized)
+    if 'Open_Odds' in df.columns:
         if 'First_Imp_Prob' not in df.columns:
             df['First_Imp_Prob'] = np.nan
         need_imp = df['First_Imp_Prob'].isna() & df['Open_Odds'].notna()
         if need_imp.any():
             df.loc[need_imp, 'First_Imp_Prob'] = df.loc[need_imp, 'Open_Odds'].apply(implied_prob)
-
-        # --- continue with your inverse hydration block as-is ---
     
-        # ➕ Define inverse rows BEFORE using them
-        df_inverse = df[df['Was_Canonical'] == False].copy()
-        logger.info(f"📦 Built {len(df_inverse)} inverse rows")
+    # ─────────────────────────────────────────────────────────
+    # 6) Inverse hydration (only rows needing it; avoid .update() on indexes)
+    # ─────────────────────────────────────────────────────────
+    df_inverse = df.loc[~df['Was_Canonical']]
+    need_hydrate_mask = df_inverse['Value'].isna() | df_inverse['Odds_Price'].isna()
+    if need_hydrate_mask.any():
+        needs_hydration = df_inverse.loc[need_hydrate_mask].copy()
+        needs_hydration = hydrate_inverse_rows_from_snapshot(needs_hydration, df_all_snapshots)
+        needs_hydration = fallback_flip_inverse_rows(needs_hydration)
+        # join back by a stable key without reindexing the whole df
+        tmp = needs_hydration[['Team_Key','Value','Odds_Price','Limit']].drop_duplicates('Team_Key')
+        df = df.merge(tmp, on='Team_Key', how='left', suffixes=('','__hyd'))
+        for c in ('Value','Odds_Price','Limit'):
+            hc = f'{c}__hyd'
+            if hc in df.columns:
+                need = df[c].isna() & df[hc].notna()
+                if need.any():
+                    df.loc[need, c] = df.loc[need, hc]
+                df.drop(columns=[hc], inplace=True)
     
-        # 🔍 Check for misclassified canonical outcomes in inverse rows
-        bad_inverse_rows = df_inverse[
-            ((df_inverse['Market'] == 'totals') & (df_inverse['Outcome_Norm'] == 'over')) |
-            ((df_inverse['Market'].isin(['spreads', 'h2h'])) & (df_inverse['Value'] < 0))
-        ]
+    # ─────────────────────────────────────────────────────────
+    # 7) Dedup and rowwise sharp metrics (one pass)
+    # ─────────────────────────────────────────────────────────
+    df = df.drop_duplicates(subset=merge_keys, keep='last')
+    df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
     
-        if not bad_inverse_rows.empty:
-            logger.warning(f"🚨 {len(bad_inverse_rows)} rows in df_inverse should have been canonical!")
-            logger.warning(bad_inverse_rows[['Team_Key', 'Market', 'Outcome_Norm', 'Value']].head(10).to_string(index=False))
-    
-        # 🧠 Preserve original outcome before hydration flip
-        df_inverse['Original_Outcome_Norm'] = df_inverse['Outcome_Norm']
-    
-       # Only hydrate if Value or Odds_Price is missing
-        needs_hydration = df_inverse[
-            df_inverse['Value'].isna() | df_inverse['Odds_Price'].isna()
-        ].copy()
-        
-        logger.info(f"💧 {len(needs_hydration)} inverse rows need hydration (missing Value or Odds)")
-        
-        if not needs_hydration.empty:
-            needs_hydration = hydrate_inverse_rows_from_snapshot(needs_hydration, df_all_snapshots)
-            needs_hydration = fallback_flip_inverse_rows(needs_hydration)
-        
-            # Update only those rows in the main df
-            df.set_index('Team_Key', inplace=True)
-            needs_hydration.set_index('Team_Key', inplace=True)
-            df.update(needs_hydration)
-            df.reset_index(inplace=True)
-        else:
-            logger.info("✅ All inverse rows already had Value and Odds_Price — no hydration needed.")
-
-
-    
-        # ✅ Deduplicate before computing sharp metrics
-        df = df.drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"])
-    
-        df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
-    
-        market_weights = load_market_weights_from_bq()
-        now = pd.Timestamp.utcnow()  # ✅ Add this line BEFORE using `now`
-
-
-
-        df['Snapshot_Timestamp'] = now
+    # ─────────────────────────────────────────────────────────
+    # 8) Score (avoid extra copies) + housekeeping
+    # ─────────────────────────────────────────────────────────
+    market_weights = load_market_weights_from_bq()
+    now = pd.Timestamp.utcnow()
+    df['Snapshot_Timestamp'] = now
+    if 'Game_Start' in df.columns:
         df['Event_Date'] = df['Game_Start'].dt.date
-        df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
-        #logging.info("🧪 Sample final spread rows before scoring:")
-        #logging.info(df[df['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price']].head(50).to_string(index=False))
-   
-        df['Line_Hash'] = df.apply(compute_line_hash, axis=1)  # ✅ Move this BEFORE scoring
-        # 📝 Log column list before scoring
-        logging.info(f"🧾 Columns before scoring: {df.columns.tolist()}")
-        df_scored = apply_blended_sharp_score(df.copy(), trained_models, df_all_snapshots, market_weights)
     
-        if not df_scored.empty:
-     
-            df_scored['Pre_Game'] = df_scored['Game_Start'] > now
-            df_scored['Post_Game'] = ~df_scored['Pre_Game']
-   
-            logger.info(f"✅ Final scored row count: total={len(df_scored)}, canonical={df_scored['Was_Canonical'].sum()}, inverse={(~df_scored['Was_Canonical']).sum()}")
-
-            df_scored = df_scored.drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"])
-
-            #logger.info("🔎 Sample scored spread rows:")
-            #logger.info(df_scored[df_scored['Market'] == 'spreads'][['Game', 'Outcome', 'Bookmaker', 'Value', 'Odds_Price', 'Was_Canonical']].head(30).to_string(index=False))
-
-            df = df_scored.copy()
-            summary_df = summarize_consensus(df, SHARP_BOOKS, REC_BOOKS)
-        else:
-            logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
-            df = pd.DataFrame()
-            summary_df = pd.DataFrame()
+    # Compute hash before scoring
+    df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
     
-    except Exception as e:
-        logging.error(f"❌ Error applying model scoring: {e}", exc_info=True)
-        df = pd.DataFrame()
+    # If apply_blended_sharp_score mutates, let it copy internally; otherwise pass df directly.
+    df_scored = apply_blended_sharp_score(df, trained_models, df_all_snapshots, market_weights)
+    
+    if not df_scored.empty:
+        df_scored['Pre_Game']  = df_scored['Game_Start'] > now
+        df_scored['Post_Game'] = ~df_scored['Pre_Game']
+        df_scored = df_scored.drop_duplicates(subset=merge_keys, keep='last')
+        summary_df = summarize_consensus(df_scored, SHARP_BOOKS, REC_BOOKS)
+    else:
+        logging.warning("⚠️ apply_blended_sharp_score() returned no rows")
+        df_scored = pd.DataFrame()
         summary_df = pd.DataFrame()
+    
+    return df_scored, df_all_snapshots, summary_df
+
     
   
     return df_scored, df_all_snapshots, summary_df
