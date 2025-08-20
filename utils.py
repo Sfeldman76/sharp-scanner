@@ -171,7 +171,7 @@ def update_power_ratings(
     project_table_scores="sharplogger.sharp_data.game_scores_final",
     table_history="sharplogger.sharp_data.ratings_history",
     table_current="sharplogger.sharp_data.ratings_current",
-    default_sport="MLB",
+    default_sport="MLB",bq: bigquery.Client
 ):
     """
     Backfill-or-incremental team power ratings (scores-only), per sport:
