@@ -4,6 +4,12 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException
 from google.cloud import tasks_v2
 from google.api_core.exceptions import AlreadyExists
+# ✅ Configure logging once, right after imports
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 
 app = FastAPI()
 
@@ -68,3 +74,4 @@ async def sharp_detection_worker(request: Request):
         logging.exception("❌ Error in sharp_detection_worker")
         # 500 => Cloud Tasks will retry per queue policy
         raise HTTPException(status_code=500, detail=str(e))
+
