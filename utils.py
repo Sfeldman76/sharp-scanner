@@ -209,7 +209,7 @@ def update_power_ratings(
         span = max((dmax - dmin).total_seconds(), 1.0)
         return (ts_series - dmin).dt.total_seconds() / span
 
-    BACKFILL_DAYS = 7 
+    BACKFILL_DAYS = 14
     def load_seed_ratings(bq: bigquery.Client, sport: str, asof_ts: dt.datetime | pd.Timestamp | None) -> dict[str, float]:
         """
         Return latest ratings per team with Updated_At <= asof_ts.
@@ -349,7 +349,7 @@ def update_power_ratings(
           FROM `{project_table_scores}`
           WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
             AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-            {'' if cutoff_check is None else 'AND TIMESTAMP(Inserted_Timestamp) > @cutoff'}
+            {'' if cutoff_check is None else 'AND TIMESTAMP(Inserted_Timestamp) >= @cutoff'}
           LIMIT 1
         """
         params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
@@ -358,6 +358,7 @@ def update_power_ratings(
     
         n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe().n.iloc[0]
         return n > 0
+
     
 
 
@@ -432,16 +433,19 @@ def update_power_ratings(
         WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
           AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
         """
+    
         if cutoff_param is None:
-            sql = base_sql + "\nORDER BY Snapshot_TS"
+            sql = base_sql + "\nORDER BY Snapshot_TS, Game_Start"
             params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
         else:
-            sql = base_sql + "\n  AND TIMESTAMP(Inserted_Timestamp) > @cutoff\nORDER BY Snapshot_TS"
+            sql = base_sql + "\n  AND TIMESTAMP(Inserted_Timestamp) >= @cutoff\nORDER BY Snapshot_TS, Game_Start"
             params = [
                 bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases),
                 bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_param),
             ]
-        return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+
+    return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+
 
     def sync_current_from_history(bq: bigquery.Client, sports: list[str]):
            """
@@ -525,6 +529,12 @@ def update_power_ratings(
         if cfg["model"] == "elo":
             # 🧠 Elo: load games since window_start (Inserted_Timestamp based)
             df_games = load_games(bq, sport, cutoff=window_start)
+            def _norm_team(s):
+                return str(s).strip().lower()
+            
+            if not df_games.empty:
+                df_games['Home_Team'] = df_games['Home_Team'].apply(_norm_team)
+                df_games['Away_Team'] = df_games['Away_Team'].apply(_norm_team)
             if df_games.empty:
                 continue
     
@@ -569,6 +579,7 @@ def update_power_ratings(
                     'Method': 'elo_mov', 'Updated_At': utc_now,
                 })
     
+  
         elif cfg["model"] == "poisson":
             # ⚾️ MLB: base totals up to window_start (snapshot clock)
             if window_start is None:
@@ -588,7 +599,23 @@ def update_power_ratings(
                         window_start.to_pydatetime() if isinstance(window_start, pd.Timestamp) else window_start
                     )]
                 )).to_dataframe()
-    
+        
+            # 🔁 New games since window_start (load_games must filter on Inserted_Timestamp >= cutoff)
+            df_new = load_games(bq, sport, cutoff=window_start).copy()
+        
+            # --- Normalize team keys before any accumulation ---
+            def _norm_team(s):
+                return str(s).strip().lower()
+        
+            for dfX in (df_base, df_new):
+                if not dfX.empty:
+                    dfX['Home_Team'] = dfX['Home_Team'].apply(_norm_team)
+                    dfX['Away_Team'] = dfX['Away_Team'].apply(_norm_team)
+        
+            # Optional: ensure deterministic order if df_new didn't ORDER BY
+            if not df_new.empty and 'Snapshot_TS' in df_new.columns:
+                df_new.sort_values(['Snapshot_TS','Game_Start'], inplace=True)
+        
             GF, GA, GP = {}, {}, {}
             def add_game_to_totals(h, a, hs, as_):
                 GF[h] = GF.get(h, 0.0) + hs
@@ -597,19 +624,20 @@ def update_power_ratings(
                 GF[a] = GF.get(a, 0.0) + as_
                 GA[a] = GA.get(a, 0.0) + hs
                 GP[a] = GP.get(a, 0) + 1
-    
+        
+            # Seed league totals from base
             for _, r in df_base.iterrows():
                 add_game_to_totals(r.Home_Team, r.Away_Team, float(r.Score_Home_Score), float(r.Score_Away_Score))
-    
-            # 🔁 New games since window_start
-            df_new = load_games(bq, sport, cutoff=window_start)   # <-- was last_ts
-            if df_new.empty:
-                continue
-    
-            history_rows, ratings = [], {}
+        
+            # Process new games (replay window)
+            history_rows = []
+            ratings_delta = {}  # ratings touched while iterating df_new
+        
             def team_rating(team):
                 g = int(GP.get(team, 0))
-                if g == 0: return 1500.0
+                if g == 0:
+                    logging.warning(f"[ratings][MLB] No games counted for team='{team}' in window; returning 1500.")
+                    return 1500.0
                 total_team_games = int(sum(GP.values()))
                 gf_league = float(sum(GF.values()))
                 eps = 1e-6
@@ -621,7 +649,7 @@ def update_power_ratings(
                 atk = np.log(atk_ratio)
                 dfn = -np.log(dfn_ratio)
                 return 1500.0 + 400.0 * (atk + dfn)
-    
+        
             tag = "backfill" if window_start is None else "incremental"
             for _, g in df_new.iterrows():
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
@@ -633,22 +661,24 @@ def update_power_ratings(
                     dict(Sport=sport, Team=g.Home_Team, Rating=Rh2, Method="poisson", Updated_At=ts, Source=tag),
                     dict(Sport=sport, Team=g.Away_Team, Rating=Ra2, Method="poisson", Updated_At=ts, Source=tag),
                 ]
-                ratings[g.Home_Team] = Rh2
-                ratings[g.Away_Team] = Ra2
-    
+                ratings_delta[g.Home_Team] = Rh2
+                ratings_delta[g.Away_Team] = Ra2
+        
             if history_rows:
                 bq.load_table_from_dataframe(pd.DataFrame(history_rows), table_history).result()
                 history_rows_all.extend(history_rows)
                 updated_sports.append(sport)
-    
+        
+            # ✅ Finalize: write ratings for ALL teams with GP>0 (base + new), not just ones touched in df_new
+            all_teams = set(GP.keys())
+            ratings_all = {t: float(team_rating(t)) for t in all_teams}
+            ratings_all.update(ratings_delta)  # harmless; same formula, but keeps intent clear
+        
             utc_now = pd.Timestamp.now(tz="UTC")
-            for team, rating in ratings.items():
+            for team, rating in ratings_all.items():
                 current_rows_all.append(dict(
-                    Sport=sport, Team=team, Rating=float(rating), Method="poisson", Updated_At=utc_now
+                    Sport=sport, Team=team, Rating=rating, Method="poisson", Updated_At=utc_now
                 ))
-    
-        else:
-            continue
 
 
     # Upsert current across all sports (no-op if empty)
