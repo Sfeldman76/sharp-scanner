@@ -4202,8 +4202,6 @@ def detect_sharp_moves(
                     })
 
   
-   
-
     # ─────────────────────────────────────────────────────────
     # Build base frame (keep ALL columns)
     # ─────────────────────────────────────────────────────────
@@ -4212,7 +4210,7 @@ def detect_sharp_moves(
         logging.warning("⚠️ No sharp rows built.")
         return df, df_history, pd.DataFrame()
     
-    # Normalize common string fields (without dropping any columns)
+    # Normalize common string fields (keep dtype='string', no categories here)
     norm_str = lambda s: s.astype('string').str.strip().str.lower()
     for c in ('Market','Outcome','Outcome_Norm','Bookmaker','Game_Key'):
         if c in df.columns:
@@ -4231,11 +4229,6 @@ def detect_sharp_moves(
     mask_tot_over = mkt.eq('totals') & outn.eq('over')
     mask_sp_h2h   = mkt.isin(('spreads','h2h')) & (val < 0)
     df.loc[mask_tot_over | mask_sp_h2h, 'Was_Canonical'] = True
-    
-    # Convert hot strings → category (memory win, keep all columns)
-    for c in ('Market','Outcome','Outcome_Norm','Bookmaker','Game_Key'):
-        if c in df.columns:
-            df[c] = df[c].astype('category')
     
     # Numeric downcasts (keep columns)
     for c in ('Value','Odds_Price','Limit'):
@@ -4257,16 +4250,24 @@ def detect_sharp_moves(
     # ─────────────────────────────────────────────────────────
     df_all_snapshots = read_recent_sharp_master_cached(hours=120)
     
+    # Keep join keys as string for safe merges & concatenation later
     for c in ('Game_Key','Market','Outcome','Bookmaker'):
         if c in df_all_snapshots.columns:
-            df_all_snapshots[c] = (
-                df_all_snapshots[c].astype('string').str.strip().str.lower().astype('category')
-            )
+            df_all_snapshots[c] = df_all_snapshots[c].astype('string').str.strip().str.lower()
     
+    # Keep team norms as string (we concatenate these later)
+    for c in ('Home_Team_Norm','Away_Team_Norm'):
+        if c in df_all_snapshots.columns:
+            df_all_snapshots[c] = df_all_snapshots[c].astype('string').str.strip().str.lower()
+        if c in df.columns:
+            df[c] = df[c].astype('string').str.strip().str.lower()
+    
+    # Numeric downcasts
     for c in ('Value','Odds_Price','Limit'):
         if c in df_all_snapshots.columns:
             df_all_snapshots[c] = pd.to_numeric(df_all_snapshots[c], errors='coerce', downcast='float')
     
+    # Timestamps
     for c in ('Snapshot_Timestamp','Game_Start'):
         if c in df_all_snapshots.columns:
             df_all_snapshots[c] = pd.to_datetime(df_all_snapshots[c], errors='coerce', utc=True)
@@ -4279,9 +4280,9 @@ def detect_sharp_moves(
         # ensure all keys exist to avoid KeyError in downstream ops
         for k in ['Game_Key','Market','Outcome','Bookmaker']:
             if k not in df.columns:
-                df[k] = pd.Series(pd.NA, index=df.index, dtype='category')
+                df[k] = pd.Series(pd.NA, index=df.index, dtype='string')
             if k not in df_all_snapshots.columns:
-                df_all_snapshots[k] = pd.Series(pd.NA, index=df_all_snapshots.index, dtype='category')
+                df_all_snapshots[k] = pd.Series(pd.NA, index=df_all_snapshots.index, dtype='string')
         merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
     
     _keys = df[merge_keys].drop_duplicates()
@@ -4389,13 +4390,12 @@ def detect_sharp_moves(
     # tiny guard: ensure team norm cols exist so metrics won't KeyError
     for c in ('Home_Team_Norm','Away_Team_Norm'):
         if c not in df.columns:
-            df[c] = pd.Series(pd.NA, index=df.index, dtype='category')
+            df[c] = pd.Series(pd.NA, index=df.index, dtype='string')
         if c not in df_all_snapshots.columns:
-            df_all_snapshots[c] = pd.Series(pd.NA, index=df_all_snapshots.index, dtype='category')
+            df_all_snapshots[c] = pd.Series(pd.NA, index=df_all_snapshots.index, dtype='string')
     
     df = apply_compute_sharp_metrics_rowwise(df, df_all_snapshots)
 
-    
     # ─────────────────────────────────────────────────────────
     # 8) Score (avoid extra copies) + housekeeping
     # ─────────────────────────────────────────────────────────
