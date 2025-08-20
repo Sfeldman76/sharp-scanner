@@ -2310,8 +2310,9 @@ def implied_prob_vec(odds):
 
 def apply_blended_sharp_score(df, trained_models, df_all_snapshots=None, weights=None):
     logger.info("🛠️ Running `apply_blended_sharp_score()`")
+    df_empty = pd.DataFrame()
     total_start = time.time()
-
+    scored_all = []
     # ---------- models presence ----------
     trained_models = trained_models or {}
     trained_models_lc = {
