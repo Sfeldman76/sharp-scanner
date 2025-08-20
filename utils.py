@@ -209,34 +209,65 @@ def update_power_ratings(
         span = max((dmax - dmin).total_seconds(), 1.0)
         return (ts_series - dmin).dt.total_seconds() / span
 
-    def load_seed_ratings(bq: bigquery.Client, sport: str) -> dict:
-        """Prefer ratings_current; else last snapshot in history; else {}."""
-        q_cur = f"""
-          SELECT Team, Rating
-          FROM `{table_current}`
-          WHERE Sport = @sport
+    BACKFILL_DAYS = 7 
+    def load_seed_ratings(bq: bigquery.Client, sport: str, asof_ts: dt.datetime | pd.Timestamp | None) -> dict[str, float]:
         """
-        cur = bq.query(q_cur, job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
-        )).to_dataframe()
-        if not cur.empty:
-            return dict(zip(cur.Team, cur.Rating))
+        Return latest ratings per team with Updated_At <= asof_ts.
+        If asof_ts is None, fall back to current -> last hist -> {} (like your old logic).
+        """
+        if asof_ts is None:
+            # original seed fallback
+            cur = bq.query(
+                f"SELECT Team, Rating FROM `{table_current}` WHERE Sport = @sport",
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+                )
+            ).to_dataframe()
+            if not cur.empty:
+                return dict(zip(cur.Team, cur.Rating))
+    
+            hist = bq.query(
+                f"""
+                SELECT Team, ANY_VALUE(Rating) AS Rating
+                FROM (
+                  SELECT Team, Rating,
+                         ROW_NUMBER() OVER (PARTITION BY Team ORDER BY `Updated_At` DESC) AS rn
+                  FROM `{table_history}` WHERE Sport = @sport
+                )
+                WHERE rn = 1 GROUP BY Team
+                """,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+                )
+            ).to_dataframe()
+            return dict(zip(hist.Team, hist.Rating)) if not hist.empty else {}
+    
+        # normalize tz
+        if isinstance(asof_ts, pd.Timestamp):
+            asof_ts = (asof_ts.tz_localize("UTC") if asof_ts.tzinfo is None else asof_ts.tz_convert("UTC")).to_pydatetime()
+        elif isinstance(asof_ts, dt.datetime) and asof_ts.tzinfo is None:
+            asof_ts = asof_ts.replace(tzinfo=dt.timezone.utc)
+    
+        # seed as-of: pick latest row per team with Updated_At <= asof_ts
+        df = bq.query(
+            f"""
+            WITH latest AS (
+              SELECT Sport, Team, Rating, Updated_At,
+                     ROW_NUMBER() OVER (PARTITION BY Team ORDER BY Updated_At DESC) AS rn
+              FROM `{table_history}`
+              WHERE Sport = @sport AND Updated_At <= @asof
+            )
+            SELECT Team, Rating FROM latest WHERE rn = 1
+            """,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("sport", "STRING", sport),
+                    bigquery.ScalarQueryParameter("asof",  "TIMESTAMP", asof_ts),
+                ]
+            )
+        ).to_dataframe()
+        return dict(zip(df.Team, df.Rating))
 
-        q_hist = f"""
-          SELECT Team, ANY_VALUE(Rating) AS Rating
-          FROM (
-            SELECT Team, Rating,
-                   ROW_NUMBER() OVER (PARTITION BY Team ORDER BY `Updated_At` DESC) AS rn
-            FROM `{table_history}`
-            WHERE Sport = @sport
-          )
-          WHERE rn = 1
-          GROUP BY Team
-        """
-        hist = bq.query(q_hist, job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
-        )).to_dataframe()
-        return dict(zip(hist.Team, hist.Rating)) if not hist.empty else {}
 
     def upsert_current(bq: bigquery.Client, rows: list):
         if not rows:
@@ -303,48 +334,32 @@ def update_power_ratings(
 
     def has_new_finals_since(bq, sport: str, last_ts):
         aliases = get_aliases(sport)
-        if last_ts is None or (isinstance(last_ts, pd.Timestamp) and pd.isna(last_ts)):
-            sql = f"""
-              SELECT COUNT(*) AS n
-              FROM `{project_table_scores}`
-              WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
-                AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-              LIMIT 1
-            """
-            params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
-        else:
+        cutoff_check = None
+        if last_ts is not None and not (isinstance(last_ts, pd.Timestamp) and pd.isna(last_ts)):
+            # Always look back at least 7 days
             if isinstance(last_ts, pd.Timestamp):
-                cutoff = (last_ts.tz_localize("UTC") if last_ts.tzinfo is None else last_ts.tz_convert("UTC")).to_pydatetime()
+                lt = last_ts.tz_localize("UTC") if last_ts.tzinfo is None else last_ts.tz_convert("UTC")
+                cutoff_check = (lt - pd.Timedelta(days=BACKFILL_DAYS)).to_pydatetime()
             elif isinstance(last_ts, dt.datetime):
-                cutoff = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=dt.timezone.utc)
-            else:
-                cutoff = None
+                lt = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=dt.timezone.utc)
+                cutoff_check = lt - dt.timedelta(days=BACKFILL_DAYS)
     
-            if cutoff is None:
-                sql = f"""
-                  SELECT COUNT(*) AS n
-                  FROM `{project_table_scores}`
-                  WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
-                    AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-                  LIMIT 1
-                """
-                params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
-            else:
-                sql = f"""
-                  SELECT COUNT(*) AS n
-                  FROM `{project_table_scores}`
-                  WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
-                    AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-                    AND TIMESTAMP(Game_Start) > @cutoff
-                  LIMIT 1
-                """
-                params = [
-                    bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases),
-                    bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff),
-                ]
+        sql = f"""
+          SELECT COUNT(*) AS n
+          FROM `{project_table_scores}`
+          WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
+            AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
+            {'' if cutoff_check is None else 'AND TIMESTAMP(Inserted_Timestamp) > @cutoff'}
+          LIMIT 1
+        """
+        params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
+        if cutoff_check is not None:
+            params.append(bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_check))
     
         n = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe().n.iloc[0]
         return n > 0
+    
+
 
     def sports_present_in_history(bq: bigquery.Client) -> list[str]:
         q = f"SELECT DISTINCT UPPER(Sport) AS s FROM `{table_history}`"
@@ -418,15 +433,16 @@ def update_power_ratings(
           AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
         """
         if cutoff_param is None:
-            sql = base_sql + "\nORDER BY Game_Start"
+            sql = base_sql + "\nORDER BY Snapshot_TS"
             params = [bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases)]
         else:
-            sql = base_sql + "\n  AND TIMESTAMP(Game_Start) > @cutoff\nORDER BY Game_Start"
+            sql = base_sql + "\n  AND TIMESTAMP(Inserted_Timestamp) > @cutoff\nORDER BY Snapshot_TS"
             params = [
                 bigquery.ArrayQueryParameter("sport_aliases", "STRING", aliases),
                 bigquery.ScalarQueryParameter("cutoff", "TIMESTAMP", cutoff_param),
             ]
         return bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+
     def sync_current_from_history(bq: bigquery.Client, sports: list[str]):
            """
            Upsert ratings_current to the latest snapshot per (Sport, Team, Method)
@@ -480,84 +496,82 @@ def update_power_ratings(
     # ---------------- MAIN WORK ----------------
     bq = bigquery.Client()
     sports_available = fetch_sports_present(bq)
-    # Only process sports we support in SPORT_CFG
     sports = [s for s in sports_available if s.upper() in SPORT_CFG]
     if not sports:
         return {"message": "No finalized games found for supported sports.", "history_rows": 0, "current_rows": 0}
-
+    
     history_rows_all, current_rows_all = [], []
     updated_sports = []
-
+    
     for sport in sports:
         cfg = SPORT_CFG[sport.upper()]
         last_ts = get_last_ts(bq, sport)
-
-        # 🚦 NEW: quick skip if nothing new since last update for this sport
-        if not has_new_finals_since(bq, sport, last_ts):
-            # No finals at all (first run) or no new finals since cutoff
-            # If last_ts is None but there are also no finals, skip entirely.
+    
+        # ✅ Always replay at least BACKFILL_DAYS by SNAPSHOT time
+        if last_ts is None:
+            window_start = None
+        else:
+            if isinstance(last_ts, pd.Timestamp):
+                last_ts_utc = last_ts.tz_localize("UTC") if last_ts.tzinfo is None else last_ts.tz_convert("UTC")
+                window_start = last_ts_utc - pd.Timedelta(days=BACKFILL_DAYS)
+            else:
+                lt = last_ts if last_ts.tzinfo else last_ts.replace(tzinfo=dt.timezone.utc)
+                window_start = lt - dt.timedelta(days=BACKFILL_DAYS)
+    
+        # 🚦 Quick existence check should use the 7-day window, not last_ts
+        if not has_new_finals_since(bq, sport, window_start):
             continue
-
+    
         if cfg["model"] == "elo":
-            # NFL / NBA: Elo with MOV & K decay
-            df_games = load_games(bq, sport, cutoff=last_ts)
+            # 🧠 Elo: load games since window_start (Inserted_Timestamp based)
+            df_games = load_games(bq, sport, cutoff=window_start)
             if df_games.empty:
                 continue
-
-            ratings = load_seed_ratings(bq, sport)
-
+    
+            # ✅ Seed ratings as of window_start (see earlier guidance to add asof param)
+            ratings = load_seed_ratings(bq, sport, asof_ts=window_start)
+    
             prog = season_progress(df_games["Game_Start"])
             K_series = cfg["K_late"] + (cfg["K_start"] - cfg["K_late"]) * (1.0 - prog)
-
+    
             history_rows = []
             for (row_idx, g), K in zip(df_games.iterrows(), K_series):
                 home, away = g.Home_Team, g.Away_Team
                 Rh = ratings.get(home, 1500.0)
                 Ra = ratings.get(away, 1500.0)
-
+    
                 delta = Rh - Ra
                 p_home = elo_expected(delta, hfa=cfg["HFA"])
                 result = 1.0 if g.Score_Home_Score > g.Score_Away_Score else 0.0
                 mov = g.Score_Home_Score - g.Score_Away_Score
                 m = mov_boost(mov, delta, mov_cap=cfg.get("mov_cap"))
-
+    
                 adj = K * m * (result - p_home)
                 Rh2, Ra2 = Rh + adj, Ra - adj
-
+    
                 ts = g.Snapshot_TS
-                tag = "backfill" if last_ts is None else "incremental"
+                tag = "backfill" if window_start is None else "incremental"
                 history_rows += [
                     dict(Sport=sport, Team=home, Rating=float(Rh2), Method="elo_mov", Updated_At=ts, Source=tag),
                     dict(Sport=sport, Team=away, Rating=float(Ra2), Method="elo_mov", Updated_At=ts, Source=tag),
                 ]
                 ratings[home], ratings[away] = Rh2, Ra2
-
+    
             if history_rows:
                 bq.load_table_from_dataframe(pd.DataFrame(history_rows), table_history).result()
                 history_rows_all.extend(history_rows)
                 updated_sports.append(sport)
-
-
-            
-            # ✅ define utc_now and use it
+    
             utc_now = pd.Timestamp.now(tz="UTC")
             for team, rating in ratings.items():
                 current_rows_all.append({
-                    'Sport': sport,
-                    'Team': team,
-                    'Rating': float(rating),
-                    'Method': 'elo_mov',
-                    'Updated_At': utc_now,
+                    'Sport': sport, 'Team': team, 'Rating': float(rating),
+                    'Method': 'elo_mov', 'Updated_At': utc_now,
                 })
-
-
-
-  
-
+    
         elif cfg["model"] == "poisson":
-            # MLB: Poisson/Skellam-style attack+defense rating
-            # 1) Build totals up to last_ts (if any)
-            if last_ts is None:
+            # ⚾️ MLB: base totals up to window_start (snapshot clock)
+            if window_start is None:
                 df_base = pd.DataFrame(columns=["Home_Team","Away_Team","Score_Home_Score","Score_Away_Score"])
             else:
                 df_base = bq.query(f"""
@@ -565,18 +579,17 @@ def update_power_ratings(
                        SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
                        SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score
                 FROM `{project_table_scores}`
-                WHERE (COALESCE(CAST(Sport AS STRING), '{default_sport}') = @sport)
+                WHERE UPPER(CAST(Sport AS STRING)) IN ('MLB','BASEBALL_MLB','BASEBALL-MLB','BASEBALL')
                   AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-                  AND TIMESTAMP(Game_Start) <= @cutoff
+                  AND TIMESTAMP(Inserted_Timestamp) <= @cutoff
                 """, job_config=bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("sport","STRING",sport),
-                        bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", last_ts),
-                    ]
+                    query_parameters=[bigquery.ScalarQueryParameter(
+                        "cutoff", "TIMESTAMP",
+                        window_start.to_pydatetime() if isinstance(window_start, pd.Timestamp) else window_start
+                    )]
                 )).to_dataframe()
-
+    
             GF, GA, GP = {}, {}, {}
-
             def add_game_to_totals(h, a, hs, as_):
                 GF[h] = GF.get(h, 0.0) + hs
                 GA[h] = GA.get(h, 0.0) + as_
@@ -584,59 +597,37 @@ def update_power_ratings(
                 GF[a] = GF.get(a, 0.0) + as_
                 GA[a] = GA.get(a, 0.0) + hs
                 GP[a] = GP.get(a, 0) + 1
-
+    
             for _, r in df_base.iterrows():
                 add_game_to_totals(r.Home_Team, r.Away_Team, float(r.Score_Home_Score), float(r.Score_Away_Score))
-
-            # 2) Load new games (or all if backfill)
-            df_new = load_games(bq, sport, cutoff=last_ts)
+    
+            # 🔁 New games since window_start
+            df_new = load_games(bq, sport, cutoff=window_start)   # <-- was last_ts
             if df_new.empty:
                 continue
-
-            # 3) Process sequentially; rating = 1500 + 400*(atk+dfn)
-            rating_scale = 400.0
-            history_rows = []
-            ratings = {}
-
-            # inside the MLB ("poisson") branch, replace team_rating() with this safe version
+    
+            history_rows, ratings = [], {}
             def team_rating(team):
-                # games played by this team
                 g = int(GP.get(team, 0))
-                if g == 0:
-                    return 1500.0
-            
-                # league totals
-                total_team_games = int(sum(GP.values()))  # sum of team game counts
+                if g == 0: return 1500.0
+                total_team_games = int(sum(GP.values()))
                 gf_league = float(sum(GF.values()))
                 eps = 1e-6
-            
-                # league goals per team-game (avoid div-by-zero)
-                league_rate = gf_league / max(total_team_games, 1)
-                league_rate = max(league_rate, eps)
-            
-                # team for/against rates (avoid div-by-zero)
-                rate_for = float(GF.get(team, 0.0)) / max(g, 1)
+                league_rate = max(gf_league / max(total_team_games, 1), eps)
+                rate_for   = float(GF.get(team, 0.0)) / max(g, 1)
                 rate_against = float(GA.get(team, 0.0)) / max(g, 1)
-            
-                # clamp ratios to eps to keep log well-defined
                 atk_ratio = max(rate_for / league_rate, eps)
                 dfn_ratio = max(rate_against / league_rate, eps)
-            
                 atk = np.log(atk_ratio)
                 dfn = -np.log(dfn_ratio)
-            
-                rating_scale = 400.0
-                return 1500.0 + rating_scale * (atk + dfn)
-
-            tag = "backfill" if last_ts is None else "incremental"
+                return 1500.0 + 400.0 * (atk + dfn)
+    
+            tag = "backfill" if window_start is None else "incremental"
             for _, g in df_new.iterrows():
-                hs = float(g.Score_Home_Score)
-                as_ = float(g.Score_Away_Score)
+                hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
                 add_game_to_totals(g.Home_Team, g.Away_Team, hs, as_)
-
                 Rh2 = float(team_rating(g.Home_Team))
                 Ra2 = float(team_rating(g.Away_Team))
-
                 ts = g.Snapshot_TS
                 history_rows += [
                     dict(Sport=sport, Team=g.Home_Team, Rating=Rh2, Method="poisson", Updated_At=ts, Source=tag),
@@ -644,16 +635,18 @@ def update_power_ratings(
                 ]
                 ratings[g.Home_Team] = Rh2
                 ratings[g.Away_Team] = Ra2
-
+    
             if history_rows:
                 bq.load_table_from_dataframe(pd.DataFrame(history_rows), table_history).result()
                 history_rows_all.extend(history_rows)
                 updated_sports.append(sport)
-
+    
             utc_now = pd.Timestamp.now(tz="UTC")
             for team, rating in ratings.items():
-                current_rows_all.append(dict(Sport=sport, Team=team, Rating=float(rating),
-                                             Method="poisson", Updated_At=utc_now))
+                current_rows_all.append(dict(
+                    Sport=sport, Team=team, Rating=float(rating), Method="poisson", Updated_At=utc_now
+                ))
+    
         else:
             continue
 
