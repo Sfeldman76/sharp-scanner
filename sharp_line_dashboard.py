@@ -3298,9 +3298,22 @@ def compute_diagnostics_vectorized(df):
 
     # Context flags (UI)
     features += ['Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos']
+    # Define once
+    RATINGS_EDGE_UI_COLS = [
+        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
+        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+        'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
+        'edge_x_k','mu_x_k'
+    ]
+    
+    # Guarantee presence in df so UI shows them (default NaN is best for visibility)
+    for c in RATINGS_EDGE_UI_COLS:
+        if c not in df.columns:
+            df[c] = np.nan
+    
+    # Append to features (note the * operator, not a quoted string)
+    features += RATINGS_EDGE_UI_COLS
 
-    # De-dup (order-preserving)
-    _seen = set()
     features = [f for f in features if not (f in _seen or _seen.add(f))]
 
     # Casting helpers
@@ -3423,6 +3436,23 @@ def compute_diagnostics_vectorized(df):
         if bool(row.get('Is_Weekend', 0)): parts.append("📅 Weekend Game")
         if bool(row.get('Is_Night_Game', 0)): parts.append("🌙 Night Game")
         if bool(row.get('Is_PrimeTime', 0)): parts.append("⭐ Prime Time Matchup")
+                # --- Power ratings & outcome model edges
+        if not pd.isna(row.get('PR_Team_Rating')) and not pd.isna(row.get('PR_Opp_Rating')):
+            parts.append(f"📊 PR Ratings: {row['PR_Team_Rating']:.1f} vs {row['PR_Opp_Rating']:.1f}")
+        if float(row.get('PR_Rating_Diff', 0)) != 0:
+            parts.append(f"⚖️ PR Diff {row['PR_Rating_Diff']:+.1f}")
+        if not pd.isna(row.get('Outcome_Model_Spread')) and not pd.isna(row.get('Outcome_Market_Spread')):
+            parts.append(f"📐 Model Spread {row['Outcome_Model_Spread']:+.1f} vs Market {row['Outcome_Market_Spread']:+.1f}")
+        if float(row.get('Outcome_Spread_Edge', 0)) != 0:
+            parts.append(f"🎯 Spread Edge {row['Outcome_Spread_Edge']:+.1f}")
+        if float(row.get('Outcome_Cover_Prob', 0)) > 0.55:
+            parts.append(f"✅ Cover Prob {row['Outcome_Cover_Prob']:.0%}")
+        if bool(row.get('model_fav_vs_market_fav_agree', 0)):
+            parts.append("🤝 Model & Market Favor Same Team")
+        if float(row.get('edge_x_k', 0)) > 0:
+            parts.append(f"📈 Edge×k {row['edge_x_k']:.2f}")
+        if float(row.get('mu_x_k', 0)) > 0:
+            parts.append(f"📊 μ×k {row['mu_x_k']:.2f}")
 
         # Hybrid timing buckets → nice human labels
         HYBRID_LINE_COLS_LOCAL = [
