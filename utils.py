@@ -2910,7 +2910,7 @@ def apply_blended_sharp_score(
     val_now    = pd.to_numeric(df['Value'],      errors='coerce').astype('float64')
     val_open   = pd.to_numeric(df['Open_Value'], errors='coerce').astype('float64')
     df['Limit'] = pd.to_numeric(df['Limit'],     errors='coerce').fillna(0.0).astype('float64')
-   _suffix_snapshot(df, "after cast helpers") 
+    _suffix_snapshot(df, "after cast helpers") 
     # ---------- 1) Vectorized implied prob (American odds) ----------
     # Handles NaN; does not allocate extra Series; branch by mask once.
     def implied_prob_vec_raw(o: np.ndarray) -> np.ndarray:
