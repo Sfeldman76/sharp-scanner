@@ -44,7 +44,7 @@ import pandas as pd
 import numpy as np
 import pyarrow as pa
 import gc, datetime as dt
-
+from pandas.api.types import is_categorical_dtype, is_string_dtype
 import warnings
 from sklearn.exceptions import InconsistentVersionWarning
 
@@ -635,7 +635,7 @@ def update_power_ratings(
                 continue
             span_sec = max((max_ts - min_ts).total_seconds(), 1.0)
             def k_for(ts) -> float:
-                t = x_utc = to_utc_ts(x)
+                t = to_utc_ts(ts)          # ✅ use the parameter name
                 prog = (t - min_ts).total_seconds() / span_sec
                 return cfg["K_late"] + (cfg["K_start"] - cfg["K_late"]) * (1.0 - prog)
 
