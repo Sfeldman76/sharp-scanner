@@ -574,8 +574,7 @@ def update_power_ratings(
           {"AND TIMESTAMP(Inserted_Timestamp) >= @cutoff" if cutoff_param else ""}
         ORDER BY Snapshot_TS, Game_Start
         """
-        params = {"sport_aliases": aliases, "default_sport": default_sport}
-        params = {
+        params = {"sport_aliases": aliases, "default_sport": default_sport}       
          # datetime  -> TIMESTAMP
         if cutoff_param is not None:
             params["cutoff"] = cutoff_param
