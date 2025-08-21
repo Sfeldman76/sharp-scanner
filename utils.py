@@ -4086,8 +4086,12 @@ def apply_blended_sharp_score(
                     'Line_Moved_Away_From_Team',
                     'Disable_Line_Move_Features',
                     'Pct_On_Recent_Cover_Streak_Home','Pct_On_Recent_Cover_Streak_Away','Pct_On_Recent_Cover_Streak',
-                    'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit',
-                    'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag'
+                    'SmallBook_Total_Limit','SmallBook_Max_Limit','SmallBook_Min_Limit','SmallBook_Limit_Count',
+                    'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
+                    'Team_Recent_Cover_Streak_Away_Fav','Team_Recent_Cover_Streak_Away','Team_Recent_Cover_Streak_Fav',
+                    'Team_Recent_Cover_Streak_Home_Fav','Team_Recent_Cover_Streak_Home','Team_Recent_Cover_Streak',
+                    'On_Cover_Streak_Away_Fav','On_Cover_Streak_Away','On_Cover_Streak_Fav','On_Cover_Streak_Home_Fav',
+                    'On_Cover_Streak_Home','On_Cover_Streak'
                 ]
                 suffix_cols     = [c for c in df_inverse.columns if c.endswith('_x') or c.endswith('_y')]
                 team_stat_cols  = [c for c in df_inverse.columns if c.startswith('Team_Past_')]
