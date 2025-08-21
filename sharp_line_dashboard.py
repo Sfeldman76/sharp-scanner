@@ -3136,26 +3136,8 @@ def attach_ratings_and_edges_for_diagnostics(
     pad_days: int = 10,
     allow_forward_hours: float = 0.0,
 ) -> pd.DataFrame:
-    """
-    Add visibility columns for ratings & per-outcome edges to a diagnostics DataFrame
-    without training. Only computes for spreads rows; totals/h2h remain NaN but visible.
-
-    Produces (always present in df when done):
-        PR_Team_Rating, PR_Opp_Rating, PR_Rating_Diff,
-        Outcome_Model_Spread, Outcome_Market_Spread, Outcome_Spread_Edge,
-        Outcome_Cover_Prob, model_fav_vs_market_fav_agree, edge_x_k, mu_x_k
-
-    Dependencies already in your codebase:
-      - enrich_power_for_training_lowmem(...)
-      - prep_consensus_market_spread_lowmem(...)
-      - favorite_centric_from_powerdiff_lowmem(...)
-
-    Args:
-        df: Diagnostics source rows (must include Sport, Market, Outcome/Outcome_Norm,
-            Home_Team_Norm, Away_Team_Norm, Value, Snapshot_Timestamp or Game_Start).
-        sport_aliases: your SPORT_ALIASES map.
-    """
-
+    import numpy as np
+    import pandas as pd
 
     UI_EDGE_COLS = [
         'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
@@ -3165,46 +3147,38 @@ def attach_ratings_and_edges_for_diagnostics(
 
     def _ensure_cols(frame, cols, fill=np.nan):
         missing = [c for c in cols if c not in frame.columns]
-        if missing:
-            frame[missing] = fill
+        if missing: frame[missing] = fill
         return frame
 
     if df.empty:
-        # still ensure columns are present for UI schemas
         return _ensure_cols(df.copy(), UI_EDGE_COLS, np.nan)
 
     out = df.copy()
-
-    # --- Normalize basic keys used by helpers
     out['Sport'] = out.get('Sport', '').astype(str).str.upper().str.strip()
     out['Market'] = out.get('Market', '').astype(str).str.lower().str.strip()
     out['Home_Team_Norm'] = out.get('Home_Team_Norm', '').astype(str).str.lower().str.strip()
     out['Away_Team_Norm'] = out.get('Away_Team_Norm', '').astype(str).str.lower().str.strip()
     out['Outcome_Norm'] = out.get('Outcome_Norm', out.get('Outcome','')).astype(str).str.lower().str.strip()
 
-    # Ensure we have a time reference for rating as-of logic
     if 'Game_Start' not in out.columns or out['Game_Start'].isna().all():
         out['Game_Start'] = pd.to_datetime(out.get('Snapshot_Timestamp'), utc=True, errors='coerce')
 
-    # Pre-create UI columns so they're visible even for totals/h2h rows
     out = _ensure_cols(out, UI_EDGE_COLS, np.nan)
 
-    # Only compute for spreads (others remain NaN)
     mask = out['Market'].eq('spreads') & out['Home_Team_Norm'].ne('') & out['Away_Team_Norm'].ne('')
     if not mask.any():
         return out
 
-    # Skinny spreads slice for enrichment
     need_cols = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
     d_sp = (out.loc[mask, need_cols]
               .dropna(subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'])
               .copy())
     d_sp['Value'] = pd.to_numeric(d_sp['Value'], errors='coerce').astype('float32')
 
-    # 1) Ratings window (backward-asof; no training)
+    # 1) PR history (no training)
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-        bq=None,  # not used internally
+        bq=None,
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days,
@@ -3212,13 +3186,20 @@ def attach_ratings_and_edges_for_diagnostics(
         project=project,
     )
 
-    # 2) Consensus favorite & k from the rows you already have
+    # 2) Consensus favorite & k
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
-    # 3) Model spreads/edges at the game level from PR diff
+    # 3) Game-level model spreads/edges
     game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
     g_full = base.merge(cons, on=game_keys, how='left')
     g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
+
+    # 🔧 FIX: carry PR columns through (they are needed below)
+    for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
+        if c not in g_fc.columns and c in g_full.columns:
+            g_fc[c] = g_full[c].values
+        elif c not in g_fc.columns:
+            g_fc[c] = np.nan
 
     # Map to per-row outcome
     d_map = d_sp.merge(g_fc, on=game_keys, how='left')
@@ -3229,7 +3210,7 @@ def attach_ratings_and_edges_for_diagnostics(
     d_map['Outcome_Spread_Edge']   = np.where(is_fav_row, d_map['Fav_Edge_Pts'], d_map['Dog_Edge_Pts']).astype('float32')
     d_map['Outcome_Cover_Prob']    = np.where(is_fav_row, d_map['Fav_Cover_Prob'], d_map['Dog_Cover_Prob']).astype('float32')
 
-    # Ratings for the specific bet side on the row
+    # Ratings for the bet side
     is_home_bet = d_map['Outcome_Norm'].eq(d_map['Home_Team_Norm'])
     d_map['PR_Team_Rating'] = np.where(is_home_bet, d_map['Home_Power_Rating'], d_map['Away_Power_Rating'])
     d_map['PR_Opp_Rating']  = np.where(is_home_bet, d_map['Away_Power_Rating'], d_map['Home_Power_Rating'])
@@ -3251,10 +3232,11 @@ def attach_ratings_and_edges_for_diagnostics(
     d_map['edge_x_k'] = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce') * k_abs).astype('float32')
     d_map['mu_x_k']   = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce').abs() * k_abs).astype('float32')
 
-    # Merge back to the original frame on the skinny keys
+    # Merge back to the original frame
     out = out.merge(d_map[need_cols + UI_EDGE_COLS], on=need_cols, how='left')
 
     return out
+
         
 def compute_diagnostics_vectorized(df):
    
