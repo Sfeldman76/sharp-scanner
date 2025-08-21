@@ -1273,183 +1273,212 @@ def implied_prob_to_point_move(prob_delta, base_odds=-110):
     point_equiv = prob_delta / approx_slope
     return point_equiv    
 
-def compute_sharp_metrics(entries, open_val, mtype, label, gk=None, book=None, open_odds=None, opening_limit=None):
-    logging.debug(f"🔍 Running compute_sharp_metrics for Outcome: {label}, Market: {mtype}")
-    logging.debug(f"📥 Open value: {open_val}, Open odds: {open_odds}")
-    logging.debug(f"📦 Received {len(entries)} entries")
+def compute_sharp_metrics(
+    entries,
+    open_val,
+    mtype,
+    label,
+    gk=None,
+    book=None,
+    open_odds=None,
+    opening_limit=None,
+):
+    """
+    entries: iterable of (limit, value, ts, game_start, odds)
+             Prefer ts and game_start as pd.Timestamp or datetime for speed.
+    """
+    lg_debug = logging.getLogger().isEnabledFor(logging.DEBUG)
+    if lg_debug:
+        logging.debug("🔍 compute_sharp_metrics outcome=%s market=%s", label, mtype)
+
+    # ── pre-normalize a couple of cheap strings once
+    mtype = (mtype or "").strip().lower()
+    label = (label or "").strip().lower()
+
+    # ── ensure sorted by timestamp once (skip if caller guaranteed sorted)
+    if entries and not all(entries[i][2] <= entries[i+1][2] for i in range(len(entries)-1)):
+        entries = sorted(entries, key=lambda x: x[2])
 
     move_signal = 0.0
-    move_magnitude_score = 0.0
+    move_mag_sum = 0.0
     limit_score = 0.0
     total_limit = 0.0
-    hybrid_timing_mags = defaultdict(float)
-    odds_move_magnitude_score = 0.0
-    hybrid_timing_odds_mags = defaultdict(float)
+    odds_move_mag_pts = 0.0
 
-    # === Net movement from opening
+    # 16 hybrid timing buckets (4 TOD × 4 MTG) as a small float list
+    # idx = tod_idx*4 + mtg_idx
+    mag_buckets = [0.0]*16
+    odds_buckets = [0.0]*16
+
+    # helpers for bucket index (no strings in the loop)
+    def _tod_idx(hour: int) -> int:
+        # Overnight[0:5], Early[6:11], Midday[12:15], Late[16:23]
+        if 0 <= hour <= 5:   return 0
+        if 6 <= hour <= 11:  return 1
+        if 12 <= hour <= 15: return 2
+        return 3
+
+    def _mtg_idx(minutes_to_game: float | None) -> int:
+        # VeryEarly (>720), MidRange (180–720], LateGame (60–180], Urgent (<=60)
+        if minutes_to_game is None:       return 0  # treat as VeryEarly
+        if minutes_to_game > 720:         return 0
+        if minutes_to_game > 180:         return 1
+        if minutes_to_game > 60:          return 2
+        return 3
+
+    def _bucket_index(ts, game_start) -> int:
+        # ts, game_start should already be Timestamps/datetimes
+        try:
+            h = ts.hour
+        except Exception:
+            # fallback if ts somehow not datetime-like
+            h = pd.to_datetime(ts).hour
+        mtg = None
+        if game_start is not None:
+            try:
+                mtg = (game_start - ts).total_seconds() / 60.0
+            except Exception:
+                mtg = (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60.0
+        return _tod_idx(h) * 4 + _mtg_idx(mtg)
+
+    # opening trio may be missing → capture earliest non-null during pass
+    first_val = open_val
+    first_odds = open_odds
+    first_limit = opening_limit
+
+    prev_val = None
+    prev_odds = None
+
     net_line_move = None
     abs_net_line_move = None
     net_odds_move = None
     abs_net_odds_move = None
-    # derive opening trio from entries if missing
-    if open_val is None or open_odds is None or opening_limit is None:
-        for (lim, val, ts, game_start, odds) in sorted(entries, key=lambda x: x[2]):
-            if open_val is None and pd.notna(val):
-                open_val = val
-            if open_odds is None and pd.notna(odds):
-                open_odds = odds
-            if opening_limit is None and pd.notna(lim):
-                opening_limit = lim
-            if (open_val is not None) and (open_odds is not None) and (opening_limit is not None):
-                break
-    # --- Always sort first
-    mtype = (mtype or "").strip().lower()
-    label = (label or "").strip().lower()
-    entries = sorted(entries, key=lambda x: x[2])  # (limit, value, ts, game_start, odds)
 
-    def get_hybrid_bucket(ts, game_start):
-        hour = pd.to_datetime(ts).hour
-        minutes_to_game = (
-            (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60
-            if pd.notnull(game_start) else None
-        )
-        tod = ('Overnight' if 0 <= hour <= 5 else
-               'Early'     if 6 <= hour <= 11 else
-               'Midday'    if 12 <= hour <= 15 else
-               'Late')
-        mtg = ('VeryEarly' if minutes_to_game is None else
-               'VeryEarly' if minutes_to_game > 720 else
-               'MidRange'  if 180 < minutes_to_game <= 720 else
-               'LateGame'  if 60 < minutes_to_game <= 180 else
-               'Urgent')
-        return f"{tod}_{mtg}"
-
-    # --- Bootstrap open trio from earliest non-nulls in entries if missing
-    if (open_val is None or pd.isna(open_val)) or (open_odds is None or pd.isna(open_odds)) or (opening_limit is None or pd.isna(opening_limit)):
-        for (lim, val, ts, game_start, odds) in entries:
-            if (open_val is None or pd.isna(open_val)) and pd.notna(val):
-                open_val = val
-            if (open_odds is None or pd.isna(open_odds)) and pd.notna(odds):
-                open_odds = odds
-            if (opening_limit is None or pd.isna(opening_limit)) and pd.notna(lim):
-                opening_limit = lim
-            if pd.notna(open_val) and pd.notna(open_odds) and (opening_limit is not None):
-                break
-
-    # === Track previous values for proper delta logic
-    prev_val = open_val
-    prev_odds = open_odds
-
-    for i, entry in enumerate(entries):
-        if len(entry) != 5:
-            logging.warning(f"⚠️ Malformed entry {i+1}: {entry}")
-            continue
-
-        limit, curr_val, ts, game_start, curr_odds = entry
-        logging.debug(f"🧾 Entry {i+1} → Limit={limit}, Value={curr_val}, Time={ts}, Odds={curr_odds}")
-
+    for i, (lim, curr_val, ts, game_start, curr_odds) in enumerate(entries):
+        # Fast numeric coercion (assume mostly numeric):
         try:
-            # ensure numerics
-            curr_val = pd.to_numeric(curr_val, errors='coerce')
-            curr_odds = pd.to_numeric(curr_odds, errors='coerce')
-            limit = pd.to_numeric(limit, errors='coerce')
+            if lim is not None and not isinstance(lim, (int, float)):
+                lim = pd.to_numeric(lim, errors="coerce")
+            if curr_val is not None and not isinstance(curr_val, (int, float)):
+                curr_val = pd.to_numeric(curr_val, errors="coerce")
+            if curr_odds is not None and not isinstance(curr_odds, (int, float)):
+                curr_odds = pd.to_numeric(curr_odds, errors="coerce")
+        except Exception:
+            # ignore bad coercions silently here
+            pass
 
-            # === Line movement
-            if pd.notna(prev_val) and pd.notna(curr_val):
-                delta = curr_val - prev_val
-                sharp_move_delta = delta
+        # establish opening trio lazily
+        if first_val is None and pd.notna(curr_val):
+            first_val = curr_val
+        if first_odds is None and pd.notna(curr_odds):
+            first_odds = curr_odds
+        if first_limit is None and pd.notna(lim):
+            first_limit = lim
 
-                move_magnitude_score += sharp_move_delta
+        # compute bucket index once
+        b_idx = _bucket_index(ts, game_start)
 
-                if mtype == 'totals':
-                    if 'under' in label and sharp_move_delta < 0:
-                        move_signal += sharp_move_delta
-                    elif 'over' in label and sharp_move_delta > 0:
-                        move_signal += sharp_move_delta
-                elif mtype == 'spreads':
-                    if prev_val < 0 and curr_val < prev_val:
-                        move_signal += sharp_move_delta
-                    elif prev_val > 0 and curr_val > prev_val:
-                        move_signal += sharp_move_delta
+        # line movement deltas
+        if pd.notna(prev_val) and pd.notna(curr_val):
+            delta = curr_val - prev_val
+            move_mag_sum += float(delta)
 
-                timing_label = get_hybrid_bucket(ts, game_start)
-                hybrid_timing_mags[timing_label] += sharp_move_delta
+            if mtype == "totals":
+                # Under sharp if line drops; Over sharp if line rises
+                if ("under" in label and delta < 0) or ("over" in label and delta > 0):
+                    move_signal += float(delta)
+            elif mtype == "spreads":
+                # Push direction: more extreme toward current side
+                if prev_val < 0 and curr_val < prev_val:
+                    move_signal += float(delta)
+                elif prev_val > 0 and curr_val > prev_val:
+                    move_signal += float(delta)
 
-                prev_val = curr_val
+            mag_buckets[b_idx] += float(delta)
 
-            # === Odds movement
-            if pd.notna(prev_odds) and pd.notna(curr_odds):
-                prev_prob = implied_prob(prev_odds)
-                curr_prob = implied_prob(curr_odds)
+        # odds movement (convert to prob only when both present)
+        if pd.notna(prev_odds) and pd.notna(curr_odds):
+            prev_prob = implied_prob(prev_odds)
+            curr_prob = implied_prob(curr_odds)
+            odds_delta = curr_prob - prev_prob
+            point_equiv = implied_prob_to_point_move(odds_delta)
+            odds_move_mag_pts += float(point_equiv)
+            odds_buckets[b_idx] += float(odds_delta)
 
-                odds_delta = curr_prob - prev_prob
-                point_equiv = implied_prob_to_point_move(odds_delta)
+        # rolling net-from-open
+        if pd.notna(first_val) and pd.notna(curr_val):
+            net_line_move = float(curr_val - first_val)
+            abs_net_line_move = abs(net_line_move)
 
-                logging.debug(f"🧾 Odds Δ: {odds_delta:+.3f} (~{point_equiv:+.1f} pts), From {prev_odds} → {curr_odds}")
+        if pd.notna(first_odds) and pd.notna(curr_odds):
+            net_odds_move = float(curr_odds - first_odds)
+            abs_net_odds_move = abs(net_odds_move)
 
-                odds_move_magnitude_score += point_equiv
-                timing_label = get_hybrid_bucket(ts, game_start)
-                hybrid_timing_odds_mags[timing_label] += odds_delta
+        # limit tracking
+        if pd.notna(lim):
+            f_lim = float(lim)
+            total_limit += f_lim
+            if f_lim >= 100:
+                limit_score += f_lim
 
-                prev_odds = curr_odds
+        # advance prevs after using them
+        if pd.notna(curr_val):
+            prev_val = curr_val
+        if pd.notna(curr_odds):
+            prev_odds = curr_odds
 
-            # === Net moves from opening
-            if pd.notna(open_val) and pd.notna(curr_val):
-                net_line_move = curr_val - open_val
-                abs_net_line_move = abs(net_line_move)
+        if lg_debug and (i < 3 or i == len(entries)-1):  # sample a few logs only
+            logging.debug("…%d/%d val=%s odds=%s lim=%s", i+1, len(entries), curr_val, curr_odds, lim)
 
-            if pd.notna(open_odds) and pd.notna(curr_odds):
-                net_odds_move = curr_odds - open_odds
-                abs_net_odds_move = abs(net_odds_move)
+    # dominant timing label from the 16 buckets (by absolute magnitude of line deltas)
+    if mag_buckets:
+        dom_idx = max(range(16), key=lambda k: abs(mag_buckets[k]))
+        tods = ["Overnight", "Early", "Midday", "Late"]
+        mtgs = ["VeryEarly", "MidRange", "LateGame", "Urgent"]
+        dominant_label = f"{tods[dom_idx//4]}_{mtgs[dom_idx%4]}"
+    else:
+        dominant_label = "unknown"
 
-            # === Limit tracking
-            if pd.notna(limit):
-                total_limit += float(limit)
-                if float(limit) >= 100:
-                    limit_score += float(limit)
+    # First_Imp_Prob from the actual opening odds chosen
+    first_imp_prob = implied_prob(first_odds) if pd.notna(first_odds) else None
 
-        except Exception as e:
-            logging.warning(f"⚠️ Error in entry {i+1}: {e}")
+    # flatten buckets into dict keys only once, after the pass
+    out = {
+        "Open_Value": first_val,
+        "Open_Odds": first_odds,
+        "Opening_Limit": first_limit,
+        "First_Imp_Prob": first_imp_prob,
 
-    # === Final bucket flattening
-    all_possible_buckets = [
-        f"{tod}_{mtg}"
-        for tod in ['Overnight', 'Early', 'Midday', 'Late']
-        for mtg in ['VeryEarly', 'MidRange', 'LateGame', 'Urgent']
-    ]
-    flattened_buckets = {f'SharpMove_Magnitude_{b}': round(hybrid_timing_mags.get(b, 0.0), 3) for b in all_possible_buckets}
-    flattened_odds_buckets = {f'OddsMove_Magnitude_{b}': round(hybrid_timing_odds_mags.get(b, 0.0), 3) for b in all_possible_buckets}
+        "Sharp_Move_Signal": int(move_signal > 0),
+        "Sharp_Line_Magnitude": round(move_mag_sum, 2),
+        "Sharp_Limit_Jump": int(limit_score >= 10000),
+        "Sharp_Limit_Total": round(total_limit, 1),
 
-    dominant_label, dominant_mag = max(hybrid_timing_mags.items(), key=lambda x: x[1], default=("unknown", 0.0))
-
-    # derive First_Imp_Prob from the open odds we ended up with
-    first_imp_prob = implied_prob(open_odds) if pd.notna(open_odds) else None
-
-    logging.debug(f"📊 Final hybrid_timing_mags: {dict(hybrid_timing_mags)}")
-    logging.debug(f"📊 Final hybrid_timing_odds_mags: {dict(hybrid_timing_odds_mags)}")
-
-    return {
-        # ← return the open trio so callers can use them
-        'Open_Value': open_val,
-        'Open_Odds': open_odds,
-        'Opening_Limit': opening_limit,
-        'First_Imp_Prob': first_imp_prob,
-
-        'Sharp_Move_Signal': int(move_signal > 0),
-        'Sharp_Line_Magnitude': round(move_magnitude_score, 2),
-        'Sharp_Limit_Jump': int(limit_score >= 10000),
-        'Sharp_Limit_Total': round(total_limit, 1),
-        'SharpMove_Timing_Dominant': dominant_label,
-        'Net_Line_Move_From_Opening': round(net_line_move, 3) if net_line_move is not None else None,
-        'Abs_Line_Move_From_Opening': round(abs_net_line_move, 3) if abs_net_line_move is not None else None,
-        'Net_Odds_Move_From_Opening': round(net_odds_move, 3) if net_odds_move is not None else None,
-        'Abs_Odds_Move_From_Opening': round(abs_net_odds_move, 3) if abs_net_odds_move is not None else None,
-        'SharpMove_Timing_Magnitude': round(move_magnitude_score, 3),
-        **flattened_buckets,
-        'Odds_Move_Magnitude': round(odds_move_magnitude_score, 2),
-        **flattened_odds_buckets,
-        'SharpBetScore': 0.0
+        "SharpMove_Timing_Dominant": dominant_label,
+        "Net_Line_Move_From_Opening": round(net_line_move, 3) if net_line_move is not None else None,
+        "Abs_Line_Move_From_Opening": round(abs_net_line_move, 3) if abs_net_line_move is not None else None,
+        "Net_Odds_Move_From_Opening": round(net_odds_move, 3) if net_odds_move is not None else None,
+        "Abs_Odds_Move_From_Opening": round(abs_net_odds_move, 3) if abs_net_odds_move is not None else None,
+        "SharpMove_Timing_Magnitude": round(move_mag_sum, 3),
+        "Odds_Move_Magnitude": round(odds_move_mag_pts, 2),
+        "SharpBetScore": 0.0,
     }
+
+    # attach the 16×2 bucket features (strings created only here)
+    tods = ["Overnight", "Early", "Midday", "Late"]
+    mtgs = ["VeryEarly", "MidRange", "LateGame", "Urgent"]
+    for ti, tod in enumerate(tods):
+        for mi, mtg in enumerate(mtgs):
+            idx = ti*4 + mi
+            out[f"SharpMove_Magnitude_{tod}_{mtg}"] = round(mag_buckets[idx], 3)
+            out[f"OddsMove_Magnitude_{tod}_{mtg}"] = round(odds_buckets[idx], 3)
+
+    if lg_debug:
+        logging.debug("📊 timing mag (first 6): %s", mag_buckets[:6])
+        logging.debug("📊 odds mag (first 6): %s", odds_buckets[:6])
+
+    return out
+
 def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame,
                                         df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     """
@@ -4765,135 +4794,188 @@ def summarize_consensus(df, SHARP_BOOKS, REC_BOOKS):
 
         
 def detect_market_leaders(df_history, sharp_books, rec_books):
-    df_history = df_history.copy()
-    df_history['Time'] = pd.to_datetime(df_history['Time'])
-    df_history['Book'] = df_history['Book'].str.lower()
-    df_history['Book'] = df_history.apply(
-        lambda row: normalize_book_name(row['Book'], row.get('Bookmaker')), axis=1
-    )
+    """
+    Memory-lean market-leader detection:
+    - Avoids rowwise .apply over the full frame for normalization
+    - Avoids merging large "open" columns back into df_history
+    - Computes first change times per (Game, Market, Outcome, Book) via a tiny groupby result
+    """
+    import numpy as np
+    import pandas as pd
 
+    if df_history is None or df_history.empty:
+        return pd.DataFrame(columns=[
+            'Game','Market','Outcome','Book',
+            'First_Line_Move_Time','First_Odds_Move_Time',
+            'Book_Type','Line_Move_Rank','Odds_Move_Rank',
+            'Market_Leader_Line','Market_Leader_Odds','Market_Leader'
+        ])
 
-    # === LINE MOVE DETECTION ===
-    df_open_line = (
-        df_history
-        .sort_values('Time')
-        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Value']
-        .first()
-        .reset_index()
-        .rename(columns={'Value': 'Open_Line_Value'})
-    )
-
-    df_history = df_history.merge(df_open_line, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-    df_history['Line_Has_Moved'] = (df_history['Value'] != df_history['Open_Line_Value']) & df_history['Value'].notna()
-
-    first_line_moves = (
-        df_history[df_history['Line_Has_Moved']]
-        .groupby(['Game', 'Market', 'Outcome', 'Book'])['Time']
-        .min()
-        .reset_index()
-        .rename(columns={'Time': 'First_Line_Move_Time'})
-    )
-
-    # === ODDS MOVE DETECTION ===
+    # ---- 0) Work skinny & normalize types early
+    need = ['Game','Market','Outcome','Book','Bookmaker','Time','Value']
     if 'Odds_Price' in df_history.columns:
-        df_open_odds = (
-            df_history
-            .sort_values('Time')
-            .groupby(['Game', 'Market', 'Outcome', 'Book'])['Odds_Price']
-            .first()
-            .reset_index()
-            .rename(columns={'Odds_Price': 'Open_Odds_Price'})
-        )
-        df_history = df_history.merge(df_open_odds, on=['Game', 'Market', 'Outcome', 'Book'], how='left')
-        df_history['Odds_Has_Moved'] = (df_history['Odds_Price'] != df_history['Open_Odds_Price']) & df_history['Odds_Price'].notna()
+        need.append('Odds_Price')
+    df = df_history.loc[:, [c for c in need if c in df_history.columns]].copy()
 
-        first_odds_moves = (
-            df_history[df_history['Odds_Has_Moved']]
-            .groupby(['Game', 'Market', 'Outcome', 'Book'])['Time']
-            .min()
-            .reset_index()
-            .rename(columns={'Time': 'First_Odds_Move_Time'})
+    # Types
+    df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
+    for c in ('Game','Market','Outcome','Book','Bookmaker'):
+        if c in df.columns:
+            df[c] = df[c].astype('string').str.strip()
+    # Lowercase book now; bookmaker left as-is for normalize function if it needs case
+    if 'Book' in df.columns:
+        df['Book'] = df['Book'].str.lower()
+
+    # ---- 1) Normalize Book with a tiny unique map (avoids rowwise apply over all rows)
+    # Build map on unique pairs, then merge back once.
+    if 'Bookmaker' in df.columns:
+        uniq = df[['Book','Bookmaker']].drop_duplicates()
+        uniq['Book_norm'] = uniq.apply(lambda r: normalize_book_name(r['Book'], r['Bookmaker']), axis=1)
+        df = df.merge(uniq, on=['Book','Bookmaker'], how='left')
+        df['Book'] = df['Book_norm'].astype('string').str.lower()
+        df.drop(columns=['Book_norm'], inplace=True)
+    else:
+        # Fallback: if no Bookmaker, still normalize on Book only
+        uniq = df[['Book']].drop_duplicates()
+        uniq['Book_norm'] = uniq['Book'].map(lambda b: normalize_book_name(b, None))
+        df = df.merge(uniq, on='Book', how='left')
+        df['Book'] = df['Book_norm'].astype('string').str.lower()
+        df.drop(columns=['Book_norm'], inplace=True)
+
+    # Categories (big win for memory during groupby)
+    for c in ('Game','Market','Outcome','Book'):
+        if c in df.columns:
+            df[c] = df[c].astype('category')
+
+    # Sort once for deterministic "first" logic; keep only needed cols
+    df.sort_values(['Game','Market','Outcome','Book','Time'], inplace=True, kind='mergesort')
+
+    # ---- 2) First-change helpers (operate per group, return a single timestamp)
+    def first_change_time_from_open(values: pd.Series, times: pd.Series):
+        # values & times are already time-sorted
+        if len(values) == 0:
+            return pd.NaT
+        v = values.to_numpy()
+        t = times.to_numpy()
+        # first non-nan as opener (fallback to v[0] if all nan)
+        # Using the first element is fine because we sorted and the problem wants change vs the open snapshot
+        opener = v[0]
+        # Compare against opener; ignore NaNs
+        mask = (~pd.isna(v)) & (v != opener)
+        idx = np.flatnonzero(mask)
+        return pd.NaT if idx.size == 0 else pd.Timestamp(t[idx[0]])
+
+    # Group key
+    gkeys = ['Game','Market','Outcome','Book']
+
+    # ---- 3) Compute first line-move time (tiny result: one row per group)
+    line_moves = (
+        df.groupby(gkeys, observed=True, sort=False)
+          .apply(lambda g: first_change_time_from_open(g['Value'], g['Time']))
+          .reset_index(name='First_Line_Move_Time')
+    )
+
+    # ---- 4) Compute first odds-move time (only if present)
+    if 'Odds_Price' in df.columns:
+        odds_moves = (
+            df.groupby(gkeys, observed=True, sort=False)
+              .apply(lambda g: first_change_time_from_open(g['Odds_Price'], g['Time']))
+              .reset_index(name='First_Odds_Move_Time')
         )
     else:
-        first_odds_moves = pd.DataFrame(columns=['Game', 'Market', 'Outcome', 'Book', 'First_Odds_Move_Time'])
+        odds_moves = pd.DataFrame(columns=gkeys + ['First_Odds_Move_Time'])
 
-    # === Merge both move types ===
-    first_moves = pd.merge(first_line_moves, first_odds_moves, on=['Game', 'Market', 'Outcome', 'Book'], how='outer')
+    # ---- 5) Merge the two tiny move tables (outer keeps groups that moved in one dimension only)
+    first_moves = pd.merge(line_moves, odds_moves, on=gkeys, how='outer')
 
-    # Identify sharp vs. rec books
-    first_moves['Book_Type'] = first_moves['Book'].map(
-        lambda b: 'Sharp' if b in sharp_books else ('Rec' if b in rec_books else 'Other')
+    # ---- 6) Book type mapping (vectorized set membership)
+    sharp_set = set(x.lower() for x in sharp_books or [])
+    rec_set   = set(x.lower() for x in rec_books or [])
+    first_moves['Book'] = first_moves['Book'].astype('string').str.lower()
+    first_moves['Book_Type'] = np.where(
+        first_moves['Book'].isin(sharp_set), 'Sharp',
+        np.where(first_moves['Book'].isin(rec_set), 'Rec', 'Other')
+    ).astype('category')
+
+    # ---- 7) Ranks within (Game, Market, Outcome)
+    # Earlier time => lower rank number. NaT yields NaN (not ranked).
+    by_gmo = ['Game','Market','Outcome']
+    first_moves['Line_Move_Rank'] = first_moves.groupby(by_gmo, observed=True)['First_Line_Move_Time'] \
+                                               .rank(method='first', ascending=True)
+    first_moves['Odds_Move_Rank'] = first_moves.groupby(by_gmo, observed=True)['First_Odds_Move_Time'] \
+                                               .rank(method='first', ascending=True)
+
+    # ---- 8) Leader flags (Sharp book that moved first on line and/or odds)
+    is_sharp = first_moves['Book_Type'].eq('Sharp')
+    first_moves['Market_Leader_Line'] = is_sharp & first_moves['Line_Move_Rank'].eq(1.0)
+    first_moves['Market_Leader_Odds'] = is_sharp & first_moves['Odds_Move_Rank'].eq(1.0)
+    first_moves['Market_Leader'] = is_sharp & (
+        first_moves['Line_Move_Rank'].eq(1.0) | first_moves['Odds_Move_Rank'].eq(1.0)
     )
 
-    # Rank order
-    first_moves['Line_Move_Rank'] = first_moves.groupby(
-        ['Game', 'Market', 'Outcome']
-    )['First_Line_Move_Time'].rank(method='first')
+    # Order/trim columns
+    cols = [
+        'Game','Market','Outcome','Book',
+        'First_Line_Move_Time','First_Odds_Move_Time',
+        'Book_Type','Line_Move_Rank','Odds_Move_Rank',
+        'Market_Leader_Line','Market_Leader_Odds','Market_Leader'
+    ]
+    return first_moves.loc[:, [c for c in cols if c in first_moves.columns]]
 
-    first_moves['Odds_Move_Rank'] = first_moves.groupby(
-        ['Game', 'Market', 'Outcome']
-    )['First_Odds_Move_Time'].rank(method='first')
+def detect_cross_market_sharp_support(
+    df_moves,
+    SHARP_BOOKS,
+    game_col="Game_Key",           # use normalized keys if you have them
+    outcome_col="Outcome_Norm"     # avoids building a string SupportKey
+):
+    # Work in-place to avoid duplicating the whole DataFrame
+    df = df_moves
 
-    # === Market Leader Flags ===
-    first_moves['Market_Leader_Line'] = (
-        (first_moves['Book_Type'] == 'Sharp') & (first_moves['Line_Move_Rank'] == 1)
+    # Make SHARP_BOOKS a set for fast membership checks
+    sharp_books = set(SHARP_BOOKS)
+
+    # (Optional but cheap) shrink high-cardinality strings to categories
+    # Do this only if these columns exist; avoids fragmentation later.
+    if "Market" in df.columns and df["Market"].dtype == object:
+        df["Market"] = df["Market"].astype("category")
+    if "Book" in df.columns and df["Book"].dtype == object:
+        df["Book"] = df["Book"].astype("category")
+
+    # Boolean mask instead of materializing an extra column or copy
+    mask = df["Book"].isin(sharp_books) & df["Sharp_Move_Signal"].astype(bool)
+
+    # Group only the needed skinny slice; no .copy() (let GC reclaim the slice quickly)
+    gb = (
+        df.loc[mask, [game_col, outcome_col, "Market", "Book"]]
+          .groupby([game_col, outcome_col], observed=True)
+          .agg(
+              CrossMarketSharpSupport=("Market", "nunique"),
+              Unique_Sharp_Books=("Book", "nunique"),
+          )
+          .reset_index()
     )
 
-    first_moves['Market_Leader_Odds'] = (
-        (first_moves['Book_Type'] == 'Sharp') & (first_moves['Odds_Move_Rank'] == 1)
-    )
+    # Downcast the small result before merging
+    gb["CrossMarketSharpSupport"] = gb["CrossMarketSharpSupport"].astype("int16")
+    gb["Unique_Sharp_Books"]      = gb["Unique_Sharp_Books"].astype("int16")
 
-    # ✅ Final combined flag — fallback-compatible
-    first_moves['Market_Leader'] = (
-        (first_moves['Book_Type'] == 'Sharp') &
-        (
-            (first_moves['Line_Move_Rank'] == 1) |
-            (first_moves['Odds_Move_Rank'] == 1)
-        )
-    ) # change logic here if you want a blend
+    # Single merge back on keys (much cheaper than merging twice or on a long string key)
+    df.merge(gb, on=[game_col, outcome_col], how="left", inplace=True)
 
-    return first_moves
+    # Fill NA (no sharp support) and finalize types
+    if "CrossMarketSharpSupport" in df.columns:
+        df["CrossMarketSharpSupport"] = df["CrossMarketSharpSupport"].fillna(0).astype("int16")
+    else:
+        df["CrossMarketSharpSupport"] = 0
 
+    if "Unique_Sharp_Books" in df.columns:
+        df["Unique_Sharp_Books"] = df["Unique_Sharp_Books"].fillna(0).astype("int16")
+    else:
+        df["Unique_Sharp_Books"] = 0
 
-def detect_cross_market_sharp_support(df_moves, SHARP_BOOKS):
-    df = df_moves.copy()
-    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
-    df['SupportKey'] = df['Game'].astype(str).str.strip() + " | " + df['Outcome'].astype(str).str.strip()
-
-    # ✅ Step 1: Define a "sharp" row: book is sharp and sharp signal exists
-    df['Is_Sharp_Row'] = (
-        df['Book'].isin(SHARP_BOOKS) & 
-        (df['Sharp_Move_Signal'].astype(bool))  # could also include other flags like Limit_Jump or Prob_Shift
-    )
-
-    df_sharp = df[df['Is_Sharp_Row']].copy()
-
-    # ✅ Step 2: Count cross-market sharp support per (Game + Outcome)
-    market_counts = (
-        df_sharp.groupby('SupportKey')['Market']
-        .nunique()
-        .reset_index()
-        .rename(columns={'Market': 'CrossMarketSharpSupport'})
-    )
-
-    # ✅ Step 3: Count how many sharp books have that outcome
-    sharp_book_counts = (
-        df_sharp.groupby('SupportKey')['Book']
-        .nunique()
-        .reset_index()
-        .rename(columns={'Book': 'Unique_Sharp_Books'})
-    )
-
-    # ✅ Step 4: Merge back to original dataframe
-    df = df.merge(market_counts, on='SupportKey', how='left')
-    df = df.merge(sharp_book_counts, on='SupportKey', how='left')
-
-    df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
-    df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
-
-    # ✅ Step 5: Final flag
-    df['Is_Reinforced_MultiMarket'] = (
-        (df['CrossMarketSharpSupport'] >= 2) | (df['Unique_Sharp_Books'] >= 2)
+    # Final flag (bool—1 byte)
+    df["Is_Reinforced_MultiMarket"] = (
+        (df["CrossMarketSharpSupport"] >= 2) | (df["Unique_Sharp_Books"] >= 2)
     )
 
     return df
