@@ -1645,24 +1645,30 @@ def apply_compute_sharp_metrics_rowwise(
 
     metrics_df = pd.DataFrame.from_records(records)
 
-    out = df.merge(metrics_df, on=keys, how='left', copy=False)
 
+    
+    # Do NOT re-merge opener columns; they already exist on df
+    _opener_cols = ['Open_Value', 'Open_Odds', 'Opening_Limit', 'First_Imp_Prob']
+    metrics_df = metrics_df.drop(columns=[c for c in _opener_cols if c in metrics_df.columns],
+                                 errors='ignore')
+    
+    out = df.merge(metrics_df, on=keys, how='left', copy=False)
+    
     # Fill NaNs for groups that had no snapshots at all
     for col, val in default_metrics.items():
         if col not in out.columns:
             out[col] = val
         else:
-            # skip no-op fills for np.nan to avoid work
             if not (isinstance(val, float) and np.isnan(val)):
                 out[col] = out[col].fillna(val)
-
+    
     # optional: tighten dtypes for numeric metrics
     num_cols = [c for c, v in default_metrics.items()
                 if isinstance(v, (int, float)) or (isinstance(v, float) and (pd.isna(v) or np.isnan(v)))]
     for c in num_cols:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors='coerce').astype('float32', copy=False)
-
+    
     return out
 
 
