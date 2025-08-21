@@ -1289,7 +1289,7 @@ def enrich_and_grade_for_training(
     sport_aliases: dict,
     value_col: str = "Value",
     outcome_col: str = "Outcome_Norm",
-    pad_days: int = 10,
+    pad_days: int =30,
     allow_forward_hours: float = 0.0,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     project: str = None,
@@ -3152,9 +3152,9 @@ def read_market_weights_from_bigquery():
 def attach_ratings_and_edges_for_diagnostics(
     df: pd.DataFrame,
     sport_aliases: dict,
-    table_history: str = "sharplogger.sharp_data.ratings_current",
+    table_history: str = "sharplogger.sharp_data.ratings_current",  # ← current table by default
     project: str = "sharplogger",
-    pad_days: int = 10,
+    pad_days: int = 30,     # normal pad for history tables
     allow_forward_hours: float = 0.0,
 ) -> pd.DataFrame:
     import numpy as np
@@ -3166,6 +3166,7 @@ def attach_ratings_and_edges_for_diagnostics(
         'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
     ]
 
+    # Fast exit on empty input — keep UI cols present
     if df.empty:
         out = df.copy()
         for c in UI_EDGE_COLS:
@@ -3174,7 +3175,7 @@ def attach_ratings_and_edges_for_diagnostics(
 
     out = df.copy()
 
-    # ---- Safe normalizations (use Series defaults, not scalar strings)
+    # ---- Safe normalizations (Series-safe defaults)
     def _series(col, default=""):
         return out[col] if col in out.columns else pd.Series(default, index=out.index)
 
@@ -3182,54 +3183,64 @@ def attach_ratings_and_edges_for_diagnostics(
     out['Market']         = _series('Market').astype(str).str.lower().str.strip()
     out['Home_Team_Norm'] = _series('Home_Team_Norm').astype(str).str.lower().str.strip()
     out['Away_Team_Norm'] = _series('Away_Team_Norm').astype(str).str.lower().str.strip()
-    out['Outcome_Norm']   = (_series('Outcome_Norm', None).where(out.get('Outcome_Norm').notna() if 'Outcome_Norm' in out else False,
-                           _series('Outcome'))).astype(str).str.lower().str.strip()
+    out['Outcome_Norm']   = (
+        _series('Outcome_Norm', None)
+        .where((_series('Outcome_Norm', None).notna()) if 'Outcome_Norm' in out else False,
+               _series('Outcome'))
+        .astype(str).str.lower().str.strip()
+    )
 
-    # Game_Start fallback to Snapshot_Timestamp (as Series)
+    # Game_Start fallback to Snapshot_Timestamp
     if 'Game_Start' not in out.columns or out['Game_Start'].isna().all():
-        snap = _series('Snapshot_Timestamp', pd.NaT)
-        out['Game_Start'] = pd.to_datetime(snap, utc=True, errors='coerce')
+        out['Game_Start'] = pd.to_datetime(_series('Snapshot_Timestamp', pd.NaT),
+                                           utc=True, errors='coerce')
 
-    # Work on spreads rows only
+    # We only compute edges for spreads
     mask = out['Market'].eq('spreads') & out['Home_Team_Norm'].ne('') & out['Away_Team_Norm'].ne('')
     if not mask.any():
-        # Ensure UI cols exist (NaN) and return
         for c in UI_EDGE_COLS:
             if c not in out.columns:
                 out[c] = np.nan
         return out
 
+    # Minimal join key back into the original rows
     need_cols = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
-    d_sp = (out.loc[mask, need_cols]
-              .dropna(subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'])
-              .copy())
+    d_sp = (
+        out.loc[mask, need_cols]
+           .dropna(subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'])
+           .copy()
+    )
     d_sp['Value'] = pd.to_numeric(d_sp['Value'], errors='coerce').astype('float32')
 
-    # 1) Ratings (backward as-of)
+    # ---------- KEY FIX: widen the ratings window when using *current* table ----------
+    is_current_table = 'ratings_current' in str(table_history).lower()
+    pad_days_eff = (365 if is_current_table else pad_days)  # wide window so older “Updated_At” is included
+
+    # 1) Ratings (as-of, low-mem)
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
         bq=None,
         sport_aliases=sport_aliases,
-        table_history=table_history,
-        pad_days=pad_days,
+        table_history=table_history,           # ← points at ratings_current by default
+        pad_days=pad_days_eff,                 # ← wide pad for current table
         allow_forward_hours=allow_forward_hours,
         project=project,
     )
 
-    # 2) Consensus fav & k
+    # 2) Consensus favorite & k
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
     # 3) Game-level model spreads/edges
     game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
     g_full = base.merge(cons, on=game_keys, how='left')
-    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
+    g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
 
-    # Ensure PR columns exist in g_fc
+    # Ensure PR columns exist (carry from g_full or set NaN)
     for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
         if c not in g_fc.columns:
             g_fc[c] = g_full[c] if c in g_full.columns else np.nan
 
-    # Map to per-row outcome
+    # Map to the row’s bet side
     d_map = d_sp.merge(g_fc, on=game_keys, how='left')
 
     is_fav_row = d_map['Outcome_Norm'].eq(d_map['Market_Favorite_Team'])
@@ -3238,19 +3249,20 @@ def attach_ratings_and_edges_for_diagnostics(
     d_map['Outcome_Spread_Edge']   = np.where(is_fav_row, d_map['Fav_Edge_Pts'], d_map['Dog_Edge_Pts']).astype('float32')
     d_map['Outcome_Cover_Prob']    = np.where(is_fav_row, d_map['Fav_Cover_Prob'], d_map['Dog_Cover_Prob']).astype('float32')
 
-    # Ratings for the bet side
+    # Ratings shown for the bet side (home vs away)
     is_home_bet = d_map['Outcome_Norm'].eq(d_map['Home_Team_Norm'])
     d_map['PR_Team_Rating'] = np.where(is_home_bet, d_map['Home_Power_Rating'], d_map['Away_Power_Rating']).astype('float32')
     d_map['PR_Opp_Rating']  = np.where(is_home_bet, d_map['Away_Power_Rating'], d_map['Home_Power_Rating']).astype('float32')
-    d_map['PR_Rating_Diff'] = (pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
-                               pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')).astype('float32')
+    d_map['PR_Rating_Diff'] = (
+        pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
+        pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')
+    ).astype('float32')
 
     # Agreement & scaled edges
     k_abs = (
-        pd.to_numeric(d_map.get('Favorite_Market_Spread'), errors='coerce').abs()
+        pd.to_numeric(d_map.get('Favorite_Market_Spread'),  errors='coerce').abs()
           .combine_first(pd.to_numeric(d_map.get('Underdog_Market_Spread'), errors='coerce').abs())
-    ).astype('float32')
-    k_abs = k_abs.where(k_abs > 0, np.nan)
+    ).astype('float32').where(lambda s: s > 0, np.nan)
 
     d_map['model_fav_vs_market_fav_agree'] = (
         (pd.to_numeric(d_map['Outcome_Model_Spread'], errors='coerce') < 0) ==
@@ -3260,23 +3272,16 @@ def attach_ratings_and_edges_for_diagnostics(
     d_map['edge_x_k'] = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce') * k_abs).astype('float32')
     d_map['mu_x_k']   = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce').abs() * k_abs).astype('float32')
 
-    # ---- Avoid suffixes: drop any pre-existing UI cols before merge-back
+    # Clean merge back (avoid suffixes)
     out.drop(columns=UI_EDGE_COLS, inplace=True, errors='ignore')
+    out = out.merge(d_map[need_cols + UI_EDGE_COLS], on=need_cols, how='left')
 
-    # Merge back (left) on the minimal key to avoid row multiplication
-    out = out.merge(
-        d_map[need_cols + UI_EDGE_COLS],
-        on=need_cols,
-        how='left'
-    )
-
-    # Ensure columns exist (if some rows didn't match)
+    # Ensure UI cols always exist
     for c in UI_EDGE_COLS:
         if c not in out.columns:
             out[c] = np.nan
 
     return out
-        
 def compute_diagnostics_vectorized(df):
    
     df = df.copy()
