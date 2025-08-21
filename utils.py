@@ -193,67 +193,52 @@ from google.cloud import bigquery, bigquery_storage
 import pandas as pd, datetime as dt, gc, pyarrow as pa
 
 def _bqs_singleton():
-    # reuse one client to keep memory low
     if not hasattr(_bqs_singleton, "_c"):
         _bqs_singleton._c = bigquery_storage.BigQueryReadClient()
     return _bqs_singleton._c
 
 def _to_bq_params(params: dict | None):
-    """Infer proper BigQuery QueryParameter objects from a plain dict."""
     if not params:
         return None
     qps = []
     for k, v in params.items():
-        # Arrays
         if isinstance(v, (list, tuple)):
-            if not v:  # empty -> default to STRING array
+            if not v:
                 qps.append(bigquery.ArrayQueryParameter(k, "STRING", []))
             else:
-                first = v[0]
-                if isinstance(first, str):
+                x = v[0]
+                if isinstance(x, str):
                     qps.append(bigquery.ArrayQueryParameter(k, "STRING", list(v)))
-                elif isinstance(first, (int,)):
+                elif isinstance(x, int):
                     qps.append(bigquery.ArrayQueryParameter(k, "INT64", list(v)))
-                elif isinstance(first, (float,)):
+                elif isinstance(x, float):
                     qps.append(bigquery.ArrayQueryParameter(k, "FLOAT64", list(v)))
-                elif isinstance(first, (dt.datetime, pd.Timestamp)):
-                    # Normalize to aware python datetime in UTC
+                elif isinstance(x, (dt.datetime, pd.Timestamp)):
                     vv = []
-                    for x in v:
-                        t = pd.to_datetime(x, errors="coerce")
-                        if getattr(t, "tzinfo", None) is None and getattr(t, "tz", None) is None:
-                            t = t.tz_localize("UTC")
-                        else:
-                            t = t.tz_convert("UTC")
+                    for t in v:
+                        t = pd.to_datetime(t, errors="coerce")
+                        t = t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
                         vv.append(t.to_pydatetime())
                     qps.append(bigquery.ArrayQueryParameter(k, "TIMESTAMP", vv))
                 else:
-                    # fall back to STRING array
-                    qps.append(bigquery.ArrayQueryParameter(k, "STRING", [str(x) for x in v]))
-            continue
-
-        # Scalars
-        if isinstance(v, str):
-            qps.append(bigquery.ScalarQueryParameter(k, "STRING", v))
-        elif isinstance(v, bool):
-            qps.append(bigquery.ScalarQueryParameter(k, "BOOL", v))
-        elif isinstance(v, int):
-            qps.append(bigquery.ScalarQueryParameter(k, "INT64", v))
-        elif isinstance(v, float):
-            qps.append(bigquery.ScalarQueryParameter(k, "FLOAT64", v))
-        elif isinstance(v, (dt.datetime, pd.Timestamp)):
-            t = pd.to_datetime(v, errors="coerce")
-            if getattr(t, "tzinfo", None) is None and getattr(t, "tz", None) is None:
-                t = t.tz_localize("UTC")
-            else:
-                t = t.tz_convert("UTC")
-            qps.append(bigquery.ScalarQueryParameter(k, "TIMESTAMP", t.to_pydatetime()))
-        elif v is None:
-            # BigQuery doesn't have a typeless NULL param; make it a STRING NULL (rarely needed)
-            qps.append(bigquery.ScalarQueryParameter(k, "STRING", None))
+                    qps.append(bigquery.ArrayQueryParameter(k, "STRING", [str(y) for y in v]))
         else:
-            # fallback stringify to avoid JSON errors
-            qps.append(bigquery.ScalarQueryParameter(k, "STRING", str(v)))
+            if isinstance(v, str):
+                qps.append(bigquery.ScalarQueryParameter(k, "STRING", v))
+            elif isinstance(v, bool):
+                qps.append(bigquery.ScalarQueryParameter(k, "BOOL", v))
+            elif isinstance(v, int):
+                qps.append(bigquery.ScalarQueryParameter(k, "INT64", v))
+            elif isinstance(v, float):
+                qps.append(bigquery.ScalarQueryParameter(k, "FLOAT64", v))
+            elif isinstance(v, (dt.datetime, pd.Timestamp)):
+                t = pd.to_datetime(v, errors="coerce")
+                t = t.tz_localize("UTC") if t.tz is None else t.tz_convert("UTC")
+                qps.append(bigquery.ScalarQueryParameter(k, "TIMESTAMP", t.to_pydatetime()))
+            elif v is None:
+                qps.append(bigquery.ScalarQueryParameter(k, "STRING", None))
+            else:
+                qps.append(bigquery.ScalarQueryParameter(k, "STRING", str(v)))
     return qps
 
 def stream_query_dfs(
@@ -263,27 +248,27 @@ def stream_query_dfs(
     *,
     page_rows: int = 200_000,
     select_cols: list[str] | None = None,
-    dtypes: dict | None = None
+    dtypes: dict | None = None,
 ):
+    # Build job config with typed params
     qps = _to_bq_params(params)
     job_config = bigquery.QueryJobConfig(query_parameters=qps) if qps else None
-    job = bq.query(sql, job_config=job_config)
-    it = job.result(page_size=page_rows)
 
+    # Run query
+    it = bq.query(sql, job_config=job_config).result(page_size=page_rows)
+
+    # Stream DataFrames using the Storage API
     bqs = _bqs_singleton()
-    for page in it.pages:
-        tbl: pa.Table = page.to_arrow(bqstorage_client=bqs)
+    for df in it.to_dataframe_iterable(bqstorage_client=bqs):
         if select_cols:
-            # only keep columns we actually need
-            keep = [c for c in select_cols if c in tbl.column_names]
-            tbl = tbl.select(keep)
-        df = tbl.to_pandas(types_mapper=pd.ArrowDtype)
+            keep = [c for c in select_cols if c in df.columns]
+            if keep:
+                df = df[keep]
         if dtypes:
             df = df.astype(dtypes, copy=False)
         yield df
-        del df, tbl
+        del df
         gc.collect()
-
 
 def to_utc_ts(x):
     """
@@ -4913,10 +4898,11 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
         df.drop(columns=['Book_norm'], inplace=True)
 
     # Categories (big win for memory during groupby)
-    for c in ('Game','Market','Outcome','Book'):
-        if c in df.columns:
-            df[c] = df[c].astype('category')
+    for c in ["Sport","Market","Outcome_Norm","Game_Key","Book"]:
+        if c in df.columns and is_categorical_dtype(df[c]):
+            df[c] = df[c].astype("string")  # strip category for the merge
 
+    
     # Sort once for deterministic "first" logic; keep only needed cols
     df.sort_values(['Game','Market','Outcome','Book','Time'], inplace=True, kind='mergesort')
 
