@@ -3128,19 +3128,148 @@ def read_market_weights_from_bigquery():
         print(f"❌ Failed to load market weights from BigQuery: {e}")
         return {}
         
+def attach_ratings_and_edges_for_diagnostics(
+    df: pd.DataFrame,
+    sport_aliases: dict,
+    table_history: str = "sharplogger.sharp_data.ratings_history",
+    project: str = "sharplogger",
+    pad_days: int = 10,
+    allow_forward_hours: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Add visibility columns for ratings & per-outcome edges to a diagnostics DataFrame
+    without training. Only computes for spreads rows; totals/h2h remain NaN but visible.
+
+    Produces (always present in df when done):
+        PR_Team_Rating, PR_Opp_Rating, PR_Rating_Diff,
+        Outcome_Model_Spread, Outcome_Market_Spread, Outcome_Spread_Edge,
+        Outcome_Cover_Prob, model_fav_vs_market_fav_agree, edge_x_k, mu_x_k
+
+    Dependencies already in your codebase:
+      - enrich_power_for_training_lowmem(...)
+      - prep_consensus_market_spread_lowmem(...)
+      - favorite_centric_from_powerdiff_lowmem(...)
+
+    Args:
+        df: Diagnostics source rows (must include Sport, Market, Outcome/Outcome_Norm,
+            Home_Team_Norm, Away_Team_Norm, Value, Snapshot_Timestamp or Game_Start).
+        sport_aliases: your SPORT_ALIASES map.
+    """
+
+
+    UI_EDGE_COLS = [
+        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
+        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+        'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
+    ]
+
+    def _ensure_cols(frame, cols, fill=np.nan):
+        missing = [c for c in cols if c not in frame.columns]
+        if missing:
+            frame[missing] = fill
+        return frame
+
+    if df.empty:
+        # still ensure columns are present for UI schemas
+        return _ensure_cols(df.copy(), UI_EDGE_COLS, np.nan)
+
+    out = df.copy()
+
+    # --- Normalize basic keys used by helpers
+    out['Sport'] = out.get('Sport', '').astype(str).str.upper().str.strip()
+    out['Market'] = out.get('Market', '').astype(str).str.lower().str.strip()
+    out['Home_Team_Norm'] = out.get('Home_Team_Norm', '').astype(str).str.lower().str.strip()
+    out['Away_Team_Norm'] = out.get('Away_Team_Norm', '').astype(str).str.lower().str.strip()
+    out['Outcome_Norm'] = out.get('Outcome_Norm', out.get('Outcome','')).astype(str).str.lower().str.strip()
+
+    # Ensure we have a time reference for rating as-of logic
+    if 'Game_Start' not in out.columns or out['Game_Start'].isna().all():
+        out['Game_Start'] = pd.to_datetime(out.get('Snapshot_Timestamp'), utc=True, errors='coerce')
+
+    # Pre-create UI columns so they're visible even for totals/h2h rows
+    out = _ensure_cols(out, UI_EDGE_COLS, np.nan)
+
+    # Only compute for spreads (others remain NaN)
+    mask = out['Market'].eq('spreads') & out['Home_Team_Norm'].ne('') & out['Away_Team_Norm'].ne('')
+    if not mask.any():
+        return out
+
+    # Skinny spreads slice for enrichment
+    need_cols = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
+    d_sp = (out.loc[mask, need_cols]
+              .dropna(subset=['Sport','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value'])
+              .copy())
+    d_sp['Value'] = pd.to_numeric(d_sp['Value'], errors='coerce').astype('float32')
+
+    # 1) Ratings window (backward-asof; no training)
+    base = enrich_power_for_training_lowmem(
+        df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+        bq=None,  # not used internally
+        sport_aliases=sport_aliases,
+        table_history=table_history,
+        pad_days=pad_days,
+        allow_forward_hours=allow_forward_hours,
+        project=project,
+    )
+
+    # 2) Consensus favorite & k from the rows you already have
+    cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
+
+    # 3) Model spreads/edges at the game level from PR diff
+    game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
+    g_full = base.merge(cons, on=game_keys, how='left')
+    g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
+
+    # Map to per-row outcome
+    d_map = d_sp.merge(g_fc, on=game_keys, how='left')
+
+    is_fav_row = d_map['Outcome_Norm'].eq(d_map['Market_Favorite_Team'])
+    d_map['Outcome_Model_Spread']  = np.where(is_fav_row, d_map['Model_Fav_Spread'], d_map['Model_Dog_Spread']).astype('float32')
+    d_map['Outcome_Market_Spread'] = np.where(is_fav_row, d_map['Favorite_Market_Spread'], d_map['Underdog_Market_Spread']).astype('float32')
+    d_map['Outcome_Spread_Edge']   = np.where(is_fav_row, d_map['Fav_Edge_Pts'], d_map['Dog_Edge_Pts']).astype('float32')
+    d_map['Outcome_Cover_Prob']    = np.where(is_fav_row, d_map['Fav_Cover_Prob'], d_map['Dog_Cover_Prob']).astype('float32')
+
+    # Ratings for the specific bet side on the row
+    is_home_bet = d_map['Outcome_Norm'].eq(d_map['Home_Team_Norm'])
+    d_map['PR_Team_Rating'] = np.where(is_home_bet, d_map['Home_Power_Rating'], d_map['Away_Power_Rating'])
+    d_map['PR_Opp_Rating']  = np.where(is_home_bet, d_map['Away_Power_Rating'], d_map['Home_Power_Rating'])
+    d_map['PR_Rating_Diff'] = (pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
+                               pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')).astype('float32')
+
+    # Agreement & scaled edges
+    k_abs = (
+        pd.to_numeric(d_map.get('Favorite_Market_Spread'), errors='coerce').abs()
+          .combine_first(pd.to_numeric(d_map.get('Underdog_Market_Spread'), errors='coerce').abs())
+    ).astype('float32')
+    k_abs = k_abs.where(k_abs > 0, np.nan)
+
+    d_map['model_fav_vs_market_fav_agree'] = (
+        (pd.to_numeric(d_map['Outcome_Model_Spread'], errors='coerce') < 0) ==
+        d_map['Outcome_Norm'].eq(d_map['Market_Favorite_Team'])
+    ).astype('int8')
+
+    d_map['edge_x_k'] = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce') * k_abs).astype('float32')
+    d_map['mu_x_k']   = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce').abs() * k_abs).astype('float32')
+
+    # Merge back to the original frame on the skinny keys
+    out = out.merge(d_map[need_cols + UI_EDGE_COLS], on=need_cols, how='left')
+
+    return out
         
 def compute_diagnostics_vectorized(df):
-    import numpy as np
-    import pandas as pd
-
+   
     df = df.copy()
-
-    # === Ensure only latest snapshot per bookmaker is used (to match df_summary_base logic)
+   
     df = (
         df.sort_values('Snapshot_Timestamp')
         .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
     )
-
+    df = attach_ratings_and_edges_for_diagnostics(
+        df=df,
+        sport_aliases=SPORT_ALIASES,           # your existing global/map
+        table_history="sharplogger.sharp_data.ratings_history",
+        project="sharplogger",
+    )
     # === Tier ordering for change tracking
     TIER_ORDER = {
         '🪙 Low Probability': 1,
@@ -3789,6 +3918,13 @@ def ensure_opposite_side_rows(df, scored_df):
         st.info("✅ No mirrored rows needed — both sides already present.")
 
     return df
+
+import numpy as np
+import pandas as pd
+from math import erf, sqrt
+
+
+
 def render_scanner_tab(label, sport_key, container, force_reload=False):
     if st.session_state.get("pause_refresh", False):
         st.info("⏸️ Auto-refresh paused")
@@ -4262,7 +4398,9 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 for df_ in (df_summary_base, diag_source):
                     for k in ['Game_Key','Market','Outcome','Bookmaker']:
                         df_[k] = df_[k].astype(str).str.strip().str.lower()
-            
+                # Optionally build a ratings_map (if you have a simple table of team → rating)
+                # ratings_map = pd.DataFrame({'Team': [...], 'PRating': [...]})
+  
                 diagnostics_df = compute_diagnostics_vectorized(diag_source)  # per-book diagnostics
             
                 rep = df_summary_base[['Game_Key','Market','Outcome','Bookmaker']].drop_duplicates()
@@ -4271,7 +4409,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 )[[
                     'Game_Key','Market','Outcome','Bookmaker',
                     'Tier Δ','Line/Model Direction','Why Model Likes It',
-                    'Timing_Opportunity_Score','Timing_Stage'  # <-- add these
+                    'Timing_Opportunity_Score','Timing_Stage',  # <-- add these
                 ]]
             
                 df_summary_base = df_summary_base.merge(
