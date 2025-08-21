@@ -1534,190 +1534,151 @@ def compute_sharp_metrics(
 
     return out
 
-def apply_compute_sharp_metrics_rowwise(df: pd.DataFrame,
-                                        df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
+def apply_compute_sharp_metrics_rowwise(
+    df: pd.DataFrame,
+    df_all_snapshots: pd.DataFrame,
+) -> pd.DataFrame:
     """
-    Applies compute_sharp_metrics() to each row in df using historical snapshots.
-    Enriches df with sharp movement features like Sharp_Move_Signal, timing buckets, etc.
-    Safe against category dtype by casting to string for key ops.
+    Memory-lean sharp metrics enrichment:
+    - No 'category' dtype.
+    - Computes metrics ONCE per (Game_Key, Market, Outcome, Bookmaker) group
+      from snapshots, then merges onto df.
+    - Keeps snapshots "skinny" and downcasts numeric columns to float32.
+    - Stable ordering by Snapshot_Timestamp is done once up-front.
     """
+    import numpy as np
+    import pandas as pd
+
     if df is None or df.empty or df_all_snapshots is None or df_all_snapshots.empty:
         return df
 
-    df = df.copy()
-    snaps = df_all_snapshots.copy()
+    keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    missing = [k for k in keys if k not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required column(s) in df: {missing}")
 
-    # ---- required cols in df ----
-    need_df = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-    miss = [c for c in need_df if c not in df.columns]
-    if miss:
-        raise ValueError(f"Missing required column(s) in df: {miss}")
+    # --- Keep snapshots skinny (only what we actually need) ---
+    snap_needed = list(dict.fromkeys(
+        keys + ['Limit', 'Value', 'Snapshot_Timestamp', 'Game_Start', 'Odds_Price']
+    ))
+    snaps = df_all_snapshots.loc[:, [c for c in snap_needed if c in df_all_snapshots.columns]].copy()
 
-    # ---- cast keys to string (avoid category + issues) ----
-    for c in ('Game_Key','Market','Outcome','Bookmaker'):
-        if c in df.columns:
-            df[c] = df[c].astype('string')
-        if c in snaps.columns:
-            snaps[c] = snaps[c].astype('string')
+    # --- Helpers (avoid category; prefer pyarrow string if available) ---
+    def _to_str_col(s: pd.Series) -> pd.Series:
+        # Keep as-is if already a string extension array
+        if str(s.dtype).startswith('string'):
+            return s
+        try:
+            # Best memory profile when pyarrow is available
+            return s.astype('string[pyarrow]')
+        except Exception:
+            # Fallback to Python object strings (still avoids 'category')
+            return s.astype(str)
 
-    # ---- team norms as string (avoid numpy op add on category) ----
-    for c in ('Home_Team_Norm','Away_Team_Norm'):
-        if c in snaps.columns:
-            snaps[c] = snaps[c].astype('string')
-        if c in df.columns:
-            df[c] = df[c].astype('string')
+    # --- Normalize merge keys on BOTH sides (lower/strip; no category) ---
+    for k in (set(keys) & set(snaps.columns)):
+        snaps[k] = _to_str_col(snaps[k]).str.strip().str.lower()
+    for k in (set(keys) & set(df.columns)):
+        # This modifies df’s key columns in place (no big extra copy)
+        df[k] = _to_str_col(df[k]).str.strip().str.lower()
 
-    # ---- timestamps normalized ----
+    # --- Timestamps to UTC ---
     if 'Snapshot_Timestamp' in snaps.columns:
         snaps['Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
     if 'Game_Start' in snaps.columns:
         snaps['Game_Start'] = pd.to_datetime(snaps['Game_Start'], errors='coerce', utc=True)
 
-    # ---- optional hour bucket (only if useful for your metrics) ----
-    if 'Game_Start' in snaps.columns:
-        snaps['Commence_Hour'] = snaps['Game_Start'].dt.floor('h')
-    else:
-        snaps['Commence_Hour'] = pd.NaT
-
-    # ---- build a robust Team_Key using str.cat (na safe) ----
-    for c in ('Market','Outcome'):
+    # --- Downcast numerics to save memory ---
+    for c in ('Limit', 'Value', 'Odds_Price'):
         if c in snaps.columns:
-            snaps[c] = snaps[c].astype('string')
+            snaps[c] = pd.to_numeric(snaps[c], errors='coerce').astype('float32', copy=False)
 
-    snaps['Team_Key'] = (
-        snaps.get('Home_Team_Norm', pd.Series('', index=snaps.index, dtype='string')).str.cat(
-        snaps.get('Away_Team_Norm', pd.Series('', index=snaps.index, dtype='string')), sep='_', na_rep='')
-        .str.cat(snaps['Commence_Hour'].astype('string'), sep='_', na_rep='')
-        .str.cat(snaps.get('Market', ''), sep='_', na_rep='')
-        .str.cat(snaps.get('Outcome', ''), sep='_', na_rep='')
-    )
+    # --- Sort once by keys + time (stable) ---
+    sort_cols = [c for c in keys if c in snaps.columns]
+    if 'Snapshot_Timestamp' in snaps.columns:
+        sort_cols.append('Snapshot_Timestamp')
+    if sort_cols:
+        snaps.sort_values(sort_cols, inplace=True, kind='mergesort')
 
-    # ---- group snapshots for fast lookup ----
-    # (keys are strings now; no category math will be attempted)
-    group_keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-    for k in group_keys:
-        if k not in snaps.columns:
-            snaps[k] = pd.Series(pd.NA, index=snaps.index, dtype='string')
-    snapshots_grouped = snaps.groupby(group_keys, sort=False, observed=True)
+    # --- Default metrics for groups with no history ---
+    default_metrics = {
+        'Sharp_Move_Signal': 0,
+        'Opening_Limit': None,
+        'Sharp_Line_Magnitude': 0.0,
+        'Sharp_Limit_Jump': 0,
+        'Sharp_Limit_Total': 0.0,
+        'SharpMove_Timing_Dominant': 'unknown',
+        'Net_Line_Move_From_Opening': None,
+        'Abs_Line_Move_From_Opening': None,
+        'Net_Odds_Move_From_Opening': None,
+        'Abs_Odds_Move_From_Opening': None,
+        'SharpMove_Timing_Magnitude': 0.0,
+        'Odds_Move_Magnitude': 0.0,
+        **{f'SharpMove_Magnitude_{tod}_{mtg}': 0.0
+           for tod in ['Overnight','Early','Midday','Late']
+           for mtg in ['VeryEarly','MidRange','LateGame','Urgent']},
+        **{f'OddsMove_Magnitude_{tod}_{mtg}': 0.0
+           for tod in ['Overnight','Early','Midday','Late']
+           for mtg in ['VeryEarly','MidRange','LateGame','Urgent']},
+    }
 
-    enriched_rows = []
-    for idx, row in df.iterrows():
-        gk = row['Game_Key']
-        market = row['Market']
-        outcome = row['Outcome']
-        book = row['Bookmaker']
+    # --- Group once and compute metrics per group (NOT per row) ---
+    # observed=True is harmless here (beneficial only if categorical is present elsewhere)
+    gb = snaps.groupby(keys, sort=False, observed=True, dropna=False)
 
-        try:
-            group = snapshots_grouped.get_group((gk, market, outcome, book))
-        except KeyError:
-            default_metrics = {
-                'Sharp_Move_Signal': 0,
-                'Opening_Limit': None,
-                'Sharp_Line_Magnitude': 0.0,
-                'Sharp_Limit_Jump': 0,
-                'Sharp_Limit_Total': 0.0,
-                'SharpMove_Timing_Dominant': 'unknown',
-                'Net_Line_Move_From_Opening': None,
-                'Abs_Line_Move_From_Opening': None,
-                'Net_Odds_Move_From_Opening': None,
-                'Abs_Odds_Move_From_Opening': None,
-                'SharpMove_Timing_Magnitude': 0.0,
-                'Odds_Move_Magnitude': 0.0,
-                'SharpBetScore': 0.0,
-                **{f'SharpMove_Magnitude_{b}': 0.0 for b in [
-                    f'{tod}_{mtg}' for tod in ['Overnight','Early','Midday','Late']
-                                   for mtg in ['VeryEarly','MidRange','LateGame','Urgent']
-                ]},
-                **{f'OddsMove_Magnitude_{b}': 0.0 for b in [
-                    f'{tod}_{mtg}' for tod in ['Overnight','Early','Midday','Late']
-                                   for mtg in ['VeryEarly','MidRange','LateGame','Urgent']
-                ]},
-            }
-            # keep original row columns
-            enriched = {**row.to_dict(), **default_metrics}
-            enriched_rows.append(enriched)
-            continue
+    records = []
+    append = records.append
 
-        # sorted by time once
-        if 'Snapshot_Timestamp' in group.columns:
-            group = group.sort_values('Snapshot_Timestamp')
+    for name, g in gb:
+        # name is a 4-tuple: (Game_Key, Market, Outcome, Bookmaker)
+        if g.empty:
+            m = default_metrics.copy()
+        else:
+            # game_start & openers from first non-null after sort
+            game_start = g['Game_Start'].dropna().iloc[0] if 'Game_Start' in g and g['Game_Start'].notna().any() else None
+            open_val   = g['Value'].dropna().iloc[0] if 'Value' in g and g['Value'].notna().any() else None
+            open_odds  = g['Odds_Price'].dropna().iloc[0] if 'Odds_Price' in g and g['Odds_Price'].notna().any() else None
+            opening_limit = g['Limit'].dropna().iloc[0] if 'Limit' in g and g['Limit'].notna().any() else None
 
-        # openers
-        game_start = group['Game_Start'].dropna().iloc[0] if 'Game_Start' in group and not group['Game_Start'].isna().all() else None
-        open_val   = group['Value'].dropna().iloc[0]      if 'Value' in group and not group['Value'].isna().all() else None
-        open_odds  = group['Odds_Price'].dropna().iloc[0] if 'Odds_Price' in group and not group['Odds_Price'].isna().all() else None
-        opening_limit = group['Limit'].dropna().iloc[0]   if 'Limit' in group and not group['Limit'].isna().all() else None
+            # Build entries with zero-copy views where possible
+            n = len(g)
+            lim  = g['Limit'].to_numpy(dtype='float32', copy=False)      if 'Limit' in g else np.empty(n, dtype='float32')
+            val  = g['Value'].to_numpy(dtype='float32', copy=False)      if 'Value' in g else np.empty(n, dtype='float32')
+            ts   = g['Snapshot_Timestamp'].to_numpy(copy=False)          if 'Snapshot_Timestamp' in g else np.array([pd.NaT]*n, dtype='datetime64[ns]')
+            odds = g['Odds_Price'].to_numpy(dtype='float32', copy=False) if 'Odds_Price' in g else np.empty(n, dtype='float32')
+            gs_repeat = np.repeat(game_start, n)
 
-        # entries tuple for metrics
-        entries = list(zip(
-            group.get('Limit', pd.Series(index=group.index, dtype='float32')),
-            group.get('Value', pd.Series(index=group.index, dtype='float32')),
-            group.get('Snapshot_Timestamp', pd.Series(index=group.index, dtype='datetime64[ns, UTC]')),
-            [game_start] * len(group),
-            group.get('Odds_Price', pd.Series(index=group.index, dtype='float32')),
-        ))
+            entries = list(zip(lim, val, ts, gs_repeat, odds))
 
-        metrics = compute_sharp_metrics(
-            entries=entries,
-            open_val=open_val,
-            mtype=market,
-            label=outcome,
-            gk=gk,
-            book=book,
-            open_odds=open_odds,
-            opening_limit=opening_limit,
-        )
+            m = compute_sharp_metrics(
+                entries=entries,
+                open_val=open_val,
+                mtype=name[1],
+                label=name[2],
+                gk=name[0],
+                book=name[3],
+                open_odds=open_odds,
+                opening_limit=opening_limit,
+            )
 
-        enriched_rows.append({**row.to_dict(), **metrics})
+        rec = {keys[0]: name[0], keys[1]: name[1], keys[2]: name[2], keys[3]: name[3]}
+        rec.update(m)
+        append(rec)
 
-    return pd.DataFrame(enriched_rows)
+    metrics_df = pd.DataFrame.from_records(records)
+
+    # --- Left-merge metrics back onto df ---
+    out = df.merge(metrics_df, on=keys, how='left', copy=False)
+
+    # --- Fill missing metrics with defaults (only the new columns) ---
+    for col, val in default_metrics.items():
+        if col in out.columns:
+            out[col] = out[col].fillna(val)
+
+    return out
 
     
-def compute_all_sharp_metrics(df_all_snapshots):
-    results = []
 
-    grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
-
-    for (gk, market, outcome, book), group in grouped:
-        game_start = (
-            group['Game_Start'].dropna().iloc[0]
-            if 'Game_Start' in group and not group['Game_Start'].isnull().all()
-            else None
-        )
-        open_val = (
-            group.sort_values('Snapshot_Timestamp')['Value']
-            .dropna().iloc[0]
-            if not group['Value'].isnull().all()
-            else None
-        )
-        open_odds = (
-            group.sort_values('Snapshot_Timestamp')['Odds_Price']
-            .dropna().iloc[0]
-            if not group['Odds_Price'].isnull().all()
-            else None
-        )
-
-        entries = list(zip(
-            group['Limit'],
-            group['Value'],
-            group['Snapshot_Timestamp'],
-            [game_start] * len(group),
-            group['Odds_Price']
-        ))
-
-        metrics = compute_sharp_metrics(
-            entries, open_val=open_val, mtype=market, label=outcome,
-            gk=gk, book=book, open_odds=open_odds
-        )
-        metrics.update({
-            'Game_Key': gk,
-            'Market': market,
-            'Outcome': outcome,
-            'Bookmaker': book
-        })
-        results.append(metrics)
-
-    return pd.DataFrame(results)
     
     
 SPORT_ALIAS = {
@@ -1806,76 +1767,165 @@ def compute_line_resistance_flag(df, source='moves'):
     return df
 
 
-def compute_sharp_magnitude_by_time_bucket(df_all_snapshots):
-    results = []
+import logging
+import numpy as np
+import pandas as pd
 
-    grouped = df_all_snapshots.groupby(['Game_Key', 'Market', 'Outcome', 'Bookmaker'])
+def compute_sharp_magnitude_by_time_bucket(df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
+    """
+    Memory-lean version:
+    - Works on a skinny, normalized copy of snapshots
+    - Sorts ONCE globally by keys+time
+    - Iterates groups with zero-copy numpy views (no per-row iterrows)
+    - Avoids 'category' dtypes entirely
+    """
+    if df_all_snapshots is None or df_all_snapshots.empty:
+        return pd.DataFrame()
 
-    for (gk, market, outcome, book), group in grouped:
-        logging.debug(f"📊 Group: Game={gk}, Market={market}, Outcome={outcome}, Book={book}")
-        logging.debug(f"📋 Columns in group: {list(group.columns)}")
+    keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
+    need = list(dict.fromkeys(keys + ['Limit', 'Value', 'Snapshot_Timestamp', 'Game_Start']))
+    snaps = df_all_snapshots.loc[:, [c for c in need if c in df_all_snapshots.columns]].copy()
 
-        game_start = (
-            group['Game_Start'].dropna().iloc[0]
-            if 'Game_Start' in group and not group['Game_Start'].isnull().all()
-            else None
-        )
+    # ---- normalize keys (string, lower) ----
+    def _s(s: pd.Series) -> pd.Series:
+        if str(s.dtype).startswith('string'):
+            out = s
+        else:
+            try:
+                out = s.astype('string[pyarrow]')
+            except Exception:
+                out = s.astype(str)
+        return out.str.strip().str.lower()
 
-        entries = list(zip(
-            group['Limit'],
-            group['Value'],
-            group['Snapshot_Timestamp'],
-            [game_start] * len(group)  # Apply game_start to all entries
-        ))
+    for k in (set(keys) & set(snaps.columns)):
+        snaps[k] = _s(snaps[k])
 
-        open_val = (
-            group.sort_values('Snapshot_Timestamp')['Value']
-            .dropna().iloc[0]
-            if not group['Value'].isnull().all()
-            else None
-        )
+    # ---- datetimes + downcast numerics ----
+    if 'Snapshot_Timestamp' in snaps.columns:
+        snaps['Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
+    if 'Game_Start' in snaps.columns:
+        snaps['Game_Start'] = pd.to_datetime(snaps['Game_Start'], errors='coerce', utc=True)
+    for c in ('Limit', 'Value'):
+        if c in snaps.columns:
+            snaps[c] = pd.to_numeric(snaps[c], errors='coerce').astype('float32', copy=False)
 
-        metrics = compute_sharp_metrics(entries, open_val, market, outcome)
-        metrics.update({
-            'Game_Key': gk,
-            'Market': market,
-            'Outcome': outcome,
-            'Bookmaker': book
-        })
-        results.append(metrics)
+    # ---- global stable sort once ----
+    sort_cols = [c for c in keys if c in snaps.columns]
+    if 'Snapshot_Timestamp' in snaps.columns:
+        sort_cols.append('Snapshot_Timestamp')
+    if sort_cols:
+        snaps.sort_values(sort_cols, inplace=True, kind='mergesort')
 
-    return pd.DataFrame(results)
-        
-def add_minutes_to_game(df):
-    df = df.copy()
+    # ---- group & compute with zero-copy views ----
+    gb = snaps.groupby(keys, sort=False, observed=True, dropna=False)
 
-    if 'Commence_Hour' not in df.columns or 'Snapshot_Timestamp' not in df.columns:
-        logger.warning("⏳ Skipping time-to-game calculation — missing 'Commence_Hour' or 'Snapshot_Timestamp'")
-        df['Minutes_To_Game'] = None
-        df['Timing_Tier'] = None
+    recs = []
+    append = recs.append
+    dbg = logging.getLogger(__name__).isEnabledFor(logging.DEBUG)
+
+    for name, g in gb:
+        if dbg:
+            logging.debug("📊 Group: %s", name)
+
+        n = len(g)
+        if n == 0:
+            continue
+
+        # zero-copy arrays
+        val  = g['Value'].to_numpy(dtype='float32', copy=False)               if 'Value' in g else np.empty(0, 'float32')
+        lim  = g['Limit'].to_numpy(dtype='float32', copy=False)               if 'Limit' in g else np.empty(n, 'float32')
+        ts   = g['Snapshot_Timestamp'].to_numpy(copy=False)                   if 'Snapshot_Timestamp' in g else np.array([pd.NaT]*n, dtype='datetime64[ns]')
+        gstart = g['Game_Start'].dropna().iloc[0] if 'Game_Start' in g and g['Game_Start'].notna().any() else None
+
+        # opener (first non-nan after sort)
+        if val.size and np.any(~np.isnan(val)):
+            first_idx = np.flatnonzero(~np.isnan(val))[0]
+            open_val = float(val[first_idx])
+        else:
+            open_val = None
+
+        # build entries with minimal Python overhead
+        entries = list(zip(lim, val, ts, np.repeat(gstart, n)))
+
+        metrics = compute_sharp_metrics(entries, open_val, name[1], name[2])  # (entries, open_val, market, outcome)
+
+        rec = {
+            'Game_Key': name[0],
+            'Market':   name[1],
+            'Outcome':  name[2],
+            'Bookmaker':name[3],
+        }
+        rec.update(metrics)
+        append(rec)
+
+    return pd.DataFrame.from_records(recs)
+
+
+def add_minutes_to_game(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Vectorized, low-copy, no 'category'.
+    - Computes Minutes_To_Game as int32 (clipped >= 0)
+    - Timing_Tier via np.select -> string dtype (not categorical)
+    """
+    if df is None or df.empty:
         return df
 
-    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce')
-    df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], utc=True, errors='coerce')
+    # Avoid full-frame copy; operate in place (enable pandas CoW globally if desired)
+    out = df
 
-    df['Minutes_To_Game'] = (
-        (df['Commence_Hour'] - df['Snapshot_Timestamp'])
-        .dt.total_seconds() / 60
-    ).clip(lower=0)
+    # Ensure timestamps exist
+    has_commence = 'Commence_Hour' in out.columns
+    has_start    = 'Game_Start' in out.columns
+    has_snap     = 'Snapshot_Timestamp' in out.columns
 
-    df['Timing_Tier'] = pd.cut(
-        df['Minutes_To_Game'],
-        bins=[0, 60, 360, 1440, float('inf')],  # <1h, 1–6h, 6–24h, >24h
-        labels=[
-            '🔥 Late (<1h)',
-            '⚠️ Mid (1–6h)',
-            '⏳ Early (6–24h)',
-            '🧊 Very Early (>24h)',
-        ],
-        right=False
-    )
+    if not has_snap or (not has_commence and not has_start):
+        logging.warning("⏳ Skipping time-to-game calculation — missing Commence_Hour/Game_Start or Snapshot_Timestamp")
+        out['Minutes_To_Game'] = np.nan
+        out['Timing_Tier'] = pd.Series(pd.array([], dtype="string[pyarrow]")).reindex(out.index)
+        return out
 
-    return df
+    # Datetime normalize
+    out['Snapshot_Timestamp'] = pd.to_datetime(out['Snapshot_Timestamp'], errors='coerce', utc=True)
+    if has_commence:
+        out['Commence_Hour'] = pd.to_datetime(out['Commence_Hour'], errors='coerce', utc=True)
+        commence = out['Commence_Hour'].to_numpy(copy=False)
+    else:
+        out['Game_Start'] = pd.to_datetime(out['Game_Start'], errors='coerce', utc=True)
+        # floor to hour to preserve your original intent
+        commence = out['Game_Start'].dt.floor('h').to_numpy(copy=False)
+
+    snap = out['Snapshot_Timestamp'].to_numpy(copy=False)
+
+    # Minutes as int32 (clip >= 0)
+    mins = ((commence - snap) / np.timedelta64(1, 'm'))
+    # convert to float64 numpy -> clip -> nan->keep -> cast
+    mins = np.where(mins < 0, 0, mins)
+    # keep NaNs (cannot cast NaN to int32 directly)
+    minutes_int = mins.astype('float64')
+    out['Minutes_To_Game'] = pd.Series(minutes_int, index=out.index)
+
+    # Timing tier via np.select (strings, not category)
+    conds = [
+        (minutes_int < 60),
+        (minutes_int >= 60) & (minutes_int < 360),
+        (minutes_int >= 360) & (minutes_int < 1440),
+        (minutes_int >= 1440),
+    ]
+    choices = [
+        '🔥 Late (<1h)',
+        '⚠️ Mid (1–6h)',
+        '⏳ Early (6–24h)',
+        '🧊 Very Early (>24h)',
+    ]
+    tier = np.select(conds, choices, default=None)
+
+    try:
+        out['Timing_Tier'] = pd.array(tier, dtype='string[pyarrow]')
+    except Exception:
+        out['Timing_Tier'] = pd.Series(tier, dtype='string')
+
+    return out
+
 
 from scipy.stats import zscore
 
