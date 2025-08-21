@@ -189,12 +189,15 @@ def to_cats(df: pd.DataFrame, cols) -> pd.DataFrame:
             df[c] = df[c].astype("string").str.strip().astype("category")
     return df
 
-def stream_query_dfs(bq: bigquery.Client, sql: str, params=None, *, page_rows: int = 200_000,
-                     select_cols: list[str] | None = None, dtypes: dict | None = None):
-    """
-    Yield pandas DataFrames page-by-page using BigQuery Storage API.
-    Each chunk is independent; keep it skinny, process, then del+gc.
-    """
+def stream_query_dfs(
+    bq: bigquery.Client,
+    sql: str,
+    params: dict | None = None,
+    *,
+    page_rows: int = 200_000,
+    select_cols: list[str] | None = None,
+    dtypes: dict | None = None
+):
     job_config = None
     if params:
         qp = [bigquery.ScalarQueryParameter(k, None, v) for k, v in params.items()]
@@ -204,15 +207,14 @@ def stream_query_dfs(bq: bigquery.Client, sql: str, params=None, *, page_rows: i
     it = job.result(page_size=page_rows)
 
     for page in it.pages:
-        tbl: pa.Table = page.to_arrow(bqstorage_client=_bqs())
+        tbl = page.to_arrow(bqstorage_client=_bqs())
         if select_cols:
-            keep = [c for c in select_cols if c in tbl.column_names]
-            tbl = tbl.select(keep)
+            tbl = tbl.select([c for c in select_cols if c in tbl.column_names])
         df = tbl.to_pandas(types_mapper=pd.ArrowDtype)
         if dtypes:
             df = df.astype(dtypes, copy=False)
         yield df
-        del df, tbl
+        del df, tblf
         gc.collect()
 
 def to_utc_ts(x):
@@ -509,7 +511,13 @@ def update_power_ratings(
             params["cutoff"] = cutoff_param
 
         need = ["Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS","Score_Home_Score","Score_Away_Score"]
-        for df in stream_query_dfs(base_sql, params=params, page_rows=page_rows, select_cols=need):
+        for df in stream_query_dfs(
+            bq,                # <- add the client here
+            base_sql,
+            params=params,
+            page_rows=page_rows,
+            select_cols=need
+        ):
             _norm = lambda s: str(s).strip().lower()
             df["Home_Team"] = df["Home_Team"].map(_norm)
             df["Away_Team"] = df["Away_Team"].map(_norm)
@@ -517,7 +525,6 @@ def update_power_ratings(
             df = to_cats(df, ["Sport","Home_Team","Away_Team"])
             yield df
             del df; gc.collect()
-
     # ---------------- ELO math helpers ----------------
     def mov_boost(margin, delta, mov_cap=None):
         rd = max(1.0, abs(float(margin)))
