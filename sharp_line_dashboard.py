@@ -3130,6 +3130,9 @@ def read_market_weights_from_bigquery():
         
         
 def compute_diagnostics_vectorized(df):
+    import numpy as np
+    import pandas as pd
+
     df = df.copy()
 
     # === Ensure only latest snapshot per bookmaker is used (to match df_summary_base logic)
@@ -3168,16 +3171,14 @@ def compute_diagnostics_vectorized(df):
         ),
         "⚠️ Missing"
     )
-            
+
     # === Confidence Trend
-    prob_now = pd.to_numeric(df['Model Prob'], errors='coerce')
-    prob_start = pd.to_numeric(df['First_Sharp_Prob'], errors='coerce')
-    
+    prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
+    prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
+
     df['Model Prob Snapshot'] = prob_now
     df['First Prob Snapshot'] = prob_start
 
-    # Group and collect snapshot history of model probabilities
-    
     df['Confidence Trend'] = np.where(
         prob_now.isna() | prob_start.isna(),
         "⚠️ Missing",
@@ -3195,7 +3196,7 @@ def compute_diagnostics_vectorized(df):
     # === Line/Model Direction Alignment
     df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
     df['Line_Support_Sign'] = df.apply(
-        lambda row: -1 if row.get('Market', '').lower() == 'totals' and row.get('Outcome', '').lower() == 'under' else 1,
+        lambda row: -1 if str(row.get('Market','')).lower() == 'totals' and str(row.get('Outcome','')).lower() == 'under' else 1,
         axis=1
     )
     df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
@@ -3216,60 +3217,138 @@ def compute_diagnostics_vectorized(df):
         default="⚪ Mixed"
     )
 
-    # ✅ Cast all diagnostic flags to numeric
+    # ----------------------------------------------------------------
+    # 💡 MODEL FEATURES: ensure presence, casting, and hybrid flags
+    # ----------------------------------------------------------------
+    # Full modeling feature list you provided (order-preserving)
+    features = [
+        # Core sharp signals
+        'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Limit_Total',
+        'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
 
-    # ✅ Cast all diagnostic flags to numeric
-    flag_cols = [
-        'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Market_Leader',
-        'Is_Reinforced_MultiMarket', 'LimitUp_NoMove_Flag', 'Is_Sharp_Book',
-        'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'Is_Home_Team_Bet',
-        'SharpMove_Resistance_Break', 'Late_Game_Steam_Flag',
-        'Value_Reversal_Flag', 'Odds_Reversal_Flag',
-        'Hybrid_Line_Timing_Flag', 'Hybrid_Odds_Timing_Flag'
-    ]
-    
-    magnitude_cols = [
-        'Sharp_Line_Magnitude', 'Sharp_Time_Score', 'Rec_Line_Magnitude',
-        'Sharp_Limit_Total', 'SharpMove_Odds_Mag', 'SharpMove_Timing_Magnitude',
-        'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening',
-        'Team_Past_Hit_Rate', 'Team_Past_Avg_Model_Prob',
-        'Team_Past_Hit_Rate_Home', 'Team_Past_Hit_Rate_Away',
-        'Team_Past_Avg_Model_Prob_Home', 'Team_Past_Avg_Model_Prob_Away'
+        # Market response
+        'Sharp_Line_Magnitude',
+        'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
+
+        # Engineered odds shift decomposition
+        'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
+
+        # Engineered interactions
+        'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',
+        'SharpMove_Resistance_Break',
+
+        # Reversal logic
+        'Value_Reversal_Flag','Odds_Reversal_Flag',
+
+        # Mispricing + cross-market alignment
+        'Market_Mispricing','Abs_Market_Mispricing',
+        'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
+        'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap',
+        'Total_vs_Spread_ProbGap','CrossMarket_Prob_Gap_Exists',
+
+        # Movement diagnostics
+        'Line_Moved_Away_From_Team','Pct_Line_Move_From_Opening','Pct_Line_Move_Bin',
+        'Potential_Overmove_Flag','Potential_Overmove_Total_Pct_Flag','Mispricing_Flag',
+        'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
+        # 'Abs_Line_Move_Z',  # (optional in display)
+        'Pct_Line_Move_Z',
+
+        # Small-book reliability / liquidity
+        'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
+        'Book_Reliability_Lift','Book_Reliability_x_Sharp',
+        'Book_Reliability_x_Magnitude','Book_Reliability_x_PROB_SHIFT',
+
+        # Power ratings & model/market edges
+        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
+        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+        'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k',
     ]
 
-    for col in flag_cols + magnitude_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    HYBRID_LINE_COLS = [
+    # Hybrid timing features (line + odds)
+    hybrid_timing_features = [
         f'SharpMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+            'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+            'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+            'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
         ]
     ]
-    
-    HYBRID_ODDS_COLS = [
+    hybrid_odds_timing_features = [
         f'OddsMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+            'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+            'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+            'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
         ]
     ]
-    # === Compute Hybrid Line/Odds Timing Flags if missing
+    features += hybrid_timing_features + hybrid_odds_timing_features
+
+    # Team history & streaks
+    features += [
+        'Team_Past_Avg_Model_Prob','Team_Past_Hit_Rate',
+        'Team_Past_Avg_Model_Prob_Home','Team_Past_Hit_Rate_Home',
+        'Team_Past_Avg_Model_Prob_Away','Team_Past_Hit_Rate_Away',
+        'Team_Past_Avg_Model_Prob_Fav','Team_Past_Hit_Rate_Fav',
+        'Team_Past_Avg_Model_Prob_Home_Fav','Team_Past_Hit_Rate_Home_Fav',
+        'Team_Past_Avg_Model_Prob_Away_Fav','Team_Past_Hit_Rate_Away_Fav',
+        'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
+        'Avg_Recent_Cover_Streak_Away','Avg_Recent_Cover_Streak_Fav',
+        'Avg_Recent_Cover_Streak_Home_Fav','Avg_Recent_Cover_Streak_Away_Fav',
+    ]
+
+    # Context flags (UI)
+    features += ['Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos']
+
+    # De-dup (order-preserving)
+    _seen = set()
+    features = [f for f in features if not (f in _seen or _seen.add(f))]
+
+    # Casting helpers
+    def _ensure_cols(frame, cols, fill=0.0):
+        missing = [c for c in cols if c not in frame.columns]
+        if missing:
+            frame[missing] = fill
+        return frame
+
+    # Flag & magnitude groups used by your build_why and display
+    flag_cols = [
+        'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
+        'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book',
+        'SharpMove_Odds_Up','SharpMove_Odds_Down','Is_Home_Team_Bet',
+        'SharpMove_Resistance_Break','Late_Game_Steam_Flag',
+        'Value_Reversal_Flag','Odds_Reversal_Flag',
+        'Hybrid_Line_Timing_Flag','Hybrid_Odds_Timing_Flag'
+    ]
+    magnitude_cols = [
+        'Sharp_Line_Magnitude','Sharp_Time_Score','Rec_Line_Magnitude',
+        'Sharp_Limit_Total','SharpMove_Odds_Mag','SharpMove_Timing_Magnitude',
+        'Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
+        'Team_Past_Hit_Rate','Team_Past_Avg_Model_Prob',
+        'Team_Past_Hit_Rate_Home','Team_Past_Hit_Rate_Away',
+        'Team_Past_Avg_Model_Prob_Home','Team_Past_Avg_Model_Prob_Away'
+    ]
+
+    # Ensure all model features exist (numeric default 0)
+    df = _ensure_cols(df, features, 0.0)
+
+    # Compute Hybrid Line/Odds Timing Flags if missing
+    HYBRID_LINE_COLS = hybrid_timing_features
+    HYBRID_ODDS_COLS = hybrid_odds_timing_features
     if 'Hybrid_Line_Timing_Flag' not in df.columns:
         df['Hybrid_Line_Timing_Flag'] = (df[HYBRID_LINE_COLS].sum(axis=1) > 0).astype(int)
-    
     if 'Hybrid_Odds_Timing_Flag' not in df.columns:
         df['Hybrid_Odds_Timing_Flag'] = (df[HYBRID_ODDS_COLS].sum(axis=1) > 0).astype(int)
 
+    # Cast flags & magnitudes to numeric
+    for col in flag_cols + magnitude_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-        # --- make sure aliases/defaults exist *before* build_why runs
+    # --- make sure aliases/defaults exist *before* build_why runs
     if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
         df['Model Prob'] = df['Model_Sharp_Win_Prob']
-    
-    # sensible default for Passes_Gate if it's missing or NaN (prevents one side showing "Still Calculating")
+
+    # sensible default for Passes_Gate if it's missing or NaN
     core_flags = [
         'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
         'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book'
@@ -3279,53 +3358,54 @@ def compute_diagnostics_vectorized(df):
             df[c] = 0
     df['Passes_Gate'] = (
         df.get('Passes_Gate')
-        .fillna((df[core_flags].fillna(0).astype(int).sum(axis=1) > 0))
+          .fillna((df[core_flags].fillna(0).astype(int).sum(axis=1) > 0))
         if 'Passes_Gate' in df.columns else
         (df[core_flags].fillna(0).astype(int).sum(axis=1) > 0)
     )
-    
+
+    # === build_why (unchanged, uses the casted columns above)
     def build_why(row):
         model_prob = row.get('Model Prob')
         if pd.isna(model_prob):
             return "⚠️ Missing — run apply_blended_sharp_score() first"
-    
+
         parts = []
-    
-        # --- Core sharp move reasons (cast to bool so 0/1 ints work)
+
+        # Core sharp move reasons
         if bool(row.get('Sharp_Move_Signal', 0)): parts.append("📈 Sharp Move Detected")
         if bool(row.get('Sharp_Limit_Jump', 0)): parts.append("💰 Limit Jumped")
         if bool(row.get('Market_Leader', 0)): parts.append("🏆 Market Leader")
         if bool(row.get('Is_Reinforced_MultiMarket', 0)): parts.append("📊 Multi-Market Consensus")
         if bool(row.get('LimitUp_NoMove_Flag', 0)): parts.append("🛡️ Limit Up + No Line Move")
-        if bool(row.get('Is_Sharp_Book', 0)): parts.append("🎯 Sharp Book Signal")  # ← typo fixed
-    
-        # --- Odds & line movement
+        if bool(row.get('Is_Sharp_Book', 0)): parts.append("🎯 Sharp Book Signal")
+
+        # Odds & line movement
         if bool(row.get('SharpMove_Odds_Up', 0)): parts.append("🟢 Odds Moved Up (Steam)")
         if bool(row.get('SharpMove_Odds_Down', 0)): parts.append("🔻 Odds Moved Down (Buyback)")
         if float(row.get('Sharp_Line_Magnitude', 0)) > 0.5: parts.append("📏 Big Line Move")
         if float(row.get('Rec_Line_Magnitude', 0)) > 0.5: parts.append("📉 Rec Book Move")
         if float(row.get('Sharp_Limit_Total', 0)) > 10000: parts.append("💼 Sharp High Limit")
         if float(row.get('SharpMove_Odds_Mag', 0)) > 5: parts.append("💥 Sharp Odds Steam")
-    
-        # --- Resistance & timing
+
+        # Resistance & timing
         if bool(row.get('SharpMove_Resistance_Break', 0)): parts.append("🧱 Broke Key Resistance")
         if bool(row.get('Late_Game_Steam_Flag', 0)): parts.append("⏰ Late Game Steam")
         if bool(row.get('Value_Reversal_Flag', 0)): parts.append("🔄 Value Reversal")
         if bool(row.get('Odds_Reversal_Flag', 0)): parts.append("📉 Odds Reversal")
         if float(row.get('Sharp_Time_Score', 0)) > 0.5: parts.append("⏱️ Timing Edge")
-    
-        # --- Team-level
+
+        # Team-level
         if float(row.get('Team_Past_Hit_Rate', 0)) > 0.5: parts.append("⚔️📊 Team Historically Sharp")
         if float(row.get('Team_Past_Avg_Model_Prob', 0)) > 0.5: parts.append("🔮 Model Favored This Team Historically")
         if float(row.get('Avg_Recent_Cover_Streak', 0)) >= 2: parts.append("🔥 Recent Hot Streak")
         if float(row.get('Avg_Recent_Cover_Streak_Home', 0)) >= 2: parts.append("🏠🔥 Home Streaking")
         if float(row.get('Avg_Recent_Cover_Streak_Away', 0)) >= 2: parts.append("✈️🔥 Road Streaking")
-    
-        # --- From open
+
+        # From open
         if float(row.get('Abs_Line_Move_From_Opening', 0)) > 1.0: parts.append("📈 Line Moved from Open")
         if float(row.get('Abs_Odds_Move_From_Opening', 0)) > 5.0: parts.append("💹 Odds Moved from Open")
-    
-        # --- Cross-market + diagnostics
+
+        # Cross-market + diagnostics
         if bool(row.get('Spread_vs_H2H_Aligned', 0)): parts.append("🧩 Spread and H2H Align")
         if bool(row.get('Total_vs_Spread_Contradiction', 0)): parts.append("⚠️ Total Contradicts Spread")
         if bool(row.get('CrossMarket_Prob_Gap_Exists', 0)): parts.append("🔀 Cross-Market Probability Gap")
@@ -3343,9 +3423,9 @@ def compute_diagnostics_vectorized(df):
         if bool(row.get('Is_Weekend', 0)): parts.append("📅 Weekend Game")
         if bool(row.get('Is_Night_Game', 0)): parts.append("🌙 Night Game")
         if bool(row.get('Is_PrimeTime', 0)): parts.append("⭐ Prime Time Matchup")
-    
-        # --- Hybrid timing buckets
-        HYBRID_LINE_COLS = [
+
+        # Hybrid timing buckets → nice human labels
+        HYBRID_LINE_COLS_LOCAL = [
             'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
             'SharpMove_Magnitude_Overnight_LateGame','SharpMove_Magnitude_Overnight_Urgent',
             'SharpMove_Magnitude_Early_VeryEarly','SharpMove_Magnitude_Early_MidRange',
@@ -3355,7 +3435,7 @@ def compute_diagnostics_vectorized(df):
             'SharpMove_Magnitude_Late_VeryEarly','SharpMove_Magnitude_Late_MidRange',
             'SharpMove_Magnitude_Late_LateGame','SharpMove_Magnitude_Late_Urgent'
         ]
-        HYBRID_ODDS_COLS = [
+        HYBRID_ODDS_COLS_LOCAL = [
             'OddsMove_Magnitude_Overnight_VeryEarly','OddsMove_Magnitude_Overnight_MidRange',
             'OddsMove_Magnitude_Overnight_LateGame','OddsMove_Magnitude_Overnight_Urgent',
             'OddsMove_Magnitude_Early_VeryEarly','OddsMove_Magnitude_Early_MidRange',
@@ -3366,94 +3446,69 @@ def compute_diagnostics_vectorized(df):
             'OddsMove_Magnitude_Late_LateGame','OddsMove_Magnitude_Late_Urgent'
         ]
         EMOJI_MAP = {'Overnight':'🌙','Early':'🌅','Midday':'🌞','Late':'🌆'}
-    
-        for col in HYBRID_LINE_COLS:
+
+        for col in HYBRID_LINE_COLS_LOCAL:
             if float(row.get(col, 0)) > 0.25:
                 bucket = col.replace('SharpMove_Magnitude_', '').replace('_', ' ')
                 epoch = col.split('_')[2]  # Overnight/Early/Midday/Late
                 parts.append(f"{EMOJI_MAP.get(epoch, '⏱️')} {bucket} Sharp Move")
-    
-        for col in HYBRID_ODDS_COLS:
+
+        for col in HYBRID_ODDS_COLS_LOCAL:
             if float(row.get(col, 0)) > 0.5:
                 bucket = col.replace('OddsMove_Magnitude_', '').replace('_', ' ')
                 epoch = col.split('_')[2]
                 parts.append(f"{EMOJI_MAP.get(epoch, '⏱️')} {bucket} Odds Steam")
-    
-        # If we truly have nothing and gate is false, show the waiting message
+
         if not parts and not bool(row.get('Passes_Gate', False)):
             return "🕓 Still Calculating Signal"
-    
         return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
 
-# keep this AFTER the aliasing above
+    # keep this AFTER the aliasing above
     df['Why Model Likes It'] = df.apply(build_why, axis=1)
 
-    # Apply to DataFrame
-   # === Model_Confidence_Tier for summary compatibility
+    # === Model_Confidence_Tier for summary compatibility
     df['Model_Confidence_Tier'] = df['Confidence Tier']
-    
- 
-    # === Load Timing Opportunity Model
-    # === Load All Timing Models by Market
-    # === Load Timing Opportunity Models by Market
+
+    # === Timing Opportunity Models (unchanged scaffold)
     timing_models = {}
     for m in ['spreads', 'totals', 'h2h']:
         try:
             model_data = load_model_from_gcs(sport=sport, market=f"timing_{m}", bucket_name=GCS_BUCKET)
             timing_models[m] = model_data.get("calibrator") or model_data.get("model")
         except Exception:
-            timing_models[m] = None  # fallback if missing
-        
-    # === Timing Features
+            timing_models[m] = None
+
     timing_feature_cols = [
-        'Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'
-    ] + [
-        f'SharpMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
-        ]
-    ] + [
-        f'OddsMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-            'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-            'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-            'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
-        ]
-    ]
-    
-    # Ensure all features exist
+        'Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening','Late_Game_Steam_Flag'
+    ] + hybrid_timing_features + hybrid_odds_timing_features
+
     for col in timing_feature_cols:
         if col not in df.columns:
             df[col] = 0.0
-    
-    from sklearn.cluster import KMeans
-   # Ensure all required features exist
-    for col in timing_feature_cols:
-        if col not in df.columns:
-            df[col] = 0.0
-    
+
     df['Timing_Opportunity_Score'] = np.nan
-    for m in ['spreads', 'totals', 'h2h']:
+    for m in ['spreads','totals','h2h']:
         model = timing_models.get(m)
         if model is None:
             continue
         mask = df['Market'].str.lower() == m
         if mask.any():
             X = df.loc[mask, timing_feature_cols].fillna(0)
-            df.loc[mask, 'Timing_Opportunity_Score'] = model.predict_proba(X)[:, 1]
-        
+            # handle both calibrated and raw models
+            if hasattr(model, "predict_proba"):
+                df.loc[mask, 'Timing_Opportunity_Score'] = model.predict_proba(X)[:, 1]
+            else:
+                df.loc[mask, 'Timing_Opportunity_Score'] = np.clip(model.predict(X), 0, 1)
+
     if 'Timing_Opportunity_Score' in df.columns:
         scores = df[['Timing_Opportunity_Score']].copy()
         scores['Timing_Opportunity_Score'] = scores['Timing_Opportunity_Score'].clip(0, 1).fillna(0)
-    
+
         from sklearn.cluster import KMeans
         kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
         kmeans.fit(scores)
-    
+
         df['Timing_Cluster'] = kmeans.labels_
-    
         cluster_order = np.argsort(kmeans.cluster_centers_.ravel())
         cluster_map = {
             cluster_order[0]: "🔴 Late / Overmoved",
@@ -3463,19 +3518,25 @@ def compute_diagnostics_vectorized(df):
         df['Timing_Stage'] = df['Timing_Cluster'].map(cluster_map)
     else:
         df['Timing_Stage'] = "⚠️ Unavailable"
-        
+
     # === Final Output
-    diagnostics_df = df[[
-        'Game_Key', 'Market', 'Outcome', 'Bookmaker',
-        'Tier_Change', 'Confidence Trend', 'Line/Model Direction',
-        'Why Model Likes It', 'Passes_Gate', 'Confidence Tier',
-        'Model Prob Snapshot', 'First Prob Snapshot',
+    # Base diagnostic columns
+    base_cols = [
+        'Game_Key','Market','Outcome','Bookmaker',
+        'Tier_Change','Confidence Trend','Line/Model Direction',
+        'Why Model Likes It','Passes_Gate','Confidence Tier',
+        'Model Prob Snapshot','First Prob Snapshot',
         'Model_Confidence_Tier',
-        'Timing_Opportunity_Score',  # ✅
-        'Timing_Stage'   # ✅ Add this
-    ]].rename(columns={
-        'Tier_Change': 'Tier Δ'
-    })
+        'Timing_Opportunity_Score','Timing_Stage'
+    ]
+
+    # Only include features that actually exist (we ensured most above)
+    feature_cols_present = [c for c in features if c in df.columns]
+
+    diagnostics_df = df[base_cols + feature_cols_present].rename(columns={'Tier_Change': 'Tier Δ'})
+
+    return diagnostics_df
+
 
 
     
@@ -4207,7 +4268,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
             )
             df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
-            #st.write( df_summary_base.columns.tolist())
+            st.write( df_summary_base.columns.tolist())
             
             # === 10) Build summary_df with selected columns ===
             summary_cols = [
@@ -4259,7 +4320,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
     
           
             #st.write("🧪 Columns ibefore soummary group:")
-            #st.write(filtered_df.columns.tolist())
+            st.write(filtered_df.columns.tolist())
                 
             
             # Step 5: Group from merged filtered_df to produce summary
