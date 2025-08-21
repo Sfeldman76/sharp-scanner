@@ -3166,28 +3166,37 @@ def attach_ratings_and_edges_for_diagnostics(
         'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
     ]
 
-    def _ensure_cols(frame, cols, fill=np.nan):
-        missing = [c for c in cols if c not in frame.columns]
-        if missing: frame[missing] = fill
-        return frame
-
     if df.empty:
-        return _ensure_cols(df.copy(), UI_EDGE_COLS, np.nan)
+        out = df.copy()
+        for c in UI_EDGE_COLS:
+            out[c] = np.nan
+        return out
 
     out = df.copy()
-    out['Sport'] = out.get('Sport', '').astype(str).str.upper().str.strip()
-    out['Market'] = out.get('Market', '').astype(str).str.lower().str.strip()
-    out['Home_Team_Norm'] = out.get('Home_Team_Norm', '').astype(str).str.lower().str.strip()
-    out['Away_Team_Norm'] = out.get('Away_Team_Norm', '').astype(str).str.lower().str.strip()
-    out['Outcome_Norm'] = out.get('Outcome_Norm', out.get('Outcome','')).astype(str).str.lower().str.strip()
 
+    # ---- Safe normalizations (use Series defaults, not scalar strings)
+    def _series(col, default=""):
+        return out[col] if col in out.columns else pd.Series(default, index=out.index)
+
+    out['Sport']          = _series('Sport').astype(str).str.upper().str.strip()
+    out['Market']         = _series('Market').astype(str).str.lower().str.strip()
+    out['Home_Team_Norm'] = _series('Home_Team_Norm').astype(str).str.lower().str.strip()
+    out['Away_Team_Norm'] = _series('Away_Team_Norm').astype(str).str.lower().str.strip()
+    out['Outcome_Norm']   = (_series('Outcome_Norm', None).where(out.get('Outcome_Norm').notna() if 'Outcome_Norm' in out else False,
+                           _series('Outcome'))).astype(str).str.lower().str.strip()
+
+    # Game_Start fallback to Snapshot_Timestamp (as Series)
     if 'Game_Start' not in out.columns or out['Game_Start'].isna().all():
-        out['Game_Start'] = pd.to_datetime(out.get('Snapshot_Timestamp'), utc=True, errors='coerce')
+        snap = _series('Snapshot_Timestamp', pd.NaT)
+        out['Game_Start'] = pd.to_datetime(snap, utc=True, errors='coerce')
 
-    out = _ensure_cols(out, UI_EDGE_COLS, np.nan)
-
+    # Work on spreads rows only
     mask = out['Market'].eq('spreads') & out['Home_Team_Norm'].ne('') & out['Away_Team_Norm'].ne('')
     if not mask.any():
+        # Ensure UI cols exist (NaN) and return
+        for c in UI_EDGE_COLS:
+            if c not in out.columns:
+                out[c] = np.nan
         return out
 
     need_cols = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
@@ -3196,7 +3205,7 @@ def attach_ratings_and_edges_for_diagnostics(
               .copy())
     d_sp['Value'] = pd.to_numeric(d_sp['Value'], errors='coerce').astype('float32')
 
-    # 1) PR history (no training)
+    # 1) Ratings (backward as-of)
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
         bq=None,
@@ -3207,7 +3216,7 @@ def attach_ratings_and_edges_for_diagnostics(
         project=project,
     )
 
-    # 2) Consensus favorite & k
+    # 2) Consensus fav & k
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
     # 3) Game-level model spreads/edges
@@ -3215,12 +3224,10 @@ def attach_ratings_and_edges_for_diagnostics(
     g_full = base.merge(cons, on=game_keys, how='left')
     g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
 
-    # 🔧 FIX: carry PR columns through (they are needed below)
+    # Ensure PR columns exist in g_fc
     for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
-        if c not in g_fc.columns and c in g_full.columns:
-            g_fc[c] = g_full[c].values
-        elif c not in g_fc.columns:
-            g_fc[c] = np.nan
+        if c not in g_fc.columns:
+            g_fc[c] = g_full[c] if c in g_full.columns else np.nan
 
     # Map to per-row outcome
     d_map = d_sp.merge(g_fc, on=game_keys, how='left')
@@ -3233,8 +3240,8 @@ def attach_ratings_and_edges_for_diagnostics(
 
     # Ratings for the bet side
     is_home_bet = d_map['Outcome_Norm'].eq(d_map['Home_Team_Norm'])
-    d_map['PR_Team_Rating'] = np.where(is_home_bet, d_map['Home_Power_Rating'], d_map['Away_Power_Rating'])
-    d_map['PR_Opp_Rating']  = np.where(is_home_bet, d_map['Away_Power_Rating'], d_map['Home_Power_Rating'])
+    d_map['PR_Team_Rating'] = np.where(is_home_bet, d_map['Home_Power_Rating'], d_map['Away_Power_Rating']).astype('float32')
+    d_map['PR_Opp_Rating']  = np.where(is_home_bet, d_map['Away_Power_Rating'], d_map['Home_Power_Rating']).astype('float32')
     d_map['PR_Rating_Diff'] = (pd.to_numeric(d_map['PR_Team_Rating'], errors='coerce') -
                                pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')).astype('float32')
 
@@ -3253,11 +3260,22 @@ def attach_ratings_and_edges_for_diagnostics(
     d_map['edge_x_k'] = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce') * k_abs).astype('float32')
     d_map['mu_x_k']   = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce').abs() * k_abs).astype('float32')
 
-    # Merge back to the original frame
-    out = out.merge(d_map[need_cols + UI_EDGE_COLS], on=need_cols, how='left')
+    # ---- Avoid suffixes: drop any pre-existing UI cols before merge-back
+    out.drop(columns=UI_EDGE_COLS, inplace=True, errors='ignore')
+
+    # Merge back (left) on the minimal key to avoid row multiplication
+    out = out.merge(
+        d_map[need_cols + UI_EDGE_COLS],
+        on=need_cols,
+        how='left'
+    )
+
+    # Ensure columns exist (if some rows didn't match)
+    for c in UI_EDGE_COLS:
+        if c not in out.columns:
+            out[c] = np.nan
 
     return out
-
         
 def compute_diagnostics_vectorized(df):
    
@@ -3566,41 +3584,50 @@ def compute_diagnostics_vectorized(df):
         if bool(row.get('Is_Weekend', 0)): parts.append("📅 Weekend Game")
         if bool(row.get('Is_Night_Game', 0)): parts.append("🌙 Night Game")
         if bool(row.get('Is_PrimeTime', 0)): parts.append("⭐ Prime Time Matchup")
-        # --- Power ratings & outcome model edges (robust to NaN)
-        _pr_team = row.get('PR_Team_Rating')
-        _pr_opp  = row.get('PR_Opp_Rating')
+        # --- Power ratings & outcome model edges (robust & tolerant) ---
+        def _num(row, col):
+            v = row.get(col)
+            # normalize common formatting issues
+            if isinstance(v, str):
+                v = v.replace('\u2212','-').replace(',','').strip()
+                if v in ('', '—', '–'):
+                    return np.nan
+            return pd.to_numeric(v, errors='coerce')
+        
+        _pr_team, _pr_opp = _num(row,'PR_Team_Rating'), _num(row,'PR_Opp_Rating')
         if pd.notna(_pr_team) and pd.notna(_pr_opp):
             parts.append(f"📊 PR Ratings: {_pr_team:.1f} vs {_pr_opp:.1f}")
         
-        _pr_diff = pd.to_numeric(row.get('PR_Rating_Diff'), errors='coerce')
-        if pd.notna(_pr_diff) and _pr_diff != 0:
+        _pr_diff = _num(row,'PR_Rating_Diff')
+        if pd.notna(_pr_diff):  # show even if 0, like earlier behavior; or use abs(_pr_diff) >= 0.1
             parts.append(f"⚖️ PR Diff {_pr_diff:+.1f}")
         
-        _mod_spread = pd.to_numeric(row.get('Outcome_Model_Spread'), errors='coerce')
-        _mkt_spread = pd.to_numeric(row.get('Outcome_Market_Spread'), errors='coerce')
+        _mod_spread, _mkt_spread = _num(row,'Outcome_Model_Spread'), _num(row,'Outcome_Market_Spread')
         if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
             parts.append(f"📐 Model Spread {_mod_spread:+.1f} vs Market {_mkt_spread:+.1f}")
         
-        _edge = pd.to_numeric(row.get('Outcome_Spread_Edge'), errors='coerce')
-        if pd.notna(_edge) and _edge != 0:
+        _edge = _num(row,'Outcome_Spread_Edge')
+        if pd.notna(_edge):     # or abs(_edge) >= 0.1 if you want a threshold
             parts.append(f"🎯 Spread Edge {_edge:+.1f}")
         
-        _cov = pd.to_numeric(row.get('Outcome_Cover_Prob'), errors='coerce')
-        if pd.notna(_cov) and _cov > 0.55:
-            parts.append(f"✅ Cover Prob {_cov:.0%}")
+        _cov = _num(row,'Outcome_Cover_Prob')
+        if pd.notna(_cov):
+            parts.append(f"🛡️ Cover Prob {_cov:.0%}" + (" ✅" if _cov >= 0.55 else ""))
         
-        agree = row.get('model_fav_vs_market_fav_agree', 0)
-        if str(agree) in ("1", "1.0") or agree is True:
+        # robust agree check
+        agree_val = row.get('model_fav_vs_market_fav_agree', 0)
+        agree_num = pd.to_numeric(agree_val, errors='coerce')
+        if (pd.notna(agree_num) and int(round(float(agree_num))) == 1) or \
+           (str(agree_val).strip().lower() in ('1','true','yes')):
             parts.append("🤝 Model & Market Favor Same Team")
         
-        _edge_x_k = pd.to_numeric(row.get('edge_x_k'), errors='coerce')
-        if pd.notna(_edge_x_k) and _edge_x_k > 0:
+        _edge_x_k = _num(row,'edge_x_k')
+        if pd.notna(_edge_x_k):
             parts.append(f"📈 Edge×k {_edge_x_k:.2f}")
         
-        _mu_x_k = pd.to_numeric(row.get('mu_x_k'), errors='coerce')
-        if pd.notna(_mu_x_k) and _mu_x_k > 0:
+        _mu_x_k = _num(row,'mu_x_k')
+        if pd.notna(_mu_x_k):
             parts.append(f"📊 μ×k {_mu_x_k:.2f}")
-
 
         # Hybrid timing buckets → nice human labels
         HYBRID_LINE_COLS_LOCAL = [
