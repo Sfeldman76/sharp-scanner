@@ -189,6 +189,73 @@ def to_cats(df: pd.DataFrame, cols) -> pd.DataFrame:
             df[c] = df[c].astype("string").str.strip().astype("category")
     return df
 
+from google.cloud import bigquery, bigquery_storage
+import pandas as pd, datetime as dt, gc, pyarrow as pa
+
+def _bqs_singleton():
+    # reuse one client to keep memory low
+    if not hasattr(_bqs_singleton, "_c"):
+        _bqs_singleton._c = bigquery_storage.BigQueryReadClient()
+    return _bqs_singleton._c
+
+def _to_bq_params(params: dict | None):
+    """Infer proper BigQuery QueryParameter objects from a plain dict."""
+    if not params:
+        return None
+    qps = []
+    for k, v in params.items():
+        # Arrays
+        if isinstance(v, (list, tuple)):
+            if not v:  # empty -> default to STRING array
+                qps.append(bigquery.ArrayQueryParameter(k, "STRING", []))
+            else:
+                first = v[0]
+                if isinstance(first, str):
+                    qps.append(bigquery.ArrayQueryParameter(k, "STRING", list(v)))
+                elif isinstance(first, (int,)):
+                    qps.append(bigquery.ArrayQueryParameter(k, "INT64", list(v)))
+                elif isinstance(first, (float,)):
+                    qps.append(bigquery.ArrayQueryParameter(k, "FLOAT64", list(v)))
+                elif isinstance(first, (dt.datetime, pd.Timestamp)):
+                    # Normalize to aware python datetime in UTC
+                    vv = []
+                    for x in v:
+                        t = pd.to_datetime(x, errors="coerce")
+                        if getattr(t, "tzinfo", None) is None and getattr(t, "tz", None) is None:
+                            t = t.tz_localize("UTC")
+                        else:
+                            t = t.tz_convert("UTC")
+                        vv.append(t.to_pydatetime())
+                    qps.append(bigquery.ArrayQueryParameter(k, "TIMESTAMP", vv))
+                else:
+                    # fall back to STRING array
+                    qps.append(bigquery.ArrayQueryParameter(k, "STRING", [str(x) for x in v]))
+            continue
+
+        # Scalars
+        if isinstance(v, str):
+            qps.append(bigquery.ScalarQueryParameter(k, "STRING", v))
+        elif isinstance(v, bool):
+            qps.append(bigquery.ScalarQueryParameter(k, "BOOL", v))
+        elif isinstance(v, int):
+            qps.append(bigquery.ScalarQueryParameter(k, "INT64", v))
+        elif isinstance(v, float):
+            qps.append(bigquery.ScalarQueryParameter(k, "FLOAT64", v))
+        elif isinstance(v, (dt.datetime, pd.Timestamp)):
+            t = pd.to_datetime(v, errors="coerce")
+            if getattr(t, "tzinfo", None) is None and getattr(t, "tz", None) is None:
+                t = t.tz_localize("UTC")
+            else:
+                t = t.tz_convert("UTC")
+            qps.append(bigquery.ScalarQueryParameter(k, "TIMESTAMP", t.to_pydatetime()))
+        elif v is None:
+            # BigQuery doesn't have a typeless NULL param; make it a STRING NULL (rarely needed)
+            qps.append(bigquery.ScalarQueryParameter(k, "STRING", None))
+        else:
+            # fallback stringify to avoid JSON errors
+            qps.append(bigquery.ScalarQueryParameter(k, "STRING", str(v)))
+    return qps
+
 def stream_query_dfs(
     bq: bigquery.Client,
     sql: str,
@@ -198,24 +265,25 @@ def stream_query_dfs(
     select_cols: list[str] | None = None,
     dtypes: dict | None = None
 ):
-    job_config = None
-    if params:
-        qp = [bigquery.ScalarQueryParameter(k, None, v) for k, v in params.items()]
-        job_config = bigquery.QueryJobConfig(query_parameters=qp)
-
+    qps = _to_bq_params(params)
+    job_config = bigquery.QueryJobConfig(query_parameters=qps) if qps else None
     job = bq.query(sql, job_config=job_config)
     it = job.result(page_size=page_rows)
 
+    bqs = _bqs_singleton()
     for page in it.pages:
-        tbl = page.to_arrow(bqstorage_client=_bqs())
+        tbl: pa.Table = page.to_arrow(bqstorage_client=bqs)
         if select_cols:
-            tbl = tbl.select([c for c in select_cols if c in tbl.column_names])
+            # only keep columns we actually need
+            keep = [c for c in select_cols if c in tbl.column_names]
+            tbl = tbl.select(keep)
         df = tbl.to_pandas(types_mapper=pd.ArrowDtype)
         if dtypes:
             df = df.astype(dtypes, copy=False)
         yield df
-        del df, tblf
+        del df, tbl
         gc.collect()
+
 
 def to_utc_ts(x):
     """
@@ -507,10 +575,13 @@ def update_power_ratings(
         ORDER BY Snapshot_TS, Game_Start
         """
         params = {"sport_aliases": aliases, "default_sport": default_sport}
-        if cutoff_param:
+        params = {
+         # datetime  -> TIMESTAMP
+        if cutoff_param is not None:
             params["cutoff"] = cutoff_param
 
         need = ["Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS","Score_Home_Score","Score_Away_Score"]
+        
         for df in stream_query_dfs(
             bq,                # <- add the client here
             base_sql,
@@ -4922,29 +4993,31 @@ def detect_market_leaders(df_history, sharp_books, rec_books):
     ]
     return first_moves.loc[:, [c for c in cols if c in first_moves.columns]]
 
+import pandas as pd
+
 def detect_cross_market_sharp_support(
     df_moves,
     SHARP_BOOKS,
-    game_col="Game_Key",           # use normalized keys if you have them
-    outcome_col="Outcome_Norm"     # avoids building a string SupportKey
+    game_col="Game_Key",
+    outcome_col="Outcome_Norm",
 ):
-    # Work in-place to avoid duplicating the whole DataFrame
-    df = df_moves
-
-    # Make SHARP_BOOKS a set for fast membership checks
+    """
+    Compute cross-market sharp support with minimal allocations:
+    - No string concat keys
+    - One groupby + one merge
+    - Safe categorical casting AFTER merge
+    """
+    df = df_moves  # operate on the provided frame (caller controls copying if needed)
     sharp_books = set(SHARP_BOOKS)
 
-    # (Optional but cheap) shrink high-cardinality strings to categories
-    # Do this only if these columns exist; avoids fragmentation later.
-    if "Market" in df.columns and df["Market"].dtype == object:
-        df["Market"] = df["Market"].astype("category")
-    if "Book" in df.columns and df["Book"].dtype == object:
-        df["Book"] = df["Book"].astype("category")
+    # Ensure join keys exist
+    if game_col not in df.columns or outcome_col not in df.columns:
+        raise KeyError(f"Missing join keys: need '{game_col}' and '{outcome_col}' in df_moves")
 
-    # Boolean mask instead of materializing an extra column or copy
+    # Build a boolean mask for "sharp rows"
     mask = df["Book"].isin(sharp_books) & df["Sharp_Move_Signal"].astype(bool)
 
-    # Group only the needed skinny slice; no .copy() (let GC reclaim the slice quickly)
+    # Group on a skinny slice; count distinct markets and sharp books per (game, outcome)
     gb = (
         df.loc[mask, [game_col, outcome_col, "Market", "Book"]]
           .groupby([game_col, outcome_col], observed=True)
@@ -4955,28 +5028,29 @@ def detect_cross_market_sharp_support(
           .reset_index()
     )
 
-    # Downcast the small result before merging
-    gb["CrossMarketSharpSupport"] = gb["CrossMarketSharpSupport"].astype("int16")
-    gb["Unique_Sharp_Books"]      = gb["Unique_Sharp_Books"].astype("int16")
+    # Downcast counts before merge
+    if not gb.empty:
+        gb["CrossMarketSharpSupport"] = gb["CrossMarketSharpSupport"].astype("int16")
+        gb["Unique_Sharp_Books"]      = gb["Unique_Sharp_Books"].astype("int16")
 
-    # Single merge back on keys (much cheaper than merging twice or on a long string key)
-    df.merge(gb, on=[game_col, outcome_col], how="left", inplace=True)
+    # ❌ No 'inplace' here — Pandas merge doesn't support it
+    df = df.merge(gb, on=[game_col, outcome_col], how="left")
 
-    # Fill NA (no sharp support) and finalize types
-    if "CrossMarketSharpSupport" in df.columns:
-        df["CrossMarketSharpSupport"] = df["CrossMarketSharpSupport"].fillna(0).astype("int16")
-    else:
+    # Fill and finalize types
+    if "CrossMarketSharpSupport" not in df.columns:
         df["CrossMarketSharpSupport"] = 0
-
-    if "Unique_Sharp_Books" in df.columns:
-        df["Unique_Sharp_Books"] = df["Unique_Sharp_Books"].fillna(0).astype("int16")
-    else:
+    if "Unique_Sharp_Books" not in df.columns:
         df["Unique_Sharp_Books"] = 0
 
-    # Final flag (bool—1 byte)
+    df["CrossMarketSharpSupport"] = df["CrossMarketSharpSupport"].fillna(0).astype("int16")
+    df["Unique_Sharp_Books"]      = df["Unique_Sharp_Books"].fillna(0).astype("int16")
+
+    # Final flag
     df["Is_Reinforced_MultiMarket"] = (
         (df["CrossMarketSharpSupport"] >= 2) | (df["Unique_Sharp_Books"] >= 2)
     )
+
+    
 
     return df
 
