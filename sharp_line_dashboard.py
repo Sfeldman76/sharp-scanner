@@ -307,6 +307,27 @@ SPORT_ALIASES = {
     # extend as needed
 }
 
+def _is_num(x):
+    x = pd.to_numeric(x, errors="coerce")
+    return pd.notna(x) and np.isfinite(x)
+
+def _fmt_signed(x, nd=1, suffix=""):
+    x = float(x)
+    return f"{x:+.{nd}f}{suffix}"
+
+def _fmt_pct(x, nd=0):
+    x = float(x)
+    return f"{x:.{nd}%}"
+
+def _append_metric(parts, label, value, fmt="signed", nd=1, suffix=""):
+    if _is_num(value):
+        if fmt == "signed":
+            parts.append(f"{label} {_fmt_signed(value, nd, suffix)}")
+        elif fmt == "pct":
+            parts.append(f"{label} {_fmt_pct(value, nd)}")
+        else:
+            parts.append(f"{label} {value}")
+
 def _aliases_for(s: str | None) -> list[str]:
     if not s:
         return []
@@ -3545,23 +3566,41 @@ def compute_diagnostics_vectorized(df):
         if bool(row.get('Is_Weekend', 0)): parts.append("📅 Weekend Game")
         if bool(row.get('Is_Night_Game', 0)): parts.append("🌙 Night Game")
         if bool(row.get('Is_PrimeTime', 0)): parts.append("⭐ Prime Time Matchup")
-                # --- Power ratings & outcome model edges
-        if not pd.isna(row.get('PR_Team_Rating')) and not pd.isna(row.get('PR_Opp_Rating')):
-            parts.append(f"📊 PR Ratings: {row['PR_Team_Rating']:.1f} vs {row['PR_Opp_Rating']:.1f}")
-        if float(row.get('PR_Rating_Diff', 0)) != 0:
-            parts.append(f"⚖️ PR Diff {row['PR_Rating_Diff']:+.1f}")
-        if not pd.isna(row.get('Outcome_Model_Spread')) and not pd.isna(row.get('Outcome_Market_Spread')):
-            parts.append(f"📐 Model Spread {row['Outcome_Model_Spread']:+.1f} vs Market {row['Outcome_Market_Spread']:+.1f}")
-        if float(row.get('Outcome_Spread_Edge', 0)) != 0:
-            parts.append(f"🎯 Spread Edge {row['Outcome_Spread_Edge']:+.1f}")
-        if float(row.get('Outcome_Cover_Prob', 0)) > 0.55:
-            parts.append(f"✅ Cover Prob {row['Outcome_Cover_Prob']:.0%}")
-        if bool(row.get('model_fav_vs_market_fav_agree', 0)):
+        # --- Power ratings & outcome model edges (robust to NaN)
+        _pr_team = row.get('PR_Team_Rating')
+        _pr_opp  = row.get('PR_Opp_Rating')
+        if pd.notna(_pr_team) and pd.notna(_pr_opp):
+            parts.append(f"📊 PR Ratings: {_pr_team:.1f} vs {_pr_opp:.1f}")
+        
+        _pr_diff = pd.to_numeric(row.get('PR_Rating_Diff'), errors='coerce')
+        if pd.notna(_pr_diff) and _pr_diff != 0:
+            parts.append(f"⚖️ PR Diff {_pr_diff:+.1f}")
+        
+        _mod_spread = pd.to_numeric(row.get('Outcome_Model_Spread'), errors='coerce')
+        _mkt_spread = pd.to_numeric(row.get('Outcome_Market_Spread'), errors='coerce')
+        if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
+            parts.append(f"📐 Model Spread {_mod_spread:+.1f} vs Market {_mkt_spread:+.1f}")
+        
+        _edge = pd.to_numeric(row.get('Outcome_Spread_Edge'), errors='coerce')
+        if pd.notna(_edge) and _edge != 0:
+            parts.append(f"🎯 Spread Edge {_edge:+.1f}")
+        
+        _cov = pd.to_numeric(row.get('Outcome_Cover_Prob'), errors='coerce')
+        if pd.notna(_cov) and _cov > 0.55:
+            parts.append(f"✅ Cover Prob {_cov:.0%}")
+        
+        agree = row.get('model_fav_vs_market_fav_agree', 0)
+        if str(agree) in ("1", "1.0") or agree is True:
             parts.append("🤝 Model & Market Favor Same Team")
-        if float(row.get('edge_x_k', 0)) > 0:
-            parts.append(f"📈 Edge×k {row['edge_x_k']:.2f}")
-        if float(row.get('mu_x_k', 0)) > 0:
-            parts.append(f"📊 μ×k {row['mu_x_k']:.2f}")
+        
+        _edge_x_k = pd.to_numeric(row.get('edge_x_k'), errors='coerce')
+        if pd.notna(_edge_x_k) and _edge_x_k > 0:
+            parts.append(f"📈 Edge×k {_edge_x_k:.2f}")
+        
+        _mu_x_k = pd.to_numeric(row.get('mu_x_k'), errors='coerce')
+        if pd.notna(_mu_x_k) and _mu_x_k > 0:
+            parts.append(f"📊 μ×k {_mu_x_k:.2f}")
+
 
         # Hybrid timing buckets → nice human labels
         HYBRID_LINE_COLS_LOCAL = [
