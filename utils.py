@@ -3166,7 +3166,7 @@ def apply_blended_sharp_score(
 
   
     
-   _suffix_snapshot(df, "after detect cross market")
+    _suffix_snapshot(df, "after detect cross market")
     # === Confidence scores and tiers
     try:
         if weights:
