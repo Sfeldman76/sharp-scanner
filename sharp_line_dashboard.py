@@ -3152,7 +3152,7 @@ def read_market_weights_from_bigquery():
 def attach_ratings_and_edges_for_diagnostics(
     df: pd.DataFrame,
     sport_aliases: dict,
-    table_history: str = "sharplogger.sharp_data.ratings_history",
+    table_history: str = "sharplogger.sharp_data.ratings_current",
     project: str = "sharplogger",
     pad_days: int = 10,
     allow_forward_hours: float = 0.0,
@@ -4482,7 +4482,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 .drop_duplicates(subset=['Game_Key','Market','Outcome'], keep='last')
             )
             df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
-            st.write( df_summary_base.columns.tolist())
+            #st.write( df_summary_base.columns.tolist())
             
             # === 10) Build summary_df with selected columns ===
             summary_cols = [
@@ -4534,7 +4534,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
     
           
             #st.write("🧪 Columns ibefore soummary group:")
-            st.write(filtered_df.columns.tolist())
+            #st.write(filtered_df.columns.tolist())
                 
             
             # Step 5: Group from merged filtered_df to produce summary
