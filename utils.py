@@ -2096,82 +2096,150 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-          
-def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame, df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
+
+def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame,
+                                       df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
+    if df_inverse is None or df_inverse.empty or df_all_snapshots is None or df_all_snapshots.empty:
+        return df_inverse
+
+    # Work on shallow copies (pandas 2.x CoW friendly)
     df = df_inverse.copy()
+    snaps = df_all_snapshots.loc[:, [
+        c for c in ['Bookmaker','Book','Home_Team_Norm','Away_Team_Norm',
+                    'Game_Start','Market','Outcome','Snapshot_Timestamp',
+                    'Value','Odds_Price','Limit']
+        if c in df_all_snapshots.columns
+    ]].copy()
 
-    # Normalize bookmaker names
-    df['Bookmaker'] = df.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
-    df_all_snapshots['Bookmaker'] = df_all_snapshots.apply(lambda row: normalize_book_name(row.get('Bookmaker'), row.get('Book')), axis=1)
+    # ========= 1) Normalize bookmakers WITHOUT row-wise apply =========
+    # Build a unique mapping once, then merge back (drastically fewer function calls).
+    cols_for_norm = [c for c in ['Bookmaker','Book'] if c in df.columns]
+    cols_for_norm_snaps = [c for c in ['Bookmaker','Book'] if c in snaps.columns]
+    # Ensure both frames have both columns for the mapping join
+    if 'Book' not in df.columns:    df['Book'] = pd.Series(pd.NA, index=df.index, dtype='string')
+    if 'Book' not in snaps.columns: snaps['Book'] = pd.Series(pd.NA, index=snaps.index, dtype='string')
 
-    # ⛔️ DO NOT FLIP OUTCOMES — inverse rows are already constructed correctly
-    # df['Outcome'] = df.apply(get_inverse_label, axis=1)
-    # df['Outcome_Norm'] = df['Outcome']
-
-    # Ensure Commence_Hour is normalized
-    df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], utc=True, errors='coerce').dt.floor('h')
-    df['Team_Key'] = (
-        df['Home_Team_Norm'] + "_" +
-        df['Away_Team_Norm'] + "_" +
-        df['Commence_Hour'].astype(str) + "_" +
-        df['Market'] + "_" +
-        df['Outcome']
+    pairs = (
+        pd.concat([
+            df[['Bookmaker','Book']].drop_duplicates(),
+            snaps[['Bookmaker','Book']].drop_duplicates()
+        ], ignore_index=True)
+        .drop_duplicates()
     )
 
-    # Build snapshot Team_Key
-    df_all_snapshots['Commence_Hour'] = pd.to_datetime(df_all_snapshots['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-    df_all_snapshots['Team_Key'] = (
-        df_all_snapshots['Home_Team_Norm'] + "_" +
-        df_all_snapshots['Away_Team_Norm'] + "_" +
-        df_all_snapshots['Commence_Hour'].astype(str) + "_" +
-        df_all_snapshots['Market'] + "_" +
-        df_all_snapshots['Outcome']
-    )
+    # One call per unique pair (list comprehension is lighter than axis=1 apply)
+    pairs['Bookmaker_Norm'] = [
+        normalize_book_name(bm, bk)  # re-use your existing function safely
+        for bm, bk in zip(pairs['Bookmaker'], pairs['Book'])
+    ]
 
-    # Merge latest snapshot per (Team_Key, Bookmaker)
-    df_latest = (
-        df_all_snapshots
-        .sort_values('Snapshot_Timestamp', ascending=False)
-        .drop_duplicates(subset=['Team_Key', 'Bookmaker'])
-        [['Team_Key', 'Bookmaker', 'Value', 'Odds_Price', 'Limit']]
-        .rename(columns={
-            'Value': 'Value_opponent',
-            'Odds_Price': 'Odds_Price_opponent',
-            'Limit': 'Limit_opponent'
-        })
-    )
+    # Merge mapping back (vectorized)
+    df    = df.merge(pairs,   on=['Bookmaker','Book'], how='left')
+    snaps = snaps.merge(pairs, on=['Bookmaker','Book'], how='left')
+    df['Bookmaker']    = df['Bookmaker_Norm'].fillna(df['Bookmaker'])
+    snaps['Bookmaker'] = snaps['Bookmaker_Norm'].fillna(snaps['Bookmaker'])
+    df.drop(columns=['Bookmaker_Norm'], inplace=True)
+    snaps.drop(columns=['Bookmaker_Norm'], inplace=True)
 
-    df = df.merge(df_latest, on=['Team_Key', 'Bookmaker'], how='left')
+    # ========= 2) Vectorized key building (no Python '+', no axis=1) =========
+    def _s(x: pd.Series) -> pd.Series:
+        # string dtype, lower, strip; avoids category/object churn
+        if not str(x.dtype).startswith('string'):
+            try:
+                x = x.astype('string[pyarrow]')
+            except Exception:
+                x = x.astype('string')
+        return x.str.strip().str.lower()
 
-    # Only overwrite if snapshot value is available
-    for col in ['Value', 'Odds_Price', 'Limit']:
-        opp_col = f"{col}_opponent"
-        if opp_col in df.columns:
-            df[col] = np.where(df[opp_col].notna(), df[opp_col], df[col])
+    for c in ['Home_Team_Norm','Away_Team_Norm','Market','Outcome']:
+        if c in df.columns:    df[c]    = _s(df[c])
+        if c in snaps.columns: snaps[c] = _s(snaps[c])
 
-    df.drop(columns=['Value_opponent', 'Odds_Price_opponent', 'Limit_opponent'], errors='ignore', inplace=True)
+    # Commence_Hour
+    if 'Commence_Hour' in df.columns:
+        df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True).dt.floor('h')
+    elif 'Game_Start' in df.columns:
+        df['Commence_Hour'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True).dt.floor('h')
+    else:
+        df['Commence_Hour'] = pd.NaT
+
+    snaps['Commence_Hour'] = pd.to_datetime(snaps.get('Game_Start'), errors='coerce', utc=True).dt.floor('h')
+
+    # Team_Key via str.cat (fast & NA-safe)
+    def _team_key(frame: pd.DataFrame) -> pd.Series:
+        return (
+            frame['Home_Team_Norm'].astype('string')
+            .str.cat(frame['Away_Team_Norm'].astype('string'), sep='_', na_rep='')
+            .str.cat(frame['Commence_Hour'].astype('string'), sep='_', na_rep='')
+            .str.cat(frame['Market'].astype('string'), sep='_', na_rep='')
+            .str.cat(frame['Outcome'].astype('string'), sep='_', na_rep='')
+        )
+
+    df['Team_Key']    = _team_key(df)
+    snaps['Team_Key'] = _team_key(snaps)
+
+    # ========= 3) Latest snapshot per (Team_Key, Bookmaker) WITHOUT global sort =========
+    snaps['Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
+    snap_nonnull = snaps.dropna(subset=['Snapshot_Timestamp'])
+    if not snap_nonnull.empty:
+        idx = snap_nonnull.groupby(['Team_Key','Bookmaker'])['Snapshot_Timestamp'].idxmax()
+        df_latest = snap_nonnull.loc[idx, ['Team_Key','Bookmaker','Value','Odds_Price','Limit']].rename(
+            columns={'Value': 'Value_opponent', 'Odds_Price': 'Odds_Price_opponent', 'Limit': 'Limit_opponent'}
+        )
+    else:
+        # No timestamps; create empty latest
+        df_latest = pd.DataFrame(columns=['Team_Key','Bookmaker','Value_opponent','Odds_Price_opponent','Limit_opponent'])
+
+    # ========= 4) Merge + coalesce to overwrite only when available =========
+    df = df.merge(df_latest, on=['Team_Key','Bookmaker'], how='left')
+    for col in ['Value','Odds_Price','Limit']:
+        opp = f'{col}_opponent'
+        if opp in df.columns:
+            # prefer snapshot when present
+            df[col] = df[opp].combine_first(df[col])
+    df.drop(columns=['Value_opponent','Odds_Price_opponent','Limit_opponent'], errors='ignore', inplace=True)
+
+    # Optional: downcast numerics to save memory
+    for c in ['Value','Odds_Price','Limit']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').astype('float32', copy=False)
+
     return df
 
 
+
 def fallback_flip_inverse_rows(df_inverse: pd.DataFrame) -> pd.DataFrame:
-    # Only flip if Value is missing
-    missing_value_mask = df_inverse['Value'].isnull()
+    if df_inverse is None or df_inverse.empty:
+        return df_inverse
 
-    df_to_flip = df_inverse[missing_value_mask].copy()
-    if df_to_flip.empty:
-        return df_inverse  # Nothing to flip
+    df = df_inverse  # operate in place (CoW-friendly in pandas 2.x)
 
-    logger.info(f"🔁 Fallback flipping {len(df_to_flip)} inverse rows missing value...")
+    if 'Value' not in df.columns or 'Market' not in df.columns:
+        return df
 
-    if 'Market' in df_to_flip.columns:
-        df_to_flip.loc[df_to_flip['Market'] == 'spreads', 'Value'] *= -1
-        df_to_flip.loc[df_to_flip['Market'] == 'totals', 'Outcome_Norm'] = df_to_flip['Outcome_Norm'].map(
-            {'over': 'under', 'under': 'over'}
-        )
-        df_to_flip.loc[df_to_flip['Market'] == 'totals', 'Outcome'] = df_to_flip['Outcome_Norm']
-    
-    df_inverse.update(df_to_flip)
-    return df_inverse
+    # normalize just once (no category)
+    mkt = df['Market'].astype('string').str.strip().str.lower()
+    missing_val = df['Value'].isna()
+
+    # ---- spreads: fill from the opponent value if present, then negate ----
+    if 'Value_opponent' in df.columns:
+        s_mask = missing_val & mkt.eq('spreads') & df['Value_opponent'].notna()
+        if s_mask.any():
+            df.loc[s_mask, 'Value'] = -pd.to_numeric(df.loc[s_mask, 'Value_opponent'], errors='coerce')
+
+    # ---- totals: flip labels only where Value is missing (Value may stay NaN) ----
+    t_mask = missing_val & mkt.eq('totals')
+    if t_mask.any() and 'Outcome_Norm' in df.columns:
+        on = df['Outcome_Norm'].astype('string').str.strip().str.lower()
+        flipped = on.where(~t_mask, on.map({'over':'under', 'under':'over'}))
+        df['Outcome_Norm'] = flipped
+        if 'Outcome' in df.columns:
+            df.loc[t_mask, 'Outcome'] = flipped
+
+    # optional: tighten dtype
+    df['Value'] = pd.to_numeric(df['Value'], errors='coerce').astype('float32', copy=False)
+    return df
+
 
 
 def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "America/New_York") -> pd.DataFrame:
