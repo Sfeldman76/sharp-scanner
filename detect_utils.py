@@ -31,7 +31,7 @@ from utils import (
     build_game_key,
     normalize_book_key, 
     #apply_sharp_scoring,
-    compute_sharp_metrics,
+    #compute_sharp_metrics,
     log_memory,
     calc_implied_prob,
     load_market_weights_from_bq,
