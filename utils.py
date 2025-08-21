@@ -4851,134 +4851,139 @@ def summarize_consensus(df, SHARP_BOOKS, REC_BOOKS):
 def detect_market_leaders(df_history, sharp_books, rec_books):
     """
     Memory-lean market-leader detection:
-    - Avoids rowwise .apply over the full frame for normalization
-    - Avoids merging large "open" columns back into df_history
-    - Computes first change times per (Game, Market, Outcome, Book) via a tiny groupby result
+    - Keeps join/group keys as plain strings (not category) to avoid dtype issues
+    - Normalizes Book via a tiny unique map (avoids rowwise .apply over full frame)
+    - Computes first change times per (Game, Market, Outcome, Book) with a fast numpy helper
     """
-    import numpy as np
-    import pandas as pd
-
+    
     if df_history is None or df_history.empty:
         return pd.DataFrame(columns=[
-            'Game','Market','Outcome','Book',
-            'First_Line_Move_Time','First_Odds_Move_Time',
-            'Book_Type','Line_Move_Rank','Odds_Move_Rank',
-            'Market_Leader_Line','Market_Leader_Odds','Market_Leader'
+            "Game","Market","Outcome","Book",
+            "First_Line_Move_Time","First_Odds_Move_Time",
+            "Book_Type","Line_Move_Rank","Odds_Move_Rank",
+            "Market_Leader_Line","Market_Leader_Odds","Market_Leader"
         ])
 
-    # ---- 0) Work skinny & normalize types early
-    need = ['Game','Market','Outcome','Book','Bookmaker','Time','Value']
-    if 'Odds_Price' in df_history.columns:
-        need.append('Odds_Price')
+    # ── 0) Skinny slice & types
+    need = ["Game","Market","Outcome","Book","Bookmaker","Time","Value"]
+    if "Odds_Price" in df_history.columns:
+        need.append("Odds_Price")
     df = df_history.loc[:, [c for c in need if c in df_history.columns]].copy()
 
-    # Types
-    df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-    for c in ('Game','Market','Outcome','Book','Bookmaker'):
+    # Ensure datetime w/ UTC (NaT ok)
+    df["Time"] = pd.to_datetime(df["Time"], errors="coerce", utc=True)
+
+    # Normalize string keys (plain string -> safe for merge/groupby)
+    for c in ("Game","Market","Outcome","Book","Bookmaker"):
         if c in df.columns:
-            df[c] = df[c].astype('string').str.strip()
-    # Lowercase book now; bookmaker left as-is for normalize function if it needs case
-    if 'Book' in df.columns:
-        df['Book'] = df['Book'].str.lower()
+            df[c] = df[c].astype("string").str.strip()
+    if "Book" in df.columns:
+        df["Book"] = df["Book"].str.lower()
 
-    # ---- 1) Normalize Book with a tiny unique map (avoids rowwise apply over all rows)
-    # Build map on unique pairs, then merge back once.
-    if 'Bookmaker' in df.columns:
-        uniq = df[['Book','Bookmaker']].drop_duplicates()
-        uniq['Book_norm'] = uniq.apply(lambda r: normalize_book_name(r['Book'], r['Bookmaker']), axis=1)
-        df = df.merge(uniq, on=['Book','Bookmaker'], how='left')
-        df['Book'] = df['Book_norm'].astype('string').str.lower()
-        df.drop(columns=['Book_norm'], inplace=True)
+    # ── 1) Normalize Book using a tiny unique map (no full-frame apply)
+    def _norm_book(book, bookmaker):
+        # You already have this in your codebase
+        return normalize_book_name(book, bookmaker)
+
+    if "Bookmaker" in df.columns:
+        uniq = df[["Book","Bookmaker"]].drop_duplicates()
+        uniq["Book_norm"] = uniq.apply(lambda r: _norm_book(r["Book"], r["Bookmaker"]), axis=1)
+        df = df.merge(uniq, on=["Book","Bookmaker"], how="left")
     else:
-        # Fallback: if no Bookmaker, still normalize on Book only
-        uniq = df[['Book']].drop_duplicates()
-        uniq['Book_norm'] = uniq['Book'].map(lambda b: normalize_book_name(b, None))
-        df = df.merge(uniq, on='Book', how='left')
-        df['Book'] = df['Book_norm'].astype('string').str.lower()
-        df.drop(columns=['Book_norm'], inplace=True)
+        uniq = df[["Book"]].drop_duplicates()
+        uniq["Book_norm"] = uniq["Book"].map(lambda b: _norm_book(b, None))
+        df = df.merge(uniq, on="Book", how="left")
 
-    # Categories (big win for memory during groupby)
-    for c in ["Sport","Market","Outcome_Norm","Game_Key","Book"]:
-        if c in df.columns and is_categorical_dtype(df[c]):
-            df[c] = df[c].astype("string")  # strip category for the merge
+    df["Book"] = df["Book_norm"].astype("string").str.lower()
+    df.drop(columns=["Book_norm"], inplace=True)
 
-    
-    # Sort once for deterministic "first" logic; keep only needed cols
-    df.sort_values(['Game','Market','Outcome','Book','Time'], inplace=True, kind='mergesort')
+    # ── 2) Sort once for deterministic "first-change" logic
+    df.sort_values(["Game","Market","Outcome","Book","Time"], inplace=True, kind="mergesort")
 
-    # ---- 2) First-change helpers (operate per group, return a single timestamp)
+    # ── 3) Helper: first change time vs FIRST NON-NULL opener
     def first_change_time_from_open(values: pd.Series, times: pd.Series):
-        # values & times are already time-sorted
-        if len(values) == 0:
-            return pd.NaT
+        # values & times are already time-ordered
         v = values.to_numpy()
         t = times.to_numpy()
-        # first non-nan as opener (fallback to v[0] if all nan)
-        # Using the first element is fine because we sorted and the problem wants change vs the open snapshot
-        opener = v[0]
-        # Compare against opener; ignore NaNs
-        mask = (~pd.isna(v)) & (v != opener)
-        idx = np.flatnonzero(mask)
+
+        if v.size == 0:
+            return pd.NaT
+
+        # find first non-null opener
+        nn = ~pd.isna(v)
+        if not nn.any():
+            return pd.NaT
+        opener_idx = np.flatnonzero(nn)[0]
+        opener = v[opener_idx]
+
+        # find first index AFTER opener where value is non-null and != opener
+        # (include opener_idx+1 .. end)
+        idx = np.flatnonzero(nn & (v != opener) & (np.arange(v.size) > opener_idx))
         return pd.NaT if idx.size == 0 else pd.Timestamp(t[idx[0]])
 
-    # Group key
-    gkeys = ['Game','Market','Outcome','Book']
+    gkeys = ["Game","Market","Outcome","Book"]
 
-    # ---- 3) Compute first line-move time (tiny result: one row per group)
+    # ── 4) First line-move time (tiny result)
     line_moves = (
         df.groupby(gkeys, observed=True, sort=False)
-          .apply(lambda g: first_change_time_from_open(g['Value'], g['Time']))
-          .reset_index(name='First_Line_Move_Time')
+          .apply(lambda g: first_change_time_from_open(g["Value"], g["Time"]))
+          .reset_index(name="First_Line_Move_Time")
     )
 
-    # ---- 4) Compute first odds-move time (only if present)
-    if 'Odds_Price' in df.columns:
+    # ── 5) First odds-move time (if present)
+    if "Odds_Price" in df.columns:
         odds_moves = (
             df.groupby(gkeys, observed=True, sort=False)
-              .apply(lambda g: first_change_time_from_open(g['Odds_Price'], g['Time']))
-              .reset_index(name='First_Odds_Move_Time')
+              .apply(lambda g: first_change_time_from_open(g["Odds_Price"], g["Time"]))
+              .reset_index(name="First_Odds_Move_Time")
         )
     else:
-        odds_moves = pd.DataFrame(columns=gkeys + ['First_Odds_Move_Time'])
+        odds_moves = pd.DataFrame(columns=gkeys + ["First_Odds_Move_Time"])
 
-    # ---- 5) Merge the two tiny move tables (outer keeps groups that moved in one dimension only)
-    first_moves = pd.merge(line_moves, odds_moves, on=gkeys, how='outer')
+    # ── 6) Merge the two tiny tables (outer keeps groups that moved in only one dim)
+    first_moves = line_moves.merge(odds_moves, on=gkeys, how="outer")
 
-    # ---- 6) Book type mapping (vectorized set membership)
-    sharp_set = set(x.lower() for x in sharp_books or [])
-    rec_set   = set(x.lower() for x in rec_books or [])
-    first_moves['Book'] = first_moves['Book'].astype('string').str.lower()
-    first_moves['Book_Type'] = np.where(
-        first_moves['Book'].isin(sharp_set), 'Sharp',
-        np.where(first_moves['Book'].isin(rec_set), 'Rec', 'Other')
-    ).astype('category')
+    # ── 7) Book type mapping (vectorized membership on lowercase)
+    sharp_set = set((b or "").lower() for b in (sharp_books or []))
+    rec_set   = set((b or "").lower() for b in (rec_books or []))
 
-    # ---- 7) Ranks within (Game, Market, Outcome)
-    # Earlier time => lower rank number. NaT yields NaN (not ranked).
-    by_gmo = ['Game','Market','Outcome']
-    first_moves['Line_Move_Rank'] = first_moves.groupby(by_gmo, observed=True)['First_Line_Move_Time'] \
-                                               .rank(method='first', ascending=True)
-    first_moves['Odds_Move_Rank'] = first_moves.groupby(by_gmo, observed=True)['First_Odds_Move_Time'] \
-                                               .rank(method='first', ascending=True)
-
-    # ---- 8) Leader flags (Sharp book that moved first on line and/or odds)
-    is_sharp = first_moves['Book_Type'].eq('Sharp')
-    first_moves['Market_Leader_Line'] = is_sharp & first_moves['Line_Move_Rank'].eq(1.0)
-    first_moves['Market_Leader_Odds'] = is_sharp & first_moves['Odds_Move_Rank'].eq(1.0)
-    first_moves['Market_Leader'] = is_sharp & (
-        first_moves['Line_Move_Rank'].eq(1.0) | first_moves['Odds_Move_Rank'].eq(1.0)
+    first_moves["Book"] = first_moves["Book"].astype("string").str.lower()
+    first_moves["Book_Type"] = np.where(
+        first_moves["Book"].isin(sharp_set), "Sharp",
+        np.where(first_moves["Book"].isin(rec_set), "Rec", "Other")
     )
 
-    # Order/trim columns
-    cols = [
-        'Game','Market','Outcome','Book',
-        'First_Line_Move_Time','First_Odds_Move_Time',
-        'Book_Type','Line_Move_Rank','Odds_Move_Rank',
-        'Market_Leader_Line','Market_Leader_Odds','Market_Leader'
-    ]
-    return first_moves.loc[:, [c for c in cols if c in first_moves.columns]]
+    # ── 8) Ranks within (Game, Market, Outcome); earlier time -> rank 1
+    by_gmo = ["Game","Market","Outcome"]
+    first_moves["Line_Move_Rank"] = first_moves.groupby(by_gmo, observed=True)["First_Line_Move_Time"] \
+                                               .rank(method="first", ascending=True)
+    first_moves["Odds_Move_Rank"] = first_moves.groupby(by_gmo, observed=True)["First_Odds_Move_Time"] \
+                                               .rank(method="first", ascending=True)
 
-import pandas as pd
+    # ── 9) Leaders: sharp book that moved first on line and/or odds
+    is_sharp = first_moves["Book_Type"].eq("Sharp")
+    first_moves["Market_Leader_Line"] = is_sharp & first_moves["Line_Move_Rank"].eq(1.0)
+    first_moves["Market_Leader_Odds"] = is_sharp & first_moves["Odds_Move_Rank"].eq(1.0)
+    first_moves["Market_Leader"] = is_sharp & (
+        first_moves["Line_Move_Rank"].eq(1.0) | first_moves["Odds_Move_Rank"].eq(1.0)
+    )
+
+    # ── 10) Trim/Order columns
+    cols = [
+        "Game","Market","Outcome","Book",
+        "First_Line_Move_Time","First_Odds_Move_Time",
+        "Book_Type","Line_Move_Rank","Odds_Move_Rank",
+        "Market_Leader_Line","Market_Leader_Odds","Market_Leader"
+    ]
+    out = first_moves.loc[:, [c for c in cols if c in first_moves.columns]]
+
+    # Optional: if you want memory wins after the merge, cast *now* (safe):
+    # for c in ("Sport","Market","Outcome","Book"):
+    #     if c in out.columns:
+    #         out[c] = out[c].astype("category")
+
+    return out
+
 
 def detect_cross_market_sharp_support(
     df_moves,
