@@ -1538,14 +1538,6 @@ def apply_compute_sharp_metrics_rowwise(
     df: pd.DataFrame,
     df_all_snapshots: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Memory-lean sharp metrics enrichment:
-    - No 'category' dtype.
-    - Computes metrics ONCE per (Game_Key, Market, Outcome, Bookmaker) group
-      from snapshots, then merges onto df.
-    - Keeps snapshots "skinny" and downcasts numeric columns to float32.
-    - Stable ordering by Snapshot_Timestamp is done once up-front.
-    """
     import numpy as np
     import pandas as pd
 
@@ -1557,61 +1549,54 @@ def apply_compute_sharp_metrics_rowwise(
     if missing:
         raise ValueError(f"Missing required column(s) in df: {missing}")
 
-    # --- Keep snapshots skinny (only what we actually need) ---
-    snap_needed = list(dict.fromkeys(
-        keys + ['Limit', 'Value', 'Snapshot_Timestamp', 'Game_Start', 'Odds_Price']
-    ))
+    # ── skinny snapshots ────────────────────────────────────────────────────────
+    snap_needed = list(dict.fromkeys(keys + [
+        'Limit', 'Value', 'Snapshot_Timestamp', 'Game_Start', 'Odds_Price'
+    ]))
     snaps = df_all_snapshots.loc[:, [c for c in snap_needed if c in df_all_snapshots.columns]].copy()
 
-    # --- Helpers (avoid category; prefer pyarrow string if available) ---
     def _to_str_col(s: pd.Series) -> pd.Series:
-        # Keep as-is if already a string extension array
         if str(s.dtype).startswith('string'):
-            return s
-        try:
-            # Best memory profile when pyarrow is available
-            return s.astype('string[pyarrow]')
-        except Exception:
-            # Fallback to Python object strings (still avoids 'category')
-            return s.astype(str)
+            out = s
+        else:
+            try:
+                out = s.astype('string[pyarrow]')
+            except Exception:
+                out = s.astype(str)
+        return out.str.strip().str.lower()
 
-    # --- Normalize merge keys on BOTH sides (lower/strip; no category) ---
     for k in (set(keys) & set(snaps.columns)):
-        snaps[k] = _to_str_col(snaps[k]).str.strip().str.lower()
+        snaps[k] = _to_str_col(snaps[k])
     for k in (set(keys) & set(df.columns)):
-        # This modifies df’s key columns in place (no big extra copy)
-        df[k] = _to_str_col(df[k]).str.strip().str.lower()
+        df[k] = _to_str_col(df[k])
 
-    # --- Timestamps to UTC ---
     if 'Snapshot_Timestamp' in snaps.columns:
         snaps['Snapshot_Timestamp'] = pd.to_datetime(snaps['Snapshot_Timestamp'], errors='coerce', utc=True)
     if 'Game_Start' in snaps.columns:
         snaps['Game_Start'] = pd.to_datetime(snaps['Game_Start'], errors='coerce', utc=True)
 
-    # --- Downcast numerics to save memory ---
     for c in ('Limit', 'Value', 'Odds_Price'):
         if c in snaps.columns:
             snaps[c] = pd.to_numeric(snaps[c], errors='coerce').astype('float32', copy=False)
 
-    # --- Sort once by keys + time (stable) ---
     sort_cols = [c for c in keys if c in snaps.columns]
     if 'Snapshot_Timestamp' in snaps.columns:
         sort_cols.append('Snapshot_Timestamp')
     if sort_cols:
         snaps.sort_values(sort_cols, inplace=True, kind='mergesort')
 
-    # --- Default metrics for groups with no history ---
+    # ── defaults (numeric unknowns -> np.nan, not None) ─────────────────────────
     default_metrics = {
-        'Sharp_Move_Signal': 0,
-        'Opening_Limit': None,
+        'Sharp_Move_Signal': 0.0,
+        'Opening_Limit': np.nan,
         'Sharp_Line_Magnitude': 0.0,
-        'Sharp_Limit_Jump': 0,
+        'Sharp_Limit_Jump': 0.0,
         'Sharp_Limit_Total': 0.0,
         'SharpMove_Timing_Dominant': 'unknown',
-        'Net_Line_Move_From_Opening': None,
-        'Abs_Line_Move_From_Opening': None,
-        'Net_Odds_Move_From_Opening': None,
-        'Abs_Odds_Move_From_Opening': None,
+        'Net_Line_Move_From_Opening': np.nan,
+        'Abs_Line_Move_From_Opening': np.nan,
+        'Net_Odds_Move_From_Opening': np.nan,
+        'Abs_Odds_Move_From_Opening': np.nan,
         'SharpMove_Timing_Magnitude': 0.0,
         'Odds_Move_Magnitude': 0.0,
         **{f'SharpMove_Magnitude_{tod}_{mtg}': 0.0
@@ -1622,33 +1607,25 @@ def apply_compute_sharp_metrics_rowwise(
            for mtg in ['VeryEarly','MidRange','LateGame','Urgent']},
     }
 
-    # --- Group once and compute metrics per group (NOT per row) ---
-    # observed=True is harmless here (beneficial only if categorical is present elsewhere)
     gb = snaps.groupby(keys, sort=False, observed=True, dropna=False)
 
     records = []
     append = records.append
-
     for name, g in gb:
-        # name is a 4-tuple: (Game_Key, Market, Outcome, Bookmaker)
         if g.empty:
-            m = default_metrics.copy()
+            m = {}
         else:
-            # game_start & openers from first non-null after sort
             game_start = g['Game_Start'].dropna().iloc[0] if 'Game_Start' in g and g['Game_Start'].notna().any() else None
             open_val   = g['Value'].dropna().iloc[0] if 'Value' in g and g['Value'].notna().any() else None
             open_odds  = g['Odds_Price'].dropna().iloc[0] if 'Odds_Price' in g and g['Odds_Price'].notna().any() else None
             opening_limit = g['Limit'].dropna().iloc[0] if 'Limit' in g and g['Limit'].notna().any() else None
 
-            # Build entries with zero-copy views where possible
             n = len(g)
             lim  = g['Limit'].to_numpy(dtype='float32', copy=False)      if 'Limit' in g else np.empty(n, dtype='float32')
             val  = g['Value'].to_numpy(dtype='float32', copy=False)      if 'Value' in g else np.empty(n, dtype='float32')
             ts   = g['Snapshot_Timestamp'].to_numpy(copy=False)          if 'Snapshot_Timestamp' in g else np.array([pd.NaT]*n, dtype='datetime64[ns]')
             odds = g['Odds_Price'].to_numpy(dtype='float32', copy=False) if 'Odds_Price' in g else np.empty(n, dtype='float32')
-            gs_repeat = np.repeat(game_start, n)
-
-            entries = list(zip(lim, val, ts, gs_repeat, odds))
+            entries = list(zip(lim, val, ts, np.repeat(game_start, n), odds))
 
             m = compute_sharp_metrics(
                 entries=entries,
@@ -1661,21 +1638,33 @@ def apply_compute_sharp_metrics_rowwise(
                 opening_limit=opening_limit,
             )
 
-        rec = {keys[0]: name[0], keys[1]: name[1], keys[2]: name[2], keys[3]: name[3]}
-        rec.update(m)
+        # ensure all keys exist for every group
+        m = {**default_metrics, **(m or {})}
+        rec = {keys[0]: name[0], keys[1]: name[1], keys[2]: name[2], keys[3]: name[3], **m}
         append(rec)
 
     metrics_df = pd.DataFrame.from_records(records)
 
-    # --- Left-merge metrics back onto df ---
     out = df.merge(metrics_df, on=keys, how='left', copy=False)
 
-    # --- Fill missing metrics with defaults (only the new columns) ---
+    # Fill NaNs for groups that had no snapshots at all
     for col, val in default_metrics.items():
-        if col in out.columns:
-            out[col] = out[col].fillna(val)
+        if col not in out.columns:
+            out[col] = val
+        else:
+            # skip no-op fills for np.nan to avoid work
+            if not (isinstance(val, float) and np.isnan(val)):
+                out[col] = out[col].fillna(val)
+
+    # optional: tighten dtypes for numeric metrics
+    num_cols = [c for c, v in default_metrics.items()
+                if isinstance(v, (int, float)) or (isinstance(v, float) and (pd.isna(v) or np.isnan(v)))]
+    for c in num_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors='coerce').astype('float32', copy=False)
 
     return out
+
 
     
 
