@@ -3288,7 +3288,7 @@ def compute_diagnostics_vectorized(df):
     df = attach_ratings_and_edges_for_diagnostics(
         df=df,
         sport_aliases=SPORT_ALIASES,           # your existing global/map
-        table_history="sharplogger.sharp_data.ratings_history",
+        table_history="sharplogger.sharp_data.ratings_current",
         project="sharplogger",
     )
     # === Tier ordering for change tracking
