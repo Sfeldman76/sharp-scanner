@@ -2715,6 +2715,12 @@ def log_df_top_columns(df: pd.DataFrame, logger, tag: str, topn: int = 12, deep:
     except Exception as e:
         logger.warning("⚠️ Column memory breakdown failed [%s]: %s", tag, e)
 
+def _suffix_snapshot(df, tag):
+    bad = [c for c in df.columns if c.endswith(('_x','_y')) and
+           (c.startswith('Open_') or c.startswith('First_Imp_Prob'))]
+    if bad:
+        logger.warning("❗ %s introduced %s", tag, bad)
+
 def apply_blended_sharp_score(
     df,
     trained_models,
@@ -2895,7 +2901,7 @@ def apply_blended_sharp_score(
                     df.loc[:10, cols].to_string(index=False))
     except Exception as e:
         logger.warning("⚠️ Failed to print preview: %s", e)
-
+    _suffix_snapshot(df, "before helpers")
   
 
     # ---------- 0) Cast once up front ----------
@@ -2904,7 +2910,7 @@ def apply_blended_sharp_score(
     val_now    = pd.to_numeric(df['Value'],      errors='coerce').astype('float64')
     val_open   = pd.to_numeric(df['Open_Value'], errors='coerce').astype('float64')
     df['Limit'] = pd.to_numeric(df['Limit'],     errors='coerce').fillna(0.0).astype('float64')
-    
+   _suffix_snapshot(df, "after cast helpers") 
     # ---------- 1) Vectorized implied prob (American odds) ----------
     # Handles NaN; does not allocate extra Series; branch by mask once.
     def implied_prob_vec_raw(o: np.ndarray) -> np.ndarray:
@@ -3160,7 +3166,7 @@ def apply_blended_sharp_score(
 
   
     
-  
+   _suffix_snapshot(df, "after detect cross market")
     # === Confidence scores and tiers
     try:
         if weights:
@@ -3268,8 +3274,11 @@ def apply_blended_sharp_score(
 
     # After base enrichment (Implied_Prob, Open_* fills, odds pivot, reliability merge, etc.)
     df = compute_small_book_liquidity_features(df)
+
+    _suffix_snapshot(df, "after compute_small_book_liquidity_features")
+
     df = add_line_and_crossmarket_features(df)
-    
+    _suffix_snapshot(df, "after add_line_and_crossmarket_features")
     # Ensure Outcome_Norm once
     if 'Outcome_Norm' not in df.columns:
         df['Outcome_Norm'] = df.get('Outcome', pd.Series(index=df.index, dtype='object')) \
@@ -3381,7 +3390,7 @@ def apply_blended_sharp_score(
         ]
     else:
         markets_present = []
-    
+    _suffix_snapshot(df, "before canon ")
     # ---------- NO-MODEL / NO-ELIGIBLE-MARKETS EARLY EXIT ----------
     if (not HAS_MODELS) or (len(markets_present) == 0):
         logger.info("ℹ️ No trained models / no eligible markets present; returning minimally-enriched, unscored snapshots.")
