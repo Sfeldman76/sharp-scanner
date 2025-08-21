@@ -3421,12 +3421,10 @@ def compute_diagnostics_vectorized(df):
     for c in RATINGS_EDGE_UI_COLS:
         if c not in df.columns:
             df[c] = np.nan
-    
-    # Append to features (note the * operator, not a quoted string)
-    features += RATINGS_EDGE_UI_COLS
-
+    _seen = set()
     features = [f for f in features if not (f in _seen or _seen.add(f))]
 
+  
     # Casting helpers
     def _ensure_cols(frame, cols, fill=0.0):
         missing = [c for c in cols if c not in frame.columns]
