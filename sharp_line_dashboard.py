@@ -1425,9 +1425,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_bt['Game_Start'] = pd.to_datetime(df_bt['Game_Start'], errors='coerce', utc=True)
     else:
         df_bt['Game_Start'] = df_bt['Snapshot_Timestamp']
-    for c in ['Sport', 'Market', 'Bookmaker', 'Outcome', 'Game_Key']:
+    for c in ['Outcome']:
         if c in df_bt.columns:
-  # === New team-history features (all are "as-of", no leakage) ===
+            df_bt[c] = df_bt[c].astype(str).str.lower().str.strip()
+
+ 
+     === New team-history features (all are "as-of", no leakage) ===
     history_cols = [
         "After_Win_Flag","After_Loss_Flag","Revenge_Flag",
         "Win_Pct_Prior","Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
