@@ -1694,23 +1694,40 @@ SPORT_ALIAS = {
 }
 
 KEY_LINE_RESISTANCE = {
-    'NFL': {'spread': [3, 7, 10, 14], 'total': [41, 44, 47, 51]},
-    'NBA': {'spread': [2.5, 5, 7, 10], 'total': [210, 220, 225, 230]},
+    'NFL': {
+        'spread': [3, 7, 10, 14],
+        'total': [41, 44, 47, 51]
+    },
+    'NBA': {
+        'spread': [2.5, 5, 7, 10],
+        'total': [210, 220, 225, 230]
+    },
     'WNBA': {
-        'spread': [1.5, 3.5, 6.5, 9.5],     # updated with common clustering points
+        'spread': [1.5, 3.5, 6.5, 9.5],      # updated with common clustering points
         'total': [157.5, 162.5, 167.5, 172.5]  # reflects key ranges in WNBA totals
     },
     'CFL': {
-        'spread': [2.5, 4.5, 6.5, 9.5],      # narrower CFL games; 6.5 is key for TDs
-        'total': [48.5, 52.5, 55.5, 58.5]    # aligns with common key total zones
+        'spread': [2.5, 4.5, 6.5, 9.5],       # narrower CFL games; 6.5 is key for TDs
+        'total': [48.5, 52.5, 55.5, 58.5]     # aligns with common key total zones
     },
-    'NCAAF': {'spread': [3, 7, 10, 14, 17], 'total': [45, 52, 59, 66]},
-    'NCAAB': {'spread': [2, 5, 7, 10], 'total': [125, 135, 145, 150]},
+    'NCAAF': {
+        'spread': [3, 7, 10, 14, 17],
+        'total': [45, 52, 59, 66]
+    },
+    'NCAAB': {
+        'spread': [2, 5, 7, 10],
+        'total': [125, 135, 145, 150]
+    },
     'MLB': {
-        'spread': [],                        # runline is fixed at -1.5 / +1.5
+        'spread': [],                         # runline is fixed at -1.5 / +1.5
         'total': [6.5, 7, 7.5, 8, 8.5, 9]     # updated with common clustering points
     },
-    'NHL': {'spread': [], 'total': [5.5, 6, 6.5, 7]},
+    'NHL': {
+        'spread': [],
+        'total': [5.5, 6, 6.5, 7]
+    }
+}   # <-- ✅ this was missing
+
 
 def _flatten_keys(raw):
     out = []
