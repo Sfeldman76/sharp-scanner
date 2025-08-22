@@ -486,18 +486,14 @@ def build_merge_key(home, away, game_start):
     return f"{normalize_team(home)}_{normalize_team(away)}_{game_start.floor('h').strftime('%Y-%m-%d %H:%M:%S')}"
 
 
-def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = None):
+def read_recent_sharp_moves(
+    hours=24,
+    table: str = "sharplogger.sharp_data.moves_with_features_merged"
+    sport: str | None = None
+):
     try:
         client = bq_client
         hours_int = int(hours)
-
-        # select only columns you actually use to cut bytes (optional but recommended)
-        #cols = [
-            #"Snapshot_Timestamp","Game_Key","Game_Start","Sport","Market","Outcome",
-            #"Bookmaker","Book","Value","Odds_Price","Limit","Was_Canonical",
-            #"Outcome_Norm","Team_Key","Merge_Key_Short","Commence_Hour"
-        #]
-        #cols_select = ", ".join([f"`{c}`" for c in cols])
 
         time_where = f"Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours_int} HOUR)"
         aliases = _aliases_for(sport)
@@ -509,13 +505,12 @@ def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = N
             where_clause = time_where
 
         query = f"""
-            SELECT {cols_select}
+            SELECT *
             FROM `{table}`
             WHERE {where_clause}
         """
         df = client.query(query).to_dataframe()
 
-        # keep your existing normalize/casts
         if "Commence_Hour" in df.columns:
             df["Commence_Hour"] = pd.to_datetime(df["Commence_Hour"], errors="coerce", utc=True)
         if "Sport" in df.columns:
@@ -527,6 +522,7 @@ def read_recent_sharp_moves(hours=24, table=BQ_FULL_TABLE, sport: str | None = N
     except Exception as e:
         print(f"❌ Failed to read from BigQuery: {e}")
         return pd.DataFrame()
+
 
 
 # ✅ Cached wrapper for diagnostics and line movement history
@@ -549,7 +545,7 @@ def _validate_table(table: str) -> str:
 def read_recent_sharp_moves_cached(
     hours: int = 24,
     sport: str | None = None,
-    table: str = DEFAULT_TABLE,
+    table: str = "sharplogger.sharp_data.moves_with_features_merged",
 ):
     """Cached BigQuery reader for recent sharp moves."""
     tbl = _validate_table(table)
@@ -3487,7 +3483,7 @@ def compute_diagnostics_vectorized(df):
         'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
         'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book',
         'SharpMove_Odds_Up','SharpMove_Odds_Down','Is_Home_Team_Bet',
-        'SharpMove_Resistance_Break','Late_Game_Steam_Flag','Was_Line_Resistance_Broken'.
+        'SharpMove_Resistance_Break','Late_Game_Steam_Flag','Was_Line_Resistance_Broken',
         'Value_Reversal_Flag','Odds_Reversal_Flag',
         'Hybrid_Line_Timing_Flag','Hybrid_Odds_Timing_Flag'
     ]
