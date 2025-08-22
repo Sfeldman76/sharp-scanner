@@ -542,10 +542,6 @@ def _validate_table(table: str) -> str:
     return tbl
 
 @st.cache_data(ttl=600)
-from functools import lru_cache
-from google.cloud import bigquery
-
-@lru_cache(maxsize=64)
 def read_recent_sharp_moves_cached(
     hours: int = 24,
     sport: str | None = None,
