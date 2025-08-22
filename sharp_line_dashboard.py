@@ -1470,7 +1470,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     if 'Sharp_Line_Magnitude' not in df_bt.columns:
         df_bt['Sharp_Line_Magnitude'] = pd.to_numeric(df_bt.get('Line_Delta', 0), errors='coerce').abs().fillna(0)
     # === Line resistance enrichment (binary + continuous) ===
-    from your_module_with_resistance import compute_line_resistance_flag  # if needed
+    from utils import compute_line_resistance_flag
+
     
     # ensure Market is normalized first (you already do this above)
     df_bt['Market'] = df_bt['Market'].astype(str).str.lower().str.strip()
