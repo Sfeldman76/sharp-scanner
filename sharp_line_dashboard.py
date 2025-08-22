@@ -545,7 +545,7 @@ def _validate_table(table: str) -> str:
 def read_recent_sharp_moves_cached(
     hours: int = 24,
     sport: str | None = None,
-    table: "sharplogger.sharp_data.moves_with_features_merged",
+    table: str = "sharplogger.sharp_data.moves_with_features_merged",
 ):
     """Cached BigQuery reader for recent sharp moves."""
     tbl = _validate_table(table)
