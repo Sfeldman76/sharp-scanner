@@ -1433,19 +1433,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     #=== New team-history features (all are "as-of", no leakage) ===
     history_cols = [
         "After_Win_Flag","After_Loss_Flag","Revenge_Flag",
-        "Win_Pct_Prior","Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
+        "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
         "H2H_Win_Pct_Prior","Opp_WinPct_Prior",
         "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
-        "Cum_Wins_Prior","Cum_Games_Prior","Wins_Last5_Prior","Margin_Last5_Prior",
+        "Wins_Last5_Prior","Margin_Last5_Prior",
         "Wins_Last3_Prior","Margin_Last3_Avg_Prior","Days_Since_Last_Game",
-        "Games_Last7_Prior","Games_Last14_Prior",
-        "Close_Games_Prior","Blowout_Games_Prior",
         "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
-        "Home_Wins_Prior","Home_Games_Prior","Home_Win_Pct_Prior",
-        "Away_Wins_Prior","Away_Games_Prior","Away_Win_Pct_Prior",
         "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
         "Season_Game_Num_Prior",
-        "Cum_H2H_Wins_Prior","Cum_H2H_Games_Prior","H2H_Win_Pct_Prior",
         "Wins_Last3_H2H_Prior","Margin_Last3_H2H_Prior",
         "H2H_Streak_Dir_Prior","H2H_Streak_Len_Prior"
     ]
