@@ -1430,7 +1430,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_bt[c] = df_bt[c].astype(str).str.lower().str.strip()
 
  
-     === New team-history features (all are "as-of", no leakage) ===
+    #=== New team-history features (all are "as-of", no leakage) ===
     history_cols = [
         "After_Win_Flag","After_Loss_Flag","Revenge_Flag",
         "Win_Pct_Prior","Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
