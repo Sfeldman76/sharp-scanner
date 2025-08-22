@@ -1476,44 +1476,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Prefer 'moves' so it uses Open_Value as the opening line
     df_bt = compute_line_resistance_flag(df_bt, source='moves')
     # ---- Sanitize resistance outputs ----
-    if 'Line_Resistance_Crossed_Levels' in df_bt.columns:
-        # Convert list/array to JSON string (or empty string)
-        def _to_json_str(x):
-            if isinstance(x, (list, tuple, np.ndarray)):
-                try:
-                    return json.dumps(list(map(float, x)))  # or str(x)
-                except Exception:
-                    return json.dumps(list(x))
-            # If already a string in BQ view, just keep it
-            return str(x) if not pd.isna(x) else ""
-    
-        import json
-        df_bt['Line_Resistance_Crossed_Levels'] = df_bt['Line_Resistance_Crossed_Levels'].apply(_to_json_str)
-    
-    # Cast booleans → int
-    for c in [
-        'Within_One_Tick_Of_Key', 'Would_Cross_Key_Next', 'Crossed_Key_Any'
-    ]:
-        if c in df_bt.columns:
-            df_bt[c] = df_bt[c].astype('int8')
-    
-    # Force numeric on numeric-ish columns (won’t error if missing)
-    for c in [
-        'Was_Line_Resistance_Broken','Line_Resistance_Crossed_Count',
-        'Nearest_Key','Key_Distance','Signed_Key_Dist',
-        'Keys_Crossed_Since_Open','Line_Resistance_Factor'
-    ]:
-        if c in df_bt.columns:
-            df_bt[c] = pd.to_numeric(df_bt[c], errors='coerce')
-    
-    # FINAL guard: drop any nested/object columns that slipped through
-    def _has_nested(v):
-        return isinstance(v, (list, dict, tuple, pd.Series, pd.DataFrame))
-    bad_obj_cols = [c for c in df_bt.columns if df_bt[c].dtype == 'O' and df_bt[c].apply(_has_nested).any()]
-    if bad_obj_cols:
-        print(f"🧹 Dropping nested object columns: {bad_obj_cols}")
-        df_bt.drop(columns=bad_obj_cols, inplace=True)
+    df_bt.drop(columns=['Line_Resistance_Crossed_Levels'], errors='ignore', inplace=True)
 
+   
     
     # === Get latest snapshot per Game_Key + Market + Outcome (avoid multi-snapshot double counting) ===
     dedup_cols = [
