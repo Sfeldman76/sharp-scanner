@@ -1746,11 +1746,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
 
     
+
     for idx, market in enumerate(markets, start=1):
         status.write(f"🚧 Training model for `{market.upper()}`...")
         df_market = df_bt[df_bt['Market'] == market].copy()
-      
-
+    
+        # 🔧 Totals often duplicate (over/under, multiple snapshots) — dedup here
+        if market == "totals":
+            df_market = (
+                df_market
+                .sort_values(['Snapshot_Timestamp'])
+                .drop_duplicates(subset=['Game_Key','Bookmaker','Market','Outcome'], keep='last')
+            )
+    
+        # Make alignment issues impossible downstream
+        df_market.reset_index(drop=True, inplace=True)
+    
         df_market = compute_small_book_liquidity_features(df_market)
         df_market = add_favorite_context_flag(df_market)  # adds Is_Favorite_Context
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
@@ -1760,12 +1771,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             pb.progress(int(round(idx / n_markets * 100)))
             continue
     
-        # Normalize
+        # Normalize...
         df_market['Outcome_Norm']   = df_market['Outcome'].astype(str).str.lower().str.strip()
         df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Market']         = df_market['Market'].astype(str).str.lower().str.strip()
-        df_market['Game_Key']       = df_market['Game_Key'].astype(str).str.lower().str.strip()   # <- add this
+        df_market['Game_Key']       = df_market['Game_Key'].astype(str).str.lower().str.strip()
+
         
         # --- Team / Is_Home (totals anchor to home)
         is_totals = df_market['Market'].eq('totals')
@@ -2093,10 +2105,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             .astype(int)
         )
         
-        df_market['SharpMove_Odds_Mag'] = (
-            df_market['Odds_Shift'].abs().fillna(0) * df_market['Sharp_Move_Signal'].fillna(0)
-        )
-
         # === Interaction Features (filtered for value)
         #if 'Odds_Shift' in df_market.columns:
             #df_market['SharpMove_OddsShift'] = df_market['Sharp_Move_Signal'] * df_market['Odds_Shift']
@@ -2112,10 +2120,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
         df_market = df_market.reset_index(drop=True)
 
-        df_market['SharpMove_Resistance_Break'] = (
-            df_market['Sharp_Move_Signal'].fillna(0).astype(int)
-            * df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int)
+        # Odds magnitude * sharp flag
+        df_market['SharpMove_Odds_Mag'] = (
+            df_market['Odds_Shift'].abs().fillna(0).to_numpy()
+            * df_market['Sharp_Move_Signal'].fillna(0).astype(int).to_numpy()
         )
+        
+        # Resistance break (your failing line) — position-wise and NA-safe
+        df_market['SharpMove_Resistance_Break'] = (
+            df_market['Sharp_Move_Signal'].fillna(0).astype(int).to_numpy()
+            * df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int).to_numpy()
+        )
+
 
 
         df_market['Market_Implied_Prob'] = df_market['Odds_Price'].apply(implied_prob)
