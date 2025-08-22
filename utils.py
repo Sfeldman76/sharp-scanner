@@ -1860,80 +1860,99 @@ def compute_line_resistance_flag(df, source='moves'):
     break_df = out.apply(_apply_break, axis=1)
     out = pd.concat([out, break_df], axis=1)
 
+   
     # ----------------- Continuous resistance (new, optional) -----------------
-    # Safe numeric views
-    val_now   = pd.to_numeric(out.get("Value"), errors="coerce")
-    val_open  = pd.to_numeric(out.get("Open_Value" if source == "moves" else "First_Line_Value"), errors="coerce")
-    val_prev  = pd.to_numeric(out.get("Prev_Value"), errors="coerce")  # optional
-    market    = out.get("Market", pd.Series("", index=out.index)).astype("string")
-    is_spread = (market == "spreads")
-    is_total  = (market == "totals")
-
+    # Always return Series aligned to out.index (never scalars)
+    if "Value" in out.columns:
+        val_now = pd.to_numeric(out["Value"], errors="coerce")
+    else:
+        val_now = pd.Series(np.nan, index=out.index, dtype=float)
+    
+    if source == "moves":
+        if "Open_Value" in out.columns:
+            val_open = pd.to_numeric(out["Open_Value"], errors="coerce")
+        else:
+            val_open = pd.Series(np.nan, index=out.index, dtype=float)
+    else:
+        if "First_Line_Value" in out.columns:
+            val_open = pd.to_numeric(out["First_Line_Value"], errors="coerce")
+        else:
+            val_open = pd.Series(np.nan, index=out.index, dtype=float)
+    
+    if "Prev_Value" in out.columns:
+        val_prev = pd.to_numeric(out["Prev_Value"], errors="coerce")
+    else:
+        val_prev = pd.Series(np.nan, index=out.index, dtype=float)
+    
+    if "Market" in out.columns:
+        market = out["Market"].astype("string")
+    else:
+        market = pd.Series("", index=out.index, dtype="string")
+    
+    # Boolean masks as numpy arrays for vector ops
+    is_spread = market.eq("spreads").to_numpy()
+    is_total  = market.eq("totals").to_numpy()
+    
+    # Work with numpy arrays for index-safe access in the loop below
+    val_now_arr  = val_now.to_numpy()
+    val_open_arr = val_open.to_numpy()
+    val_prev_arr = val_prev.to_numpy()
+    
     # Absolute line for spreads; raw for totals/h2h
-    abs_now  = np.where(is_spread, np.abs(val_now), val_now)
-    abs_open = np.where(is_spread, np.abs(val_open), val_open)
-    abs_prev = np.where(is_spread, np.abs(val_prev), val_prev)
-
+    abs_now  = np.where(is_spread, np.abs(val_now_arr), val_now_arr)
+    abs_open = np.where(is_spread, np.abs(val_open_arr), val_open_arr)
+    abs_prev = np.where(is_spread, np.abs(val_prev_arr), val_prev_arr)
+    
     # Per-row key set and nearest key / distance
     nearest_key = np.full(len(out), np.nan, float)
     key_dist    = np.full(len(out), np.nan, float)
-
+    
     for i in range(len(out)):
         ks = _key_levels(out.at[i, "Sport"], out.at[i, "Market"] if "Market" in out else "")
         if not ks or not np.isfinite(abs_now[i]):
             continue
-        # spreads: |keys|
         if is_spread[i]:
             ks = [abs(float(k)) for k in ks]
-        try:
-            ks_arr = np.asarray(ks, dtype=float)
-            dists  = np.abs(abs_now[i] - ks_arr)
-            j      = int(np.argmin(dists))
-            nearest_key[i] = ks_arr[j]
-            key_dist[i]    = dists[j]
-        except Exception:
-            pass
-
+        ks_arr = np.asarray(ks, dtype=float)
+        dists  = np.abs(abs_now[i] - ks_arr)
+        j      = int(np.argmin(dists))
+        nearest_key[i] = ks_arr[j]
+        key_dist[i]    = dists[j]
+    
     out["Nearest_Key"]  = nearest_key
     out["Key_Distance"] = key_dist
-
+    
     # Direction toward/away from the nearest key (use prev if available, else open)
-    # dir_sign ∈ {-1,0,+1}: +1 if moving toward the key (resistance higher), -1 if away
-    toward_mask = np.full(len(out), np.nan, float)
-    has_prev    = np.isfinite(abs_prev)
-    has_open    = np.isfinite(abs_open)
-
-    # helper: distance-to-nearest-key at prev/open/current
-    prev_d = np.abs(abs_prev - out["Nearest_Key"])
-    open_d = np.abs(abs_open - out["Nearest_Key"])
-    now_d  = np.abs(abs_now  - out["Nearest_Key"])
-
-    toward_prev = (prev_d > now_d)  # distance shrank → moved toward
+    prev_d = np.abs(abs_prev - out["Nearest_Key"].to_numpy())
+    open_d = np.abs(abs_open - out["Nearest_Key"].to_numpy())
+    now_d  = np.abs(abs_now  - out["Nearest_Key"].to_numpy())
+    
+    has_prev = np.isfinite(abs_prev)
+    has_open = np.isfinite(abs_open)
+    
+    toward_prev = (prev_d > now_d)
     toward_open = (open_d > now_d)
-
+    
     toward_mask = np.where(has_prev, toward_prev.astype(float),
-                    np.where(has_open, toward_open.astype(float), np.nan))
+                   np.where(has_open, toward_open.astype(float), np.nan))
     dir_sign = np.where(np.isnan(toward_mask), 0.0, np.where(toward_mask > 0, 1.0, -1.0))
-    out["Signed_Key_Dist"] = out["Key_Distance"] * (-dir_sign)  # toward → negative
-
-    # Within one tick of a key? (window ~0.5 for spreads, ~1.0 for totals default)
+    out["Signed_Key_Dist"] = out["Key_Distance"] * (-dir_sign)
+    
+    # Within one tick of a key?
     near_window = np.where(is_spread, 0.5, 1.0)
-    out["Within_One_Tick_Of_Key"] = (out["Key_Distance"] <= near_window).fillna(False)
-
-    # Would cross a key on the next tick if continuing last |v| move?
+    out["Within_One_Tick_Of_Key"] = (out["Key_Distance"].to_numpy() <= near_window)
+    
+    # Would cross next tick?
     tick = np.where(is_spread, 0.5, 1.0)
-    # next abs value if we continue last direction (prev→now); else conservative fallback
     last_dir = np.sign(abs_now - abs_prev)
-    abs_next = np.where(np.isfinite(abs_prev),
-                        abs_now + tick * last_dir,
-                        np.where(out["Within_One_Tick_Of_Key"], abs_now + tick, np.nan))
-    # crossing if nearest_key lies between abs_now and abs_next
+    abs_next = np.where(np.isfinite(abs_prev), abs_now + tick * last_dir,
+                        np.where(out["Within_One_Tick_Of_Key"].to_numpy(), abs_now + tick, np.nan))
     lo = np.minimum(abs_now, abs_next)
     hi = np.maximum(abs_now, abs_next)
-    would_cross = (lo < out["Nearest_Key"]) & (out["Nearest_Key"] <= hi)
-    out["Would_Cross_Key_Next"] = would_cross.fillna(out["Within_One_Tick_Of_Key"]).astype(bool)
-
-    # Keys crossed since open (uses your keys)
+    would_cross = (lo < out["Nearest_Key"].to_numpy()) & (out["Nearest_Key"].to_numpy() <= hi)
+    out["Would_Cross_Key_Next"] = np.where(np.isnan(would_cross), out["Within_One_Tick_Of_Key"].to_numpy(), would_cross)
+    
+    # Keys crossed since open — use the *_arr arrays
     def _cross_count(a, b, ks, spread_mode):
         if not (np.isfinite(a) and np.isfinite(b)):
             return 0
@@ -1942,12 +1961,12 @@ def compute_line_resistance_flag(df, source='moves'):
             a, b = abs(a), abs(b)
         lo_, hi_ = (min(a, b), max(a, b))
         return int(sum((k >= lo_) and (k <= hi_) for k in ks))
-
+    
     crossed_counts = []
     for i in range(len(out)):
         ks = _key_levels(out.at[i, "Sport"], out.at[i, "Market"] if "Market" in out else "")
-        crossed_counts.append(_cross_count(val_open[i], val_now[i], ks, bool(is_spread[i])))
-
+        crossed_counts.append(_cross_count(val_open_arr[i], val_now_arr[i], ks, bool(is_spread[i])))
+    
     out["Keys_Crossed_Since_Open"] = crossed_counts
     out["Crossed_Key_Any"] = (out["Keys_Crossed_Since_Open"] > 0)
 
