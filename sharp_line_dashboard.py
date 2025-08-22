@@ -1439,6 +1439,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_bt['Is_Sharp_Book'] = df_bt['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     if 'Sharp_Line_Magnitude' not in df_bt.columns:
         df_bt['Sharp_Line_Magnitude'] = pd.to_numeric(df_bt.get('Line_Delta', 0), errors='coerce').abs().fillna(0)
+    # === Line resistance enrichment (binary + continuous) ===
+    from your_module_with_resistance import compute_line_resistance_flag  # if needed
+    
+    # ensure Market is normalized first (you already do this above)
+    df_bt['Market'] = df_bt['Market'].astype(str).str.lower().str.strip()
+    df_bt['Sport']  = df_bt['Sport'].astype(str).str.upper()
+    
+    # Prefer 'moves' so it uses Open_Value as the opening line
+    df_bt = compute_line_resistance_flag(df_bt, source='moves')
+    
+    # (Optional for logging)
+    br = float(df_bt['Was_Line_Resistance_Broken'].mean())
+    rf_mean = float(df_bt['Line_Resistance_Factor'].mean())
+    st.write(f"🧱 Resistance: break-rate={br:.3f} | factor mean={rf_mean:.3f}")
+
     # === Get latest snapshot per Game_Key + Market + Outcome (avoid multi-snapshot double counting) ===
     dedup_cols = [
         'Game_Key','Market','Outcome','Bookmaker','Value',
@@ -2066,21 +2081,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Example for engineered features
 
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
-        df_market['Was_Line_Resistance_Broken'] = df_market.get('Was_Line_Resistance_Broken', 0).fillna(0).astype(int)
+       
         df_market['SharpMove_Resistance_Break'] = (
             df_market['Sharp_Move_Signal'].fillna(0).astype(int) *
             df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int)
         )
 
-        # === Normalize Resistance Break Count
-        df_market['Line_Resistance_Crossed_Count'] = (
-            pd.to_numeric(df_market.get('Line_Resistance_Crossed_Count'), errors='coerce')
-            .fillna(0)
-            .astype(int)
-        )
-        
-        # === Optional: store decoded JSON for preview/debug only (not as model input)
-        df_market['Line_Resistance_Crossed_Levels'] = df_market.get('Line_Resistance_Crossed_Levels', '[]')
         df_market['Market_Implied_Prob'] = df_market['Odds_Price'].apply(implied_prob)
 
         df_market['Market_Mispricing'] = df_market['Team_Past_Avg_Model_Prob'] - df_market['Market_Implied_Prob']
@@ -2298,7 +2304,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'SharpMove_Resistance_Break',
         
             # 🔹 Resistance feature
-            #'Line_Resistance_Crossed_Count',  # ✅ newly added here
+            'Line_Resistance_Factor','Was_Line_Resistance_Broken',
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
@@ -3390,7 +3396,7 @@ def compute_diagnostics_vectorized(df):
 
         # Engineered interactions
         'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',
-        'SharpMove_Resistance_Break',
+        'SharpMove_Resistance_Break', 'Was_Line_Resistance_Broken',
 
         # Reversal logic
         'Value_Reversal_Flag','Odds_Reversal_Flag',
@@ -3481,7 +3487,7 @@ def compute_diagnostics_vectorized(df):
         'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
         'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book',
         'SharpMove_Odds_Up','SharpMove_Odds_Down','Is_Home_Team_Bet',
-        'SharpMove_Resistance_Break','Late_Game_Steam_Flag',
+        'SharpMove_Resistance_Break','Late_Game_Steam_Flag','Was_Line_Resistance_Broken'.
         'Value_Reversal_Flag','Odds_Reversal_Flag',
         'Hybrid_Line_Timing_Flag','Hybrid_Odds_Timing_Flag'
     ]
@@ -3554,7 +3560,7 @@ def compute_diagnostics_vectorized(df):
         if float(row.get('SharpMove_Odds_Mag', 0)) > 5: parts.append("💥 Sharp Odds Steam")
 
         # Resistance & timing
-        if bool(row.get('SharpMove_Resistance_Break', 0)): parts.append("🧱 Broke Key Resistance")
+        if bool(row.get('Was_Line_Resistance_Broken', 0)): parts.append("🧱 Broke Key Resistance")
         if bool(row.get('Late_Game_Steam_Flag', 0)): parts.append("⏰ Late Game Steam")
         if bool(row.get('Value_Reversal_Flag', 0)): parts.append("🔄 Value Reversal")
         if bool(row.get('Odds_Reversal_Flag', 0)): parts.append("📉 Odds Reversal")
@@ -3580,7 +3586,7 @@ def compute_diagnostics_vectorized(df):
         if bool(row.get('Potential_Odds_Overmove_Flag', 0)): parts.append("🎯 Odds Possibly Overmoved")
         if bool(row.get('Line_Moved_Toward_Team', 0)): parts.append("🧲 Line Moved Toward This Team")
         if bool(row.get('Line_Moved_Away_From_Team', 0)): parts.append("🚫 Line Moved Away From This Team")
-        if float(row.get('Line_Resistance_Crossed_Count', 0)) >= 1: parts.append("🧱 Crossed Resistance Levels")
+     
         if float(row.get('Abs_Line_Move_Z', 0)) > 1: parts.append("📊 Unusual Line Z-Move")
         if float(row.get('Pct_Line_Move_Z', 0)) > 1: parts.append("📈 Abnormal % Line Z-Score")
         if bool(row.get('Mispricing_Flag', 0)): parts.append("💸 Market Mispricing Detected")
