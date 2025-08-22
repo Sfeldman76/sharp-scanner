@@ -1474,9 +1474,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     df_bt['Sport']  = df_bt['Sport'].astype(str).str.upper()
     
     # Prefer 'moves' so it uses Open_Value as the opening line
-    df_bt = compute_line_resistance_flag(df_bt, source='moves')
+    #df_bt = compute_line_resistance_flag(df_bt, source='moves')
     # ---- Sanitize resistance outputs ----
-    df_bt.drop(columns=['Line_Resistance_Crossed_Levels'], errors='ignore', inplace=True)
+    #df_bt.drop(columns=['Line_Resistance_Crossed_Levels'], errors='ignore', inplace=True)
 
    
     
@@ -2127,10 +2127,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         # Resistance break (your failing line) — position-wise and NA-safe
-        df_market['SharpMove_Resistance_Break'] = (
-            df_market['Sharp_Move_Signal'].fillna(0).astype(int).to_numpy()
-            * df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int).to_numpy()
-        )
+        #df_market['SharpMove_Resistance_Break'] = (
+            #df_market['Sharp_Move_Signal'].fillna(0).astype(int).to_numpy()
+            #* df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int).to_numpy()
+        #)
 
 
 
@@ -2348,10 +2348,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 🔹 Engineered interactions
             'MarketLeader_ImpProbShift', 'LimitProtect_SharpMag', 'Delta_Sharp_vs_Rec',
             #'Sharp_Leads',
-            'SharpMove_Resistance_Break',
+            #'SharpMove_Resistance_Break',
         
             # 🔹 Resistance feature
-            'Line_Resistance_Factor','Was_Line_Resistance_Broken',
+            #'Line_Resistance_Factor','Was_Line_Resistance_Broken',
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
@@ -3443,7 +3443,7 @@ def compute_diagnostics_vectorized(df):
 
         # Engineered interactions
         'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',
-        'SharpMove_Resistance_Break', 'Was_Line_Resistance_Broken',
+        #'SharpMove_Resistance_Break', 'Was_Line_Resistance_Broken',
 
         # Reversal logic
         'Value_Reversal_Flag','Odds_Reversal_Flag',
@@ -3534,7 +3534,8 @@ def compute_diagnostics_vectorized(df):
         'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
         'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book',
         'SharpMove_Odds_Up','SharpMove_Odds_Down','Is_Home_Team_Bet',
-        'SharpMove_Resistance_Break','Late_Game_Steam_Flag','Was_Line_Resistance_Broken',
+        #'SharpMove_Resistance_Break',
+        'Late_Game_Steam_Flag',#'Was_Line_Resistance_Broken',
         'Value_Reversal_Flag','Odds_Reversal_Flag',
         'Hybrid_Line_Timing_Flag','Hybrid_Odds_Timing_Flag'
     ]
@@ -3607,7 +3608,7 @@ def compute_diagnostics_vectorized(df):
         if float(row.get('SharpMove_Odds_Mag', 0)) > 5: parts.append("💥 Sharp Odds Steam")
 
         # Resistance & timing
-        if bool(row.get('Was_Line_Resistance_Broken', 0)): parts.append("🧱 Broke Key Resistance")
+        #if bool(row.get('Was_Line_Resistance_Broken', 0)): parts.append("🧱 Broke Key Resistance")
         if bool(row.get('Late_Game_Steam_Flag', 0)): parts.append("⏰ Late Game Steam")
         if bool(row.get('Value_Reversal_Flag', 0)): parts.append("🔄 Value Reversal")
         if bool(row.get('Odds_Reversal_Flag', 0)): parts.append("📉 Odds Reversal")
