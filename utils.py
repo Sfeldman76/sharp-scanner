@@ -5411,22 +5411,59 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         return None
 
 
-def read_recent_sharp_moves(hours=120, table=BQ_FULL_TABLE):
-    try:
-        client = bq_client
-        query = f"""
-            SELECT * FROM `{table}`
-            WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {hours} HOUR)
-        """
-        df = client.query(query).to_dataframe()
-        df['Commence_Hour'] = pd.to_datetime(df['Commence_Hour'], errors='coerce', utc=True)
+DEFAULT_MOVES_VIEW = "sharplogger.sharp_data.moves_with_features_merged"
 
-        print(f"✅ Loaded {len(df)} rows from BigQuery (last {hours}h)")
+def read_recent_sharp_moves(
+    hours: int = 120,
+    table: str = DEFAULT_MOVES_VIEW,
+    pregame_only: bool = True
+) -> pd.DataFrame:
+    """
+    Load recent sharp moves (enriched with team features) from BigQuery.
+
+    - `table` should usually be the merged view:
+        sharplogger.sharp_data.moves_with_features_merged
+      (no totals duplication; has home_/away_ feature columns)
+
+    - Set `pregame_only=False` if you also want in-play/post-game rows.
+    """
+    try:
+        client = bq_client  # reuse your existing client
+
+        where_clauses = [
+            "Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)"
+        ]
+        if pregame_only:
+            where_clauses += [
+                "COALESCE(Pre_Game, TRUE)",
+                "Game_Start IS NOT NULL",
+                "Time IS NOT NULL",
+                "TIMESTAMP_DIFF(Game_Start, Time, SECOND) >= 0"
+            ]
+
+        query = f"""
+            SELECT *
+            FROM `{table}`
+            WHERE {' AND '.join(where_clauses)}
+        """
+
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("hours", "INT64", hours)]
+        )
+
+        df = client.query(query, job_config=job_config).to_dataframe(create_bqstorage_client=True)
+
+        # Normalize timestamps to pandas UTC datetimes
+        for col in ("Commence_Hour", "Game_Start", "Time", "Snapshot_Timestamp"):
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+
+        print(f"✅ Loaded {len(df):,} rows from {table} (last {hours}h, pregame_only={pregame_only})")
         return df
+
     except Exception as e:
         print(f"❌ Failed to read from BigQuery: {e}")
         return pd.DataFrame()
-
 def force_bool(series):
     return series.map(lambda x: bool(int(x)) if str(x).strip() in ['0', '1'] else bool(x)).fillna(False).astype(bool)
        
