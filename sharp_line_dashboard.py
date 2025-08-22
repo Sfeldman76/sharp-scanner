@@ -529,7 +529,7 @@ def read_recent_sharp_moves(
 # Smart getter — use cache unless forced to reload
 
 # Optional: restrict allowed tables if you truly want this configurable.
-DEFAULT_TABLE = "sharplogger.sharp_data.sharp_moves_maste"
+DEFAULT_TABLE = "sharplogger.sharp_data.sharp_moves_master"
 ALLOWED_TABLES = {DEFAULT_TABLE}  # add more if needed
 
 bq_client = bigquery.Client()
@@ -545,8 +545,7 @@ def _validate_table(table: str) -> str:
 def read_recent_sharp_moves_cached(
     hours: int = 24,
     sport: str | None = None,
-    table: str = "sharplogger.sharp_data.sharp_moves_maste",
-):
+    table: str = "sharplogger.sharp_data.sharp_moves_master",
     """Cached BigQuery reader for recent sharp moves."""
     tbl = _validate_table(table)
 
