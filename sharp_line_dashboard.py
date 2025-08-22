@@ -2110,10 +2110,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         df_market['High_Limit_Flag'] = (df_market['Sharp_Limit_Total'] >= 7000).astype(int)
        
+        df_market = df_market.reset_index(drop=True)
+
         df_market['SharpMove_Resistance_Break'] = (
-            df_market['Sharp_Move_Signal'].fillna(0).astype(int) *
-            df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int)
+            df_market['Sharp_Move_Signal'].fillna(0).astype(int)
+            * df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int)
         )
+
 
         df_market['Market_Implied_Prob'] = df_market['Odds_Price'].apply(implied_prob)
 
