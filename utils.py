@@ -1711,107 +1711,116 @@ KEY_LINE_RESISTANCE = {
         'total': [6.5, 7, 7.5, 8, 8.5, 9]     # updated with common clustering points
     },
     'NHL': {'spread': [], 'total': [5.5, 6, 6.5, 7]},
-}
 
+def _flatten_keys(raw):
+    out = []
+    for k in (raw or []):
+        if k is None:
+            continue
+        if isinstance(k, (list, tuple, np.ndarray)):
+            for x in k:
+                try:
+                    out.append(float(x))
+                except Exception:
+                    pass
+        else:
+            try:
+                out.append(float(k))
+            except Exception:
+                pass
+    return out
+
+def _flatten_keys_to_midpoints(raw):
+    """
+    Convert list/tuple pairs like (141.5, 142.5) into a single midpoint (142.0).
+    Any non-pairs fall back to simple float coercion. Always returns a 1-D list of floats.
+    """
+    out = []
+    for k in (raw or []):
+        if k is None:
+            continue
+        if isinstance(k, (list, tuple, np.ndarray)):
+            kk = []
+            for x in k:
+                try:
+                    kk.append(float(x))
+                except Exception:
+                    pass
+            if len(kk) == 2:
+                out.append(0.5 * (kk[0] + kk[1]))
+            else:
+                out.extend(kk)
+        else:
+            try:
+                out.append(float(k))
+            except Exception:
+                pass
+    return out
 
 def was_line_resistance_broken(open_val, close_val, key_levels, market_type):
-    """
-    Return (flag, crossed_levels) where:
-      - flag = 1 if any key level lies strictly between open_val and close_val; else 0
-      - crossed_levels = sorted list of the keys that were crossed
-
-    Notes:
-      - For spreads, resistance is defined in |value| space (e.g., -3.0 -> 2.5 treats 3.0 as a barrier).
-      - For totals, checks are done in raw value space.
-      - Keys equal to open or close are NOT counted as “crossed”.
-    """
-
-
-    # Guard: missing inputs → not broken
     if pd.isna(open_val) or pd.isna(close_val):
         return 0, []
 
-    # Normalize market label
     mkt = (market_type or "").strip().lower()
     if mkt == "spread":
-        mkt = "spreads"  # tolerate legacy label
+        mkt = "spreads"
 
-    # Normalize floats
     try:
-        o = float(open_val)
-        c = float(close_val)
+        o = float(open_val); c = float(close_val)
     except Exception:
         return 0, []
 
-    # Normalize keys
+    # ALWAYS flatten keys to scalars
     try:
-        ks = [float(k) for k in (key_levels or [])]
+        raw = (key_levels or [])
     except Exception:
-        ks = []
+        raw = []
+    ks = _flatten_keys_to_midpoints(raw)
 
-    # Spreads in absolute space
     if mkt == "spreads":
         o, c = abs(o), abs(c)
         ks = [abs(k) for k in ks]
 
     lo, hi = (min(o, c), max(o, c))
     crossed = sorted([k for k in ks if (lo < k < hi)])
-
     return int(bool(crossed)), crossed
 
+def _key_levels(sport, market):
+    try:
+        return KEY_LINE_RESISTANCE.get((sport or ""), {}).get((market or "").lower(), [])
+    except Exception:
+        return []
+
+def _apply_break(row):
+    open_val = _opening_line(row)
+    close_val = row.get("Value")
+    market    = row.get("Market", "")
+    keys_raw  = _key_levels(row.get("Sport", ""), market)
+    keys      = _flatten_keys_to_midpoints(keys_raw)  # normalize -> 1-D scalars
+    flag, lvls = was_line_resistance_broken(open_val, close_val, keys, market)
+    return pd.Series({
+        "Was_Line_Resistance_Broken": flag,
+        "Line_Resistance_Crossed_Levels": lvls,
+        "Line_Resistance_Crossed_Count": len(lvls),
+    })
 
 def compute_line_resistance_flag(df, source='moves'):
-    """
-    Adds to df (keeping your existing columns intact):
-      - Was_Line_Resistance_Broken      : int {0,1}              (existing behavior)
-      - Line_Resistance_Crossed_Levels  : list[float]            (existing behavior)
-      - Line_Resistance_Crossed_Count   : int                    (existing behavior)
-
-    NEW (continuous resistance + small diagnostics; safe to ignore if unused):
-      - Nearest_Key                     : float
-      - Key_Distance                    : float                  (abs distance to nearest key in |line| space for spreads)
-      - Signed_Key_Dist                 : float                  (negative when moving toward the key)
-      - Within_One_Tick_Of_Key          : bool
-      - Would_Cross_Key_Next            : bool
-      - Keys_Crossed_Since_Open         : int
-      - Crossed_Key_Any                 : bool
-      - Line_Resistance_Factor          : float in [0,1]         (continuous resistance score)
-
-    Expected inputs already in your pipeline (used if present; otherwise gracefully skipped):
-      - df['Sport'] (will be uppercased & mapped via SPORT_ALIAS)
-      - df['Market'] in {'spreads','totals','h2h'}
-      - df['Value'] (current main line)
-      - df['Open_Value'] OR df['First_Line_Value'] (selected by `source`)
-      - Optional: 'Prev_Value', 'Limit', 'Book', 'Minutes_To_Game', 'Active_Signal_Count'
-      - Globals: SPORT_ALIAS, KEY_LINE_RESISTANCE
-    """
-
-
-    # Early return with empty columns if needed
     if df is None or df.empty:
         out = df.copy()
         out["Was_Line_Resistance_Broken"] = 0
         out["Line_Resistance_Crossed_Levels"] = [[]] * len(out)
         out["Line_Resistance_Crossed_Count"] = 0
-        # Also provide the new columns (empty/neutral defaults)
         for c, v in [
-            ("Nearest_Key", np.nan),
-            ("Key_Distance", np.nan),
-            ("Signed_Key_Dist", np.nan),
-            ("Within_One_Tick_Of_Key", False),
-            ("Would_Cross_Key_Next", False),
-            ("Keys_Crossed_Since_Open", 0),
-            ("Crossed_Key_Any", False),
-            ("Line_Resistance_Factor", 0.5),
+            ("Nearest_Key", np.nan), ("Key_Distance", np.nan), ("Signed_Key_Dist", np.nan),
+            ("Within_One_Tick_Of_Key", False), ("Would_Cross_Key_Next", False),
+            ("Keys_Crossed_Since_Open", 0), ("Crossed_Key_Any", False), ("Line_Resistance_Factor", 0.5),
         ]:
             out[c] = v
         return out
 
     out = df.copy()
 
-    # -------- Helpers (robust, no extra deps) --------
-    def _sigmoid(x):
-        return 1.0 / (1.0 + np.exp(-x))
+    def _sigmoid(x): return 1.0 / (1.0 + np.exp(-x))
 
     def _robust_z(x):
         x = pd.to_numeric(x, errors="coerce").astype(float)
@@ -1821,7 +1830,6 @@ def compute_line_resistance_flag(df, source='moves'):
             mad = 1.0
         return (x - med) / (1.4826 * mad)
 
-    # Normalize sport via alias (no schema change elsewhere)
     sport_raw = out.get("Sport")
     if sport_raw is not None:
         sport_up = sport_raw.astype("string").str.upper()
@@ -1829,148 +1837,106 @@ def compute_line_resistance_flag(df, source='moves'):
     else:
         out["Sport"] = pd.Series(pd.NA, index=out.index, dtype="string")
 
-    # Market normalization
     if "Market" in out:
         out["Market"] = out["Market"].astype("string").str.lower().replace({"spread": "spreads"})
 
-    # Which opener column to use (keeps your current switch)
     def _opening_line(row):
         return row.get("Open_Value") if source == "moves" else row.get("First_Line_Value")
 
-    # Key levels per row from your global KEY_LINE_RESISTANCE
     def _key_levels(sport, market):
         try:
             return KEY_LINE_RESISTANCE.get((sport or ""), {}).get((market or "").lower(), [])
         except Exception:
             return []
 
-    # ----------------- Binary break logic (unchanged behavior) -----------------
-    def _apply_break(row):
-        open_val = _opening_line(row)
-        close_val = row.get("Value")
-        market    = row.get("Market", "")
-        keys      = _key_levels(row.get("Sport", ""), market)
-        flag, lvls = was_line_resistance_broken(open_val, close_val, keys, market)
-        return pd.Series({
-            "Was_Line_Resistance_Broken": flag,
-            "Line_Resistance_Crossed_Levels": lvls,
-            "Line_Resistance_Crossed_Count": len(lvls),
-        })
-
+    # Binary break fields
     break_df = out.apply(_apply_break, axis=1)
     out = pd.concat([out, break_df], axis=1)
 
-   
-    # ----------------- Continuous resistance (new, optional) -----------------
-    # Always return Series aligned to out.index (never scalars)
-    if "Value" in out.columns:
-        val_now = pd.to_numeric(out["Value"], errors="coerce")
-    else:
-        val_now = pd.Series(np.nan, index=out.index, dtype=float)
-    
-    if source == "moves":
-        if "Open_Value" in out.columns:
-            val_open = pd.to_numeric(out["Open_Value"], errors="coerce")
-        else:
-            val_open = pd.Series(np.nan, index=out.index, dtype=float)
-    else:
-        if "First_Line_Value" in out.columns:
-            val_open = pd.to_numeric(out["First_Line_Value"], errors="coerce")
-        else:
-            val_open = pd.Series(np.nan, index=out.index, dtype=float)
-    
-    if "Prev_Value" in out.columns:
-        val_prev = pd.to_numeric(out["Prev_Value"], errors="coerce")
-    else:
-        val_prev = pd.Series(np.nan, index=out.index, dtype=float)
-    
-    if "Market" in out.columns:
-        market = out["Market"].astype("string")
-    else:
-        market = pd.Series("", index=out.index, dtype="string")
-    
-    # Boolean masks as numpy arrays for vector ops
+    # Continuous bits
+    val_now  = pd.to_numeric(out.get("Value", pd.Series(np.nan, index=out.index)), errors="coerce")
+    val_open = (pd.to_numeric(out.get("Open_Value", pd.Series(np.nan, index=out.index)), errors="coerce")
+                if source == "moves"
+                else pd.to_numeric(out.get("First_Line_Value", pd.Series(np.nan, index=out.index)), errors="coerce"))
+    val_prev = pd.to_numeric(out.get("Prev_Value", pd.Series(np.nan, index=out.index)), errors="coerce")
+    market   = out.get("Market", pd.Series("", index=out.index)).astype("string")
+
     is_spread = market.eq("spreads").to_numpy()
-    is_total  = market.eq("totals").to_numpy()
-    
-    # Work with numpy arrays for index-safe access in the loop below
+
     val_now_arr  = val_now.to_numpy()
     val_open_arr = val_open.to_numpy()
     val_prev_arr = val_prev.to_numpy()
-    
-    # Absolute line for spreads; raw for totals/h2h
-    abs_now  = np.where(is_spread, np.abs(val_now_arr), val_now_arr)
+
+    abs_now  = np.where(is_spread, np.abs(val_now_arr),  val_now_arr)
     abs_open = np.where(is_spread, np.abs(val_open_arr), val_open_arr)
     abs_prev = np.where(is_spread, np.abs(val_prev_arr), val_prev_arr)
-    
-    # Per-row key set and nearest key / distance
+
     nearest_key = np.full(len(out), np.nan, float)
     key_dist    = np.full(len(out), np.nan, float)
-    
+
     for i in range(len(out)):
-        ks = _key_levels(out.at[i, "Sport"], out.at[i, "Market"] if "Market" in out else "")
+        keys_raw = _key_levels(out.at[i, "Sport"], out.at[i, "Market"] if "Market" in out else "")
+        ks = _flatten_keys_to_midpoints(keys_raw)  # ensure 1-D
         if not ks or not np.isfinite(abs_now[i]):
             continue
         if is_spread[i]:
             ks = [abs(float(k)) for k in ks]
-        ks_arr = np.asarray(ks, dtype=float)
-        dists  = np.abs(abs_now[i] - ks_arr)
+        ks_arr = np.asarray(ks, dtype=float)       # (m,)
+        dists  = np.abs(abs_now[i] - ks_arr)       # (m,)
         j      = int(np.argmin(dists))
         nearest_key[i] = ks_arr[j]
         key_dist[i]    = dists[j]
-    
+
     out["Nearest_Key"]  = nearest_key
     out["Key_Distance"] = key_dist
-    
-    # Direction toward/away from the nearest key (use prev if available, else open)
-    prev_d = np.abs(abs_prev - out["Nearest_Key"].to_numpy())
-    open_d = np.abs(abs_open - out["Nearest_Key"].to_numpy())
-    now_d  = np.abs(abs_now  - out["Nearest_Key"].to_numpy())
-    
+
+    nk = out["Nearest_Key"].to_numpy()
+    prev_d = np.abs(abs_prev - nk)
+    open_d = np.abs(abs_open - nk)
+    now_d  = np.abs(abs_now  - nk)
+
     has_prev = np.isfinite(abs_prev)
     has_open = np.isfinite(abs_open)
-    
+
     toward_prev = (prev_d > now_d)
-    toward_open = (open_d > now_d)
-    
+    toward_open = (open_d  > now_d)
+
     toward_mask = np.where(has_prev, toward_prev.astype(float),
                    np.where(has_open, toward_open.astype(float), np.nan))
     dir_sign = np.where(np.isnan(toward_mask), 0.0, np.where(toward_mask > 0, 1.0, -1.0))
     out["Signed_Key_Dist"] = out["Key_Distance"] * (-dir_sign)
-    
-    # Within one tick of a key?
+
     near_window = np.where(is_spread, 0.5, 1.0)
     out["Within_One_Tick_Of_Key"] = (out["Key_Distance"].to_numpy() <= near_window)
-    
-    # Would cross next tick?
-    tick = np.where(is_spread, 0.5, 1.0)
+
+    tick     = np.where(is_spread, 0.5, 1.0)
     last_dir = np.sign(abs_now - abs_prev)
     abs_next = np.where(np.isfinite(abs_prev), abs_now + tick * last_dir,
                         np.where(out["Within_One_Tick_Of_Key"].to_numpy(), abs_now + tick, np.nan))
     lo = np.minimum(abs_now, abs_next)
     hi = np.maximum(abs_now, abs_next)
-    would_cross = (lo < out["Nearest_Key"].to_numpy()) & (out["Nearest_Key"].to_numpy() <= hi)
-    out["Would_Cross_Key_Next"] = np.where(np.isnan(would_cross), out["Within_One_Tick_Of_Key"].to_numpy(), would_cross)
-    
-    # Keys crossed since open — use the *_arr arrays
+    would_cross = (lo < nk) & (nk <= hi)
+    out["Would_Cross_Key_Next"] = np.where(np.isnan(abs_next), out["Within_One_Tick_Of_Key"].to_numpy(), would_cross)
+
     def _cross_count(a, b, ks, spread_mode):
+        # flatten here too to avoid accidental 2-D keys
+        ks = _flatten_keys_to_midpoints(ks)
         if not (np.isfinite(a) and np.isfinite(b)):
             return 0
         if spread_mode:
             ks = [abs(float(k)) for k in (ks or [])]
             a, b = abs(a), abs(b)
         lo_, hi_ = (min(a, b), max(a, b))
-        return int(sum((k >= lo_) and (k <= hi_) for k in ks))
-    
+        return int(sum((lo_ <= k <= hi_) for k in ks))
+
     crossed_counts = []
     for i in range(len(out)):
         ks = _key_levels(out.at[i, "Sport"], out.at[i, "Market"] if "Market" in out else "")
         crossed_counts.append(_cross_count(val_open_arr[i], val_now_arr[i], ks, bool(is_spread[i])))
-    
+
     out["Keys_Crossed_Since_Open"] = crossed_counts
     out["Crossed_Key_Any"] = (out["Keys_Crossed_Since_Open"] > 0)
 
-    # Light context (optional): Limit, Book, Minutes_To_Game, Active_Signal_Count
     limit_z = _robust_z(out["Limit"]) if "Limit" in out.columns else pd.Series(0.0, index=out.index)
     book = out.get("Book", pd.Series("", index=out.index)).astype("string").str.lower()
     originators = {"pinnacle","circa","bookmaker","betcris","matchbook",
@@ -1979,36 +1945,31 @@ def compute_line_resistance_flag(df, source='moves'):
 
     if "Minutes_To_Game" in out.columns:
         mtg = pd.to_numeric(out["Minutes_To_Game"], errors="coerce")
-        time_term = _sigmoid((120.0 - mtg) / 40.0).fillna(0.5)  # stiffer near start
+        time_term = _sigmoid((120.0 - mtg) / 40.0).fillna(0.5)
     else:
         time_term = pd.Series(0.5, index=out.index)
 
     steam = pd.Series(0.0, index=out.index)
     if "Active_Signal_Count" in out.columns:
         steam = steam + _robust_z(out["Active_Signal_Count"]).fillna(0.0)
-    # (If you have a separate OFI column, add it here the same way.)
 
-    # Compose continuous resistance score (weights are benign defaults; tune later)
     w_near, w_cross, w_limit, w_orig, w_time, w_toward, w_steam = 0.45, 0.15, 0.10, 0.07, 0.08, 0.08, -0.13
     sigma = 0.35
-    near_term   = np.exp(- (np.square(out["Key_Distance"])) / (2 * sigma * sigma))
+    near_term   = np.exp(-(np.square(out["Key_Distance"])) / (2 * sigma * sigma))
     toward_term = (dir_sign > 0).astype(float)
 
-    raw = (
-        w_near   * near_term
-        + w_cross  * out["Would_Cross_Key_Next"].astype(float)
-        + w_limit  * np.clip(limit_z, -3, 3)
-        + w_orig   * is_originator
-        + w_time   * time_term
-        + w_toward * toward_term
-        + w_steam  * np.clip(steam, -3, 3)
-    )
+    raw = (w_near * near_term
+           + w_cross  * out["Would_Cross_Key_Next"].astype(float)
+           + w_limit  * np.clip(limit_z, -3, 3)
+           + w_orig   * is_originator
+           + w_time   * time_term
+           + w_toward * toward_term
+           + w_steam  * np.clip(steam, -3, 3))
 
     out["Line_Resistance_Factor"] = _sigmoid(raw)
-
     return out
 
-
+    
 def compute_sharp_magnitude_by_time_bucket(df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     """
     Memory-lean version:
