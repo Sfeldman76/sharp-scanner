@@ -542,33 +542,33 @@ def _validate_table(table: str) -> str:
     return tbl
 
 @st.cache_data(ttl=600)
+from functools import lru_cache
+from google.cloud import bigquery
+
+@lru_cache(maxsize=64)
 def read_recent_sharp_moves_cached(
     hours: int = 24,
     sport: str | None = None,
     table: str = "sharplogger.sharp_data.sharp_moves_master",
-    """Cached BigQuery reader for recent sharp moves."""
-    tbl = _validate_table(table)
 ):
-    # Build query with optional sport filter. Table name must be literal in SQL.
+    # Validate/whitelist the table name at call time
+    tbl = _validate_table(table)  # must return a backticked identifier or a known-safe string
+
+    # Build query with optional sport filter
     sport_filter = "AND Sport = @sport" if sport else ""
     query = f"""
         SELECT *
-        FROM `{tbl}`
+        FROM {tbl}
         WHERE Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
         {sport_filter}
         ORDER BY Snapshot_Timestamp DESC
     """
 
-    params = [
-        bigquery.ScalarQueryParameter("hours", "INT64", hours),
-    ]
+    params = [bigquery.ScalarQueryParameter("hours", "INT64", int(hours))]
     if sport:
         params.append(bigquery.ScalarQueryParameter("sport", "STRING", sport))
 
-    job = bq_client.query(
-        query,
-        job_config=bigquery.QueryJobConfig(query_parameters=params),
-    )
+    job = bq_client.query(query, job_config=bigquery.QueryJobConfig(query_parameters=params))
     df = job.to_dataframe()
     return df
 
@@ -583,12 +583,9 @@ def read_recent_sharp_moves_conditional(
     force_reload: bool = False,
     table: str = DEFAULT_TABLE,
 ):
-    """Non-decorated wrapper that can optionally force a cache refresh."""
     if force_reload:
-        # Clear all cached results for this function
         read_recent_sharp_moves_cached.cache_clear()
     return read_recent_sharp_moves_cached(hours=hours, sport=sport, table=table)
-
     
 
 @st.cache_resource
