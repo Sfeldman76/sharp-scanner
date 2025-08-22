@@ -1480,10 +1480,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Prefer 'moves' so it uses Open_Value as the opening line
     df_bt = compute_line_resistance_flag(df_bt, source='moves')
     
-    # (Optional for logging)
-    br = float(df_bt['Was_Line_Resistance_Broken'].mean())
-    rf_mean = float(df_bt['Line_Resistance_Factor'].mean())
-    st.write(f"🧱 Resistance: break-rate={br:.3f} | factor mean={rf_mean:.3f}")
+    # (Optional for logging, NA/duplicate safe)
+    br = pd.to_numeric(df_bt['Was_Line_Resistance_Broken'], errors='coerce').mean(skipna=True)
+    rf_mean = pd.to_numeric(df_bt['Line_Resistance_Factor'], errors='coerce').mean(skipna=True)
+    
+    # Coerce to floats (will stay nan if empty/invalid)
+    br_val = float(br) if pd.notna(br) else 0.0
+    rf_val = float(rf_mean) if pd.notna(rf_mean) else 0.0
+    
+    st.write(f"🧱 Resistance: break-rate={br_val:.3f} | factor mean={rf_val:.3f}")
 
     # === Get latest snapshot per Game_Key + Market + Outcome (avoid multi-snapshot double counting) ===
     dedup_cols = [
