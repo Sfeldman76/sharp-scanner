@@ -548,7 +548,7 @@ def read_recent_sharp_moves_cached(
     table: str = "sharplogger.sharp_data.sharp_moves_master",
     """Cached BigQuery reader for recent sharp moves."""
     tbl = _validate_table(table)
-
+):
     # Build query with optional sport filter. Table name must be literal in SQL.
     sport_filter = "AND Sport = @sport" if sport else ""
     query = f"""
@@ -585,11 +585,9 @@ def read_recent_sharp_moves_conditional(
 ):
     """Non-decorated wrapper that can optionally force a cache refresh."""
     if force_reload:
-        # Clear only this function's cache, then re-run
-        read_recent_sharp_moves_cached.clear()
+        # Clear all cached results for this function
+        read_recent_sharp_moves_cached.cache_clear()
     return read_recent_sharp_moves_cached(hours=hours, sport=sport, table=table)
-
-
 
     
 
@@ -1395,7 +1393,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # ✅ Load from sharp_scores_full with all necessary columns up front
     query = f"""
         SELECT *
-        FROM `sharplogger.sharp_data.scores_with_features`
+        FROM `sharplogger.sharp_data.sharp_scores_full`
         WHERE Sport = '{sport.upper()}'
           AND Scored = TRUE
           AND SHARP_HIT_BOOL IS NOT NULL
