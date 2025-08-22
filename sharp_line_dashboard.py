@@ -1400,7 +1400,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # ✅ Load from sharp_scores_full with all necessary columns up front
     query = f"""
         SELECT *
-        FROM `sharplogger.sharp_data.sharp_scores_full`
+        FROM `sharplogger.sharp_data.scores_with_features`
         WHERE Sport = '{sport.upper()}'
           AND Scored = TRUE
           AND SHARP_HIT_BOOL IS NOT NULL
@@ -3038,7 +3038,7 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
     # === Load historical scored data
     query = f"""
         SELECT *
-        FROM `sharplogger.sharp_data.sharp_scores_full`
+        FROM `sharplogger.sharp_data.scores_with_features`
         WHERE UPPER(Sport) = '{sport.upper()}'
           AND Scored = TRUE
           AND SHARP_HIT_BOOL IS NOT NULL
@@ -4798,7 +4798,7 @@ def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.Dat
             SHARP_HIT_BOOL, SHARP_COVER_RESULT, Scored, Snapshot_Timestamp, Sport,
             First_Line_Value, First_Sharp_Prob, Line_Delta, Model_Prob_Diff, Direction_Aligned
 
-        FROM `sharplogger.sharp_data.sharp_scores_full`
+        FROM `sharplogger.sharp_data.scores_with_features`
         WHERE 
             Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
             AND SHARP_HIT_BOOL IS NOT NULL
@@ -4834,7 +4834,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
         try:
             df = client.query(f"""
                 SELECT *
-                FROM `sharplogger.sharp_data.sharp_scores_full`
+                FROM `sharplogger.sharp_data.scores_with_features`
                 WHERE Sport = '{sport_label.upper()}' {date_filter}
             """).to_dataframe()
         except Exception as e:
