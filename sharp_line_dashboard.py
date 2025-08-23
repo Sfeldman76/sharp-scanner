@@ -2703,26 +2703,55 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             scale_pos_weight=scale_pos_weight,
             random_state=42
         )
+                # --- Pre-flight: ensure the CV actually yields folds ---
+        # Try current settings
+        folds = list(cv.split(X_full, y_full, groups=groups))
         
-        # === LogLoss model search (with purged CV) ===
+        # If empty, relax progressively
+        if len(folds) == 0:
+            # 1) reduce splits, reduce embargo
+            n_splits_relaxed = max(2, min(3, len(np.unique(groups)) // 2 or 2))
+            cv = PurgedGroupTimeSeriesSplit(
+                n_splits=n_splits_relaxed,
+                embargo=pd.Timedelta("0 hours"),
+                time_values=df_market[time_col].values
+            )
+            folds = list(cv.split(X_full, y_full, groups=groups))
+        
+        # If still empty, fall back to a simple time split (keeps chronology, no groups)
+        if len(folds) == 0:
+            from sklearn.model_selection import TimeSeriesSplit
+            # Choose small splits so each val is bigger
+            tscv = TimeSeriesSplit(n_splits=3)
+            folds = list(tscv.split(X_full, y_full))
+            # NOTE: leakage risk across same-game snapshots disappears in your setup
+            # because you have one finalized row per game.
+        
+        # Final guard
+        if len(folds) == 0:
+            raise ValueError("Cross-validation produced no usable folds after relaxation. "
+                             "Try fewer splits, smaller embargo, or verify both classes exist.")
+        
+        # Use the concrete folds for both searches
+        cv_for_search = folds
+ 
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
             scoring='neg_log_loss',
-            cv=cv,
+            cv=cv_for_search,          # <--- use the realized folds
             n_iter=50,
             verbose=1,
             random_state=42
         )
-        grid_logloss.fit(X_full, y_full, groups=groups)   # ← only once
+        grid_logloss.fit(X_full, y_full, groups=groups)
         model_logloss = grid_logloss.best_estimator_
         
-        # === AUC model search (with purged CV) ===
         grid_auc = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
             scoring='roc_auc',
-            cv=cv,
+            cv=cv_for_search,          # <--- same folds
             n_iter=50,
             verbose=1,
             random_state=42
