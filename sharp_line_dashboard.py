@@ -1422,7 +1422,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
  
     #=== New team-history features (all are "as-of", no leakage) ===
     history_cols = [
-        "After_Win_Flag","After_Loss_Flag","Revenge_Flag",
+        "After_Win_Flag","Revenge_Flag",
         "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
         "H2H_Win_Pct_Prior","Opp_WinPct_Prior",
         "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
@@ -1430,7 +1430,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         "Wins_Last3_Prior","Margin_Last3_Avg_Prior","Days_Since_Last_Game",
         "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
         "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
-        "Season_Game_Num_Prior",
+        
         "Wins_Last3_H2H_Prior","Margin_Last3_H2H_Prior",
         "H2H_Streak_Dir_Prior","H2H_Streak_Len_Prior"
     ]
@@ -1454,30 +1454,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_bt['Is_Sharp_Book'] = df_bt['Bookmaker'].isin(SHARP_BOOKS).astype(int)
     if 'Sharp_Line_Magnitude' not in df_bt.columns:
         df_bt['Sharp_Line_Magnitude'] = pd.to_numeric(df_bt.get('Line_Delta', 0), errors='coerce').abs().fillna(0)
-    # === Line resistance enrichment (binary + continuous) ===
-    from utils import compute_line_resistance_flag
-
-    # --- add resistance features ---
-    df_bt = compute_line_resistance_flag(df_bt, source='moves')
-    
-    # --- drop list-like resistance columns (BigQuery + NumPy safe) ---
-    def drop_listlike_columns(frame):
-        def is_listy(series):
-            try:
-                return series.apply(lambda x: isinstance(x, (list, tuple, np.ndarray))).any()
-            except Exception:
-                return False
-        listlike_cols = [c for c in frame.columns if is_listy(frame[c])]
-        if listlike_cols:
-            frame = frame.drop(columns=listlike_cols, errors="ignore")
-        return frame, listlike_cols
-    
-    df_bt, dropped = drop_listlike_columns(df_bt)
-    
-    st.write("Resistance columns present (after cleanup):", 
-             [c for c in df_bt.columns if "Resistance" in c])
-    st.write("Dropped list-like columns:", dropped)
-    # ensure Market is normalized first (you already do this above)
+   
     df_bt['Market'] = df_bt['Market'].astype(str).str.lower().str.strip()
     df_bt['Sport']  = df_bt['Sport'].astype(str).str.upper()
     
@@ -2129,14 +2106,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_market['Odds_Shift'].abs().fillna(0).to_numpy()
             * df_market['Sharp_Move_Signal'].fillna(0).astype(int).to_numpy()
         )
-        
-        # Resistance break (your failing line) — position-wise and NA-safe
-        df_market['SharpMove_Resistance_Break'] = (
-            df_market['Sharp_Move_Signal'].fillna(0).astype(int).to_numpy()
-            * df_market['Was_Line_Resistance_Broken'].fillna(0).astype(int).to_numpy()
-        )
-
-
+       
 
         df_market['Market_Implied_Prob'] = df_market['Odds_Price'].apply(implied_prob)
 
@@ -2352,10 +2322,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 🔹 Engineered interactions
             'MarketLeader_ImpProbShift', 'LimitProtect_SharpMag', 'Delta_Sharp_vs_Rec',
             #'Sharp_Leads',
-            'SharpMove_Resistance_Break',
-        
-            # 🔹 Resistance feature
-            'Line_Resistance_Factor','Was_Line_Resistance_Broken',
+            
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
@@ -3447,8 +3414,7 @@ def compute_diagnostics_vectorized(df):
 
         # Engineered interactions
         'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',
-        #'SharpMove_Resistance_Break', 'Was_Line_Resistance_Broken',
-
+    
         # Reversal logic
         'Value_Reversal_Flag','Odds_Reversal_Flag',
 
@@ -3538,8 +3504,8 @@ def compute_diagnostics_vectorized(df):
         'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
         'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book',
         'SharpMove_Odds_Up','SharpMove_Odds_Down','Is_Home_Team_Bet',
-        #'SharpMove_Resistance_Break',
-        'Late_Game_Steam_Flag',#'Was_Line_Resistance_Broken',
+       
+        'Late_Game_Steam_Flag',
         'Value_Reversal_Flag','Odds_Reversal_Flag',
         'Hybrid_Line_Timing_Flag','Hybrid_Odds_Timing_Flag'
     ]
@@ -3612,7 +3578,7 @@ def compute_diagnostics_vectorized(df):
         if float(row.get('SharpMove_Odds_Mag', 0)) > 5: parts.append("💥 Sharp Odds Steam")
 
         # Resistance & timing
-        #if bool(row.get('Was_Line_Resistance_Broken', 0)): parts.append("🧱 Broke Key Resistance")
+        
         if bool(row.get('Late_Game_Steam_Flag', 0)): parts.append("⏰ Late Game Steam")
         if bool(row.get('Value_Reversal_Flag', 0)): parts.append("🔄 Value Reversal")
         if bool(row.get('Odds_Reversal_Flag', 0)): parts.append("📉 Odds Reversal")
