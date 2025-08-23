@@ -2478,7 +2478,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Purged Group Time-Series CV (PGTSCV) + Embargo
         # ===============================
       
-         SPORT_EMBARGO = {
+        SPORT_EMBARGO = {
             # Daily/high-frequency leagues
             "MLB":  pd.Timedelta("12 hours"),
             "NBA":  pd.Timedelta("12 hours"),
