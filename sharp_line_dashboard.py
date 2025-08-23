@@ -2541,18 +2541,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ===============================
         # Normalize the sport string for lookup
         # Use the passed-in `sport` exactly as-is (case-sensitive mapping + default)
-        SPORT_EMBARGO = {
-            "MLB":  pd.Timedelta("12 hours"),
-            "NBA":  pd.Timedelta("12 hours"),
-            "NHL":  pd.Timedelta("12 hours"),
-            "NCAAB": pd.Timedelta("12 hours"),
-            "NFL":  pd.Timedelta("3 days"),
-            "NCAAF": pd.Timedelta("2 days"),
-            "WNBA": pd.Timedelta("24 hours"),
-            "MLS":  pd.Timedelta("24 hours"),
-            "default": pd.Timedelta("12 hours"),
-        }
-        # --- imports (top of file, once) ---
+       
        
         from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
         import xgboost as xgb
@@ -2591,53 +2580,68 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     raise ValueError("groups must be provided to split()")
                 if self.time_values is None:
                     raise ValueError("time_values must be set on the splitter")
-        
+            
                 meta = pd.DataFrame({
                     "group": np.asarray(groups),
                     "time":  pd.to_datetime(self.time_values, errors="coerce", utc=True)
                 })
-        
+            
                 gmeta = (meta.groupby("group")
                               .agg(start=("time","min"), end=("time","max"))
                               .sort_values("start")
                               .reset_index())
-        
+            
                 n = len(gmeta)
                 n_splits = min(self.n_splits, max(2, n))
                 fold_sizes = (n // n_splits) * np.ones(n_splits, dtype=int)
                 fold_sizes[: n % n_splits] += 1
-        
+            
                 cur = 0
                 for _k in range(n_splits):
                     val_groups = gmeta.iloc[cur:cur + fold_sizes[_k]]["group"].values
                     val_start  = gmeta.iloc[cur]["start"]
                     val_end    = gmeta.iloc[cur + fold_sizes[_k] - 1]["end"]
                     cur += fold_sizes[_k]
-        
+            
                     # purge overlapping groups
                     overlap = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
                     purged = set(gmeta.loc[overlap, "group"])
-        
+            
                     # embargo groups that start <= train_end + embargo
                     cand = gmeta[~gmeta["group"].isin(val_groups)]
                     cand = cand[~cand["group"].isin(purged)]
-        
+            
                     embargo_groups = set()
                     if not cand.empty:
                         train_end   = cand["end"].max()
                         embargo_cut = train_end + self.embargo
                         embargo_mask = gmeta["start"] <= embargo_cut
                         embargo_groups = set(gmeta.loc[embargo_mask, "group"])
-        
+            
                     train_groups = gmeta[
                         ~gmeta["group"].isin(val_groups)
                         & ~gmeta["group"].isin(purged)
                         & ~gmeta["group"].isin(embargo_groups)
                     ]["group"].values
-        
+            
                     all_groups = meta["group"].values
                     train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
                     val_idx   = np.flatnonzero(np.isin(all_groups, val_groups))
+            
+                    # --------- HARDENING: skip bad folds ---------
+                    # 1) skip if either side empty
+                    if len(val_idx) == 0 or len(train_idx) == 0:
+                        continue
+                    # 2) skip if validation set too tiny (tune threshold as you like)
+                    if len(val_idx) < 20:
+                        continue
+                    # 3) skip if y provided and val has only one class
+                    if y is not None:
+                        y_arr = np.asarray(y)
+                        if len(np.unique(y_arr[val_idx])) < 2:
+                            continue
+                    # ---------------------------------------------
+            
                     yield train_idx, val_idx
                         
         # === Param grid (expanded) — your settings ===
