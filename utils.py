@@ -1,52 +1,51 @@
-import pandas as pd
+# --- Core Python ---
+import os, sys, gc, time, json, math, hashlib, logging, pickle, warnings
+from io import BytesIO
+from collections import defaultdict, Counter
+from functools import lru_cache
+from typing import Optional, Callable, Iterable
 from datetime import datetime
-from collections import defaultdict
-from google.cloud import bigquery, storage
+import datetime as dt
+
+# --- Data Science ---
+import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from io import BytesIO
+import psutil
+
+# --- Cloud (BigQuery / GCS) ---
+from google.cloud import bigquery, storage, bigquery_storage
 import requests
-import numpy as np
-import logging
-import hashlib
-import time
-import json
-import psutil
-import os
-import gc
-import psutil
-import logging
 from pandas_gbq import to_gbq
-import traceback
-import pickle  # ✅ Add this at the top of your script
-import datetime as dt
-import sys, traceback, json  # safe local imports used in this block
-from typing import Optional, Callable
-from functools import lru_cache
-from typing import Iterable
-import sys
-from xgboost import XGBClassifier
-from sklearn.isotonic import IsotonicRegression
-from sklearn.model_selection import train_test_split
-from google.cloud import bigquery, storage
-import logging
-logging.basicConfig(level=logging.INFO)  # <- Must be INFO or DEBUG to show .info() logs
-logger = logging.getLogger(__name__)
-from google.cloud import bigquery, bigquery_storage
-import pyarrow as pa
-import numpy as np
-import pandas as pd
-import datetime as dt
-import gc
-import math
-from google.cloud import bigquery, bigquery_storage
-import pandas as pd
-import numpy as np
-import pyarrow as pa
-import gc, datetime as dt
-from pandas.api.types import is_categorical_dtype, is_string_dtype
-import warnings
+
+# --- Sklearn / ML ---
+from sklearn.model_selection import (
+    train_test_split,
+    RandomizedSearchCV,
+    TimeSeriesSplit,
+)
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import (
+    roc_auc_score,
+    log_loss,
+    brier_score_loss,
+)
 from sklearn.exceptions import InconsistentVersionWarning
+
+# --- XGBoost ---
+import xgboost as xgb
+from xgboost import XGBClassifier
+
+# --- Streamlit (if in dashboard) ---
+import streamlit as st
+
+# --- Pandas dtypes helpers ---
+from pandas.api.types import is_categorical_dtype, is_string_dtype
+
+# --- Logging setup ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 🔇 Suppress scikit-learn version mismatch warnings
 warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
