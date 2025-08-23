@@ -1150,14 +1150,13 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Line_Magnitude_Abs',       # Already present
         'Direction_Aligned','Odds_Price', 'Implied_Prob', 
         'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
-        'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds', 'Was_Line_Resistance_Broken',
-        'Line_Resistance_Crossed_Levels',
-        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 'Sharp_Line_Magnitude',
+        'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds', 
+        'Late_Game_Steam_Flag', 'Sharp_Line_Magnitude',
         'Rec_Line_Magnitude',
         'SharpMove_Odds_Up',
         'SharpMove_Odds_Down',
         'SharpMove_Odds_Mag',
-        'SharpMove_Resistance_Break',
+        
         'Active_Signal_Count', 
         'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
         'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
@@ -3204,48 +3203,7 @@ def apply_blended_sharp_score(
 
     # ---------- 3b) Line resistance (binary break + continuous factor) ----------
     # ---------- 3b) Line resistance (binary break + continuous factor) ----------
-    try:
-        # Normalize optional columns
-        if 'Book' not in df_market.columns and 'Bookmaker' in df_market.columns:
-            df_market['Book'] = df_market['Bookmaker']
-    
-        # Compute resistance features (adds columns; leaves others intact)
-        df_market = compute_line_resistance_flag(df_market, source='moves')
-    
-        # --- Enforce 1-D numerics on critical columns (guard against list/tuple leakage) ---
-        for c in ["Nearest_Key", "Key_Distance", "Signed_Key_Dist", "Line_Resistance_Factor"]:
-            if c in df_market.columns:
-                s = df_market[c]
-                # any list/tuple/ndarray -> NaN, then coerce to float
-                mask_listy = s.apply(lambda x: isinstance(x, (list, tuple, np.ndarray)))
-                if mask_listy.any():
-                    s = s.where(~mask_listy, np.nan)
-                df_market[c] = pd.to_numeric(s, errors="coerce").astype(float)
-    
-        # --- Drop list-like columns so they can’t produce (N,2) shapes in modeling ---
-        def drop_listlike_columns(frame: pd.DataFrame):
-            def is_listy_series(series: pd.Series) -> bool:
-                try:
-                    return series.apply(lambda x: isinstance(x, (list, tuple, np.ndarray))).any()
-                except Exception:
-                    return False
-            listlike_cols = [col for col in frame.columns if is_listy_series(frame[col])]
-            # Keep the count (numeric) column and drop the list-valued one(s)
-            # If you want to keep any other list-valued columns, exclude them here.
-            cols_to_drop = listlike_cols
-            if cols_to_drop:
-                frame = frame.drop(columns=cols_to_drop, errors="ignore")
-            return frame, listlike_cols
-    
-        df_market, list_cols_dropped = drop_listlike_columns(df_market)
-        # Optional: print/log what got removed
-        # print("Dropped list-like cols:", list_cols_dropped)
-    
-    except Exception as e:
-        # Optional: log and keep going
-        # st.warning(f"Line resistance enrichment failed: {e}")
-        pass
-        
+   
     # ---------- 4) Value reversal (vectorized, single cast) ----------
     def compute_value_reversal(df: pd.DataFrame, market_col: str = 'Market') -> pd.DataFrame:
         m = df[market_col].astype(str).str.lower().str.strip()
@@ -4534,13 +4492,13 @@ def apply_blended_sharp_score(
             cols_for_count = [
                 'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Limit_Total','LimitUp_NoMove_Flag',
                 'Market_Leader','Is_Reinforced_MultiMarket','Sharp_Line_Magnitude','SharpMove_Odds_Up',
-                'SharpMove_Odds_Down','SharpMove_Odds_Mag','SharpMove_Resistance_Break','Late_Game_Steam_Flag',
+                'SharpMove_Odds_Down','SharpMove_Odds_Mag','Late_Game_Steam_Flag',
                 'Value_Reversal_Flag','Odds_Reversal_Flag','Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
                 'Team_Past_Hit_Rate','Mispricing_Flag','Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
                 'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home','Avg_Recent_Cover_Streak_Away',
                 'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction','CrossMarket_Prob_Gap_Exists',
                 'Potential_Overmove_Flag','Potential_Overmove_Total_Pct_Flag','Potential_Odds_Overmove_Flag',
-                'Line_Moved_Toward_Team','Line_Moved_Away_From_Team','Line_Resistance_Crossed_Count',
+                'Line_Moved_Toward_Team','Line_Moved_Away_From_Team',
                 'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
                 'SmallBook_Total_Limit'
             ] + hybrid_line_cols + hybrid_odds_cols
@@ -4572,7 +4530,7 @@ def apply_blended_sharp_score(
                 (df_final['SharpMove_Odds_Up'] == 1).astype(int) +
                 (df_final['SharpMove_Odds_Down'] == 1).astype(int) +
                 (df_final['SharpMove_Odds_Mag'] > 5).astype(int) +
-                (df_final['SharpMove_Resistance_Break'] == 1).astype(int) +
+                
                 (df_final['Late_Game_Steam_Flag'] == 1).astype(int) +
                 (df_final['Value_Reversal_Flag'] == 1).astype(int) +
                 (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
@@ -4595,7 +4553,7 @@ def apply_blended_sharp_score(
                 (df_final['Potential_Odds_Overmove_Flag'] == 1).astype(int) +
                 (df_final['Line_Moved_Toward_Team'] == 1).astype(int) +
                 (df_final['Line_Moved_Away_From_Team'] == 1).astype(int) +
-                (df_final['Line_Resistance_Crossed_Count'] >= 1).astype(int) +
+                
                 (df_final['Abs_Line_Move_Z'] > 1).astype(int) +
                 (df_final['Pct_Line_Move_Z'] > 1).astype(int) +
                 (df_final['SmallBook_Heavy_Liquidity_Flag'] == 1).astype(int) +
@@ -5530,10 +5488,7 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
             'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds','Value_Reversal_Flag','Odds_Reversal_Flag', 
     
             # ✅ Resistance logic additions
-            'Was_Line_Resistance_Broken',
-            'SharpMove_Resistance_Break',
-            'Line_Resistance_Crossed_Levels',
-            'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 
+            'Late_Game_Steam_Flag', 
             'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
             'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
             'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
@@ -6210,10 +6165,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'Line_Magnitude_Abs', 'High_Limit_Flag',
         'Line_Move_Magnitude', 'Is_Home_Team_Bet', 'Is_Favorite_Bet','Model_Sharp_Win_Prob', 'Odds_Price', 'Implied_Prob','First_Odds', 'First_Imp_Prob','Odds_Shift','Implied_Prob_Shift',
         'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds', 'Value_Reversal_Flag','Odds_Reversal_Flag',      
-        'Was_Line_Resistance_Broken',
-        'SharpMove_Resistance_Break',
-        'Line_Resistance_Crossed_Levels',
-        'Line_Resistance_Crossed_Count', 'Late_Game_Steam_Flag', 
+        'Late_Game_Steam_Flag', 
         'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
         'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
         'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
@@ -6327,9 +6279,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['First_Imp_Prob'] = pd.to_numeric(df_scores_out['First_Imp_Prob'], errors='coerce')
     df_scores_out['Odds_Shift'] = df_scores_out['Odds_Price'] - df_scores_out['First_Odds']
     df_scores_out['Implied_Prob_Shift'] = df_scores_out['Implied_Prob'] - df_scores_out['First_Imp_Prob']
-    df_scores_out['Was_Line_Resistance_Broken'] = pd.to_numeric(df_scores_out['Was_Line_Resistance_Broken'], errors='coerce').astype('Int64')
-    df_scores_out['SharpMove_Resistance_Break'] = pd.to_numeric(df_scores_out['SharpMove_Resistance_Break'], errors='coerce').astype('Int64')
-    df_scores_out['Line_Resistance_Crossed_Count'] = pd.to_numeric(df_scores_out['Line_Resistance_Crossed_Count'], errors='coerce').astype('Int64')
+   
     df_scores_out['Odds_Reversal_Flag'] = pd.to_numeric(df_scores_out['Odds_Reversal_Flag'], errors='coerce').astype('Int64')
 
     # === Final upload
