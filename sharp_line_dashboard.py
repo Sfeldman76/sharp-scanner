@@ -2366,7 +2366,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',                  
             'model_fav_vs_market_fav_agree',            
-            'edge_x_k', 'mu_x_k',
+         
             
         ]
         
@@ -3623,13 +3623,7 @@ def compute_diagnostics_vectorized(df):
                     return np.nan
             return pd.to_numeric(v, errors='coerce')
         
-        _pr_team, _pr_opp = _num(row,'PR_Team_Rating'), _num(row,'PR_Opp_Rating')
-        if pd.notna(_pr_team) and pd.notna(_pr_opp):
-            parts.append(f"📊 PR Ratings: {_pr_team:.1f} vs {_pr_opp:.1f}")
         
-        _pr_diff = _num(row,'PR_Rating_Diff')
-        if pd.notna(_pr_diff):  # show even if 0, like earlier behavior; or use abs(_pr_diff) >= 0.1
-            parts.append(f"⚖️ PR Diff {_pr_diff:+.1f}")
         
         _mod_spread, _mkt_spread = _num(row,'Outcome_Model_Spread'), _num(row,'Outcome_Market_Spread')
         if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
@@ -3650,14 +3644,7 @@ def compute_diagnostics_vectorized(df):
            (str(agree_val).strip().lower() in ('1','true','yes')):
             parts.append("🤝 Model & Market Favor Same Team")
         
-        _edge_x_k = _num(row,'edge_x_k')
-        if pd.notna(_edge_x_k):
-            parts.append(f"📈 Edge×k {_edge_x_k:.2f}")
-        
-        _mu_x_k = _num(row,'mu_x_k')
-        if pd.notna(_mu_x_k):
-            parts.append(f"📊 μ×k {_mu_x_k:.2f}")
-
+     
         # Hybrid timing buckets → nice human labels
         HYBRID_LINE_COLS_LOCAL = [
             'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
