@@ -2472,25 +2472,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Purged Group Time-Series CV (PGTSCV) + Embargo
         # ===============================
         # Normalize the sport string for lookup
-        sport_norm = str(sport).strip().upper() if sport is not None else "DEFAULT"
+        # Use the passed-in `sport` exactly as-is (case-sensitive mapping + default)
         SPORT_EMBARGO = {
-            # Daily/high-frequency leagues
             "MLB":  pd.Timedelta("12 hours"),
             "NBA":  pd.Timedelta("12 hours"),
             "NHL":  pd.Timedelta("12 hours"),
             "NCAAB": pd.Timedelta("12 hours"),
-        
-            # Lower-frequency / larger info cycles
             "NFL":  pd.Timedelta("3 days"),
             "NCAAF": pd.Timedelta("2 days"),
             "WNBA": pd.Timedelta("24 hours"),
             "MLS":  pd.Timedelta("24 hours"),
-        
-            # Fallback
-            "DEFAULT": pd.Timedelta("12 hours"),
+            "default": pd.Timedelta("12 hours"),
         }
         
-        embargo_td = SPORT_EMBARGO.get(sport_norm, SPORT_EMBARGO["DEFAULT"])
+        def get_embargo_for_sport(sport: str) -> pd.Timedelta:
+            return SPORT_EMBARGO.get(sport, SPORT_EMBARGO["default"])
+        
+        # In training:
+       
+        
+        # In apply/scoring (if needed for any sport-specific behavior):
+        embargo_td = get_embargo_for_sport(sport)  # or other sport-specific config
         # --- Purged + Embargoed CV over games (prevents same-game leakage) ---
         class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
             """
