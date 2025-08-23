@@ -1909,8 +1909,17 @@ def compute_line_resistance_flag(df, source='moves'):
         nearest_key[i] = float(ks_arr[j])        # <- scalar float
         key_dist[i]    = float(dists[j])         # <- scalar float
 
+    # after computing nearest_key/key_dist arrays:
     out["Nearest_Key"]  = nearest_key
     out["Key_Distance"] = key_dist
+    
+    # --- HARD COERCE to 1-D floats; any list/tuple/ndarray becomes NaN ---
+    for col in ["Nearest_Key", "Key_Distance"]:
+        s = out[col]
+        mask_listy = s.apply(lambda x: isinstance(x, (list, tuple, np.ndarray)))
+        if mask_listy.any():
+            s = s.where(~mask_listy, np.nan)
+        out[col] = pd.to_numeric(s, errors="coerce").astype(float)
 
     # ---- Hard-coerce Nearest_Key to 1-D float array (no list/tuple leakage) ----
     nk_series = out["Nearest_Key"]
@@ -1992,6 +2001,9 @@ def compute_line_resistance_flag(df, source='moves'):
 
     out["Line_Resistance_Factor"] = _sigmoid(raw)
     return out
+
+
+
 def compute_sharp_magnitude_by_time_bucket(df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
     """
     Memory-lean version:
@@ -3191,28 +3203,49 @@ def apply_blended_sharp_score(
     df['Line_Move_Magnitude']  = abs_delta
 
     # ---------- 3b) Line resistance (binary break + continuous factor) ----------
+    # ---------- 3b) Line resistance (binary break + continuous factor) ----------
     try:
-        # Ensure keys exist / normalized (tolerant if missing)
-        if 'Book' not in df.columns and 'Bookmaker' in df.columns:
-            df['Book'] = df['Bookmaker']
-        if 'Minutes_To_Game' not in df.columns:
-            # optional: derive if you keep Commence_Hour/Game_Start around (safe no-op otherwise)
-            pass
+        # Normalize optional columns
+        if 'Book' not in df_market.columns and 'Bookmaker' in df_market.columns:
+            df_market['Book'] = df_market['Bookmaker']
     
-        # Compute both:
-        # - Was_Line_Resistance_Broken (0/1), Line_Resistance_Crossed_Levels, Line_Resistance_Crossed_Count
-        # - Line_Resistance_Factor in [0,1], plus Nearest_Key/Key_Distance/etc.
-        df = compute_line_resistance_flag(df, source='moves')
+        # Compute resistance features (adds columns; leaves others intact)
+        df_market = compute_line_resistance_flag(df_market, source='moves')
     
-        # (Optional) quick sanity log
-        brate = float(df['Was_Line_Resistance_Broken'].mean()) if 'Was_Line_Resistance_Broken' in df else 0.0
-        logger.info("🧱 Resistance: break-rate=%.3f  (factor ~ mean=%.3f)",
-                    brate,
-                    float(df['Line_Resistance_Factor'].mean()) if 'Line_Resistance_Factor' in df else float('nan'))
+        # --- Enforce 1-D numerics on critical columns (guard against list/tuple leakage) ---
+        for c in ["Nearest_Key", "Key_Distance", "Signed_Key_Dist", "Line_Resistance_Factor"]:
+            if c in df_market.columns:
+                s = df_market[c]
+                # any list/tuple/ndarray -> NaN, then coerce to float
+                mask_listy = s.apply(lambda x: isinstance(x, (list, tuple, np.ndarray)))
+                if mask_listy.any():
+                    s = s.where(~mask_listy, np.nan)
+                df_market[c] = pd.to_numeric(s, errors="coerce").astype(float)
+    
+        # --- Drop list-like columns so they can’t produce (N,2) shapes in modeling ---
+        def drop_listlike_columns(frame: pd.DataFrame):
+            def is_listy_series(series: pd.Series) -> bool:
+                try:
+                    return series.apply(lambda x: isinstance(x, (list, tuple, np.ndarray))).any()
+                except Exception:
+                    return False
+            listlike_cols = [col for col in frame.columns if is_listy_series(frame[col])]
+            # Keep the count (numeric) column and drop the list-valued one(s)
+            # If you want to keep any other list-valued columns, exclude them here.
+            cols_to_drop = listlike_cols
+            if cols_to_drop:
+                frame = frame.drop(columns=cols_to_drop, errors="ignore")
+            return frame, listlike_cols
+    
+        df_market, list_cols_dropped = drop_listlike_columns(df_market)
+        # Optional: print/log what got removed
+        # print("Dropped list-like cols:", list_cols_dropped)
+    
     except Exception as e:
-        logger.warning("⚠️ line resistance enrichment skipped: %s", e)
-
-    
+        # Optional: log and keep going
+        # st.warning(f"Line resistance enrichment failed: {e}")
+        pass
+        
     # ---------- 4) Value reversal (vectorized, single cast) ----------
     def compute_value_reversal(df: pd.DataFrame, market_col: str = 'Market') -> pd.DataFrame:
         m = df[market_col].astype(str).str.lower().str.strip()
