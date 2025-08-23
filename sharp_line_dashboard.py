@@ -105,7 +105,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from html import escape
 from pandas.util import hash_pandas_object
- 
+import numpy as np
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
@@ -841,8 +841,7 @@ def add_book_reliability_features(
     return out
 
 def sanitize_features(X: pd.DataFrame) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
+
     from pandas.api.types import (
         is_bool_dtype, is_numeric_dtype, is_categorical_dtype
     )
@@ -908,8 +907,7 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
     return mapping
 # --- IMPORTS (must be before helpers) ---
 import streamlit as st
-import pandas as pd
-import numpy as np
+
 from pandas.api.types import is_categorical_dtype
 from google.cloud import bigquery
 import gc
@@ -988,8 +986,7 @@ def enrich_power_for_training_lowmem(
     allow_forward_hours: float = 0.0,  # 0 = strict backward-only
     project: str = None,
 ) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
+    
     from pandas.api.types import is_categorical_dtype
 
     if df.empty:
@@ -1127,7 +1124,7 @@ def _phi(x):
     Approx to Φ(x) using Abramowitz–Stegun 7.1.26.
     Vectorized, float32, stable for |x| up to ~8.
     """
-    import numpy as np
+  
     x = np.asarray(x, dtype=np.float32)
     # constants as float32
     p = np.float32(0.2316419)
@@ -1163,8 +1160,7 @@ def prep_consensus_market_spread_lowmem(
     value_col: str = "Value",
     outcome_col: str = "Outcome_Norm",
 ) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
+   
     cols = ['Sport','Home_Team_Norm','Away_Team_Norm', outcome_col, value_col]
     d = df_spreads[cols].copy()
 
@@ -1208,8 +1204,7 @@ def prep_consensus_market_spread_lowmem(
     return g
 
 def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
+   
     g = df_games.copy()
     g['Sport'] = g['Sport'].astype(str).str.upper()
 
@@ -1284,8 +1279,7 @@ def enrich_and_grade_for_training(
     table_history: str = "sharplogger.sharp_data.ratings_history",
     project: str = None,
 ) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
+   
 
     if df_spread_rows.empty:
         return df_spread_rows
@@ -2667,7 +2661,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             cal_auc     = CalibratedClassifierCV(model_auc,     method='isotonic', cv=tscv_cal).fit(X_train, y_train)
         
         # --- Final time-forward holdout evaluation ---
-        import numpy as np
+       
         p_ll = np.clip(cal_logloss.predict_proba(X_val)[:, 1], 1e-4, 1-1e-4)
         p_au = np.clip(cal_auc.predict_proba(X_val)[:, 1],     1e-4, 1-1e-4)
         
@@ -3173,8 +3167,7 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
 
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV
-import numpy as np
-import pandas as pd
+
 
 def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
@@ -3307,9 +3300,7 @@ def attach_ratings_and_edges_for_diagnostics(
     pad_days: int = 30,     # normal pad for history tables
     allow_forward_hours: float = 0.0,
 ) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
-
+    
     UI_EDGE_COLS = [
         'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
         'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
@@ -4107,8 +4098,7 @@ def ensure_opposite_side_rows(df, scored_df):
 
     return df
 
-import numpy as np
-import pandas as pd
+
 from math import erf, sqrt
 
 
