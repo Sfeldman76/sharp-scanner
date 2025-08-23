@@ -1,5 +1,5 @@
 # --- Core Python ---
-import os, sys, gc, time, json, math, hashlib, logging, pickle, warnings
+import os, sys, gc, time, json, math, hashlib, logging, pickle, warnings, traceback
 from io import BytesIO
 from collections import defaultdict, Counter
 from functools import lru_cache
@@ -13,10 +13,10 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import psutil
+import requests
 
 # --- Cloud (BigQuery / GCS) ---
 from google.cloud import bigquery, storage, bigquery_storage
-import requests
 from pandas_gbq import to_gbq
 
 # --- Sklearn / ML ---
@@ -24,23 +24,21 @@ from sklearn.model_selection import (
     train_test_split,
     RandomizedSearchCV,
     TimeSeriesSplit,
+    BaseCrossValidator,     # <-- needed for custom splitter
 )
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import (
-    roc_auc_score,
-    log_loss,
-    brier_score_loss,
-)
+from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
 from sklearn.exceptions import InconsistentVersionWarning
+from sklearn.isotonic import IsotonicRegression  # optional; safe to keep
 
 # --- XGBoost ---
 import xgboost as xgb
 from xgboost import XGBClassifier
 
-# --- Streamlit (if in dashboard) ---
+# --- Streamlit (dashboard) ---
 import streamlit as st
 
-# --- Pandas dtypes helpers ---
+# --- Pandas dtype helpers ---
 from pandas.api.types import is_categorical_dtype, is_string_dtype
 
 # --- Logging setup ---
