@@ -620,6 +620,74 @@ def tmr(label):
     dt = time.perf_counter() - t0
     st.write(f"⏱ {label}: {dt:.2f}s")
 
+from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV
+
+
+# --- Purged + Embargoed CV that uses external groups & times (doesn't read X columns)
+class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
+    def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"),
+                 time_values=None):
+        """
+        time_values: 1D array-like of datetimes aligned to X rows (same length as X)
+        groups     : will be provided via .fit(..., groups=...) (e.g., Game_Key)
+        """
+        self.n_splits = n_splits
+        self.embargo = embargo
+        self.time_values = time_values
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits
+
+    def split(self, X, y=None, groups=None):
+        if groups is None:
+            raise ValueError("groups (e.g., Game_Key) must be provided to split()")
+        if self.time_values is None:
+            raise ValueError("time_values must be provided to the splitter")
+
+        meta = pd.DataFrame({
+            "group": np.asarray(groups),
+            "time":  pd.to_datetime(self.time_values, errors="coerce", utc=True)
+        })
+        gmeta = (meta.groupby("group")
+                      .agg(start=("time", "min"), end=("time", "max"))
+                      .sort_values("start")
+                      .reset_index())
+
+        n = len(gmeta)
+        n_splits = min(self.n_splits, max(2, n))
+        fold_sizes = (n // n_splits) * np.ones(n_splits, dtype=int)
+        fold_sizes[: n % n_splits] += 1
+
+        cur = 0
+        for k in range(n_splits):
+            val_groups = gmeta.iloc[cur:cur + fold_sizes[k]]["group"].values
+            val_start = gmeta.iloc[cur]["start"]
+            val_end   = gmeta.iloc[cur + fold_sizes[k] - 1]["end"]
+            cur += fold_sizes[k]
+
+            overlap = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
+            purged = set(gmeta.loc[overlap, "group"])
+
+            cand = gmeta[~gmeta["group"].isin(val_groups)]
+            cand = cand[~cand["group"].isin(purged)]
+
+            embargo_groups = set()
+            if not cand.empty:
+                train_end = cand["end"].max()
+                embargo_cut = train_end + self.embargo
+                embargo_mask = gmeta["start"] <= embargo_cut
+                embargo_groups = set(gmeta.loc[embargo_mask, "group"])
+
+            train_groups = gmeta[
+                ~gmeta["group"].isin(val_groups)
+                & ~gmeta["group"].isin(purged)
+                & ~gmeta["group"].isin(embargo_groups)
+            ]["group"].values
+
+            all_groups = meta["group"].values
+            train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
+            val_idx   = np.flatnonzero(np.isin(all_groups, val_groups))
+            yield train_idx, val_idx
 
 
 def write_market_weights_to_bigquery(weights_dict):
@@ -2605,10 +2673,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- CV object: Purged Group Time-Series with embargo (e.g., 2 days) ---
         cv = PurgedGroupTimeSeriesSplit(
             n_splits=5,
-            group_col="Game_Key",
-            time_col=time_col,            # "Game_Start" preferred, else "Snapshot_Timestamp"
-            embargo=embargo_td
+            embargo=embargo_td,
+            time_values=df_market[time_col].values
         )
+       
         
         # === LogLoss model grid search (purged CV) ===
         neg = int((y_full == 0).sum())
