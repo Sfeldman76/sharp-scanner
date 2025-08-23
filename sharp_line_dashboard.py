@@ -2308,19 +2308,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = [
         
             # 🔹 Core sharp signals
-            'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT',
-            'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
+            #'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT',
+            #'Sharp_Limit_Total',
+            'Is_Reinforced_MultiMarket', 'Market_Leader', #'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            'Sharp_Line_Magnitude', #'Is_Home_Team_Bet',
+            #'Sharp_Line_Magnitude', #'Is_Home_Team_Bet',
             'Team_Implied_Prob_Gap_Home', 'Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
-            'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'SharpMove_Odds_Mag',
+            #'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
-            'MarketLeader_ImpProbShift', 'LimitProtect_SharpMag', 'Delta_Sharp_vs_Rec',
+            'MarketLeader_ImpProbShift', #'LimitProtect_SharpMag',
+            'Delta_Sharp_vs_Rec',
             #'Sharp_Leads',
             
         
@@ -2332,17 +2333,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             
             #'Abs_Line_Move_From_Opening',
             #'Abs_Odds_Move_From_Opening', 
-            'Market_Mispricing', 'Abs_Market_Mispricing',
+            'Market_Mispricing', #'Abs_Market_Mispricing',
             'Spread_vs_H2H_Aligned',
-            'Total_vs_Spread_Contradiction',
-            'Spread_vs_H2H_ProbGap',
-            'Total_vs_H2H_ProbGap',
-            'Total_vs_Spread_ProbGap',
+            #'Total_vs_Spread_Contradiction',
+            #'Spread_vs_H2H_ProbGap',
+            #'Total_vs_H2H_ProbGap',
+            #'Total_vs_Spread_ProbGap',
             'CrossMarket_Prob_Gap_Exists',
             
             'Line_Moved_Away_From_Team',            
             'Pct_Line_Move_From_Opening', 
-            'Pct_Line_Move_Bin',
+            #'Pct_Line_Move_Bin',
             'Potential_Overmove_Flag', 
             'Potential_Overmove_Total_Pct_Flag', 'Mispricing_Flag',
         
@@ -2351,12 +2352,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Line_Moved_Toward_Team',
             #'Abs_Line_Move_Z',
             'Pct_Line_Move_Z', 
-            'SmallBook_Limit_Skew',
+            #'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag',
             'SmallBook_Limit_Skew_Flag',
             #'Book_Reliability_Score',
             'Book_Reliability_Lift',
-            'Book_Reliability_x_Sharp',
+            #'Book_Reliability_x_Sharp',
             'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
             'PR_Team_Rating','PR_Opp_Rating',
@@ -2471,30 +2472,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
       
         # === Check each fold for label 
 
-       
+       'max_depth': [2, 3],
+
         
         # === Param grid (expanded)
         param_grid = {
             'n_estimators': [50, 100, 200],
-            'max_depth': [3, 4, 5],
+            'max_depth': [2, 3],
             'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.8, 0.9, 1.0],
-            'colsample_bytree': [0.7, 0.85, 1.0],
-            'min_child_weight': [3, 5, 7, 10],
+            'subsample': [0.6, 0.8],
+            'colsample_bytree': [0.6, 0.8],
+            'min_child_weight': [7, 10, 15],
             'gamma': [0, 0.1, 0.3],
-            'reg_alpha': [0.1, 0.5, 1.0, 5.0],  # L1
-            'reg_lambda': [1.0, 5.0, 10.0],     # L2
+            'reg_alpha': [1.0, 5.0, 10.0],   # stronger L1
+            'reg_lambda': [5.0, 10.0, 20.0],   # L2
         }
         
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         
+                
+           # --- Time-forward split ---
+        # 1) sort chronologically
+        df_market = df_market.sort_values("Snapshot_Timestamp")
         
-   
-        # Split data
-        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
+        # 2) align X, y with the sorted frame
+        X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
+        y = df_market['SHARP_HIT_BOOL'].astype(int)
         
-    
-        
+        # 3) cut last 25% as holdout
+        cut = int(len(df_market) * 0.75)
+        X_train, X_val = X.iloc[:cut], X.iloc[cut:]
+        y_train, y_val = y.iloc[:cut], y.iloc[cut:]
+                
         
         # === LogLoss model
         # ✅ Calculate scale_pos_weight for class imbalance
