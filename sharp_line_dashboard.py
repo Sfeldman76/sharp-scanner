@@ -1481,11 +1481,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     df_bt['Market'] = df_bt['Market'].astype(str).str.lower().str.strip()
     df_bt['Sport']  = df_bt['Sport'].astype(str).str.upper()
     
-    # Prefer 'moves' so it uses Open_Value as the opening line
-    df_bt = compute_line_resistance_flag(df_bt, source='moves')
-    # ---- Sanitize resistance outputs ----
-    df_bt.drop(columns=['Line_Resistance_Crossed_Levels'], errors='ignore', inplace=True)
-
+   
    
     
     # === Get latest snapshot per Game_Key + Market + Outcome (avoid multi-snapshot double counting) ===
