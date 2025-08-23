@@ -2552,84 +2552,94 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "MLS":  pd.Timedelta("24 hours"),
             "default": pd.Timedelta("12 hours"),
         }
+        # --- imports (top of file, once) ---
+       
+        from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
+        import xgboost as xgb
         
+        # --- sport → embargo (top of file, once) ---
+        SPORT_EMBARGO = {
+            "MLB":  pd.Timedelta("12 hours"),
+            "NBA":  pd.Timedelta("12 hours"),
+            "NHL":  pd.Timedelta("12 hours"),
+            "NCAAB": pd.Timedelta("12 hours"),
+            "NFL":  pd.Timedelta("3 days"),
+            "NCAAF": pd.Timedelta("2 days"),
+            "WNBA":  pd.Timedelta("24 hours"),
+            "MLS":   pd.Timedelta("24 hours"),
+            "default": pd.Timedelta("12 hours"),
+        }
         def get_embargo_for_sport(sport: str) -> pd.Timedelta:
             return SPORT_EMBARGO.get(sport, SPORT_EMBARGO["default"])
         
-        # In training:
-       
-        
-        # In apply/scoring (if needed for any sport-specific behavior):
-        embargo_td = get_embargo_for_sport(sport)  # or other sport-specific config
-        # --- Purged + Embargoed CV over games (prevents same-game leakage) ---
+        # --- CV splitter (top of file, once) ---
         class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
-            """
-            Time-ordered splits with:
-              - grouping by `group_col` (e.g., Game_Key) so a game never appears in both train/val
-              - purge: remove groups that overlap the validation window from training
-              - embargo: drop groups whose start time is within `embargo` AFTER the train end
-            """
-            def __init__(self, n_splits=5, group_col="Game_Key", time_col="Game_Start", embargo=pd.Timedelta("0 days")):
+            def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"), time_values=None):
+                """
+                time_values: 1D datetime-like aligned to X rows
+                groups     : provided to .fit(..., groups=...) (e.g., Game_Key)
+                """
                 self.n_splits = n_splits
-                self.group_col = group_col
-                self.time_col = time_col
                 self.embargo = embargo
+                self.time_values = time_values
         
             def get_n_splits(self, X=None, y=None, groups=None):
                 return self.n_splits
         
             def split(self, X, y=None, groups=None):
                 if groups is None:
-                    groups = X[self.group_col].values
+                    raise ValueError("groups must be provided to split()")
+                if self.time_values is None:
+                    raise ValueError("time_values must be set on the splitter")
         
-                df = X[[self.group_col, self.time_col]].copy()
-                df[self.time_col] = pd.to_datetime(df[self.time_col], errors="coerce", utc=True)
+                meta = pd.DataFrame({
+                    "group": np.asarray(groups),
+                    "time":  pd.to_datetime(self.time_values, errors="coerce", utc=True)
+                })
         
-                # one row per group with its min/max time, sorted by start
-                gmeta = (df.groupby(self.group_col)
-                           .agg(start=(self.time_col, "min"),
-                                end=(self.time_col, "max"))
-                           .sort_values("start")
-                           .reset_index())
+                gmeta = (meta.groupby("group")
+                              .agg(start=("time","min"), end=("time","max"))
+                              .sort_values("start")
+                              .reset_index())
         
-                n_groups = len(gmeta)
-                fold_sizes = (n_groups // self.n_splits) * np.ones(self.n_splits, dtype=int)
-                fold_sizes[: n_groups % self.n_splits] += 1
+                n = len(gmeta)
+                n_splits = min(self.n_splits, max(2, n))
+                fold_sizes = (n // n_splits) * np.ones(n_splits, dtype=int)
+                fold_sizes[: n % n_splits] += 1
         
                 cur = 0
-                for k in range(self.n_splits):
-                    val_g = gmeta.iloc[cur:cur + fold_sizes[k]][self.group_col].values
-                    val_start = gmeta.iloc[cur]["start"]
-                    val_end   = gmeta.iloc[cur + fold_sizes[k] - 1]["end"]
-                    cur += fold_sizes[k]
+                for _k in range(n_splits):
+                    val_groups = gmeta.iloc[cur:cur + fold_sizes[_k]]["group"].values
+                    val_start  = gmeta.iloc[cur]["start"]
+                    val_end    = gmeta.iloc[cur + fold_sizes[_k] - 1]["end"]
+                    cur += fold_sizes[_k]
         
-                    # PURGE: drop any group that overlaps validation window
+                    # purge overlapping groups
                     overlap = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
-                    purged = set(gmeta.loc[overlap, self.group_col])
+                    purged = set(gmeta.loc[overlap, "group"])
         
-                    # candidates for training (exclude val + purged)
-                    cand = gmeta[~gmeta[self.group_col].isin(val_g)]
-                    cand = cand[~cand[self.group_col].isin(purged)]
+                    # embargo groups that start <= train_end + embargo
+                    cand = gmeta[~gmeta["group"].isin(val_groups)]
+                    cand = cand[~cand["group"].isin(purged)]
         
-                    # EMBARGO: remove groups whose start <= (train_end + embargo)
+                    embargo_groups = set()
                     if not cand.empty:
-                        train_end = cand["end"].max()
+                        train_end   = cand["end"].max()
                         embargo_cut = train_end + self.embargo
                         embargo_mask = gmeta["start"] <= embargo_cut
-                        embargo_groups = set(gmeta.loc[embargo_mask, self.group_col])
-                    else:
-                        embargo_groups = set()
+                        embargo_groups = set(gmeta.loc[embargo_mask, "group"])
         
-                    train_g = gmeta[
-                        ~gmeta[self.group_col].isin(val_g)
-                        & ~gmeta[self.group_col].isin(purged)
-                        & ~gmeta[self.group_col].isin(embargo_groups)
-                    ][self.group_col].values
+                    train_groups = gmeta[
+                        ~gmeta["group"].isin(val_groups)
+                        & ~gmeta["group"].isin(purged)
+                        & ~gmeta["group"].isin(embargo_groups)
+                    ]["group"].values
         
-                    train_idx = np.flatnonzero(np.isin(groups, train_g))
-                    val_idx   = np.flatnonzero(np.isin(groups, val_g))
-                    yield (train_idx, val_idx)
-        
+                    all_groups = meta["group"].values
+                    train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
+                    val_idx   = np.flatnonzero(np.isin(all_groups, val_groups))
+                    yield train_idx, val_idx
+                        
         # === Param grid (expanded) — your settings ===
         param_grid = {
             'n_estimators': [50, 100, 200],
@@ -2644,44 +2654,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         }
         
         # --- Time column & chronological order (prefer Game_Start to keep games intact) ---
+        # --- time col & sort ---
         time_col = "Game_Start" if "Game_Start" in df_market.columns else "Snapshot_Timestamp"
-        df_market = df_market.copy()
-        df_market[time_col] = pd.to_datetime(df_market[time_col], errors="coerce", utc=True)
         df_market = df_market.sort_values(time_col).reset_index(drop=True)
         
-        # --- Build matrices and groups ---
-        X_full = (df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0.0).astype(float))
+        # --- X, y, groups ---
+        X_full = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0.0).astype(float)
         y_full = df_market['SHARP_HIT_BOOL'].astype(int)
-        groups = df_market['Game_Key']  # critical for grouping by game
+        groups = df_market['Game_Key'].values
         
-        # --- Time-forward holdout: last 25% by time (sanity check after CV) ---
-        cut_time = df_market[time_col].quantile(0.75)
-        tr_mask = df_market[time_col] <= cut_time
-        va_mask = df_market[time_col] >  cut_time
+        # --- embargo from sport (use the passed-in `sport` exactly as-is) ---
+        embargo_td = get_embargo_for_sport(sport)
         
-        X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
-        X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
-        
-        # make sure both classes exist; if not, nudge the cut to 80/20
-        if y_train.nunique() < 2 or y_val.nunique() < 2:
-            cut_time = df_market[time_col].quantile(0.80)
-            tr_mask = df_market[time_col] <= cut_time
-            va_mask = df_market[time_col] >  cut_time
-            X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
-            X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
-        
-        # --- CV object: Purged Group Time-Series with embargo (e.g., 2 days) ---
+        # --- build splitter (pass time_values here) ---
         cv = PurgedGroupTimeSeriesSplit(
             n_splits=5,
             embargo=embargo_td,
             time_values=df_market[time_col].values
         )
-       
         
-        # === LogLoss model grid search (purged CV) ===
-        neg = int((y_full == 0).sum())
-        pos = int((y_full == 1).sum())
-        scale_pos_weight = (neg / max(pos, 1))
+        # --- sanity: alignment ---
+        assert len(X_full) == len(groups) == len(df_market[time_col]), "Misaligned X/groups/time_values"
+        
+        # === param grid (yours) ===
+        param_grid = {
+            'n_estimators': [50, 100, 200],
+            'max_depth': [2, 3],
+            'learning_rate': [0.01, 0.05, 0.1],
+            'subsample': [0.6, 0.8],
+            'colsample_bytree': [0.6, 0.8],
+            'min_child_weight': [7, 10, 15],
+            'gamma': [0, 0.1, 0.3],
+            'reg_alpha': [1.0, 5.0, 10.0],
+            'reg_lambda': [5.0, 10.0, 20.0],
+        }
+        
+        # === imbalance weight ===
+        scale_pos_weight = (len(y_full) - y_full.sum()) / max(y_full.sum(), 1)
         
         base_est = dict(
             eval_metric='logloss',
@@ -2691,6 +2700,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             random_state=42
         )
         
+        # === LogLoss model search (with purged CV) ===
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
@@ -2700,11 +2710,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             random_state=42
         )
-        # IMPORTANT: pass `groups=groups`
-        grid_logloss.fit(X_full, y_full, groups=groups)
+        grid_logloss.fit(X_full, y_full, groups=groups)   # ← only once
         model_logloss = grid_logloss.best_estimator_
         
-        # === AUC model grid search (purged CV) ===
+        # === AUC model search (with purged CV) ===
         grid_auc = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
@@ -2716,6 +2725,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         grid_auc.fit(X_full, y_full, groups=groups)
         model_auc = grid_auc.best_estimator_
+        
+        # --- time-forward holdout (unchanged) ---
+        cut_time = df_market[time_col].quantile(0.75)
+        tr_mask = df_market[time_col] <= cut_time
+        va_mask = df_market[time_col] >  cut_time
+        X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
+        X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
+        if y_train.nunique() < 2 or y_val.nunique() < 2:
+            cut_time = df_market[time_col].quantile(0.80)
+            tr_mask = df_market[time_col] <= cut_time
+            va_mask = df_market[time_col] >  cut_time
+            X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
+            X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
+        
+        # (calibration & the rest of your pipeline continues here)
         
         # --- Isotonic calibration on TRAIN ONLY (use a time-aware split internally) ---
         # (CalibratedClassifierCV doesn't accept `groups`; use a simple TimeSeriesSplit on train)
