@@ -1457,8 +1457,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # === Line resistance enrichment (binary + continuous) ===
     from utils import compute_line_resistance_flag
 
-    st.write("Resistance columns present:", [c for c in df_bt.columns if "Resistance" in c])
-
+    # --- add resistance features ---
+    df_bt = compute_line_resistance_flag(df_bt, source='moves')
+    
+    # --- drop list-like resistance columns (BigQuery + NumPy safe) ---
+    def drop_listlike_columns(frame):
+        def is_listy(series):
+            try:
+                return series.apply(lambda x: isinstance(x, (list, tuple, np.ndarray))).any()
+            except Exception:
+                return False
+        listlike_cols = [c for c in frame.columns if is_listy(frame[c])]
+        if listlike_cols:
+            frame = frame.drop(columns=listlike_cols, errors="ignore")
+        return frame, listlike_cols
+    
+    df_bt, dropped = drop_listlike_columns(df_bt)
+    
+    st.write("Resistance columns present (after cleanup):", 
+             [c for c in df_bt.columns if "Resistance" in c])
+    st.write("Dropped list-like columns:", dropped)
     # ensure Market is normalized first (you already do this above)
     df_bt['Market'] = df_bt['Market'].astype(str).str.lower().str.strip()
     df_bt['Sport']  = df_bt['Sport'].astype(str).str.upper()
