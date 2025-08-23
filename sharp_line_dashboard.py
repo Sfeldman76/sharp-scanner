@@ -105,7 +105,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from html import escape
 from pandas.util import hash_pandas_object
-            
+ 
+from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+import xgboost as xgb          
 import re
 import logging
 
@@ -2470,12 +2474,98 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             pb.progress(int(round(idx / n_markets * 100)))
             continue
       
-        # === Check each fold for label 
-
-    
-
+        # ===============================
+        # Purged Group Time-Series CV (PGTSCV) + Embargo
+        # ===============================
+      
+         SPORT_EMBARGO = {
+            # Daily/high-frequency leagues
+            "MLB":  pd.Timedelta("12 hours"),
+            "NBA":  pd.Timedelta("12 hours"),
+            "NHL":  pd.Timedelta("12 hours"),
+            "NCAAB": pd.Timedelta("12 hours"),
         
-        # === Param grid (expanded)
+            # Lower-frequency / larger info cycles
+            "NFL":  pd.Timedelta("3 days"),
+            "NCAAF": pd.Timedelta("2 days"),
+            "WNBA": pd.Timedelta("24 hours"),
+            "MLS":  pd.Timedelta("24 hours"),
+        
+            # Fallback
+            "DEFAULT": pd.Timedelta("12 hours"),
+        }
+        
+        embargo_td = SPORT_EMBARGO.get(sport_norm, SPORT_EMBARGO["DEFAULT"])
+        # --- Purged + Embargoed CV over games (prevents same-game leakage) ---
+        class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
+            """
+            Time-ordered splits with:
+              - grouping by `group_col` (e.g., Game_Key) so a game never appears in both train/val
+              - purge: remove groups that overlap the validation window from training
+              - embargo: drop groups whose start time is within `embargo` AFTER the train end
+            """
+            def __init__(self, n_splits=5, group_col="Game_Key", time_col="Game_Start", embargo=pd.Timedelta("0 days")):
+                self.n_splits = n_splits
+                self.group_col = group_col
+                self.time_col = time_col
+                self.embargo = embargo
+        
+            def get_n_splits(self, X=None, y=None, groups=None):
+                return self.n_splits
+        
+            def split(self, X, y=None, groups=None):
+                if groups is None:
+                    groups = X[self.group_col].values
+        
+                df = X[[self.group_col, self.time_col]].copy()
+                df[self.time_col] = pd.to_datetime(df[self.time_col], errors="coerce", utc=True)
+        
+                # one row per group with its min/max time, sorted by start
+                gmeta = (df.groupby(self.group_col)
+                           .agg(start=(self.time_col, "min"),
+                                end=(self.time_col, "max"))
+                           .sort_values("start")
+                           .reset_index())
+        
+                n_groups = len(gmeta)
+                fold_sizes = (n_groups // self.n_splits) * np.ones(self.n_splits, dtype=int)
+                fold_sizes[: n_groups % self.n_splits] += 1
+        
+                cur = 0
+                for k in range(self.n_splits):
+                    val_g = gmeta.iloc[cur:cur + fold_sizes[k]][self.group_col].values
+                    val_start = gmeta.iloc[cur]["start"]
+                    val_end   = gmeta.iloc[cur + fold_sizes[k] - 1]["end"]
+                    cur += fold_sizes[k]
+        
+                    # PURGE: drop any group that overlaps validation window
+                    overlap = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
+                    purged = set(gmeta.loc[overlap, self.group_col])
+        
+                    # candidates for training (exclude val + purged)
+                    cand = gmeta[~gmeta[self.group_col].isin(val_g)]
+                    cand = cand[~cand[self.group_col].isin(purged)]
+        
+                    # EMBARGO: remove groups whose start <= (train_end + embargo)
+                    if not cand.empty:
+                        train_end = cand["end"].max()
+                        embargo_cut = train_end + self.embargo
+                        embargo_mask = gmeta["start"] <= embargo_cut
+                        embargo_groups = set(gmeta.loc[embargo_mask, self.group_col])
+                    else:
+                        embargo_groups = set()
+        
+                    train_g = gmeta[
+                        ~gmeta[self.group_col].isin(val_g)
+                        & ~gmeta[self.group_col].isin(purged)
+                        & ~gmeta[self.group_col].isin(embargo_groups)
+                    ][self.group_col].values
+        
+                    train_idx = np.flatnonzero(np.isin(groups, train_g))
+                    val_idx   = np.flatnonzero(np.isin(groups, val_g))
+                    yield (train_idx, val_idx)
+        
+        # === Param grid (expanded) — your settings ===
         param_grid = {
             'n_estimators': [50, 100, 200],
             'max_depth': [2, 3],
@@ -2484,39 +2574,60 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'colsample_bytree': [0.6, 0.8],
             'min_child_weight': [7, 10, 15],
             'gamma': [0, 0.1, 0.3],
-            'reg_alpha': [1.0, 5.0, 10.0],   # stronger L1
-            'reg_lambda': [5.0, 10.0, 20.0],   # L2
+            'reg_alpha': [1.0, 5.0, 10.0],   # L1
+            'reg_lambda': [5.0, 10.0, 20.0], # L2
         }
         
-        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        # --- Time column & chronological order (prefer Game_Start to keep games intact) ---
+        time_col = "Game_Start" if "Game_Start" in df_market.columns else "Snapshot_Timestamp"
+        df_market = df_market.copy()
+        df_market[time_col] = pd.to_datetime(df_market[time_col], errors="coerce", utc=True)
+        df_market = df_market.sort_values(time_col).reset_index(drop=True)
         
-                
-           # --- Time-forward split ---
-        # 1) sort chronologically
-        df_market = df_market.sort_values("Snapshot_Timestamp")
+        # --- Build matrices and groups ---
+        X_full = (df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0.0).astype(float))
+        y_full = df_market['SHARP_HIT_BOOL'].astype(int)
+        groups = df_market['Game_Key']  # critical for grouping by game
         
-        # 2) align X, y with the sorted frame
-        X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
-        y = df_market['SHARP_HIT_BOOL'].astype(int)
+        # --- Time-forward holdout: last 25% by time (sanity check after CV) ---
+        cut_time = df_market[time_col].quantile(0.75)
+        tr_mask = df_market[time_col] <= cut_time
+        va_mask = df_market[time_col] >  cut_time
         
-        # 3) cut last 25% as holdout
-        cut = int(len(df_market) * 0.75)
-        X_train, X_val = X.iloc[:cut], X.iloc[cut:]
-        y_train, y_val = y.iloc[:cut], y.iloc[cut:]
-                
+        X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
+        X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
         
-        # === LogLoss model
-        # ✅ Calculate scale_pos_weight for class imbalance
-        scale_pos_weight = (len(y) - y.sum()) / y.sum()
+        # make sure both classes exist; if not, nudge the cut to 80/20
+        if y_train.nunique() < 2 or y_val.nunique() < 2:
+            cut_time = df_market[time_col].quantile(0.80)
+            tr_mask = df_market[time_col] <= cut_time
+            va_mask = df_market[time_col] >  cut_time
+            X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
+            X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
         
-        # ✅ LogLoss Model Grid Search
+        # --- CV object: Purged Group Time-Series with embargo (e.g., 2 days) ---
+        cv = PurgedGroupTimeSeriesSplit(
+            n_splits=5,
+            group_col="Game_Key",
+            time_col=time_col,            # "Game_Start" preferred, else "Snapshot_Timestamp"
+            embargo=embargo_td
+        )
+        
+        # === LogLoss model grid search (purged CV) ===
+        neg = int((y_full == 0).sum())
+        pos = int((y_full == 1).sum())
+        scale_pos_weight = (neg / max(pos, 1))
+        
+        base_est = dict(
+            eval_metric='logloss',
+            tree_method='hist',
+            n_jobs=-1,
+            scale_pos_weight=scale_pos_weight,
+            random_state=42
+        )
+        
         grid_logloss = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(
-                eval_metric='logloss',
-                tree_method='hist',
-                n_jobs=-1,
-                scale_pos_weight=scale_pos_weight  # ✅ Proper location
-            ),
+            estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
             scoring='neg_log_loss',
             cv=cv,
@@ -2524,19 +2635,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             random_state=42
         )
-        # 🚫 Detect and drop nested/bad columns from X_train
-        
-        grid_logloss.fit(X_train, y_train)
+        # IMPORTANT: pass `groups=groups`
+        grid_logloss.fit(X_full, y_full, groups=groups)
         model_logloss = grid_logloss.best_estimator_
         
-        # ✅ AUC Model Grid Search
+        # === AUC model grid search (purged CV) ===
         grid_auc = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(
-                eval_metric='logloss',
-                tree_method='hist',
-                n_jobs=-1,
-                scale_pos_weight=scale_pos_weight  # ✅ Proper location
-            ),
+            estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
             scoring='roc_auc',
             cv=cv,
@@ -2544,26 +2649,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             random_state=42
         )
-        grid_auc.fit(X_train, y_train)
+        grid_auc.fit(X_full, y_full, groups=groups)
         model_auc = grid_auc.best_estimator_
+        
+        # --- Isotonic calibration on TRAIN ONLY (use a time-aware split internally) ---
+        # (CalibratedClassifierCV doesn't accept `groups`; use a simple TimeSeriesSplit on train)
+        tscv_cal = TimeSeriesSplit(n_splits=3)
         from collections import Counter
-
-        # Count class distribution in training set
-        class_counts = Counter(y_train)
-        min_class_count = min(class_counts.values())
+        min_class_count = min(Counter(y_train).values()) if len(y_train) else 0
         
         if min_class_count < 5:
             st.warning(f"⚠️ Not enough samples per class for isotonic calibration in {market.upper()} — skipping calibration.")
             cal_logloss = model_logloss
             cal_auc = model_auc
         else:
-            cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=cv).fit(X_train, y_train)
-            cal_auc = CalibratedClassifierCV(model_auc, method='isotonic', cv=cv).fit(X_train, y_train)
-        # ✅ Use isotonic calibration (more stable for reducing std dev)
-                # ================================
-        # === 📊 MODEL STRESS TESTS  ====
-        # ================================
-       
+            cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=tscv_cal).fit(X_train, y_train)
+            cal_auc     = CalibratedClassifierCV(model_auc,     method='isotonic', cv=tscv_cal).fit(X_train, y_train)
+        
+        # --- Final time-forward holdout evaluation ---
+        import numpy as np
+        p_ll = np.clip(cal_logloss.predict_proba(X_val)[:, 1], 1e-4, 1-1e-4)
+        p_au = np.clip(cal_auc.predict_proba(X_val)[:, 1],     1e-4, 1-1e-4)
+        
+        auc_ll = roc_auc_score(y_val, p_ll) if y_val.nunique() == 2 else np.nan
+        auc_au = roc_auc_score(y_val, p_au) if y_val.nunique() == 2 else np.nan
+        ll     = log_loss(y_val, p_au, labels=[0, 1]) if y_val.nunique() == 2 else np.nan
+        brier  = brier_score_loss(y_val, p_au) if y_val.nunique() == 2 else np.nan
+        
+        st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
+        st.write(f"- LogLoss Model AUC: `{auc_ll:.4f}`")
+        st.write(f"- AUC Model AUC:     `{auc_au:.4f}`")
+        st.write(f"- Holdout LogLoss:   `{ll:.4f}`")
+        st.write(f"- Holdout Brier:     `{brier:.4f}`")
         st.subheader(f"🧪 Holdout Validation – {market.upper()}")
 
         # --- Helpers
