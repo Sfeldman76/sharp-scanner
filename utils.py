@@ -1039,7 +1039,7 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
 
 
 
-def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
+def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'): 
     if df is None or df.empty:
         logging.warning("⚠️ No sharp moves to write.")
         return
@@ -5404,7 +5404,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         return None
 
 
-DEFAULT_MOVES_VIEW = "sharplogger.sharp_data.sharp_moves_master"
+DEFAULT_MOVES_VIEW = "sharp_data.moves_with_features_merged"
 
 def read_recent_sharp_moves(
     hours: int = 120,
@@ -5415,7 +5415,7 @@ def read_recent_sharp_moves(
     Load recent sharp moves (enriched with team features) from BigQuery.
 
     - `table` should usually be the merged view:
-        sharplogger.sharp_data.sharp_moves_master
+        sharp_data.moves_with_features_merged
       (no totals duplication; has home_/away_ feature columns)
 
     - Set `pregame_only=False` if you also want in-play/post-game rows.
