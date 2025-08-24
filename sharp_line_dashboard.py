@@ -2707,18 +2707,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             
                     yield train_idx, val_idx
                         
-        # === Param grid (expanded) — your settings ===
-        param_grid = {
-            'n_estimators': [50, 100, 200],
-            'max_depth': [2, 3],
-            'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.6, 0.8],
-            'colsample_bytree': [0.6, 0.8],
-            'min_child_weight': [7, 10, 15],
-            'gamma': [0, 0.1, 0.3],
-            'reg_alpha': [1.0, 5.0, 10.0],   # L1
-            'reg_lambda': [5.0, 10.0, 20.0], # L2
-        }
+       
         
         # --- Time column & chronological order (prefer Game_Start to keep games intact) ---
         # --- time col & sort ---
@@ -2743,36 +2732,39 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- sanity: alignment ---
         assert len(X_full) == len(groups) == len(df_market[time_col]), "Misaligned X/groups/time_values"
         
-        # === param grid (yours) ===
+        # === param grid (regularized) ===
         param_grid = {
-            'n_estimators': [50, 100, 200],
-            'max_depth': [2, 3],
-            'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.6, 0.8],
-            'colsample_bytree': [0.6, 0.8],
-            'min_child_weight': [7, 10, 15],
-            'gamma': [0, 0.1, 0.3],
-            'reg_alpha': [1.0, 5.0, 10.0],
-            'reg_lambda': [5.0, 10.0, 20.0],
+            "n_estimators":      [200, 400, 800],        # more trees + smaller steps
+            "max_depth":         [2, 3, 4],
+            "learning_rate":     [0.01, 0.03, 0.05],
+            "subsample":         [0.6, 0.8],
+            "colsample_bytree":  [0.5, 0.7, 0.8],        # curb feature overuse
+            "min_child_weight":  [15, 25, 35],           # require more evidence to split
+            "gamma":             [0.1, 0.3, 0.5],        # conservative splits
+            "reg_alpha":         [5.0, 10.0, 20.0, 40.0],
+            "reg_lambda":        [10.0, 20.0, 40.0, 80.0],
         }
         
         # === imbalance weight ===
-        scale_pos_weight = (len(y_full) - y_full.sum()) / max(y_full.sum(), 1)
+        pos = float(y_full.sum())
+        scale_pos_weight = (len(y_full) - pos) / max(pos, 1.0)
         
         base_est = dict(
-            eval_metric='logloss',
-            tree_method='hist',
+            objective="binary:logistic",
+            eval_metric="logloss",          # scoring alters per search; this keeps xgb happy
+            tree_method="hist",
+            max_delta_step=1,               # <---- stabilizes logistic updates
             n_jobs=-1,
             scale_pos_weight=scale_pos_weight,
-            random_state=42
+            random_state=42,
+            importance_type="total_gain",   # for stability diagnostics later
+            # (optional) grow_policy="lossguide",
         )
-                # --- Pre-flight: ensure the CV actually yields folds ---
-        # Try current settings
+        
+        # --- Pre-flight: ensure the CV actually yields folds ---
         folds = list(cv.split(X_full, y_full, groups=groups))
         
-        # If empty, relax progressively
         if len(folds) == 0:
-            # 1) reduce splits, reduce embargo
             n_splits_relaxed = max(2, min(3, len(np.unique(groups)) // 2 or 2))
             cv = PurgedGroupTimeSeriesSplit(
                 n_splits=n_splits_relaxed,
@@ -2781,28 +2773,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             )
             folds = list(cv.split(X_full, y_full, groups=groups))
         
-        # If still empty, fall back to a simple time split (keeps chronology, no groups)
         if len(folds) == 0:
             from sklearn.model_selection import TimeSeriesSplit
-            # Choose small splits so each val is bigger
             tscv = TimeSeriesSplit(n_splits=3)
             folds = list(tscv.split(X_full, y_full))
-            # NOTE: leakage risk across same-game snapshots disappears in your setup
-            # because you have one finalized row per game.
         
-        # Final guard
         if len(folds) == 0:
             raise ValueError("Cross-validation produced no usable folds after relaxation. "
                              "Try fewer splits, smaller embargo, or verify both classes exist.")
         
-        # Use the concrete folds for both searches
         cv_for_search = folds
- 
+        
+        # --- searches (same folds for both) ---
+        from sklearn.model_selection import RandomizedSearchCV
+        import xgboost as xgb
+        
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
-            scoring='neg_log_loss',
-            cv=cv_for_search,          # <--- use the realized folds
+            scoring="neg_log_loss",
+            cv=cv_for_search,
             n_iter=50,
             verbose=1,
             random_state=42
@@ -2813,14 +2803,68 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         grid_auc = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
-            scoring='roc_auc',
-            cv=cv_for_search,          # <--- same folds
+            scoring="roc_auc",
+            cv=cv_for_search,
             n_iter=50,
             verbose=1,
             random_state=42
         )
         grid_auc.fit(X_full, y_full, groups=groups)
         model_auc = grid_auc.best_estimator_
+        
+        # ---------- OOF predictions for calibration bins ----------
+        import numpy as np
+        import pandas as pd
+        from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
+        
+        oof_pred_logloss = np.zeros(len(y_full), dtype=float)
+        oof_pred_auc     = np.zeros(len(y_full), dtype=float)
+        
+        for tr_idx, va_idx in cv_for_search:
+            X_tr, X_va = X_full.iloc[tr_idx], X_full.iloc[va_idx]
+            y_tr, y_va = y_full.iloc[tr_idx], y_full.iloc[va_idx]
+        
+            # clone with best params to avoid refit leakage across folds
+            m_log = xgb.XGBClassifier(**{**base_est, **model_logloss.get_params()})
+            m_auc = xgb.XGBClassifier(**{**base_est, **model_auc.get_params()})
+        
+            m_log.fit(X_tr, y_tr, verbose=False)
+            m_auc.fit(X_tr, y_tr, verbose=False)
+        
+            oof_pred_logloss[va_idx] = m_log.predict_proba(X_va)[:, 1]
+            oof_pred_auc[va_idx]     = m_auc.predict_proba(X_va)[:, 1]
+        
+        # simple 50/50 blend (you can learn weights later)
+        oof_blend = 0.5 * oof_pred_logloss + 0.5 * oof_pred_auc
+        
+        # quick OOF diagnostics
+        def _safe_auc(y, p):
+            return roc_auc_score(y, p) if np.unique(y).size > 1 else np.nan
+        
+        oof_auc   = _safe_auc(y_full, oof_blend)
+        oof_ll    = log_loss(y_full, np.clip(oof_blend, 1e-6, 1-1e-6))
+        oof_brier = brier_score_loss(y_full, oof_blend)
+        
+        # (optional) isotonic calibrator on OOF
+        # from sklearn.isotonic import IsotonicRegression
+        # iso = IsotonicRegression(out_of_bounds="clip")
+        # iso.fit(oof_blend, y_full)
+        # oof_blend_cal = iso.transform(oof_blend)
+        
+        # ---------- calibration bins ----------
+        def calibration_bins(y, p, n_bins=10):
+            df = pd.DataFrame({"y": np.asarray(y, float), "p": np.asarray(p, float)})
+            df["bin"] = pd.qcut(df["p"], q=n_bins, duplicates="drop")
+            out = (df.groupby("bin")
+                     .agg(count=("y","size"),
+                          avg_pred=("p","mean"),
+                          emp_rate=("y","mean"))
+                     .reset_index(drop=True))
+            out["abs_err"] = (out["avg_pred"] - out["emp_rate"]).abs()
+            return out
+        
+        calib_oof = calibration_bins(y_full, oof_blend, n_bins=10)
+        st.dataframe(calib_oof)  # if in Streamlit
         
         # --- time-forward holdout (unchanged) ---
         cut_time = df_market[time_col].quantile(0.75)
