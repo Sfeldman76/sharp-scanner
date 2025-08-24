@@ -112,7 +112,10 @@ from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
 import xgboost as xgb          
 import re
 import logging
+from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
 
+from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
+import xgboost as xgb
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -2606,8 +2609,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Use the passed-in `sport` exactly as-is (case-sensitive mapping + default)
        
        
-        from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
-        import xgboost as xgb
         
         # --- sport → embargo (top of file, once) ---
         SPORT_EMBARGO = {
@@ -2813,9 +2814,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         model_auc = grid_auc.best_estimator_
         
         # ---------- OOF predictions for calibration bins ----------
-        import numpy as np
-        import pandas as pd
-        from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
         
         oof_pred_logloss = np.zeros(len(y_full), dtype=float)
         oof_pred_auc     = np.zeros(len(y_full), dtype=float)
