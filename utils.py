@@ -5912,7 +5912,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         logging.info("📈 Time-series mode enabled: Skipping scored-key filter to allow resnapshots")
     
     # Only now load snapshots / df_master / df_first, etc.
-    df_master = read_recent_sharp_master_cached(hours=24)
+    df_master = read_recent_sharp_master_cached(hours=72)
     df_master = build_game_key(df_master)
 
     # Ensure Merge_Key_Short exists AFTER loading
@@ -5932,7 +5932,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     logging.info(f"Memory before snapshot load: {process.memory_info().rss / 1024 / 1024:.2f} MB")
     
     # === 1) Load recent master history (with openers)
-    df_all_snapshots = read_recent_sharp_master_cached(hours=120)
+    df_all_snapshots = read_recent_sharp_master_cached(hours=72)
     log_memory("AFTER read_recent_sharp_master_cached")
     
     # === (Optional) Latest-line view if you need it downstream.
