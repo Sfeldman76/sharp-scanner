@@ -287,7 +287,7 @@ def to_utc_ts(x):
 SPORT_ALIASES = {
         "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
         "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
-        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "CFB"],
+        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF"],
         "NBA":   ["NBA", "BASKETBALL_NBA"],
         "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
         "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
@@ -540,6 +540,7 @@ def update_power_ratings(
           CASE
             WHEN UPPER(CAST(Sport AS STRING)) IN ('BASEBALL_MLB','BASEBALL-MLB','BASEBALL','MLB') THEN 'MLB'
             WHEN UPPER(CAST(Sport AS STRING)) IN ('AMERICANFOOTBALL_NFL','FOOTBALL_NFL','NFL') THEN 'NFL'
+            WHEN UPPER(CAST(Sport AS STRING)) IN ('AMERICANFOOTBALL_NCAAF','FOOTBALL_NCAAF','NCAAF') THEN 'NCAAF'
             WHEN UPPER(CAST(Sport AS STRING)) IN ('BASKETBALL_NBA','NBA') THEN 'NBA'
             WHEN UPPER(CAST(Sport AS STRING)) IN ('BASKETBALL_WNBA','WNBA') THEN 'WNBA'
             WHEN UPPER(CAST(Sport AS STRING)) IN ('CFL','CANADIANFOOTBALL','CANADIAN_FOOTBALL') THEN 'CFL'
@@ -5600,6 +5601,10 @@ def get_scored_keys_cached(bq_client, since_ts, sport_label=None):
     _scored_keys_cache[key] = vals
     return vals
 
+def _is_sport(df: pd.DataFrame, sport_label: str) -> pd.Series:
+    aliases = {s.upper() for s in SPORT_ALIASES.get(sport_label.upper(), [sport_label.upper()])}
+    return df["Sport"].astype(str).str.upper().isin(aliases)
+
 
 def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API_KEY, trained_models=None):
     expected_label = [k for k, v in SPORTS.items() if v == sport_key]
@@ -5910,11 +5915,21 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     else:
         df_scores_needed = df_scores.copy()
         logging.info("📈 Time-series mode enabled: Skipping scored-key filter to allow resnapshots")
-    
+    # 🔒 Keep only the target sport (prevents cross-sport joins)
+    if "Sport" in df_scores_needed.columns:
+        before = len(df_scores_needed)
+        df_scores_needed = df_scores_needed[_is_sport(df_scores_needed, sport_label)].copy()
+        logging.info("🎯 %s: df_scores_needed filtered by sport: %d → %d",
+                     sport_label, before, len(df_scores_needed))
     # Only now load snapshots / df_master / df_first, etc.
     df_master = read_recent_sharp_master_cached(hours=72)
     df_master = build_game_key(df_master)
-
+    # 🎯 sport filter on master
+    if "Sport" in df_master.columns:
+        m0 = len(df_master)
+        df_master = df_master[_is_sport(df_master, sport_label)].copy()
+        
+    logging.info("🎯 %s: df_master filtered by sport: %d → %d", sport_label, m0, len(df_master))
     # Ensure Merge_Key_Short exists AFTER loading
     if 'Merge_Key_Short' not in df_master.columns:
         df_master = build_game_key(df_master)
@@ -5934,7 +5949,12 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     # === 1) Load recent master history (with openers)
     df_all_snapshots = read_recent_sharp_master_cached(hours=72)
     log_memory("AFTER read_recent_sharp_master_cached")
-    
+    # 🎯 sport filter on snapshots (so df_first isn't polluted by CFL/NFL rows)
+    if "Sport" in df_all_snapshots.columns:
+        s0 = len(df_all_snapshots)
+        df_all_snapshots = df_all_snapshots[_is_sport(df_all_snapshots, sport_label)].copy()
+        logging.info("🎯 %s: df_all_snapshots filtered by sport: %d → %d",
+                     sport_label, s0, len(df_all_snapshots))
     # === (Optional) Latest-line view if you need it downstream.
     df_all_snapshots_filtered = pd.DataFrame()
     try:
@@ -5951,14 +5971,16 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     except Exception as e:
         logging.warning(f"⚠️ Skipping df_all_snapshots_filtered due to error: {e}")
     
+   
+   
     # === 2) Build df_first directly from Open_* in master
-    need_cols = ["Game_Key","Market","Outcome","Bookmaker","Open_Value","Open_Odds"]
+    need_cols = ["Game_Key","Market","Outcome","Bookmaker","Open_Value","Open_Odds","Sport"]  # 👈 keep Sport
     missing = [c for c in need_cols if c not in df_all_snapshots.columns]
     if missing:
         logging.warning(f"⚠️ Cannot build df_first — missing columns: {missing}")
         df_first = pd.DataFrame(columns=[
             "Game_Key","Market","Outcome","Bookmaker",
-            "First_Line_Value","First_Odds","First_Imp_Prob"
+            "First_Line_Value","First_Odds","First_Imp_Prob","Sport"
         ])
     else:
         df_first = (
@@ -5970,8 +5992,13 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
             .copy()
         )
         df_first["First_Imp_Prob"] = df_first["First_Odds"].map(calc_implied_prob)
-        logging.info("📋 Sample df_first:\n" + df_first[["Game_Key","Market","Outcome","Bookmaker","First_Line_Value"]].head(10).to_string(index=False))
+        # 🎯 and filter again just in case
+        if "Sport" in df_first.columns:
+            f0 = len(df_first)
+            df_first = df_first[_is_sport(df_first, sport_label)].copy()
+            logging.info("🎯 %s: df_first filtered by sport: %d → %d", sport_label, f0, len(df_first))
     
+        logging.info("📋 Sample df_first:\n" + df_first[["Game_Key","Market","Outcome","Bookmaker","First_Line_Value"]].head(10).to_string(index=False))
     # === 3) Normalize join keys
     key_cols = ["Game_Key","Market","Outcome","Bookmaker"]
     for _df in (df_master, df_first):
@@ -6218,6 +6245,7 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
         'BASKETBALL_NBA': 'NBA',
         'BASKETBALL_WNBA': 'WNBA',
         'FOOTBALL_CFL': 'CFL',
+        'FOOTBALL_NCAAF' : 'NCAAF'
         'MLB': 'MLB',  # handles redundancy safely
         'NBA': 'NBA',
         'WNBA': 'WNBA',
