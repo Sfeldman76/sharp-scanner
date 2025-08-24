@@ -995,19 +995,29 @@ def _iso(ts) -> str:
 # --- HISTORY-ONLY FETCH (CACHED FOR STREAMLIT) ---
 @st.cache_data(ttl=900, show_spinner=False)
 
-def _resolve_rating_col(bq: bigquery.Client, table_fq: str) -> str:
-    project, dataset, table = table_fq.split(".")
-    q = f"""
-    SELECT UPPER(column_name) AS col
-    FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
-    WHERE table_name = '{table}'
+
+# --- 1) Cached helper: resolve the rating column name without hashing the client
+@st.cache_data(show_spinner=False)
+def _resolve_rating_col(_table_fq: str, _project: str = None) -> str:
     """
-    cols = {r.col for r in bq.query(q).result()}
+    Return the rating column to use (one of: PR_TEAM_RATING, POINTS_RATING, RATING), uppercased.
+    We avoid passing the BigQuery client so Streamlit doesn't try to hash it.
+    """
+    bq = bigquery.Client(project=_project) if _project else bigquery.Client()
+    project, dataset, table = _table_fq.split(".")
+    q = f"""
+        SELECT UPPER(column_name) AS col
+        FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
+        WHERE table_name = '{table}'
+    """
+    cols = {row.col for row in bq.query(q).result()}
     for cand in ("PR_TEAM_RATING", "POINTS_RATING", "RATING"):
         if cand in cols:
-            return cand  # return uppercase
-    raise RuntimeError(f"No rating column found in {table_fq}. Found: {sorted(cols)}")
+            return cand
+    raise RuntimeError(f"No rating column found in {_table_fq}. Found: {sorted(cols)}")
 
+# --- 2) Cached main fetch: no unhashable args; uses query params properly
+@st.cache_data(show_spinner=True, ttl=600)
 def fetch_training_ratings_window_cached(
     sport: str, start_iso: str, end_iso: str,
     table_history: str = "sharplogger.sharp_data.ratings_history",
