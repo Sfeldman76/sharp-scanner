@@ -1486,7 +1486,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_bt[c] = df_bt[c].astype(str).str.lower().str.strip()
 
  
-    #=== New team-history features (all are "as-of", no leakage) ===
+   # === Existing "as-of" history features (unchanged) ===
     history_cols = [
         "After_Win_Flag","Revenge_Flag",
         "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
@@ -1496,24 +1496,104 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         "Wins_Last3_Prior","Margin_Last3_Avg_Prior","Days_Since_Last_Game",
         "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
         "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
-        
         "Wins_Last3_H2H_Prior","Margin_Last3_H2H_Prior",
         "H2H_Streak_Dir_Prior","H2H_Streak_Len_Prior"
     ]
     
-    # Keep only columns that actually exist in the view (schema-safe)
-    history_present = [c for c in history_cols if c in df_bt.columns]
+    # === New situational flags (binary indicators) ===
+    situational_flag_cols = [
+        "Home_After_Home_Win_Flag",
+        "Home_After_Home_Loss_Flag",
+        "Home_After_Away_Win_Flag",
+        "Home_After_Away_Loss_Flag",
+        "Away_After_Home_Win_Flag",
+        "Away_After_Home_Loss_Flag",
+        "Away_After_Away_Win_Flag",
+        "Away_After_Away_Loss_Flag",
+    ]
     
-    # Coerce numerics safely (booleans/ints/floats); leave categorical-like intact
-    for c in history_present:
-        if df_bt[c].dtype.kind not in "biufc":  # not numeric
-            df_bt[c] = pd.to_numeric(df_bt[c], errors="coerce")
-            
-    # Simple impute (median) so the model won’t choke on season openers / missing priors
-    for c in history_present:
-        if str(df_bt[c].dtype).startswith(("float", "int")):
-            med = df_bt[c].median(skipna=True)
-            df_bt[c] = df_bt[c].fillna(med)
+    # === New team ATS cover / margin stats (prior-only, last-5) ===
+    team_cover_cols = [
+        # overall cover signal
+        "Cover_Rate_Last5",
+        "Cover_Rate_After_Win_Last5",
+        "Cover_Rate_After_Loss_Last5",
+        # 8 situational cover rates (last-5)
+        "Cover_Rate_Home_After_Home_Win_Last5",
+        "Cover_Rate_Home_After_Home_Loss_Last5",
+        "Cover_Rate_Home_After_Away_Win_Last5",
+        "Cover_Rate_Home_After_Away_Loss_Last5",
+        "Cover_Rate_Away_After_Home_Win_Last5",
+        "Cover_Rate_Away_After_Home_Loss_Last5",
+        "Cover_Rate_Away_After_Away_Win_Last5",
+        "Cover_Rate_Away_After_Away_Loss_Last5",
+        # margin distribution
+        "ATS_Cover_Margin_Last5_Prior_Mean",
+        "ATS_Cover_Margin_Last5_Prior_Std",
+        # (optional per-game instantaneous margin if you want it)
+        "ATS_Cover_Margin",
+    ]
+    
+    # === Opponent mirrors (prior-only, last-5) ===
+    opp_cover_cols = [
+        "Opp_Cover_Rate_Last5",
+        "Opp_ATS_Cover_Margin_Last5_Prior_Mean",
+        "Opp_ATS_Cover_Margin_Last5_Prior_Std",
+        "Opp_Cover_Rate_After_Win_Last5",
+        "Opp_Cover_Rate_After_Loss_Last5",
+        "Opp_Cover_Rate_Home_After_Home_Win_Last5",
+        "Opp_Cover_Rate_Home_After_Home_Loss_Last5",
+        "Opp_Cover_Rate_Home_After_Away_Win_Last5",
+        "Opp_Cover_Rate_Home_After_Away_Loss_Last5",
+        "Opp_Cover_Rate_Away_After_Home_Win_Last5",
+        "Opp_Cover_Rate_Away_After_Home_Loss_Last5",
+        "Opp_Cover_Rate_Away_After_Away_Win_Last5",
+        "Opp_Cover_Rate_Away_After_Away_Loss_Last5",
+    ]
+    
+    # === (Optional but recommended) Team-vs-Opp diffs ===
+    # These often help the model; they’ll be created only if both sides exist.
+    diff_specs = [
+        ("Cover_Rate_Last5", "Opp_Cover_Rate_Last5", "Diff_Cover_Rate_Last5"),
+        ("Cover_Rate_After_Win_Last5",  "Opp_Cover_Rate_After_Win_Last5",  "Diff_Cover_Rate_After_Win_Last5"),
+        ("Cover_Rate_After_Loss_Last5", "Opp_Cover_Rate_After_Loss_Last5", "Diff_Cover_Rate_After_Loss_Last5"),
+        ("ATS_Cover_Margin_Last5_Prior_Mean", "Opp_ATS_Cover_Margin_Last5_Prior_Mean", "Diff_ATS_Cover_Margin_Last5_Mean"),
+        ("ATS_Cover_Margin_Last5_Prior_Std",  "Opp_ATS_Cover_Margin_Last5_Prior_Std",  "Diff_ATS_Cover_Margin_Last5_Std"),
+    ]
+    
+    # =============== Schema-safe selection ===============
+    all_feature_cols = (
+        history_cols
+        + situational_flag_cols
+        + team_cover_cols
+        + opp_cover_cols
+    )
+    
+    # Keep only columns that actually exist
+    history_present = [c for c in history_cols if c in df_bt.columns]
+    situational_flags_present = [c for c in situational_flag_cols if c in df_bt.columns]
+    team_cover_present = [c for c in team_cover_cols if c in df_bt.columns]
+    opp_cover_present = [c for c in opp_cover_cols if c in df_bt.columns]
+    all_present = history_present + situational_flags_present + team_cover_present + opp_cover_present
+    
+    # Optional: build diffs where both inputs exist
+    for left, right, out in diff_specs:
+        if left in df_bt.columns and right in df_bt.columns:
+            df_bt[out] = df_bt[left] - df_bt[right]
+            all_present.append(out)
+    
+    # (Optional) enforce numeric dtypes for model features
+    for col in all_present:
+        # Leave booleans as is; cast others to numeric where possible
+        if df_bt[col].dtype == "bool":
+            continue
+        df_bt[col] = pd.to_numeric(df_bt[col], errors="coerce")
+    
+    # Handle NaNs if your model can’t
+    df_bt[all_present] = df_bt[all_present].fillna(0.0)
+    
+
+   
         
     # ✅ Make sure helper won't choke if these are missing
     if 'Is_Sharp_Book' not in df_bt.columns:
@@ -2370,171 +2450,154 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['PR_Abs_Rating_Diff'] = df_market['PR_Rating_Diff'].abs()
         #df_market['PR_Total_Est']       = (df_market['PR_Team_Off'] + df_market['PR_Opp_Off'] - df_market['PR_Team_Def'] - df_market['PR_Opp_Def'])
 
-       
-        features = [
+                       `# helper to extend without dupes (order-preserving)
+        def extend_unique(base, items):
+            for c in items:
+                if c not in base:
+                    base.append(c)
         
+        # --- start with your manual core list ---
+        features = [
             # 🔹 Core sharp signals
-            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT',
-            'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
+            'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Time_Score','Book_lift_x_Sharp',
+            'Book_lift_x_Magnitude','Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
+            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            'Sharp_Line_Magnitude', 'Is_Home_Team_Bet',
-            'Team_Implied_Prob_Gap_Home', 'Team_Implied_Prob_Gap_Away',
+            'Sharp_Line_Magnitude','Is_Home_Team_Bet',
+            'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
-            'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'SharpMove_Odds_Mag',
+            'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
-            'MarketLeader_ImpProbShift', 'LimitProtect_SharpMag',
-            'Delta_Sharp_vs_Rec',
-            'Sharp_Leads',
-            
+            'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec','Sharp_Leads',
         
             # 🔁 Reversal logic
-            'Value_Reversal_Flag', 'Odds_Reversal_Flag',
+            'Value_Reversal_Flag','Odds_Reversal_Flag',
         
             # 🔥 Timing flags
             'Late_Game_Steam_Flag',
-            
-            'Abs_Line_Move_From_Opening',
-            'Abs_Odds_Move_From_Opening', 
-            'Market_Mispricing', #'Abs_Market_Mispricing',
-            'Spread_vs_H2H_Aligned',
-            'Total_vs_Spread_Contradiction',
-            'Spread_vs_H2H_ProbGap',
-            'Total_vs_H2H_ProbGap',
-            'Total_vs_Spread_ProbGap',
-            'CrossMarket_Prob_Gap_Exists',
-            
-            'Line_Moved_Away_From_Team',            
-            'Pct_Line_Move_From_Opening', 
-            'Pct_Line_Move_Bin',
-            'Potential_Overmove_Flag', 
-            'Potential_Overmove_Total_Pct_Flag', 'Mispricing_Flag',
         
-            # 🧠 Cross-market alignment                       
-            'Potential_Odds_Overmove_Flag',
-            'Line_Moved_Toward_Team',
-            'Abs_Line_Move_Z',
-            'Pct_Line_Move_Z', 
-            'SmallBook_Limit_Skew',
-            'SmallBook_Heavy_Liquidity_Flag',
-            'SmallBook_Limit_Skew_Flag',
-            'Book_Reliability_Score',
-            'Book_Reliability_Lift',
-            'Book_Reliability_x_Sharp',
-            'Book_Reliability_x_Magnitude',
-            'Book_Reliability_x_PROB_SHIFT',
-            'PR_Team_Rating','PR_Opp_Rating',
-            'PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread',
-            'Outcome_Market_Spread',
-            'Outcome_Spread_Edge',
-            'Outcome_Cover_Prob',                  
-            'model_fav_vs_market_fav_agree', 'edge_pts'           
-         
-            
+            'Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
+            'Market_Mispricing','Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
+            'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
+            'CrossMarket_Prob_Gap_Exists','Line_Moved_Away_From_Team',
+            'Pct_Line_Move_From_Opening','Pct_Line_Move_Bin','Potential_Overmove_Flag',
+            'Potential_Overmove_Total_Pct_Flag','Mispricing_Flag',
+        
+            # 🧠 Cross-market alignment
+            'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
+            'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Limit_Skew',
+            'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
+            'Book_Reliability_Score','Book_Reliability_Lift','Book_Reliability_x_Sharp',
+            'Book_Reliability_x_Magnitude','Book_Reliability_x_PROB_SHIFT',
+        
+            # Power ratings / edges
+            'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
+            'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_pts'
         ]
         
-    
-         #ensure features list has unique names (order-preserving)
+        # ensure uniqueness (order-preserving)
         _seen = set()
         features = [f for f in features if not (f in _seen or _seen.add(f))]
-        assert len(features) == len(set(features)), "Duplicate names in `features` list."
         
+        # build generated groups
         hybrid_timing_features = [
-            
-            f'SharpMove_Magnitude_{b}' for b in [
-                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            f'SharpMove_Magnitude_{b}'
+            for b in [
+                'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+                'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+                'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+                'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
             ]
         ]
         hybrid_odds_timing_features = [
-
-            f'OddsMove_Magnitude_{b}' for b in [
-                'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
-                'Early_VeryEarly', 'Early_MidRange', 'Early_LateGame', 'Early_Urgent',
-                'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
-                'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
+            f'OddsMove_Magnitude_{b}'
+            for b in [
+                'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+                'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+                'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+                'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
             ]
-        ]   
-        features += hybrid_timing_features
-        features += hybrid_odds_timing_features
-        features += [c for c in history_present if c not in features]
-        features += [
-            # 🔮 Historical team model performance
-            'Team_Past_Avg_Model_Prob',
-            'Team_Past_Hit_Rate',
-            'Team_Past_Avg_Model_Prob_Home',
-            'Team_Past_Hit_Rate_Home',
-            'Team_Past_Avg_Model_Prob_Away',
-            'Team_Past_Hit_Rate_Away',
-            'Team_Past_Avg_Model_Prob_Fav',
-            'Team_Past_Hit_Rate_Fav',
-            'Team_Past_Avg_Model_Prob_Home_Fav',
-            'Team_Past_Hit_Rate_Home_Fav',
-            'Team_Past_Avg_Model_Prob_Away_Fav',
-            'Team_Past_Hit_Rate_Away_Fav',
-        
-            # 🔥 Recent cover streak stats (overall + home/away)
-            'Avg_Recent_Cover_Streak',
-            'Avg_Recent_Cover_Streak_Home',
-            'Avg_Recent_Cover_Streak_Away',
-            'Avg_Recent_Cover_Streak_Fav',
-            'Avg_Recent_Cover_Streak_Home_Fav',
-            'Avg_Recent_Cover_Streak_Away_Fav',  
-                   
         ]
-        df_market = add_time_context_flags(df_market, sport=sport)
+        extend_unique(features, hybrid_timing_features)
+        extend_unique(features, hybrid_odds_timing_features)
         
-        # add to features
-        features += [
-            'Is_Weekend',
-            'Is_Night_Game',
-            'Is_PrimeTime',      # if you kept it
-            'DOW_Sin','DOW_Cos' # if you enabled cyclical
-        ]
-
-
-        st.markdown(f"### 📈 Features Used: `{len(features)}`")
+        # add historical/streak features you computed earlier (schema-safe list)
+        extend_unique(features, [c for c in history_present if c not in features])
+        
+        # add recent team model performance stats
+        extend_unique(features, [
+            'Team_Past_Avg_Model_Prob','Team_Past_Hit_Rate',
+            'Team_Past_Avg_Model_Prob_Home','Team_Past_Hit_Rate_Home',
+            'Team_Past_Avg_Model_Prob_Away','Team_Past_Hit_Rate_Away',
+            'Team_Past_Avg_Model_Prob_Fav','Team_Past_Hit_Rate_Fav',
+            'Team_Past_Avg_Model_Prob_Home_Fav','Team_Past_Hit_Rate_Home_Fav',
+            'Team_Past_Avg_Model_Prob_Away_Fav','Team_Past_Hit_Rate_Away_Fav',
+            'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
+            'Avg_Recent_Cover_Streak_Away','Avg_Recent_Cover_Streak_Fav',
+            'Avg_Recent_Cover_Streak_Home_Fav','Avg_Recent_Cover_Streak_Away_Fav'
+        ])
+        
+        # add time-context flags
+        extend_unique(features, ['Is_Weekend','Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos'])
+        
+        # merge view-driven features (all_present) without losing order
+        if 'all_present' in locals():
+            extend_unique(features, all_present)
+        
+        # ======= IMPORTANT: work with df_market from here on =======
+        
+        # Make sure df_market has placeholders for requested feature columns (0 default)
         df_market = ensure_columns(df_market, features, 0)
-
-        X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0).astype(float)
-        # Step: Check for multicollinearity in features
-        corr_matrix = X.corr().abs()
         
-        # Threshold for flagging redundancy
-        threshold = 0.85
+        # Now prune to columns that actually exist (or were just ensured)
+        missing_in_market = [c for c in features if c not in df_market.columns]
+        if missing_in_market:
+            st.write(f"ℹ️ Dropping {len(missing_in_market)} missing feature(s): "
+                     f"{sorted(missing_in_market)[:20]}{'...' if len(missing_in_market)>20 else ''}")
         
-        # Collect highly correlated feature pairs (excluding self-pairs)
-        high_corr_pairs = []
-        for i in range(len(corr_matrix.columns)):
-            for j in range(i + 1, len(corr_matrix.columns)):
-                f1 = corr_matrix.columns[i]
-                f2 = corr_matrix.columns[j]
-                corr = corr_matrix.iloc[i, j]
-                if corr > threshold:
-                    high_corr_pairs.append((f1, f2, corr))
+        features = [c for c in features if c in df_market.columns]
         
-        # Display as DataFrame
-        if high_corr_pairs:
-            df_corr = pd.DataFrame(high_corr_pairs, columns=['Feature_1', 'Feature_2', 'Correlation'])
-            df_corr = df_corr.sort_values(by='Correlation', ascending=False)
-            
-            st.subheader(f"🔁 Highly Correlated Features — {market.upper()}")
-            st.dataframe(df_corr)
+        st.markdown(f"### 📈 Features Used: `{len(features)}`")
+        
+        # final dataset for modeling
+        X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0.0).astype(float)
+        
+        # Correlation check (robust to NaNs/constant columns)
+        try:
+            corr_matrix = X.corr(numeric_only=True).abs()
+            threshold = 0.85
+            high_corr_pairs = []
+            cols = corr_matrix.columns.tolist()
+            for i in range(len(cols)):
+                for j in range(i + 1, len(cols)):
+                    corr = corr_matrix.iat[i, j]
+                    if pd.notna(corr) and corr > threshold:
+                        high_corr_pairs.append((cols[i], cols[j], corr))
+            if high_corr_pairs:
+                df_corr = (pd.DataFrame(high_corr_pairs, columns=['Feature_1','Feature_2','Correlation'])
+                             .sort_values('Correlation', ascending=False))
+                title_market = market.upper() if 'market' in locals() else 'MARKET'
+                st.subheader(f"🔁 Highly Correlated Features — {title_market}")
+                st.dataframe(df_corr)
+            else:
+                st.success("✅ No highly correlated feature pairs found")
+        except Exception as e:
+            st.write(f"Correlation check skipped: {e}")
+        
+        # target
+        if 'SHARP_HIT_BOOL' not in df_market.columns:
+            st.warning("⚠️ Missing SHARP_HIT_BOOL in df_market — skipping.")
+            # handle skip/continue in your loop as appropriate
         else:
-            st.success("✅ No highly correlated feature pairs found")
-        y = df_market['SHARP_HIT_BOOL'].astype(int)
-        
-        # === Abort early if label has only one class
-        if y.nunique() < 2:
-            st.warning(f"⚠️ Skipping {market.upper()} — only one label class.")
-            pb.progress(int(round(idx / n_markets * 100)))
-            continue
+            y = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(int)
+            if y.nunique() < 2:
+                title_market = market.upper() if 'market' in locals() else 'MARKET'
+                st.warning(f"⚠️ Skipping {title_market} — only one label class.")
+        # continue / return in your loop
       
         # ===============================
         # Purged Group Time-Series CV (PGTSCV) + Embargo
