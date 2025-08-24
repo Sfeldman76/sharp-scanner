@@ -1563,7 +1563,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         "ATS_Cover_Margin_Last5_Prior_Mean",
         "ATS_Cover_Margin_Last5_Prior_Std",
         # (optional per-game instantaneous margin if you want it)
-        "ATS_Cover_Margin",
+       
     ]
     
     # === Opponent mirrors (prior-only, last-5) ===
