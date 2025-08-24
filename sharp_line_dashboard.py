@@ -2450,7 +2450,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['PR_Abs_Rating_Diff'] = df_market['PR_Rating_Diff'].abs()
         #df_market['PR_Total_Est']       = (df_market['PR_Team_Off'] + df_market['PR_Opp_Off'] - df_market['PR_Team_Def'] - df_market['PR_Opp_Def'])
 
-                       `# helper to extend without dupes (order-preserving)
+        # helper to extend without dupes (order-preserving)
         def extend_unique(base, items):
             for c in items:
                 if c not in base:
