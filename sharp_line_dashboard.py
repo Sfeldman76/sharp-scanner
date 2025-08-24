@@ -2374,65 +2374,65 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = [
         
             # 🔹 Core sharp signals
-            #'Sharp_Move_Signal', 'Sharp_Limit_Jump', #'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT',
-            #'Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket', 'Market_Leader', #'LimitUp_NoMove_Flag',
+            'Sharp_Move_Signal', 'Sharp_Limit_Jump', 'Sharp_Time_Score', 'Book_lift_x_Sharp', 'Book_lift_x_Magnitude', 'Book_lift_x_PROB_SHIFT',
+            'Sharp_Limit_Total',
+            'Is_Reinforced_MultiMarket', 'Market_Leader', 'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            #'Sharp_Line_Magnitude', #'Is_Home_Team_Bet',
+            'Sharp_Line_Magnitude', 'Is_Home_Team_Bet',
             'Team_Implied_Prob_Gap_Home', 'Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
-            #'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'SharpMove_Odds_Mag',
+            'SharpMove_Odds_Up', 'SharpMove_Odds_Down', 'SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
-            'MarketLeader_ImpProbShift', #'LimitProtect_SharpMag',
+            'MarketLeader_ImpProbShift', 'LimitProtect_SharpMag',
             'Delta_Sharp_vs_Rec',
-            #'Sharp_Leads',
+            'Sharp_Leads',
             
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag', 'Odds_Reversal_Flag',
         
             # 🔥 Timing flags
-            #'Late_Game_Steam_Flag',
+            'Late_Game_Steam_Flag',
             
-            #'Abs_Line_Move_From_Opening',
-            #'Abs_Odds_Move_From_Opening', 
+            'Abs_Line_Move_From_Opening',
+            'Abs_Odds_Move_From_Opening', 
             'Market_Mispricing', #'Abs_Market_Mispricing',
             'Spread_vs_H2H_Aligned',
-            #'Total_vs_Spread_Contradiction',
-            #'Spread_vs_H2H_ProbGap',
-            #'Total_vs_H2H_ProbGap',
-            #'Total_vs_Spread_ProbGap',
+            'Total_vs_Spread_Contradiction',
+            'Spread_vs_H2H_ProbGap',
+            'Total_vs_H2H_ProbGap',
+            'Total_vs_Spread_ProbGap',
             'CrossMarket_Prob_Gap_Exists',
             
             'Line_Moved_Away_From_Team',            
             'Pct_Line_Move_From_Opening', 
-            #'Pct_Line_Move_Bin',
+            'Pct_Line_Move_Bin',
             'Potential_Overmove_Flag', 
             'Potential_Overmove_Total_Pct_Flag', 'Mispricing_Flag',
         
             # 🧠 Cross-market alignment                       
             'Potential_Odds_Overmove_Flag',
             'Line_Moved_Toward_Team',
-            #'Abs_Line_Move_Z',
+            'Abs_Line_Move_Z',
             'Pct_Line_Move_Z', 
-            #'SmallBook_Limit_Skew',
+            'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag',
             'SmallBook_Limit_Skew_Flag',
-            #'Book_Reliability_Score',
+            'Book_Reliability_Score',
             'Book_Reliability_Lift',
-            #'Book_Reliability_x_Sharp',
+            'Book_Reliability_x_Sharp',
             'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
             'PR_Team_Rating','PR_Opp_Rating',
-            'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
+            'PR_Rating_Diff','PR_Abs_Rating_Diff',
             'Outcome_Model_Spread',
             'Outcome_Market_Spread',
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',                  
-            'model_fav_vs_market_fav_agree',            
+            'model_fav_vs_market_fav_agree', 'edge_pts'           
          
             
         ]
@@ -2492,7 +2492,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # add to features
         features += [
-            #'Is_Weekend',
+            'Is_Weekend',
             'Is_Night_Game',
             'Is_PrimeTime',      # if you kept it
             'DOW_Sin','DOW_Cos' # if you enabled cyclical
