@@ -994,20 +994,36 @@ def _iso(ts) -> str:
 
 # --- HISTORY-ONLY FETCH (CACHED FOR STREAMLIT) ---
 @st.cache_data(ttl=900, show_spinner=False)
+
+def _resolve_rating_col(bq: bigquery.Client, table_fq: str) -> str:
+    project, dataset, table = table_fq.split(".")
+    q = f"""
+    SELECT UPPER(column_name) AS col
+    FROM `{project}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
+    WHERE table_name = '{table}'
+    """
+    cols = {r.col for r in bq.query(q).result()}
+    for cand in ("PR_TEAM_RATING", "POINTS_RATING", "RATING"):
+        if cand in cols:
+            return cand  # return uppercase
+    raise RuntimeError(f"No rating column found in {table_fq}. Found: {sorted(cols)}")
+
 def fetch_training_ratings_window_cached(
     sport: str, start_iso: str, end_iso: str,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     project: str = "sharplogger",
-) -> pd.DataFrame:
+):
     bq = bigquery.Client(project=project)
-    sql = """
+    rating_col = _resolve_rating_col(bq, table_history)  # e.g. "PR_TEAM_RATING"
+    # Use the resolved column and alias it to Power_Rating
+    sql = f"""
       WITH base AS (
         SELECT
           UPPER(Sport) AS Sport,
           LOWER(TRIM(Team)) AS Team_Norm,
           TIMESTAMP(Updated_At) AS AsOfTS,
-          CAST(Rating AS FLOAT64) AS Power_Rating
-        FROM `""" + table_history + """`
+          CAST(`{rating_col}` AS FLOAT64) AS Power_Rating
+        FROM `{table_history}`
         WHERE UPPER(Sport) = @sport
           AND Updated_At BETWEEN @start_ts AND @end_ts
       ),
@@ -1023,28 +1039,41 @@ def fetch_training_ratings_window_cached(
       FROM dedup
       WHERE rn = 1
     """
-    job = bq.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            use_query_cache=True,
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport",    "STRING", sport.upper()),
-                bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", pd.to_datetime(start_iso).to_pydatetime()),
-                bigquery.ScalarQueryParameter("end_ts",   "TIMESTAMP", pd.to_datetime(end_iso).to_pydatetime()),
-            ],
-        ),
+
+    # Optional: dry-run to surface exact parse errors before execution
+    job_cfg = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False,
+        query_parameters=[
+            bigquery.ScalarQueryParameter("sport",    "STRING", sport.upper()),
+            bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", pd.to_datetime(start_iso).to_pydatetime()),
+            bigquery.ScalarQueryParameter("end_ts",   "TIMESTAMP", pd.to_datetime(end_iso).to_pydatetime()),
+        ],
     )
-    df = job.to_dataframe()
-    if df.empty: return df
+    try:
+        bq.query(sql, job_config=job_cfg).result()
+    except Exception as e:
+        print("❌ Dry run error:", e)
+        print("SQL was:\n", sql)
+        raise
+
+    # Real run
+    job_cfg = bigquery.QueryJobConfig(
+        use_query_cache=True,
+        query_parameters=[
+            bigquery.ScalarQueryParameter("sport",    "STRING", sport.upper()),
+            bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", pd.to_datetime(start_iso).to_pydatetime()),
+            bigquery.ScalarQueryParameter("end_ts",   "TIMESTAMP", pd.to_datetime(end_iso).to_pydatetime()),
+        ],
+    )
+    df = bq.query(sql, job_config=job_cfg).result().to_dataframe()
+    if df.empty:
+        return df
 
     df = df[['Sport','Team_Norm','AsOfTS','Power_Rating']].copy()
     df['AsOfTS'] = pd.to_datetime(df['AsOfTS'], utc=True, errors='coerce')
     df['Power_Rating'] = pd.to_numeric(df['Power_Rating'], errors='coerce').astype('float32')
-    # keep join keys as strings here (avoid category merge issues)
     df['Sport'] = df['Sport'].astype(str)
     df['Team_Norm'] = df['Team_Norm'].astype(str)
     return df
-
 # --- TRAINING ENRICHMENT (LEAK-SAFE) ---
 
 
