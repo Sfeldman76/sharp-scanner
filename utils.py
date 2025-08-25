@@ -6240,19 +6240,41 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
     df_scores_out['Sport'] = sport_label.upper()
     
     # === Normalize and unify sport labels
-    df_scores_out['Sport'] = df_scores_out['Sport'].replace({
-        'BASEBALL_MLB': 'MLB',
-        'BASKETBALL_NBA': 'NBA',
-        'BASKETBALL_WNBA': 'WNBA',
-        'FOOTBALL_CFL': 'CFL',
-        'FOOTBALL_NCAAF' : 'NCAAF'
-        'MLB': 'MLB',  # handles redundancy safely
-        'NBA': 'NBA',
-        'WNBA': 'WNBA',
-        'CFL': 'CFL',
-        'NFL': 'NFL',
-        'NCAAF': 'NCAAF',
-    }).str.upper()
+    # === Normalize and unify sport labels
+    df_scores_out['Sport'] = (
+        df_scores_out['Sport']
+          .astype(str).str.strip().str.upper()
+          .replace({
+              # Baseball
+              'BASEBALL_MLB': 'MLB',
+              'BASEBALL-MLB': 'MLB',
+              'BASEBALL':     'MLB',
+              'MLB':          'MLB',
+    
+              # Basketball
+              'BASKETBALL_NBA':  'NBA',
+              'NBA':             'NBA',
+              'BASKETBALL_WNBA': 'WNBA',
+              'WNBA':            'WNBA',
+    
+              # Football – NFL
+              'AMERICANFOOTBALL_NFL': 'NFL',
+              'FOOTBALL_NFL':         'NFL',
+              'NFL':                  'NFL',
+    
+              # Football – NCAAF (college)
+              'AMERICANFOOTBALL_NCAAF': 'NCAAF',
+              'FOOTBALL_NCAAF':         'NCAAF',
+              'CFB':                    'NCAAF',
+              'NCAAF':                  'NCAAF',
+    
+              # Football – CFL (Canadian)
+              'FOOTBALL_CFL':     'CFL',
+              'CANADIANFOOTBALL': 'CFL',
+              'CANADIAN_FOOTBALL':'CFL',
+              'CFL':              'CFL',
+          })
+    )
     
     if 'Snapshot_Timestamp' in df.columns:
         df_scores_out['Snapshot_Timestamp'] = df['Snapshot_Timestamp']
