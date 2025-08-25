@@ -5143,7 +5143,15 @@ def detect_sharp_moves(
     # ─────────────────────────────────────────────────────────
     # 8) Score (avoid extra copies) + housekeeping
     # ─────────────────────────────────────────────────────────
-    market_weights = load_market_weights_from_bq(sport_label, days_back=14) if HAS_MODELS else {}
+    # ---- normalize flags
+    if has_models is None:
+        has_models = bool(trained_models)
+    
+    # ---- NEVER self-load weights here; use what the caller passed
+    if weights is None:
+        # if no models, empty weights; if models but none provided, still proceed with {}
+        weights = {}  # keep it simple; caller decides whether to load real weights
+
 
    
     now = pd.Timestamp.utcnow()
