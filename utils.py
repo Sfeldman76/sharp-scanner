@@ -614,72 +614,62 @@ def update_power_ratings(
         return float(min(max(mov, -cap), cap))
 
     def run_kalman_elo(bq, sport: str, aliases: list[str], cfg: dict, window_start):
-        """Kalman/DLM on point margins. Stores 1500+points_rating with Method='elo_kalman'."""
         phi        = float(cfg.get("phi", 0.96))
-        sigma_eta  = float(cfg.get("sigma_eta", 6.0))   # process sd (points)
-        sigma_y    = float(cfg.get("sigma_y", 13.0))    # obs sd (points)
+        sigma_eta  = float(cfg.get("sigma_eta", 6.0))
+        sigma_y    = float(cfg.get("sigma_y", 13.0))
         mov_cap    = cfg.get("mov_cap", None)
         HFA_pts    = float(cfg.get("HFA_pts", 2.0))
-
-        r_mean: dict[str, float] = {}   # points scale
-        r_var:  dict[str, float] = {}   # variance on points
-        def _m(team): return r_mean.get(team, 0.0)
-        def _v(team): return r_var.get(team, 100.0)
-
-        history_batch = []
-        BATCH_SZ = 50_000
-
+    
+        r_mean, r_var = {}, {}
+        def _m(t): return r_mean.get(t, 0.0)
+        def _v(t): return r_var.get(t, 100.0)
+    
+        history_batch, BATCH_SZ = [], 50_000
+    
         for chunk in load_games_stream(sport, aliases, cutoff=window_start, page_rows=200_000):
             for _, g in chunk.iterrows():
                 h, a = g.Home_Team, g.Away_Team
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
                 mov = _cap_margin(hs - as_, mov_cap)
-
+    
                 Rh, Ra = _m(h), _m(a)
                 Vh, Va = _v(h), _v(a)
-
-                y_hat = (Rh - Ra + (0.0 if bool(g.Neutral_Site) else HFA_pts))
+    
+                # ⬇️ no neutral logic; always add HFA_pts for home team
+                y_hat = (Rh - Ra + HFA_pts)
                 e = mov - y_hat
                 S = Vh + Va + sigma_y**2
                 if S <= 0: S = 1e-6
-                Kh = Vh / S
-                Ka = Va / S
-
-                # posterior
-                Rh_post = Rh + Kh * e
-                Ra_post = Ra - Ka * e
-                Vh_post = Vh - Kh * Vh
-                Va_post = Va - Ka * Va
-
-                # time propagate
-                Rh_next = phi * Rh_post
-                Ra_next = phi * Ra_post
-                Vh_next = (phi**2) * Vh_post + (sigma_eta**2)
-                Va_next = (phi**2) * Va_post + (sigma_eta**2)
-
+                Kh, Ka = Vh / S, Va / S
+    
+                Rh_post, Ra_post = Rh + Kh*e, Ra - Ka*e
+                Vh_post, Va_post = Vh - Kh*Vh, Va - Ka*Va
+    
+                Rh_next, Ra_next = phi*Rh_post, phi*Ra_post
+                Vh_next, Va_next = (phi**2)*Vh_post + sigma_eta**2, (phi**2)*Va_post + sigma_eta**2
+    
                 r_mean[h], r_var[h] = Rh_next, Vh_next
                 r_mean[a], r_var[a] = Ra_next, Va_next
-
+    
                 ts = g.Snapshot_TS
                 tag = "backfill" if window_start is None else "incremental"
                 history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + Rh_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
                 history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + Ra_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-
+    
                 if len(history_batch) >= BATCH_SZ:
                     bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
                     history_batch.clear()
             del chunk; gc.collect()
-
+    
         if history_batch:
             bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
-            history_batch.clear()
-
+    
         utc_now = pd.Timestamp.now(tz="UTC")
-        rows = [{"Sport": sport, "Team": t, "Rating": 1500.0 + r_mean[t],
+        return [{"Sport": sport, "Team": t, "Rating": 1500.0 + r_mean[t],
                  "Method": "elo_kalman", "Updated_At": utc_now} for t in r_mean.keys()]
-        return rows
+
 
     def run_ridge_massey(bq, sport: str, aliases: list[str], cfg: dict):
         """Ridge-Massey fit on recent window of finals. Stores 1500+points_rating with Method='ridge_massey'."""
@@ -693,7 +683,6 @@ def update_power_ratings(
           LOWER(TRIM(Away_Team)) AS away,
           SAFE_CAST(Score_Home_Score AS FLOAT64) AS hs,
           SAFE_CAST(Score_Away_Score AS FLOAT64) AS as_,
-          BOOL(IFNULL(Neutral_Site, FALSE)) AS neutral,
           TIMESTAMP(Game_Start) AS gs
         FROM `{project_table_scores}`
         WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
@@ -726,7 +715,7 @@ def update_power_ratings(
             hi, ai = idx[row.home], idx[row.away]
             X[i, hi] = 1.0
             X[i, ai] = -1.0
-            X[i, n]  = 0.0 if bool(row.neutral) else 1.0
+            X[i, n]  = 1.0
 
         XtX = X.T @ X
         XtX[:n, :n] += np.eye(n) * ridge_lambda
