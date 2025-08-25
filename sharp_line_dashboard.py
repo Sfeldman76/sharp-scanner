@@ -3100,11 +3100,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         
         # ----- final refit with early stopping on most-recent 15% -----
-        n = len(X_full); hold = max(1, int(round(n * 0.15)))
-        X_tr, y_tr = X_full[:-hold], y_full[:-hold].astype(int)
-        X_va, y_va = X_full[-hold:], y_full[-hold:].astype(int)
-        # alias for consistency with downstream code
-        X_val, y_val = X_va, y_va
+        # --- final time-forward holdout split (15% tail) ---
+        n = len(X_full)
+        hold = max(1, int(round(n * 0.15)))
+        
+        # indices for validation rows in the ORIGINAL order
+        val_idx = np.arange(n - hold, n)
+        
+        # split arrays
+        X_tr = X_full[: n - hold]
+        y_tr = y_full[: n - hold].astype(int)
+        
+        X_val = X_full[val_idx]                                  # NumPy array (fine for model.predict_proba)
+        y_val = pd.Series(y_full[val_idx].astype(int), index=val_idx)  # Pandas Series so .nunique(), alignment, merges work
 
         es = xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True, maximize=False)
         
@@ -3255,7 +3263,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- Build aligned evaluation frame
         df_eval = pd.DataFrame({
             "p": val_proba,
-            "y": pd.Series(y_val, index=val_idx),
+            "y": y_val, 
             "odds": pd.to_numeric(df_market.loc[val_idx, "Odds_Price"], errors="coerce"),
         })
         
