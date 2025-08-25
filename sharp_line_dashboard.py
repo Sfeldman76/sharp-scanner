@@ -1451,18 +1451,17 @@ def add_favorite_context_flag(df: pd.DataFrame) -> pd.DataFrame:
     out['Is_Favorite_Context'] = fav_flag
     return out
 
-# utils_totals.py
-import pandas as pd
-import numpy as np
 
-def build_totals_training_from_scores(df_scores: pd.DataFrame,
-                                      sport: str | None = None,
-                                      window_games: int = 10,
-                                      shrink: float = 0.30) -> pd.DataFrame:
+def build_totals_training_from_scores_fast(
+    df_scores: pd.DataFrame,
+    sport: str | None = None,
+    window_games: int = 10,
+    shrink: float = 0.30
+) -> pd.DataFrame:
     """
-    Returns one row per historical game with:
-      Game_Key, Proj_Total_Baseline, Off_H, Def_H, Off_A, Def_A, GT_H, GT_A, LgAvg_Total, Actual_Total
-    Uses only prior games (shifted) => leakage-safe.
+    Faster version of build_totals_training_from_scores.
+    Same columns: returns one row per historical game with
+      Game_Key + TOT_* features (including TOT_Actual_Total).
     """
     df = df_scores.copy()
     df["Game_Start"] = pd.to_datetime(df["Game_Start"])
@@ -1471,57 +1470,99 @@ def build_totals_training_from_scores(df_scores: pd.DataFrame,
     if sport:
         df = df[df["Sport"].str.upper() == sport.upper()].copy()
 
-    home = df.assign(team=df["Home_Team"], opp=df["Away_Team"],
-                     pts_for=df["Score_Home_Score"], pts_against=df["Score_Away_Score"])
-    away = df.assign(team=df["Away_Team"], opp=df["Home_Team"],
-                     pts_for=df["Score_Away_Score"], pts_against=df["Score_Home_Score"])
+    # Build long format (2 rows per game) with only needed cols
+    home = df.loc[:, ["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
+                      "Score_Home_Score","Score_Away_Score"]].rename(
+        columns={"Home_Team":"team","Away_Team":"opp",
+                 "Score_Home_Score":"pts_for","Score_Away_Score":"pts_against"}
+    )
+    away = df.loc[:, ["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
+                      "Score_Home_Score","Score_Away_Score"]].rename(
+        columns={"Away_Team":"team","Home_Team":"opp",
+                 "Score_Away_Score":"pts_for","Score_Home_Score":"pts_against"}
+    )
     long = pd.concat([home, away], ignore_index=True)
-    long = long.sort_values(["Season","team","Game_Start"]).reset_index(drop=True)
+
+    # (Small speed wins)
+    long["team"] = long["team"].astype("category")
+    long["Season"] = long["Season"].astype("int32")
+
+    # Sort once for all rolling ops
+    long = long.sort_values(["Season","team","Game_Start"], kind="mergesort").reset_index(drop=True)
     long["game_total"] = long["pts_for"] + long["pts_against"]
 
-    def _roll(x, col, w):
-        return x[col].rolling(w, min_periods=1).mean().shift(1)  # exclude current game
+    # --- Vectorized rolling means (exclude current game via shift) ---
+    gb = long.groupby(["Season","team"], sort=False)
 
-    long["pf_roll"] = long.groupby(["Season","team"], group_keys=False).apply(_roll, "pts_for", window_games)
-    long["pa_roll"] = long.groupby(["Season","team"], group_keys=False).apply(_roll, "pts_against", window_games)
-    long["gt_roll"] = long.groupby(["Season","team"], group_keys=False).apply(_roll, "game_total", window_games)
+    pf_roll = gb["pts_for"].rolling(window_games, min_periods=1).mean().reset_index(level=[0,1], drop=True)
+    pa_roll = gb["pts_against"].rolling(window_games, min_periods=1).mean().reset_index(level=[0,1], drop=True)
+    gt_roll = gb["game_total"].rolling(window_games, min_periods=1).mean().reset_index(level=[0,1], drop=True)
 
-    long["league_avg_total_prior"] = (long.groupby("Season")["game_total"]
-                                         .expanding().mean().reset_index(level=0, drop=True).shift(1))
-    long["league_avg_total_prior"] = long["league_avg_total_prior"].fillna(
-        long.groupby("Season")["game_total"].transform("mean")
-    )
+    long["pf_roll"] = pf_roll.shift(1)
+    long["pa_roll"] = pa_roll.shift(1)
+    long["gt_roll"] = gt_roll.shift(1)
 
+    # --- League expanding mean per season (exclude current) via cumsum/cumcount ---
+    gbs = long.groupby("Season", sort=False)
+    cum_sum = gbs["game_total"].cumsum() - long["game_total"]
+    counts  = gbs.cumcount()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        long["league_avg_total_prior"] = cum_sum / counts.replace(0, np.nan)
+
+    # Fill remaining NaNs with season mean (single pass)
+    season_mean = gbs["game_total"].transform("mean")
+    long["league_avg_total_prior"] = long["league_avg_total_prior"].fillna(season_mean)
+
+    # Ratings vs half-league average (shrunk)
     half = long["league_avg_total_prior"] / 2.0
-    long["Off_Rating"] = (1-shrink)*(long["pf_roll"] - half)
-    long["Def_Rating"] = (1-shrink)*(long["pa_roll"] - half)
+    long["Off_Rating"] = (1 - shrink) * (long["pf_roll"] - half)
+    long["Def_Rating"] = (1 - shrink) * (long["pa_roll"] - half)
 
-    ratings = long[["Sport","Season","Game_Key","Game_Start","team","opp",
-                    "Off_Rating","Def_Rating","gt_roll","league_avg_total_prior"]]
+    # Keep compact rating snapshot
+    ratings = long[[
+        "Sport","Season","Game_Key","Game_Start","team","opp",
+        "Off_Rating","Def_Rating","gt_roll","league_avg_total_prior"
+    ]]
 
-    home_r = ratings.rename(columns={"team":"Home_Team","opp":"Away_Team",
-                                     "Off_Rating":"Off_H","Def_Rating":"Def_H",
-                                     "gt_roll":"GT_H","league_avg_total_prior":"LgAvg_H"})
-    away_r = ratings.rename(columns={"team":"Away_Team","opp":"Home_Team",
-                                     "Off_Rating":"Off_A","Def_Rating":"Def_A",
-                                     "gt_roll":"GT_A","league_avg_total_prior":"LgAvg_A"})
+    # Build game-level table once
+    g = df[[
+        "Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
+        "Score_Home_Score","Score_Away_Score"
+    ]].drop_duplicates()
 
-    g = df[["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
-            "Score_Home_Score","Score_Away_Score"]].drop_duplicates()
-    g = (g.merge(home_r, on=["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team"], how="left")
-          .merge(away_r, on=["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team"], how="left"))
+    # Join home/away features using minimal keys (avoid joining on many cols)
+    # Home side
+    rH = ratings.rename(columns={
+        "team":"Home_Team","opp":"Away_Team",
+        "Off_Rating":"Off_H","Def_Rating":"Def_H",
+        "gt_roll":"GT_H","league_avg_total_prior":"LgAvg_H"
+    })[["Season","Game_Key","Home_Team","Off_H","Def_H","GT_H","LgAvg_H"]]
 
+    # Away side
+    rA = ratings.rename(columns={
+        "team":"Away_Team","opp":"Home_Team",
+        "Off_Rating":"Off_A","Def_Rating":"Def_A",
+        "gt_roll":"GT_A","league_avg_total_prior":"LgAvg_A"
+    })[["Season","Game_Key","Away_Team","Off_A","Def_A","GT_A","LgAvg_A"]]
+
+    g = g.merge(rH, on=["Season","Game_Key","Home_Team"], how="left")
+    g = g.merge(rA, on=["Season","Game_Key","Away_Team"], how="left")
+
+    # Build projection
     g["LgAvg_Total"] = g["LgAvg_H"].combine_first(g["LgAvg_A"])
-    base = (g["LgAvg_Total"]
-            + 0.5*(g["Off_H"].fillna(0)+g["Def_A"].fillna(0))
-            + 0.5*(g["Off_A"].fillna(0)+g["Def_H"].fillna(0)))
-    pace_mult = ((g["GT_H"].fillna(g["LgAvg_Total"]) + g["GT_A"].fillna(g["LgAvg_Total"])) /
-                 (2.0 * g["LgAvg_Total"].replace(0, np.nan))).clip(0.8, 1.2).fillna(1.0)
+    base = (
+        g["LgAvg_Total"]
+        + 0.5*(g["Off_H"].fillna(0) + g["Def_A"].fillna(0))
+        + 0.5*(g["Off_A"].fillna(0) + g["Def_H"].fillna(0))
+    )
+    pace_mult = (
+        (g["GT_H"].fillna(g["LgAvg_Total"]) + g["GT_A"].fillna(g["LgAvg_Total"])) /
+        (2.0 * g["LgAvg_Total"].replace(0, np.nan))
+    ).clip(0.8, 1.2).fillna(1.0)
     g["Proj_Total_Baseline"] = base * pace_mult
 
     g["Actual_Total"] = g["Score_Home_Score"].astype(float) + g["Score_Away_Score"].astype(float)
 
-    # Prefix so they’re easy to spot in your feature list
     cols = ["Proj_Total_Baseline","Off_H","Def_H","Off_A","Def_A","GT_H","GT_A","LgAvg_Total","Actual_Total"]
     g = g[["Game_Key"] + cols].rename(columns={c: f"TOT_{c}" for c in cols})
     return g
@@ -3028,20 +3069,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         model_auc = rs_auc.best_estimator_
         
         # --- OOF predictions for isotonic (fast + accurate) ---
-       
-        
-        oof_pred_logloss = np.zeros(len(y_full), dtype=float)
-        oof_pred_auc     = np.zeros(len(y_full), dtype=float)
+        oof_pred_logloss = np.full(len(y_full), np.nan, dtype=float)
+        oof_pred_auc     = np.full(len(y_full), np.nan, dtype=float)
         
         for tr_idx, va_idx in cv_for_search:
             X_tr, X_va = X_full[tr_idx], X_full[va_idx]
             y_tr       = y_full[tr_idx]
         
-            m_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params()})
-            m_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params()})
-            # keep search budget for OOF speed
-            m_log.set_params(n_estimators=search_estimators)
-            m_auc.set_params(n_estimators=search_estimators)
+            m_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": search_estimators})
+            m_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": search_estimators})
         
             m_log.fit(X_tr, y_tr, verbose=False)
             m_auc.fit(X_tr, y_tr, verbose=False)
@@ -3049,19 +3085,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             oof_pred_logloss[va_idx] = m_log.predict_proba(X_va)[:, 1]
             oof_pred_auc[va_idx]     = m_auc.predict_proba(X_va)[:, 1]
         
-        # 50/50 blend (often as good/better); you can learn weights later
-        oof_blend = 0.5 * oof_pred_logloss + 0.5 * oof_pred_auc
+        # mask out any rows not scored due to skipped folds
+        mask_oof = ~np.isnan(oof_pred_logloss) & ~np.isnan(oof_pred_auc)
+        if mask_oof.sum() < 50:
+            raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
         
-        # --- Isotonic on OOF (fast + strong calibration)
-        from sklearn.isotonic import IsotonicRegression
-        iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend, y_full)
+        oof_blend = 0.5 * oof_pred_logloss[mask_oof] + 0.5 * oof_pred_auc[mask_oof]
+        y_oof     = y_full[mask_oof].astype(int)
         
-        # --- final refit with early stopping on most-recent 15% ---
+        # ----- Isotonic on OOF -----
+        iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend, y_oof)
+        
+        # Optional: wrapper so we can use predict_proba later
+        class IsoWrapper:
+            def __init__(self, base, iso):
+                self.base = base; self.iso = iso
+            def predict_proba(self, X):
+                p = self.base.predict_proba(X)[:, 1]
+                p_cal = np.clip(self.iso.transform(p), 1e-6, 1-1e-6)
+                return np.vstack([1 - p_cal, p_cal]).T
+        
+        # ----- final refit with early stopping on most-recent 15% -----
         n = len(X_full); hold = max(1, int(round(n * 0.15)))
-        X_tr, y_tr = X_full[:-hold], y_full[:-hold]
-        X_va, y_va = X_full[-hold:], y_full[-hold:]
+        X_tr, y_tr = X_full[:-hold], y_full[:-hold].astype(int)
+        X_va, y_va = X_full[-hold:], y_full[-hold:].astype(int)
         
-        # refit two models with *high cap* + early stopping for accuracy
         es = xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True, maximize=False)
         
         final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
@@ -3069,18 +3117,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         final_log.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
         final_auc.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
+        class IsoWrapper:
+            def __init__(self, base, iso):
+                self.base = base
+                self.iso = iso
+            def predict_proba(self, X):
+                p = self.base.predict_proba(X)[:, 1]
+                p_cal = np.clip(self.iso.transform(p), 1e-6, 1-1e-6)
+                return np.vstack([1 - p_cal, p_cal]).T
+                
+        cal_logloss = IsoWrapper(final_log, iso)
+        cal_auc     = IsoWrapper(final_auc, iso)
         
-        # calibrated predictions on validation
-        p_ll = final_log.predict_proba(X_va)[:, 1]
-        p_au = final_auc.predict_proba(X_va)[:, 1]
+        # ----- holdout metrics (blended + calibrated) -----
+        p_ll = cal_logloss.predict_proba(X_va)[:, 1]
+        p_au = cal_auc.predict_proba(X_va)[:, 1]
         p_blend = 0.5 * p_ll + 0.5 * p_au
-        p_cal = np.clip(iso.transform(p_blend), 1e-6, 1-1e-6)
+        p_cal = np.clip(p_blend, 1e-6, 1-1e-6)
         
-        # metrics
-        auc = roc_auc_score(y_va, p_cal) if np.unique(y_va).size == 2 else np.nan
-        ll  = log_loss(y_va, p_cal, labels=[0,1]) if np.unique(y_va).size == 2 else np.nan
-        bri = brier_score_loss(y_va, p_cal) if np.unique(y_va).size == 2 else np.nan
-
+        def safe_auc(y, p):  return roc_auc_score(y, p) if np.unique(y).size == 2 else np.nan
+        def safe_ll(y, p):   return log_loss(y, p, labels=[0,1]) if np.unique(y).size == 2 else np.nan
+        def safe_brier(y, p):return brier_score_loss(y, p) if np.unique(y).size == 2 else np.nan
+        
+        auc = safe_auc(y_va, p_cal)
+        ll  = safe_ll(y_va, p_cal)
+        bri = safe_brier(y_va, p_cal)
         
         st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
         st.write(f"- Blended+Calibrated AUC: `{auc:.4f}`")
