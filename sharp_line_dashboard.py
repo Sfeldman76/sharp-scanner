@@ -3176,146 +3176,65 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
 
         
-        # --- Helpers
-        def _american_to_roi(odds_series, outcome_bool):
-            """
-            Unit stake ROI given American odds and binary outcomes.
-            ROI = (return - stake)/stake. For a win:
-              - If odds > 0: profit = odds/100
-              - If odds < 0: profit = 100/|odds|
-            For a loss: -1
-            """
-            odds = pd.to_numeric(odds_series, errors='coerce')
-            win = pd.Series(outcome_bool).astype(int)
-            pos = (odds > 0).astype(int)
-
-            profit_on_win_pos = odds.where(odds > 0, np.nan) / 100.0
-            profit_on_win_neg = 100.0 / odds.abs()
-            profit_on_win = np.where(pos == 1, profit_on_win_pos, profit_on_win_neg)
-            profit_on_win = pd.Series(profit_on_win).fillna(0.0)
-
-            roi = win * profit_on_win - (1 - win) * 1.0
-            return roi
-
-        def _psi(expected, actual, bins=10):
-            """
-            Population Stability Index for numeric arrays.
-            Bins are derived from expected distribution.
-            """
-            exp = pd.to_numeric(pd.Series(expected).dropna(), errors='coerce')
-            act = pd.to_numeric(pd.Series(actual).dropna(), errors='coerce')
-            if exp.empty or act.empty:
-                return np.nan
-
-            # use quantiles from expected to define bins
-            qs = np.linspace(0, 1, bins + 1)
-            try:
-                cuts = np.unique(np.quantile(exp, qs))
-                if len(cuts) < 3:  # not enough spread
-                    return 0.0
-                exp_bins = pd.cut(exp, cuts, include_lowest=True)
-                act_bins = pd.cut(act, cuts, include_lowest=True)
-            except Exception:
-                return np.nan
-
-            exp_dist = exp_bins.value_counts(normalize=True).reindex(exp_bins.cat.categories, fill_value=0)
-            act_dist = act_bins.value_counts(normalize=True).reindex(exp_bins.cat.categories, fill_value=0)
-
-            # avoid log(0)
-            exp_dist = exp_dist.replace(0, 1e-6)
-            act_dist = act_dist.replace(0, 1e-6)
-
-            return float(((act_dist - exp_dist) * np.log(act_dist / exp_dist)).sum())
-
-        def _grade_psi(v):
-            if pd.isna(v):
-                return "n/a"
-            if v > 0.3:
-                return "🚨 heavy drift"
-            if v > 0.2:
-                return "⚠️ medium drift"
-            return "✅ stable"
-
-        # === 1) DRIFT & STABILITY (PSI) =======================================
-        st.markdown("### 🔁 Drift & Stability (PSI)")
-        # choose most recent 7 days in df_market as "live" window
-        if pd.api.types.is_datetime64_any_dtype(df_market['Snapshot_Timestamp']) and not df_market['Snapshot_Timestamp'].isna().all():
-            recent_end = df_market['Snapshot_Timestamp'].max()
-            recent_start = recent_end - pd.Timedelta(days=7)
-            df_recent = df_market[(df_market['Snapshot_Timestamp'] >= recent_start) & (df_market['Snapshot_Timestamp'] <= recent_end)]
-        else:
-            df_recent = pd.DataFrame()
-
-        # --- Build a DataFrame view for PSI (numeric only)
-        X_df = df_market.reindex(columns=features)
-        X_base = X_df.apply(pd.to_numeric, errors='coerce')
+        # --- blended + calibrated validation probabilities aligned to original rows ---
+        # assumes you already defined: val_idx, X_val (np.array), y_val (pd.Series with index=val_idx)
+        p_ll    = cal_logloss.predict_proba(X_val)[:, 1]
+        p_au    = cal_auc.predict_proba(X_val)[:, 1]
+        p_blend = 0.5 * p_ll + 0.5 * p_au
+        p_cal   = np.clip(p_blend, 1e-6, 1-1e-6)
         
-        psi_rows = []
-        if not df_recent.empty:
-            X_recent = df_recent.reindex(columns=features)
-            X_recent_num = X_recent.apply(pd.to_numeric, errors='coerce')
-        
-            # only compute PSI on shared cols
-            shared_cols = list(set(X_base.columns) & set(X_recent_num.columns))
-            for col in shared_cols:
-                try:
-                    v = _psi(X_base[col], X_recent_num[col])
-                    psi_rows.append((col, v, _grade_psi(v)))
-                except Exception:
-                    psi_rows.append((col, np.nan, "n/a"))
-        
-            df_psi = (pd.DataFrame(psi_rows, columns=["Feature", "PSI", "Assessment"])
-                        .sort_values("PSI", ascending=False))
-            st.dataframe(df_psi.head(30))
-        else:
-            st.info("No recent window found for PSI (missing or non-datetime Snapshot_Timestamp).")
-        
-        # === Validation indices from your time-forward split ===
-        # If you used the 15% tail split:
-        n = len(X_full)
-        hold = max(1, int(round(n * 0.15)))
-        val_idx = np.arange(n)[-hold:]   # indices of validation rows in original df
-        
-        # If you instead used a time mask earlier, you can do:
-        # val_idx = np.where(va_mask)[0]
-        
-        # --- Calibrated validation probabilities as a Series aligned to df rows
-        val_proba = pd.Series(cal_logloss.predict_proba(X_val)[:, 1], index=val_idx)
-        
-        # --- Build aligned evaluation frame
+        # Build aligned evaluation frame (index = original df rows for the val slice)
         df_eval = pd.DataFrame({
-            "p": val_proba,
-            "y": y_val, 
+            "p":   pd.Series(p_cal, index=val_idx),
+            "y":   y_val.astype(int),  # already a Series with val_idx
             "odds": pd.to_numeric(df_market.loc[val_idx, "Odds_Price"], errors="coerce"),
-        })
+        }).dropna(subset=["p", "y"])   # keep rows with both prob and label
         
-        # --- Probability bins
-        bins = np.linspace(0, 1, 11)
-        labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
-        cuts = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
+        # --- probability bins (0.0–1.0 by 0.1) ---
+        bins   = np.linspace(0, 1, 11)
+        labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins) - 1)]
+        cuts   = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
         
-        # --- Per-bin metrics
-        out_rows = []
+        # helper: ROI per bin (only if we have odds)
+        def _roi_mean(sub: pd.DataFrame) -> float:
+            if sub["odds"].notna().any():
+                return float(_american_to_roi(sub["odds"], sub["y"]).mean())
+            return float("nan")
+        
+        # aggregate per bin
+        out = []
         for lb in labels:
             sub = df_eval[cuts == lb]
-            nbin = int(len(sub))
-            if nbin == 0:
-                out_rows.append((lb, 0, np.nan, np.nan, np.nan))
+            n   = int(len(sub))
+            if n == 0:
+                out.append((lb, 0, np.nan, np.nan, np.nan))
                 continue
-        
-            hr = float(sub["y"].mean())
-            roi = float(_american_to_roi(sub["odds"], sub["y"]).mean()) if sub["odds"].notna().any() else np.nan
+            hit   = float(sub["y"].mean())
+            roi   = _roi_mean(sub)
             avg_p = float(sub["p"].mean())
-            out_rows.append((lb, nbin, hr, roi, avg_p))
+            out.append((lb, n, hit, roi, avg_p))
         
-        df_bins = pd.DataFrame(out_rows, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
+        df_bins = pd.DataFrame(out, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
         df_bins["N"] = df_bins["N"].astype(int)
         
-        # --- Extreme-bucket snapshot
+        # show table
+        st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
+        st.dataframe(df_bins)
+        
+        # quick extreme-bucket snapshot (only if they’re non-empty)
         hi = df_bins.iloc[-1]
         lo = df_bins.iloc[0]
-        st.write(f"**High bin ({hi['Prob Bin']}):** N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}")
-        st.write(f"**Low bin  ({lo['Prob Bin']}):** N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}")
+        if hi["N"] > 0:
+            st.write(f"**High bin ({hi['Prob Bin']}):** N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}")
+        else:
+            st.write(f"**High bin ({hi['Prob Bin']}):** N=0")
+        if lo["N"] > 0:
+            st.write(f"**Low bin  ({lo['Prob Bin']}):** N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}")
+        else:
+            st.write(f"**Low bin  ({lo['Prob Bin']}):** N=0")
+        
+        # optional: show prediction distribution to explain empty extreme bins
+        # st.bar_chart(pd.Series(p_cal).value_counts(bins=10, normalize=True).sort_index())
 
 
         # === 3) ADVERSE SCENARIO REPLAY ======================================
