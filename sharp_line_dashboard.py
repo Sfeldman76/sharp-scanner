@@ -3021,180 +3021,101 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         cv_for_search = folds
         # --- small, regularized grid (we rely on early stopping, not n_estimators search) ---
 
+        # --- SPEED KNOBS ---
+        early_stopping_rounds = 100   # tighter patience; still stable
+        search_estimators     = 600   # train fewer trees during hyperparam search
+        final_estimators_cap  = 3000  # high cap for final; early stopping will cut it
+        n_folds               = 3     # purged folds
         
-        # --- search space (randomized, not exhaustive grid) ---
-        param_grid = {
-            "max_depth":         randint(2, 4),               # shallow trees
-            "learning_rate":     loguniform(1e-2, 6e-2),      # 0.01–0.06
-            "subsample":         uniform(0.6, 0.4),           # 0.6–1.0
-            "colsample_bytree":  uniform(0.5, 0.4),           # 0.5–0.9
-            "colsample_bynode":  uniform(0.6, 0.4),           # less features per split
+        # base kwargs for all classifiers
+        base_kwargs = dict(
+            objective="binary:logistic",
+            eval_metric="logloss",
+            tree_method="hist",          # if GPU available: "gpu_hist"
+            max_delta_step=1,
+            n_jobs=3,                    # avoid oversubscription with CV
+            scale_pos_weight=scale_pos_weight,
+            random_state=42,
+            importance_type="total_gain",
+            colsample_bynode=0.8,        # ↓ split cost
+            max_bin=128,                 # faster histograms
+        )
+        
+        # --- build purged folds (n_folds=3) ---
+        cv = PurgedGroupTimeSeriesSplit(
+            n_splits=n_folds,
+            embargo=embargo_td,
+            time_values=df_market[time_col].values,
+            min_val_size=20,
+        )
+        cv_for_search = list(cv.split(X_full, y_full, groups=groups))
+        if not cv_for_search:
+            from sklearn.model_selection import TimeSeriesSplit
+            cv_for_search = list(TimeSeriesSplit(n_splits=3).split(X_full, y_full))
+        
+        # --- randomized search space (scipy dists or small lists) ---
+        from scipy.stats import randint, loguniform, uniform
+        param_distributions = {
+            "max_depth":         randint(2, 4),
+            "learning_rate":     loguniform(1e-2, 6e-2),
+            "subsample":         uniform(0.6, 0.4),    # 0.6–1.0
+            "colsample_bytree":  uniform(0.5, 0.4),    # 0.5–0.9
             "min_child_weight":  randint(15, 40),
             "gamma":             uniform(0.1, 0.6),
             "reg_alpha":         loguniform(1.0, 50.0),
             "reg_lambda":        loguniform(5.0, 120.0),
-            "max_bin":           randint(96, 192),            # histogram bins → speed/accuracy tradeoff
+            # max_bin, colsample_bynode fixed in base_kwargs for stability/speed
         }
         
-        # --- imbalance weight ---
-        pos = float(y_full.sum())
-        scale_pos_weight = (len(y_full) - pos) / max(pos, 1.0)
+        from sklearn.model_selection import RandomizedSearchCV
+        import xgboost as xgb
         
-        # --- base estimator (early stopping will truncate) ---
-        base_kwargs = dict(
-            objective="binary:logistic",
-            eval_metric="logloss",
-            tree_method="hist",             # if GPU: "gpu_hist"
-            max_delta_step=1,
-            n_estimators=3000,              # high cap; rely on early stopping
-            n_jobs=3,                       # balance with CV outer jobs
-            scale_pos_weight=scale_pos_weight,
-            random_state=42,
-            importance_type="total_gain",
-        )
-
-     
-                # ---------- Manual grid CV with per-fold early stopping ----------
-
+        search_base = xgb.XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
         
-        early_stopping_rounds = 100  # tighter patience = faster, usually same quality
-        
-        # --- per-fold evaluation with early stopping ---
-        def evaluate_params(params) -> float:
-            scores = []
-            for tr_idx, va_idx in folds:
-                X_tr, y_tr = X_full[tr_idx], y_full[tr_idx]
-                X_va, y_va = X_full[va_idx], y_full[va_idx]
-        
-                es = xgb.callback.EarlyStopping(
-                    rounds=early_stopping_rounds,
-                    save_best=True,
-                    maximize=False  # logloss lower is better
-                )
-        
-                model = XGBClassifier(**base_kwargs, **params)
-                model.fit(
-                    X_tr, y_tr,
-                    eval_set=[(X_va, y_va)],
-                    callbacks=[es],
-                    verbose=False,
-                )
-        
-                p = model.predict_proba(X_va)[:, 1]
-                scores.append(log_loss(y_va, p, labels=[0, 1]))
-        
-            if not scores:
-                raise RuntimeError("No valid folds produced a score.")
-            return float(np.mean(scores))
-        
-        # --- randomized sampling over your param_grid of scipy distributions ---
-        rng = np.random.default_rng(42)
-        INT_KEYS = {"max_depth", "min_child_weight", "max_bin"}
-        
-        def _py(v):
-            # ensure plain Python scalars
-            if isinstance(v, (np.floating,)):
-                return float(v)
-            if isinstance(v, (np.integer,)):
-                return int(v)
-            return v
-        
-        def sample_params(space) -> dict:
-            params = {}
-            for k, v in space.items():
-                if hasattr(v, "rvs"):  # scipy.stats distribution
-                    seed = int(rng.integers(0, 2**32 - 1))
-                    val = v.rvs(random_state=seed)
-                    if k in INT_KEYS:
-                        val = int(round(val))
-                    params[k] = _py(val)
-                elif isinstance(v, (list, tuple)):
-                    params[k] = _py(rng.choice(v))
-                else:  # scalar
-                    params[k] = _py(v)
-            return params
-        
-        n_trials = 40  # 30–60 is a good range
-        best_score = float("inf")
-        best_params = None
-        
-        for _ in range(n_trials):
-            params = sample_params(param_grid)  # param_grid now holds distributions
-            score = evaluate_params(params)
-            if score < best_score:
-                best_score, best_params = score, params
-        
-        if best_params is None:
-            raise RuntimeError("No valid parameter set found.")
-        
-        # --- final refit with a most-recent holdout for early stopping ---
-        n = len(X_full)
-        hold = max(1, int(round(n * 0.15)))
-        X_tr, y_tr = X_full[:-hold], y_full[:-hold]
-        X_va, y_va = X_full[-hold:], y_full[-hold:]
-        
-        es_final = xgb.callback.EarlyStopping(
-            rounds=early_stopping_rounds,
-            save_best=True,
-            maximize=False
-        )
-        
-        best_model = XGBClassifier(**base_kwargs, **best_params)
-        best_model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_va, y_va)],
-            callbacks=[es_final],
-            verbose=False,
-        )
-     
-        # 1) Fast search: smaller n_estimators for speed (no early stopping inside RSV)
-        search_base = xgb.XGBClassifier(
-            **{**base_kwargs, "n_estimators": 600}  # smaller cap for search speed
-        )
-        
-        grid_logloss = RandomizedSearchCV(
+        rs_ll = RandomizedSearchCV(
             estimator=search_base,
-            param_distributions=param_grid,   # your scipy dists / lists
+            param_distributions=param_distributions,
             scoring="neg_log_loss",
-            cv=cv_for_search,                 # your purged-group folds
-            n_iter=50,
+            cv=cv_for_search,
+            n_iter=40,               # 30–60 good range
             n_jobs=3,
             verbose=1,
             random_state=42,
             refit=True,
         )
-        grid_logloss.fit(X_full, y_full, groups=groups)
-        model_logloss = grid_logloss.best_estimator_
+        rs_ll.fit(X_full, y_full, groups=groups)
+        model_logloss = rs_ll.best_estimator_
         
-        grid_auc = RandomizedSearchCV(
+        rs_auc = RandomizedSearchCV(
             estimator=search_base,
-            param_distributions=param_grid,
+            param_distributions=param_distributions,
             scoring="roc_auc",
             cv=cv_for_search,
-            n_iter=50,
+            n_iter=40,
             n_jobs=3,
             verbose=1,
-            random_state=42,
+            random_state=4242,
             refit=True,
         )
-        grid_auc.fit(X_full, y_full, groups=groups)
-        model_auc = grid_auc.best_estimator_
+        rs_auc.fit(X_full, y_full, groups=groups)
+        model_auc = rs_auc.best_estimator_
         
-        # 2) OOF predictions (use array indexing, not .iloc)
+        # --- OOF predictions for isotonic (fast + accurate) ---
+        import numpy as np
+        from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+        
         oof_pred_logloss = np.zeros(len(y_full), dtype=float)
         oof_pred_auc     = np.zeros(len(y_full), dtype=float)
         
         for tr_idx, va_idx in cv_for_search:
             X_tr, X_va = X_full[tr_idx], X_full[va_idx]
-            y_tr, y_va = y_full[tr_idx], y_full[va_idx]
+            y_tr       = y_full[tr_idx]
         
-            # clone with best params on top of base_kwargs
             m_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params()})
             m_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params()})
-        
-            # fit quickly for OOF (no early stopping here)
-            m_log.set_params(n_estimators=600)
-            m_auc.set_params(n_estimators=600)
+            # keep search budget for OOF speed
+            m_log.set_params(n_estimators=search_estimators)
+            m_auc.set_params(n_estimators=search_estimators)
         
             m_log.fit(X_tr, y_tr, verbose=False)
             m_auc.fit(X_tr, y_tr, verbose=False)
@@ -3202,68 +3123,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             oof_pred_logloss[va_idx] = m_log.predict_proba(X_va)[:, 1]
             oof_pred_auc[va_idx]     = m_auc.predict_proba(X_va)[:, 1]
         
-        # 3) Simple blend + diagnostics
+        # 50/50 blend (often as good/better); you can learn weights later
         oof_blend = 0.5 * oof_pred_logloss + 0.5 * oof_pred_auc
         
-        def _safe_auc(y, p):
-            return roc_auc_score(y, p) if np.unique(y).size > 1 else np.nan
+        # --- Isotonic on OOF (fast + strong calibration)
+        from sklearn.isotonic import IsotonicRegression
+        iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend, y_full)
         
-        oof_auc   = _safe_auc(y_full, oof_blend)
-        oof_ll    = log_loss(y_full, np.clip(oof_blend, 1e-6, 1-1e-6))
-        oof_brier = brier_score_loss(y_full, oof_blend)
+        # --- final refit with early stopping on most-recent 15% ---
+        n = len(X_full); hold = max(1, int(round(n * 0.15)))
+        X_tr, y_tr = X_full[:-hold], y_full[:-hold]
+        X_va, y_va = X_full[-hold:], y_full[-hold:]
         
-        def calibration_bins(y, p, n_bins=10):
-            df = pd.DataFrame({"y": np.asarray(y, float), "p": np.asarray(p, float)})
-            df["bin"] = pd.qcut(df["p"], q=n_bins, duplicates="drop")
-            out = (df.groupby("bin")
-                     .agg(count=("y","size"), avg_pred=("p","mean"), emp_rate=("y","mean"))
-                     .reset_index(drop=True))
-            out["abs_err"] = (out["avg_pred"] - out["emp_rate"]).abs()
-            return out
+        # refit two models with *high cap* + early stopping for accuracy
+        es = xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True, maximize=False)
         
-        calib_oof = calibration_bins(y_full, oof_blend, n_bins=10)
-        st.dataframe(calib_oof)
+        final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
+        final_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": final_estimators_cap})
         
-        # 4) Time-forward holdout split (use DataFrame/Series indexing – convert if needed)
-        # If X_full/y_full are arrays, derive masks from df_market and index arrays.
-        cut_time = df_market[time_col].quantile(0.75)
-        tr_mask = (df_market[time_col] <= cut_time).to_numpy()
-        va_mask = ~tr_mask
+        final_log.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
+        final_auc.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
         
-        X_train, y_train = X_full[tr_mask], y_full[tr_mask]
-        X_val,   y_val   = X_full[va_mask], y_full[va_mask]
+        # calibrated predictions on validation
+        p_ll = final_log.predict_proba(X_va)[:, 1]
+        p_au = final_auc.predict_proba(X_va)[:, 1]
+        p_blend = 0.5 * p_ll + 0.5 * p_au
+        p_cal = np.clip(iso.transform(p_blend), 1e-6, 1-1e-6)
         
-        if np.unique(y_train).size < 2 or np.unique(y_val).size < 2:
-            cut_time = df_market[time_col].quantile(0.80)
-            tr_mask = (df_market[time_col] <= cut_time).to_numpy()
-            va_mask = ~tr_mask
-            X_train, y_train = X_full[tr_mask], y_full[tr_mask]
-            X_val,   y_val   = X_full[va_mask], y_full[va_mask]
-        
-        # 5) Optional isotonic calibration (train-only)
-        from sklearn.model_selection import TimeSeriesSplit
-        from sklearn.calibration import CalibratedClassifierCV
-        from collections import Counter
-        
-        tscv_cal = TimeSeriesSplit(n_splits=3)
-        min_class_count = min(Counter(y_train).values()) if y_train.size else 0
-        
-        if min_class_count < 5:
-            st.warning(f"⚠️ Not enough samples per class for isotonic calibration — skipping.")
-            cal_logloss = model_logloss
-            cal_auc     = model_auc
-        else:
-            cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=tscv_cal).fit(X_train, y_train)
-            cal_auc     = CalibratedClassifierCV(model_auc,     method='isotonic', cv=tscv_cal).fit(X_train, y_train)
-        
-        # 6) Holdout metrics
-        p_ll = np.clip(cal_logloss.predict_proba(X_val)[:, 1], 1e-4, 1-1e-4)
-        p_au = np.clip(cal_auc.predict_proba(X_val)[:, 1],     1e-4, 1-1e-4)
-        
-        auc_ll = roc_auc_score(y_val, p_ll) if np.unique(y_val).size == 2 else np.nan
-        auc_au = roc_auc_score(y_val, p_au) if np.unique(y_val).size == 2 else np.nan
-        ll     = log_loss(y_val, p_au, labels=[0, 1]) if np.unique(y_val).size == 2 else np.nan
-        brier  = brier_score_loss(y_val, p_au) if np.unique(y_val).size == 2 else np.nan
+        # metrics
+        auc = roc_auc_score(y_va, p_cal) if np.unique(y_va).size == 2 else np.nan
+        ll  = log_loss(y_va, p_cal, labels=[0,1]) if np.unique(y_va).size == 2 else np.nan
+        bri = brier_score_loss(y_va, p_cal) if np.unique(y_va).size == 2 else np.nan
+
         
         st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
         st.write(f"- LogLoss Model AUC: `{auc_ll:.4f}`")
