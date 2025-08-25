@@ -3103,7 +3103,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         n = len(X_full); hold = max(1, int(round(n * 0.15)))
         X_tr, y_tr = X_full[:-hold], y_full[:-hold].astype(int)
         X_va, y_va = X_full[-hold:], y_full[-hold:].astype(int)
-        
+        # alias for consistency with downstream code
+        X_val, y_val = X_va, y_va
+
         es = xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True, maximize=False)
         
         final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
