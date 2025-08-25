@@ -1740,7 +1740,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
     team_cover_present = [c for c in team_cover_cols if c in df_bt.columns]
     opp_cover_present = [c for c in opp_cover_cols if c in df_bt.columns]
-    all_present = history_present + situational_flags_present + team_cover_present + opp_cover_present
+    all_present = history_present + team_cover_present + opp_cover_present
     
     # Optional: build diffs where both inputs exist
     for left, right, out in diff_specs:
