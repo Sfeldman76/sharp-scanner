@@ -133,6 +133,7 @@ def detect_and_save_all_sports():
             HAS_MODELS = bool(trained_models)
             logging.info(f"🧠 Models loaded for {sport_label}: {sorted(trained_models.keys()) or 'none'}")
             
+            
             if HAS_MODELS:
                 try:
                     market_weights = load_market_weights_from_bq(sport_label, days_back=14)
@@ -143,6 +144,23 @@ def detect_and_save_all_sports():
             else:
                 logging.info(f"⏭️ Skipping market weights for {sport_label} (HAS_MODELS=False)")
                 market_weights = {}
+
+            # --- Uniform fallback if weights missing/empty ---
+            if not market_weights:  # handles None or {}
+                present = set()
+                for g in current:
+                    for b in g.get("bookmakers", []) or []:
+                        for m in b.get("markets", []) or []:
+                            k = (m.get("key") or "").strip().lower()
+                            if k in ("spreads", "totals", "h2h"):
+                                present.add(k)
+                present = present or {"spreads", "totals", "h2h"}
+                market_weights = {m: 1.0 for m in present}
+                logging.info(
+                    f"✅ Using uniform weights=1.0 for {len(market_weights)} markets "
+                    f"({sport_label}): {sorted(market_weights)}"
+                )
+            
             # ---- 4) Detect sharp moves (detect computes Line_Hash)
             try:
                 df_moves, df_snap_unused, df_audit = detect_sharp_moves(
