@@ -116,21 +116,39 @@ def detect_and_save_all_sports():
             if not current or n_games == 0:
                 logging.warning(f"⚠️ No odds for {sport_label}, skipping…")
                 continue
-
-            # ---- 3) Load models (optional per market)
-            models_to_try = ["spreads", "totals", "h2h"]
-            trained_models = {}
-            for m in models_to_try:
+            
+            # ---- 3) Load models (optional per market) + conditional weights
+            MODELS_TO_TRY = ("spreads", "totals", "h2h")
+            
+            def load_models_for_sport(sport_label: str) -> dict:
+                models = {}
+                for m in MODELS_TO_TRY:
+                    try:
+                        mdl = load_model_from_gcs(sport_label, m)
+                        if mdl:
+                            models[m] = mdl
+                    except FileNotFoundError:
+                        logging.warning(f"⚠️ Model missing in GCS for {sport_label}-{m}; skipping that market.")
+                    except Exception as e:
+                        logging.warning(f"⚠️ Model load error for {sport_label}-{m}: {e}")
+                return models
+            
+            trained_models = load_models_for_sport(sport_label)
+            HAS_MODELS = bool(trained_models)
+            logging.info(f"🧠 Models loaded for {sport_label}: {sorted(trained_models.keys()) or 'none'}")
+            
+            # Only load weights when we actually have models
+            if HAS_MODELS:
                 try:
-                    model = load_model_from_gcs(sport_label, m)
-                    if model:
-                        trained_models[m] = model
-                except FileNotFoundError:
-                    logging.warning(f"⚠️ Model missing in GCS for {sport_label}-{m}; will skip model scoring for that market.")
+                    market_weights = load_market_weights_from_bq(sport_label, days_back=14)
+                    logging.info(f"✅ Loaded market weights for {len(market_weights) or 0} markets")
                 except Exception as e:
-                    logging.warning(f"⚠️ Model load error for {sport_label}-{m}: {e}")
+                    logging.warning(f"⚠️ Failed to load market weights for {sport_label}: {e}")
+                    market_weights = {}
+            else:
+                logging.info(f"⏭️ Skipping market weights for {sport_label} (HAS_MODELS=False)")
+                market_weights = {}
 
-            logging.info(f"🧠 Models loaded for {sport_label}: {list(trained_models.keys()) or 'none'}")
 
             # ---- 4) Detect sharp moves (detect computes Line_Hash)
             try:
