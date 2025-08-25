@@ -4882,13 +4882,10 @@ def detect_sharp_moves(
     if has_models is None:
         has_models = bool(trained_models)
 
-    # ---- NEVER self-load weights here; respect what caller passed
-    if weights is None:
-        if has_models:
-            logging.info("ℹ️ detect_sharp_moves: has_models=True but no weights provided; using empty weights.")
-        else:
-            logging.info("ℹ️ detect_sharp_moves: has_models=False; using empty weights.")
-        weights = {}
+    # ---- Assign weights (always at least uniform=1.0)
+    if not weights:  # handles None or {}
+        weights = {"spreads": 1.0, "totals": 1.0, "h2h": 1.0}
+        logging.info(f"✅ Using uniform weights=1.0 for spreads/totals/h2h ({_sport_label or _sport_key})")
 
     # ---- fast path when no models
     if not has_models:
@@ -5223,6 +5220,18 @@ def detect_sharp_moves(
         # if no models, empty weights; if models but none provided, still proceed with {}
         weights = {}  # keep it simple; caller decides whether to load real weights
 
+    # ✨ MINIMAL ADD: if weights not provided or empty, assign uniform weights=1.0
+    if not weights:
+        markets_present = (
+            df['Market']
+            .dropna()
+            .astype(str)
+            .str.lower()
+            .unique()
+            .tolist()
+        )
+        weights = {m: 1.0 for m in markets_present}
+        logging.info(f"✅ Using uniform we
 
    
     now = pd.Timestamp.utcnow()
