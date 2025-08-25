@@ -4790,6 +4790,7 @@ def detect_sharp_moves(
     BOOKMAKER_REGIONS=None,
     trained_models=None,
     weights=None,
+    has_models: bool | None = None,
     sport_label: str | None = None,   # e.g. "NBA"
     history_hours: int = 120,         # 0/None to skip history
 ):
@@ -4806,6 +4807,23 @@ def detect_sharp_moves(
     # Normalize sport identifiers (both helpful later)
     _sport_key   = sport_key            # keep as passed (can be None)
     _sport_label = sport_label  
+
+        if has_models is None:
+        has_models = bool(trained_models)
+
+    # ---- NEVER self-load weights here; respect what caller passed
+    if weights is None:
+        if has_models:
+            logging.info("ℹ️ detect_sharp_moves: has_models=True but no weights provided; using empty weights.")
+        else:
+            logging.info("ℹ️ detect_sharp_moves: has_models=False; using empty weights.")
+        weights = {}
+
+    # ---- fast path when no models
+    if not has_models:
+        skip_snapshot_hydration = True
+        skip_df_first = True
+        history_hours = 0
 
   
 
