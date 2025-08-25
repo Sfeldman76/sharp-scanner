@@ -3018,7 +3018,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if not folds:
             raise ValueError("Cross-validation produced no usable folds after relaxation; "
                              "try fewer splits, smaller embargo, or verify both classes exist.")
-        
+        cv_for_search = folds
         # --- small, regularized grid (we rely on early stopping, not n_estimators search) ---
 
         
