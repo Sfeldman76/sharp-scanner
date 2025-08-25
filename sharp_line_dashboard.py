@@ -3097,13 +3097,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend, y_oof)
         
         # Optional: wrapper so we can use predict_proba later
-        class IsoWrapper:
-            def __init__(self, base, iso):
-                self.base = base; self.iso = iso
-            def predict_proba(self, X):
-                p = self.base.predict_proba(X)[:, 1]
-                p_cal = np.clip(self.iso.transform(p), 1e-6, 1-1e-6)
-                return np.vstack([1 - p_cal, p_cal]).T
+        
         
         # ----- final refit with early stopping on most-recent 15% -----
         n = len(X_full); hold = max(1, int(round(n * 0.15)))
