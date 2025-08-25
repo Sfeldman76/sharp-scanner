@@ -569,10 +569,6 @@ def update_power_ratings(
             if not pd.isna(cutoff_utc):
                 cutoff_param = cutoff_utc.to_pydatetime()
     
-        # Detect presence of Neutral_Site once; if missing, hardcode FALSE
-        has_neutral = _table_has_column(bq, project_table_scores, "Neutral_Site")
-        neutral_select = "FALSE AS Neutral_Site" if not has_neutral else "SAFE_CAST(t.Neutral_Site AS BOOL) AS Neutral_Site"
-    
         base_sql = f"""
         SELECT
           CASE
@@ -590,8 +586,7 @@ def update_power_ratings(
           TIMESTAMP(t.Game_Start) AS Game_Start,
           SAFE_CAST(t.Score_Home_Score AS FLOAT64) AS Score_Home_Score,
           SAFE_CAST(t.Score_Away_Score AS FLOAT64) AS Score_Away_Score,
-          TIMESTAMP(t.Inserted_Timestamp) AS Snapshot_TS,
-          {neutral_select}
+          TIMESTAMP(t.Inserted_Timestamp) AS Snapshot_TS
         FROM `{project_table_scores}` t
         WHERE UPPER(CAST(t.Sport AS STRING)) IN UNNEST(@sport_aliases)
           AND t.Score_Home_Score IS NOT NULL AND t.Score_Away_Score IS NOT NULL
@@ -603,13 +598,14 @@ def update_power_ratings(
             params["cutoff"] = cutoff_param
     
         need = ["Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS",
-                "Score_Home_Score","Score_Away_Score","Neutral_Site"]
+                "Score_Home_Score","Score_Away_Score"]
     
         for df in stream_query_dfs(bq, base_sql, params=params, page_rows=page_rows, select_cols=need):
             df = downcast_numeric(df)
             df = to_cats(df, ["Sport","Home_Team","Away_Team"])
             yield df
             del df; gc.collect()
+
 
     # ---------------- new engines ----------------
     def _cap_margin(mov, cap):
