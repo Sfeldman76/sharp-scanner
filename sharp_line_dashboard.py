@@ -3056,10 +3056,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
      
                 # ---------- Manual grid CV with per-fold early stopping ----------
 
-        early_stopping_rounds = 150
         
-        # ---------- Manual grid CV with per-fold early stopping ----------
-       
+        early_stopping_rounds = 100  # tighter patience = faster, usually same quality
+        
+        # --- per-fold evaluation with early stopping ---
         def evaluate_params(params) -> float:
             scores = []
             for tr_idx, va_idx in folds:
@@ -3069,11 +3069,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 es = xgb.callback.EarlyStopping(
                     rounds=early_stopping_rounds,
                     save_best=True,
-                    maximize=False   # lower logloss is better
+                    maximize=False  # logloss lower is better
                 )
         
                 model = XGBClassifier(**base_kwargs, **params)
-                # DO NOT pass eval_metric here
                 model.fit(
                     X_tr, y_tr,
                     eval_set=[(X_va, y_va)],
@@ -3088,23 +3087,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 raise RuntimeError("No valid folds produced a score.")
             return float(np.mean(scores))
         
-        # grid search loop unchanged...
-        grid_keys = list(param_grid.keys())
-        grid_vals = [param_grid[k] for k in grid_keys]
-        best_score = np.inf
+        # --- randomized sampling over your param_grid of scipy distributions ---
+        rng = np.random.default_rng(42)
+        INT_KEYS = {"max_depth", "min_child_weight", "max_bin"}
+        
+        def _py(v):
+            # ensure plain Python scalars
+            if isinstance(v, (np.floating,)):
+                return float(v)
+            if isinstance(v, (np.integer,)):
+                return int(v)
+            return v
+        
+        def sample_params(space) -> dict:
+            params = {}
+            for k, v in space.items():
+                if hasattr(v, "rvs"):  # scipy.stats distribution
+                    seed = int(rng.integers(0, 2**32 - 1))
+                    val = v.rvs(random_state=seed)
+                    if k in INT_KEYS:
+                        val = int(round(val))
+                    params[k] = _py(val)
+                elif isinstance(v, (list, tuple)):
+                    params[k] = _py(rng.choice(v))
+                else:  # scalar
+                    params[k] = _py(v)
+            return params
+        
+        n_trials = 40  # 30–60 is a good range
+        best_score = float("inf")
         best_params = None
         
-        for combo in product(*grid_vals):
-            params = dict(zip(grid_keys, combo))
+        for _ in range(n_trials):
+            params = sample_params(param_grid)  # param_grid now holds distributions
             score = evaluate_params(params)
             if score < best_score:
-                best_score = score
-                best_params = params
+                best_score, best_params = score, params
         
         if best_params is None:
             raise RuntimeError("No valid parameter set found.")
         
-        # final refit with early stopping (again: no eval_metric in .fit)
+        # --- final refit with a most-recent holdout for early stopping ---
         n = len(X_full)
         hold = max(1, int(round(n * 0.15)))
         X_tr, y_tr = X_full[:-hold], y_full[:-hold]
@@ -3123,7 +3146,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             callbacks=[es_final],
             verbose=False,
         )
-                
+           
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
