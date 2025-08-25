@@ -1451,120 +1451,86 @@ def add_favorite_context_flag(df: pd.DataFrame) -> pd.DataFrame:
     out['Is_Favorite_Context'] = fav_flag
     return out
 
+def build_totals_training_from_scores(df_scores: pd.DataFrame,
+                                      sport: str | None = None,
+                                      window_games: int = 10,
+                                      shrink: float = 0.30,
+                                      key_col: str = "Merge_Key_Short"  # 👈 NEW
+                                      ) -> pd.DataFrame:
+    """
+    Returns one row per historical game with:
+      {key_col}, TOT_Proj_Total_Baseline, TOT_Off_H, TOT_Def_H, TOT_Off_A, TOT_Def_A,
+      TOT_GT_H, TOT_GT_A, TOT_LgAvg_Total, TOT_Actual_Total
+    Uses only prior games (shifted) => leakage-safe.
+    """
+    if key_col not in df_scores.columns:
+        raise ValueError(f"Expected key_col '{key_col}' in df_scores")
 
-def build_totals_training_from_scores(
-    df_scores: pd.DataFrame,
-    sport: str | None = None,
-    window_games: int = 10,
-    shrink: float = 0.30
-) -> pd.DataFrame:
-    """
-    Faster version of build_totals_training_from_scores.
-    Same columns: returns one row per historical game with
-      Game_Key + TOT_* features (including TOT_Actual_Total).
-    """
     df = df_scores.copy()
+    # normalize the join key and rename to internal 'Game_Key'
+    df[key_col] = df[key_col].astype(str).str.strip().str.lower()
+    df = df.rename(columns={key_col: "Game_Key"})  # 👈 internal key
+
     df["Game_Start"] = pd.to_datetime(df["Game_Start"])
     if "Season" not in df.columns:
         df["Season"] = df["Game_Start"].dt.year
     if sport:
         df = df[df["Sport"].str.upper() == sport.upper()].copy()
 
-    # Build long format (2 rows per game) with only needed cols
-    home = df.loc[:, ["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
-                      "Score_Home_Score","Score_Away_Score"]].rename(
-        columns={"Home_Team":"team","Away_Team":"opp",
-                 "Score_Home_Score":"pts_for","Score_Away_Score":"pts_against"}
-    )
-    away = df.loc[:, ["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
-                      "Score_Home_Score","Score_Away_Score"]].rename(
-        columns={"Away_Team":"team","Home_Team":"opp",
-                 "Score_Away_Score":"pts_for","Score_Home_Score":"pts_against"}
-    )
+    home = df.assign(team=df["Home_Team"], opp=df["Away_Team"],
+                     pts_for=df["Score_Home_Score"], pts_against=df["Score_Away_Score"])
+    away = df.assign(team=df["Away_Team"], opp=df["Home_Team"],
+                     pts_for=df["Score_Away_Score"], pts_against=df["Score_Home_Score"])
     long = pd.concat([home, away], ignore_index=True)
-
-    # (Small speed wins)
-    long["team"] = long["team"].astype("category")
-    long["Season"] = long["Season"].astype("int32")
-
-    # Sort once for all rolling ops
-    long = long.sort_values(["Season","team","Game_Start"], kind="mergesort").reset_index(drop=True)
+    long = long.sort_values(["Season","team","Game_Start"]).reset_index(drop=True)
     long["game_total"] = long["pts_for"] + long["pts_against"]
 
-    # --- Vectorized rolling means (exclude current game via shift) ---
-    gb = long.groupby(["Season","team"], sort=False)
+    def _roll(x, col, w):
+        return x[col].rolling(w, min_periods=1).mean().shift(1)  # exclude current game
 
-    pf_roll = gb["pts_for"].rolling(window_games, min_periods=1).mean().reset_index(level=[0,1], drop=True)
-    pa_roll = gb["pts_against"].rolling(window_games, min_periods=1).mean().reset_index(level=[0,1], drop=True)
-    gt_roll = gb["game_total"].rolling(window_games, min_periods=1).mean().reset_index(level=[0,1], drop=True)
+    long["pf_roll"] = long.groupby(["Season","team"], group_keys=False).apply(_roll, "pts_for", window_games)
+    long["pa_roll"] = long.groupby(["Season","team"], group_keys=False).apply(_roll, "pts_against", window_games)
+    long["gt_roll"] = long.groupby(["Season","team"], group_keys=False).apply(_roll, "game_total", window_games)
 
-    long["pf_roll"] = pf_roll.shift(1)
-    long["pa_roll"] = pa_roll.shift(1)
-    long["gt_roll"] = gt_roll.shift(1)
-
-    # --- League expanding mean per season (exclude current) via cumsum/cumcount ---
-    gbs = long.groupby("Season", sort=False)
-    cum_sum = gbs["game_total"].cumsum() - long["game_total"]
-    counts  = gbs.cumcount()
-    with np.errstate(invalid="ignore", divide="ignore"):
-        long["league_avg_total_prior"] = cum_sum / counts.replace(0, np.nan)
-
-    # Fill remaining NaNs with season mean (single pass)
-    season_mean = gbs["game_total"].transform("mean")
-    long["league_avg_total_prior"] = long["league_avg_total_prior"].fillna(season_mean)
-
-    # Ratings vs half-league average (shrunk)
-    half = long["league_avg_total_prior"] / 2.0
-    long["Off_Rating"] = (1 - shrink) * (long["pf_roll"] - half)
-    long["Def_Rating"] = (1 - shrink) * (long["pa_roll"] - half)
-
-    # Keep compact rating snapshot
-    ratings = long[[
-        "Sport","Season","Game_Key","Game_Start","team","opp",
-        "Off_Rating","Def_Rating","gt_roll","league_avg_total_prior"
-    ]]
-
-    # Build game-level table once
-    g = df[[
-        "Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
-        "Score_Home_Score","Score_Away_Score"
-    ]].drop_duplicates()
-
-    # Join home/away features using minimal keys (avoid joining on many cols)
-    # Home side
-    rH = ratings.rename(columns={
-        "team":"Home_Team","opp":"Away_Team",
-        "Off_Rating":"Off_H","Def_Rating":"Def_H",
-        "gt_roll":"GT_H","league_avg_total_prior":"LgAvg_H"
-    })[["Season","Game_Key","Home_Team","Off_H","Def_H","GT_H","LgAvg_H"]]
-
-    # Away side
-    rA = ratings.rename(columns={
-        "team":"Away_Team","opp":"Home_Team",
-        "Off_Rating":"Off_A","Def_Rating":"Def_A",
-        "gt_roll":"GT_A","league_avg_total_prior":"LgAvg_A"
-    })[["Season","Game_Key","Away_Team","Off_A","Def_A","GT_A","LgAvg_A"]]
-
-    g = g.merge(rH, on=["Season","Game_Key","Home_Team"], how="left")
-    g = g.merge(rA, on=["Season","Game_Key","Away_Team"], how="left")
-
-    # Build projection
-    g["LgAvg_Total"] = g["LgAvg_H"].combine_first(g["LgAvg_A"])
-    base = (
-        g["LgAvg_Total"]
-        + 0.5*(g["Off_H"].fillna(0) + g["Def_A"].fillna(0))
-        + 0.5*(g["Off_A"].fillna(0) + g["Def_H"].fillna(0))
+    long["league_avg_total_prior"] = (long.groupby("Season")["game_total"]
+                                         .expanding().mean().reset_index(level=0, drop=True).shift(1))
+    long["league_avg_total_prior"] = long["league_avg_total_prior"].fillna(
+        long.groupby("Season")["game_total"].transform("mean")
     )
-    pace_mult = (
-        (g["GT_H"].fillna(g["LgAvg_Total"]) + g["GT_A"].fillna(g["LgAvg_Total"])) /
-        (2.0 * g["LgAvg_Total"].replace(0, np.nan))
-    ).clip(0.8, 1.2).fillna(1.0)
+
+    half = long["league_avg_total_prior"] / 2.0
+    long["Off_Rating"] = (1-shrink)*(long["pf_roll"] - half)
+    long["Def_Rating"] = (1-shrink)*(long["pa_roll"] - half)
+
+    ratings = long[["Sport","Season","Game_Key","Game_Start","team","opp",
+                    "Off_Rating","Def_Rating","gt_roll","league_avg_total_prior"]]
+
+    home_r = ratings.rename(columns={"team":"Home_Team","opp":"Away_Team",
+                                     "Off_Rating":"Off_H","Def_Rating":"Def_H",
+                                     "gt_roll":"GT_H","league_avg_total_prior":"LgAvg_H"})
+    away_r = ratings.rename(columns={"team":"Away_Team","opp":"Home_Team",
+                                     "Off_Rating":"Off_A","Def_Rating":"Def_A",
+                                     "gt_roll":"GT_A","league_avg_total_prior":"LgAvg_A"})
+
+    g = df[["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team",
+            "Score_Home_Score","Score_Away_Score"]].drop_duplicates()
+    g = (g.merge(home_r, on=["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team"], how="left")
+          .merge(away_r, on=["Sport","Season","Game_Key","Game_Start","Home_Team","Away_Team"], how="left"))
+
+    g["LgAvg_Total"] = g["LgAvg_H"].combine_first(g["LgAvg_A"])
+    base = (g["LgAvg_Total"]
+            + 0.5*(g["Off_H"].fillna(0)+g["Def_A"].fillna(0))
+            + 0.5*(g["Off_A"].fillna(0)+g["Def_H"].fillna(0)))
+    pace_mult = ((g["GT_H"].fillna(g["LgAvg_Total"]) + g["GT_A"].fillna(g["LgAvg_Total"])) /
+                 (2.0 * g["LgAvg_Total"].replace(0, np.nan))).clip(0.8, 1.2).fillna(1.0)
     g["Proj_Total_Baseline"] = base * pace_mult
 
     g["Actual_Total"] = g["Score_Home_Score"].astype(float) + g["Score_Away_Score"].astype(float)
 
+    # rename internal key back to your key_col and prefix outputs
+    g = g.rename(columns={"Game_Key": key_col})
     cols = ["Proj_Total_Baseline","Off_H","Def_H","Off_A","Def_A","GT_H","GT_A","LgAvg_Total","Actual_Total"]
-    g = g[["Game_Key"] + cols].rename(columns={c: f"TOT_{c}" for c in cols})
+    g = g[[key_col] + cols].rename(columns={c: f"TOT_{c}" for c in cols})
     return g
 
 
@@ -1572,19 +1538,19 @@ def totals_features_for_upcoming(df_scores: pd.DataFrame,
                                  df_schedule_like: pd.DataFrame,
                                  sport: str | None = None,
                                  window_games: int = 10,
-                                 shrink: float = 0.30) -> pd.DataFrame:
-    """
-    For upcoming games (no scores yet): use the same logic but
-    grab each team’s latest *prior* snapshot ('as of' Game_Start).
-    Returns: Game_Key + TOT_* columns (no label).
-    """
-    # Reuse the training builder, but only keep rows for keys in df_schedule_like
-    hist = build_totals_training_from_scores(df_scores, sport=sport,
-                                             window_games=window_games, shrink=shrink)
-    want = df_schedule_like[["Game_Key"]].drop_duplicates()
-    cols = [c for c in hist.columns if c.startswith("TOT_") and c != "TOT_Actual_Total"]
-    return hist.merge(want, on="Game_Key", how="right")[["Game_Key"] + cols]
+                                 shrink: float = 0.30,
+                                 key_col: str = "Merge_Key_Short"  # 👈 NEW
+                                 ) -> pd.DataFrame:
+    if key_col not in df_scores.columns or key_col not in df_schedule_like.columns:
+        raise ValueError(f"Expected key_col '{key_col}' in both dataframes")
 
+    # normalize join keys
+    hist = build_totals_training_from_scores(df_scores, sport=sport,
+                                             window_games=window_games, shrink=shrink,
+                                             key_col=key_col)
+    want = df_schedule_like[[key_col]].drop_duplicates()
+    cols = [c for c in hist.columns if c.startswith("TOT_") and c != "TOT_Actual_Total"]
+    return hist.merge(want, on=key_col, how="right")[[key_col] + cols]
 
 
 
@@ -1662,13 +1628,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
     # build totals features (key_col = Merge_Key_Short)
     df_tot_train = build_totals_training_from_scores(
-        df_scores=df_results,
-        sport=sport,
-        window_games=10,
-        shrink=0.30,
-        key_col="Merge_Key_Short"
+        df_totals, sport=sport, window_games=10, shrink=0.30, key_col="Merge_Key_Short"
     )
-    
+        
     # merge into sharp_scores_full
     df_bt = df_bt.merge(
         df_tot_train.drop(columns=['TOT_Actual_Total']),
