@@ -5125,7 +5125,9 @@ def detect_sharp_moves(
     # ─────────────────────────────────────────────────────────
     # 8) Score (avoid extra copies) + housekeeping
     # ─────────────────────────────────────────────────────────
-    market_weights = load_market_weights_from_bq()
+    market_weights = load_market_weights_from_bq(sport_label, days_back=14) if HAS_MODELS else {}
+
+   
     now = pd.Timestamp.utcnow()
     df['Snapshot_Timestamp'] = now
     if 'Game_Start' in df.columns:
