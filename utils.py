@@ -1296,22 +1296,75 @@ def normalize_book_key(raw_key, sharp_books, rec_books):
     return raw_key
 
 
+def load_market_weights_from_bq(sport_label: str, days_back: int = 14):
+    """Load minimal rows for one sport and recent window; compute weights only."""
+    has_models = True  # the caller should have checked; keep for clarity
+    if not has_models:
+        logging.info("⏭️ Skipping market weights (HAS_MODELS=False).")
+        return {}
 
-def load_market_weights_from_bq():
-    
     client = bigquery.Client(project="sharplogger", location="us")
 
-    query = """
-        SELECT *
-        FROM `sharplogger.sharp_data.sharp_scores_full`
-        WHERE SHARP_HIT_BOOL IS NOT NULL
-          AND Scored = TRUE
-    """
-    df = client.query(query).to_dataframe()
+    # Columns actually needed by your weight computation
+    needed_cols = [
+        "Sport", "Market", "Outcome", "Bookmaker", "Value", "Model_Sharp_Win_Prob",
+        "SHARP_HIT_BOOL", "Scored", "Snapshot_Timestamp"
+    ]
+    select_cols = ", ".join(needed_cols)
 
-    market_weights = compute_and_write_market_weights(df)  # Returns a dict
-    logging.info(f"✅ Loaded market weights for {len(market_weights)} markets")
+    # Normalize sport label in SQL
+    sport_norms = ["NCAAF","AMERICANFOOTBALL_NCAAF","CFB"] if sport_label.upper()=="NCAAF" else [sport_label.upper()]
+
+    query = f"""
+      SELECT {select_cols}
+      FROM `sharplogger.sharp_data.sharp_scores_full`
+      WHERE SHARP_HIT_BOOL IS NOT NULL
+        AND TRUE = Scored
+        AND UPPER(Sport) IN UNNEST(@sports)
+        AND Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days_back DAY)
+    """
+
+    job = client.query(
+        query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ArrayQueryParameter("sports", "STRING", sport_norms),
+                bigquery.ScalarQueryParameter("days_back", "INT64", days_back),
+            ]
+        )
+    )
+    df = job.to_dataframe(create_bqstorage_client=True)
+
+    if df.empty:
+        logging.info(f"ℹ️ No rows for weights: sport={sport_label}, days_back={days_back}")
+        return {}
+
+    market_weights = compute_and_write_market_weights(df)  # or split compute vs write (see below)
+    logging.info(f"✅ Loaded market weights for {len(market_weights)} markets (sport={sport_label}, {days_back}d)")
     return market_weights
+
+_market_weights_cache = {}
+
+def get_market_weights(sport_label, has_models, days_back=14):
+    if not has_models:
+        return {}
+    key = (sport_label.upper(), days_back)
+    if key in _market_weights_cache:
+        return _market_weights_cache[key]
+    mw = load_market_weights_from_bq(sport_label, days_back)
+    _market_weights_cache[key] = mw
+    return mw
+
+def with_timeout(fn, timeout_s=60, fallback=lambda: {}):
+    t0 = time.time()
+    try:
+        return fn()
+    finally:
+        if time.time() - t0 > timeout_s:
+            logging.error(f"⏰ market weights load exceeded {timeout_s}s; using empty weights.")
+            return fallback()
+
+
     
 def implied_prob_to_point_move(prob_delta, base_odds=-110):
     """
