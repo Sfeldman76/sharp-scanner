@@ -2922,21 +2922,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         times  = pd.to_datetime(df_market[time_col], errors='coerce', utc=True).to_numpy()
         if np.isnan(times.astype('datetime64[ns]')).any():
             raise ValueError(f"{time_col} has NaT values after to_datetime.")
-        
+        pos = float(y_full.sum())
+        scale_pos_weight = (len(y_full) - pos) / max(pos, 1.0)
         # --- embargo from sport ---
         embargo_td = get_embargo_for_sport(sport)  # e.g., pd.Timedelta("24h")
         
-        # --- build splitter ---
+        # --- SPEED KNOBS ---
+        early_stopping_rounds = 100   # tighter patience; still stable
+        search_estimators     = 600   # fewer trees during hyperparam search
+        final_estimators_cap  = 3000  # high cap for final; early stopping will cut it
+        n_folds               = 3     # purged folds (faster than 5)
+        
+        # --- time values once ---
+        times = pd.to_datetime(df_market[time_col], errors="coerce", utc=True).to_numpy()
+        
+        # --- build purged-group splitter once ---
         cv = PurgedGroupTimeSeriesSplit(
-            n_splits=5,
+            n_splits=n_folds,
             embargo=embargo_td,
             time_values=times,
             min_val_size=20,
         )
         
-        # --- ensure CV yields folds; relax if needed ---
+        # --- generate folds; relax if needed ---
         folds = list(cv.split(X_full, y_full, groups=groups))
         if not folds:
+            # relax embargo & splits a bit
             cv = PurgedGroupTimeSeriesSplit(
                 n_splits=max(2, min(3, len(np.unique(groups)) // 2 or 2)),
                 embargo=pd.Timedelta("0h"),
@@ -2950,42 +2961,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             folds = list(TimeSeriesSplit(n_splits=3).split(X_full, y_full))
         
         if not folds:
-            raise ValueError("Cross-validation produced no usable folds after relaxation; "
-                             "try fewer splits, smaller embargo, or verify both classes exist.")
-        cv_for_search = folds
-        # --- small, regularized grid (we rely on early stopping, not n_estimators search) ---
-
-        # --- SPEED KNOBS ---
-        early_stopping_rounds = 100   # tighter patience; still stable
-        search_estimators     = 600   # train fewer trees during hyperparam search
-        final_estimators_cap  = 3000  # high cap for final; early stopping will cut it
-        n_folds               = 3     # purged folds
+            raise ValueError(
+                "Cross-validation produced no usable folds after relaxation; "
+                "try fewer splits, smaller embargo, or verify both classes exist."
+            )
         
-        # base kwargs for all classifiers
+        cv_for_search = folds  # iterable of (train_idx, val_idx)
+        
+        # --- base kwargs for all classifiers ---
         base_kwargs = dict(
             objective="binary:logistic",
             eval_metric="logloss",
-            tree_method="hist",          # if GPU available: "gpu_hist"
+            tree_method="hist",          # if GPU: "gpu_hist"
             max_delta_step=1,
             n_jobs=3,                    # avoid oversubscription with CV
-            scale_pos_weight=scale_pos_weight,
+            scale_pos_weight=scale_pos_weight,  # must be defined earlier from y_full
             random_state=42,
             importance_type="total_gain",
             colsample_bynode=0.8,        # ↓ split cost
             max_bin=128,                 # faster histograms
         )
-        
-        # --- build purged folds (n_folds=3) ---
-        cv = PurgedGroupTimeSeriesSplit(
-            n_splits=n_folds,
-            embargo=embargo_td,
-            time_values=df_market[time_col].values,
-            min_val_size=20,
-        )
-        cv_for_search = list(cv.split(X_full, y_full, groups=groups))
-        if not cv_for_search:
-            from sklearn.model_selection import TimeSeriesSplit
-            cv_for_search = list(TimeSeriesSplit(n_splits=3).split(X_full, y_full))
         
         # --- randomized search space (scipy dists or small lists) ---
         from scipy.stats import randint, loguniform, uniform
@@ -2998,9 +2993,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "gamma":             uniform(0.1, 0.6),
             "reg_alpha":         loguniform(1.0, 50.0),
             "reg_lambda":        loguniform(5.0, 120.0),
-            # max_bin, colsample_bynode fixed in base_kwargs for stability/speed
+            # max_bin & colsample_bynode fixed in base_kwargs for stability/speed
         }
-        
+
 
         search_base = xgb.XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
         
