@@ -3119,8 +3119,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
         final_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": final_estimators_cap})
         
-        final_log.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
-        final_auc.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
+        # y_val is a pandas Series; either .values or .to_numpy() is fine
+        final_log.fit(X_tr, y_tr, eval_set=[(X_val, y_val.values)], callbacks=[es], verbose=False)
+        final_auc.fit(X_tr, y_tr, eval_set=[(X_val, y_val.values)], callbacks=[es], verbose=False)
+
         class IsoWrapper:
             def __init__(self, base, iso):
                 self.base = base
