@@ -109,10 +109,11 @@ import numpy as np
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
-import xgboost as xgb          
+
 import re
 import logging
 from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
+from sklearn.model_selection import RandomizedSearchCV
 
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
 import xgboost as xgb
@@ -2710,16 +2711,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         def get_embargo_for_sport(sport: str) -> pd.Timedelta:
             return SPORT_EMBARGO.get(sport, SPORT_EMBARGO["default"])
         
-        # --- CV splitter (top of file, once) ---
+
+
         class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
-            def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"), time_values=None):
+            """
+            Time-ordered, group-based CV with purge + time embargo.
+        
+            - Groups (e.g., Game_Key) never straddle train/val.
+            - Any group overlapping the validation time window is *purged* from train.
+            - Any group starting within [val_start - embargo, val_end + embargo] is embargoed from train.
+            - Folds are contiguous in time at the group level.
+            """
+        
+            def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"), time_values=None, min_val_size=20):
                 """
-                time_values: 1D datetime-like aligned to X rows
-                groups     : provided to .fit(..., groups=...) (e.g., Game_Key)
+                Parameters
+                ----------
+                n_splits : int
+                    Number of time-ordered folds over *groups*.
+                embargo : pd.Timedelta
+                    Symmetric embargo applied around the validation window.
+                time_values : 1D datetime-like aligned to X rows
+                    Timestamps for each row (e.g., Game_Start or Snapshot_Timestamp).
+                min_val_size : int
+                    Minimum number of validation rows required for a fold to be yielded.
                 """
-                self.n_splits = n_splits
-                self.embargo = embargo
+                if n_splits < 2:
+                    raise ValueError("n_splits must be at least 2")
+                self.n_splits = int(n_splits)
+                self.embargo = pd.Timedelta(embargo)
                 self.time_values = time_values
+                self.min_val_size = int(min_val_size)
         
             def get_n_splits(self, X=None, y=None, groups=None):
                 return self.n_splits
@@ -2729,150 +2751,225 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     raise ValueError("groups must be provided to split()")
                 if self.time_values is None:
                     raise ValueError("time_values must be set on the splitter")
-            
+        
+                # Align & normalize inputs
+                if len(groups) != len(self.time_values):
+                    raise ValueError("groups and time_values must be aligned to X rows")
+        
                 meta = pd.DataFrame({
                     "group": np.asarray(groups),
                     "time":  pd.to_datetime(self.time_values, errors="coerce", utc=True)
                 })
-            
-                gmeta = (meta.groupby("group")
-                              .agg(start=("time","min"), end=("time","max"))
-                              .sort_values("start")
-                              .reset_index())
-            
-                n = len(gmeta)
-                n_splits = min(self.n_splits, max(2, n))
-                fold_sizes = (n // n_splits) * np.ones(n_splits, dtype=int)
-                fold_sizes[: n % n_splits] += 1
-            
-                cur = 0
-                for _k in range(n_splits):
-                    val_groups = gmeta.iloc[cur:cur + fold_sizes[_k]]["group"].values
-                    val_start  = gmeta.iloc[cur]["start"]
-                    val_end    = gmeta.iloc[cur + fold_sizes[_k] - 1]["end"]
-                    cur += fold_sizes[_k]
-            
-                    # purge overlapping groups
-                    overlap = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
-                    purged = set(gmeta.loc[overlap, "group"])
-            
-                    # embargo groups that start <= train_end + embargo
-                    cand = gmeta[~gmeta["group"].isin(val_groups)]
-                    cand = cand[~cand["group"].isin(purged)]
-            
-                    embargo_groups = set()
-                    if not cand.empty:
-                        train_end   = cand["end"].max()
-                        embargo_cut = train_end + self.embargo
-                        embargo_mask = gmeta["start"] <= embargo_cut
-                        embargo_groups = set(gmeta.loc[embargo_mask, "group"])
-            
-                    train_groups = gmeta[
+                if meta["time"].isna().any():
+                    raise ValueError("time_values contain NaT after to_datetime; check your inputs")
+        
+                # One row per group with start/end times, ordered by start time
+                gmeta = (meta.groupby("group", as_index=False)["time"]
+                             .agg(start="min", end="max")
+                             .sort_values("start")
+                             .reset_index(drop=True))
+        
+                n_groups = len(gmeta)
+                if n_groups < self.n_splits:
+                    # relax to feasible number of splits, minimum 2
+                    self.n_splits = max(2, n_groups)
+        
+                # contiguous group folds
+                fold_sizes = np.full(self.n_splits, n_groups // self.n_splits, dtype=int)
+                fold_sizes[: n_groups % self.n_splits] += 1
+                edges = np.cumsum(fold_sizes)
+        
+                start = 0
+                for k, stop in enumerate(edges):
+                    val_slice = gmeta.iloc[start:stop]
+                    start = stop
+        
+                    if val_slice.empty:
+                        continue
+        
+                    val_groups = val_slice["group"].to_numpy()
+                    val_start  = val_slice["start"].iloc[0]
+                    val_end    = val_slice["end"].iloc[-1]
+        
+                    # 1) PURGE: remove any group that overlaps validation window
+                    overlap_mask = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
+                    purged_groups = set(gmeta.loc[overlap_mask, "group"])
+        
+                    # 2) EMBARGO: drop groups whose *start* falls inside the embargo window around validation
+                    emb_lo = val_start - self.embargo
+                    emb_hi = val_end + self.embargo
+                    embargo_mask = (gmeta["start"] >= emb_lo) & (gmeta["start"] <= emb_hi)
+                    embargo_groups = set(gmeta.loc[embargo_mask, "group"])
+        
+                    # Training groups = not in val, not purged, not embargoed
+                    train_groups = gmeta.loc[
                         ~gmeta["group"].isin(val_groups)
-                        & ~gmeta["group"].isin(purged)
-                        & ~gmeta["group"].isin(embargo_groups)
-                    ]["group"].values
-            
-                    all_groups = meta["group"].values
-                    train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
+                        & ~gmeta["group"].isin(purged_groups)
+                        & ~gmeta["group"].isin(embargo_groups),
+                        "group"
+                    ].to_numpy()
+        
+                    # Map back to row indices
+                    all_groups = meta["group"].to_numpy()
                     val_idx   = np.flatnonzero(np.isin(all_groups, val_groups))
-            
-                    # --------- HARDENING: skip bad folds ---------
-                    # 1) skip if either side empty
+                    train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
+        
+                    # HARDENING
                     if len(val_idx) == 0 or len(train_idx) == 0:
                         continue
-                    # 2) skip if validation set too tiny (tune threshold as you like)
-                    if len(val_idx) < 20:
+                    if len(val_idx) < self.min_val_size:
                         continue
-                    # 3) skip if y provided and val has only one class
                     if y is not None:
                         y_arr = np.asarray(y)
-                        if len(np.unique(y_arr[val_idx])) < 2:
+                        # need both classes in validation to drive stable early stopping / metrics
+                        if np.unique(y_arr[val_idx]).size < 2:
                             continue
-                    # ---------------------------------------------
-            
-                    yield train_idx, val_idx
-                        
-       
         
-        # --- Time column & chronological order (prefer Game_Start to keep games intact) ---
-        # --- time col & sort ---
+                    yield train_idx, val_idx
+ 
+        # --- choose time col & sort (prefer Game_Start) ---
         time_col = "Game_Start" if "Game_Start" in df_market.columns else "Snapshot_Timestamp"
         df_market = df_market.sort_values(time_col).reset_index(drop=True)
         
-        # --- X, y, groups ---
-        X_full = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0.0).astype(float)
-        y_full = df_market['SHARP_HIT_BOOL'].astype(int)
-        groups = df_market['Game_Key'].values
+        # --- X, y, groups (hardened) ---
+        missing_feats = [c for c in features if c not in df_market.columns]
+        if missing_feats:
+            raise ValueError(f"Missing required features: {missing_feats}")
         
-        # --- embargo from sport (use the passed-in `sport` exactly as-is) ---
-        embargo_td = get_embargo_for_sport(sport)
+        X_full = (
+            df_market[features]
+            .apply(pd.to_numeric, errors='coerce')
+            .fillna(0.0)
+            .astype(np.float32)
+        ).to_numpy()
         
-        # --- build splitter (pass time_values here) ---
+        y_full = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(np.int8).to_numpy()
+        if np.unique(y_full).size < 2:
+            raise ValueError("y_full must contain at least two classes (0/1).")
+        
+        groups = df_market['Game_Key'].astype(str).to_numpy()
+        times  = pd.to_datetime(df_market[time_col], errors='coerce', utc=True).to_numpy()
+        if np.isnan(times.astype('datetime64[ns]')).any():
+            raise ValueError(f"{time_col} has NaT values after to_datetime.")
+        
+        # --- embargo from sport ---
+        embargo_td = get_embargo_for_sport(sport)  # e.g., pd.Timedelta("24h")
+        
+        # --- build splitter ---
         cv = PurgedGroupTimeSeriesSplit(
             n_splits=5,
             embargo=embargo_td,
-            time_values=df_market[time_col].values
+            time_values=times,
+            min_val_size=20,
         )
         
-        # --- sanity: alignment ---
-        assert len(X_full) == len(groups) == len(df_market[time_col]), "Misaligned X/groups/time_values"
-        
-        # === param grid (regularized) ===
-        param_grid = {
-            "n_estimators":      [200, 400, 800],        # more trees + smaller steps
-            "max_depth":         [2, 3, 4],
-            "learning_rate":     [0.01, 0.03, 0.05],
-            "subsample":         [0.6, 0.8],
-            "colsample_bytree":  [0.5, 0.7, 0.8],        # curb feature overuse
-            "min_child_weight":  [15, 25, 35],           # require more evidence to split
-            "gamma":             [0.1, 0.3, 0.5],        # conservative splits
-            "reg_alpha":         [5.0, 10.0, 20.0, 40.0],
-            "reg_lambda":        [10.0, 20.0, 40.0, 80.0],
-        }
-        
-        # === imbalance weight ===
-        pos = float(y_full.sum())
-        scale_pos_weight = (len(y_full) - pos) / max(pos, 1.0)
-        
-        base_est = dict(
-            objective="binary:logistic",
-            eval_metric="logloss",          # scoring alters per search; this keeps xgb happy
-            tree_method="hist",
-            max_delta_step=1,               # <---- stabilizes logistic updates
-            n_jobs=-1,
-            scale_pos_weight=scale_pos_weight,
-            random_state=42,
-            importance_type="total_gain",   # for stability diagnostics later
-            # (optional) grow_policy="lossguide",
-        )
-        
-        # --- Pre-flight: ensure the CV actually yields folds ---
+        # --- ensure CV yields folds; relax if needed ---
         folds = list(cv.split(X_full, y_full, groups=groups))
-        
-        if len(folds) == 0:
-            n_splits_relaxed = max(2, min(3, len(np.unique(groups)) // 2 or 2))
+        if not folds:
             cv = PurgedGroupTimeSeriesSplit(
-                n_splits=n_splits_relaxed,
-                embargo=pd.Timedelta("0 hours"),
-                time_values=df_market[time_col].values
+                n_splits=max(2, min(3, len(np.unique(groups)) // 2 or 2)),
+                embargo=pd.Timedelta("0h"),
+                time_values=times,
+                min_val_size=10,
             )
             folds = list(cv.split(X_full, y_full, groups=groups))
         
-        if len(folds) == 0:
+        if not folds:
             from sklearn.model_selection import TimeSeriesSplit
-            tscv = TimeSeriesSplit(n_splits=3)
-            folds = list(tscv.split(X_full, y_full))
+            folds = list(TimeSeriesSplit(n_splits=3).split(X_full, y_full))
         
-        if len(folds) == 0:
-            raise ValueError("Cross-validation produced no usable folds after relaxation. "
-                             "Try fewer splits, smaller embargo, or verify both classes exist.")
+        if not folds:
+            raise ValueError("Cross-validation produced no usable folds after relaxation; "
+                             "try fewer splits, smaller embargo, or verify both classes exist.")
         
-        cv_for_search = folds
+        # --- small, regularized grid (we rely on early stopping, not n_estimators search) ---
+        param_grid = {
+            "max_depth":         [2, 3],
+            "learning_rate":     [0.02, 0.04],
+            "subsample":         [0.6, 0.75, 0.9, 1.0],
+            "colsample_bytree":  [0.6, 0.8],
+            "min_child_weight":  [15, 30],
+            "gamma":             [0.2, 0.5],
+            "reg_alpha":         [5.0, 20.0],
+            "reg_lambda":        [20.0, 40.0],
+        }
         
-        # --- searches (same folds for both) ---
-        from sklearn.model_selection import RandomizedSearchCV
-        import xgboost as xgb
+        # --- imbalance weight ---
+        pos = float(y_full.sum())
+        scale_pos_weight = (len(y_full) - pos) / max(pos, 1.0)
+        
+        # --- base estimator (high cap; early stopping will truncate) ---
+        base_kwargs = dict(
+            objective="binary:logistic",
+            eval_metric="logloss",
+            tree_method="hist",
+            max_delta_step=1,
+            n_estimators=2000,          # high cap; we early-stop
+            n_jobs=4,                   # avoid thread thrash with outer loops
+            scale_pos_weight=scale_pos_weight,
+            random_state=42,
+            importance_type="total_gain",
+        )
+        
+        early_stopping_rounds = 150
+        
+        # ---------- Manual grid CV with per-fold early stopping ----------
+        def evaluate_params(params) -> float:
+            """Return mean validation logloss across folds for given params."""
+            scores = []
+            for tr_idx, va_idx in folds:
+                X_tr, y_tr = X_full[tr_idx], y_full[tr_idx]
+                X_va, y_va = X_full[va_idx], y_full[va_idx]
+        
+                model = XGBClassifier(**base_kwargs, **params)
+                model.fit(
+                    X_tr, y_tr,
+                    eval_set=[(X_va, y_va)],
+                    verbose=False,
+                    early_stopping_rounds=early_stopping_rounds,
+                )
+                # use best_iteration_ implicitly via predict_proba
+                p = model.predict_proba(X_va)[:, 1]
+                scores.append(log_loss(y_va, p, labels=[0,1]))
+            return float(np.mean(scores))
+        
+        # grid iterator (small, so full product is fine)
+        grid_keys = list(param_grid.keys())
+        grid_vals = [param_grid[k] for k in grid_keys]
+        
+        best_score = np.inf
+        best_params = None
+        
+        for combo in product(*grid_vals):
+            params = dict(zip(grid_keys, combo))
+            score = evaluate_params(params)
+            # OPTIONAL: print or log incremental results
+            # print(f"{params} -> logloss {score:.4f}")
+            if score < best_score:
+                best_score = score
+                best_params = params
+        
+        if best_params is None:
+            raise RuntimeError("No valid parameter set found.")
+        
+        # --- Refit best model on *all* data with a small, most-recent holdout for early stopping ---
+        # hold out the last 15% by time for early stopping signal (no leakage across time)
+        n = len(X_full)
+        hold = max(1, int(round(n * 0.15)))
+        X_tr, y_tr = X_full[:-hold], y_full[:-hold]
+        X_va, y_va = X_full[-hold:], y_full[-hold:]
+        
+        best_model = XGBClassifier(**base_kwargs, **best_params)
+        best_model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_va, y_va)],
+            verbose=False,
+            early_stopping_rounds=early_stopping_rounds,
+        )
+        
+        # best_model is ready; you can also access:
+        # best_params, best_model.best_iteration, best_model.get_booster().feature_names, etc.
+
         
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
