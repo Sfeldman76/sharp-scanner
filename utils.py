@@ -1033,6 +1033,9 @@ def write_snapshot_to_gcs_parquet(snapshot_list, bucket_name="sharp-models", fol
     except Exception as e:
         logging.exception("❌ Failed to upload snapshot to GCS.")
 
+def compute_market_weights(df):
+    # Temporary shim to keep new loader working
+    return compute_and_write_market_weights(df)
 
 
 
@@ -5163,7 +5166,9 @@ def detect_sharp_moves(
     df['Line_Hash'] = df.apply(compute_line_hash, axis=1)
     
     # If apply_blended_sharp_score mutates, let it copy internally; otherwise pass df directly.
-    df_scored = apply_blended_sharp_score(df, trained_models, df_all_snapshots, market_weights)
+    
+    df_scored = apply_blended_sharp_score(df, trained_models, df_all_snapshots, weights)
+
     
     if not df_scored.empty:
         df_scored['Pre_Game']  = df_scored['Game_Start'] > now
