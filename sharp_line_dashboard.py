@@ -3146,43 +3146,55 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             callbacks=[es_final],
             verbose=False,
         )
-           
+     
+        # 1) Fast search: smaller n_estimators for speed (no early stopping inside RSV)
+        search_base = xgb.XGBClassifier(
+            **{**base_kwargs, "n_estimators": 600}  # smaller cap for search speed
+        )
+        
         grid_logloss = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(**base_est),
-            param_distributions=param_grid,
+            estimator=search_base,
+            param_distributions=param_grid,   # your scipy dists / lists
             scoring="neg_log_loss",
-            cv=cv_for_search,
+            cv=cv_for_search,                 # your purged-group folds
             n_iter=50,
+            n_jobs=3,
             verbose=1,
-            random_state=42
+            random_state=42,
+            refit=True,
         )
         grid_logloss.fit(X_full, y_full, groups=groups)
         model_logloss = grid_logloss.best_estimator_
         
         grid_auc = RandomizedSearchCV(
-            estimator=xgb.XGBClassifier(**base_est),
+            estimator=search_base,
             param_distributions=param_grid,
             scoring="roc_auc",
             cv=cv_for_search,
             n_iter=50,
+            n_jobs=3,
             verbose=1,
-            random_state=42
+            random_state=42,
+            refit=True,
         )
         grid_auc.fit(X_full, y_full, groups=groups)
         model_auc = grid_auc.best_estimator_
         
-        # ---------- OOF predictions for calibration bins ----------
-        
+        # 2) OOF predictions (use array indexing, not .iloc)
         oof_pred_logloss = np.zeros(len(y_full), dtype=float)
         oof_pred_auc     = np.zeros(len(y_full), dtype=float)
         
         for tr_idx, va_idx in cv_for_search:
-            X_tr, X_va = X_full.iloc[tr_idx], X_full.iloc[va_idx]
-            y_tr, y_va = y_full.iloc[tr_idx], y_full.iloc[va_idx]
+            X_tr, X_va = X_full[tr_idx], X_full[va_idx]
+            y_tr, y_va = y_full[tr_idx], y_full[va_idx]
         
-            # clone with best params to avoid refit leakage across folds
-            m_log = xgb.XGBClassifier(**{**base_est, **model_logloss.get_params()})
-            m_auc = xgb.XGBClassifier(**{**base_est, **model_auc.get_params()})
+            # clone with best params on top of base_kwargs
+            m_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params()})
+            m_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params()})
+        
+            # fit quickly for OOF (no early stopping here)
+            m_log.set_params(n_estimators=600)
+            m_auc.set_params(n_estimators=600)
         
             m_log.fit(X_tr, y_tr, verbose=False)
             m_auc.fit(X_tr, y_tr, verbose=False)
@@ -3190,10 +3202,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             oof_pred_logloss[va_idx] = m_log.predict_proba(X_va)[:, 1]
             oof_pred_auc[va_idx]     = m_auc.predict_proba(X_va)[:, 1]
         
-        # simple 50/50 blend (you can learn weights later)
+        # 3) Simple blend + diagnostics
         oof_blend = 0.5 * oof_pred_logloss + 0.5 * oof_pred_auc
         
-        # quick OOF diagnostics
         def _safe_auc(y, p):
             return roc_auc_score(y, p) if np.unique(y).size > 1 else np.nan
         
@@ -3201,73 +3212,66 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         oof_ll    = log_loss(y_full, np.clip(oof_blend, 1e-6, 1-1e-6))
         oof_brier = brier_score_loss(y_full, oof_blend)
         
-        # (optional) isotonic calibrator on OOF
-        # from sklearn.isotonic import IsotonicRegression
-        # iso = IsotonicRegression(out_of_bounds="clip")
-        # iso.fit(oof_blend, y_full)
-        # oof_blend_cal = iso.transform(oof_blend)
-        
-        # ---------- calibration bins ----------
         def calibration_bins(y, p, n_bins=10):
             df = pd.DataFrame({"y": np.asarray(y, float), "p": np.asarray(p, float)})
             df["bin"] = pd.qcut(df["p"], q=n_bins, duplicates="drop")
             out = (df.groupby("bin")
-                     .agg(count=("y","size"),
-                          avg_pred=("p","mean"),
-                          emp_rate=("y","mean"))
+                     .agg(count=("y","size"), avg_pred=("p","mean"), emp_rate=("y","mean"))
                      .reset_index(drop=True))
             out["abs_err"] = (out["avg_pred"] - out["emp_rate"]).abs()
             return out
         
         calib_oof = calibration_bins(y_full, oof_blend, n_bins=10)
-        st.dataframe(calib_oof)  # if in Streamlit
+        st.dataframe(calib_oof)
         
-        # --- time-forward holdout (unchanged) ---
+        # 4) Time-forward holdout split (use DataFrame/Series indexing – convert if needed)
+        # If X_full/y_full are arrays, derive masks from df_market and index arrays.
         cut_time = df_market[time_col].quantile(0.75)
-        tr_mask = df_market[time_col] <= cut_time
-        va_mask = df_market[time_col] >  cut_time
-        X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
-        X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
-        if y_train.nunique() < 2 or y_val.nunique() < 2:
+        tr_mask = (df_market[time_col] <= cut_time).to_numpy()
+        va_mask = ~tr_mask
+        
+        X_train, y_train = X_full[tr_mask], y_full[tr_mask]
+        X_val,   y_val   = X_full[va_mask], y_full[va_mask]
+        
+        if np.unique(y_train).size < 2 or np.unique(y_val).size < 2:
             cut_time = df_market[time_col].quantile(0.80)
-            tr_mask = df_market[time_col] <= cut_time
-            va_mask = df_market[time_col] >  cut_time
-            X_train, y_train = X_full.loc[tr_mask], y_full.loc[tr_mask]
-            X_val,   y_val   = X_full.loc[va_mask], y_full.loc[va_mask]
+            tr_mask = (df_market[time_col] <= cut_time).to_numpy()
+            va_mask = ~tr_mask
+            X_train, y_train = X_full[tr_mask], y_full[tr_mask]
+            X_val,   y_val   = X_full[va_mask], y_full[va_mask]
         
-        # (calibration & the rest of your pipeline continues here)
-        
-        # --- Isotonic calibration on TRAIN ONLY (use a time-aware split internally) ---
-        # (CalibratedClassifierCV doesn't accept `groups`; use a simple TimeSeriesSplit on train)
-        tscv_cal = TimeSeriesSplit(n_splits=3)
+        # 5) Optional isotonic calibration (train-only)
+        from sklearn.model_selection import TimeSeriesSplit
+        from sklearn.calibration import CalibratedClassifierCV
         from collections import Counter
-        min_class_count = min(Counter(y_train).values()) if len(y_train) else 0
+        
+        tscv_cal = TimeSeriesSplit(n_splits=3)
+        min_class_count = min(Counter(y_train).values()) if y_train.size else 0
         
         if min_class_count < 5:
-            st.warning(f"⚠️ Not enough samples per class for isotonic calibration in {market.upper()} — skipping calibration.")
+            st.warning(f"⚠️ Not enough samples per class for isotonic calibration — skipping.")
             cal_logloss = model_logloss
-            cal_auc = model_auc
+            cal_auc     = model_auc
         else:
             cal_logloss = CalibratedClassifierCV(model_logloss, method='isotonic', cv=tscv_cal).fit(X_train, y_train)
             cal_auc     = CalibratedClassifierCV(model_auc,     method='isotonic', cv=tscv_cal).fit(X_train, y_train)
         
-        # --- Final time-forward holdout evaluation ---
-       
+        # 6) Holdout metrics
         p_ll = np.clip(cal_logloss.predict_proba(X_val)[:, 1], 1e-4, 1-1e-4)
         p_au = np.clip(cal_auc.predict_proba(X_val)[:, 1],     1e-4, 1-1e-4)
         
-        auc_ll = roc_auc_score(y_val, p_ll) if y_val.nunique() == 2 else np.nan
-        auc_au = roc_auc_score(y_val, p_au) if y_val.nunique() == 2 else np.nan
-        ll     = log_loss(y_val, p_au, labels=[0, 1]) if y_val.nunique() == 2 else np.nan
-        brier  = brier_score_loss(y_val, p_au) if y_val.nunique() == 2 else np.nan
+        auc_ll = roc_auc_score(y_val, p_ll) if np.unique(y_val).size == 2 else np.nan
+        auc_au = roc_auc_score(y_val, p_au) if np.unique(y_val).size == 2 else np.nan
+        ll     = log_loss(y_val, p_au, labels=[0, 1]) if np.unique(y_val).size == 2 else np.nan
+        brier  = brier_score_loss(y_val, p_au) if np.unique(y_val).size == 2 else np.nan
         
         st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
         st.write(f"- LogLoss Model AUC: `{auc_ll:.4f}`")
         st.write(f"- AUC Model AUC:     `{auc_au:.4f}`")
         st.write(f"- Holdout LogLoss:   `{ll:.4f}`")
         st.write(f"- Holdout Brier:     `{brier:.4f}`")
-        st.subheader(f"🧪 Holdout Validation – {market.upper()}")
 
+        
         # --- Helpers
         def _american_to_roi(odds_series, outcome_bool):
             """
