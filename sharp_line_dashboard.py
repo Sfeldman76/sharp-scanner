@@ -3052,8 +3052,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         early_stopping_rounds = 150
         
         # ---------- Manual grid CV with per-fold early stopping ----------
+       
         def evaluate_params(params) -> float:
-            """Return mean validation logloss across folds for given params."""
             scores = []
             for tr_idx, va_idx in folds:
                 X_tr, y_tr = X_full[tr_idx], y_full[tr_idx]
@@ -3061,37 +3061,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
                 es = xgb.callback.EarlyStopping(
                     rounds=early_stopping_rounds,
-                    save_best=True,   # keep best iteration
-                    maximize=False    # logloss: lower is better
+                    save_best=True,
+                    maximize=False   # lower logloss is better
                 )
         
                 model = XGBClassifier(**base_kwargs, **params)
+                # DO NOT pass eval_metric here
                 model.fit(
                     X_tr, y_tr,
                     eval_set=[(X_va, y_va)],
-                    eval_metric="logloss",
                     callbacks=[es],
                     verbose=False,
                 )
         
-                p = model.predict_proba(X_va)[:, 1]  # uses best iteration thanks to save_best=True
+                p = model.predict_proba(X_va)[:, 1]
                 scores.append(log_loss(y_va, p, labels=[0, 1]))
         
             if not scores:
                 raise RuntimeError("No valid folds produced a score.")
             return float(np.mean(scores))
         
-        # grid iterator (small, so full product is fine)
+        # grid search loop unchanged...
         grid_keys = list(param_grid.keys())
         grid_vals = [param_grid[k] for k in grid_keys]
-        
         best_score = np.inf
         best_params = None
         
         for combo in product(*grid_vals):
             params = dict(zip(grid_keys, combo))
             score = evaluate_params(params)
-            # print(f"{params} -> logloss {score:.4f}")  # optional
             if score < best_score:
                 best_score = score
                 best_params = params
@@ -3099,7 +3097,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if best_params is None:
             raise RuntimeError("No valid parameter set found.")
         
-        # --- Refit best model on most of the data; hold out most-recent 15% for early stopping ---
+        # final refit with early stopping (again: no eval_metric in .fit)
         n = len(X_full)
         hold = max(1, int(round(n * 0.15)))
         X_tr, y_tr = X_full[:-hold], y_full[:-hold]
@@ -3115,14 +3113,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_model.fit(
             X_tr, y_tr,
             eval_set=[(X_va, y_va)],
-            eval_metric="logloss",
             callbacks=[es_final],
             verbose=False,
         )
-
-    
-
-        
+                
         grid_logloss = RandomizedSearchCV(
             estimator=xgb.XGBClassifier(**base_est),
             param_distributions=param_grid,
