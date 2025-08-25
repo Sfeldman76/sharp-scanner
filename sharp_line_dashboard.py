@@ -1642,48 +1642,52 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     for c in ['Outcome']:
         if c in df_bt.columns:
             df_bt[c] = df_bt[c].astype(str).str.lower().str.strip()
-    df_scores = bq_client.query("""
+
+    # normalize Merge_Key_Short on df_bt (sharp_scores_full)
+    df_bt['Merge_Key_Short'] = df_bt['Merge_Key_Short'].astype(str).str.strip().str.lower()
+    
+    # pull completed scores from game_scores_final
+    df_results = bq_client.query("""
       SELECT
-        Merge_Key_Short AS Game_Key,
+        Merge_Key_Short,
         Home_Team, Away_Team, Game_Start,
         SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
         SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score,
         Sport
       FROM `sharplogger.sharp_data.game_scores_final`
+      WHERE Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
     """).to_dataframe()
-
-    # normalize Game_Key to match df_bt
-    df_scores['Game_Key'] = df_scores['Game_Key'].astype(str).str.strip().str.lower()
-
+    
+    df_results['Merge_Key_Short'] = df_results['Merge_Key_Short'].astype(str).str.strip().str.lower()
+    
+    # build totals features (key_col = Merge_Key_Short)
     df_tot_train = build_totals_training_from_scores(
-        df_scores, sport=sport, window_games=10, shrink=0.30
+        df_scores=df_results,
+        sport=sport,
+        window_games=10,
+        shrink=0.30,
+        key_col="Merge_Key_Short"
     )
-
-    # Merge (drop label to avoid leakage)
+    
+    # merge into sharp_scores_full
     df_bt = df_bt.merge(
         df_tot_train.drop(columns=['TOT_Actual_Total']),
-        on='Game_Key', how='left'
+        on='Merge_Key_Short',
+        how='left'
     )
-
-    # Optional mispricing feature for totals rows
+    
+    # add mispricing only for totals markets
     if 'Value' not in df_bt.columns:
-        df_bt['Value'] = np.nan  # keep pipeline tolerant
-
-    is_totals = df_bt['Market'].eq('totals')
+        df_bt['Value'] = np.nan
+    is_totals = df_bt['Market'].str.lower().eq('totals')
+    
     df_bt['TOT_Mispricing'] = np.where(
         is_totals & df_bt['TOT_Proj_Total_Baseline'].notna(),
         df_bt['Value'] - df_bt['TOT_Proj_Total_Baseline'],
         np.nan
     )
 
-    # Ensure features exist
-    TOT_FEATURES = [
-        "TOT_Proj_Total_Baseline","TOT_Off_H","TOT_Def_H","TOT_Off_A","TOT_Def_A",
-        "TOT_GT_H","TOT_GT_A","TOT_LgAvg_Total","TOT_Mispricing"
-    ]
-    for c in TOT_FEATURES:
-        if c not in df_bt.columns:
-            df_bt[c] = np.nan
+    
             
    # === Existing "as-of" history features (unchanged) ===
     history_cols = [
@@ -1751,7 +1755,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # =============== Schema-safe selection ===============
     all_feature_cols = (
         history_cols
-        + situational_flag_cols
         + team_cover_cols
         + opp_cover_cols
     )
@@ -2687,7 +2690,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
             'Outcome_Model_Spread','Outcome_Market_Spread',#'Outcome_Spread_Edge',
-            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_pts'
+            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_pts',
+            'TOT_Proj_Total_Baseline','TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
+            'TOT_GT_H','TOT_GT_A','TOT_LgAvg_Total','TOT_Mispricing'
         ]
         
         # ensure uniqueness (order-preserving)
@@ -2735,7 +2740,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # add time-context flags
         extend_unique(features, ['Is_Weekend','Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos'])
         
-        extend_unique(features, [c for c in TOT_FEATURES if c in df_bt.columns])
+        
         
         # merge view-driven features (all_present) without losing order
         if 'all_present' in locals():
