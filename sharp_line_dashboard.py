@@ -3166,8 +3166,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Build aligned evaluation frame (index = original df rows for the val slice)
         df_eval = pd.DataFrame({
-            "p":   pd.Series(p_cal, index=val_idx),
-            "y":   y_val.astype(int),  # already a Series with val_idx
+            "p":    pd.Series(p_cal, index=val_idx),
+            "y":    y_val.astype(int),  # Series with val_idx
             "odds": pd.to_numeric(df_market.loc[val_idx, "Odds_Price"], errors="coerce"),
         }).dropna(subset=["p", "y"])   # keep rows with both prob and label
         
@@ -3176,48 +3176,60 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins) - 1)]
         cuts   = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
         
-        # helper: ROI per bin (only if we have odds)
-        def _roi_mean(sub: pd.DataFrame) -> float:
-            if sub["odds"].notna().any():
-                return float(_american_to_roi(sub["odds"], sub["y"]).mean())
-            return float("nan")
+        # --- inline ROI calc: American odds to unit ROI ---
+        def _roi_mean_inline(sub: pd.DataFrame) -> float:
+            if not sub["odds"].notna().any():
+                return float("nan")
+            odds = pd.to_numeric(sub["odds"], errors="coerce")
+            win  = sub["y"].astype(int)
         
-        # aggregate per bin
-        out = []
+            # profit if win: +odds/100 for positive odds, +100/|odds| for negative odds
+            profit_pos = odds.where(odds > 0, np.nan) / 100.0
+            profit_neg = 100.0 / odds.abs()
+            profit_on_win = np.where(odds > 0, profit_pos, profit_neg)
+            profit_on_win = pd.Series(profit_on_win, index=odds.index).fillna(0.0)
+        
+            roi = win * profit_on_win - (1 - win) * 1.0   # lose stake if loss
+            return float(roi.mean())
+        
+        # --- aggregate per bin
+        rows = []
         for lb in labels:
             sub = df_eval[cuts == lb]
             n   = int(len(sub))
             if n == 0:
-                out.append((lb, 0, np.nan, np.nan, np.nan))
+                rows.append((lb, 0, np.nan, np.nan, np.nan))
                 continue
             hit   = float(sub["y"].mean())
-            roi   = _roi_mean(sub)
+            roi   = _roi_mean_inline(sub)
             avg_p = float(sub["p"].mean())
-            out.append((lb, n, hit, roi, avg_p))
+            rows.append((lb, n, hit, roi, avg_p))
         
-        df_bins = pd.DataFrame(out, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
+        df_bins = pd.DataFrame(rows, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
         df_bins["N"] = df_bins["N"].astype(int)
         
-        # show table
         st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
         st.dataframe(df_bins)
         
-        # quick extreme-bucket snapshot (only if they’re non-empty)
+        # quick extreme-bucket snapshot (only if non-empty)
         hi = df_bins.iloc[-1]
         lo = df_bins.iloc[0]
-        if hi["N"] > 0:
-            st.write(f"**High bin ({hi['Prob Bin']}):** N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}")
-        else:
-            st.write(f"**High bin ({hi['Prob Bin']}):** N=0")
-        if lo["N"] > 0:
-            st.write(f"**Low bin  ({lo['Prob Bin']}):** N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}")
-        else:
-            st.write(f"**Low bin  ({lo['Prob Bin']}):** N=0")
+        st.write(f"**High bin ({hi['Prob Bin']}):** " + (f"N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}" if hi["N"] > 0 else "N=0"))
+        st.write(f"**Low bin  ({lo['Prob Bin']}):** " + (f"N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}" if lo["N"] > 0 else "N=0"))
         
-        # optional: show prediction distribution to explain empty extreme bins
-        # st.bar_chart(pd.Series(p_cal).value_counts(bins=10, normalize=True).sort_index())
-
-
+        # === Summary Card =====================================================
+        st.markdown("### ✅ Deployment Readiness Snapshot")
+        psi_flag = "Unknown"
+        if 'df_psi' in locals():
+            psi_worst = df_psi['PSI'].replace(np.nan, 0).max()
+            psi_flag = "🚨 heavy drift" if psi_worst > 0.3 else ("⚠️ medium drift" if psi_worst > 0.2 else "✅ stable")
+        
+        hi_ok = (hi["N"] > 0) and ( (hi["Hit Rate"] >= 0.60) or (pd.notna(hi["Avg ROI (unit)"]) and hi["Avg ROI (unit)"] > 0) )
+        lo_ok = (lo["N"] > 0) and ( ((1 - lo["Hit Rate"]) >= 0.60) or (pd.notna(lo["Avg ROI (unit)"]) and lo["Avg ROI (unit)"] > 0) )
+        
+        st.write(f"- **PSI status:** {psi_flag}")
+        st.write(f"- **High-confidence bucket profitable/accurate?** {'✅' if hi_ok else '⚠️'}")
+        st.write(f"- **Low-confidence bucket fade profitable/accurate?** {'✅' if lo_ok else '⚠️'}")
         # === 3) ADVERSE SCENARIO REPLAY ======================================
         st.markdown("### 🌪️ Adverse Scenario Replay (reversal-heavy days)")
         if "Value_Reversal_Flag" in df_market.columns or "Odds_Reversal_Flag" in df_market.columns:
@@ -3257,25 +3269,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         else:
             st.info("Reversal flags not present — skipping adverse replay.")
 
-        # === Summary Card =====================================================
-        st.markdown("### ✅ Deployment Readiness Snapshot")
-        # PSI summary
-        psi_flag = "Unknown"
-        if 'df_psi' in locals():
-            psi_worst = df_psi['PSI'].replace(np.nan, 0).max()
-            if psi_worst > 0.3:
-                psi_flag = "🚨 heavy drift"
-            elif psi_worst > 0.2:
-                psi_flag = "⚠️ medium drift"
-            else:
-                psi_flag = "✅ stable"
-        # extreme bin checks
-        hi_ok = (hi["N"] > 0) and (hi["Hit Rate"] >= 0.60 or hi["Avg ROI (unit)"] > 0)
-        lo_ok = (lo["N"] > 0) and ((1 - lo["Hit Rate"]) >= 0.60 or lo["Avg ROI (unit)"] > 0)
-
-        st.write(f"- **PSI status:** {psi_flag}")
-        st.write(f"- **High-confidence bucket profitable/accurate?** {'✅' if hi_ok else '⚠️'}")
-        st.write(f"- **Low-confidence bucket fade profitable/accurate?** {'✅' if lo_ok else '⚠️'}")
+       
         # 🕵️‍♂️ Debug: Inspect problematic features in X
         for col in X.columns:
             try:
