@@ -629,72 +629,6 @@ def tmr(label):
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV
 
 
-# --- Purged + Embargoed CV that uses external groups & times (doesn't read X columns)
-class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
-    def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"),
-                 time_values=None):
-        """
-        time_values: 1D array-like of datetimes aligned to X rows (same length as X)
-        groups     : will be provided via .fit(..., groups=...) (e.g., Game_Key)
-        """
-        self.n_splits = n_splits
-        self.embargo = embargo
-        self.time_values = time_values
-
-    def get_n_splits(self, X=None, y=None, groups=None):
-        return self.n_splits
-
-    def split(self, X, y=None, groups=None):
-        if groups is None:
-            raise ValueError("groups (e.g., Game_Key) must be provided to split()")
-        if self.time_values is None:
-            raise ValueError("time_values must be provided to the splitter")
-
-        meta = pd.DataFrame({
-            "group": np.asarray(groups),
-            "time":  pd.to_datetime(self.time_values, errors="coerce", utc=True)
-        })
-        gmeta = (meta.groupby("group")
-                      .agg(start=("time", "min"), end=("time", "max"))
-                      .sort_values("start")
-                      .reset_index())
-
-        n = len(gmeta)
-        n_splits = min(self.n_splits, max(2, n))
-        fold_sizes = (n // n_splits) * np.ones(n_splits, dtype=int)
-        fold_sizes[: n % n_splits] += 1
-
-        cur = 0
-        for k in range(n_splits):
-            val_groups = gmeta.iloc[cur:cur + fold_sizes[k]]["group"].values
-            val_start = gmeta.iloc[cur]["start"]
-            val_end   = gmeta.iloc[cur + fold_sizes[k] - 1]["end"]
-            cur += fold_sizes[k]
-
-            overlap = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
-            purged = set(gmeta.loc[overlap, "group"])
-
-            cand = gmeta[~gmeta["group"].isin(val_groups)]
-            cand = cand[~cand["group"].isin(purged)]
-
-            embargo_groups = set()
-            if not cand.empty:
-                train_end = cand["end"].max()
-                embargo_cut = train_end + self.embargo
-                embargo_mask = gmeta["start"] <= embargo_cut
-                embargo_groups = set(gmeta.loc[embargo_mask, "group"])
-
-            train_groups = gmeta[
-                ~gmeta["group"].isin(val_groups)
-                & ~gmeta["group"].isin(purged)
-                & ~gmeta["group"].isin(embargo_groups)
-            ]["group"].values
-
-            all_groups = meta["group"].values
-            train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
-            val_idx   = np.flatnonzero(np.isin(all_groups, val_groups))
-            yield train_idx, val_idx
-
 
 def write_market_weights_to_bigquery(weights_dict):
     rows = []
@@ -3067,9 +3001,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # max_bin, colsample_bynode fixed in base_kwargs for stability/speed
         }
         
-        from sklearn.model_selection import RandomizedSearchCV
-        import xgboost as xgb
-        
+
         search_base = xgb.XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
         
         rs_ll = RandomizedSearchCV(
@@ -3101,8 +3033,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         model_auc = rs_auc.best_estimator_
         
         # --- OOF predictions for isotonic (fast + accurate) ---
-        import numpy as np
-        from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+       
         
         oof_pred_logloss = np.zeros(len(y_full), dtype=float)
         oof_pred_auc     = np.zeros(len(y_full), dtype=float)
@@ -3157,10 +3088,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
-        st.write(f"- LogLoss Model AUC: `{auc_ll:.4f}`")
-        st.write(f"- AUC Model AUC:     `{auc_au:.4f}`")
-        st.write(f"- Holdout LogLoss:   `{ll:.4f}`")
-        st.write(f"- Holdout Brier:     `{brier:.4f}`")
+        st.write(f"- Blended+Calibrated AUC: `{auc:.4f}`")
+        st.write(f"- Holdout LogLoss:        `{ll:.4f}`")
+        st.write(f"- Holdout Brier:          `{bri:.4f}`")
+
 
         
         # --- Helpers
