@@ -3113,15 +3113,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         X_val = X_full[val_idx]                                  # NumPy array (fine for model.predict_proba)
         y_val = pd.Series(y_full[val_idx].astype(int), index=val_idx)  # Pandas Series so .nunique(), alignment, merges work
-
+                # --- helper for robust early stopping ---
+        def fit_with_es(model, X_tr, y_tr, X_va, y_va, es_rounds):
+            """Try native early_stopping_rounds; fallback to callback API if needed."""
+            try:
+                model.fit(
+                    X_tr, y_tr,
+                    eval_set=[(X_va, y_va)],
+                    early_stopping_rounds=es_rounds,
+                    verbose=False,
+                )
+            except TypeError:
+                es = xgb.callback.EarlyStopping(
+                    rounds=es_rounds,
+                    save_best=True,
+                    maximize=False
+                )
+                model.fit(
+                    X_tr, y_tr,
+                    eval_set=[(X_va, y_va)],
+                    callbacks=[es],
+                    verbose=False,
+                )
+            return model
         es = xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True, maximize=False)
         
-        final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
-        final_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": final_estimators_cap})
-        
-        # y_val is a pandas Series; pass .values to XGB for eval_set labels
-        final_log.fit(X_tr, y_tr, eval_set=[(X_val, y_val.values)], callbacks=[es], verbose=False)
-        final_auc.fit(X_tr, y_tr, eval_set=[(X_val, y_val.values)], callbacks=[es], verbose=False)
+        final_log = xgb.XGBClassifier(
+            **{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap}
+        )
+        final_auc = xgb.XGBClassifier(
+            **{**base_kwargs, **model_auc.get_params(), "n_estimators": final_estimators_cap}
+        )
+    
+        final_log = fit_with_es(final_log, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
+        final_auc = fit_with_es(final_auc, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
+
         
         class IsoWrapper:
             def __init__(self, base, iso):
