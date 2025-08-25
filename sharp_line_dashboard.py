@@ -114,7 +114,7 @@ import re
 import logging
 from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
 from sklearn.model_selection import RandomizedSearchCV
-
+from itertools import product
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
 import xgboost as xgb
 
