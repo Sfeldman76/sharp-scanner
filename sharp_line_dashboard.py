@@ -3023,7 +3023,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # --- search space (randomized, not exhaustive grid) ---
-        search_space = {
+        param_grid = {
             "max_depth":         randint(2, 4),               # shallow trees
             "learning_rate":     loguniform(1e-2, 6e-2),      # 0.01–0.06
             "subsample":         uniform(0.6, 0.4),           # 0.6–1.0
