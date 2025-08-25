@@ -2983,7 +2983,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         # --- randomized search space (scipy dists or small lists) ---
-        from scipy.stats import randint, loguniform, uniform
+
         param_distributions = {
             "max_depth":         randint(2, 4),
             "learning_rate":     loguniform(1e-2, 6e-2),
