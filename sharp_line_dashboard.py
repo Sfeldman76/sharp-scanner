@@ -109,14 +109,14 @@ import numpy as np
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
-
+import xgboost as xgb  # make sure this import exists
 import re
 import logging
 from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
 from sklearn.model_selection import RandomizedSearchCV
 from itertools import product
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
-import xgboost as xgb
+
 
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -3046,6 +3046,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             importance_type="total_gain",
         )
         
+     
+                # ---------- Manual grid CV with per-fold early stopping ----------
+
         early_stopping_rounds = 150
         
         # ---------- Manual grid CV with per-fold early stopping ----------
@@ -3056,16 +3059,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 X_tr, y_tr = X_full[tr_idx], y_full[tr_idx]
                 X_va, y_va = X_full[va_idx], y_full[va_idx]
         
+                es = xgb.callback.EarlyStopping(
+                    rounds=early_stopping_rounds,
+                    save_best=True,   # keep best iteration
+                    maximize=False    # logloss: lower is better
+                )
+        
                 model = XGBClassifier(**base_kwargs, **params)
                 model.fit(
                     X_tr, y_tr,
                     eval_set=[(X_va, y_va)],
+                    eval_metric="logloss",
+                    callbacks=[es],
                     verbose=False,
-                    early_stopping_rounds=early_stopping_rounds,
                 )
-                # use best_iteration_ implicitly via predict_proba
-                p = model.predict_proba(X_va)[:, 1]
-                scores.append(log_loss(y_va, p, labels=[0,1]))
+        
+                p = model.predict_proba(X_va)[:, 1]  # uses best iteration thanks to save_best=True
+                scores.append(log_loss(y_va, p, labels=[0, 1]))
+        
+            if not scores:
+                raise RuntimeError("No valid folds produced a score.")
             return float(np.mean(scores))
         
         # grid iterator (small, so full product is fine)
@@ -3078,8 +3091,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         for combo in product(*grid_vals):
             params = dict(zip(grid_keys, combo))
             score = evaluate_params(params)
-            # OPTIONAL: print or log incremental results
-            # print(f"{params} -> logloss {score:.4f}")
+            # print(f"{params} -> logloss {score:.4f}")  # optional
             if score < best_score:
                 best_score = score
                 best_params = params
@@ -3087,23 +3099,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if best_params is None:
             raise RuntimeError("No valid parameter set found.")
         
-        # --- Refit best model on *all* data with a small, most-recent holdout for early stopping ---
-        # hold out the last 15% by time for early stopping signal (no leakage across time)
+        # --- Refit best model on most of the data; hold out most-recent 15% for early stopping ---
         n = len(X_full)
         hold = max(1, int(round(n * 0.15)))
         X_tr, y_tr = X_full[:-hold], y_full[:-hold]
         X_va, y_va = X_full[-hold:], y_full[-hold:]
         
+        es_final = xgb.callback.EarlyStopping(
+            rounds=early_stopping_rounds,
+            save_best=True,
+            maximize=False
+        )
+        
         best_model = XGBClassifier(**base_kwargs, **best_params)
         best_model.fit(
             X_tr, y_tr,
             eval_set=[(X_va, y_va)],
+            eval_metric="logloss",
+            callbacks=[es_final],
             verbose=False,
-            early_stopping_rounds=early_stopping_rounds,
         )
-        
-        # best_model is ready; you can also access:
-        # best_params, best_model.best_iteration, best_model.get_booster().feature_names, etc.
+
+    
 
         
         grid_logloss = RandomizedSearchCV(
