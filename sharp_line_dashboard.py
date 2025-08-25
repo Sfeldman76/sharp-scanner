@@ -1737,7 +1737,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
     # Keep only columns that actually exist
     history_present = [c for c in history_cols if c in df_bt.columns]
-    situational_flags_present = [c for c in situational_flag_cols if c in df_bt.columns]
+    
     team_cover_present = [c for c in team_cover_cols if c in df_bt.columns]
     opp_cover_present = [c for c in opp_cover_cols if c in df_bt.columns]
     all_present = history_present + situational_flags_present + team_cover_present + opp_cover_present
