@@ -116,8 +116,10 @@ from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
 from sklearn.model_selection import RandomizedSearchCV
 from itertools import product
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
-
-
+from sklearn.experimental import enable_halving_search_cv  # noqa
+from sklearn.model_selection import HalvingRandomSearchCV
+from scipy.stats import randint, loguniform, uniform
+      
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
 BQ_TABLE = "sharp_moves_master" # ✅ your table name
@@ -3018,34 +3020,39 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                              "try fewer splits, smaller embargo, or verify both classes exist.")
         
         # --- small, regularized grid (we rely on early stopping, not n_estimators search) ---
-        param_grid = {
-            "max_depth":         [2, 3],
-            "learning_rate":     [0.02, 0.04],
-            "subsample":         [0.6, 0.75, 0.9, 1.0],
-            "colsample_bytree":  [0.6, 0.8],
-            "min_child_weight":  [15, 30],
-            "gamma":             [0.2, 0.5],
-            "reg_alpha":         [5.0, 20.0],
-            "reg_lambda":        [20.0, 40.0],
+
+        
+        # --- search space (randomized, not exhaustive grid) ---
+        search_space = {
+            "max_depth":         randint(2, 4),               # shallow trees
+            "learning_rate":     loguniform(1e-2, 6e-2),      # 0.01–0.06
+            "subsample":         uniform(0.6, 0.4),           # 0.6–1.0
+            "colsample_bytree":  uniform(0.5, 0.4),           # 0.5–0.9
+            "colsample_bynode":  uniform(0.6, 0.4),           # less features per split
+            "min_child_weight":  randint(15, 40),
+            "gamma":             uniform(0.1, 0.6),
+            "reg_alpha":         loguniform(1.0, 50.0),
+            "reg_lambda":        loguniform(5.0, 120.0),
+            "max_bin":           randint(96, 192),            # histogram bins → speed/accuracy tradeoff
         }
         
         # --- imbalance weight ---
         pos = float(y_full.sum())
         scale_pos_weight = (len(y_full) - pos) / max(pos, 1.0)
         
-        # --- base estimator (high cap; early stopping will truncate) ---
+        # --- base estimator (early stopping will truncate) ---
         base_kwargs = dict(
             objective="binary:logistic",
             eval_metric="logloss",
-            tree_method="hist",
+            tree_method="hist",             # if GPU: "gpu_hist"
             max_delta_step=1,
-            n_estimators=2000,          # high cap; we early-stop
-            n_jobs=4,                   # avoid thread thrash with outer loops
+            n_estimators=3000,              # high cap; rely on early stopping
+            n_jobs=3,                       # balance with CV outer jobs
             scale_pos_weight=scale_pos_weight,
             random_state=42,
             importance_type="total_gain",
         )
-        
+
      
                 # ---------- Manual grid CV with per-fold early stopping ----------
 
