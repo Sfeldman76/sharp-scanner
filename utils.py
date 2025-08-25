@@ -284,6 +284,46 @@ def to_utc_ts(x):
         return t.tz_localize("UTC")
     else:
         return t.tz_convert("UTC")
+# --- add this helper near your other SQL helpers ---
+def _table_has_column(bq: bigquery.Client, full_table: str, column: str) -> bool:
+    """
+    full_table is like 'project.dataset.table' or 'dataset.table'
+    """
+    parts = full_table.split(".")
+    if len(parts) == 3:
+        project_id, dataset_id, table_id = parts
+    elif len(parts) == 2:
+        # assume default project
+        project_id = None
+        dataset_id, table_id = parts
+    else:
+        return False
+
+    if project_id:
+        from_clause = f"`{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS`"
+        tbl_filter = f"table_catalog = @proj AND table_schema = @ds AND table_name = @tbl"
+        params = [
+            bigquery.ScalarQueryParameter("proj", "STRING", project_id),
+            bigquery.ScalarQueryParameter("ds",   "STRING", dataset_id),
+            bigquery.ScalarQueryParameter("tbl",  "STRING", table_id),
+            bigquery.ScalarQueryParameter("col",  "STRING", column),
+        ]
+    else:
+        from_clause = f"`{dataset_id}.INFORMATION_SCHEMA.COLUMNS`"
+        tbl_filter = f"table_schema = @ds AND table_name = @tbl"
+        params = [
+            bigquery.ScalarQueryParameter("ds",   "STRING", dataset_id),
+            bigquery.ScalarQueryParameter("tbl",  "STRING", table_id),
+            bigquery.ScalarQueryParameter("col",  "STRING", column),
+        ]
+
+    sql = f"""
+    SELECT COUNT(1) AS n
+    FROM {from_clause}
+    WHERE {tbl_filter} AND column_name = @col
+    """
+    df = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+    return (not df.empty) and (int(df.n.iloc[0]) > 0)
 
 
 SPORT_ALIASES = {
@@ -521,45 +561,50 @@ def update_power_ratings(
         ).to_dataframe()
         return df.min_ts.iloc[0], df.max_ts.iloc[0]
 
+   
     def load_games_stream(sport: str, aliases: list[str], cutoff=None, page_rows: int = 200_000):
         cutoff_param = None
         if cutoff is not None and not pd.isna(cutoff):
             cutoff_utc = to_utc_ts(cutoff)
             if not pd.isna(cutoff_utc):
                 cutoff_param = cutoff_utc.to_pydatetime()
-
+    
+        # Detect presence of Neutral_Site once; if missing, hardcode FALSE
+        has_neutral = _table_has_column(bq, project_table_scores, "Neutral_Site")
+        neutral_select = "FALSE AS Neutral_Site" if not has_neutral else "SAFE_CAST(t.Neutral_Site AS BOOL) AS Neutral_Site"
+    
         base_sql = f"""
         SELECT
           CASE
-            WHEN UPPER(CAST(Sport AS STRING)) IN ('BASEBALL_MLB','BASEBALL-MLB','BASEBALL','MLB') THEN 'MLB'
-            WHEN UPPER(CAST(Sport AS STRING)) IN ('AMERICANFOOTBALL_NFL','FOOTBALL_NFL','NFL') THEN 'NFL'
-            WHEN UPPER(CAST(Sport AS STRING)) IN ('AMERICANFOOTBALL_NCAAF','FOOTBALL_NCAAF','NCAAF','CFB','COLLEGE_FOOTBALL') THEN 'NCAAF'
-            WHEN UPPER(CAST(Sport AS STRING)) IN ('BASKETBALL_NBA','NBA') THEN 'NBA'
-            WHEN UPPER(CAST(Sport AS STRING)) IN ('BASKETBALL_WNBA','WNBA') THEN 'WNBA'
-            WHEN UPPER(CAST(Sport AS STRING)) IN ('BASKETBALL_NCAAB','NCAAB','COLLEGE_BASKETBALL') THEN 'NCAAB'
-            WHEN UPPER(CAST(Sport AS STRING)) IN ('CFL','CANADIANFOOTBALL','CANADIAN_FOOTBALL') THEN 'CFL'
-            ELSE COALESCE(CAST(Sport AS STRING), @default_sport)
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASEBALL_MLB','BASEBALL-MLB','BASEBALL','MLB') THEN 'MLB'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('AMERICANFOOTBALL_NFL','FOOTBALL_NFL','NFL') THEN 'NFL'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('AMERICANFOOTBALL_NCAAF','FOOTBALL_NCAAF','NCAAF','CFB','COLLEGE_FOOTBALL') THEN 'NCAAF'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NBA','NBA') THEN 'NBA'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_WNBA','WNBA') THEN 'WNBA'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NCAAB','NCAAB','COLLEGE_BASKETBALL') THEN 'NCAAB'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('CFL','CANADIANFOOTBALL','CANADIAN_FOOTBALL') THEN 'CFL'
+            ELSE COALESCE(CAST(t.Sport AS STRING), @default_sport)
           END AS Sport,
-          LOWER(TRIM(Home_Team)) AS Home_Team,
-          LOWER(TRIM(Away_Team)) AS Away_Team,
-          TIMESTAMP(Game_Start) AS Game_Start,
-          SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
-          SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score,
-          TIMESTAMP(Inserted_Timestamp) AS Snapshot_TS,
-          SAFE_CAST(Neutral_Site AS BOOL) AS Neutral_Site
-        FROM `{project_table_scores}`
-        WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@sport_aliases)
-          AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-          {"AND TIMESTAMP(Inserted_Timestamp) >= @cutoff" if cutoff_param else ""}
+          LOWER(TRIM(t.Home_Team)) AS Home_Team,
+          LOWER(TRIM(t.Away_Team)) AS Away_Team,
+          TIMESTAMP(t.Game_Start) AS Game_Start,
+          SAFE_CAST(t.Score_Home_Score AS FLOAT64) AS Score_Home_Score,
+          SAFE_CAST(t.Score_Away_Score AS FLOAT64) AS Score_Away_Score,
+          TIMESTAMP(t.Inserted_Timestamp) AS Snapshot_TS,
+          {neutral_select}
+        FROM `{project_table_scores}` t
+        WHERE UPPER(CAST(t.Sport AS STRING)) IN UNNEST(@sport_aliases)
+          AND t.Score_Home_Score IS NOT NULL AND t.Score_Away_Score IS NOT NULL
+          {"AND TIMESTAMP(t.Inserted_Timestamp) >= @cutoff" if cutoff_param else ""}
         ORDER BY Snapshot_TS, Game_Start
         """
         params = {"sport_aliases": aliases, "default_sport": default_sport}
         if cutoff_param is not None:
             params["cutoff"] = cutoff_param
-
+    
         need = ["Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS",
                 "Score_Home_Score","Score_Away_Score","Neutral_Site"]
-
+    
         for df in stream_query_dfs(bq, base_sql, params=params, page_rows=page_rows, select_cols=need):
             df = downcast_numeric(df)
             df = to_cats(df, ["Sport","Home_Team","Away_Team"])
@@ -5231,8 +5276,10 @@ def detect_sharp_moves(
             .tolist()
         )
         weights = {m: 1.0 for m in markets_present}
-        logging.info(f"✅ Using uniform we
-
+        logging.info(
+            f"✅ Using uniform weights=1.0 for {len(market_weights)} markets "
+            f"({sport_label}): {sorted(market_weights)}"
+        )
    
     now = pd.Timestamp.utcnow()
     df['Snapshot_Timestamp'] = now
