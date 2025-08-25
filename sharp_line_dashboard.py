@@ -1452,7 +1452,7 @@ def add_favorite_context_flag(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_totals_training_from_scores_fast(
+def build_totals_training_from_scores(
     df_scores: pd.DataFrame,
     sport: str | None = None,
     window_games: int = 10,
