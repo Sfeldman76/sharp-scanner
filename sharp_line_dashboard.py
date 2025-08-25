@@ -3119,10 +3119,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
         final_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": final_estimators_cap})
         
-        # y_val is a pandas Series; either .values or .to_numpy() is fine
+        # y_val is a pandas Series; pass .values to XGB for eval_set labels
         final_log.fit(X_tr, y_tr, eval_set=[(X_val, y_val.values)], callbacks=[es], verbose=False)
         final_auc.fit(X_tr, y_tr, eval_set=[(X_val, y_val.values)], callbacks=[es], verbose=False)
-
+        
         class IsoWrapper:
             def __init__(self, base, iso):
                 self.base = base
@@ -3131,23 +3131,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 p = self.base.predict_proba(X)[:, 1]
                 p_cal = np.clip(self.iso.transform(p), 1e-6, 1-1e-6)
                 return np.vstack([1 - p_cal, p_cal]).T
-                
+        
         cal_logloss = IsoWrapper(final_log, iso)
         cal_auc     = IsoWrapper(final_auc, iso)
         
         # ----- holdout metrics (blended + calibrated) -----
-        p_ll = cal_logloss.predict_proba(X_va)[:, 1]
-        p_au = cal_auc.predict_proba(X_va)[:, 1]
+        # Use X_val / y_val (new names) instead of X_va / y_va
+        p_ll    = cal_logloss.predict_proba(X_val)[:, 1]
+        p_au    = cal_auc.predict_proba(X_val)[:, 1]
         p_blend = 0.5 * p_ll + 0.5 * p_au
-        p_cal = np.clip(p_blend, 1e-6, 1-1e-6)
+        p_cal   = np.clip(p_blend, 1e-6, 1-1e-6)
         
-        def safe_auc(y, p):  return roc_auc_score(y, p) if np.unique(y).size == 2 else np.nan
-        def safe_ll(y, p):   return log_loss(y, p, labels=[0,1]) if np.unique(y).size == 2 else np.nan
-        def safe_brier(y, p):return brier_score_loss(y, p) if np.unique(y).size == 2 else np.nan
+        def safe_auc(y, p):   return roc_auc_score(y, p) if np.unique(y).size == 2 else np.nan
+        def safe_ll(y, p):    return log_loss(y, p, labels=[0,1]) if np.unique(y).size == 2 else np.nan
+        def safe_brier(y, p): return brier_score_loss(y, p) if np.unique(y).size == 2 else np.nan
         
-        auc = safe_auc(y_va, p_cal)
-        ll  = safe_ll(y_va, p_cal)
-        bri = safe_brier(y_va, p_cal)
+        auc = safe_auc(y_val.values, p_cal)
+        ll  = safe_ll(y_val.values, p_cal)
+        bri = safe_brier(y_val.values, p_cal)
+
         
         st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
         st.write(f"- Blended+Calibrated AUC: `{auc:.4f}`")
