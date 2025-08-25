@@ -1625,19 +1625,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     """).to_dataframe()
     
     df_results['Merge_Key_Short'] = df_results['Merge_Key_Short'].astype(str).str.strip().str.lower()
+    # Pull completed games from game_scores_final
+    df_totals = bq_client.query("""
+      SELECT
+        Merge_Key_Short,
+        Home_Team, Away_Team, Game_Start,
+        SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score,
+        SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score,
+        Sport
+      FROM `sharplogger.sharp_data.game_scores_final`
+      WHERE Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
+    """).to_dataframe()
     
-    # build totals features (key_col = Merge_Key_Short)
+    # Normalize join key
+    df_totals["Merge_Key_Short"] = df_totals["Merge_Key_Short"].astype(str).str.strip().str.lower()
+    
+    # Build totals features
     df_tot_train = build_totals_training_from_scores(
         df_totals, sport=sport, window_games=10, shrink=0.30, key_col="Merge_Key_Short"
     )
-        
-    # merge into sharp_scores_full
-    df_bt = df_bt.merge(
-        df_tot_train.drop(columns=['TOT_Actual_Total']),
-        on='Merge_Key_Short',
-        how='left'
-    )
     
+    # Merge into sharp_scores_full
+    df_bt = df_bt.merge(
+        df_tot_train.drop(columns=["TOT_Actual_Total"]),
+        on="Merge_Key_Short",
+        how="left"
+    )
+   
     # add mispricing only for totals markets
     if 'Value' not in df_bt.columns:
         df_bt['Value'] = np.nan
