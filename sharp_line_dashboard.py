@@ -2983,33 +2983,76 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         cv_for_search = folds  # iterable of (train_idx, val_idx)
         
         # --- base kwargs for all classifiers ---
+        # --- BASE (CPU-optimized) ---
         base_kwargs = dict(
             objective="binary:logistic",
             eval_metric="logloss",
-            tree_method="hist",          # if GPU: "gpu_hist"
+            tree_method="hist",              # stay CPU
+            grow_policy="lossguide",         # better splits at same cost
+            max_leaves=32,                   # strong default; 48 if more data
+            max_bin=128 if X_full.shape[0] < 150_000 else 64,  # speed on big sets
+            sampling_method="gradient_based",# faster, same quality vs uniform
+            single_precision_histogram=True, # smaller/faster hist build (xgboost>=1.7)
+            colsample_bynode=0.8,            # cheaper splits
             max_delta_step=1,
-            n_jobs=3,                    # avoid oversubscription with CV
-            scale_pos_weight=scale_pos_weight,  # must be defined earlier from y_full
+            n_jobs=3,                        # match your vCPUs to avoid thrash
+            scale_pos_weight=scale_pos_weight,
             random_state=42,
             importance_type="total_gain",
-            colsample_bynode=0.8,        # ↓ split cost
-            max_bin=128,                 # faster histograms
         )
         
-        # --- randomized search space (scipy dists or small lists) ---
+        mono = {c: 0 for c in features}  # default: unconstrained
 
+        plus_1 = [
+            # Movement/shift magnitudes that generally help
+            "Abs_Odds_Move_From_Opening",
+            "Pct_Line_Move_From_Opening", "Pct_Line_Move_Bin",
+            "Abs_Line_Move_Z", "Pct_Line_Move_Z",
+            "Line_Moved_Toward_Team",
+        
+            # Hybrid sharp/odds timing magnitudes
+            *[c for c in features if c.startswith("SharpMove_Magnitude_")],
+            *[c for c in features if c.startswith("OddsMove_Magnitude_")],
+        
+            # Cross-market alignment (safe positive)
+            "Spread_vs_H2H_Aligned",
+        
+            # Market/Book composites that represent sharper support or reliability
+            "MarketLeader_ImpProbShift", "LimitProtect_SharpMag",
+            "Delta_Sharp_vs_Rec", "Sharp_Leads",
+            "Book_Reliability_Lift", "Book_Reliability_x_Sharp", "Book_Reliability_x_PROB_SHIFT",
+        
+            # Direct probability from your model (higher ⇒ more likely hit)
+            "Outcome_Cover_Prob",
+        ]
+        
+        minus_1 = [
+            # Reversal/overmove/contradiction = usually bad
+            "Value_Reversal_Flag", "Odds_Reversal_Flag",
+            "Potential_Overmove_Flag", "Potential_Odds_Overmove_Flag",
+            "Total_vs_Spread_Contradiction",
+        ]
+        
+        # Apply only if present
+        for c in plus_1:
+            if c in mono: mono[c] = 1
+        for c in minus_1:
+            if c in mono: mono[c] = -1
+        
+        monotone_constraints = "(" + ",".join(str(mono.get(c, 0)) for c in features) + ")"
+        base_kwargs["monotone_constraints"] = monotone_constraints
+                
+        # --- SEARCH SPACE (tighter, same time, better hits) ---
         param_distributions = {
-            "max_depth":         randint(2, 4),
-            "learning_rate":     loguniform(1e-2, 6e-2),
-            "subsample":         uniform(0.6, 0.4),    # 0.6–1.0
-            "colsample_bytree":  uniform(0.5, 0.4),    # 0.5–0.9
-            "min_child_weight":  randint(15, 40),
-            "gamma":             uniform(0.1, 0.6),
-            "reg_alpha":         loguniform(1.0, 50.0),
-            "reg_lambda":        loguniform(5.0, 120.0),
-            # max_bin & colsample_bynode fixed in base_kwargs for stability/speed
+            "max_depth":           randint(2, 3),
+            "learning_rate":       loguniform(1e-2, 3e-2),
+            "subsample":           uniform(0.7, 0.25),     # 0.70–0.95
+            "colsample_bytree":    uniform(0.6, 0.3),      # 0.60–0.90
+            "min_child_weight":    randint(20, 36),        # 20–35
+            "gamma":               uniform(0.1, 0.4),
+            "reg_alpha":           loguniform(1.0, 20.0),
+            "reg_lambda":          loguniform(5.0, 60.0),
         }
-
 
         search_base = xgb.XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
         
