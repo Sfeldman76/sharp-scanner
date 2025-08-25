@@ -3216,66 +3216,77 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         else:
             df_recent = pd.DataFrame()
 
+        # --- Build a DataFrame view for PSI (numeric only)
+        X_df = df_market.reindex(columns=features)
+        X_base = X_df.apply(pd.to_numeric, errors='coerce')
+        
         psi_rows = []
         if not df_recent.empty:
             X_recent = df_recent.reindex(columns=features)
-            # numeric-only for PSI
-            X_base = X[features].apply(pd.to_numeric, errors='coerce')
             X_recent_num = X_recent.apply(pd.to_numeric, errors='coerce')
-            shared_cols = [c for c in X_base.columns if c in X_recent_num.columns]
-
+        
+            # only compute PSI on shared cols
+            shared_cols = list(set(X_base.columns) & set(X_recent_num.columns))
             for col in shared_cols:
                 try:
                     v = _psi(X_base[col], X_recent_num[col])
                     psi_rows.append((col, v, _grade_psi(v)))
                 except Exception:
                     psi_rows.append((col, np.nan, "n/a"))
-
-            df_psi = pd.DataFrame(psi_rows, columns=["Feature", "PSI", "Assessment"]).sort_values("PSI", ascending=False)
+        
+            df_psi = (pd.DataFrame(psi_rows, columns=["Feature", "PSI", "Assessment"])
+                        .sort_values("PSI", ascending=False))
             st.dataframe(df_psi.head(30))
         else:
             st.info("No recent window found for PSI (missing or non-datetime Snapshot_Timestamp).")
-
-        # Ensure val_proba is a Series with the X_val index
-        try:
-            val_proba = pd.Series(val_proba, index=X_val.index)
-        except Exception:
-            val_proba = pd.Series(cal_logloss.predict_proba(X_val)[:, 1], index=X_val.index)
         
-        # Build one aligned frame
+        # === Validation indices from your time-forward split ===
+        # If you used the 15% tail split:
+        n = len(X_full)
+        hold = max(1, int(round(n * 0.15)))
+        val_idx = np.arange(n)[-hold:]   # indices of validation rows in original df
+        
+        # If you instead used a time mask earlier, you can do:
+        # val_idx = np.where(va_mask)[0]
+        
+        # --- Calibrated validation probabilities as a Series aligned to df rows
+        val_proba = pd.Series(cal_logloss.predict_proba(X_val)[:, 1], index=val_idx)
+        
+        # --- Build aligned evaluation frame
         df_eval = pd.DataFrame({
             "p": val_proba,
-            "y": pd.Series(y_val, index=val_proba.index),
-            "odds": pd.to_numeric(df_market.loc[val_proba.index, "Odds_Price"], errors="coerce")
+            "y": pd.Series(y_val, index=val_idx),
+            "odds": pd.to_numeric(df_market.loc[val_idx, "Odds_Price"], errors="coerce"),
         })
         
-        # Define bins
+        # --- Probability bins
         bins = np.linspace(0, 1, 11)
         labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
         cuts = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
         
-        # Compute per-bin metrics safely
+        # --- Per-bin metrics
         out_rows = []
         for lb in labels:
             sub = df_eval[cuts == lb]
-            n = int(len(sub))
-            if n == 0:
+            nbin = int(len(sub))
+            if nbin == 0:
                 out_rows.append((lb, 0, np.nan, np.nan, np.nan))
                 continue
         
             hr = float(sub["y"].mean())
             roi = float(_american_to_roi(sub["odds"], sub["y"]).mean()) if sub["odds"].notna().any() else np.nan
             avg_p = float(sub["p"].mean())
-            out_rows.append((lb, n, hr, roi, avg_p))
+            out_rows.append((lb, nbin, hr, roi, avg_p))
         
         df_bins = pd.DataFrame(out_rows, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
         df_bins["N"] = df_bins["N"].astype(int)
-
-        # quick extreme-bucket snapshot
+        
+        # --- Extreme-bucket snapshot
         hi = df_bins.iloc[-1]
         lo = df_bins.iloc[0]
         st.write(f"**High bin ({hi['Prob Bin']}):** N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}")
         st.write(f"**Low bin  ({lo['Prob Bin']}):** N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}")
+
 
         # === 3) ADVERSE SCENARIO REPLAY ======================================
         st.markdown("### 🌪️ Adverse Scenario Replay (reversal-heavy days)")
