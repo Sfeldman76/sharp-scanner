@@ -4808,7 +4808,7 @@ def detect_sharp_moves(
     _sport_key   = sport_key            # keep as passed (can be None)
     _sport_label = sport_label  
 
-        if has_models is None:
+    if has_models is None:
         has_models = bool(trained_models)
 
     # ---- NEVER self-load weights here; respect what caller passed
