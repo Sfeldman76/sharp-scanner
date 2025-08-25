@@ -1295,55 +1295,88 @@ def normalize_book_key(raw_key, sharp_books, rec_books):
     # ✅ Final fallback — return normalized key as-is
     return raw_key
 
+from google.cloud import bigquery
+import logging
+import time
 
-def load_market_weights_from_bq(sport_label: str, days_back: int = 14):
-    """Load minimal rows for one sport and recent window; compute weights only."""
-    has_models = True  # the caller should have checked; keep for clarity
-    if not has_models:
-        logging.info("⏭️ Skipping market weights (HAS_MODELS=False).")
-        return {}
+# Map for sport aliasing in SQL
 
-    client = bigquery.Client(project="sharplogger", location="us")
+# Optional per-run cache to avoid repeated BQ hits
+_market_weights_cache = {}
 
-    # Columns actually needed by your weight computation
+def load_market_weights_from_bq(
+    sport_label: str,
+    days_back: int = 14,
+    project: str = "sharplogger",
+    dataset_table: str = "sharplogger.sharp_data.sharp_scores_full",
+    use_cache: bool = True,
+):
+    """
+    Load recent rows for one sport and compute market weights.
+    Returns a dict; never raises (logs and returns {} on error/empty).
+    """
+    t0 = time.time()
+    sport = (sport_label or "").strip().upper()
+    key = (sport, days_back)
+
+    if use_cache and key in _market_weights_cache:
+        return _market_weights_cache[key]
+
+    aliases = SPORT_ALIASES.get(sport, [sport])
+
     needed_cols = [
-        "Sport", "Market", "Outcome", "Bookmaker", "Value", "Model_Sharp_Win_Prob",
-        "SHARP_HIT_BOOL", "Scored", "Snapshot_Timestamp"
+        "Sport", "Market", "Outcome", "Bookmaker", "Value",
+        "Model_Sharp_Win_Prob", "SHARP_HIT_BOOL", "Scored", "Snapshot_Timestamp"
     ]
     select_cols = ", ".join(needed_cols)
 
-    # Normalize sport label in SQL
-    sport_norms = ["NCAAF","AMERICANFOOTBALL_NCAAF","CFB"] if sport_label.upper()=="NCAAF" else [sport_label.upper()]
-
     query = f"""
       SELECT {select_cols}
-      FROM `sharplogger.sharp_data.sharp_scores_full`
-      WHERE SHARP_HIT_BOOL IS NOT NULL
-        AND TRUE = Scored
+      FROM `{dataset_table}`
+      WHERE Scored = TRUE
+        AND SHARP_HIT_BOOL IS NOT NULL
         AND UPPER(Sport) IN UNNEST(@sports)
         AND Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days_back DAY)
     """
 
-    job = client.query(
-        query,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("sports", "STRING", sport_norms),
-                bigquery.ScalarQueryParameter("days_back", "INT64", days_back),
-            ]
+    try:
+        client = bigquery.Client(project=project, location="us")
+        job = client.query(
+            query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ArrayQueryParameter("sports", "STRING", aliases),
+                    bigquery.ScalarQueryParameter("days_back", "INT64", days_back),
+                ]
+            ),
         )
-    )
-    df = job.to_dataframe(create_bqstorage_client=True)
-
-    if df.empty:
-        logging.info(f"ℹ️ No rows for weights: sport={sport_label}, days_back={days_back}")
+        df = job.to_dataframe(create_bqstorage_client=True)
+    except Exception as e:
+        logging.warning(f"⚠️ Weights query failed (sport={sport}, {days_back}d): {e}")
         return {}
 
-    market_weights = compute_and_write_market_weights(df)  # or split compute vs write (see below)
-    logging.info(f"✅ Loaded market weights for {len(market_weights)} markets (sport={sport_label}, {days_back}d)")
-    return market_weights
+    if df.empty:
+        logging.info(f"ℹ️ No rows for weights (sport={sport}, window={days_back}d).")
+        return {}
 
-_market_weights_cache = {}
+    try:
+        # Prefer a pure compute function; avoid writing from a 'load' function.
+        weights = compute_market_weights(df)  # <-- extract from your compute_and_write_... if possible
+        # If you must keep the current API:
+        # weights = compute_and_write_market_weights(df)
+    except Exception as e:
+        logging.warning(f"⚠️ Failed computing weights (sport={sport}): {e}")
+        return {}
+
+    logging.info(
+        f"✅ Loaded market weights for {len(weights) if weights else 0} markets "
+        f"(sport={sport}, {days_back}d, {time.time()-t0:.1f}s)"
+    )
+
+    if use_cache:
+        _market_weights_cache[key] = weights
+    return weights
+
 
 def get_market_weights(sport_label, has_models, days_back=14):
     if not has_models:
