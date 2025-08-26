@@ -3801,8 +3801,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
 
-from scipy.stats import entropy
-        
        
         st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
         - AUC: {auc:.4f}
