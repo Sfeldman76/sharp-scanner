@@ -3719,53 +3719,89 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
 
         
-    
-        book_reliability_map = build_book_reliability_map(df_bt, prior_strength=200.0)
-        # --- TRAIN (in-sample) metrics on blended probs ---
-        ensemble_prob = best_w * prob_logloss + (1 - best_w) * prob_auc
-        ensemble_prob_val = best_w * val_prob_logloss + (1 - best_w) * val_prob_auc
-
-
-        y_train_vec = np.asarray(y, dtype=int)
-        p_train_vec = np.asarray(ensemble_prob, dtype=float)
+        # --- aliases from the blended/calibrated step ---
+        ensemble_prob     = p_cal        # train/OOF blended + calibrated
+        ensemble_prob_val = p_cal_val    # holdout/val blended + calibrated
         
+        # If X_val is a DataFrame, align y_val to it (prevents length mismatches)
+        if isinstance('X_val' in locals() and X_val, pd.DataFrame) and isinstance(y_val, (pd.Series, pd.DataFrame)):
+            y_val = y_val.loc[X_val.index]
+        
+        # Safe metric helpers
         def _safe_auc(yv, pv):
-            return roc_auc_score(yv, pv) if np.unique(yv).size == 2 else np.nan
+            if len(yv) != len(pv) or np.unique(yv).size < 2:
+                return np.nan
+            return roc_auc_score(yv, pv)
         
         def _safe_ll(yv, pv):
-            return log_loss(yv, pv, labels=[0, 1]) if np.unique(yv).size == 2 else np.nan
-        
+            if len(yv) != len(pv):
+                return np.nan
+            return log_loss(yv, np.clip(pv, 1e-6, 1-1e-6), labels=[0, 1])
+
         def _safe_brier(yv, pv):
-            return brier_score_loss(yv, pv) if np.unique(yv).size == 2 else np.nan
+            if len(yv) != len(pv):
+                return np.nan
+            return brier_score_loss(yv, np.clip(pv, 1e-6, 1-1e-6))
         
-        auc_train    = _safe_auc(y_train_vec, p_train_vec)
-        acc_train    = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int))
-        logloss_train= _safe_ll(y_train_vec, p_train_vec)
-        brier_train  = _safe_brier(y_train_vec, p_train_vec)
+        # --- TRAIN (in-sample) metrics ---
+        y_train_vec = np.asarray(y_full, dtype=int)                 # use the same target as prob_logloss/prob_auc
+        p_train_vec = np.asarray(ensemble_prob, dtype=float)
         
-        # --- HOLDOUT metrics on blended + calibrated probs ---
-        y_hold_vec = np.asarray(y_val, dtype=int)              # from your holdout slice
-        p_hold_vec = np.asarray(p_cal, dtype=float)            # blended+calibrated (p_cal)
+        auc_train     = _safe_auc(y_train_vec, p_train_vec)
+        acc_train     = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int)) if np.unique(y_train_vec).size == 2 else np.nan
+        logloss_train = _safe_ll(y_train_vec, p_train_vec)
+        brier_train   = _safe_brier(y_train_vec, p_train_vec)
         
-        auc_hold    = _safe_auc(y_hold_vec, p_hold_vec)
-        acc_hold    = accuracy_score(y_hold_vec, (p_hold_vec >= 0.5).astype(int)) if np.unique(y_hold_vec).size == 2 else np.nan
-        logloss_hold= _safe_ll(y_hold_vec, p_hold_vec)
-        brier_hold  = _safe_brier(y_hold_vec, p_hold_vec)
+        # --- HOLDOUT (validation) metrics ---
+        y_hold_vec = np.asarray(y_val, dtype=int)
+        p_hold_vec = np.asarray(ensemble_prob_val, dtype=float)     # <-- use *_val here, not p_cal
         
+        auc_hold     = _safe_auc(y_hold_vec, p_hold_vec)
+        acc_hold     = accuracy_score(y_hold_vec, (p_hold_vec >= 0.5).astype(int)) if np.unique(y_hold_vec).size == 2 else np.nan
+        logloss_hold = _safe_ll(y_hold_vec, p_hold_vec)
+        brier_hold   = _safe_brier(y_hold_vec, p_hold_vec)
+        
+        # Streamlit summary (choose what you want to display)
+        # st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
+        # Train — AUC: {auc_train:.4f} | LogLoss: {logloss_train:.4f} | Brier: {brier_train:.4f} | Acc: {acc_train:.4f}
+        # Hold  — AUC: {auc_hold:.4f}  | LogLoss: {logloss_hold:.4f}  | Brier: {brier_hold:.4f}  | Acc: {acc_hold:.4f}
+        # Ensemble weight (logloss vs auc): w={best_w:.2f}
+        # """)
+
         # pretty helpers
         fmt = lambda x: ("{:.4f}".format(x) if np.isfinite(x) else "nan")
 
 
         # === Save ensemble (choose one or both)
         trained_models[market] = {
-            "model": model_auc,
-            "calibrator": cal_auc,
+            "model_logloss": model_logloss,
+            "calibrator_logloss": cal_logloss,
+            "model_auc": model_auc,
+            "calibrator_auc": cal_auc,
+            "best_w": best_w,   # weight chosen by log loss
             "team_feature_map": team_feature_map,
-            "book_reliability_map": book_reliability_map  # ✅ include for in-memory use
+            "book_reliability_map": book_reliability_map
         }
+        save_model_to_gcs(
+            model={
+                "model_logloss": model_logloss,
+                "model_auc": model_auc,
+                "best_w": float(best_w)  # ensure JSON/pickle-safe
+            },
+            calibrator={
+                "cal_logloss": cal_logloss,
+                "cal_auc": cal_auc
+            },
+            sport=sport,
+            market=market,
+            bucket_name=GCS_BUCKET,
+            team_feature_map=team_feature_map,
+            book_reliability_map=book_reliability_map,
+            meta={"objective": "ensemble_logloss_weighted", "trained_at": str(pd.Timestamp.utcnow())}
+        )
+        
 
-        save_model_to_gcs(model_auc, cal_auc, sport, market, bucket_name=GCS_BUCKET, team_feature_map=team_feature_map,book_reliability_map=book_reliability_map)
-        from scipy.stats import entropy
+from scipy.stats import entropy
         
        
         st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
