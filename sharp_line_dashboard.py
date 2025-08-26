@@ -3815,7 +3815,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             bucket_name=GCS_BUCKET,
             team_feature_map=team_feature_map,
             book_reliability_map=book_reliability_map,
-            meta={"objective": "ensemble_logloss_weighted", "trained_at": str(pd.Timestamp.utcnow())}
         )
         
 
@@ -4697,59 +4696,44 @@ def save_model_to_gcs(
     calibrator=None,
     team_feature_map=None,
     book_reliability_map=None,
-    meta=None,                # ✅ NEW: accept meta
-    **kwargs                  # ignore extra args
+    **kwargs                  # ignore any other extras silently
 ):
-    from io import BytesIO
-    import pickle, logging
-    from google.cloud import storage
-
-    sport_l  = str(sport).lower()
-    market_l = str(market).lower()
-    filename = f"sharp_win_model_{sport_l}_{market_l}.pkl"
-
-    # Build the payload exactly like before; just add meta if provided.
+    # Build the payload exactly like before, just add meta if provided.
     if isinstance(model, dict):
-        payload = dict(model)  # shallow copy
+        payload = dict(model)  # shallow copy so we don't mutate caller's dict
         if calibrator is not None and "calibrator" not in payload:
             payload["calibrator"] = calibrator
         if team_feature_map is not None and "team_feature_map" not in payload:
             payload["team_feature_map"] = team_feature_map
         if book_reliability_map is not None and "book_reliability_map" not in payload:
             payload["book_reliability_map"] = book_reliability_map
-        if meta is not None:
-            payload["meta"] = meta
+                          # ✅ store meta
     else:
-        # Legacy single-model artifact
+        # legacy single-model artifact
         payload = {
             "model": model,
             "calibrator": calibrator,
             "team_feature_map": team_feature_map,
             "book_reliability_map": book_reliability_map,
         }
-        if meta is not None:
-            payload["meta"] = meta
-
-    try:
-        # Serialize
+     
+        # Serialize to bytes
         buffer = BytesIO()
-        pickle.dump(payload, buffer, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(payload, buffer)
         buffer.seek(0)
 
         # Upload to GCS
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(filename)
-        blob.upload_from_file(buffer, content_type="application/octet-stream")
+        blob.upload_from_file(buffer, content_type='application/octet-stream')
 
         print(
-            f"✅ Saved model artifact to GCS: gs://{bucket_name}/{filename}"
+            f"✅ Model + calibrator"
+            f"{' + team features' if team_feature_map is not None else ''}"
+            f"{' + book reliability map' if book_reliability_map is not None else ''} "
+            f"saved to GCS: gs://{bucket_name}/{filename}"
         )
-        return {"bucket": bucket_name, "path": filename}
+
     except Exception as e:
         logging.error(f"❌ Failed to save model to GCS: {e}", exc_info=True)
-        raise
-
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
