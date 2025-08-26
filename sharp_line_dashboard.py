@@ -3627,6 +3627,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         for t in np.round(np.linspace(0.50, 0.80, 13), 2):
             rows.append({"Thresh": float(t), "N": int(np.sum(p_val_ser>=t)), "AvgROI": profit_at_thresh(p_val_ser, y_val, odds_val, t)})
         st.dataframe(pd.DataFrame(rows))
+        
+        
         # Derive feature_names if not already set
         if 'feature_names' not in locals() or not feature_names:
             feat_in = getattr(final_log, 'feature_names_in_', None) \
@@ -3853,13 +3855,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
 
-       
-        st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
+        auc = auc_hold
+        acc = acc_hold
+        logloss = logloss_hold
+        brier = brier_hold
+        
+        st.success(
+            f"""✅ Trained + saved ensemble model for {market.upper()}
         - AUC: {auc:.4f}
         - Accuracy: {acc:.4f}
         - Log Loss: {logloss:.4f}
         - Brier Score: {brier:.4f}
-        """)
+        """
+        )
+       
         pb.progress(int(round(idx / n_markets * 100)))
 
     status.update(label="✅ All models trained", state="complete", expanded=False)
@@ -4551,54 +4560,91 @@ def compute_diagnostics_vectorized(df):
     df['Model_Confidence_Tier'] = df['Confidence Tier']
 
     # === Timing Opportunity Models (unchanged scaffold)
-    timing_models = {}
-    for m in ['spreads', 'totals', 'h2h']:
-        try:
-            model_data = load_model_from_gcs(sport=sport, market=f"timing_{m}", bucket_name=GCS_BUCKET)
-            timing_models[m] = model_data.get("calibrator") or model_data.get("model")
-        except Exception:
-            timing_models[m] = None
+# --- Timing Opportunity (UI-only, in-memory) ---
 
-    timing_feature_cols = [
-        'Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening','Late_Game_Steam_Flag'
-    ] + hybrid_timing_features + hybrid_odds_timing_features
+# load timing models (handles dict payloads where model may be under "model")
+timing_models = {}
+for m in ['spreads', 'totals', 'h2h']:
+    try:
+        payload = load_model_from_gcs(sport=sport, market=f"timing_{m}", bucket_name=GCS_BUCKET) or {}
+        timing_models[m] = payload.get("model") or payload.get("calibrator")
+    except Exception:
+        timing_models[m] = None
 
+    # features you intend to use
+    timing_feature_cols = (
+        ['Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag']
+        + hybrid_timing_features
+        + hybrid_odds_timing_features
+    )
+    
+    # ensure presence (UI-only)
     for col in timing_feature_cols:
         if col not in df.columns:
             df[col] = 0.0
-
-    df['Timing_Opportunity_Score'] = np.nan
-    for m in ['spreads','totals','h2h']:
+    
+    # ensure timing columns exist so groupby won't crash
+    if 'Timing_Opportunity_Score' not in df.columns:
+        df['Timing_Opportunity_Score'] = np.nan
+    if 'Timing_Stage' not in df.columns:
+        df['Timing_Stage'] = '—'
+    
+    # helper: align columns to what the model expects
+    def _align_X(X, model):
+        # prefer exact feature names captured by sklearn
+        names = getattr(model, 'feature_names_in_', None)
+        if names is not None:
+            # reindex to expected names, fill any missing with 0.0
+            return X.reindex(columns=list(names), fill_value=0.0)
+        # otherwise, try to match feature count
+        n = getattr(model, 'n_features_in_', None)
+        if n is not None and X.shape[1] != n:
+            # fallback: keep the first n known timing features present
+            keep = [c for c in timing_feature_cols if c in X.columns][:n]
+            return X.reindex(columns=keep, fill_value=0.0)
+        return X
+    
+    # score per market
+    for m in ['spreads', 'totals', 'h2h']:
         model = timing_models.get(m)
         if model is None:
             continue
-        mask = df['Market'].str.lower() == m
-        if mask.any():
-            X = df.loc[mask, timing_feature_cols].fillna(0)
-            # handle both calibrated and raw models
-            if hasattr(model, "predict_proba"):
-                df.loc[mask, 'Timing_Opportunity_Score'] = model.predict_proba(X)[:, 1]
+    
+        mask = df['Market'].astype(str).str.lower().eq(m)
+        if not mask.any():
+            continue
+    
+        X = df.loc[mask, timing_feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+        X = _align_X(X, model)
+    
+        try:
+            if hasattr(model, 'predict_proba'):
+                p = model.predict_proba(X)[:, 1]
             else:
-                df.loc[mask, 'Timing_Opportunity_Score'] = np.clip(model.predict(X), 0, 1)
-
-    if 'Timing_Opportunity_Score' in df.columns:
-        scores = df[['Timing_Opportunity_Score']].copy()
-        scores['Timing_Opportunity_Score'] = scores['Timing_Opportunity_Score'].clip(0, 1).fillna(0)
-
-        from sklearn.cluster import KMeans
-        kmeans = KMeans(n_clusters=3, random_state=42, n_init='auto')
-        kmeans.fit(scores)
-
-        df['Timing_Cluster'] = kmeans.labels_
-        cluster_order = np.argsort(kmeans.cluster_centers_.ravel())
-        cluster_map = {
-            cluster_order[0]: "🔴 Late / Overmoved",
-            cluster_order[1]: "🟡 Developing",
-            cluster_order[2]: "🟢 Smart Timing"
-        }
-        df['Timing_Stage'] = df['Timing_Cluster'].map(cluster_map)
-    else:
-        df['Timing_Stage'] = "⚠️ Unavailable"
+                # raw predict -> clip to [0,1] just in case
+                p = np.clip(model.predict(X), 0, 1)
+            df.loc[mask, 'Timing_Opportunity_Score'] = p
+        except Exception as e:
+            # leave NaNs; UI stays up
+            print(f"Timing scoring failed for {m}: {e}")
+    
+    # clip/fill on the same df (not on a detached copy)
+    df['Timing_Opportunity_Score'] = (
+        df['Timing_Opportunity_Score']
+          .astype(float)
+          .clip(0, 1)
+    )
+    
+    # simple in-memory bucketing (swap to k-means later if you like)
+    def _assign_timing_stage(p: pd.Series) -> pd.Series:
+        p = p.fillna(0.0)
+        bins = [0.0, 0.40, 0.66, 1.01]
+        labels = ["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
+        ix = np.digitize(p.to_numpy(), bins, right=False) - 1
+        ix = np.clip(ix, 0, len(labels)-1)
+        return pd.Series([labels[i] for i in ix], index=p.index)
+    
+    df['Timing_Stage'] = _assign_timing_stage(df['Timing_Opportunity_Score'])
 
     # === Final Output
     # Base diagnostic columns
