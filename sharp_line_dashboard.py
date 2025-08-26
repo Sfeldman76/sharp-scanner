@@ -3372,7 +3372,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_train_blend = best_w*prob_logloss + (1-best_w)*prob_auc
         p_val_blend   = best_w*val_prob_logloss + (1-best_w)*val_prob_auc
         p_val_blend   = np.clip(p_val_blend, 1e-6, 1-1e-6)
+        # --- alias the learned blend to the names used downstream ---
+        ensemble_prob      = np.clip(p_train_blend, 1e-6, 1-1e-6)
+        ensemble_prob_val  = np.clip(p_val_blend,   1e-6, 1-1e-6)
         
+        # if your downstream code expects arrays:
+        p_train_vec = np.asarray(ensemble_prob, dtype=float)
+        p_val_vec   = np.asarray(ensemble_prob_val, dtype=float)
+
         # ---- headline holdout metrics ----------------------------------------------
         auc_ho = safe_auc(y_val.values, p_val_blend)
         ll_ho  = safe_ll (y_val.values, p_val_blend)
@@ -3669,9 +3676,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
 
         
-
+    
         book_reliability_map = build_book_reliability_map(df_bt, prior_strength=200.0)
         # --- TRAIN (in-sample) metrics on blended probs ---
+        ensemble_prob = best_w * prob_logloss + (1 - best_w) * prob_auc
+        ensemble_prob_val = best_w * val_prob_logloss + (1 - best_w) * val_prob_auc
+
+
         y_train_vec = np.asarray(y, dtype=int)
         p_train_vec = np.asarray(ensemble_prob, dtype=float)
         
