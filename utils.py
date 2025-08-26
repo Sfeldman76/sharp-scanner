@@ -3170,22 +3170,14 @@ def _suffix_snapshot(df, tag):
 
 
 def predict_blended(bundle, X, model=None, iso=None):
-    """
-    Returns calibrated/blended probabilities in [1e-6, 1-1e-6].
-    Supports:
-      - Ensemble bundle: model_logloss, calibrator_logloss, model_auc, calibrator_auc, best_w
-      - Single calibrated model (iso)
-      - Single model only
-    """
+    """Return calibrated/blended probs in [1e-6, 1-1e-6] or None."""
     def _cal_pred(m, cal, X_):
-        # prefer calibrator if present
         if cal is not None:
             if hasattr(cal, "predict_proba"):
                 p = cal.predict_proba(X_)
                 return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
             if hasattr(cal, "predict"):
                 return np.asarray(cal.predict(X_), dtype=float)
-        # fallback to model
         if m is not None:
             if hasattr(m, "predict_proba"):
                 p = m.predict_proba(X_)
@@ -3194,30 +3186,24 @@ def predict_blended(bundle, X, model=None, iso=None):
                 return np.asarray(m.predict(X_), dtype=float)
         return None
 
-    # 1) Ensemble path
-    if isinstance(bundle, dict) and all(k in bundle for k in
-        ("model_logloss", "calibrator_logloss", "model_auc", "calibrator_auc", "best_w")):
-        mL, calL = bundle["model_logloss"], bundle["calibrator_logloss"]
-        mA, calA = bundle["model_auc"],     bundle["calibrator_auc"]
-        w        = float(bundle["best_w"])
-        pL = _cal_pred(mL, calL, X)
-        pA = _cal_pred(mA, calA, X)
+    if isinstance(bundle, dict) and any(k in bundle for k in ("model_logloss","model_auc")):
+        mL  = bundle.get("model_logloss")
+        cL  = bundle.get("calibrator_logloss")
+        mA  = bundle.get("model_auc")
+        cA  = bundle.get("calibrator_auc")
+        w   = float(bundle.get("best_w", 1.0))
+        pL  = _cal_pred(mL, cL, X)
+        pA  = _cal_pred(mA, cA, X)
         if pL is not None and pA is not None and len(pL) == len(pA):
-            p = w * pL + (1.0 - w) * pA
-            return np.clip(p, 1e-6, 1-1e-6)
-        # ensemble fallback to whichever path is available
+            return np.clip(w*pL + (1.0-w)*pA, 1e-6, 1-1e-6)
         if pL is not None:
             return np.clip(pL, 1e-6, 1-1e-6)
         if pA is not None:
             return np.clip(pA, 1e-6, 1-1e-6)
 
-    # 2) Single calibrated model (legacy path)
+    # legacy single-model
     p = _cal_pred(model, iso, X)
-    if p is not None:
-        return np.clip(p, 1e-6, 1-1e-6)
-
-    # 3) Nothing usable
-    return None
+    return np.clip(p, 1e-6, 1-1e-6) if p is not None else None
 
 
 
@@ -3969,10 +3955,17 @@ def apply_blended_sharp_score(
         df_m = df.loc[mask].copy()
     
         # Resolve bundle inside loop
-        bundle = trained_models_lc.get(mkt) if HAS_MODELS else None
-        model = bundle.get('model') if bundle else None
-        iso   = bundle.get('calibrator') if bundle else None
-    
+        bundle = (trained_models_by_market or {}).get(mkt)
+        model  = None
+        iso    = None
+        if isinstance(bundle, dict):
+            if ("model_logloss" in bundle) or ("model_auc" in bundle):
+                model = bundle.get("model_logloss") or bundle.get("model_auc")
+                iso   = bundle.get("calibrator_logloss") or bundle.get("calibrator_auc")
+            else:
+                model = bundle.get("model")
+                iso   = bundle.get("calibrator")
+        
        
         # ===== Build per-market frame & canonical split =====
         df_m['Outcome'] = df_m['Outcome'].astype(str).str.lower().str.strip()
@@ -4237,9 +4230,7 @@ def apply_blended_sharp_score(
             for col in hybrid_odds_timing_cols:
                 df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0) if col in df_canon.columns else 0.0
     
-            # ===== MODEL SCORING =====
-            feature_cols = []
-            # ===== MODEL SCORING =====
+                    # ===== MODEL SCORING =====
             feature_cols = []
             if bundle and isinstance(bundle.get('feature_cols'), (list, tuple)) and bundle['feature_cols']:
                 feature_cols = list(bundle['feature_cols'])
@@ -4309,10 +4300,11 @@ def apply_blended_sharp_score(
                             df_canon[col] = default
                     else:
                         # 🔁 Ensemble-first prediction with fallbacks (uses your bundle)
+                       
                         preds = predict_blended(bundle, X_can, model=model, iso=iso)
-                
-                        if preds is None:
-                            logger.info(f"ℹ️ {mkt.upper()} has no usable predictor — stamping unscored columns on canon.")
+                        
+                        if preds is None or len(preds) != len(df_canon):
+                            logger.info(f"ℹ️ {mkt.upper()} no usable predictor or length mismatch — stamping unscored.")
                             for col, default in [
                                 ('Model_Sharp_Win_Prob', np.nan),
                                 ('Model_Confidence',     np.nan),
@@ -4321,12 +4313,16 @@ def apply_blended_sharp_score(
                             ]:
                                 df_canon[col] = default
                         else:
-                            preds = np.asarray(preds, dtype=float)
-                            preds = np.clip(preds, 1e-6, 1-1e-6)  # stabilize
+                            preds = np.asarray(preds, dtype=float).ravel()
+                            preds = np.clip(preds, 1e-6, 1-1e-6)
                             df_canon['Model_Sharp_Win_Prob'] = preds
                             df_canon['Model_Confidence']     = preds
                             df_canon['Scored_By_Model']      = True
                             df_canon['Scoring_Market']       = mkt
+                        
+                        # ✅ write back ONLY the prediction columns to the original df
+                        cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
+                        df.loc[mask, cols_to_write] = df_canon[cols_to_write].values
 
             
             except Exception as e:
@@ -5663,35 +5659,110 @@ def detect_cross_market_sharp_support(
     return df
 
 
+
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
-    filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
+    """
+    Loads an ensemble bundle saved as a single pickled dict.
+    Backward-compatible: supports legacy single-model artifacts.
+    Returns a dict with keys:
+      - model_logloss, calibrator_logloss
+      - model_auc, calibrator_auc
+      - best_w
+      - team_feature_map (DataFrame)
+      - book_reliability_map (DataFrame)
+      - feature_cols (optional)
+      - meta (optional)
+    """
+    sport_l = str(sport).lower()
+    market_l = str(market).lower()
+
+    # Try new path first, then legacy filename
+    candidates = [
+        f"models/{sport_l}/{market_l}/bundle.pkl",                     # new suggested path
+        f"sharp_win_model_{sport_l}_{market_l}.pkl",                   # your legacy filename
+    ]
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = None
+
+    for path in candidates:
+        b = bucket.blob(path)
+        try:
+            # Blob.exists() avoids raising if the first path doesn’t exist
+            if b.exists(client=client):
+                blob = b
+                break
+        except Exception:
+            # If exists() isn’t allowed, we’ll try download directly below
+            pass
+
+    # If exists() wasn’t usable or failed to find, just try both by download
+    if blob is None:
+        for path in candidates:
+            b = bucket.blob(path)
+            try:
+                content = b.download_as_bytes()
+                blob = b
+                break
+            except Exception:
+                continue
+
+    if blob is None:
+        logging.warning(f"⚠️ No model artifact found for {sport}-{market} in {bucket_name} (tried {candidates})")
+        return None
+
     try:
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(filename)
         content = blob.download_as_bytes()
         data = pickle.loads(content)
-
-        print(f"✅ Loaded model artifact from GCS: gs://{bucket_name}/{filename}")
-
-        # Normalize optional payloads to DataFrames
-        tfm = data.get("team_feature_map", pd.DataFrame())
-        brm = data.get("book_reliability_map", pd.DataFrame())
-
-        if not isinstance(tfm, pd.DataFrame) and tfm is not None:
-            tfm = pd.DataFrame(tfm)
-        if not isinstance(brm, pd.DataFrame) and brm is not None:
-            brm = pd.DataFrame(brm)
-
-        return {
-            "model": data.get("model"),
-            "calibrator": data.get("calibrator"),
-            "team_feature_map": tfm,                 # ✅ optional
-            "book_reliability_map": brm              # ✅ optional
-        }
+        print(f"✅ Loaded model artifact from GCS: gs://{bucket_name}/{blob.name}")
     except Exception as e:
-        logging.warning(f"⚠️ Could not load model from GCS for {sport}-{market}: {e}")
+        logging.warning(f"⚠️ Failed to load {sport}-{market} from {bucket_name}: {e}")
         return None
+
+    # ---- Normalize payloads to DataFrames where needed ----
+    def _to_df(x):
+        if isinstance(x, pd.DataFrame):
+            return x
+        if x is None:
+            return pd.DataFrame()
+        try:
+            return pd.DataFrame(x)
+        except Exception:
+            return pd.DataFrame()
+
+    tfm = _to_df(data.get("team_feature_map"))
+    brm = _to_df(data.get("book_reliability_map"))
+
+    # ---- Build a unified ensemble bundle shape (works for new or legacy) ----
+    is_new = any(k in data for k in ("model_logloss", "model_auc", "calibrator_logloss", "calibrator_auc"))
+    if is_new:
+        bundle = {
+            "model_logloss":      data.get("model_logloss"),
+            "calibrator_logloss": data.get("calibrator_logloss"),
+            "model_auc":          data.get("model_auc"),
+            "calibrator_auc":     data.get("calibrator_auc"),
+            "best_w":             float(data.get("best_w", 1.0)),
+            "team_feature_map":   tfm,
+            "book_reliability_map": brm,
+            "feature_cols":       data.get("feature_cols"),
+            "meta":               data.get("meta"),
+        }
+    else:
+        # Legacy artifact: map old keys into the new structure
+        bundle = {
+            "model_logloss":      data.get("model"),         # legacy single model as logloss path
+            "calibrator_logloss": data.get("calibrator"),     # legacy calibrator
+            "model_auc":          data.get("model_auc"),
+            "calibrator_auc":     data.get("calibrator_auc"),
+            "best_w":             float(data.get("best_w", 1.0)),  # default to 1.0 (use logloss path)
+            "team_feature_map":   tfm,
+            "book_reliability_map": brm,
+            "feature_cols":       data.get("feature_cols"),
+            "meta":               data.get("meta", {"objective": "legacy_single_model"}),
+        }
+
+    return bundle
 
 
 DEFAULT_MOVES_VIEW = "sharp_data.moves_with_features_merged"
