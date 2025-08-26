@@ -3113,53 +3113,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert getattr(search_base, "_estimator_type", "") == "classifier"
         
         # --- one-time debug (optional) ---
-        def _proba_scorer_debug(est, X, y):
-            obj = getattr(est, "objective", None)
-            est_type = getattr(est, "_estimator_type", None)
+      
+        
+        def proba_scorer_debug(estimator, X, y):
+            # Ensure it's really a classifier
+            obj = getattr(estimator, "objective", None)
+            est_type = getattr(estimator, "_estimator_type", None)
             if est_type != "classifier":
-                raise TypeError(
-                    f"Not classifier: type={type(est)}, _estimator_type={est_type}, objective={obj}"
-                )
-            proba = est.predict_proba(X)[:, 1]
-            return -log_loss(y, proba)
+                raise TypeError(f"Not classifier: type={type(estimator)}, _estimator_type={est_type}, objective={obj}")
+            proba = estimator.predict_proba(X)[:, 1]
+            return -log_loss(y, proba)  # higher is better for scorers (we return negative loss)
+        
+        DEBUG_ONCE = True  # flip to False after one run
         
         if DEBUG_ONCE:
-           
-            dbg = RandomizedSearchCV(
+            rs_dbg = RandomizedSearchCV(
                 estimator=search_base,
-                param_distributions=param_distributions,  # same space you use normally
-                scoring=make_scorer(_proba_scorer_debug),
+                param_distributions=param_distributions,
+                scoring=proba_scorer_debug,   # <-- pass the callable directly
                 cv=folds,
-                n_iter=5,          # small/fast just to catch the issue
-                n_jobs=1,          # keep single-threaded for clearer errors
+                n_iter=5,                     # small, just for diagnosis
+                n_jobs=1,                     # single-threaded to simplify traces
                 verbose=2,
                 random_state=7,
                 refit=True,
                 error_score="raise",
             )
-            try:
-                dbg.fit(X_full, y_full, groups=groups)
-                print("[DEBUG] All candidates were classifiers with predict_proba ✅")
-            except Exception as e:
-                # Print the exact failure and the candidate params
-                import traceback, pprint
-                print("[DEBUG] Candidate failed with exception:")
-                traceback.print_exc()
-                # Try to show the last set of tested parameters, if available
-                if hasattr(dbg, "cv_results_"):
-                    # Find the first failed candidate (status == 'error')
-                 
-                    res = dbg.cv_results_
-                    status = np.array(res.get("status", []))
-                    if status.size:
-                        bad_idx = np.where(status == "error")[0]
-                        if bad_idx.size:
-                            i = int(bad_idx[0])
-                            # params are stored per candidate
-                            print("[DEBUG] Offending params:")
-                            pprint.pprint(res["params"][i])
-                raise  # re-raise so you notice during the run
-        
+            rs_dbg.fit(X_full, y_full, groups=groups)
+
         # --- main searches ---
         rs_ll = RandomizedSearchCV(
             estimator=search_base,
