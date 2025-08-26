@@ -1641,6 +1641,34 @@ def get_xgb_search_space(
 
     return base_kwargs, param_distributions
 
+def resolve_groups(df: pd.DataFrame) -> np.ndarray:
+    # 1) Prefer the per-game key if present
+    if "Merge_Key_Short" in df.columns and df["Merge_Key_Short"].notna().any():
+        return df["Merge_Key_Short"].astype(str).to_numpy()
+
+    # 2) If Merge_Key_Short missing, derive a per-game key
+    #    Build from normalized teams + commence time (already in your table)
+    cols_ok = all(c in df.columns for c in ["Home_Team_Norm","Away_Team_Norm","Commence_Hour"])
+    if cols_ok:
+        return (
+            df["Home_Team_Norm"].astype(str)
+            + "|" + df["Away_Team_Norm"].astype(str)
+            + "|" + pd.to_datetime(df["Commence_Hour"], errors="coerce", utc=True).astype(str)
+        ).to_numpy()
+
+    # 3) Last-resort: strip market/outcome from Game_Key if possible
+    #    Keep the substring up to the commence timestamp (first 19 chars of ISO datetime)
+    if "Game_Key" in df.columns:
+        # Example Game_Key pattern: "..._2025-07-20 01:00:00+00:00_h2h_los angeles dodgers"
+        base = df["Game_Key"].astype(str).str.replace(r"_\d{4}-\d{2}-\d{2} .*", "", regex=True)
+        # Reattach a normalized commence time if available for stability
+        if "Commence_Hour" in df.columns:
+            ch = pd.to_datetime(df["Commence_Hour"], errors="coerce", utc=True).astype(str)
+            return (base + "|" + ch).to_numpy()
+        return base.to_numpy()
+
+    raise ValueError("No columns available to form per-game groups")
+
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
     SPORT_DAYS_BACK = {
@@ -3001,8 +3029,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # 0) Build matrices and folds FIRST
         X_full = df_market[features].to_numpy()
         y_full = df_market["SHARP_HIT_BOOL"].astype(int).to_numpy()
-        groups = df_market[group_col].to_numpy()
-        times = pd.to_datetime(df_market[time_col], errors="coerce", utc=True).to_numpy()
+        groups = resolve_groups(df_market)
+        times  = pd.to_datetime(df_market["Snapshot_Timestamp"], errors="coerce", utc=True).to_numpy()
+       
         
         # CV splitter (after building X_full, y_full, groups, times)
         cv = PurgedGroupTimeSeriesSplit(
