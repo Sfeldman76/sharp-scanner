@@ -120,7 +120,8 @@ from sklearn.experimental import enable_halving_search_cv  # noqa
 from sklearn.model_selection import HalvingRandomSearchCV
 from scipy.stats import randint, loguniform, uniform
 from sklearn.metrics import log_loss, make_scorer
-from xgboost import XGBClassifier
+
+
               
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -138,7 +139,7 @@ import os, json
 
 
 
-import xgboost as xgb
+
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
@@ -3115,60 +3116,97 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- one-time debug (optional) ---
       
         
-        def proba_scorer_debug(estimator, X, y):
-            # Ensure it's really a classifier
-            obj = getattr(estimator, "objective", None)
-            est_type = getattr(estimator, "_estimator_type", None)
-            if est_type != "classifier":
-                raise TypeError(f"Not classifier: type={type(estimator)}, _estimator_type={est_type}, objective={obj}")
-            proba = estimator.predict_proba(X)[:, 1]
-            return -log_loss(y, proba)  # higher is better for scorers (we return negative loss)
+        def neg_logloss_scorer(est, X, y):
+            proba = est.predict_proba(X)[:, 1]   # will raise if regressor
+            return -log_loss(y, proba)
         
-        DEBUG_ONCE = True  # flip to False after one run
+        def roc_auc_proba_scorer(est, X, y):
+            proba = est.predict_proba(X)[:, 1]
+            return roc_auc_score(y, proba)
+        
+        # 3) debug scorer to *show* the bad candidate in Streamlit
+        def neg_logloss_scorer_debug(est, X, y):
+            try:
+                proba = est.predict_proba(X)[:, 1]
+                return -log_loss(y, proba)
+            except Exception as e:
+                # Surface details in the Streamlit UI
+                try:
+                    xgb_params = est.get_xgb_params()
+                except Exception:
+                    xgb_params = {}
+                st.error("Offending candidate encountered during CV:")
+                st.json({
+                    "estimator_type": type(est).__name__,
+                    "_estimator_type": getattr(est, "_estimator_type", None),
+                    "objective": getattr(est, "objective", None),
+                    "xgb_params": xgb_params,
+                })
+                st.exception(e)
+                # Re-raise so the run stops here and you can fix it
+                raise
+        
+        DEBUG_ONCE = TRUE  # flip to False after one run
         
         if DEBUG_ONCE:
-            rs_dbg = RandomizedSearchCV(
+            try:
+                rs_dbg = RandomizedSearchCV(
+                    estimator=search_base,
+                    param_distributions=param_distributions,
+                    scoring=neg_logloss_scorer_debug,  # <— debug scorer
+                    cv=folds,
+                    n_iter=5,      # small, fast
+                    n_jobs=1,      # simpler trace
+                    verbose=2,
+                    random_state=7,
+                    refit=True,
+                    error_score="raise",
+                )
+                rs_dbg.fit(X_full, y_full, groups=groups)
+                st.success("DEBUG: All candidates were classifiers with predict_proba ✅")
+            except Exception:
+                st.stop()  # stop Streamlit run after showing details
+
+       
+        try:
+            rs_ll = RandomizedSearchCV(
                 estimator=search_base,
                 param_distributions=param_distributions,
-                scoring=proba_scorer_debug,   # <-- pass the callable directly
+                scoring=neg_logloss_scorer,   # your callable scorer
                 cv=folds,
-                n_iter=5,                     # small, just for diagnosis
-                n_jobs=1,                     # single-threaded to simplify traces
-                verbose=2,
-                random_state=7,
+                n_iter=40,
+                n_jobs=3,
+                verbose=1,
+                random_state=42,
+                refit=True,
+                error_score="raise",          # <-- force raise instead of silent -inf
+            )
+            rs_ll.fit(X_full, y_full, groups=groups)
+        except Exception as e:
+            st.error("❌ Error during RandomizedSearchCV (logloss search)")
+            st.exception(e)
+            st.stop()   # stop Streaml
+        
+        
+        try:
+            rs_auc = RandomizedSearchCV(
+                estimator=search_base,
+                param_distributions=param_distributions,
+                scoring="roc_auc",
+                cv=folds,
+                n_iter=40,
+                n_jobs=3,
+                verbose=1,
+                random_state=4242,
                 refit=True,
                 error_score="raise",
             )
-            rs_dbg.fit(X_full, y_full, groups=groups)
-
-        # --- main searches ---
-        rs_ll = RandomizedSearchCV(
-            estimator=search_base,
-            param_distributions=param_distributions,
-            scoring="neg_log_loss",
-            cv=folds,
-            n_iter=40,
-            n_jobs=3,
-            verbose=1,
-            random_state=42,
-            refit=True,
-            error_score="raise",
-        )
-        rs_ll.fit(X_full, y_full, groups=groups)
+            rs_auc.fit(X_full, y_full, groups=groups)
+        except Exception as e:
+            st.error("❌ Error during RandomizedSearchCV (AUC search)")
+            st.exception(e)
+            st.stop()   # stop Streaml
         
-        rs_auc = RandomizedSearchCV(
-            estimator=search_base,
-            param_distributions=param_distributions,
-            scoring="roc_auc",
-            cv=folds,
-            n_iter=40,
-            n_jobs=3,
-            verbose=1,
-            random_state=4242,
-            refit=True,
-            error_score="raise",
-        )
-        rs_auc.fit(X_full, y_full, groups=groups)
         
         # clean best params (strip any unsafe keys)
         best_ll_params  = rs_ll.best_params_.copy()
