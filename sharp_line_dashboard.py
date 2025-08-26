@@ -2991,11 +2991,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             grow_policy="lossguide",         # better splits at same cost
             max_leaves=32,                   # strong default; 48 if more data
             max_bin=128 if X_full.shape[0] < 150_000 else 64,  # speed on big sets
-            sampling_method="uniform"
+            sampling_method="uniform",
             single_precision_histogram=True, # smaller/faster hist build (xgboost>=1.7)
             colsample_bynode=0.8,            # cheaper splits
             max_delta_step=1,
-            n_jobs=3,                        # match your vCPUs to avoid thrash
+            n_jobs=1,                        # match your vCPUs to avoid thrash
             scale_pos_weight=scale_pos_weight,
             random_state=42,
             importance_type="total_gain",
