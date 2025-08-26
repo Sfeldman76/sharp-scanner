@@ -3027,8 +3027,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     yield train_idx, val_idx
  
         # 0) Build matrices and folds FIRST
-        X_full = df_market[features].to_numpy()
+        X_full = df_market[features].to_numpy()       
+        # labels
         y_full = df_market["SHARP_HIT_BOOL"].astype(int).to_numpy()
+        
+        # class balance for scale_pos_weight
+        pos = y_full.sum()
+        neg = len(y_full) - pos
+        scale_pos_weight = (neg / pos) if pos > 0 else 1.0
         groups = resolve_groups(df_market)
         times  = pd.to_datetime(df_market["Snapshot_Timestamp"], errors="coerce", utc=True).to_numpy()
         # sport can be "WNBA", "MLB", etc.
