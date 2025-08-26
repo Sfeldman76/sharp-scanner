@@ -1589,14 +1589,17 @@ def get_xgb_search_space(
     # ---- sport-size specific search spaces ----
     if s in SMALL_LEAGUES:
         param_distributions = {
-            "max_depth":        randint(2, 4),            # allow 4 to add interactions when data permits
-            "learning_rate":    loguniform(1.5e-2, 5e-2), # slightly faster to escape flatness
-            "subsample":        uniform(0.70, 0.25),      # 0.70–0.95
-            "colsample_bytree": uniform(0.60, 0.30),      # 0.60–0.90
-            "min_child_weight": randint(3, 9),            # 3–8 (both ends exclusive of 9)
-            "gamma":            uniform(0.00, 0.30),      # let some small/medium splits occur
-            "reg_alpha":        loguniform(5e-1, 10.0),   # 0.5–10 (ease L1 slightly)
-            "reg_lambda":       loguniform(2.0, 30.0),    # 2–30 (ease L2 slightly)
+            "max_depth":        randint(2, 4),            # {2,3}
+            "learning_rate":    loguniform(1e-2, 4e-2),   # 0.01–0.04 (slightly higher ceiling)
+            "subsample":        uniform(0.60, 0.35),      # 0.60–0.95 (more diversity)
+            "colsample_bytree": uniform(0.55, 0.35),      # 0.55–0.90
+            # ↓↓↓ key change: lower child weight to let leaves form more easily
+            "min_child_weight": randint(1, 7),            # 2–8  (previously 5–10 / 20–35)
+            # ↓↓↓ allow easier splits (less minimum loss required)
+            "gamma":            uniform(0.00, 0.25),      # 0.00–0.25
+            # ↓↓↓ dial back regularization slightly to reduce underfitting/flattening
+            "reg_alpha":        loguniform(1e-2, 1.0e1),  # 0.01–10
+            "reg_lambda":       loguniform(1.0, 2.5e1),   # 1–25
         }
     else:
         # Bigger leagues → allow more expressiveness to expand std dev & AUC
@@ -3668,6 +3671,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
 
         book_reliability_map = build_book_reliability_map(df_bt, prior_strength=200.0)
+        # --- TRAIN (in-sample) metrics on blended probs ---
+        y_train_vec = np.asarray(y, dtype=int)
+        p_train_vec = np.asarray(ensemble_prob, dtype=float)
+        
+        def _safe_auc(yv, pv):
+            return roc_auc_score(yv, pv) if np.unique(yv).size == 2 else np.nan
+        
+        def _safe_ll(yv, pv):
+            return log_loss(yv, pv, labels=[0, 1]) if np.unique(yv).size == 2 else np.nan
+        
+        def _safe_brier(yv, pv):
+            return brier_score_loss(yv, pv) if np.unique(yv).size == 2 else np.nan
+        
+        auc_train    = _safe_auc(y_train_vec, p_train_vec)
+        acc_train    = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int))
+        logloss_train= _safe_ll(y_train_vec, p_train_vec)
+        brier_train  = _safe_brier(y_train_vec, p_train_vec)
+        
+        # --- HOLDOUT metrics on blended + calibrated probs ---
+        y_hold_vec = np.asarray(y_val, dtype=int)              # from your holdout slice
+        p_hold_vec = np.asarray(p_cal, dtype=float)            # blended+calibrated (p_cal)
+        
+        auc_hold    = _safe_auc(y_hold_vec, p_hold_vec)
+        acc_hold    = accuracy_score(y_hold_vec, (p_hold_vec >= 0.5).astype(int)) if np.unique(y_hold_vec).size == 2 else np.nan
+        logloss_hold= _safe_ll(y_hold_vec, p_hold_vec)
+        brier_hold  = _safe_brier(y_hold_vec, p_hold_vec)
+        
+        # pretty helpers
+        fmt = lambda x: ("{:.4f}".format(x) if np.isfinite(x) else "nan")
 
 
         # === Save ensemble (choose one or both)
