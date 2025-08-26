@@ -3124,7 +3124,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # Re-raise so the run stops here and you can fix it
                 raise
         
-        DEBUG_ONCE = True  # flip to False after one run
+        DEBUG_ONCE = False  # flip to False after one run
         
         if DEBUG_ONCE:
             try:
@@ -3170,7 +3170,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             rs_auc = RandomizedSearchCV(
                 estimator=search_base,
                 param_distributions=param_distributions,
-                scoring="roc_auc",
+                scoring="roc_auc_proba_scorer",
                 cv=folds,
                 n_iter=40,
                 n_jobs=3,
