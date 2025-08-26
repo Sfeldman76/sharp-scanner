@@ -3409,7 +3409,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.write(f"📈 AUC:     train={auc_train:.4f}, val={auc_val:.4f}")
         st.write(f"🎯 Brier:   train={brier_tr:.4f}, val={brier_val:.4f}")
         
-         --- quick calibration table (for sanity; full plot optional) ---
+         #--- quick calibration table (for sanity; full plot optional) ---
         bins = np.linspace(0,1,11)
         idx  = np.digitize(p_cal_val, bins) - 1
         cal_tbl = []
