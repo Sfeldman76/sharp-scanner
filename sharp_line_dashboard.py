@@ -3319,6 +3319,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend_50, y_oof)
         
         # ---- final refit with early stopping on most-recent 15% --------------------
+        # ---- final refit with early stopping on most-recent 15% --------------------
         n = len(X_full)
         hold = max(1, int(round(n * 0.15)))
         val_idx = np.arange(n - hold, n)
@@ -3350,22 +3351,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         final_log = fit_with_es(final_log, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
         final_auc = fit_with_es(final_auc, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
         
-        iso_logloss = IsotonicRegression(out_of_bounds='clip').fit(prob_logloss, y_full)
-        iso_auc     = IsotonicRegression(out_of_bounds='clip').fit(prob_auc,     y_full)
+        # --- 1) raw probs from FINAL models on TRAIN/OOF slice ---
+        p_raw_logloss_tr = final_log.predict_proba(X_full)[:, 1]
+        p_raw_auc_tr     = final_auc.predict_proba(X_full)[:, 1]
         
+        # --- 2) fit isotonic calibrators on those raw probs vs y_full ---
+        iso_logloss = IsotonicRegression(out_of_bounds='clip').fit(p_raw_logloss_tr, y_full)
+        iso_auc     = IsotonicRegression(out_of_bounds='clip').fit(p_raw_auc_tr,     y_full)
+        
+        # --- 3) calibrated wrappers (IsoWrapper must be defined at module top-level) ---
         cal_logloss = IsoWrapper(final_log, iso_logloss)
         cal_auc     = IsoWrapper(final_auc, iso_auc)
-        # ---- calibrated probs (train/holdout) --------------------------------------
-        # Keep a pandas X for feature-name-based diagnostics (your earlier X was a DataFrame)
-        X_pd = df_market[features].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).fillna(0.0)
         
-        # === Calibrated model outputs (already fitted calibrators) ===
-        # X_full / X_val are your feature matrices aligned to y_full / y_val
-        prob_logloss      = cal_logloss.predict_proba(X_full)[:, 1]
-        prob_auc          = cal_auc.predict_proba(X_full)[:, 1]
-        val_prob_logloss  = cal_logloss.predict_proba(X_val)[:, 1]
-        val_prob_auc      = cal_auc.predict_proba(X_val)[:, 1]
+        # --- 4) calibrated probs (TRAIN & VAL) used downstream (blend weight, metrics) ---
+        prob_logloss     = cal_logloss.predict_proba(X_full)[:, 1]
+        prob_auc         = cal_auc.predict_proba(X_full)[:, 1]
+        val_prob_logloss = cal_logloss.predict_proba(X_val)[:, 1]
+        val_prob_auc     = cal_auc.predict_proba(X_val)[:, 1]
         
+        # (now do your weight search on prob_logloss/prob_auc vs y_full, then build p_train_blend/p_val_blend)
         # --- pick ensemble weight by minimizing LOG LOSS (primary metric) ---
         grid = np.linspace(0.0, 1.0, 51)
         def _ll(y, p): 
