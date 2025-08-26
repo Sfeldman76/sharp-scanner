@@ -3773,32 +3773,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         need = ['Sport','Market','Bookmaker','SHARP_HIT_BOOL']
         
         
-        # normalize like your function expects (it already upper/lower/strip in the return)
-        # --- Build book_reliability_map (minimal) ---
-        try:
-            # use whatever column you actually have for bookmaker
-            bk_col = 'Bookmaker' if 'Bookmaker' in df_market.columns else 'Bookmaker_Norm'
         
-            need = ['Sport', 'Market', bk_col, 'SHARP_HIT_BOOL']
-            df_rel_in = df_market.loc[X_val.index, [c for c in need if c in df_market.columns]].copy()
-            if bk_col != 'Bookmaker':  # normalize name for your builder
-                df_rel_in = df_rel_in.rename(columns={bk_col: 'Bookmaker'})
+        # --- Build book_reliability_map exactly like before (DataFrame) ---
+        bk_col = 'Bookmaker' if 'Bookmaker' in df_market.columns else 'Bookmaker_Norm'
+        need   = ['Sport', 'Market', bk_col, 'SHARP_HIT_BOOL']
         
-            book_rel_df = build_book_reliability_map(df_rel_in, prior_strength=200.0)
+        # align to the holdout indices you used for p_cal_val / y_val
+        df_rel_in = df_market.loc[X_val.index, [c for c in need if c in df_market.columns]].copy()
+        if bk_col != 'Bookmaker':  # builder expects 'Bookmaker'
+            df_rel_in = df_rel_in.rename(columns={bk_col: 'Bookmaker'})
         
-            # dict exactly like you proposed (keys normalized)
-            book_reliability_map = {
-                (r.Sport, r.Market, r.Bookmaker): {
-                    "score": float(r.Book_Reliability_Score),
-                    "lift":  float(r.Book_Reliability_Lift),
-                }
-                for r in book_rel_df.itertuples(index=False)
-            }
-        except Exception as e:
-            logger.info(f"book_reliability_map build failed; defaulting to empty. err={e}")
-            book_reliability_map = {}
-
-
+        book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)
+        
 
         # === Save ensemble (choose one or both)
         trained_models[market] = {
