@@ -3167,6 +3167,61 @@ def _suffix_snapshot(df, tag):
     if bad:
         logger.warning("❗ %s introduced %s", tag, bad)
 
+
+
+def predict_blended(bundle, X, model=None, iso=None):
+    """
+    Returns calibrated/blended probabilities in [1e-6, 1-1e-6].
+    Supports:
+      - Ensemble bundle: model_logloss, calibrator_logloss, model_auc, calibrator_auc, best_w
+      - Single calibrated model (iso)
+      - Single model only
+    """
+    def _cal_pred(m, cal, X_):
+        # prefer calibrator if present
+        if cal is not None:
+            if hasattr(cal, "predict_proba"):
+                p = cal.predict_proba(X_)
+                return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+            if hasattr(cal, "predict"):
+                return np.asarray(cal.predict(X_), dtype=float)
+        # fallback to model
+        if m is not None:
+            if hasattr(m, "predict_proba"):
+                p = m.predict_proba(X_)
+                return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+            if hasattr(m, "predict"):
+                return np.asarray(m.predict(X_), dtype=float)
+        return None
+
+    # 1) Ensemble path
+    if isinstance(bundle, dict) and all(k in bundle for k in
+        ("model_logloss", "calibrator_logloss", "model_auc", "calibrator_auc", "best_w")):
+        mL, calL = bundle["model_logloss"], bundle["calibrator_logloss"]
+        mA, calA = bundle["model_auc"],     bundle["calibrator_auc"]
+        w        = float(bundle["best_w"])
+        pL = _cal_pred(mL, calL, X)
+        pA = _cal_pred(mA, calA, X)
+        if pL is not None and pA is not None and len(pL) == len(pA):
+            p = w * pL + (1.0 - w) * pA
+            return np.clip(p, 1e-6, 1-1e-6)
+        # ensemble fallback to whichever path is available
+        if pL is not None:
+            return np.clip(pL, 1e-6, 1-1e-6)
+        if pA is not None:
+            return np.clip(pA, 1e-6, 1-1e-6)
+
+    # 2) Single calibrated model (legacy path)
+    p = _cal_pred(model, iso, X)
+    if p is not None:
+        return np.clip(p, 1e-6, 1-1e-6)
+
+    # 3) Nothing usable
+    return None
+
+
+
+
 def apply_blended_sharp_score(
     df,
     trained_models,
@@ -4241,6 +4296,7 @@ def apply_blended_sharp_score(
                     ]:
                         df_canon[col] = default
                 else:
+                 
                     X_can = df_canon.loc[:, feature_cols]
                     if X_can.empty:
                         logger.info(f"ℹ️ {mkt.upper()} has empty X_can — stamping unscored columns on canon.")
@@ -4252,22 +4308,9 @@ def apply_blended_sharp_score(
                         ]:
                             df_canon[col] = default
                     else:
-                        preds = None
-                        # prefer calibrator
-                        if iso is not None:
-                            if hasattr(iso, "predict_proba"):
-                                p = iso.predict_proba(X_can)
-                                preds = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p)
-                            elif hasattr(iso, "predict"):
-                                preds = np.asarray(iso.predict(X_can))
-                        # fallback to model
-                        if preds is None and model is not None:
-                            if hasattr(model, "predict_proba"):
-                                p = model.predict_proba(X_can)
-                                preds = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p)
-                            elif hasattr(model, "predict"):
-                                preds = np.asarray(model.predict(X_can))
-            
+                        # 🔁 Ensemble-first prediction with fallbacks (uses your bundle)
+                        preds = predict_blended(bundle, X_can, model=model, iso=iso)
+                
                         if preds is None:
                             logger.info(f"ℹ️ {mkt.upper()} has no usable predictor — stamping unscored columns on canon.")
                             for col, default in [
@@ -4278,10 +4321,13 @@ def apply_blended_sharp_score(
                             ]:
                                 df_canon[col] = default
                         else:
+                            preds = np.asarray(preds, dtype=float)
+                            preds = np.clip(preds, 1e-6, 1-1e-6)  # stabilize
                             df_canon['Model_Sharp_Win_Prob'] = preds
                             df_canon['Model_Confidence']     = preds
                             df_canon['Scored_By_Model']      = True
                             df_canon['Scoring_Market']       = mkt
+
             
             except Exception as e:
                 logger.error(f"❌ Scoring failed for {mkt.upper()} — stamping unscored columns on canon. Error: {e}")
