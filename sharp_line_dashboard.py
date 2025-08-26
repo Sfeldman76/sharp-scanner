@@ -120,7 +120,15 @@ from sklearn.experimental import enable_halving_search_cv  # noqa
 from sklearn.model_selection import HalvingRandomSearchCV
 from scipy.stats import randint, loguniform, uniform
 from sklearn.metrics import log_loss, make_scorer
-
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import (
+    roc_auc_score, log_loss, brier_score_loss, accuracy_score,
+    precision_score, recall_score, f1_score, roc_curve
+)
+import numpy as np, pandas as pd
+import xgboost as xgb
+from xgboost import XGBClassifier
+        
 
               
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
@@ -3221,29 +3229,83 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
+        
+        # =========================
+        # VALIDATION + DIAGNOSTICS + OPT BLENDING (DROP-IN)
+        # =========================
 
-        # ---- helper: safest best-round extraction across xgboost versions ----
+        # ---- helpers ---------------------------------------------------------------
         def best_rounds(clf: XGBClassifier) -> int:
-            # try sklearn attr
             br = getattr(clf, "best_iteration", None)
             if br is not None and br >= 0:
-                return int(br + 1)  # iterations are 0-based; n_estimators is count
-            # try booster attrs
+                return int(br + 1)
             try:
                 booster = clf.get_booster()
-                if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
+                if getattr(booster, "best_iteration", None) is not None:
                     return int(booster.best_iteration + 1)
-                if hasattr(booster, "best_ntree_limit") and booster.best_ntree_limit:
+                if getattr(booster, "best_ntree_limit", None):
                     return int(booster.best_ntree_limit)
             except Exception:
                 pass
-            # fallback to set n_estimators if early stopping wasn’t used
             return int(getattr(clf, "n_estimators", 200))
         
+        def safe_auc(y, p):
+            return roc_auc_score(y, p) if np.unique(y).size == 2 else np.nan
+        
+        def safe_ll(y, p):
+            p = np.clip(p, 1e-6, 1-1e-6)
+            return log_loss(y, p, labels=[0,1]) if np.unique(y).size == 2 else np.nan
+        
+        def safe_brier(y, p):
+            return brier_score_loss(y, p) if np.unique(y).size == 2 else np.nan
+        
+        def ks_stat(y_true, p):
+            fpr, tpr, _ = roc_curve(y_true, p)
+            return float(np.max(tpr - fpr))
+        
+        def ECE(y_true, p, n_bins=10):
+            y_true = np.asarray(y_true); p = np.asarray(p)
+            bins = np.linspace(0,1,n_bins+1)
+            idx  = np.digitize(p, bins) - 1
+            ece, total = 0.0, len(p)
+            for b in range(n_bins):
+                m = (idx==b)
+                if np.any(m):
+                    conf = float(np.mean(p[m]))
+                    acc  = float(np.mean(y_true[m]))
+                    ece += (np.sum(m)/total) * abs(acc - conf)
+            return float(ece)
+        
+        def brier_decomp(y_true, p, n_bins=10):
+            y_true = np.asarray(y_true); p = np.asarray(p)
+            base = float(np.mean(y_true))
+            unc = base * (1 - base)
+            bins = np.linspace(0,1,n_bins+1)
+            idx  = np.digitize(p, bins) - 1
+            res = 0.0; rel = 0.0
+            for b in range(n_bins):
+                m = (idx==b)
+                if np.any(m):
+                    py = float(np.mean(y_true[m]))
+                    pp = float(np.mean(p[m]))
+                    w  = float(np.mean(m))
+                    res += w * (py - base)**2
+                    rel += w * (pp - py)**2
+            brier = brier_score_loss(y_true, p)
+            return float(brier), float(unc), float(res), float(rel)
+        
+        def psi_num(a, b, bins=10):
+            qa = np.quantile(a, np.linspace(0,1,bins+1))
+            qa[0] -= 1e-9; qa[-1] += 1e-9
+            ca = np.histogram(a, qa)[0] / max(1, len(a))
+            cb = np.histogram(b, qa)[0] / max(1, len(b))
+            cb = np.where(cb==0, 1e-6, cb); ca = np.where(ca==0, 1e-6, ca)
+            return float(np.sum((ca - cb) * np.log(ca / cb)))
+        
+        # ---- OOF predictions for isotonic (with tuned rounds) ----------------------
         n_trees_ll  = best_rounds(model_logloss)
         n_trees_auc = best_rounds(model_auc)
         
-        # ---- OOF predictions (single pass over 'folds') ----
         oof_pred_logloss = np.full(len(y_full), np.nan, dtype=float)
         oof_pred_auc     = np.full(len(y_full), np.nan, dtype=float)
         
@@ -3255,36 +3317,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             oof_pred_logloss[va_idx] = m_ll.predict_proba(X_full[va_idx])[:, 1]
             oof_pred_auc[va_idx]     = m_auc.predict_proba(X_full[va_idx])[:, 1]
         
-        # ---- Isotonic on the blended OOF predictions ----
         mask_oof = ~np.isnan(oof_pred_logloss) & ~np.isnan(oof_pred_auc)
         if mask_oof.sum() < 50:
             raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
         
-        oof_blend = 0.5 * oof_pred_logloss[mask_oof] + 0.5 * oof_pred_auc[mask_oof]
-        y_oof     = y_full[mask_oof].astype(int)
+        oof_blend_50 = 0.5 * oof_pred_logloss[mask_oof] + 0.5 * oof_pred_auc[mask_oof]
+        y_oof        = y_full[mask_oof].astype(int)
         
-        iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend, y_oof)
+        iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend_50, y_oof)
         
-        # Optional: wrapper so we can use predict_proba later
-        
-        
-        # ----- final refit with early stopping on most-recent 15% -----
-        # --- final time-forward holdout split (15% tail) ---
+        # ---- final refit with early stopping on most-recent 15% --------------------
         n = len(X_full)
         hold = max(1, int(round(n * 0.15)))
-        
-        # indices for validation rows in the ORIGINAL order
         val_idx = np.arange(n - hold, n)
         
-        # split arrays
-        X_tr = X_full[: n - hold]
-        y_tr = y_full[: n - hold].astype(int)
+        X_tr  = X_full[: n - hold]
+        y_tr  = y_full[: n - hold].astype(int)
+        X_val = X_full[val_idx]
+        y_val = pd.Series(y_full[val_idx].astype(int), index=val_idx)
         
-        X_val = X_full[val_idx]                                  # NumPy array (fine for model.predict_proba)
-        y_val = pd.Series(y_full[val_idx].astype(int), index=val_idx)  # Pandas Series so .nunique(), alignment, merges work
-                # --- helper for robust early stopping ---
-        def fit_with_es(model, X_tr, y_tr, X_va, y_va, es_rounds):
-            """Try native early_stopping_rounds; fallback to callback API if needed."""
+        def fit_with_es(model, X_tr, y_tr, X_va, y_va, es_rounds=100, maximize=False):
             try:
                 model.fit(
                     X_tr, y_tr,
@@ -3293,35 +3345,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     verbose=False,
                 )
             except TypeError:
-                es = xgb.callback.EarlyStopping(
-                    rounds=es_rounds,
-                    save_best=True,
-                    maximize=False
-                )
-                model.fit(
-                    X_tr, y_tr,
-                    eval_set=[(X_va, y_va)],
-                    callbacks=[es],
-                    verbose=False,
-                )
+                es = xgb.callback.EarlyStopping(rounds=es_rounds, save_best=True, maximize=maximize)
+                model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
             return model
-        es = xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True, maximize=False)
         
-        final_log = xgb.XGBClassifier(
-            **{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap}
-        )
-        final_auc = xgb.XGBClassifier(
-            **{**base_kwargs, **model_auc.get_params(), "n_estimators": final_estimators_cap}
-        )
-    
+        final_estimators_cap  = 3000
+        early_stopping_rounds = 100
+        
+        final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
+        final_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": final_estimators_cap})
+        
         final_log = fit_with_es(final_log, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
         final_auc = fit_with_es(final_auc, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
-
         
         class IsoWrapper:
             def __init__(self, base, iso):
                 self.base = base
-                self.iso = iso
+                self.iso  = iso
             def predict_proba(self, X):
                 p = self.base.predict_proba(X)[:, 1]
                 p_cal = np.clip(self.iso.transform(p), 1e-6, 1-1e-6)
@@ -3330,307 +3370,262 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         cal_logloss = IsoWrapper(final_log, iso)
         cal_auc     = IsoWrapper(final_auc, iso)
         
-        # ----- holdout metrics (blended + calibrated) -----
-        # Use X_val / y_val (new names) instead of X_va / y_va
-        p_ll    = cal_logloss.predict_proba(X_val)[:, 1]
-        p_au    = cal_auc.predict_proba(X_val)[:, 1]
-        p_blend = 0.5 * p_ll + 0.5 * p_au
-        p_cal   = np.clip(p_blend, 1e-6, 1-1e-6)
+        # ---- calibrated probs (train/holdout) --------------------------------------
+        # Keep a pandas X for feature-name-based diagnostics (your earlier X was a DataFrame)
+        X_pd = df_market[features].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).fillna(0.0)
         
-        def safe_auc(y, p):   return roc_auc_score(y, p) if np.unique(y).size == 2 else np.nan
-        def safe_ll(y, p):    return log_loss(y, p, labels=[0,1]) if np.unique(y).size == 2 else np.nan
-        def safe_brier(y, p): return brier_score_loss(y, p) if np.unique(y).size == 2 else np.nan
+        prob_logloss = cal_logloss.predict_proba(X_full)[:, 1]
+        prob_auc     = cal_auc.predict_proba(X_full)[:, 1]
+        val_prob_logloss = cal_logloss.predict_proba(X_val)[:, 1]
+        val_prob_auc     = cal_auc.predict_proba(X_val)[:, 1]
         
-        auc = safe_auc(y_val.values, p_cal)
-        ll  = safe_ll(y_val.values, p_cal)
-        bri = safe_brier(y_val.values, p_cal)
-
+        # ---- learn optimal blend weight on OOF/train; apply to holdout -------------
+        grid = np.linspace(0.0, 1.0, 51)
+        def _ll(ytrue, p): return log_loss(ytrue, np.clip(p,1e-6,1-1e-6), labels=[0,1])
+        
+        best_w, best_ll = 0.5, 1e9
+        for w in grid:
+            p = w*prob_logloss + (1-w)*prob_auc
+            ll = _ll(y_full, p)
+            if ll < best_ll:
+                best_ll, best_w = ll, w
+        
+        p_train_blend = best_w*prob_logloss + (1-best_w)*prob_auc
+        p_val_blend   = best_w*val_prob_logloss + (1-best_w)*val_prob_auc
+        p_val_blend   = np.clip(p_val_blend, 1e-6, 1-1e-6)
+        
+        # ---- headline holdout metrics ----------------------------------------------
+        auc_ho = safe_auc(y_val.values, p_val_blend)
+        ll_ho  = safe_ll (y_val.values, p_val_blend)
+        br_ho  = safe_brier(y_val.values, p_val_blend)
         
         st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
-        st.write(f"- Blended+Calibrated AUC: `{auc:.4f}`")
-        st.write(f"- Holdout LogLoss:        `{ll:.4f}`")
-        st.write(f"- Holdout Brier:          `{bri:.4f}`")
-
-
+        st.write(f"- **Optimal Blend Weight (LogLoss model)**: `{best_w:.2f}`  (AUC weight `{1-best_w:.2f}`)")
+        st.write(f"- **Blended + Calibrated AUC**: `{auc_ho:.4f}`")
+        st.write(f"- **Holdout LogLoss**: `{ll_ho:.4f}`")
+        st.write(f"- **Holdout Brier**: `{br_ho:.4f}`")
         
-        # --- blended + calibrated validation probabilities aligned to original rows ---
-        # assumes you already defined: val_idx, X_val (np.array), y_val (pd.Series with index=val_idx)
-        p_ll    = cal_logloss.predict_proba(X_val)[:, 1]
-        p_au    = cal_auc.predict_proba(X_val)[:, 1]
-        p_blend = 0.5 * p_ll + 0.5 * p_au
-        p_cal   = np.clip(p_blend, 1e-6, 1-1e-6)
+        # ---- sanity sentinels (flatness/entropy) -----------------------------------
+        std_ens = float(np.std(p_train_blend))
+        rng_ens = float(np.max(p_train_blend) - np.min(p_train_blend))
+        entropy = -np.mean(p_train_blend*np.log(p_train_blend+1e-10) + (1-p_train_blend)*np.log(1-p_train_blend+1e-10))
         
-        # Build aligned evaluation frame (index = original df rows for the val slice)
-        df_eval = pd.DataFrame({
-            "p":    pd.Series(p_cal, index=val_idx),
-            "y":    y_val.astype(int),  # Series with val_idx
-            "odds": pd.to_numeric(df_market.loc[val_idx, "Odds_Price"], errors="coerce"),
-        }).dropna(subset=["p", "y"])   # keep rows with both prob and label
+        st.markdown(f"### 🔍 Prediction Confidence Analysis – `{market.upper()}`")
+        st.write(f"- Std Dev of Predictions: `{std_ens:.4f}`")
+        st.write(f"- Probability Range: `{rng_ens:.4f}`")
+        st.write(f"- Avg Prediction Entropy: `{entropy:.4f}`")
+        if std_ens < 0.02 or rng_ens < 0.05:
+            st.error("⚠️ Predictions look too flat. Loosen min_child_weight/gamma, review constraints & feature variance.")
         
-        # --- probability bins (0.0–1.0 by 0.1) ---
+        # ---- model disagreement (diversity) ----------------------------------------
+        st.markdown("### 🔀 Model Disagreement")
+        st.write(f"- Corr(train) LogLoss vs AUC: `{float(np.corrcoef(prob_logloss, prob_auc)[0,1]):.3f}`")
+        st.write(f"- Corr(holdout) LogLoss vs AUC: `{float(np.corrcoef(val_prob_logloss, val_prob_auc)[0,1]):.3f}`")
+        
+        # ---- threshold sweep (train) -----------------------------------------------
+        st.markdown(f"#### 📈 Performance by Threshold – `{market.upper()}` (Train)")
+        thresholds = np.arange(0.1, 0.96, 0.05)
+        rows=[]
+        for t in thresholds:
+            preds = (p_train_blend >= t).astype(int)
+            rows.append({
+                "Threshold": round(float(t),2),
+                "Accuracy":  accuracy_score(y_full, preds),
+                "Precision": precision_score(y_full, preds, zero_division=0),
+                "Recall":    recall_score(y_full, preds, zero_division=0),
+                "F1":        f1_score(y_full, preds, zero_division=0),
+            })
+        df_thresh = pd.DataFrame(rows)[["Threshold","Accuracy","Precision","Recall","F1"]]
+        st.dataframe(df_thresh.style.format({c:"{:.3f}" for c in df_thresh.columns if c!="Threshold"}))
+        
+        # ---- calibration bins (holdout) + ROI per bin ------------------------------
+        st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
         bins   = np.linspace(0, 1, 11)
-        labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins) - 1)]
-        cuts   = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
+        labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
+        eval_idx = pd.Index(val_idx)
         
-        # --- inline ROI calc: American odds to unit ROI ---
+        df_eval = pd.DataFrame({
+            "p":    pd.Series(p_val_blend, index=eval_idx),
+            "y":    y_val.astype(int),
+            "odds": pd.to_numeric(df_market.loc[eval_idx, "Odds_Price"], errors="coerce"),
+        }).dropna(subset=["p","y"])
+        
+        cuts = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
+        
         def _roi_mean_inline(sub: pd.DataFrame) -> float:
-            if not sub["odds"].notna().any():
-                return float("nan")
+            if not sub["odds"].notna().any(): return float("nan")
             odds = pd.to_numeric(sub["odds"], errors="coerce")
             win  = sub["y"].astype(int)
-        
-            # profit if win: +odds/100 for positive odds, +100/|odds| for negative odds
             profit_pos = odds.where(odds > 0, np.nan) / 100.0
             profit_neg = 100.0 / odds.abs()
             profit_on_win = np.where(odds > 0, profit_pos, profit_neg)
             profit_on_win = pd.Series(profit_on_win, index=odds.index).fillna(0.0)
-        
-            roi = win * profit_on_win - (1 - win) * 1.0   # lose stake if loss
+            roi = win * profit_on_win - (1 - win) * 1.0
             return float(roi.mean())
         
-        # --- aggregate per bin
-        rows = []
+        rows=[]
         for lb in labels:
             sub = df_eval[cuts == lb]
             n   = int(len(sub))
             if n == 0:
-                rows.append((lb, 0, np.nan, np.nan, np.nan))
-                continue
+                rows.append((lb, 0, np.nan, np.nan, np.nan)); continue
             hit   = float(sub["y"].mean())
             roi   = _roi_mean_inline(sub)
             avg_p = float(sub["p"].mean())
             rows.append((lb, n, hit, roi, avg_p))
         
-        df_bins = pd.DataFrame(rows, columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
+        df_bins = pd.DataFrame(rows, columns=["Prob Bin","N","Hit Rate","Avg ROI (unit)","Avg Pred P"])
         df_bins["N"] = df_bins["N"].astype(int)
-        
-        st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
         st.dataframe(df_bins)
         
-        # quick extreme-bucket snapshot (only if non-empty)
-        hi = df_bins.iloc[-1]
-        lo = df_bins.iloc[0]
-        st.write(f"**High bin ({hi['Prob Bin']}):** " + (f"N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}" if hi["N"] > 0 else "N=0"))
-        st.write(f"**Low bin  ({lo['Prob Bin']}):** " + (f"N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}" if lo["N"] > 0 else "N=0"))
+        # quick extremes snapshot
+        hi, lo = df_bins.iloc[-1], df_bins.iloc[0]
+        st.write(f"**High bin ({hi['Prob Bin']}):** " + (f"N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}" if hi["N"]>0 else "N=0"))
+        st.write(f"**Low bin  ({lo['Prob Bin']}):** " + (f"N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}" if lo["N"]>0 else "N=0"))
         
-        # === Summary Card =====================================================
-        st.markdown("### ✅ Deployment Readiness Snapshot")
-        psi_flag = "Unknown"
-        if 'df_psi' in locals():
-            psi_worst = df_psi['PSI'].replace(np.nan, 0).max()
-            psi_flag = "🚨 heavy drift" if psi_worst > 0.3 else ("⚠️ medium drift" if psi_worst > 0.2 else "✅ stable")
+        # ---- overfitting check (train vs holdout) ----------------------------------
+        auc_tr = safe_auc(y_full, p_train_blend)
+        ll_tr  = safe_ll (y_full, p_train_blend)
+        br_tr  = safe_brier(y_full, p_train_blend)
         
-        hi_ok = (hi["N"] > 0) and ( (hi["Hit Rate"] >= 0.60) or (pd.notna(hi["Avg ROI (unit)"]) and hi["Avg ROI (unit)"] > 0) )
-        lo_ok = (lo["N"] > 0) and ( ((1 - lo["Hit Rate"]) >= 0.60) or (pd.notna(lo["Avg ROI (unit)"]) and lo["Avg ROI (unit)"] > 0) )
-        
-        st.write(f"- **PSI status:** {psi_flag}")
-        st.write(f"- **High-confidence bucket profitable/accurate?** {'✅' if hi_ok else '⚠️'}")
-        st.write(f"- **Low-confidence bucket fade profitable/accurate?** {'✅' if lo_ok else '⚠️'}")
-        # === 3) ADVERSE SCENARIO REPLAY ======================================
-        st.markdown("### 🌪️ Adverse Scenario Replay (reversal-heavy days)")
-        if "Value_Reversal_Flag" in df_market.columns or "Odds_Reversal_Flag" in df_market.columns:
-            df_market["_rev_flag"] = (
-                df_market.get("Value_Reversal_Flag", 0).fillna(0).astype(int) |
-                df_market.get("Odds_Reversal_Flag", 0).fillna(0).astype(int)
-            )
-            # day-level reversal rate
-            if "Snapshot_Timestamp" in df_market.columns and pd.api.types.is_datetime64_any_dtype(df_market["Snapshot_Timestamp"]):
-                df_market["_day"] = pd.to_datetime(df_market["Snapshot_Timestamp"], utc=True, errors='coerce').dt.date
-                daily = df_market.groupby("_day")["_rev_flag"].mean().sort_values(ascending=False).head(5).index.tolist()
-                if len(daily) == 0:
-                    st.info("No reversal-heavy days found.")
-                else:
-                    rows = []
-                    for d in daily:
-                        mask = df_market["_day"] == d
-                        Xd = df_market.loc[mask, features].apply(pd.to_numeric, errors='coerce').fillna(0)
-                        yd = df_market.loc[mask, "SHARP_HIT_BOOL"].astype(int)
-                        if len(yd.unique()) < 2:
-                            continue
-                        try:
-                            pd_pred = pd.Series(cal_logloss.predict_proba(Xd)[:, 1], index=Xd.index)
-                        except Exception:
-                            pd_pred = pd.Series(model_logloss.predict_proba(Xd)[:, 1], index=Xd.index)
-                        auc_d = roc_auc_score(yd, pd_pred)
-                        ll_d = log_loss(yd, pd_pred, labels=[0,1])
-                        conf = pd_pred.apply(lambda p: max(p, 1-p)).mean()
-                        rows.append((str(d), len(yd), auc_d, ll_d, conf))
-                    if rows:
-                        df_bad = pd.DataFrame(rows, columns=["Day", "N", "AUC", "LogLoss", "Avg Confidence"])
-                        st.dataframe(df_bad)
-                    else:
-                        st.info("Reversal-heavy days did not have enough label variety for evaluation.")
-            else:
-                st.info("Missing/invalid Snapshot_Timestamp for adverse replay.")
-        else:
-            st.info("Reversal flags not present — skipping adverse replay.")
-
-       
-        # 🕵️‍♂️ Debug: Inspect problematic features in X
-        for col in X.columns:
-            try:
-                sample_val = X[col].dropna().iloc[0]
-            except IndexError:
-                continue  # Skip empty columns
-        
-            if isinstance(sample_val, (pd.DataFrame, pd.Series, list, dict)):
-                print(f"❌ Feature '{col}' has bad type: {type(sample_val)} — value: {sample_val}")
-            elif not hasattr(sample_val, 'dtype'):
-                print(f"⚠️ Feature '{col}' has unknown/non-numeric type: {type(sample_val)} — value: {sample_val}")
-        # 🚫 Detect and drop nested/bad columns from X
-        # 🧹 Clean X BEFORE any predict_proba calls or calibrator usage
-        bad_cols = []
-        for col in X.columns:
-            sample_val = X[col].dropna().iloc[0] if not X[col].dropna().empty else None
-            if isinstance(sample_val, (pd.DataFrame, pd.Series, list, dict)):
-                print(f"❌ Feature '{col}' has bad type: {type(sample_val)} — value: {sample_val}")
-                bad_cols.append(col)
-        
-        if bad_cols:
-            print(f"🧹 Dropping from X: {bad_cols}")
-            X = X.drop(columns=bad_cols)
-        
-        # === Predict calibrated probabilities
-        prob_logloss = cal_logloss.predict_proba(X)[:, 1]
-        prob_auc = cal_auc.predict_proba(X)[:, 1]
-        
-        
-        # === Predict calibrated probabilities on validation set
-        val_prob_logloss = cal_logloss.predict_proba(X_val)[:, 1]
-        val_prob_auc = cal_auc.predict_proba(X_val)[:, 1]
-        
-        # === Evaluate on holdout
-        val_prob_auc = np.clip(val_prob_auc, 0.05, 0.95)
-        val_prob_logloss = np.clip(val_prob_logloss, 0.05, 0.95)
-
-        val_auc_logloss = roc_auc_score(y_val, val_prob_logloss)
-        val_auc_auc = roc_auc_score(y_val, val_prob_auc)
-        # === Log holdout performance
-        st.markdown(f"### 🧪 Holdout Validation – `{market.upper()}`")
-        st.write(f"- LogLoss Model AUC: `{val_auc_logloss:.4f}`")
-        st.write(f"- AUC Model AUC: `{val_auc_auc:.4f}`")
-        
-        if y_val.nunique() < 2:
-            st.warning("⚠️ Cannot compute log loss or Brier score — only one label class in validation set.")
-            val_logloss = np.nan
-            val_brier = np.nan
-        else:
-            val_logloss = log_loss(y_val, val_prob_auc, labels=[0, 1])
-            val_brier = brier_score_loss(y_val, val_prob_auc)
-        
-            st.write(f"- Holdout LogLoss: `{val_logloss:.4f}`")
-            st.write(f"- Holdout Brier Score: `{val_brier:.4f}`")
-        
-        # === Compute AUCs for weighting
-        auc_logloss = roc_auc_score(y, prob_logloss)
-        auc_auc = roc_auc_score(y, prob_auc)
-        
-        # === Normalize AUCs to get ensemble weights
-        total_auc = auc_logloss + auc_auc
-        w_logloss = auc_logloss / total_auc
-        w_auc = auc_auc / total_auc
-        
-        # === Weighted ensemble
-        ensemble_prob = w_logloss * prob_logloss + w_auc * prob_auc
-
-       # === Std deviation of ensemble probabilities (measures confidence tightness)
-        std_dev_pred = np.std(ensemble_prob)
-        
-        # === Spread of calibrated win probabilities
-        prob_range = np.max(ensemble_prob) - np.min(ensemble_prob)
-        
-        # === Sharpeness score (low entropy = sharper predictions)
-        entropy = -np.mean([
-            p * np.log(p + 1e-10) + (1 - p) * np.log(1 - p + 1e-10)
-            for p in ensemble_prob
-        ])
-        
-        st.markdown(f"### 🔍 Prediction Confidence Analysis – `{market.upper()}`")
-        st.write(f"- Std Dev of Predictions: `{std_dev_pred:.4f}`")
-        st.write(f"- Probability Range: `{prob_range:.4f}`")
-        st.write(f"- Avg Prediction Entropy: `{entropy:.4f}`")
-
-
-        # === Threshold sweep
-        thresholds = np.arange(0.1, 0.96, 0.05)
-        threshold_metrics = []
-        
-        for thresh in thresholds:
-            preds = (ensemble_prob >= thresh).astype(int)
-            threshold_metrics.append({
-                'Threshold': round(thresh, 2),
-                'Accuracy': accuracy_score(y, preds),
-                'Precision': precision_score(y, preds, zero_division=0),
-                'Recall': recall_score(y, preds, zero_division=0),
-                'F1': f1_score(y, preds, zero_division=0)
-            })
-        
-        # Create DataFrame for display
-        df_thresh = pd.DataFrame(threshold_metrics)
-        df_thresh = df_thresh[['Threshold', 'Accuracy', 'Precision', 'Recall', 'F1']]
-        
-        # Display in Streamlit
-        st.markdown(f"#### 📈 Performance by Threshold – `{market.upper()}`")
-        st.dataframe(df_thresh.style.format({c: "{:.3f}" for c in df_thresh.columns if c != 'Threshold'}))
-        
-        y_pred = (ensemble_prob >= 0.6).astype(int)
-        # === Log weight contributions
-        dominant_model = "AUC" if w_auc > w_logloss else "LogLoss"
-        st.markdown(f"🧠 **Ensemble Weighting:**")
-        st.write(f"- AUC Model Weight: `{w_auc:.2f}`")
-        st.write(f"- LogLoss Model Weight: `{w_logloss:.2f}`")
-        st.success(f"📌 Dominant Model in Ensemble: **{dominant_model} Model**")
-       
-        # === Metrics
-        auc = roc_auc_score(y, ensemble_prob)
-        acc = accuracy_score(y, y_pred)
-        logloss = log_loss(y, ensemble_prob)
-        brier = brier_score_loss(y, ensemble_prob)
         st.markdown("### 📉 Overfitting Check – Gap Analysis")
-        st.write(f"- AUC Gap (Train - Holdout): `{auc - val_auc_auc:.4f}`")
-        st.write(f"- LogLoss Gap (Train - Holdout): `{logloss - val_logloss:.4f}`")
-        st.write(f"- Brier Gap (Train - Holdout): `{brier - val_brier:.4f}`")
-
+        st.write(f"- AUC Gap (Train - Holdout): `{(auc_tr - auc_ho):.4f}`")
+        st.write(f"- LogLoss Gap (Train - Holdout): `{(ll_tr - ll_ho):.4f}`")
+        st.write(f"- Brier Gap (Train - Holdout): `{(br_tr - br_ho):.4f}`")
+        
+        # ---- calibration quality: ECE + Brier decomposition ------------------------
+        st.markdown("### 🎯 Calibration Metrics")
+        ece_tr = ECE(y_full, p_train_blend, n_bins=10)
+        brier_tr, unc_tr, res_tr, rel_tr = brier_decomp(y_full, p_train_blend, 10)
+        ece_ho = ECE(y_val.values, p_val_blend, 10)
+        brier_ho, unc_ho, res_ho, rel_ho = brier_decomp(y_val.values, p_val_blend, 10)
+        st.write(f"- ECE(train): `{ece_tr:.4f}` | Brier(train): `{brier_tr:.4f}` = Unc `{unc_tr:.4f}` - Res `{res_tr:.4f}` + Rel `{rel_tr:.4f}`")
+        st.write(f"- ECE(holdout): `{ece_ho:.4f}` | Brier(holdout): `{brier_ho:.4f}` = Unc `{unc_ho:.4f}` - Res `{res_ho:.4f}` + Rel `{rel_ho:.4f}`")
+        
+        # ---- ranking diagnostics: KS + Lift (train) --------------------------------
+        st.markdown("### 📈 Ranking Diagnostics")
+        st.write(f"- KS(train):   `{ks_stat(y_full, p_train_blend):.3f}`")
+        st.write(f"- KS(holdout): `{ks_stat(y_val.values, p_val_blend):.3f}`")
+        
+        def lift_table(y_true, p, k=10):
+            n = len(p); order = np.argsort(-p)
+            y_sorted = np.asarray(y_true)[order]
+            rows=[]
+            for i in range(k):
+                lo = int(i*n/k); hi = int((i+1)*n/k)
+                segment = y_sorted[lo:hi]
+                base = max(1e-9, np.mean(y_true))
+                rows.append({"Decile": i+1, "N": len(segment), "HitRate": float(np.mean(segment)), "Lift": float(np.mean(segment)/base)})
+            return pd.DataFrame(rows)
+        
+        st.markdown("#### 🚀 Lift (Train, Deciles)")
+        st.dataframe(lift_table(y_full, p_train_blend))
+        
+        # ---- segment diagnostics (holdout) -----------------------------------------
+        st.markdown("### 🧩 Segment Diagnostics (Holdout)")
+        eval_seg = pd.DataFrame({
+            "p":   p_val_blend,
+            "y":   y_val.astype(int).values,
+            "Book": df_market.loc[val_idx, "Book"].astype(str).values if "Book" in df_market.columns else "NA",
+            "Timing": df_market.loc[val_idx, "SharpMove_Timing_Dominant"].astype(str).values if "SharpMove_Timing_Dominant" in df_market.columns else "NA",
+            "Fav":  df_market.loc[val_idx, "Is_Favorite_Bet"].fillna(0).astype(int).values if "Is_Favorite_Bet" in df_market.columns else 0,
+        })
+        
+        def seg_table(df, by):
+            rows=[]
+            for k, sub in df.groupby(by):
+                if sub["y"].nunique() < 2 or len(sub) < 30:
+                    auc = np.nan
+                else:
+                    auc = roc_auc_score(sub["y"], sub["p"])
+                rows.append({
+                    by: k, "N": len(sub),
+                    "BaseRate": float(np.mean(sub["y"])),
+                    "AUC": float(auc) if not np.isnan(auc) else np.nan,
+                    "Brier": float(brier_score_loss(sub["y"], sub["p"]))
+                })
+            return pd.DataFrame(rows).sort_values("N", ascending=False)
+        
+        st.write("**by Book**")
+        if "Book" in eval_seg.columns:
+            st.dataframe(seg_table(eval_seg, "Book").head(20))
+        st.write("**by Timing**")
+        if "Timing" in eval_seg.columns:
+            st.dataframe(seg_table(eval_seg, "Timing"))
+        st.write("**Favorite vs Dog**")
+        st.dataframe(seg_table(eval_seg, "Fav"))
+        
+        # ---- drift / PSI on a few high-signal features -----------------------------
+        st.markdown("### 🌡️ Drift Check (PSI proxy)")
+        psi_rows=[]
+        feat_check = [c for c in ["Outcome_Market_Spread","Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening","Book_Reliability_Lift"] if c in df_market.columns]
+        if len(val_idx) > 0 and len(feat_check) > 0:
+            train_end = val_idx[0]  # first index of holdout window
+            for col in feat_check:
+                a = pd.to_numeric(df_market.loc[:train_end-1, col], errors="coerce").dropna().values
+                b = pd.to_numeric(df_market.loc[val_idx, col],         errors="coerce").dropna().values
+                if len(a)>50 and len(b)>20:
+                    psi_rows.append({"Feature": col, "PSI": psi_num(a,b)})
+        if psi_rows:
+            st.dataframe(pd.DataFrame(psi_rows).sort_values("PSI", ascending=False))
+        
+        # ---- profit vs threshold (holdout) -----------------------------------------
+        st.markdown("### 💵 Profit vs Threshold (Holdout)")
+        def profit_at_thresh(p_series, y_series, odds_series, t):
+            sel = p_series >= t
+            if not np.any(sel): return np.nan
+            o  = odds_series[sel]; yy = y_series[sel].astype(int)
+            profit_pos = o.where(o>0, np.nan)/100.0
+            profit_neg = 100.0/o.abs()
+            profit_on_win = np.where(o>0, profit_pos, profit_neg)
+            profit_on_win = pd.Series(profit_on_win, index=o.index).fillna(0.0).values
+            roi = yy*profit_on_win - (1-yy)*1.0
+            return float(np.mean(roi))
+        
+        odds_val = pd.to_numeric(df_market.loc[val_idx, "Odds_Price"], errors="coerce")
+        p_val_ser = pd.Series(p_val_blend, index=val_idx)
+        rows=[]
+        for t in np.round(np.linspace(0.50, 0.80, 13), 2):
+            rows.append({"Thresh": float(t), "N": int(np.sum(p_val_ser>=t)), "AvgROI": profit_at_thresh(p_val_ser, y_val, odds_val, t)})
+        st.dataframe(pd.DataFrame(rows))
+        
+        # ---- feature importance + directional sign (AUC model) ---------------------
         importances = model_auc.feature_importances_
         feature_names = features[:len(importances)]
-        
-        # === Estimate directional impact via correlation with model output
-        # This assumes you have access to the original training data X and predictions
-        X_features = X[feature_names]  # original training feature matrix
-        preds = model_auc.predict_proba(X_features)[:, 1]  # class 1 probabilities
-        
-        # Estimate sign via correlation
+        X_features = X_pd[feature_names]
+        preds_auc  = model_auc.predict_proba(X_features)[:, 1]
         correlations = np.array([
-            np.corrcoef(X_features[col], preds)[0, 1] if np.std(X_features[col]) > 0 else 0
+            np.corrcoef(X_features[col], preds_auc)[0, 1] if np.std(X_features[col]) > 0 else 0.0
             for col in feature_names
         ])
-        
-        impact_directions = np.where(correlations > 0, '↑ Increases', '↓ Decreases')
-        
-        # === Combine into one table
-        importance_df = pd.DataFrame({
-            'Feature': feature_names,
-            'Importance': importances,
-            'Impact': impact_directions
-        }).sort_values(by='Importance', ascending=False)
-        
+        impact_directions = np.where(correlations > 0, "↑ Increases", "↓ Decreases")
+        importance_df = pd.DataFrame({"Feature": feature_names, "Importance": importances, "Impact": impact_directions}) \
+                            .sort_values("Importance", ascending=False)
         st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
-        # Filter only active features (Importance > 0)
-        active_features = importance_df[importance_df['Importance'] > 0]
+        active_features = importance_df[importance_df["Importance"] > 0]
+        st.dataframe(active_features.reset_index(drop=True) if len(active_features) > 30 else active_features)
         
-        # Use dataframe for scrollable view if there are many features
-        if len(active_features) > 30:
-            st.dataframe(active_features.reset_index(drop=True))
-        else:
-            st.table(active_features)
-        # === Calibration
-        prob_true, prob_pred = calibration_curve(y, ensemble_prob, n_bins=10)
-        calib_df = pd.DataFrame({
-            "Predicted Bin Center": prob_pred,
-            "Actual Hit Rate": prob_true
-        })
-        st.markdown(f"#### 🎯 Calibration Bins – {market.upper()}")
+        # ---- calibration curve table (train) ---------------------------------------
+        from sklearn.calibration import calibration_curve
+        prob_true, prob_pred = calibration_curve(y_full, p_train_blend, n_bins=10)
+        calib_df = pd.DataFrame({"Predicted Bin Center": prob_pred, "Actual Hit Rate": prob_true})
+        st.markdown(f"#### 🎯 Calibration Bins – {market.upper()} (Train)")
         st.dataframe(calib_df)
+        
+        # ---- CV fold health ---------------------------------------------------------
+        st.markdown("### 🧩 CV Fold Health")
+        cv_rows=[]
+        for i,(tr,va) in enumerate(folds,1):
+            yv = y_full[va].astype(int)
+            cv_rows.append({
+                "Fold": i,
+                "ValN": int(len(va)),
+                "ValPosRate": float(np.mean(yv)),
+                "ValBothClasses": bool(np.unique(yv).size==2)
+            })
+        st.dataframe(pd.DataFrame(cv_rows))
+
+        
         # Start with Game_Key/Team unique combos
         # --- 0) one row per (Game_Key, Team) to merge everything onto
         df_team_base = df_bt_prepped[['Game_Key','Team']].drop_duplicates()
