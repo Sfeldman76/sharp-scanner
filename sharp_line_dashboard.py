@@ -3078,6 +3078,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             time_values=times,
             min_val_size=20,
         )
+        
         folds = list(cv.split(X_full, y_full, groups=groups))
         assert folds, "No usable folds"
         
@@ -3085,10 +3086,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         base_kwargs, param_distributions = get_xgb_search_space(
             sport=sport,
             X_rows=X_full.shape[0],
-            n_jobs=2,                               # Cloud CPU count; base_kwargs should keep n_jobs=1
+            n_jobs=2,  # CV-level parallelism; keep base_kwargs['n_jobs']=1 inside the helper
             scale_pos_weight=scale_pos_weight,
-            features=features
+            features=features,
         )
+        
+        # force classifier setup
+        base_kwargs["objective"]   = "binary:logistic"
+        base_kwargs["eval_metric"] = "logloss"
         
         # search base (cap trees; no ES in CV)
         search_estimators = 600
@@ -3108,7 +3113,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             error_score="raise",
         )
         rs_ll.fit(X_full, y_full, groups=groups)
-        best_ll_params = rs_ll.best_params_
         
         rs_auc = RandomizedSearchCV(
             estimator=search_base,
@@ -3123,7 +3127,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             error_score="raise",
         )
         rs_auc.fit(X_full, y_full, groups=groups)
-        best_auc_params = rs_auc.best_params_
+        
+        # clean best params (strip any unsafe keys just in case)
+        best_ll_params  = rs_ll.best_params_.copy()
+        best_auc_params = rs_auc.best_params_.copy()
+        for k in ("objective", "eval_metric", "_estimator_type"):
+            best_ll_params.pop(k, None)
+            best_auc_params.pop(k, None)
         
         # final refit with early stopping on forward holdout (last fold)
         (train_idx, val_idx) = folds[-1]
