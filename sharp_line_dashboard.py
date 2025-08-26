@@ -4687,6 +4687,13 @@ from google.cloud import storage
 from io import BytesIO
 import pickle
 import logging
+def _debug_picklability(payload):
+    import pickle
+    for k, v in payload.items():
+        try:
+            pickle.dumps(v, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            print(f"❌ cannot pickle key={k!r} (type={type(v)}): {e}")
 
 def save_model_to_gcs(
     model,
@@ -4696,44 +4703,63 @@ def save_model_to_gcs(
     calibrator=None,
     team_feature_map=None,
     book_reliability_map=None,
-    **kwargs                  # ignore any other extras silently
+    **kwargs  # ignore any extras silently
 ):
-    # Build the payload exactly like before, just add meta if provided.
+    from io import BytesIO
+    import logging
+    try:
+        import cloudpickle as pickler  # more robust than std pickle
+    except ImportError:
+        import pickle as pickler
+    import pickle as std_pickle  # for optional debug
+    from google.cloud import storage
+
+    sport_l  = str(sport).lower()
+    market_l = str(market).lower()
+    filename = f"sharp_win_model_{sport_l}_{market_l}.pkl"
+
+    # --- build payload exactly like before ---
     if isinstance(model, dict):
-        payload = dict(model)  # shallow copy so we don't mutate caller's dict
+        payload = dict(model)  # shallow copy
         if calibrator is not None and "calibrator" not in payload:
             payload["calibrator"] = calibrator
         if team_feature_map is not None and "team_feature_map" not in payload:
             payload["team_feature_map"] = team_feature_map
         if book_reliability_map is not None and "book_reliability_map" not in payload:
             payload["book_reliability_map"] = book_reliability_map
-                          # ✅ store meta
     else:
-        # legacy single-model artifact
         payload = {
             "model": model,
             "calibrator": calibrator,
             "team_feature_map": team_feature_map,
             "book_reliability_map": book_reliability_map,
         }
-     
-        # Serialize to bytes
+
+    #--- OPTIONAL: quick picklability debug (uncomment if needed) ---
+    for k, v in payload.items():
+        try:
+            std_pickle.dumps(v)
+        except Exception as e:
+            print(f"❌ cannot pickle key={k!r} (type={type(v)}): {e}")
+
+    try:
+        # --- serialize (cloudpickle if available) ---
         buffer = BytesIO()
-        pickle.dump(payload, buffer)
+        pickler.dump(payload, buffer)
         buffer.seek(0)
 
-        # Upload to GCS
-        blob.upload_from_file(buffer, content_type='application/octet-stream')
+        # --- upload to GCS ---
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        blob.upload_from_file(buffer, content_type="application/octet-stream")
 
-        print(
-            f"✅ Model + calibrator"
-            f"{' + team features' if team_feature_map is not None else ''}"
-            f"{' + book reliability map' if book_reliability_map is not None else ''} "
-            f"saved to GCS: gs://{bucket_name}/{filename}"
-        )
-
+        print(f"✅ Saved model artifact to GCS: gs://{bucket_name}/{filename}")
+        return {"bucket": bucket_name, "path": filename}
     except Exception as e:
         logging.error(f"❌ Failed to save model to GCS: {e}", exc_info=True)
+        raise
+
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
