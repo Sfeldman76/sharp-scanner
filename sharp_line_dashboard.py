@@ -4661,13 +4661,11 @@ for m in ['spreads', 'totals', 'h2h']:
     feature_cols_present = [c for c in features if c in df.columns]
 
     diagnostics_df = df[base_cols + feature_cols_present].rename(columns={'Tier_Change': 'Tier Δ'})
-
-    return diagnostics_df
-
-
-
+  
     
     return diagnostics_df
+
+
 def _as_num_seq(x):
     """Coerce x into a clean numeric list (drop NaNs). Handles scalars, lists, arrays, and stringified lists/CSV."""
     if x is None:
