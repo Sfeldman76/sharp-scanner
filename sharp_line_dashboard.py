@@ -85,12 +85,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from scipy.stats import zscore, entropy, randint, loguniform, uniform
-
+from sklearn.experimental import enable_halving_search_cv 
 from sklearn.model_selection import (
     train_test_split, GridSearchCV, RandomizedSearchCV, 
     TimeSeriesSplit, HalvingRandomSearchCV, BaseCrossValidator
 )
-from sklearn.experimental import enable_halving_search_cv  # noqa
+
 from sklearn.metrics import (
     roc_auc_score, log_loss, brier_score_loss, accuracy_score,
     precision_score, recall_score, f1_score, roc_curve, make_scorer
