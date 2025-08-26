@@ -3025,18 +3025,48 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                             continue
         
                     yield train_idx, val_idx
- 
-        # 0) Build matrices and folds FIRST
-        X_full = df_market[features].to_numpy()       
-        # labels
-        y_full = df_market["SHARP_HIT_BOOL"].astype(int).to_numpy()
+       
+        # 1) Make sure all model features are numeric
+        df_market[features] = df_market[features].apply(pd.to_numeric, errors="coerce")
         
+        # 2) Convert pandas NA to np.nan, then remove infs and fill
+        X_full = (df_market[features]
+                  .replace({pd.NA: np.nan})
+                  .replace([np.inf, -np.inf], np.nan)
+                  .fillna(0.0)
+                  .to_numpy(dtype=np.float32))
+        
+        # 3) Labels: coerce and drop NA rows if any slipped through
+        y_series = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
+        valid_mask = ~y_series.isna()
+        
+        # (optional) Keep rows where label is valid; also ensure features already aligned
+        if not valid_mask.all():
+            X_full = X_full[valid_mask.to_numpy()]
+        y_full = y_series.loc[valid_mask].astype(int).to_numpy()
+        
+        # 4) Groups & times: ensure no NAType
+        groups = resolve_groups(df_market.loc[valid_mask]).astype(str)  # your helper returns ndarray
+        times  = pd.to_datetime(
+            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
+        ).to_numpy()
+        
+        # 5) Quick guard: no NaT in times
+        if pd.isna(times).any():
+            bad = np.flatnonzero(pd.isna(times))
+            # drop bad rows
+            keep = np.setdiff1d(np.arange(len(times)), bad)
+            X_full = X_full[keep]
+            y_full = y_full[keep]
+            groups = groups[keep]
+            times  = times[keep]
+        # 0) Build matrices and folds FIRST
+   
         # class balance for scale_pos_weight
         pos = y_full.sum()
         neg = len(y_full) - pos
         scale_pos_weight = (neg / pos) if pos > 0 else 1.0
-        groups = resolve_groups(df_market)
-        times  = pd.to_datetime(df_market["Snapshot_Timestamp"], errors="coerce", utc=True).to_numpy()
+        
         # sport can be "WNBA", "MLB", etc.
         sport_key  = str(sport).upper()
         embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"])
