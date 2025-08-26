@@ -5422,7 +5422,11 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             )
             df_summary_base = df_summary_base.merge(sb_skinny, on=['Game_Key','Market','Outcome'], how='left')
             #st.write( df_summary_base.columns.tolist())
-            
+            # ✅ Always guarantee timing columns exist on df_summary_base (UI-only)
+            if 'Timing_Opportunity_Score' not in df_summary_base.columns:
+                df_summary_base['Timing_Opportunity_Score'] = np.nan
+            if 'Timing_Stage' not in df_summary_base.columns:
+                df_summary_base['Timing_Stage'] = '—'
             # === 10) Build summary_df with selected columns ===
             summary_cols = [
                 'Matchup','Market','Game_Start','Outcome',
