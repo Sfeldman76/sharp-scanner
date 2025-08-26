@@ -1575,32 +1575,40 @@ def get_xgb_search_space(
     base_kwargs = dict(
         objective="binary:logistic",
         eval_metric="logloss",
-        tree_method="hist",
+        tree_method="hist",           # use "gpu_hist" if on GPU
         grow_policy="lossguide",
-        max_leaves=32,                                 # bump to 48 if you see underfitting on BIG leagues
+        max_leaves=48,                # consider 48 on big leagues
         max_bin=128 if X_rows < 150_000 else 64,
         sampling_method="uniform",
+        # keep if your xgboost >= 1.7; otherwise remove or guard:
         single_precision_histogram=True,
         colsample_bynode=0.8,
-        max_delta_step=1,
-        n_jobs=n_jobs,
+    
+        # regularization & stability
+        reg_lambda=2-5,               # mild default
+        min_child_weight=5,           # avoid tiny leaves on small leagues
+        # max_delta_step=0,           # prefer default; set to 1 only if needed
+    
+        # parallelism
+        n_jobs=1,                     # if CV uses n_jobs>1
         scale_pos_weight=scale_pos_weight,
+    
         random_state=42,
-        importance_type="total_gain",
+        importance_type="total_gain", # or "gain" if version complains
+        # predictor="cpu_predictor",  # optional explicitness
     )
 
     # ---- sport-size specific search spaces ----
     if s in SMALL_LEAGUES:
-        # Small, noisy leagues → tighter, more regularized to keep generalization
         param_distributions = {
-            "max_depth":        randint(2, 4),            # {2,3}
-            "learning_rate":    loguniform(1e-2, 3e-2),   # 0.01–0.03
+            "max_depth":        randint(2, 4),            # allow 4 to add interactions when data permits
+            "learning_rate":    loguniform(1.5e-2, 5e-2), # slightly faster to escape flatness
             "subsample":        uniform(0.70, 0.25),      # 0.70–0.95
             "colsample_bytree": uniform(0.60, 0.30),      # 0.60–0.90
-            "min_child_weight": randint(20, 36),          # 20–35
-            "gamma":            uniform(0.10, 0.40),      # 0.10–0.50 is okay too
-            "reg_alpha":        loguniform(1.0, 2.0e1),   # 1–20
-            "reg_lambda":       loguniform(5.0, 6.0e1),   # 5–60
+            "min_child_weight": randint(3, 9),            # 3–8 (both ends exclusive of 9)
+            "gamma":            uniform(0.00, 0.30),      # let some small/medium splits occur
+            "reg_alpha":        loguniform(5e-1, 10.0),   # 0.5–10 (ease L1 slightly)
+            "reg_lambda":       loguniform(2.0, 30.0),    # 2–30 (ease L2 slightly)
         }
     else:
         # Bigger leagues → allow more expressiveness to expand std dev & AUC
@@ -1609,7 +1617,7 @@ def get_xgb_search_space(
             "learning_rate":    loguniform(8e-3, 5e-2),   # 0.008–0.05
             "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
             "colsample_bytree": uniform(0.65, 0.25),      # 0.65–0.90
-            "min_child_weight": randint(10, 26),          # 10–25
+            "min_child_weight": randint(10, 25),          # 10–25
             "gamma":            uniform(0.00, 0.40),      # 0–0.40
             "reg_alpha":        loguniform(1e-2, 1.5e1),  # 0.01–15
             "reg_lambda":       loguniform(2.0, 3.5e1),   # 2–35
