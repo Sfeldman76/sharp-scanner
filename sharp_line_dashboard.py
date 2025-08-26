@@ -60,74 +60,54 @@ st.markdown("""
 """, unsafe_allow_html=True)
 # === Standard Imports ===
 import os
+import re
+import time
 import json
 import pickle
-import pytz
-import time
-import requests
-import pandas as pd
-from io import StringIO, BytesIO
-from datetime import datetime
-from datetime import date, timedelta
-from collections import defaultdict, OrderedDict
-from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
-from pytz import timezone as pytz_timezone
-from google.oauth2 import service_account
-import pandas_gbq
-import pandas as pd
-import pandas_gbq  # ✅ Required for setting .context.project / .context.credentials
-from google.cloud import storage
-from google.cloud import bigquery
-from pandas_gbq import to_gbq
-import time, contextlib
-import google.api_core.exceptions
-from google.cloud import bigquery_storage_v1
-import pyarrow as pa
-import pyarrow.parquet as pq
-#from detect_utils import detect_and_save_all_sports
-import numpy as np
-from sklearn.isotonic import IsotonicRegression
-from sklearn.metrics import roc_auc_score, accuracy_score, log_loss, brier_score_loss
-import requests
+import logging
 import traceback
-from io import BytesIO
-from sklearn.model_selection import GridSearchCV
-from xgboost import XGBClassifier
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import RandomizedSearchCV
-from scipy.stats import zscore
-from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
-from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
-from scipy.stats import entropy
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import GradientBoostingClassifier
+import contextlib
+from io import StringIO, BytesIO
+from datetime import datetime, date, timedelta
+from collections import defaultdict, OrderedDict
+from itertools import product
 from html import escape
+
+import numpy as np
+import pandas as pd
 from pandas.util import hash_pandas_object
 
-from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
-from sklearn.calibration import CalibratedClassifierCV
-from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
-import xgboost as xgb  # make sure this import exists
-import re
-import logging
-from sklearn.metrics import log_loss, roc_auc_score, brier_score_loss
-from sklearn.model_selection import RandomizedSearchCV
-from itertools import product
-from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
+import requests
+import pytz
+from pytz import timezone as pytz_timezone
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from scipy.stats import zscore, entropy, randint, loguniform, uniform
+
+from sklearn.model_selection import (
+    train_test_split, GridSearchCV, RandomizedSearchCV, 
+    TimeSeriesSplit, HalvingRandomSearchCV, BaseCrossValidator
+)
 from sklearn.experimental import enable_halving_search_cv  # noqa
-from sklearn.model_selection import HalvingRandomSearchCV
-from scipy.stats import randint, loguniform, uniform
-from sklearn.metrics import log_loss, make_scorer
-from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
     roc_auc_score, log_loss, brier_score_loss, accuracy_score,
-    precision_score, recall_score, f1_score, roc_curve
+    precision_score, recall_score, f1_score, roc_curve, make_scorer
 )
-import numpy as np, pandas as pd
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
+from sklearn.ensemble import GradientBoostingClassifier
+
 import xgboost as xgb
 from xgboost import XGBClassifier
+
+from google.oauth2 import service_account
+from google.cloud import storage, bigquery, bigquery_storage_v1
+import pandas_gbq
+from pandas_gbq import to_gbq
+import google.api_core.exceptions
+
         
 
               
@@ -2739,17 +2719,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- start with your manual core list ---
         features = [
             # 🔹 Core sharp signals
-            #'Sharp_Move_Signal',
+            'Sharp_Move_Signal',
             'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
             'Book_lift_x_Magnitude','Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket',#'Market_Leader','LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            #'Sharp_Line_Magnitude','Is_Home_Team_Bet',
-            #'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
+            'Sharp_Line_Magnitude','Is_Home_Team_Bet',
+            'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
-            #'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
+            'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
             'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec','Sharp_Leads',
@@ -2758,9 +2738,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Value_Reversal_Flag','Odds_Reversal_Flag',
         
             # 🔥 Timing flags
-            #'Late_Game_Steam_Flag',
+            'Late_Game_Steam_Flag',
         
-            #'Abs_Line_Move_From_Opening',
+            'Abs_Line_Move_From_Opening',
             'Abs_Odds_Move_From_Opening',
             'Market_Mispricing','Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
@@ -2772,9 +2752,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
             'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
-            #'Book_Reliability_Score',
+            'Book_Reliability_Score',
             'Book_Reliability_Lift','Book_Reliability_x_Sharp',
-            #'Book_Reliability_x_Magnitude',
+            'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
         
             # Power ratings / edges
@@ -3208,13 +3188,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         for k in ("objective", "eval_metric", "_estimator_type"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
-        
-        # --- final refit with early stopping on forward holdout (last fold) ---
+      
+       # --- final refit with early stopping on forward holdout (last fold) ---
         (train_idx, val_idx) = folds[-1]
         final_estimators_cap  = 3000
-        early_stopping_rounds = 100
+        early_stopping_rounds = 150
         
-        model_logloss = XGBClassifier(**base_kwargs, **best_ll_params, n_estimators=final_estimators_cap)
+        # merge safely so tuned params override defaults
+        safe_base_ll  = {k: v for k, v in base_kwargs.items() if k not in best_ll_params}
+        safe_base_auc = {k: v for k, v in base_kwargs.items() if k not in best_auc_params}
+        
+        model_logloss = XGBClassifier(**safe_base_ll, **best_ll_params, n_estimators=final_estimators_cap)
         model_logloss.fit(
             X_full[train_idx], y_full[train_idx],
             eval_set=[(X_full[val_idx], y_full[val_idx])],
@@ -3222,13 +3206,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
         )
         
-        model_auc = XGBClassifier(**base_kwargs, **best_auc_params, n_estimators=final_estimators_cap)
+        model_auc = XGBClassifier(**safe_base_auc, **best_auc_params, n_estimators=final_estimators_cap)
         model_auc.fit(
             X_full[train_idx], y_full[train_idx],
             eval_set=[(X_full[val_idx], y_full[val_idx])],
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
+
         
         # =========================
         # VALIDATION + DIAGNOSTICS + OPT BLENDING (DROP-IN)
