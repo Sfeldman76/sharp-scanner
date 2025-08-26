@@ -3004,6 +3004,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         groups = df_market[group_col].to_numpy()
         times = pd.to_datetime(df_market[time_col], errors="coerce", utc=True).to_numpy()
         
+        # CV splitter (after building X_full, y_full, groups, times)
         cv = PurgedGroupTimeSeriesSplit(
             n_splits=3,
             embargo=embargo_td,          # e.g., pd.Timedelta("8h")
@@ -3011,23 +3012,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             min_val_size=20,
         )
         folds = list(cv.split(X_full, y_full, groups=groups))
-        PurgedGroupTimeSeriesSplit
         assert folds, "No usable folds"
         
-        # 1) Get sport-aware kwargs & search space
+        # sport-aware kwargs & search space
         base_kwargs, param_distributions = get_xgb_search_space(
-            sport=sport, X_rows=X_full.shape[0], n_jobs=2,
-            scale_pos_weight=scale_pos_weight, features=features
+            sport=sport,
+            X_rows=X_full.shape[0],
+            n_jobs=2,                               # Cloud CPU count; base_kwargs should keep n_jobs=1
+            scale_pos_weight=scale_pos_weight,
+            features=features
         )
         
-        # 2) Base model for search (cap trees; no early stopping inside CV)
-        
+        # search base (cap trees; no ES in CV)
         search_estimators = 600
         search_base = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
         
-        # 3) Randomized searches (logloss and AUC) using the CV folds; include groups=
-       
-        # search once with neg_log_loss
+        # Randomized searches
         rs_ll = RandomizedSearchCV(
             estimator=search_base,
             param_distributions=param_distributions,
@@ -3038,11 +3038,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             random_state=42,
             refit=True,
+            error_score="raise",
         )
         rs_ll.fit(X_full, y_full, groups=groups)
         best_ll_params = rs_ll.best_params_
         
-        # search once with roc_auc
         rs_auc = RandomizedSearchCV(
             estimator=search_base,
             param_distributions=param_distributions,
@@ -3053,18 +3053,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             random_state=4242,
             refit=True,
+            error_score="raise",
         )
         rs_auc.fit(X_full, y_full, groups=groups)
         best_auc_params = rs_auc.best_params_
         
-        # final refit w/ early stopping on last fold
+        # final refit with early stopping on forward holdout (last fold)
         (train_idx, val_idx) = folds[-1]
         final_estimators_cap  = 3000
         early_stopping_rounds = 100
         
-        
-        
-        # ---- final refit (as you already have) ----
         model_logloss = XGBClassifier(**base_kwargs, **best_ll_params, n_estimators=final_estimators_cap)
         model_logloss.fit(
             X_full[train_idx], y_full[train_idx],
@@ -3080,7 +3078,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
-        
         # ---- helper: safest best-round extraction across xgboost versions ----
         def best_rounds(clf: XGBClassifier) -> int:
             # try sklearn attr
