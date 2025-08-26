@@ -525,6 +525,19 @@ def read_recent_sharp_moves(
         return pd.DataFrame()
 
 
+class IsoWrapper:
+    def __init__(self, base, iso):
+        self.base = base              # fitted base model (has predict_proba)
+        self.iso  = iso               # fitted IsotonicRegression
+
+    def predict_proba(self, X):
+        # base probs → calibrate with isotonic → return 2-col proba
+        p = self.base.predict_proba(X)
+        p = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, float).ravel()
+        p_cal = self.iso.predict(p)   # <- use predict(), not transform()
+        p_cal = np.clip(np.asarray(p_cal, float).ravel(), 1e-6, 1-1e-6)
+        return np.column_stack([1.0 - p_cal, p_cal])
+
 
 # ✅ Cached wrapper for diagnostics and line movement history
 # Smart getter — use cache unless forced to reload
@@ -3337,18 +3350,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         final_log = fit_with_es(final_log, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
         final_auc = fit_with_es(final_auc, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
         
-        class IsoWrapper:
-            def __init__(self, base, iso):
-                self.base = base
-                self.iso  = iso
-            def predict_proba(self, X):
-                p = self.base.predict_proba(X)[:, 1]
-                p_cal = np.clip(self.iso.transform(p), 1e-6, 1-1e-6)
-                return np.vstack([1 - p_cal, p_cal]).T
+        iso_logloss = IsotonicRegression(out_of_bounds='clip').fit(prob_logloss, y_full)
+        iso_auc     = IsotonicRegression(out_of_bounds='clip').fit(prob_auc,     y_full)
         
-        cal_logloss = IsoWrapper(final_log, iso)
-        cal_auc     = IsoWrapper(final_auc, iso)
-        
+        cal_logloss = IsoWrapper(final_log, iso_logloss)
+        cal_auc     = IsoWrapper(final_auc, iso_auc)
         # ---- calibrated probs (train/holdout) --------------------------------------
         # Keep a pandas X for feature-name-based diagnostics (your earlier X was a DataFrame)
         X_pd = df_market[features].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).fillna(0.0)
