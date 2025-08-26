@@ -119,7 +119,9 @@ from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, Time
 from sklearn.experimental import enable_halving_search_cv  # noqa
 from sklearn.model_selection import HalvingRandomSearchCV
 from scipy.stats import randint, loguniform, uniform
-      
+from sklearn.metrics import log_loss, make_scorer
+from xgboost import XGBClassifier
+              
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
 BQ_TABLE = "sharp_moves_master" # ✅ your table name
@@ -3091,15 +3093,74 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             features=features,
         )
         
-        # force classifier setup
+        
+        DEBUG_ONCE = True
+        
+        # lock classifier objective/metric
         base_kwargs["objective"]   = "binary:logistic"
         base_kwargs["eval_metric"] = "logloss"
+        base_kwargs["n_jobs"]      = 1  # avoid core oversubscription
         
-        # search base (cap trees; no ES in CV)
+        # sanity: keep unsafe keys out of the search space
+        assert "objective"   not in param_distributions
+        assert "eval_metric" not in param_distributions
+        
         search_estimators = 600
         search_base = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
         
-        # Randomized searches
+        # assert classifier
+        assert isinstance(search_base, XGBClassifier)
+        assert getattr(search_base, "_estimator_type", "") == "classifier"
+        
+        # --- one-time debug (optional) ---
+        def _proba_scorer_debug(est, X, y):
+            obj = getattr(est, "objective", None)
+            est_type = getattr(est, "_estimator_type", None)
+            if est_type != "classifier":
+                raise TypeError(
+                    f"Not classifier: type={type(est)}, _estimator_type={est_type}, objective={obj}"
+                )
+            proba = est.predict_proba(X)[:, 1]
+            return -log_loss(y, proba)
+        
+        if DEBUG_ONCE:
+           
+            dbg = RandomizedSearchCV(
+                estimator=search_base,
+                param_distributions=param_distributions,  # same space you use normally
+                scoring=make_scorer(_proba_scorer_debug),
+                cv=folds,
+                n_iter=5,          # small/fast just to catch the issue
+                n_jobs=1,          # keep single-threaded for clearer errors
+                verbose=2,
+                random_state=7,
+                refit=True,
+                error_score="raise",
+            )
+            try:
+                dbg.fit(X_full, y_full, groups=groups)
+                print("[DEBUG] All candidates were classifiers with predict_proba ✅")
+            except Exception as e:
+                # Print the exact failure and the candidate params
+                import traceback, pprint
+                print("[DEBUG] Candidate failed with exception:")
+                traceback.print_exc()
+                # Try to show the last set of tested parameters, if available
+                if hasattr(dbg, "cv_results_"):
+                    # Find the first failed candidate (status == 'error')
+                    import numpy as np
+                    res = dbg.cv_results_
+                    status = np.array(res.get("status", []))
+                    if status.size:
+                        bad_idx = np.where(status == "error")[0]
+                        if bad_idx.size:
+                            i = int(bad_idx[0])
+                            # params are stored per candidate
+                            print("[DEBUG] Offending params:")
+                            pprint.pprint(res["params"][i])
+                raise  # re-raise so you notice during the run
+        
+        # --- main searches ---
         rs_ll = RandomizedSearchCV(
             estimator=search_base,
             param_distributions=param_distributions,
@@ -3128,14 +3189,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         rs_auc.fit(X_full, y_full, groups=groups)
         
-        # clean best params (strip any unsafe keys just in case)
+        # clean best params (strip any unsafe keys)
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
         
-        # final refit with early stopping on forward holdout (last fold)
+        # --- final refit with early stopping on forward holdout (last fold) ---
         (train_idx, val_idx) = folds[-1]
         final_estimators_cap  = 3000
         early_stopping_rounds = 100
@@ -3155,6 +3216,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
+
         # ---- helper: safest best-round extraction across xgboost versions ----
         def best_rounds(clf: XGBClassifier) -> int:
             # try sklearn attr
