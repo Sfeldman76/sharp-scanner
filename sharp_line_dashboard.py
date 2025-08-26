@@ -3768,44 +3768,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Ensemble weight (logloss vs auc): w={best_w:.2f}
         # """)
 
-        # pretty helpers
-        fmt = lambda x: ("{:.4f}".format(x) if np.isfinite(x) else "nan")
-        need = ['Sport','Market','Bookmaker','SHARP_HIT_BOOL']
+
+   
         
-        
-        
-        # --- Build book_reliability_map exactly like before (DataFrame) ---
+        # --- Book reliability (build DF exactly as apply expects) ---
         bk_col = 'Bookmaker' if 'Bookmaker' in df_market.columns else 'Bookmaker_Norm'
         need   = ['Sport', 'Market', bk_col, 'SHARP_HIT_BOOL']
         
-        # align to the holdout indices you used for p_cal_val / y_val
-        X_all = df_market[features].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).fillna(0.0)
-        y_all = df_market["SHARP_HIT_BOOL"].astype(int)  # or whatever your target is
+        df_rel_in = df_market.loc[:, [c for c in need if c in df_market.columns]].copy()
+        if bk_col != 'Bookmaker':  # builder expects 'Bookmaker'
+            df_rel_in.rename(columns={bk_col: 'Bookmaker'}, inplace=True)
         
-        # Split *indices* (preserves alignment)
-        idx_all = X_all.index
-        idx_tr, idx_val = train_test_split(
-            idx_all,
-            test_size=holdout_size,
-            stratify=y_all if stratify else None,
-            random_state=seed
-        )
-        
-        # Slice by index so X_full/X_val are DataFrames with .index
-        X_full = X_all.loc[idx_tr]
-        X_val  = X_all.loc[idx_val]
-        y_full = y_all.loc[idx_tr].to_numpy()
-        y_val  = y_all.loc[idx_val].to_numpy()
-        
-        # ... train, calibrate, blend ...
-        
-        # ✅ Use idx_val here (no .index on arrays needed)
-        need = ['Sport','Market','Bookmaker','SHARP_HIT_BOOL']
-        need = [c for c in need if c in df_market.columns]
-        df_rel_in = df_market.loc[idx_val, need].copy()
-       
-        
-        book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)
+        try:
+            book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)  # ✅ DataFrame
+        except Exception as e:
+            logger.warning(f"book_reliability_map build failed; defaulting to empty. err={e}")
+            book_reliability_map = pd.DataFrame(columns=[
+                'Sport','Market','Bookmaker','Book_Reliability_Score','Book_Reliability_Lift'
+            ])
+
         
 
         # === Save ensemble (choose one or both)
