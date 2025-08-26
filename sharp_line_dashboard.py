@@ -2150,14 +2150,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     pb = st.progress(0)  # 0–100
     status = st.status("🔄 Training in progress...", expanded=True)
     
-    for i, mkt in enumerate(markets_present, 1):
+    for i, market in enumerate(markets_present, 1):
         pct = int(round(i / n_markets * 100))
-        status.write(f"🚧 Training model for `{mkt.upper()}`...")
+        status.write(f"🚧 Training model for `{market.upper()}`...")
     
-        df_market = df_bt[df_bt['Market'].astype(str).str.lower() == mkt].copy()
+        df_market = df_bt[df_bt['Market'].astype(str).str.lower() == market].copy()
     
         # Totals: dedup snapshots
-        if mkt == "totals":
+        if market == "totals":
             df_market = (
                 df_market
                 .sort_values(['Snapshot_Timestamp'])
@@ -2171,7 +2171,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
     
         if df_market.empty:
-            status.warning(f"⚠️ No data for {mkt.upper()} — skipping.")
+            status.warning(f"⚠️ No data for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
     
@@ -2271,12 +2271,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # 4) Model margin & spreads at game level
             g_fc = favorite_centric_from_powerdiff_lowmem(g_full)
-        
+       
             # Ensure market fields & k exist in g_fc (robust)
             need_market = ['Market_Favorite_Team','Market_Underdog_Team',
                            'Favorite_Market_Spread','Underdog_Market_Spread']
-            missing_mkt = [c for c in need_market if c not in g_fc.columns]
-            if missing_mkt:
+            missing_market = [c for c in need_market if c not in g_fc.columns]
+            if missing_market:
                 g_fc = g_fc.merge(
                     cons_map[game_keys + need_market].drop_duplicates(subset=game_keys),
                     on=game_keys, how='left', copy=False
