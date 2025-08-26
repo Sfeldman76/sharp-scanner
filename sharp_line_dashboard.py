@@ -1789,11 +1789,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         "H2H_Win_Pct_Prior","Opp_WinPct_Prior",
         #"Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
         "Wins_Last5_Prior","Margin_Last5_Prior",
-        "Wins_Last3_Prior","Margin_Last3_Avg_Prior","Days_Since_Last_Game",
+        "Days_Since_Last_Game",
         "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
         "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
-        "Wins_Last3_H2H_Prior","Margin_Last3_H2H_Prior",
-        "H2H_Streak_Dir_Prior","H2H_Streak_Len_Prior"
+        
+        
     ]
     
     # === New team ATS cover / margin stats (prior-only, last-5) ===
@@ -1803,14 +1803,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         "Cover_Rate_After_Win_Last5",
         "Cover_Rate_After_Loss_Last5",
         # 8 situational cover rates (last-5)
-        "Cover_Rate_Home_After_Home_Win_Last5",
-        "Cover_Rate_Home_After_Home_Loss_Last5",
-        "Cover_Rate_Home_After_Away_Win_Last5",
-        "Cover_Rate_Home_After_Away_Loss_Last5",
-        "Cover_Rate_Away_After_Home_Win_Last5",
-        "Cover_Rate_Away_After_Home_Loss_Last5",
-        "Cover_Rate_Away_After_Away_Win_Last5",
-        "Cover_Rate_Away_After_Away_Loss_Last5",
+        #"Cover_Rate_Home_After_Home_Win_Last5",
+        #"Cover_Rate_Home_After_Home_Loss_Last5",
+        #"Cover_Rate_Home_After_Away_Win_Last5",
+        #"Cover_Rate_Home_After_Away_Loss_Last5",
+        #"Cover_Rate_Away_After_Home_Win_Last5",
+        #"Cover_Rate_Away_After_Home_Loss_Last5",
+        #"Cover_Rate_Away_After_Away_Win_Last5",
+        #"Cover_Rate_Away_After_Away_Loss_Last5",
         # margin distribution
         "ATS_Cover_Margin_Last5_Prior_Mean",
         "ATS_Cover_Margin_Last5_Prior_Std",
@@ -1825,26 +1825,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         "Opp_ATS_Cover_Margin_Last5_Prior_Std",
         "Opp_Cover_Rate_After_Win_Last5",
         "Opp_Cover_Rate_After_Loss_Last5",
-        "Opp_Cover_Rate_Home_After_Home_Win_Last5",
-        "Opp_Cover_Rate_Home_After_Home_Loss_Last5",
-        "Opp_Cover_Rate_Home_After_Away_Win_Last5",
-        "Opp_Cover_Rate_Home_After_Away_Loss_Last5",
-        "Opp_Cover_Rate_Away_After_Home_Win_Last5",
-        "Opp_Cover_Rate_Away_After_Home_Loss_Last5",
-        "Opp_Cover_Rate_Away_After_Away_Win_Last5",
-        "Opp_Cover_Rate_Away_After_Away_Loss_Last5",
+        #"Opp_Cover_Rate_Home_After_Home_Win_Last5",
+        #"Opp_Cover_Rate_Home_After_Home_Loss_Last5",
+        #"Opp_Cover_Rate_Home_After_Away_Win_Last5",
+        #"Opp_Cover_Rate_Home_After_Away_Loss_Last5",
+        #"Opp_Cover_Rate_Away_After_Home_Win_Last5",
+        #"Opp_Cover_Rate_Away_After_Home_Loss_Last5",
+        #"Opp_Cover_Rate_Away_After_Away_Win_Last5",
+        #"Opp_Cover_Rate_Away_After_Away_Loss_Last5",
     ]
     
     # === (Optional but recommended) Team-vs-Opp diffs ===
     # These often help the model; they’ll be created only if both sides exist.
-    diff_specs = [
-        ("Cover_Rate_Last5", "Opp_Cover_Rate_Last5", "Diff_Cover_Rate_Last5"),
-        ("Cover_Rate_After_Win_Last5",  "Opp_Cover_Rate_After_Win_Last5",  "Diff_Cover_Rate_After_Win_Last5"),
-        ("Cover_Rate_After_Loss_Last5", "Opp_Cover_Rate_After_Loss_Last5", "Diff_Cover_Rate_After_Loss_Last5"),
-        ("ATS_Cover_Margin_Last5_Prior_Mean", "Opp_ATS_Cover_Margin_Last5_Prior_Mean", "Diff_ATS_Cover_Margin_Last5_Mean"),
-        ("ATS_Cover_Margin_Last5_Prior_Std",  "Opp_ATS_Cover_Margin_Last5_Prior_Std",  "Diff_ATS_Cover_Margin_Last5_Std"),
-    ]
-    
+   
     # =============== Schema-safe selection ===============
     all_feature_cols = (
         history_cols
@@ -2822,12 +2815,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Team_Past_Avg_Model_Prob','Team_Past_Hit_Rate',
             'Team_Past_Avg_Model_Prob_Home','Team_Past_Hit_Rate_Home',
             'Team_Past_Avg_Model_Prob_Away','Team_Past_Hit_Rate_Away',
-            'Team_Past_Avg_Model_Prob_Fav','Team_Past_Hit_Rate_Fav',
-            'Team_Past_Avg_Model_Prob_Home_Fav','Team_Past_Hit_Rate_Home_Fav',
-            'Team_Past_Avg_Model_Prob_Away_Fav','Team_Past_Hit_Rate_Away_Fav',
+            
             'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
-            'Avg_Recent_Cover_Streak_Away','Avg_Recent_Cover_Streak_Fav',
-            'Avg_Recent_Cover_Streak_Home_Fav','Avg_Recent_Cover_Streak_Away_Fav'
+            'Avg_Recent_Cover_Streak_Away'
         ])
         
         # add time-context flags
@@ -3146,7 +3136,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # Re-raise so the run stops here and you can fix it
                 raise
         
-        DEBUG_ONCE = TRUE  # flip to False after one run
+        DEBUG_ONCE = True  # flip to False after one run
         
         if DEBUG_ONCE:
             try:
