@@ -105,7 +105,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingClassifier
 from html import escape
 from pandas.util import hash_pandas_object
-import numpy as np
+
 from sklearn.model_selection import BaseCrossValidator, RandomizedSearchCV, TimeSeriesSplit
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
@@ -3148,7 +3148,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # Try to show the last set of tested parameters, if available
                 if hasattr(dbg, "cv_results_"):
                     # Find the first failed candidate (status == 'error')
-                    import numpy as np
+                 
                     res = dbg.cv_results_
                     status = np.array(res.get("status", []))
                     if status.size:
