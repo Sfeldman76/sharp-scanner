@@ -2138,42 +2138,46 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     after = len(df_bt)
 
 
-
     
+        
     trained_models = {}
-    markets = ['spreads', 'totals', 'h2h']
-    n_markets = len(markets)
-    pb = st.progress(0)  # use int 0–100
+    
+    # derive markets present (filter to the 3 you care about)
+    allowed = {'spreads', 'totals', 'h2h'}
+    markets_present = [m for m in df_bt['Market'].astype(str).str.lower().unique() if m in allowed]
+    
+    n_markets = max(1, len(markets_present))
+    pb = st.progress(0)  # 0–100
     status = st.status("🔄 Training in progress...", expanded=True)
-
-
-
     
-
-    for idx, market in enumerate(markets, start=1):
-        status.write(f"🚧 Training model for `{market.upper()}`...")
-        df_market = df_bt[df_bt['Market'] == market].copy()
+    for i, mkt in enumerate(markets_present, 1):
+        pct = int(round(i / n_markets * 100))
+        status.write(f"🚧 Training model for `{mkt.upper()}`...")
     
-        # 🔧 Totals often duplicate (over/under, multiple snapshots) — dedup here
-        if market == "totals":
+        df_market = df_bt[df_bt['Market'].astype(str).str.lower() == mkt].copy()
+    
+        # Totals: dedup snapshots
+        if mkt == "totals":
             df_market = (
                 df_market
                 .sort_values(['Snapshot_Timestamp'])
                 .drop_duplicates(subset=['Game_Key','Bookmaker','Market','Outcome'], keep='last')
             )
     
-        # Make alignment issues impossible downstream
         df_market.reset_index(drop=True, inplace=True)
     
         df_market = compute_small_book_liquidity_features(df_market)
-        df_market = add_favorite_context_flag(df_market)  # adds Is_Favorite_Context
+        df_market = add_favorite_context_flag(df_market)
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
     
         if df_market.empty:
-            status.warning(f"⚠️ No data for {market.upper()} — skipping.")
-            pb.progress(int(round(idx / n_markets * 100)))
+            status.warning(f"⚠️ No data for {mkt.upper()} — skipping.")
+            pb.progress(min(100, max(0, pct)))
             continue
     
+        
+        
+        
         # Normalize...
         df_market['Outcome_Norm']   = df_market['Outcome'].astype(str).str.lower().str.strip()
         df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
@@ -2212,7 +2216,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market = df_market[df_market['SHARP_HIT_BOOL'].isin([0, 1])]
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
-            pb.progress(int(round(idx / n_markets * 100)))
+            pb.progress(min(100, max(0, pct)))
             continue
         if market == "spreads":
             # ---- SPREADS training block (leakage-safe) ----
@@ -2451,7 +2455,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
-            pb.progress(int(round(idx / n_markets * 100)))
+            pb.progress(min(100, max(0, pct)))
             continue
         # === Directional agreement (for spreads/h2h invert line logic)
         df_market['Line_Delta'] = pd.to_numeric(df_market['Line_Delta'], errors='coerce')
@@ -3870,7 +3874,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
        
        
-        pb.progress(int(idx / n_markets * 100))
+        pb.progress(min(100, max(0, pct)))
     status.update(label="✅ All models trained", state="complete", expanded=False)
     if not trained_models:
         st.error("❌ No models were trained.")
@@ -4626,8 +4630,8 @@ def compute_diagnostics_vectorized(df):
                 df.loc[mask, 'Timing_Opportunity_Score'] = p
             except Exception as e:
                 # leave NaNs; UI stays up
-                print(f"Timing scoring failed for {m}: {e}")
-        
+                st.error(f"⚠️ Timing scoring failed for {m}: {e}")
+                    
         # clip/fill on the same df (not on a detached copy)
         df['Timing_Opportunity_Score'] = (
             df['Timing_Opportunity_Score']
