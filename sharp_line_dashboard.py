@@ -3359,26 +3359,40 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         val_prob_auc     = cal_auc.predict_proba(X_val)[:, 1]
         
         # ---- learn optimal blend weight on OOF/train; apply to holdout -------------
+        # ---- learn optimal blend weight on OOF/train; apply to holdout -------------
         grid = np.linspace(0.0, 1.0, 51)
-        def _ll(ytrue, p): return log_loss(ytrue, np.clip(p,1e-6,1-1e-6), labels=[0,1])
+        def _ll(ytrue, p): 
+            return log_loss(ytrue, np.clip(p, 1e-6, 1-1e-6), labels=[0,1])
         
         best_w, best_ll = 0.5, 1e9
         for w in grid:
-            p = w*prob_logloss + (1-w)*prob_auc
+            p  = w * prob_logloss + (1 - w) * prob_auc
             ll = _ll(y_full, p)
             if ll < best_ll:
                 best_ll, best_w = ll, w
         
-        p_train_blend = best_w*prob_logloss + (1-best_w)*prob_auc
-        p_val_blend   = best_w*val_prob_logloss + (1-best_w)*val_prob_auc
-        p_val_blend   = np.clip(p_val_blend, 1e-6, 1-1e-6)
-        # --- alias the learned blend to the names used downstream ---
-        ensemble_prob      = np.clip(p_train_blend, 1e-6, 1-1e-6)
-        ensemble_prob_val  = np.clip(p_val_blend,   1e-6, 1-1e-6)
+        # blended probs (train / val)
+        p_train_blend = best_w * prob_logloss      + (1 - best_w) * prob_auc
+        p_val_blend   = best_w * val_prob_logloss  + (1 - best_w) * val_prob_auc
         
-        # if your downstream code expects arrays:
-        p_train_vec = np.asarray(ensemble_prob, dtype=float)
-        p_val_vec   = np.asarray(ensemble_prob_val, dtype=float)
+        # clip once to keep losses stable
+        p_train_blend = np.clip(p_train_blend, 1e-6, 1-1e-6)
+        p_val_blend   = np.clip(p_val_blend,   1e-6, 1-1e-6)
+        
+        # canonical aliases used downstream (replace any p_cal/p_cal_val/ensemble_prob uses)
+        p_cal     = p_train_blend          # train (OOF/full) calibrated + blended
+        p_cal_val = p_val_blend            # holdout/validation calibrated + blended
+        
+        # vectors expected later
+        p_train_vec = np.asarray(p_cal,     dtype=float)
+        p_hold_vec  = np.asarray(p_cal_val, dtype=float)
+        
+        # (optional) if some code expects p_val_vec instead of p_hold_vec:
+        p_val_vec = p_hold_vec
+        
+        # (optional) log chosen weight
+        st.write(f"Ensemble weight (logloss vs auc): w={best_w:.2f}, best logloss={best_ll:.5f}")
+
 
         # ---- headline holdout metrics ----------------------------------------------
         auc_ho = safe_auc(y_val.values, p_val_blend)
