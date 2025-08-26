@@ -1553,7 +1553,93 @@ def totals_features_for_upcoming(df_scores: pd.DataFrame,
     return hist.merge(want, on=key_col, how="right")[[key_col] + cols]
 
 
+from scipy.stats import randint, uniform, loguniform
 
+SMALL_LEAGUES = {"WNBA", "CFL"}
+BIG_LEAGUES   = {"MLB", "NBA", "NFL", "NCAAF", "NCAAB"}  # extend as needed
+
+def get_xgb_search_space(
+    sport: str,
+    *,
+    X_rows: int,
+    n_jobs: int = 1,
+    scale_pos_weight: float = 1.0,
+    features: list[str] | None = None,
+) -> tuple[dict, dict]:
+    s = sport.upper()
+
+    # ---- base kwargs (same skeleton for all; size-aware max_bin & CPU cores) ----
+    base_kwargs = dict(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",
+        grow_policy="lossguide",
+        max_leaves=32,                                 # bump to 48 if you see underfitting on BIG leagues
+        max_bin=128 if X_rows < 150_000 else 64,
+        sampling_method="uniform",
+        single_precision_histogram=True,
+        colsample_bynode=0.8,
+        max_delta_step=1,
+        n_jobs=n_jobs,
+        scale_pos_weight=scale_pos_weight,
+        random_state=42,
+        importance_type="total_gain",
+    )
+
+    # ---- sport-size specific search spaces ----
+    if s in SMALL_LEAGUES:
+        # Small, noisy leagues → tighter, more regularized to keep generalization
+        param_distributions = {
+            "max_depth":        randint(2, 4),            # {2,3}
+            "learning_rate":    loguniform(1e-2, 3e-2),   # 0.01–0.03
+            "subsample":        uniform(0.70, 0.25),      # 0.70–0.95
+            "colsample_bytree": uniform(0.60, 0.30),      # 0.60–0.90
+            "min_child_weight": randint(20, 36),          # 20–35
+            "gamma":            uniform(0.10, 0.40),      # 0.10–0.50 is okay too
+            "reg_alpha":        loguniform(1.0, 2.0e1),   # 1–20
+            "reg_lambda":       loguniform(5.0, 6.0e1),   # 5–60
+        }
+    else:
+        # Bigger leagues → allow more expressiveness to expand std dev & AUC
+        param_distributions = {
+            "max_depth":        randint(2, 5),            # {2,3,4}
+            "learning_rate":    loguniform(8e-3, 5e-2),   # 0.008–0.05
+            "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
+            "colsample_bytree": uniform(0.65, 0.25),      # 0.65–0.90
+            "min_child_weight": randint(10, 26),          # 10–25
+            "gamma":            uniform(0.00, 0.40),      # 0–0.40
+            "reg_alpha":        loguniform(1e-2, 1.5e1),  # 0.01–15
+            "reg_lambda":       loguniform(2.0, 3.5e1),   # 2–35
+        }
+
+    # ---- optional: monotone constraints (no small-book creation) ----
+    if features is not None:
+        mono = {c: 0 for c in features}
+        plus_1 = [
+            "Abs_Odds_Move_From_Opening",
+            "Pct_Line_Move_From_Opening", "Pct_Line_Move_Bin",
+            "Abs_Line_Move_Z", "Pct_Line_Move_Z",
+            "Line_Moved_Toward_Team",
+            *[c for c in features if c.startswith("SharpMove_Magnitude_")],
+            *[c for c in features if c.startswith("OddsMove_Magnitude_")],
+            "Spread_vs_H2H_Aligned",
+            "MarketLeader_ImpProbShift", "LimitProtect_SharpMag",
+            "Delta_Sharp_vs_Rec", "Sharp_Leads",
+            "Book_Reliability_Lift", "Book_Reliability_x_Sharp", "Book_Reliability_x_PROB_SHIFT",
+            "Outcome_Cover_Prob",
+        ]
+        minus_1 = [
+            "Value_Reversal_Flag", "Odds_Reversal_Flag",
+            "Potential_Overmove_Flag", "Potential_Odds_Overmove_Flag",
+            "Total_vs_Spread_Contradiction",
+        ]
+        for c in plus_1:
+            if c in mono: mono[c] = 1
+        for c in minus_1:
+            if c in mono: mono[c] = -1
+        base_kwargs["monotone_constraints"] = "(" + ",".join(str(mono.get(c, 0)) for c in features) + ")"
+
+    return base_kwargs, param_distributions
 
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
@@ -2912,169 +2998,56 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
                     yield train_idx, val_idx
  
-        # --- choose time col & sort (prefer Game_Start) ---
-        time_col = "Game_Start" if "Game_Start" in df_market.columns else "Snapshot_Timestamp"
-        df_market = df_market.sort_values(time_col).reset_index(drop=True)
-        
-        # --- X, y, groups (hardened) ---
-        missing_feats = [c for c in features if c not in df_market.columns]
-        if missing_feats:
-            raise ValueError(f"Missing required features: {missing_feats}")
-        
-        X_full = (
-            df_market[features]
-            .apply(pd.to_numeric, errors='coerce')
-            .fillna(0.0)
-            .astype(np.float32)
-        ).to_numpy()
-        
-        y_full = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(np.int8).to_numpy()
-        if np.unique(y_full).size < 2:
-            raise ValueError("y_full must contain at least two classes (0/1).")
-        
-        groups = df_market['Game_Key'].astype(str).to_numpy()
-        times  = pd.to_datetime(df_market[time_col], errors='coerce', utc=True).to_numpy()
-        if np.isnan(times.astype('datetime64[ns]')).any():
-            raise ValueError(f"{time_col} has NaT values after to_datetime.")
-        pos = float(y_full.sum())
-        scale_pos_weight = (len(y_full) - pos) / max(pos, 1.0)
-        # --- embargo from sport ---
-        embargo_td = get_embargo_for_sport(sport)  # e.g., pd.Timedelta("24h")
-        
-        # --- SPEED KNOBS ---
-        early_stopping_rounds = 100   # tighter patience; still stable
-        search_estimators     = 600   # fewer trees during hyperparam search
-        final_estimators_cap  = 3000  # high cap for final; early stopping will cut it
-        n_folds               = 3     # purged folds (faster than 5)
-        
-        # --- time values once ---
+        # 0) Build matrices and folds FIRST
+        X_full = df_market[features].to_numpy()
+        y_full = df_market["SHARP_HIT_BOOL"].astype(int).to_numpy()
+        groups = df_market[group_col].to_numpy()
         times = pd.to_datetime(df_market[time_col], errors="coerce", utc=True).to_numpy()
         
-        # --- build purged-group splitter once ---
         cv = PurgedGroupTimeSeriesSplit(
-            n_splits=n_folds,
-            embargo=embargo_td,
+            n_splits=3,
+            embargo=embargo_td,          # e.g., pd.Timedelta("8h")
             time_values=times,
             min_val_size=20,
         )
-        
-        # --- generate folds; relax if needed ---
         folds = list(cv.split(X_full, y_full, groups=groups))
-        if not folds:
-            # relax embargo & splits a bit
-            cv = PurgedGroupTimeSeriesSplit(
-                n_splits=max(2, min(3, len(np.unique(groups)) // 2 or 2)),
-                embargo=pd.Timedelta("0h"),
-                time_values=times,
-                min_val_size=10,
-            )
-            folds = list(cv.split(X_full, y_full, groups=groups))
+        PurgedGroupTimeSeriesSplit
+        assert folds, "No usable folds"
         
-        if not folds:
-            from sklearn.model_selection import TimeSeriesSplit
-            folds = list(TimeSeriesSplit(n_splits=3).split(X_full, y_full))
-        
-        if not folds:
-            raise ValueError(
-                "Cross-validation produced no usable folds after relaxation; "
-                "try fewer splits, smaller embargo, or verify both classes exist."
-            )
-        
-        cv_for_search = folds  # iterable of (train_idx, val_idx)
-        
-        # --- base kwargs for all classifiers ---
-        # --- BASE (CPU-optimized) ---
-        base_kwargs = dict(
-            objective="binary:logistic",
-            eval_metric="logloss",
-            tree_method="hist",              # stay CPU
-            grow_policy="lossguide",         # better splits at same cost
-            max_leaves=32,                   # strong default; 48 if more data
-            max_bin=128 if X_full.shape[0] < 150_000 else 64,  # speed on big sets
-            sampling_method="uniform",
-            single_precision_histogram=True, # smaller/faster hist build (xgboost>=1.7)
-            colsample_bynode=0.8,            # cheaper splits
-            max_delta_step=1,
-            n_jobs=1,                        # match your vCPUs to avoid thrash
-            scale_pos_weight=scale_pos_weight,
-            random_state=42,
-            importance_type="total_gain",
+        # 1) Get sport-aware kwargs & search space
+        base_kwargs, param_distributions = get_xgb_search_space(
+            sport=sport, X_rows=X_full.shape[0], n_jobs=2,
+            scale_pos_weight=scale_pos_weight, features=features
         )
         
-        mono = {c: 0 for c in features}  # default: unconstrained
-
-        plus_1 = [
-            # Movement/shift magnitudes that generally help
-            "Abs_Odds_Move_From_Opening",
-            "Pct_Line_Move_From_Opening", "Pct_Line_Move_Bin",
-            "Abs_Line_Move_Z", "Pct_Line_Move_Z",
-            "Line_Moved_Toward_Team",
+        # 2) Base model for search (cap trees; no early stopping inside CV)
         
-            # Hybrid sharp/odds timing magnitudes
-            *[c for c in features if c.startswith("SharpMove_Magnitude_")],
-            *[c for c in features if c.startswith("OddsMove_Magnitude_")],
+        search_estimators = 600
+        search_base = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
         
-            # Cross-market alignment (safe positive)
-            "Spread_vs_H2H_Aligned",
-        
-            # Market/Book composites that represent sharper support or reliability
-            "MarketLeader_ImpProbShift", "LimitProtect_SharpMag",
-            "Delta_Sharp_vs_Rec", "Sharp_Leads",
-            "Book_Reliability_Lift", "Book_Reliability_x_Sharp", "Book_Reliability_x_PROB_SHIFT",
-        
-            # Direct probability from your model (higher ⇒ more likely hit)
-            "Outcome_Cover_Prob",
-        ]
-        
-        minus_1 = [
-            # Reversal/overmove/contradiction = usually bad
-            "Value_Reversal_Flag", "Odds_Reversal_Flag",
-            "Potential_Overmove_Flag", "Potential_Odds_Overmove_Flag",
-            "Total_vs_Spread_Contradiction",
-        ]
-        
-        # Apply only if present
-        for c in plus_1:
-            if c in mono: mono[c] = 1
-        for c in minus_1:
-            if c in mono: mono[c] = -1
-        
-        monotone_constraints = "(" + ",".join(str(mono.get(c, 0)) for c in features) + ")"
-        base_kwargs["monotone_constraints"] = monotone_constraints
-                
-        # --- SEARCH SPACE (tighter, same time, better hits) ---
-        param_distributions = {
-            "max_depth":           randint(2, 3),
-            "learning_rate":       loguniform(1e-2, 3e-2),
-            "subsample":           uniform(0.7, 0.25),     # 0.70–0.95
-            "colsample_bytree":    uniform(0.6, 0.3),      # 0.60–0.90
-            "min_child_weight":    randint(20, 36),        # 20–35
-            "gamma":               uniform(0.1, 0.4),
-            "reg_alpha":           loguniform(1.0, 20.0),
-            "reg_lambda":          loguniform(5.0, 60.0),
-        }
-
-        search_base = xgb.XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
-        
+        # 3) Randomized searches (logloss and AUC) using the CV folds; include groups=
+       
+        # search once with neg_log_loss
         rs_ll = RandomizedSearchCV(
             estimator=search_base,
             param_distributions=param_distributions,
             scoring="neg_log_loss",
-            cv=cv_for_search,
-            n_iter=40,               # 30–60 good range
+            cv=folds,
+            n_iter=40,
             n_jobs=3,
             verbose=1,
             random_state=42,
             refit=True,
         )
         rs_ll.fit(X_full, y_full, groups=groups)
-        model_logloss = rs_ll.best_estimator_
+        best_ll_params = rs_ll.best_params_
         
+        # search once with roc_auc
         rs_auc = RandomizedSearchCV(
             estimator=search_base,
             param_distributions=param_distributions,
             scoring="roc_auc",
-            cv=cv_for_search,
+            cv=folds,
             n_iter=40,
             n_jobs=3,
             verbose=1,
@@ -3082,26 +3055,66 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             refit=True,
         )
         rs_auc.fit(X_full, y_full, groups=groups)
-        model_auc = rs_auc.best_estimator_
+        best_auc_params = rs_auc.best_params_
         
-        # --- OOF predictions for isotonic (fast + accurate) ---
+        # final refit w/ early stopping on last fold
+        (train_idx, val_idx) = folds[-1]
+        final_estimators_cap  = 3000
+        early_stopping_rounds = 100
+        
+        
+        
+        # ---- final refit (as you already have) ----
+        model_logloss = XGBClassifier(**base_kwargs, **best_ll_params, n_estimators=final_estimators_cap)
+        model_logloss.fit(
+            X_full[train_idx], y_full[train_idx],
+            eval_set=[(X_full[val_idx], y_full[val_idx])],
+            early_stopping_rounds=early_stopping_rounds,
+            verbose=False,
+        )
+        
+        model_auc = XGBClassifier(**base_kwargs, **best_auc_params, n_estimators=final_estimators_cap)
+        model_auc.fit(
+            X_full[train_idx], y_full[train_idx],
+            eval_set=[(X_full[val_idx], y_full[val_idx])],
+            early_stopping_rounds=early_stopping_rounds,
+            verbose=False,
+        )
+        
+        # ---- helper: safest best-round extraction across xgboost versions ----
+        def best_rounds(clf: XGBClassifier) -> int:
+            # try sklearn attr
+            br = getattr(clf, "best_iteration", None)
+            if br is not None and br >= 0:
+                return int(br + 1)  # iterations are 0-based; n_estimators is count
+            # try booster attrs
+            try:
+                booster = clf.get_booster()
+                if hasattr(booster, "best_iteration") and booster.best_iteration is not None:
+                    return int(booster.best_iteration + 1)
+                if hasattr(booster, "best_ntree_limit") and booster.best_ntree_limit:
+                    return int(booster.best_ntree_limit)
+            except Exception:
+                pass
+            # fallback to set n_estimators if early stopping wasn’t used
+            return int(getattr(clf, "n_estimators", 200))
+        
+        n_trees_ll  = best_rounds(model_logloss)
+        n_trees_auc = best_rounds(model_auc)
+        
+        # ---- OOF predictions (single pass over 'folds') ----
         oof_pred_logloss = np.full(len(y_full), np.nan, dtype=float)
         oof_pred_auc     = np.full(len(y_full), np.nan, dtype=float)
         
-        for tr_idx, va_idx in cv_for_search:
-            X_tr, X_va = X_full[tr_idx], X_full[va_idx]
-            y_tr       = y_full[tr_idx]
+        for tr_idx, va_idx in folds:
+            m_ll  = XGBClassifier(**base_kwargs, **best_ll_params,  n_estimators=n_trees_ll)
+            m_auc = XGBClassifier(**base_kwargs, **best_auc_params, n_estimators=n_trees_auc)
+            m_ll.fit(X_full[tr_idx],  y_full[tr_idx],  verbose=False)
+            m_auc.fit(X_full[tr_idx], y_full[tr_idx], verbose=False)
+            oof_pred_logloss[va_idx] = m_ll.predict_proba(X_full[va_idx])[:, 1]
+            oof_pred_auc[va_idx]     = m_auc.predict_proba(X_full[va_idx])[:, 1]
         
-            m_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": search_estimators})
-            m_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": search_estimators})
-        
-            m_log.fit(X_tr, y_tr, verbose=False)
-            m_auc.fit(X_tr, y_tr, verbose=False)
-        
-            oof_pred_logloss[va_idx] = m_log.predict_proba(X_va)[:, 1]
-            oof_pred_auc[va_idx]     = m_auc.predict_proba(X_va)[:, 1]
-        
-        # mask out any rows not scored due to skipped folds
+        # ---- Isotonic on the blended OOF predictions ----
         mask_oof = ~np.isnan(oof_pred_logloss) & ~np.isnan(oof_pred_auc)
         if mask_oof.sum() < 50:
             raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
@@ -3109,7 +3122,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         oof_blend = 0.5 * oof_pred_logloss[mask_oof] + 0.5 * oof_pred_auc[mask_oof]
         y_oof     = y_full[mask_oof].astype(int)
         
-        # ----- Isotonic on OOF -----
         iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend, y_oof)
         
         # Optional: wrapper so we can use predict_proba later
