@@ -3627,7 +3627,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         for t in np.round(np.linspace(0.50, 0.80, 13), 2):
             rows.append({"Thresh": float(t), "N": int(np.sum(p_val_ser>=t)), "AvgROI": profit_at_thresh(p_val_ser, y_val, odds_val, t)})
         st.dataframe(pd.DataFrame(rows))
+        # Derive feature_names if not already set
+        if 'feature_names' not in locals() or not feature_names:
+            feat_in = getattr(final_log, 'feature_names_in_', None) \
+                      or getattr(final_auc, 'feature_names_in_', None)
+            if feat_in is not None:
+                feature_names = [str(c) for c in feat_in]
+            else:
+                feature_names = [str(c) for c in features]  # fallback to your training feature list
         
+        # Build the feature frame from df_market (no need for a prior X_pd)
+        X_features = df_market.reindex(columns=feature_names).copy()
+        
+        # Coerce types and clean
+        for c in feature_names:
+            if X_features[c].dtype == object:
+                X_features[c] = X_features[c].replace({
+                    'True': 1, 'False': 0, True: 1, False: 0,
+                    '': np.nan, 'none': np.nan, 'None': np.nan
+                })
+        X_features = (X_features
+                      .apply(pd.to_numeric, errors='coerce')
+                      .replace([np.inf, -np.inf], np.nan)
+                      .fillna(0.0))
+        
+        # If downstream still expects X_pd, alias it:
+        X_pd = X_features
         # ---- feature importance + directional sign (AUC model) ---------------------
         importances = model_auc.feature_importances_
         feature_names = features[:len(importances)]
