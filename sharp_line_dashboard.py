@@ -3353,45 +3353,74 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Keep a pandas X for feature-name-based diagnostics (your earlier X was a DataFrame)
         X_pd = df_market[features].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).fillna(0.0)
         
-        prob_logloss = cal_logloss.predict_proba(X_full)[:, 1]
-        prob_auc     = cal_auc.predict_proba(X_full)[:, 1]
-        val_prob_logloss = cal_logloss.predict_proba(X_val)[:, 1]
-        val_prob_auc     = cal_auc.predict_proba(X_val)[:, 1]
+        # === Calibrated model outputs (already fitted calibrators) ===
+        # X_full / X_val are your feature matrices aligned to y_full / y_val
+        prob_logloss      = cal_logloss.predict_proba(X_full)[:, 1]
+        prob_auc          = cal_auc.predict_proba(X_full)[:, 1]
+        val_prob_logloss  = cal_logloss.predict_proba(X_val)[:, 1]
+        val_prob_auc      = cal_auc.predict_proba(X_val)[:, 1]
         
-        # ---- learn optimal blend weight on OOF/train; apply to holdout -------------
-        # ---- learn optimal blend weight on OOF/train; apply to holdout -------------
+        # --- pick ensemble weight by minimizing LOG LOSS (primary metric) ---
         grid = np.linspace(0.0, 1.0, 51)
-        def _ll(ytrue, p): 
-            return log_loss(ytrue, np.clip(p, 1e-6, 1-1e-6), labels=[0,1])
+        def _ll(y, p): 
+            return log_loss(y, np.clip(p, 1e-6, 1-1e-6), labels=[0,1])
         
         best_w, best_ll = 0.5, 1e9
         for w in grid:
-            p  = w * prob_logloss + (1 - w) * prob_auc
+            p = w*prob_logloss + (1-w)*prob_auc
             ll = _ll(y_full, p)
             if ll < best_ll:
                 best_ll, best_w = ll, w
         
-        # blended probs (train / val)
-        p_train_blend = best_w * prob_logloss      + (1 - best_w) * prob_auc
-        p_val_blend   = best_w * val_prob_logloss  + (1 - best_w) * val_prob_auc
+        # --- blended probs (train / val), clipped once ---
+        p_train_blend = np.clip(best_w*prob_logloss     + (1-best_w)*prob_auc,     1e-6, 1-1e-6)
+        p_val_blend   = np.clip(best_w*val_prob_logloss + (1-best_w)*val_prob_auc, 1e-6, 1-1e-6)
         
-        # clip once to keep losses stable
-        p_train_blend = np.clip(p_train_blend, 1e-6, 1-1e-6)
-        p_val_blend   = np.clip(p_val_blend,   1e-6, 1-1e-6)
+        # --- canonical aliases used throughout the pipeline ---
+        p_cal     = p_train_blend     # calibrated + blended (train/OOF/full)
+        p_cal_val = p_val_blend       # calibrated + blended (validation/holdout)
+        if isinstance(X_val, pd.DataFrame) and isinstance(y_val, (pd.Series, pd.DataFrame)):
+            y_val = y_val.loc[X_val.index]  # align by index
         
-        # canonical aliases used downstream (replace any p_cal/p_cal_val/ensemble_prob uses)
-        p_cal     = p_train_blend          # train (OOF/full) calibrated + blended
-        p_cal_val = p_val_blend            # holdout/validation calibrated + blended
+        # Build evaluation vectors with matching lengths
+        y_train_vec = np.asarray(y_full,     dtype=int)
+        p_train_vec = np.asarray(p_cal,      dtype=float)
         
-        # vectors expected later
-        p_train_vec = np.asarray(p_cal,     dtype=float)
-        p_hold_vec  = np.asarray(p_cal_val, dtype=float)
+        y_hold_vec  = np.asarray(y_val,      dtype=int)
+        p_hold_vec  = np.asarray(p_cal_val,  dtype=float)
         
-        # (optional) if some code expects p_val_vec instead of p_hold_vec:
-        p_val_vec = p_hold_vec
+        # Final sanity checks (fail fast if mismatched)
+        assert len(y_train_vec) == len(p_train_vec), f"train len mismatch: y={len(y_train_vec)} p={len(p_train_vec)}"
+        assert 
+        # --- vectors for downstream code that expects arrays ---
+ 
+        p_val_vec   = p_hold_vec  # if some code uses this name
         
-        # (optional) log chosen weight
-        st.write(f"Ensemble weight (logloss vs auc): w={best_w:.2f}, best logloss={best_ll:.5f}")
+  
+        
+        auc_train  = roc_auc_score(y_full, p_cal)
+        auc_val    = roc_auc_score(y_val,  p_cal_val)
+        brier_tr   = brier_score_loss(y_full, p_cal)
+        brier_val  = brier_score_loss(y_val,  p_cal_val)
+        
+         Optional Streamlit logging
+         st.write(f"🔧 Ensemble weight (logloss vs auc): w={best_w:.2f}")
+         st.write(f"📉 LogLoss: train={best_ll:.5f}, val={_ll(y_val, p_cal_val):.5f}")
+         st.write(f"📈 AUC:     train={auc_train:.4f}, val={auc_val:.4f}")
+         st.write(f"🎯 Brier:   train={brier_tr:.4f}, val={brier_val:.4f}")
+        
+         --- quick calibration table (for sanity; full plot optional) ---
+         bins = np.linspace(0,1,11)
+         idx  = np.digitize(p_cal_val, bins) - 1
+         cal_tbl = []
+         for b in range(10):
+             mask = idx == b
+             if mask.any():
+                 avg_p = float(p_cal_val[mask].mean())
+                 emp   = float(y_val[mask].mean())
+                 cal_tbl.append({"bin": f"{bins[b]:.1f}-{bins[b+1]:.1f}", "avg_p": avg_p, "emp_rate": emp, "n": int(mask.sum())})
+         st.dataframe(pd.DataFrame(cal_tbl))
+        
 
 
         # ---- headline holdout metrics ----------------------------------------------
