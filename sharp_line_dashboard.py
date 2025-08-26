@@ -3031,7 +3031,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_full = df_market["SHARP_HIT_BOOL"].astype(int).to_numpy()
         groups = resolve_groups(df_market)
         times  = pd.to_datetime(df_market["Snapshot_Timestamp"], errors="coerce", utc=True).to_numpy()
-       
+        # sport can be "WNBA", "MLB", etc.
+        sport_key  = str(sport).upper()
+        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"])
         
         # CV splitter (after building X_full, y_full, groups, times)
         cv = PurgedGroupTimeSeriesSplit(
