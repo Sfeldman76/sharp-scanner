@@ -3869,8 +3869,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         """
         )
        
-        pb.progress(int(round(idx / n_markets * 100)))
-
+       
+        pb.progress(int(idx / n_markets * 100))
     status.update(label="✅ All models trained", state="complete", expanded=False)
     if not trained_models:
         st.error("❌ No models were trained.")
