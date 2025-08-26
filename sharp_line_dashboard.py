@@ -1851,19 +1851,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     team_cover_present = [c for c in team_cover_cols if c in df_bt.columns]
     opp_cover_present = [c for c in opp_cover_cols if c in df_bt.columns]
     all_present = history_present + team_cover_present + opp_cover_present
-    
-    # Optional: build diffs where both inputs exist
-    for left, right, out in diff_specs:
-        if left in df_bt.columns and right in df_bt.columns:
-            df_bt[out] = df_bt[left] - df_bt[right]
-            all_present.append(out)
-    
-    # (Optional) enforce numeric dtypes for model features
-    for col in all_present:
-        # Leave booleans as is; cast others to numeric where possible
-        if df_bt[col].dtype == "bool":
-            continue
-        df_bt[col] = pd.to_numeric(df_bt[col], errors="coerce")
+ 
     
     # Handle NaNs if your model can’t
     df_bt[all_present] = df_bt[all_present].fillna(0.0)
