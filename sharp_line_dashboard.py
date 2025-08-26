@@ -3403,23 +3403,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         brier_tr   = brier_score_loss(y_full, p_cal)
         brier_val  = brier_score_loss(y_val,  p_cal_val)
         
-         Optional Streamlit logging
-         st.write(f"🔧 Ensemble weight (logloss vs auc): w={best_w:.2f}")
-         st.write(f"📉 LogLoss: train={best_ll:.5f}, val={_ll(y_val, p_cal_val):.5f}")
-         st.write(f"📈 AUC:     train={auc_train:.4f}, val={auc_val:.4f}")
-         st.write(f"🎯 Brier:   train={brier_tr:.4f}, val={brier_val:.4f}")
+         #Optional Streamlit logging
+        st.write(f"🔧 Ensemble weight (logloss vs auc): w={best_w:.2f}")
+        st.write(f"📉 LogLoss: train={best_ll:.5f}, val={_ll(y_val, p_cal_val):.5f}")
+        st.write(f"📈 AUC:     train={auc_train:.4f}, val={auc_val:.4f}")
+        st.write(f"🎯 Brier:   train={brier_tr:.4f}, val={brier_val:.4f}")
         
          --- quick calibration table (for sanity; full plot optional) ---
-         bins = np.linspace(0,1,11)
-         idx  = np.digitize(p_cal_val, bins) - 1
-         cal_tbl = []
-         for b in range(10):
-             mask = idx == b
-             if mask.any():
-                 avg_p = float(p_cal_val[mask].mean())
-                 emp   = float(y_val[mask].mean())
-                 cal_tbl.append({"bin": f"{bins[b]:.1f}-{bins[b+1]:.1f}", "avg_p": avg_p, "emp_rate": emp, "n": int(mask.sum())})
-         st.dataframe(pd.DataFrame(cal_tbl))
+        bins = np.linspace(0,1,11)
+        idx  = np.digitize(p_cal_val, bins) - 1
+        cal_tbl = []
+        for b in range(10):
+            mask = idx == b
+            if mask.any():
+                avg_p = float(p_cal_val[mask].mean())
+                emp   = float(y_val[mask].mean())
+                cal_tbl.append({"bin": f"{bins[b]:.1f}-{bins[b+1]:.1f}", "avg_p": avg_p, "emp_rate": emp, "n": int(mask.sum())})
+        st.dataframe(pd.DataFrame(cal_tbl))
         
 
 
