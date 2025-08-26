@@ -3798,6 +3798,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "best_w": best_w,   # weight chosen by log loss
             "team_feature_map": team_feature_map,
             "book_reliability_map": book_reliability_map,
+            
         }
         save_model_to_gcs(
             model={
@@ -4688,58 +4689,67 @@ from io import BytesIO
 import pickle
 import logging
 
-def save_model_to_gcs(model, calibrator, sport, market, 
-                      team_feature_map=None, 
-                      book_reliability_map=None, 
-                      bucket_name="sharp-models"):
-    """
-    Save a trained model, calibrator, and optional feature maps to Google Cloud Storage.
+def save_model_to_gcs(
+    model,
+    sport,
+    market,
+    bucket_name="sharp-models",
+    calibrator=None,
+    team_feature_map=None,
+    book_reliability_map=None,
+    meta=None,                # ✅ NEW: accept meta
+    **kwargs                  # ignore extra args
+):
+    from io import BytesIO
+    import pickle, logging
+    from google.cloud import storage
 
-    Parameters:
-    - model: Trained XGBoost or sklearn model
-    - calibrator: CalibratedClassifierCV or similar
-    - sport (str): e.g., "nfl"
-    - market (str): e.g., "spreads"
-    - team_feature_map (pd.DataFrame or None): Optional team-level stats used in scoring
-    - book_reliability_map (dict or pd.DataFrame or None): Optional bookmaker reliability scores
-    - bucket_name (str): GCS bucket name
-    """
-    filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
+    sport_l  = str(sport).lower()
+    market_l = str(market).lower()
+    filename = f"sharp_win_model_{sport_l}_{market_l}.pkl"
 
-    try:
-        client = storage.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(filename)
-
-        # Prepare payload
+    # Build the payload exactly like before; just add meta if provided.
+    if isinstance(model, dict):
+        payload = dict(model)  # shallow copy
+        if calibrator is not None and "calibrator" not in payload:
+            payload["calibrator"] = calibrator
+        if team_feature_map is not None and "team_feature_map" not in payload:
+            payload["team_feature_map"] = team_feature_map
+        if book_reliability_map is not None and "book_reliability_map" not in payload:
+            payload["book_reliability_map"] = book_reliability_map
+        if meta is not None:
+            payload["meta"] = meta
+    else:
+        # Legacy single-model artifact
         payload = {
             "model": model,
-            "calibrator": calibrator
+            "calibrator": calibrator,
+            "team_feature_map": team_feature_map,
+            "book_reliability_map": book_reliability_map,
         }
+        if meta is not None:
+            payload["meta"] = meta
 
-        if team_feature_map is not None:
-            payload["team_feature_map"] = team_feature_map
-
-        if book_reliability_map is not None:
-            payload["book_reliability_map"] = book_reliability_map
-
-        # Serialize to bytes
+    try:
+        # Serialize
         buffer = BytesIO()
-        pickle.dump(payload, buffer)
+        pickle.dump(payload, buffer, protocol=pickle.HIGHEST_PROTOCOL)
         buffer.seek(0)
 
         # Upload to GCS
-        blob.upload_from_file(buffer, content_type='application/octet-stream')
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(filename)
+        blob.upload_from_file(buffer, content_type="application/octet-stream")
 
         print(
-            f"✅ Model + calibrator"
-            f"{' + team features' if team_feature_map is not None else ''}"
-            f"{' + book reliability map' if book_reliability_map is not None else ''} "
-            f"saved to GCS: gs://{bucket_name}/{filename}"
+            f"✅ Saved model artifact to GCS: gs://{bucket_name}/{filename}"
         )
-
+        return {"bucket": bucket_name, "path": filename}
     except Exception as e:
         logging.error(f"❌ Failed to save model to GCS: {e}", exc_info=True)
+        raise
+
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     filename = f"sharp_win_model_{sport.lower()}_{market.lower()}.pkl"
