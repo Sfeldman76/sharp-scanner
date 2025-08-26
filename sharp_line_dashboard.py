@@ -3391,7 +3391,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Final sanity checks (fail fast if mismatched)
         assert len(y_train_vec) == len(p_train_vec), f"train len mismatch: y={len(y_train_vec)} p={len(p_train_vec)}"
-        assert 
+        assert len(y_hold_vec)  == len(p_hold_vec),  f"holdout len mismatch: y={len(y_hold_vec)} p={len(p_hold_vec)}"
         # --- vectors for downstream code that expects arrays ---
  
         p_val_vec   = p_hold_vec  # if some code uses this name
