@@ -5660,109 +5660,102 @@ def detect_cross_market_sharp_support(
 
 
 
-def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
-    """
-    Loads an ensemble bundle saved as a single pickled dict.
-    Backward-compatible: supports legacy single-model artifacts.
-    Returns a dict with keys:
-      - model_logloss, calibrator_logloss
-      - model_auc, calibrator_auc
-      - best_w
-      - team_feature_map (DataFrame)
-      - book_reliability_map (DataFrame)
-      - feature_cols (optional)
-      - meta (optional)
-    """
-    sport_l = str(sport).lower()
-    market_l = str(market).lower()
+import io, pickle, logging
+import numpy as np
+import pandas as pd
+from google.cloud import storage
 
-    # Try new path first, then legacy filename
-    candidates = [
-        f"models/{sport_l}/{market_l}/bundle.pkl",                     # new suggested path
-        f"sharp_win_model_{sport_l}_{market_l}.pkl",                   # your legacy filename
-    ]
+# --- Shim for old IsoWrapper pickles ---
+class _IsoWrapperShim:
+    def __init__(self, model=None, calibrator=None):
+        self.model = model
+        self.calibrator = calibrator
+    def predict_proba(self, X):
+        if hasattr(self.model, "predict_proba"):
+            p = self.model.predict_proba(X)
+            p1 = p[:, 1] if getattr(p, "ndim", 1) == 2 else np.asarray(p).ravel()
+        else:
+            p1 = np.asarray(self.model.predict(X)).ravel()
+        if self.calibrator is not None and hasattr(self.calibrator, "transform"):
+            p1 = np.clip(self.calibrator.transform(p1), 1e-9, 1-1e-9)
+        return np.column_stack([1 - p1, p1])
+
+class _RenamingUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if (module, name) in {
+            ("__main__", "IsoWrapper"),
+            ("streamlit.runtime.scriptrunner.script_runner", "IsoWrapper"),
+            ("uvicorn", "IsoWrapper"),
+        }:
+            return _IsoWrapperShim
+        return super().find_class(module, name)
+
+def _safe_loads(b: bytes):
+    bio = io.BytesIO(b)
+    try:
+        return _RenamingUnpickler(bio).load()
+    except Exception:
+        bio.seek(0)
+        return pickle.loads(bio.read())
+
+def _to_df(x):
+    if isinstance(x, pd.DataFrame): return x
+    if x is None: return pd.DataFrame()
+    try: return pd.DataFrame(x)
+    except Exception: return pd.DataFrame()
+
+def load_model_from_gcs(sport, market, *, bucket_name="sharp-models", timing=False):
+    """Load flat legacy name: sharp_win_model_{sport}[ _timing]_{market}.pkl"""
+    sport_l  = str(sport).lower()
+    market_l = str(market).lower()
+    prefix   = f"sharp_win_model_{sport_l}_timing_" if timing else f"sharp_win_model_{sport_l}_"
+    fname    = f"{prefix}{market_l}.pkl"
 
     client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = None
-
-    for path in candidates:
-        b = bucket.blob(path)
-        try:
-            # Blob.exists() avoids raising if the first path doesn’t exist
-            if b.exists(client=client):
-                blob = b
-                break
-        except Exception:
-            # If exists() isn’t allowed, we’ll try download directly below
-            pass
-
-    # If exists() wasn’t usable or failed to find, just try both by download
-    if blob is None:
-        for path in candidates:
-            b = bucket.blob(path)
-            try:
-                content = b.download_as_bytes()
-                blob = b
-                break
-            except Exception:
-                continue
-
-    if blob is None:
-        logging.warning(f"⚠️ No model artifact found for {sport}-{market} in {bucket_name} (tried {candidates})")
-        return None
+    blob   = client.bucket(bucket_name).blob(fname)
 
     try:
         content = blob.download_as_bytes()
-        data = pickle.loads(content)
-        print(f"✅ Loaded model artifact from GCS: gs://{bucket_name}/{blob.name}")
     except Exception as e:
-        logging.warning(f"⚠️ Failed to load {sport}-{market} from {bucket_name}: {e}")
+        logging.warning(f"⚠️ No artifact: gs://{bucket_name}/{fname} ({e})")
         return None
 
-    # ---- Normalize payloads to DataFrames where needed ----
-    def _to_df(x):
-        if isinstance(x, pd.DataFrame):
-            return x
-        if x is None:
-            return pd.DataFrame()
-        try:
-            return pd.DataFrame(x)
-        except Exception:
-            return pd.DataFrame()
+    try:
+        data = _safe_loads(content)
+        logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to unpickle {fname}: {e}")
+        return None
 
-    tfm = _to_df(data.get("team_feature_map"))
-    brm = _to_df(data.get("book_reliability_map"))
-
-    # ---- Build a unified ensemble bundle shape (works for new or legacy) ----
-    is_new = any(k in data for k in ("model_logloss", "model_auc", "calibrator_logloss", "calibrator_auc"))
-    if is_new:
-        bundle = {
-            "model_logloss":      data.get("model_logloss"),
-            "calibrator_logloss": data.get("calibrator_logloss"),
-            "model_auc":          data.get("model_auc"),
-            "calibrator_auc":     data.get("calibrator_auc"),
-            "best_w":             float(data.get("best_w", 1.0)),
-            "team_feature_map":   tfm,
-            "book_reliability_map": brm,
-            "feature_cols":       data.get("feature_cols"),
-            "meta":               data.get("meta"),
-        }
-    else:
-        # Legacy artifact: map old keys into the new structure
-        bundle = {
-            "model_logloss":      data.get("model"),         # legacy single model as logloss path
-            "calibrator_logloss": data.get("calibrator"),     # legacy calibrator
-            "model_auc":          data.get("model_auc"),
-            "calibrator_auc":     data.get("calibrator_auc"),
-            "best_w":             float(data.get("best_w", 1.0)),  # default to 1.0 (use logloss path)
-            "team_feature_map":   tfm,
-            "book_reliability_map": brm,
-            "feature_cols":       data.get("feature_cols"),
-            "meta":               data.get("meta", {"objective": "legacy_single_model"}),
+    # Normalize legacy single-object pickles into a dict
+    if not isinstance(data, dict):
+        data = {
+            "model_logloss": getattr(data, "model", data),
+            "calibrator_logloss": getattr(data, "calibrator", None),
+            "best_w": 1.0,
         }
 
+    bundle = {
+        "model_logloss":        data.get("model_logloss") or data.get("model"),
+        "calibrator_logloss":   data.get("calibrator_logloss") or data.get("calibrator"),
+        "model_auc":            data.get("model_auc"),
+        "calibrator_auc":       data.get("calibrator_auc"),
+        "best_w":               float(data.get("best_w", 1.0)),
+        "team_feature_map":     _to_df(data.get("team_feature_map")),
+        "book_reliability_map": _to_df(data.get("book_reliability_map")),
+        "feature_cols":         data.get("feature_cols"),
+        "meta":                 data.get("meta") if "meta" in data else {},  # safe default
+    }
     return bundle
+
+def load_all_markets_legacy(sport, markets=("spreads","totals","h2h"), *, bucket_name="sharp-models", timing=False):
+    out = {}
+    for m in markets:
+        b = load_model_from_gcs(sport, m, bucket_name=bucket_name, timing=timing)
+        if b is not None:
+            out[m] = b
+    logging.info(f"🧠 Models loaded for {sport.upper()}{' (timing)' if timing else ''}: {', '.join(out.keys()) or 'none'}")
+    return out
 
 
 DEFAULT_MOVES_VIEW = "sharp_data.moves_with_features_merged"
