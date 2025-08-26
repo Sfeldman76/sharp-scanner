@@ -3073,7 +3073,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         
-        DEBUG_ONCE = True
+    
         
         # lock classifier objective/metric
         base_kwargs["objective"]   = "binary:logistic"
@@ -3170,7 +3170,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             rs_auc = RandomizedSearchCV(
                 estimator=search_base,
                 param_distributions=param_distributions,
-                scoring="roc_auc_proba_scorer",
+                scoring=roc_auc_proba_scorer,
                 cv=folds,
                 n_iter=40,
                 n_jobs=3,
