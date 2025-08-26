@@ -3060,107 +3060,100 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert folds, "No usable folds"
         
         # sport-aware kwargs & search space
+       # --- sport-aware kwargs & search space ---
         base_kwargs, param_distributions = get_xgb_search_space(
             sport=sport,
             X_rows=X_full.shape[0],
-            n_jobs=2,  # CV-level parallelism; keep base_kwargs['n_jobs']=1 inside the helper
+            n_jobs=2,                      # CV-level parallelism; models themselves keep n_jobs=1
             scale_pos_weight=scale_pos_weight,
             features=features,
         )
         
+        # helper: let tuned override defaults without duplicate-key errors
+        def merge_safe(base: dict, tuned: dict, **force):
+            """Drop overlapping keys from base so tuned wins; allow explicit overrides via **force."""
+            clean_base = {k: v for k, v in base.items() if k not in tuned}
+            return {**clean_base, **tuned, **force}
         
-    
-        
-        # lock classifier objective/metric
+        # lock classifier objective/metric (keep these OUT of param_distributions)
         base_kwargs["objective"]   = "binary:logistic"
         base_kwargs["eval_metric"] = "logloss"
-        base_kwargs["n_jobs"]      = 1  # avoid core oversubscription
+        base_kwargs["n_jobs"]      = 1  # avoid core oversubscription in each model
         
-        # sanity: keep unsafe keys out of the search space
         assert "objective"   not in param_distributions
         assert "eval_metric" not in param_distributions
         
+        # search base (cap trees; no ES inside CV)
         search_estimators = 600
         search_base = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
-        
-        # assert classifier
         assert isinstance(search_base, XGBClassifier)
         assert getattr(search_base, "_estimator_type", "") == "classifier"
         
-        # --- one-time debug (optional) ---
-      
-        
+        # custom scorers (callables returning larger-is-better)
         def neg_logloss_scorer(est, X, y):
-            proba = est.predict_proba(X)[:, 1]   # will raise if regressor
+            proba = est.predict_proba(X)[:, 1]   # will raise if a regressor sneaks in
             return -log_loss(y, proba)
         
         def roc_auc_proba_scorer(est, X, y):
             proba = est.predict_proba(X)[:, 1]
             return roc_auc_score(y, proba)
         
-        # 3) debug scorer to *show* the bad candidate in Streamlit
-        def neg_logloss_scorer_debug(est, X, y):
-            try:
-                proba = est.predict_proba(X)[:, 1]
-                return -log_loss(y, proba)
-            except Exception as e:
-                # Surface details in the Streamlit UI
-                try:
-                    xgb_params = est.get_xgb_params()
-                except Exception:
-                    xgb_params = {}
-                st.error("Offending candidate encountered during CV:")
-                st.json({
-                    "estimator_type": type(est).__name__,
-                    "_estimator_type": getattr(est, "_estimator_type", None),
-                    "objective": getattr(est, "objective", None),
-                    "xgb_params": xgb_params,
-                })
-                st.exception(e)
-                # Re-raise so the run stops here and you can fix it
-                raise
-        
-        DEBUG_ONCE = False  # flip to False after one run
-        
+        # optional one-time debug to surface any bad candidates in Streamlit
+        DEBUG_ONCE = False
         if DEBUG_ONCE:
-            try:
-                rs_dbg = RandomizedSearchCV(
-                    estimator=search_base,
-                    param_distributions=param_distributions,
-                    scoring=neg_logloss_scorer_debug,  # <— debug scorer
-                    cv=folds,
-                    n_iter=5,      # small, fast
-                    n_jobs=1,      # simpler trace
-                    verbose=2,
-                    random_state=7,
-                    refit=True,
-                    error_score="raise",
-                )
-                rs_dbg.fit(X_full, y_full, groups=groups)
-                st.success("DEBUG: All candidates were classifiers with predict_proba ✅")
-            except Exception:
-                st.stop()  # stop Streamlit run after showing details
-
-       
+            def neg_logloss_scorer_debug(est, X, y):
+                try:
+                    proba = est.predict_proba(X)[:, 1]
+                    return -log_loss(y, proba)
+                except Exception as e:
+                    try:
+                        xgb_params = est.get_xgb_params()
+                    except Exception:
+                        xgb_params = {}
+                    st.error("Offending candidate encountered during CV:")
+                    st.json({
+                        "estimator_type": type(est).__name__,
+                        "_estimator_type": getattr(est, "_estimator_type", None),
+                        "objective": getattr(est, "objective", None),
+                        "xgb_params": xgb_params,
+                    })
+                    st.exception(e)
+                    raise
+        
+            rs_dbg = RandomizedSearchCV(
+                estimator=search_base,
+                param_distributions=param_distributions,
+                scoring=neg_logloss_scorer_debug,
+                cv=folds,
+                n_iter=5,
+                n_jobs=1,
+                verbose=2,
+                random_state=7,
+                refit=True,
+                error_score="raise",
+            )
+            rs_dbg.fit(X_full, y_full, groups=groups)
+            st.success("DEBUG: All candidates were classifiers with predict_proba ✅")
+        
+        # ---- randomized searches (logloss / AUC) ----
         try:
             rs_ll = RandomizedSearchCV(
                 estimator=search_base,
                 param_distributions=param_distributions,
-                scoring=neg_logloss_scorer,   # your callable scorer
+                scoring=neg_logloss_scorer,
                 cv=folds,
                 n_iter=40,
                 n_jobs=3,
                 verbose=1,
                 random_state=42,
                 refit=True,
-                error_score="raise",          # <-- force raise instead of silent -inf
+                error_score="raise",
             )
             rs_ll.fit(X_full, y_full, groups=groups)
         except Exception as e:
             st.error("❌ Error during RandomizedSearchCV (logloss search)")
             st.exception(e)
-            st.stop()   # stop Streaml
-        
+            st.stop()
         
         try:
             rs_auc = RandomizedSearchCV(
@@ -3179,26 +3172,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         except Exception as e:
             st.error("❌ Error during RandomizedSearchCV (AUC search)")
             st.exception(e)
-            st.stop()   # stop Streaml
+            st.stop()
         
-        
-        # clean best params (strip any unsafe keys)
+        # clean best params (strip any unsafe keys that might slip in)
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
-      
-       # --- final refit with early stopping on forward holdout (last fold) ---
+        
+        # --- final refit with early stopping on forward holdout (last fold) ---
         (train_idx, val_idx) = folds[-1]
         final_estimators_cap  = 3000
         early_stopping_rounds = 150
         
-        # merge safely so tuned params override defaults
-        safe_base_ll  = {k: v for k, v in base_kwargs.items() if k not in best_ll_params}
-        safe_base_auc = {k: v for k, v in base_kwargs.items() if k not in best_auc_params}
+        # safe-merge so tuned params override defaults without duplicate-key errors
+        model_logloss = XGBClassifier(**merge_safe(base_kwargs, best_ll_params,  n_estimators=final_estimators_cap))
+        model_auc     = XGBClassifier(**merge_safe(base_kwargs, best_auc_params, n_estimators=final_estimators_cap))
         
-        model_logloss = XGBClassifier(**safe_base_ll, **best_ll_params, n_estimators=final_estimators_cap)
         model_logloss.fit(
             X_full[train_idx], y_full[train_idx],
             eval_set=[(X_full[val_idx], y_full[val_idx])],
@@ -3206,13 +3197,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
         )
         
-        model_auc = XGBClassifier(**safe_base_auc, **best_auc_params, n_estimators=final_estimators_cap)
         model_auc.fit(
             X_full[train_idx], y_full[train_idx],
             eval_set=[(X_full[val_idx], y_full[val_idx])],
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
+        
 
         
         # =========================
@@ -3295,8 +3286,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         oof_pred_auc     = np.full(len(y_full), np.nan, dtype=float)
         
         for tr_idx, va_idx in folds:
-            m_ll  = XGBClassifier(**base_kwargs, **best_ll_params,  n_estimators=n_trees_ll)
-            m_auc = XGBClassifier(**base_kwargs, **best_auc_params, n_estimators=n_trees_auc)
+            m_ll  = XGBClassifier(**merge_safe(base_kwargs, best_ll_params,  n_estimators=int(n_trees_ll)))
+            m_auc = XGBClassifier(**merge_safe(base_kwargs, best_auc_params, n_estimators=int(n_trees_auc)))
             m_ll.fit(X_full[tr_idx],  y_full[tr_idx],  verbose=False)
             m_auc.fit(X_full[tr_idx], y_full[tr_idx], verbose=False)
             oof_pred_logloss[va_idx] = m_ll.predict_proba(X_full[va_idx])[:, 1]
