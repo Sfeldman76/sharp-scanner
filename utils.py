@@ -4476,23 +4476,40 @@ def apply_blended_sharp_score(
             logger.info("🔧 %s: using %d feature cols", mkt.upper(), len(feature_cols))
         
             # ---- ensure every feature exists & is numeric
+            # ---- ensure every feature exists & is numeric (handles category dtypes)
             for c in feature_cols:
                 if c not in df_canon.columns:
                     df_canon[c] = 0.0
-                elif df_canon[c].dtype == object:
-                    df_canon[c] = df_canon[c].replace({
+                    continue
+            
+                s = df_canon[c]
+            
+                # If categorical, convert to object/string first (prevents setitem-on-categorical errors)
+                if pd.api.types.is_categorical_dtype(s):
+                    df_canon[c] = s.astype('string')  # or .astype(object)
+                    s = df_canon[c]
+            
+                # If string/object, normalize booleans/empties then coerce numeric
+                if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
+                    df_canon[c] = s.replace({
                         'True': 1, 'False': 0, True: 1, False: 0,
                         '': np.nan, 'none': np.nan, 'None': np.nan
                     })
-                    df_canon[c] = pd.to_numeric(df_canon[c], errors='coerce')
-        
-            X_can = (
-                df_canon.reindex(columns=feature_cols)
-                        .replace([np.inf, -np.inf], np.nan)
-                        .fillna(0.0)
-                        .astype('float32')
-            )
-        
+            
+                # Finally: numeric, finite, fill
+                df_canon[c] = (pd.to_numeric(df_canon[c], errors='coerce')
+                                 .replace([np.inf, -np.inf], np.nan)
+                                 .fillna(0.0)
+                                 .astype('float32'))
+            
+                    
+            X_can = (df_canon.reindex(columns=feature_cols)
+                 .apply(pd.to_numeric, errors='coerce')
+                 .replace([np.inf, -np.inf], np.nan)
+                 .fillna(0.0)
+                 .astype('float32'))
+
+
             # ---- ensure prediction cols exist on BOTH frames before writeback
             cols_to_write_defaults = {
                 'Model_Sharp_Win_Prob': np.nan,
