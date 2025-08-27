@@ -3778,6 +3778,16 @@ def apply_blended_sharp_score(
     if 'Limit' not in df.columns:
         df['Limit'] = np.float32(0.0)
 
+    
+    if 'Merge_Key_Short' in df.columns:
+        df['Merge_Key_Short'] = df['Merge_Key_Short'].astype('string').str.strip().str.lower()
+    elif 'Game_Key' in df.columns and df['Game_Key'].notna().any():
+        df['Merge_Key_Short'] = df['Game_Key'].astype('string').str.strip().str.lower()
+    else:
+        logger.warning("⚠️ Merge_Key_Short missing and cannot be derived; downstream totals features may fail")
+        df['Merge_Key_Short'] = pd.Series(pd.NA, index=df.index, dtype='string')
+
+    
     # Timestamp: a single scalar; avoid assigning per-row Python object repeatedly
     snap_ts = pd.Timestamp.utcnow()
     df['Snapshot_Timestamp'] = snap_ts
