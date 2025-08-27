@@ -5442,6 +5442,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             )
             
             # === 8) STEP 5: per-book diagnostics built on latest-per-book sharp rows from df_pre, then attach ===
+            # === 8) STEP 5: per-book diagnostics built on latest-per-book sharp rows from df_pre, then attach ===
             diag_source = (
                 df_pre
                   .sort_values('Snapshot_Timestamp')
@@ -5451,39 +5452,71 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             
             if diag_source.empty:
                 st.warning("⚠️ No sharp book rows available for diagnostics.")
-                for col in ['Tier Δ','Line/Model Direction','Why Model Likes It']:
+                for col in ['Tier Δ','Line/Model Direction','Why Model Likes It','Timing_Opportunity_Score','Timing_Stage']:
                     df_summary_base[col] = "⚠️ Missing"
             else:
                 # normalize keys before merge
                 for df_ in (df_summary_base, diag_source):
                     for k in ['Game_Key','Market','Outcome','Bookmaker']:
                         df_[k] = df_[k].astype(str).str.strip().str.lower()
-                # Optionally build a ratings_map (if you have a simple table of team → rating)
-                # ratings_map = pd.DataFrame({'Team': [...], 'PRating': [...]})
-  
-                def _resolve_bundle_model_for_market(trained_models_by_market, mkt):
-                    bundle = (trained_models_by_market or {}).get(mkt)
-                    model = None
+            
+                # Helper: map Market labels to canonical keys used in trained_models
+                def _canonical_market(m: str) -> str:
+                    m = str(m).lower().strip()
+                    if m in ('spread','spreads','ats'): return 'spreads'
+                    if m in ('total','totals','o/u','ou'): return 'totals'
+                    if m in ('moneyline','ml','h2h','headtohead'): return 'h2h'
+                    return m
+            
+                # Helper: resolve bundle/model for a market key
+                def _resolve_bundle_model_for_market(trained_by_market: dict, mkt_norm: str):
+                    bundle = (trained_by_market or {}).get(mkt_norm)
+                    mdl = None
                     if isinstance(bundle, dict):
-                        # prefer logloss -> auc -> generic
-                        model = bundle.get("model_logloss") or bundle.get("model_auc") or bundle.get("model")
-                    return bundle, model
-                
-                # inside your per-market loop
-                mkt = mkt.lower().strip()  # e.g., 'spreads' | 'totals' | 'h2h'
-                bundle, model = _resolve_bundle_model_for_market(trained_models_by_market, mkt)
-                
-                diagnostics_df = compute_diagnostics_vectorized(
-                    diag_source[diag_source['Market'].str.lower().eq(mkt)],  # per-book rows for this market
-                    bundle=bundle,
-                    model=model,
-                    sport=sport,                    # make sure `sport` exists in this scope
-                    gcs_bucket=GCS_BUCKET,          # and GCS_BUCKET too (or pass None)
-                    hybrid_timing_features=hybrid_timing_features,
-                    hybrid_odds_timing_features=hybrid_odds_timing_features,
+                        mdl = bundle.get("model_logloss") or bundle.get("model_auc") or bundle.get("model")
+                    return bundle, mdl
+            
+                # Figure out which markets to loop over:
+                # prefer explicit trained_models keys; otherwise derive from diag_source
+                if 'trained_models' in locals() and trained_models:
+                    markets_present = list(trained_models.keys())
+                else:
+                    markets_present = (
+                        diag_source['Market'].astype(str).str.lower().str.strip().map(_canonical_market).unique().tolist()
+                    )
+            
+                diagnostics_chunks = []
+                for market in markets_present:
+                    market_norm = _canonical_market(market)
+                    bundle, model = _resolve_bundle_model_for_market(trained_models if 'trained_models' in locals() else {}, market_norm)
+            
+                    # rows for this market
+                    diag_rows = diag_source[diag_source['Market'].astype(str).str.lower().str.strip().map(_canonical_market) == market_norm]
+                    if diag_rows.empty:
+                        continue
+            
+                    # compute diagnostics for this market with its matching model
+                    chunk = compute_diagnostics_vectorized(
+                        diag_rows,
+                        bundle=bundle,
+                        model=model,
+                        sport=label,                # you used `label` earlier for loading
+                        gcs_bucket=GCS_BUCKET,      # assumes defined earlier
+                        hybrid_timing_features=hybrid_timing_features if 'hybrid_timing_features' in globals() else None,
+                        hybrid_odds_timing_features=hybrid_odds_timing_features if 'hybrid_odds_timing_features' in globals() else None,
+                    )
+                    diagnostics_chunks.append(chunk)
+            
+                diagnostics_df = (
+                    pd.concat(diagnostics_chunks, ignore_index=True)
+                    if diagnostics_chunks else pd.DataFrame(columns=[
+                        'Game_Key','Market','Outcome','Bookmaker','Tier Δ',
+                        'Line/Model Direction','Why Model Likes It',
+                        'Timing_Opportunity_Score','Timing_Stage'
+                    ])
                 )
 
-            
+
                 rep = df_summary_base[['Game_Key','Market','Outcome','Bookmaker']].drop_duplicates()
                 diagnostics_pick = diagnostics_df.merge(
                     rep, on=['Game_Key','Market','Outcome','Bookmaker'], how='inner'
