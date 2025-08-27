@@ -1684,6 +1684,26 @@ def resolve_groups(df: pd.DataFrame) -> np.ndarray:
 
     raise ValueError("No columns available to form per-game groups")
 
+
+def _bake_feature_names_in_(est, cols):
+   
+    cols_arr = np.array([str(c) for c in cols], dtype=object)
+    # set on the estimator
+    try: setattr(est, "feature_names_in_", cols_arr)
+    except Exception: pass
+    # if it's a sklearn Pipeline, also set on its last step
+    if hasattr(est, "named_steps"):
+        try:
+            last = list(est.named_steps.values())[-1]
+            setattr(last, "feature_names_in_", cols_arr)
+        except Exception:
+            pass
+    # best-effort for LightGBM / CatBoost
+    for attr in ("feature_name_", "feature_names_"):
+        try: setattr(est, attr, list(map(str, cols)))
+        except Exception: pass
+
+
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
     SPORT_DAYS_BACK = {
@@ -3828,8 +3848,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 'Sport','Market','Bookmaker','Book_Reliability_Score','Book_Reliability_Lift'
             ])
 
+        feature_cols = list(X_train.columns)  # <- your exact training matrix column order
         
+        if model_logloss is not None:
+            _bake_feature_names_in_(model_logloss, feature_cols)
+        if model_auc is not None:
+            _bake_feature_names_in_(model_auc, feature_cols)
+        # or if you have a single model:
+        if model is not None:
+            _bake_feature_names_in_(model, feature_cols)
 
+        
         # === Save ensemble (choose one or both)
         trained_models[market] = {
             "model_logloss": model_logloss,
