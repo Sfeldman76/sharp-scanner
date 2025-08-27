@@ -4282,479 +4282,390 @@ def attach_ratings_and_edges_for_diagnostics(
             out[c] = np.nan
 
     return out
-def compute_diagnostics_vectorized(df):
-   
+
+# --- 0) Active-feature resolver (tries bundle metadata, booster names, your resolver) ---
+def _resolve_active_features(bundle, model, df_like):
+    cand = None
+    if isinstance(bundle, dict):
+        for k in ("feature_names", "features", "training_features"):
+            if k in bundle and bundle[k]:
+                cand = list(dict.fromkeys([str(c) for c in bundle[k] if c is not None]))
+                break
+    if cand is None and hasattr(model, "get_booster"):
+        try:
+            booster = model.get_booster()
+            if booster is not None and getattr(booster, "feature_names", None):
+                cand = list(dict.fromkeys([str(c) for c in booster.feature_names]))
+        except Exception:
+            pass
+    if cand is None:
+        try:
+            cols = _resolve_feature_cols_like_training(bundle, model, df_like)  # your helper if available
+            cand = list(dict.fromkeys([str(c) for c in cols if c is not None]))
+        except Exception:
+            pass
+    if cand is None:
+        cand = [c for c in df_like.columns if c not in ("y","label","target")]
+    return cand
+
+# --- 1) Safe numeric coercion (handles categoricals/strings) ---
+def _coerce_numeric_inplace(df, cols, fill=0.0):
+    for c in cols:
+        if c not in df.columns:
+            df[c] = fill
+        else:
+            if pd.api.types.is_categorical_dtype(df[c]):
+                df[c] = df[c].astype(object)
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(fill)
+
+# --- 2) Explainer rules (ONLY fire if their features are active) ---
+WHY_RULES = [
+    # Core sharp signals
+    dict(requires=["Sharp_Move_Signal"], check=lambda r: r["Sharp_Move_Signal"] > 0.0, msg="📈 Sharp Move Detected"),
+    dict(requires=["Sharp_Limit_Jump"], check=lambda r: r["Sharp_Limit_Jump"] > 0.0, msg="💰 Limit Jumped"),
+    dict(requires=["Is_Reinforced_MultiMarket"], check=lambda r: r["Is_Reinforced_MultiMarket"] > 0.0, msg="📊 Multi-Market Consensus"),
+    dict(requires=["Book_lift_x_Magnitude"], check=lambda r: r["Book_lift_x_Magnitude"] > 0.0, msg="🏦 Book Lift Supports Move"),
+    dict(requires=["Book_lift_x_PROB_SHIFT"], check=lambda r: r["Book_lift_x_PROB_SHIFT"] > 0.0, msg="📈 Book Lift Aligned with Prob Shift"),
+    dict(requires=["Sharp_Limit_Total"], check=lambda r: r["Sharp_Limit_Total"] >= 10000, msg="💼 High Sharp Limits"),
+
+    # Market response / movement
+    dict(requires=["Sharp_Line_Magnitude"], check=lambda r: r["Sharp_Line_Magnitude"] >= 0.5, msg="📏 Big Line Move"),
+    dict(requires=["Is_Home_Team_Bet"], check=lambda r: r["Is_Home_Team_Bet"] > 0.0, msg="🏠 Home Side Backed"),
+
+    # Odds shift decomposition
+    dict(requires=["SharpMove_Odds_Up"], check=lambda r: r["SharpMove_Odds_Up"] > 0.0, msg="🟢 Odds Moved Up (Steam)"),
+    dict(requires=["SharpMove_Odds_Down"], check=lambda r: r["SharpMove_Odds_Down"] > 0.0, msg="🔻 Odds Moved Down (Buyback)"),
+    dict(requires=["SharpMove_Odds_Mag"], check=lambda r: r["SharpMove_Odds_Mag"] >= 5, msg="💥 Sharp Odds Steam"),
+
+    # Interactions / alignment
+    dict(requires=["MarketLeader_ImpProbShift"], check=lambda r: r["MarketLeader_ImpProbShift"] > 0.0, msg="🏆 Leader Moved with Implied Prob"),
+    dict(requires=["LimitProtect_SharpMag"], check=lambda r: r["LimitProtect_SharpMag"] > 0.0, msg="🛡️ Limit-Protection Behavior"),
+    dict(requires=["Delta_Sharp_vs_Rec"], check=lambda r: r["Delta_Sharp_vs_Rec"] > 0.0, msg="🧭 Sharp vs Rec Divergence"),
+
+    # Reversal logic
+    dict(requires=["Value_Reversal_Flag"], check=lambda r: r["Value_Reversal_Flag"] > 0.0, msg="🔄 Value Reversal"),
+    dict(requires=["Odds_Reversal_Flag"], check=lambda r: r["Odds_Reversal_Flag"] > 0.0, msg="📉 Odds Reversal"),
+
+    # Timing / from-open
+    dict(requires=["Late_Game_Steam_Flag"], check=lambda r: r["Late_Game_Steam_Flag"] > 0.0, msg="⏰ Late Game Steam"),
+    dict(requires=["Abs_Line_Move_From_Opening"], check=lambda r: r["Abs_Line_Move_From_Opening"] >= 1.0, msg="📈 Line Moved from Open"),
+    dict(requires=["Abs_Odds_Move_From_Opening"], check=lambda r: r["Abs_Odds_Move_From_Opening"] >= 5.0, msg="💹 Odds Moved from Open"),
+
+    # Cross-market / mispricing
+    dict(requires=["Market_Mispricing"], check=lambda r: r["Market_Mispricing"] > 0.0, msg="💸 Market Mispricing"),
+    dict(requires=["Spread_vs_H2H_Aligned"], check=lambda r: r["Spread_vs_H2H_Aligned"] > 0.0, msg="🧩 Spread & H2H Align"),
+    dict(requires=["Total_vs_Spread_Contradiction"], check=lambda r: r["Total_vs_Spread_Contradiction"] > 0.0, msg="⚠️ Total Contradicts Spread"),
+    dict(requires=["CrossMarket_Prob_Gap_Exists"], check=lambda r: r["CrossMarket_Prob_Gap_Exists"] > 0.0, msg="🔀 Cross-Market Probability Gap"),
+    dict(requires=["Potential_Overmove_Flag"], check=lambda r: r["Potential_Overmove_Flag"] > 0.0, msg="📊 Line Possibly Overmoved"),
+    dict(requires=["Potential_Overmove_Total_Pct_Flag"], check=lambda r: r["Potential_Overmove_Total_Pct_Flag"] > 0.0, msg="📉 Total Possibly Overmoved"),
+    dict(requires=["Potential_Odds_Overmove_Flag"], check=lambda r: r["Potential_Odds_Overmove_Flag"] > 0.0, msg="🎯 Odds Possibly Overmoved"),
+    dict(requires=["Line_Moved_Toward_Team"], check=lambda r: r["Line_Moved_Toward_Team"] > 0.0, msg="🧲 Line Moved Toward This Team"),
+
+    # Hybrid timing buckets (virtual sums; added dynamically)
+    dict(requires=["__HYBRID_LINE_SUM__"], check=lambda r: r["__HYBRID_LINE_SUM__"] > 0.0, msg="⏱️ Sharp Line Timing Bucket"),
+    dict(requires=["__HYBRID_ODDS_SUM__"], check=lambda r: r["__HYBRID_ODDS_SUM__"] > 0.0, msg="🕰️ Sharp Odds Timing Bucket"),
+
+    # Team history (if used)
+    dict(requires=["Team_Past_Hit_Rate"], check=lambda r: r["Team_Past_Hit_Rate"] > 0.5, msg="⚔️ Team Historically Sharp"),
+    dict(requires=["Team_Past_Avg_Model_Prob"], check=lambda r: r["Team_Past_Avg_Model_Prob"] > 0.5, msg="🔮 Model Favored This Team Historically"),
+]
+
+# --- 3) Attach explainer (creates df["Why Model Likes It"]) ---
+def attach_why_model_likes_it(df_in, bundle, model):
+    df = df_in.copy()
+
+    # Families used for hybrid sums
+    HYBRID_LINE = [f'SharpMove_Magnitude_{b}' for b in [
+        'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+        'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+        'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+        'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
+    ]]
+    HYBRID_ODDS = [f'OddsMove_Magnitude_{b}' for b in [
+        'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+        'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+        'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+        'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
+    ]]
+
+    # 3a) active features
+    active = _resolve_active_features(bundle, model, df)
+    active_set = set(active)
+
+    # 3b) collect needed columns from rules that are truly active
+    needed = set()
+    for rule in WHY_RULES:
+        for req in rule["requires"]:
+            if req.startswith("__HYBRID_"):
+                continue
+            if req in active_set:
+                needed.add(req)
+    active_hybrid_line = [c for c in HYBRID_LINE if c in active_set]
+    active_hybrid_odds = [c for c in HYBRID_ODDS if c in active_set]
+    needed.update(active_hybrid_line)
+    needed.update(active_hybrid_odds)
+
+    # 3c) coerce numeric (prevents categorical setitem errors)
+    _coerce_numeric_inplace(df, list(needed), fill=0.0)
+
+    # 3d) virtual hybrid sums
+    df["__HYBRID_LINE_SUM__"] = df[active_hybrid_line].sum(axis=1) if active_hybrid_line else 0.0
+    df["__HYBRID_ODDS_SUM__"] = df[active_hybrid_odds].sum(axis=1) if active_hybrid_odds else 0.0
+
+    # 3e) build reasons rowwise
+    msgs = []
+    for _, row in df.iterrows():
+        reasons = []
+        for rule in WHY_RULES:
+            reqs = rule["requires"]
+            if not all((r in active_set) or r.startswith("__HYBRID_") for r in reqs):
+                continue
+            try:
+                if rule["check"](row):
+                    reasons.append(rule["msg"])
+            except Exception:
+                continue
+        msgs.append(" · ".join(reasons) if reasons else "—")
+
+    df["Why Model Likes It"] = msgs
+    df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
+    df.attrs["active_features_used"] = active  # expose for downstream gating
+    return df
+import numpy as np
+import pandas as pd
+
+def compute_diagnostics_vectorized(
+    df: pd.DataFrame,
+    *,
+    bundle=None,                 # model bundle for feature resolution
+    model=None,                  # fitted model used to score df
+    sport: str = None,           # needed if loading timing models from GCS
+    gcs_bucket: str = None,      # GCS bucket name for timing model load
+    timing_models: dict | None = None,   # optional preloaded {'spreads': mdl, ...}
+    hybrid_timing_features: list | None = None,
+    hybrid_odds_timing_features: list | None = None,
+    sport_aliases: dict | None = None,
+    ratings_table_fq: str = "sharplogger.sharp_data.ratings_current",
+    project: str = "sharplogger",
+):
+    """
+    Returns a diagnostics dataframe with:
+      - Tier Δ, Confidence Trend, Line/Model Direction
+      - Why Model Likes It (aligned to model-active features only)
+      - Timing_Opportunity_Score / Timing_Stage (UI-only)
+
+    Notes:
+      - Requires attach_why_model_likes_it(...) to be defined (no-ops gracefully if not).
+      - If timing_models not given, attempts GCS load for {spreads, totals, h2h} when sport & gcs_bucket are provided.
+    """
     df = df.copy()
-   
+
+    # --- 1) De-dupe to latest per (game, market, outcome, bookmaker) ---
     df = (
         df.sort_values('Snapshot_Timestamp')
-        .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
+          .drop_duplicates(subset=['Game_Key', 'Market', 'Outcome', 'Bookmaker'], keep='last')
     )
-    df = attach_ratings_and_edges_for_diagnostics(
-        df=df,
-        sport_aliases=SPORT_ALIASES,           # your existing global/map
-        table_history="sharplogger.sharp_data.ratings_current",
-        project="sharplogger",
-    )
-    # === Tier ordering for change tracking
-    TIER_ORDER = {
-        '🪙 Low Probability': 1,
-        '🤏 Lean': 2,
-        '🔥 Strong Indication': 3,
-        '🌋 Steam': 4
-    }
 
-    # === Normalize tier columns
+    # --- 2) Optional: attach ratings/edges (safe if function isn't present) ---
+    try:
+        df = attach_ratings_and_edges_for_diagnostics(
+            df=df,
+            sport_aliases=sport_aliases or {},
+            table_history=ratings_table_fq,
+            project=project,
+        )
+    except Exception:
+        pass
+
+    # --- 3) Tier Δ ---
+    TIER_ORDER = {'🪙 Low Probability':1, '🤏 Lean':2, '🔥 Strong Indication':3, '🌋 Steam':4}
     for col in ['Confidence Tier', 'First_Tier']:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].astype(str).str.strip()
 
-    # === Tier Δ logic
-    tier_now = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
+    tier_now   = df['Confidence Tier'].map(TIER_ORDER).fillna(0).astype(int)
     tier_first = df['First_Tier'].map(TIER_ORDER).fillna(0).astype(int)
     df['Tier_Change'] = np.where(
         df['First_Tier'] != "",
-        np.where(
-            tier_now > tier_first,
-            "↑ " + df['First_Tier'] + " → " + df['Confidence Tier'],
-            np.where(
-                tier_now < tier_first,
-                "↓ " + df['First_Tier'] + " → " + df['Confidence Tier'],
-                "↔ No Change"
-            )
-        ),
+        np.where(tier_now > tier_first, "↑ " + df['First_Tier'] + " → " + df['Confidence Tier'],
+        np.where(tier_now < tier_first, "↓ " + df['First_Tier'] + " → " + df['Confidence Tier'],
+                 "↔ No Change")),
         "⚠️ Missing"
     )
 
-    # === Confidence Trend
-    prob_now = pd.to_numeric(df.get('Model Prob'), errors='coerce')
+    # --- 4) Confidence Trend ---
+    prob_now   = pd.to_numeric(df.get('Model Prob'), errors='coerce')
     prob_start = pd.to_numeric(df.get('First_Sharp_Prob'), errors='coerce')
-
     df['Model Prob Snapshot'] = prob_now
     df['First Prob Snapshot'] = prob_start
-
+    delta = prob_now - prob_start
     df['Confidence Trend'] = np.where(
-        prob_now.isna() | prob_start.isna(),
-        "⚠️ Missing",
-        np.where(
-            prob_now - prob_start >= 0.04,
-            "📈 Trending Up: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
-            np.where(
-                prob_now - prob_start <= -0.04,
-                "📉 Trending Down: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%",
-                "↔ Stable: " + (prob_start * 100).round(1).astype(str) + "% → " + (prob_now * 100).round(1).astype(str) + "%"
-            )
-        )
+        prob_now.isna() | prob_start.isna(), "⚠️ Missing",
+        np.where(delta >= 0.04,
+                 "📈 Trending Up: " + (prob_start*100).round(1).astype(str) + "% → " + (prob_now*100).round(1).astype(str) + "%",
+        np.where(delta <= -0.04,
+                 "📉 Trending Down: " + (prob_start*100).round(1).astype(str) + "% → " + (prob_now*100).round(1).astype(str) + "%",
+                 "↔ Stable: "        + (prob_start*100).round(1).astype(str) + "% → " + (prob_now*100).round(1).astype(str) + "%"))
     )
 
-    # === Line/Model Direction Alignment
+    # --- 5) Line/Model Direction Alignment ---
     df['Line_Delta'] = pd.to_numeric(df.get('Line_Delta'), errors='coerce')
     df['Line_Support_Sign'] = df.apply(
-        lambda row: -1 if str(row.get('Market','')).lower() == 'totals' and str(row.get('Outcome','')).lower() == 'under' else 1,
+        lambda r: -1 if str(r.get('Market','')).lower() == 'totals' and str(r.get('Outcome','')).lower() == 'under' else 1,
         axis=1
     )
     df['Line_Support_Direction'] = df['Line_Delta'] * df['Line_Support_Sign']
-    prob_trend = prob_now - prob_start
     df['Line/Model Direction'] = np.select(
         [
-            (prob_trend > 0) & (df['Line_Support_Direction'] > 0),
-            (prob_trend < 0) & (df['Line_Support_Direction'] < 0),
-            (prob_trend > 0) & (df['Line_Support_Direction'] < 0),
-            (prob_trend < 0) & (df['Line_Support_Direction'] > 0),
+            (delta > 0) & (df['Line_Support_Direction'] > 0),
+            (delta < 0) & (df['Line_Support_Direction'] < 0),
+            (delta > 0) & (df['Line_Support_Direction'] < 0),
+            (delta < 0) & (df['Line_Support_Direction'] > 0),
         ],
-        [
-            "🟢 Aligned ↑",
-            "🔻 Aligned ↓",
-            "🔴 Model ↑ / Line ↓",
-            "🔴 Model ↓ / Line ↑"
-        ],
+        ["🟢 Aligned ↑","🔻 Aligned ↓","🔴 Model ↑ / Line ↓","🔴 Model ↓ / Line ↑"],
         default="⚪ Mixed"
     )
 
-    # ----------------------------------------------------------------
-    # 💡 MODEL FEATURES: ensure presence, casting, and hybrid flags
-    # ----------------------------------------------------------------
-    # Full modeling feature list you provided (order-preserving)
-    features = [
-        # Core sharp signals
-        'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Limit_Total',
-        'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
+    # --- 6) Attach explainer aligned to model-active features ---
+    active_feats = []
+    try:
+        if (bundle is not None) and (model is not None) and ('attach_why_model_likes_it' in globals()):
+            df = attach_why_model_likes_it(df, bundle, model)
+            active_feats = list(getattr(df, "attrs", {}).get("active_features_used", []))
+        else:
+            df["Why Model Likes It"] = "⚠️ No model context"
+            df["Why_Feature_Count"] = 0
+            df.attrs["active_features_used"] = []
+    except Exception as e:
+        df["Why Model Likes It"] = f"⚠️ Explainer failed: {e}"
+        df["Why_Feature_Count"] = 0
+        df.attrs["active_features_used"] = []
 
-        # Market response
-        'Sharp_Line_Magnitude',
-        'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
+    # --- 7) Model-vs-Market seasoning (only if those cols were active in the model) ---
+    ACTIVE_FEATS = set(active_feats)
 
-        # Engineered odds shift decomposition
-        'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
+    def _is_active(col: str) -> bool:
+        return col in ACTIVE_FEATS
 
-        # Engineered interactions
-        'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',
-    
-        # Reversal logic
-        'Value_Reversal_Flag','Odds_Reversal_Flag',
+    def _num(row, col):
+        v = row.get(col)
+        if isinstance(v, str):
+            v = v.replace('\u2212','-').replace(',', '').strip()
+            if v in ('', '—', '–'):
+                return np.nan
+        return pd.to_numeric(v, errors='coerce')
 
-        # Mispricing + cross-market alignment
-        'Market_Mispricing','Abs_Market_Mispricing',
-        'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
-        'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap',
-        'Total_vs_Spread_ProbGap','CrossMarket_Prob_Gap_Exists',
+    emit_model_market = any([
+        _is_active('Outcome_Model_Spread'),
+        _is_active('Outcome_Market_Spread'),
+        _is_active('Outcome_Spread_Edge'),
+        _is_active('Outcome_Cover_Prob'),
+        _is_active('model_fav_vs_market_fav_agree'),
+    ])
 
-        # Movement diagnostics
-        'Line_Moved_Away_From_Team','Pct_Line_Move_From_Opening','Pct_Line_Move_Bin',
-        'Potential_Overmove_Flag','Potential_Overmove_Total_Pct_Flag','Mispricing_Flag',
-        'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
-        # 'Abs_Line_Move_Z',  # (optional in display)
-        'Pct_Line_Move_Z',
+    if emit_model_market:
+        msgs = df["Why Model Likes It"].astype(str).tolist()
+        recs = df.to_dict('records')
+        for i, row in enumerate(recs):
+            parts = [] if msgs[i] in ("—", "nan") else [msgs[i]]
 
-        # Small-book reliability / liquidity
-        'SmallBook_Limit_Skew','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
-        'Book_Reliability_Lift','Book_Reliability_x_Sharp',
-        'Book_Reliability_x_Magnitude','Book_Reliability_x_PROB_SHIFT',
+            _mod_spread = _num(row, 'Outcome_Model_Spread')
+            _mkt_spread = _num(row, 'Outcome_Market_Spread')
+            if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
+                parts.append(f"📐 Model Spread {_mod_spread:+.1f} vs Market {_mkt_spread:+.1f}")
 
-        # Power ratings & model/market edges
-        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
-        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
-        'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k',
-    ]
+            _edge = _num(row, 'Outcome_Spread_Edge')
+            if pd.notna(_edge):
+                parts.append(f"🎯 Spread Edge {_edge:+.1f}")
 
-    # Hybrid timing features (line + odds)
-    hybrid_timing_features = [
-        f'SharpMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-            'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-            'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-            'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-        ]
-    ]
-    hybrid_odds_timing_features = [
-        f'OddsMove_Magnitude_{b}' for b in [
-            'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-            'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-            'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-            'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-        ]
-    ]
-    features += hybrid_timing_features + hybrid_odds_timing_features
+            _cov = _num(row, 'Outcome_Cover_Prob')
+            if pd.notna(_cov):
+                parts.append(f"🛡️ Cover Prob {_cov:.0%}" + (" ✅" if _cov >= 0.55 else ""))
 
-    # Team history & streaks
-    features += [
-        'Team_Past_Avg_Model_Prob','Team_Past_Hit_Rate',
-        'Team_Past_Avg_Model_Prob_Home','Team_Past_Hit_Rate_Home',
-        'Team_Past_Avg_Model_Prob_Away','Team_Past_Hit_Rate_Away',
-        'Team_Past_Avg_Model_Prob_Fav','Team_Past_Hit_Rate_Fav',
-        'Team_Past_Avg_Model_Prob_Home_Fav','Team_Past_Hit_Rate_Home_Fav',
-        'Team_Past_Avg_Model_Prob_Away_Fav','Team_Past_Hit_Rate_Away_Fav',
-        'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
-        'Avg_Recent_Cover_Streak_Away','Avg_Recent_Cover_Streak_Fav',
-        'Avg_Recent_Cover_Streak_Home_Fav','Avg_Recent_Cover_Streak_Away_Fav',
-    ]
+            agree_val = row.get('model_fav_vs_market_fav_agree', 0)
+            agree_num = pd.to_numeric(agree_val, errors='coerce')
+            if (pd.notna(agree_num) and int(round(float(agree_num))) == 1) or \
+               (str(agree_val).strip().lower() in ('1','true','yes')):
+                parts.append("🤝 Model & Market Favor Same Team")
 
-    # Context flags (UI)
-    features += ['Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos']
-    # Define once
-    RATINGS_EDGE_UI_COLS = [
-        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
-        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
-        'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
-        'edge_x_k','mu_x_k'
-    ]
-    
-    # Guarantee presence in df so UI shows them (default NaN is best for visibility)
-    for c in RATINGS_EDGE_UI_COLS:
-        if c not in df.columns:
-            df[c] = np.nan
-    _seen = set()
-    features = [f for f in features if not (f in _seen or _seen.add(f))]
+            msgs[i] = " · ".join([p for p in parts if p and p != "—"]) or "—"
 
-  
-    # Casting helpers
-    def _ensure_cols(frame, cols, fill=0.0):
-        missing = [c for c in cols if c not in frame.columns]
-        if missing:
-            frame[missing] = fill
-        return frame
+        df["Why Model Likes It"] = msgs
+        df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
 
-    # Flag & magnitude groups used by your build_why and display
-    flag_cols = [
-        'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
-        'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book',
-        'SharpMove_Odds_Up','SharpMove_Odds_Down','Is_Home_Team_Bet',
-       
-        'Late_Game_Steam_Flag',
-        'Value_Reversal_Flag','Odds_Reversal_Flag',
-        'Hybrid_Line_Timing_Flag','Hybrid_Odds_Timing_Flag'
-    ]
-    magnitude_cols = [
-        'Sharp_Line_Magnitude','Sharp_Time_Score','Rec_Line_Magnitude',
-        'Sharp_Limit_Total','SharpMove_Odds_Mag','SharpMove_Timing_Magnitude',
-        'Abs_Line_Move_From_Opening','Abs_Odds_Move_From_Opening',
-        'Team_Past_Hit_Rate','Team_Past_Avg_Model_Prob',
-        'Team_Past_Hit_Rate_Home','Team_Past_Hit_Rate_Away',
-        'Team_Past_Avg_Model_Prob_Home','Team_Past_Avg_Model_Prob_Away'
-    ]
-
-    # Ensure all model features exist (numeric default 0)
-    df = _ensure_cols(df, features, 0.0)
-
-    # Compute Hybrid Line/Odds Timing Flags if missing
-    HYBRID_LINE_COLS = hybrid_timing_features
-    HYBRID_ODDS_COLS = hybrid_odds_timing_features
-    if 'Hybrid_Line_Timing_Flag' not in df.columns:
-        df['Hybrid_Line_Timing_Flag'] = (df[HYBRID_LINE_COLS].sum(axis=1) > 0).astype(int)
-    if 'Hybrid_Odds_Timing_Flag' not in df.columns:
-        df['Hybrid_Odds_Timing_Flag'] = (df[HYBRID_ODDS_COLS].sum(axis=1) > 0).astype(int)
-
-    # Cast flags & magnitudes to numeric
-    for col in flag_cols + magnitude_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    # --- make sure aliases/defaults exist *before* build_why runs
-    if 'Model Prob' not in df.columns and 'Model_Sharp_Win_Prob' in df.columns:
-        df['Model Prob'] = df['Model_Sharp_Win_Prob']
-
-    # sensible default for Passes_Gate if it's missing or NaN
-    core_flags = [
-        'Sharp_Move_Signal','Sharp_Limit_Jump','Market_Leader',
-        'Is_Reinforced_MultiMarket','LimitUp_NoMove_Flag','Is_Sharp_Book'
-    ]
-    for c in core_flags:
-        if c not in df.columns:
-            df[c] = 0
-    df['Passes_Gate'] = (
-        df.get('Passes_Gate')
-          .fillna((df[core_flags].fillna(0).astype(int).sum(axis=1) > 0))
-        if 'Passes_Gate' in df.columns else
-        (df[core_flags].fillna(0).astype(int).sum(axis=1) > 0)
-    )
-
-    # === build_why (unchanged, uses the casted columns above)
-    def build_why(row):
-        model_prob = row.get('Model Prob')
-        if pd.isna(model_prob):
-            return "⚠️ Missing — run apply_blended_sharp_score() first"
-
-        parts = []
-
-        # Core sharp move reasons
-        if bool(row.get('Sharp_Move_Signal', 0)): parts.append("📈 Sharp Move Detected")
-        if bool(row.get('Sharp_Limit_Jump', 0)): parts.append("💰 Limit Jumped")
-        if bool(row.get('Market_Leader', 0)): parts.append("🏆 Market Leader")
-        if bool(row.get('Is_Reinforced_MultiMarket', 0)): parts.append("📊 Multi-Market Consensus")
-        if bool(row.get('LimitUp_NoMove_Flag', 0)): parts.append("🛡️ Limit Up + No Line Move")
-        if bool(row.get('Is_Sharp_Book', 0)): parts.append("🎯 Sharp Book Signal")
-
-        # Odds & line movement
-        if bool(row.get('SharpMove_Odds_Up', 0)): parts.append("🟢 Odds Moved Up (Steam)")
-        if bool(row.get('SharpMove_Odds_Down', 0)): parts.append("🔻 Odds Moved Down (Buyback)")
-        if float(row.get('Sharp_Line_Magnitude', 0)) > 0.5: parts.append("📏 Big Line Move")
-        if float(row.get('Rec_Line_Magnitude', 0)) > 0.5: parts.append("📉 Rec Book Move")
-        if float(row.get('Sharp_Limit_Total', 0)) > 10000: parts.append("💼 Sharp High Limit")
-        if float(row.get('SharpMove_Odds_Mag', 0)) > 5: parts.append("💥 Sharp Odds Steam")
-
-        # Resistance & timing
-        
-        if bool(row.get('Late_Game_Steam_Flag', 0)): parts.append("⏰ Late Game Steam")
-        if bool(row.get('Value_Reversal_Flag', 0)): parts.append("🔄 Value Reversal")
-        if bool(row.get('Odds_Reversal_Flag', 0)): parts.append("📉 Odds Reversal")
-        if float(row.get('Sharp_Time_Score', 0)) > 0.5: parts.append("⏱️ Timing Edge")
-
-        # Team-level
-        if float(row.get('Team_Past_Hit_Rate', 0)) > 0.5: parts.append("⚔️📊 Team Historically Sharp")
-        if float(row.get('Team_Past_Avg_Model_Prob', 0)) > 0.5: parts.append("🔮 Model Favored This Team Historically")
-        if float(row.get('Avg_Recent_Cover_Streak', 0)) >= 2: parts.append("🔥 Recent Hot Streak")
-        if float(row.get('Avg_Recent_Cover_Streak_Home', 0)) >= 2: parts.append("🏠🔥 Home Streaking")
-        if float(row.get('Avg_Recent_Cover_Streak_Away', 0)) >= 2: parts.append("✈️🔥 Road Streaking")
-
-        # From open
-        if float(row.get('Abs_Line_Move_From_Opening', 0)) > 1.0: parts.append("📈 Line Moved from Open")
-        if float(row.get('Abs_Odds_Move_From_Opening', 0)) > 5.0: parts.append("💹 Odds Moved from Open")
-
-        # Cross-market + diagnostics
-        if bool(row.get('Spread_vs_H2H_Aligned', 0)): parts.append("🧩 Spread and H2H Align")
-        if bool(row.get('Total_vs_Spread_Contradiction', 0)): parts.append("⚠️ Total Contradicts Spread")
-        if bool(row.get('CrossMarket_Prob_Gap_Exists', 0)): parts.append("🔀 Cross-Market Probability Gap")
-        if bool(row.get('Potential_Overmove_Flag', 0)): parts.append("📊 Line Possibly Overmoved")
-        if bool(row.get('Potential_Overmove_Total_Pct_Flag', 0)): parts.append("📉 Total Possibly Overmoved")
-        if bool(row.get('Potential_Odds_Overmove_Flag', 0)): parts.append("🎯 Odds Possibly Overmoved")
-        if bool(row.get('Line_Moved_Toward_Team', 0)): parts.append("🧲 Line Moved Toward This Team")
-        if bool(row.get('Line_Moved_Away_From_Team', 0)): parts.append("🚫 Line Moved Away From This Team")
-     
-        if float(row.get('Abs_Line_Move_Z', 0)) > 1: parts.append("📊 Unusual Line Z-Move")
-        if float(row.get('Pct_Line_Move_Z', 0)) > 1: parts.append("📈 Abnormal % Line Z-Score")
-        if bool(row.get('Mispricing_Flag', 0)): parts.append("💸 Market Mispricing Detected")
-        if bool(row.get('Hybrid_Line_Timing_Flag', 0)): parts.append("⏱️ Sharp Line Timing Bucket")
-        if bool(row.get('Hybrid_Odds_Timing_Flag', 0)): parts.append("🕰️ Sharp Odds Timing Bucket")
-        if bool(row.get('Is_Weekend', 0)): parts.append("📅 Weekend Game")
-        if bool(row.get('Is_Night_Game', 0)): parts.append("🌙 Night Game")
-        if bool(row.get('Is_PrimeTime', 0)): parts.append("⭐ Prime Time Matchup")
-        # --- Power ratings & outcome model edges (robust & tolerant) ---
-        def _num(row, col):
-            v = row.get(col)
-            # normalize common formatting issues
-            if isinstance(v, str):
-                v = v.replace('\u2212','-').replace(',','').strip()
-                if v in ('', '—', '–'):
-                    return np.nan
-            return pd.to_numeric(v, errors='coerce')
-        
-        
-        
-        _mod_spread, _mkt_spread = _num(row,'Outcome_Model_Spread'), _num(row,'Outcome_Market_Spread')
-        if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
-            parts.append(f"📐 Model Spread {_mod_spread:+.1f} vs Market {_mkt_spread:+.1f}")
-        
-        _edge = _num(row,'Outcome_Spread_Edge')
-        if pd.notna(_edge):     # or abs(_edge) >= 0.1 if you want a threshold
-            parts.append(f"🎯 Spread Edge {_edge:+.1f}")
-        
-        _cov = _num(row,'Outcome_Cover_Prob')
-        if pd.notna(_cov):
-            parts.append(f"🛡️ Cover Prob {_cov:.0%}" + (" ✅" if _cov >= 0.55 else ""))
-        
-        # robust agree check
-        agree_val = row.get('model_fav_vs_market_fav_agree', 0)
-        agree_num = pd.to_numeric(agree_val, errors='coerce')
-        if (pd.notna(agree_num) and int(round(float(agree_num))) == 1) or \
-           (str(agree_val).strip().lower() in ('1','true','yes')):
-            parts.append("🤝 Model & Market Favor Same Team")
-        
-     
-        # Hybrid timing buckets → nice human labels
-        HYBRID_LINE_COLS_LOCAL = [
-            'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
-            'SharpMove_Magnitude_Overnight_LateGame','SharpMove_Magnitude_Overnight_Urgent',
-            'SharpMove_Magnitude_Early_VeryEarly','SharpMove_Magnitude_Early_MidRange',
-            'SharpMove_Magnitude_Early_LateGame','SharpMove_Magnitude_Early_Urgent',
-            'SharpMove_Magnitude_Midday_VeryEarly','SharpMove_Magnitude_Midday_MidRange',
-            'SharpMove_Magnitude_Midday_LateGame','SharpMove_Magnitude_Midday_Urgent',
-            'SharpMove_Magnitude_Late_VeryEarly','SharpMove_Magnitude_Late_MidRange',
-            'SharpMove_Magnitude_Late_LateGame','SharpMove_Magnitude_Late_Urgent'
-        ]
-        HYBRID_ODDS_COLS_LOCAL = [
-            'OddsMove_Magnitude_Overnight_VeryEarly','OddsMove_Magnitude_Overnight_MidRange',
-            'OddsMove_Magnitude_Overnight_LateGame','OddsMove_Magnitude_Overnight_Urgent',
-            'OddsMove_Magnitude_Early_VeryEarly','OddsMove_Magnitude_Early_MidRange',
-            'OddsMove_Magnitude_Early_LateGame','OddsMove_Magnitude_Early_Urgent',
-            'OddsMove_Magnitude_Midday_VeryEarly','OddsMove_Magnitude_Midday_MidRange',
-            'OddsMove_Magnitude_Midday_LateGame','OddsMove_Magnitude_Midday_Urgent',
-            'OddsMove_Magnitude_Late_VeryEarly','OddsMove_Magnitude_Late_MidRange',
-            'OddsMove_Magnitude_Late_LateGame','OddsMove_Magnitude_Late_Urgent'
-        ]
-        EMOJI_MAP = {'Overnight':'🌙','Early':'🌅','Midday':'🌞','Late':'🌆'}
-
-        for col in HYBRID_LINE_COLS_LOCAL:
-            if float(row.get(col, 0)) > 0.25:
-                bucket = col.replace('SharpMove_Magnitude_', '').replace('_', ' ')
-                epoch = col.split('_')[2]  # Overnight/Early/Midday/Late
-                parts.append(f"{EMOJI_MAP.get(epoch, '⏱️')} {bucket} Sharp Move")
-
-        for col in HYBRID_ODDS_COLS_LOCAL:
-            if float(row.get(col, 0)) > 0.5:
-                bucket = col.replace('OddsMove_Magnitude_', '').replace('_', ' ')
-                epoch = col.split('_')[2]
-                parts.append(f"{EMOJI_MAP.get(epoch, '⏱️')} {bucket} Odds Steam")
-
-        if not parts and not bool(row.get('Passes_Gate', False)):
-            return "🕓 Still Calculating Signal"
-        return " + ".join(parts) if parts else "🤷‍♂️ Still Calculating"
-
-    # keep this AFTER the aliasing above
-    df['Why Model Likes It'] = df.apply(build_why, axis=1)
-
-    # === Model_Confidence_Tier for summary compatibility
-    df['Model_Confidence_Tier'] = df['Confidence Tier']
-
-    # === Timing Opportunity Models (unchanged scaffold)
-    # === Timing Opportunity (UI-only) — compute on df_summary_base ===
-    # Normalize market labels once
-    # === Timing Opportunity Models (UI-only) — compute on df ===
-    # Normalize market labels once
+    # --- 8) Timing Opportunity (UI-only) ---
+    # normalize market labels
     df['Market'] = df['Market'].astype(str).str.strip().str.lower()
-    
-    # Load timing models (saved as timing_{market})
-    timing_models = {}
-    for _m in ['spreads', 'totals', 'h2h']:
-        try:
-            payload = load_model_from_gcs(sport=sport, market=f"timing_{_m}", bucket_name=GCS_BUCKET) or {}
-            timing_models[_m] = payload.get("model") or payload.get("calibrator")
-        except Exception:
-            timing_models[_m] = None
-    
-    # Feature set (fallback if lists not in scope)
-    try:
-        _hybrid_line = hybrid_timing_features
-    except NameError:
-        _hybrid_line = []
-    try:
-        _hybrid_odds = hybrid_odds_timing_features
-    except NameError:
-        _hybrid_odds = []
-    
-    timing_feature_cols = (
-        ['Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag']
-        + _hybrid_line + _hybrid_odds
-    )
-    
-    # Ensure feature columns exist (UI-only)
+
+    # (a) feature lists
+    _hybrid_line = list(hybrid_timing_features or [])
+    _hybrid_odds = list(hybrid_odds_timing_features or [])
+    timing_feature_cols = ['Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag'] + _hybrid_line + _hybrid_odds
     for c in timing_feature_cols:
         if c not in df.columns:
             df[c] = 0.0
-    
-    # Ensure output columns exist (prevents KeyError downstream)
+
+    # (b) get timing models (preloaded or lazy-load from GCS)
+    if timing_models is None:
+        timing_models = {}
+        if sport and gcs_bucket and ('load_model_from_gcs' in globals()):
+            for _m in ['spreads', 'totals', 'h2h']:
+                try:
+                    payload = load_model_from_gcs(sport=sport, market=f"timing_{_m}", bucket_name=gcs_bucket) or {}
+                    timing_models[_m] = payload.get("model") or payload.get("calibrator") or None
+                except Exception:
+                    timing_models[_m] = None
+        else:
+            timing_models = {'spreads': None, 'totals': None, 'h2h': None}
+
+    # ensure outputs
     if 'Timing_Opportunity_Score' not in df.columns:
         df['Timing_Opportunity_Score'] = np.nan
     if 'Timing_Stage' not in df.columns:
         df['Timing_Stage'] = '—'
-    
-    def _align_X(X, model):
-        names = getattr(model, 'feature_names_in_', None)
+
+    def _align_X(X, mdl):
+        names = getattr(mdl, 'feature_names_in_', None)
         if names is not None:
             return X.reindex(columns=list(names), fill_value=0.0)
-        n = getattr(model, 'n_features_in_', None)
+        n = getattr(mdl, 'n_features_in_', None)
         if n is not None and X.shape[1] != n:
             keep = [c for c in timing_feature_cols if c in X.columns][:n]
             return X.reindex(columns=keep, fill_value=0.0)
         return X
-    
-    # Score by market on df
-    for _m in ['spreads', 'totals', 'h2h']:
-        _model = timing_models.get(_m)
-        if _model is None:
+
+    for _m, mdl in (timing_models or {}).items():
+        if mdl is None:
             continue
-        _mask = df['Market'].eq(_m)
-        if not _mask.any():
+        mask = df['Market'].eq(_m)
+        if not mask.any():
             continue
-    
-        X = (df.loc[_mask, timing_feature_cols]
-             .apply(pd.to_numeric, errors='coerce')
-             .fillna(0.0))
-        X = _align_X(X, _model)
-    
+        X = (df.loc[mask, timing_feature_cols]
+               .apply(pd.to_numeric, errors='coerce')
+               .fillna(0.0))
+        X = _align_X(X, mdl)
         try:
-            p = (_model.predict_proba(X)[:, 1] if hasattr(_model, 'predict_proba')
-                 else np.clip(_model.predict(X), 0, 1))
-            df.loc[_mask, 'Timing_Opportunity_Score'] = p
-        except Exception as e:
-            st.error(f"⚠️ Timing scoring failed for '{_m}': {e}")
-    
-    # Clip and bucket
+            p = (mdl.predict_proba(X)[:, 1] if hasattr(mdl, 'predict_proba')
+                 else np.clip(mdl.predict(X), 0, 1))
+            df.loc[mask, 'Timing_Opportunity_Score'] = p
+        except Exception:
+            # keep silent in diagnostics path; leave NaNs
+            pass
+
     df['Timing_Opportunity_Score'] = pd.to_numeric(df['Timing_Opportunity_Score'], errors='coerce').fillna(0.0).clip(0, 1)
-    
+
     def _assign_timing_stage(p: pd.Series) -> pd.Series:
         p = p.fillna(0.0)
-        bins = [0.0, 0.40, 0.66, 1.01]
+        bins   = [0.0, 0.40, 0.66, 1.01]
         labels = ["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
         idx = np.digitize(p.to_numpy(), bins, right=False) - 1
         idx = np.clip(idx, 0, len(labels)-1)
         return pd.Series([labels[i] for i in idx], index=p.index)
-    
+
     df['Timing_Stage'] = _assign_timing_stage(df['Timing_Opportunity_Score'])
 
-
-    # === Final Output
-    # Base diagnostic columns
+    # --- 9) Return only base + ACTIVE feature columns (so UI stays aligned) ---
     base_cols = [
         'Game_Key','Market','Outcome','Bookmaker',
         'Tier_Change','Confidence Trend','Line/Model Direction',
@@ -4763,14 +4674,12 @@ def compute_diagnostics_vectorized(df):
         'Model_Confidence_Tier',
         'Timing_Opportunity_Score','Timing_Stage'
     ]
+    active_cols_present = [c for c in active_feats if c in df.columns]
+    keep_cols = [c for c in base_cols if c in df.columns] + active_cols_present
 
-    # Only include features that actually exist (we ensured most above)
-    feature_cols_present = [c for c in features if c in df.columns]
-
-    diagnostics_df = df[base_cols + feature_cols_present].rename(columns={'Tier_Change': 'Tier Δ'})
-  
-    
+    diagnostics_df = df[keep_cols].rename(columns={'Tier_Change':'Tier Δ'})
     return diagnostics_df
+
 
 
 def _as_num_seq(x):
