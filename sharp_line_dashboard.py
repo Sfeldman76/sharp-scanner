@@ -2827,7 +2827,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Is_Reinforced_MultiMarket',#'Market_Leader','LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            'Sharp_Line_Magnitude','Is_Home_Team_Bet',
+            #'Sharp_Line_Magnitude',
+            'Is_Home_Team_Bet',
             'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
@@ -2854,7 +2855,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
             'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
-            'Book_Reliability_Score',
+            #'Book_Reliability_Score',
             'Book_Reliability_Lift','Book_Reliability_x_Sharp',
             'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
@@ -4024,19 +4025,24 @@ def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, mo
     }
 
 
+
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import StratifiedKFold
 
-
-def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
+def train_timing_opportunity_model(
+    sport: str = "NBA",
+    days_back: int = 35,
+    table_fq: str = "sharplogger.sharp_data.sharp_scores_full",  # <- use the main scored table
+):
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
 
-    # === Load historical scored data
+    # === Load historical scored data (robust to Scored being missing) ===
     query = f"""
         SELECT *
-        FROM `sharplogger.sharp_data.scores_with_features`
+        FROM `{table_fq}`
         WHERE UPPER(Sport) = '{sport.upper()}'
-          AND Scored = TRUE
+          AND (Scored IS NULL OR Scored = TRUE)
           AND SHARP_HIT_BOOL IS NOT NULL
           AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
     """
@@ -4045,31 +4051,44 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
         st.warning("⚠️ No historical sharp picks available.")
         return
 
-    # Normalize types/casing used below
+    # === Normalize casing + types ===
     df = df.copy()
-    df['Market'] = df['Market'].astype(str).str.lower().str.strip()
+    # prefer existing Market if present; fallback to Market_norm if you've standardized there
+    if 'Market' in df.columns:
+        df['Market'] = df['Market'].astype(str).str.lower().str.strip()
+    elif 'Market_norm' in df.columns:
+        df['Market'] = df['Market_norm'].astype(str).str.lower().str.strip()
+    else:
+        df['Market'] = ""  # will lead to per-market empties and skip
+
+    # canonical-only to avoid inverse duplication
+    if 'Was_Canonical' in df.columns:
+        df = df[df['Was_Canonical'].fillna(1).astype(int) == 1]
+
     df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(int)
 
-    # If Model_Sharp_Win_Prob is missing, create a neutral column
+    # If Model_Sharp_Win_Prob is missing (e.g., spreads train excluded it), keep neutral fallback
     if 'Model_Sharp_Win_Prob' not in df.columns:
         df['Model_Sharp_Win_Prob'] = 0.0
     else:
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce').fillna(0.0)
 
     markets = ['spreads', 'totals', 'h2h']
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
     for market in markets:
         df_market = df[df['Market'] == market].copy()
         if df_market.empty:
             st.warning(f"⚠️ No rows for market: {market}")
             continue
 
-        # Ensure numeric for movement columns (they exist in your schema)
+        # Ensure numeric for movement columns introduced in your pipeline
         for c in ['Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening']:
             if c not in df_market.columns:
                 df_market[c] = 0.0
             df_market[c] = pd.to_numeric(df_market[c], errors='coerce').fillna(0.0)
 
-        # Label: “good timing” when we hit + (both moves not already extreme) OR the model was strong
+        # --- Label definition ---
         mv_thresh  = df_market['Abs_Line_Move_From_Opening'].quantile(0.80)
         odd_thresh = df_market['Abs_Odds_Move_From_Opening'].quantile(0.80)
         df_market['TIMING_OPPORTUNITY_LABEL'] = (
@@ -4082,23 +4101,33 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
             )
         ).astype(int)
 
-        # Feature list (present in your schema)
+        # --- Feature set: movement + hybrid timing (present in your schema) ---
         base_feats = [
             'Abs_Line_Move_From_Opening',
             'Abs_Odds_Move_From_Opening',
-            'Late_Game_Steam_Flag'
+            'Late_Game_Steam_Flag',
         ]
-        sharp_blocks = [
+
+        # Hybrid timing magnitude blocks you’ve standardized
+        blocks = [
             'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
             'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
             'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
             'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
         ]
-        timing_feats = [f'SharpMove_Magnitude_{b}' for b in sharp_blocks]
-        odds_feats   = [f'OddsMove_Magnitude_{b}' for b in sharp_blocks]
+        timing_feats = [f'SharpMove_Magnitude_{b}' for b in blocks]
+        odds_feats   = [f'OddsMove_Magnitude_{b}' for b in blocks]
 
-        # Keep only features that actually exist
-        feature_cols = [c for c in base_feats + timing_feats + odds_feats if c in df_market.columns]
+        feature_cols = [c for c in (base_feats + timing_feats + odds_feats) if c in df_market.columns]
+
+        # Optional: include Minutes_To_Game_Tier if available (handles both numeric and categorical)
+        if 'Minutes_To_Game_Tier' in df_market.columns:
+            if pd.api.types.is_numeric_dtype(df_market['Minutes_To_Game_Tier']):
+                feature_cols.append('Minutes_To_Game_Tier')
+            else:
+                df_market['Minutes_To_Game_Tier_num'] = df_market['Minutes_To_Game_Tier'].astype(str).str.strip().factorize()[0].astype(float)
+                feature_cols.append('Minutes_To_Game_Tier_num')
+
         if not feature_cols:
             st.warning(f"⚠️ No usable features for {market} — skipping.")
             continue
@@ -4106,7 +4135,7 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
         X = df_market[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
         y = df_market['TIMING_OPPORTUNITY_LABEL']
 
-        # Safety: enough samples & both classes present & enough per-class for cv=5
+        # --- Safety checks for CV ---
         if y.nunique() < 2:
             st.warning(f"⚠️ Not enough variation in label for {market} — skipping.")
             continue
@@ -4115,22 +4144,22 @@ def train_timing_opportunity_model(sport: str = "NBA", days_back: int = 35):
             st.warning(f"⚠️ Not enough samples for robust CV (n={len(y)}, min_class={n_min_class}) — skipping {market}.")
             continue
 
-        # Train calibrated model
-        base = GradientBoostingClassifier()
-        calibrated = CalibratedClassifierCV(base, method='isotonic', cv=5)
+        # --- Train calibrated model ---
+        base = GradientBoostingClassifier(random_state=42)
+        calibrated = CalibratedClassifierCV(base, method='isotonic', cv=cv)
         calibrated.fit(X, y)
 
-        # Save the timing model; it does NOT need book_reliability_map
+        # --- Save under the timing_{market} namespace; store the model in the "model" slot ---
         save_model_to_gcs(
-            model=calibrated,           # store under "model" slot
-            calibrator=None,            # no separate calibrator object
+            model=calibrated,
+            calibrator=None,                 # no separate calibrator object for timing model
             sport=sport,
-            market=f"timing_{market}",  # namespaced market
+            market=f"timing_{market}",
             bucket_name=GCS_BUCKET,
-            team_feature_map=None,      # not used here
-            book_reliability_map=None   # keep explicit to avoid NameError
+            team_feature_map=None            # not used for timing models
         )
-        st.success(f"✅ Timing model saved for {market.upper()}")
+
+        st.success(f"✅ Timing model saved for {sport.upper()} · {market.upper()} (features={len(feature_cols)})")
 
     
 def read_market_weights_from_bigquery():
