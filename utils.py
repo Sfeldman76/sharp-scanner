@@ -3181,43 +3181,94 @@ def _suffix_snapshot(df, tag):
         logger.warning("❗ %s introduced %s", tag, bad)
 
 
-
 def predict_blended(bundle, X, model=None, iso=None):
-    """Return calibrated/blended probs in [1e-6, 1-1e-6] or None."""
-    def _cal_pred(m, cal, X_):
-        if cal is not None:
-            if hasattr(cal, "predict_proba"):
-                p = cal.predict_proba(X_)
-                return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
-            if hasattr(cal, "predict"):
-                return np.asarray(cal.predict(X_), dtype=float)
+    """
+    Return calibrated/blended probs in [1e-6, 1-1e-6] or None.
+    Supports:
+      - dict bundles with (model_logloss, calibrator_logloss) and/or (model_auc, calibrator_auc)
+      - dict with (model, calibrator)
+      - tuple/list: (model, calibrator)
+      - single calibrated estimator exposing predict_proba(X)
+    """
+
+    def _predict_one(m, cal, X_):
+        # If we were handed a calibrated estimator (e.g., CalibratedClassifierCV)
+        if m is not None and hasattr(m, "predict_proba") and cal is None and hasattr(m, "base_estimator_"):
+            p = m.predict_proba(X_)
+            return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+
+        # Normal path: get model prob, then calibrate that 1-D vector
+        p_raw = None
         if m is not None:
             if hasattr(m, "predict_proba"):
                 p = m.predict_proba(X_)
-                return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
-            if hasattr(m, "predict"):
-                return np.asarray(m.predict(X_), dtype=float)
+                p_raw = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+            elif hasattr(m, "decision_function"):
+                # Some models provide a score; map to (0,1) with logistic if calibrator expects that.
+                s = np.asarray(m.decision_function(X_), dtype=float)
+                # If we have a calibrator, pass the raw score; otherwise squash to prob-ish
+                p_raw = s if cal is not None else 1.0 / (1.0 + np.exp(-s))
+
+        # Apply calibrator if present
+        if cal is not None and p_raw is not None:
+            # IsotonicRegression/Platt/any regressor-like: predict/transform on 1-D inputs
+            if hasattr(cal, "predict"):
+                return np.asarray(cal.predict(p_raw), dtype=float)
+            if hasattr(cal, "transform"):  # some isotonic implementations expose transform
+                return np.asarray(cal.transform(p_raw), dtype=float)
+            if callable(cal):
+                return np.asarray(cal(p_raw), dtype=float)
+
+        # Fallbacks
+        if p_raw is not None:
+            return np.asarray(p_raw, dtype=float)
+
+        # If no model but calibrator is itself a classifier (rare), allow it
+        if cal is not None and hasattr(cal, "predict_proba"):
+            p = cal.predict_proba(X_)
+            return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+        if cal is not None and hasattr(cal, "predict"):
+            # Dangerous unless cal is a calibrated classifier; kept as last resort
+            return np.asarray(cal.predict(X_), dtype=float)
+
         return None
 
-    if isinstance(bundle, dict) and any(k in bundle for k in ("model_logloss","model_auc")):
-        mL  = bundle.get("model_logloss")
-        cL  = bundle.get("calibrator_logloss")
-        mA  = bundle.get("model_auc")
-        cA  = bundle.get("calibrator_auc")
-        w   = float(bundle.get("best_w", 1.0))
-        pL  = _cal_pred(mL, cL, X)
-        pA  = _cal_pred(mA, cA, X)
-        if pL is not None and pA is not None and len(pL) == len(pA):
-            return np.clip(w*pL + (1.0-w)*pA, 1e-6, 1-1e-6)
-        if pL is not None:
-            return np.clip(pL, 1e-6, 1-1e-6)
-        if pA is not None:
-            return np.clip(pA, 1e-6, 1-1e-6)
+    # Unpack tuple/list bundles
+    if isinstance(bundle, (tuple, list)) and len(bundle) >= 1 and model is None and iso is None:
+        model = bundle[0]
+        iso   = bundle[1] if len(bundle) > 1 else None
 
-    # legacy single-model
-    p = _cal_pred(model, iso, X)
-    return np.clip(p, 1e-6, 1-1e-6) if p is not None else None
+    # Dict bundle: try 2-model blend (logloss/auc), else single pair (model/calibrator)
+    if isinstance(bundle, dict):
+        # Two-model blend path
+        if ("model_logloss" in bundle) or ("model_auc" in bundle):
+            mL = bundle.get("model_logloss")
+            cL = bundle.get("calibrator_logloss")
+            mA = bundle.get("model_auc")
+            cA = bundle.get("calibrator_auc")
+            w  = float(bundle.get("best_w", 1.0))
 
+            pL = _predict_one(mL, cL, X) if (mL is not None or cL is not None) else None
+            pA = _predict_one(mA, cA, X) if (mA is not None or cA is not None) else None
+
+            if pL is not None and pA is not None and len(pL) == len(pA):
+                p = w * pL + (1.0 - w) * pA
+                return np.clip(p, 1e-6, 1 - 1e-6)
+            if pL is not None:
+                return np.clip(pL, 1e-6, 1 - 1e-6)
+            if pA is not None:
+                return np.clip(pA, 1e-6, 1 - 1e-6)
+
+        # Single pair path
+        if ("model" in bundle) or ("calibrator" in bundle):
+            m = bundle.get("model")
+            c = bundle.get("calibrator")
+            p = _predict_one(m, c, X)
+            return np.clip(p, 1e-6, 1 - 1e-6) if p is not None else None
+
+    # Legacy args path
+    p = _predict_one(model, iso, X)
+    return np.clip(p, 1e-6, 1 - 1e-6) if p is not None else None
 
 
 
@@ -3256,22 +3307,24 @@ def apply_blended_sharp_score(
     total_start = time.time()
     scored_all = []
     # ---------- models presence ----------
+    # ---------- models presence ----------
     trained_models = trained_models or {}
-    trained_models_lc = {
-        str(k).strip().lower(): v
-        for k, v in trained_models.items()
-        if isinstance(v, dict)
-    }
-    HAS_MODELS = any(
-        isinstance(v, dict) and ("model" in v or "calibrator" in v)
-        for v in trained_models_lc.values()
-    )
-    model_markets_lower = {
-        mk for mk, bundle in trained_models_lc.items()
-        if isinstance(bundle, dict) and ("model" in bundle or "calibrator" in bundle)
-    }
-    logger.info("📦 HAS_MODELS=%s; model markets: %s", HAS_MODELS, sorted(model_markets_lower))
-
+    
+    # normalize keys but don’t filter out tuples/objects
+    trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
+    
+    def _has_any_model(bundle):
+        if isinstance(bundle, dict):
+            return any(k in bundle for k in (
+                "model","calibrator",
+                "model_logloss","model_auc",
+                "calibrator_logloss","calibrator_auc"
+            ))
+        return bundle is not None  # accept tuples or single models too
+    
+    HAS_MODELS = any(_has_any_model(v) for v in trained_models_norm.values())
+    logger.info("📦 HAS_MODELS=%s; model markets: %s",
+                HAS_MODELS, sorted(trained_models_norm.keys()))
     # ---------- frame guard ----------
     if df is None or len(df) == 0:
         df = pd.DataFrame()
@@ -3895,113 +3948,162 @@ def apply_blended_sharp_score(
         markets_present = []
     _suffix_snapshot(df, "before canon ")
     # ---------- NO-MODEL / NO-ELIGIBLE-MARKETS EARLY EXIT ----------
-    if (not HAS_MODELS) or (len(markets_present) == 0):
-        logger.info("ℹ️ No trained models / no eligible markets present; returning minimally-enriched, unscored snapshots.")
-    
-        base = df.copy()
-    
-        # Stamp prediction columns (no placeholders helper)
-        for col, default in [
-            ('Model_Sharp_Win_Prob', np.nan),
-            ('Model_Confidence',     np.nan),
-            ('Scored_By_Model',      False),
-            ('Scoring_Market',       base.get('Market_norm', pd.Series(index=base.index, dtype='object'))),
-            ('Was_Canonical',        pd.NA),
-        ]:
-            if col not in base.columns:
-                base[col] = default
-    
-        # Friendly tier for unscored rows
-        if 'Model_Confidence_Tier' not in base.columns:
-            base['Model_Confidence_Tier'] = pd.Categorical(
-                values=['❔ No Model'] * len(base),
-                categories=["❔ No Model", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
-            )
-        else:
-            # if present, set to "No Model" for all
-            base['Model_Confidence_Tier'] = '❔ No Model'
-    
-        # Commence hour (needed for Team_Key)
-        if 'Commence_Hour' not in base.columns:
-            base['Commence_Hour'] = pd.to_datetime(
-                base.get('Game_Start', pd.NaT), utc=True, errors='coerce'
-            ).dt.floor('h')
-    
-        # Latest snapshot per (Game, Market, Outcome, Bookmaker)
-        essential = {'Snapshot_Timestamp','Game_Key','Market','Outcome','Bookmaker'}
-        if essential.issubset(base.columns):
-            base = (
-                base.sort_values('Snapshot_Timestamp')
-                    .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
-            )
-    
-        # Team_Key without np.char.* (prevents the TypeError you hit)
-        for c, default in [
-            ('Home_Team_Norm',''), ('Away_Team_Norm',''), ('Market',''),
-            ('Outcome_Norm',''),   ('Outcome','')
-        ]:
-            if c not in base.columns:
-                base[c] = default
-    
-        # Prefer Outcome_Norm when available, else Outcome
-        on = base['Outcome_Norm'].astype('string').fillna(
-                base['Outcome'].astype('string').fillna('')
-             )
-        ht = base['Home_Team_Norm'].astype('string').fillna('')
-        at = base['Away_Team_Norm'].astype('string').fillna('')
-        ch = base['Commence_Hour'].astype('string').fillna('')
-        mk = base['Market'].astype('string').fillna('')
-    
-        base['Team_Key'] = (
-            ht.str.cat(at, sep='_')
-              .str.cat(ch, sep='_')
-              .str.cat(mk, sep='_')
-              .str.cat(on, sep='_')
-        )
-    
-        logger.info("✅ Returning %d unscored rows (no models).", len(base))
-        return base
+    # ======================= MARKET RESOLUTION + SCORING LOOP =======================
+# Canonical market mapping
+MARKET_KEY_MAP = {
+    "spread": "spreads", "spreads": "spreads",
+    "total": "totals",   "totals": "totals",
+    "moneyline": "h2h",  "ml": "h2h", "h2h": "h2h",
+}
 
-    # 5) Scoring loop (no 'continue' anywhere)
+# Normalize the incoming trained_models without discarding tuples/objects
+trained_models = trained_models or {}
+trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
+
+def _has_any_model(bundle):
+    if isinstance(bundle, dict):
+        return any(k in bundle for k in (
+            "model","calibrator","model_logloss","model_auc",
+            "calibrator_logloss","calibrator_auc"
+        ))
+    return bundle is not None
+
+HAS_MODELS = any(_has_any_model(v) for v in trained_models_norm.values())
+logger.info("📦 HAS_MODELS=%s; model markets: %s",
+            HAS_MODELS, sorted(trained_models_norm.keys()))
+
+# Normalize DF markets ONCE (before building markets_present)
+if 'Market' in df.columns and not df.empty:
+    m_raw = df['Market'].astype('string').str.lower().str.strip()
+    df['Market_norm'] = m_raw.map(lambda s: MARKET_KEY_MAP.get(s, s)).astype('category')
+else:
+    df['Market_norm'] = pd.Series(pd.NA, index=df.index, dtype='category')
+
+# Determine which markets are present AND have models
+if HAS_MODELS and not df.empty:
+    markets_present = [
+        mk for mk in df['Market_norm'].dropna().unique().tolist()
+        if mk in trained_models_norm
+    ]
+else:
+    markets_present = []
+
+_suffix_snapshot(df, "before canon")
+
+# ---------- NO-MODEL / NO-ELIGIBLE-MARKETS EARLY EXIT ----------
+if (not HAS_MODELS) or (len(markets_present) == 0):
+    logger.info("ℹ️ No trained models / no eligible markets present; returning minimally-enriched, unscored snapshots.")
+    base = df.copy()
+
+    # Stamp prediction columns
+    for col, default in [
+        ('Model_Sharp_Win_Prob', np.nan),
+        ('Model_Confidence',     np.nan),
+        ('Scored_By_Model',      False),
+        ('Scoring_Market',       base.get('Market_norm', pd.Series(index=base.index, dtype='object'))),
+        ('Was_Canonical',        pd.NA),
+    ]:
+        if col not in base.columns:
+            base[col] = default
+
+    # Friendly tier for unscored rows
+    if 'Model_Confidence_Tier' not in base.columns:
+        base['Model_Confidence_Tier'] = pd.Categorical(
+            values=['❔ No Model'] * len(base),
+            categories=["❔ No Model", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
+        )
+    else:
+        base['Model_Confidence_Tier'] = '❔ No Model'
+
+    # Commence hour (needed for Team_Key)
+    if 'Commence_Hour' not in base.columns:
+        base['Commence_Hour'] = pd.to_datetime(
+            base.get('Game_Start', pd.NaT), utc=True, errors='coerce'
+        ).dt.floor('h')
+
+    # Latest snapshot per (Game, Market, Outcome, Bookmaker)
+    essential = {'Snapshot_Timestamp','Game_Key','Market','Outcome','Bookmaker'}
+    if essential.issubset(base.columns):
+        base = (
+            base.sort_values('Snapshot_Timestamp')
+                .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last')
+        )
+
+    # Team_Key (no np.char.*)
+    for c, default in [
+        ('Home_Team_Norm',''), ('Away_Team_Norm',''), ('Market',''),
+        ('Outcome_Norm',''),   ('Outcome','')
+    ]:
+        if c not in base.columns:
+            base[c] = default
+
+    on = base['Outcome_Norm'].astype('string').fillna(base['Outcome'].astype('string').fillna(''))
+    ht = base['Home_Team_Norm'].astype('string').fillna('')
+    at = base['Away_Team_Norm'].astype('string').fillna('')
+    ch = base['Commence_Hour'].astype('string').fillna('')
+    mk = base['Market'].astype('string').fillna('')
+
+    base['Team_Key'] = ht.str.cat([at, ch, mk, on], sep='_')
+
+    logger.info("✅ Returning %d unscored rows (no models).", len(base))
+    return base
+    
+    # ------------------------ 5) SCORING LOOP ------------------------
     for mkt in markets_present:
         mask = (df['Market_norm'] == mkt)
         df_m = df.loc[mask].copy()
     
-        # Resolve bundle inside loop
-        bundle = (trained_models_by_market or {}).get(mkt)
-        model  = None
-        iso    = None
+        # ----- resolve the bundle for this market (dict / tuple / object) -----
+        bundle = trained_models_norm.get(mkt)
+        model = iso = None
         if isinstance(bundle, dict):
-            if ("model_logloss" in bundle) or ("model_auc" in bundle):
-                model = bundle.get("model_logloss") or bundle.get("model_auc")
-                iso   = bundle.get("calibrator_logloss") or bundle.get("calibrator_auc")
-            else:
-                model = bundle.get("model")
-                iso   = bundle.get("calibrator")
-        
-       
+            # Prefer explicit logloss/auc pair; else generic model/calibrator
+            model = bundle.get("model_logloss") or bundle.get("model_auc") or bundle.get("model")
+            iso   = bundle.get("calibrator_logloss") or bundle.get("calibrator_auc") or bundle.get("calibrator")
+        elif isinstance(bundle, (tuple, list)):
+            model = bundle[0] if len(bundle) > 0 else None
+            iso   = bundle[1] if len(bundle) > 1 else None
+        else:
+            model = bundle  # bare model or calibrated estimator
+    
+        if not _has_any_model(bundle):
+            logger.warning("⚠️ No usable model bundle for %s; available=%s",
+                           mkt, list(trained_models_norm.keys()))
+            # stamp placeholders on all rows in this market
+            for col, default in [
+                ('Model_Sharp_Win_Prob', np.nan),
+                ('Model_Confidence',     np.nan),
+                ('Scored_By_Model',      False),
+                ('Scoring_Market',       mkt),
+            ]:
+                if col not in df.columns:
+                    df[col] = default
+                else:
+                    df.loc[mask, col] = default
+            continue
+    
         # ===== Build per-market frame & canonical split =====
         df_m['Outcome'] = df_m['Outcome'].astype(str).str.lower().str.strip()
         df_m['Outcome_Norm'] = df_m['Outcome']
         df_m['Value'] = pd.to_numeric(df_m['Value'], errors='coerce')
         df_m['Commence_Hour'] = pd.to_datetime(df_m['Game_Start'], utc=True, errors='coerce').dt.floor('h')
-
+    
         if 'Odds_Price' in df_m.columns:
             df_m['Odds_Price'] = pd.to_numeric(df_m['Odds_Price'], errors='coerce')
         else:
             df_m['Odds_Price'] = np.nan
-
+    
         df_m['Implied_Prob'] = df_m['Odds_Price'].apply(implied_prob)
-
+    
         sport_str = (str(df_m['Sport'].mode(dropna=True).iloc[0]).upper()
                      if 'Sport' in df_m.columns and not df_m['Sport'].isna().all()
                      else "GENERIC")
         df_m = add_time_context_flags(df_m, sport=sport_str)
-
+    
         for c in ['Home_Team_Norm','Away_Team_Norm','Market']:
             if c not in df_m.columns:
                 df_m[c] = ""
-
+    
         df_m['Game_Key'] = (
             df_m['Home_Team_Norm'] + "_" +
             df_m['Away_Team_Norm'] + "_" +
@@ -4015,7 +4117,7 @@ def apply_blended_sharp_score(
             df_m['Commence_Hour'].astype(str) + "_" +
             df_m['Market']
         )
-
+    
         sided_games_check = (
             df_m.groupby(['Game_Key_Base'])['Outcome']
                 .nunique()
@@ -4023,10 +4125,9 @@ def apply_blended_sharp_score(
         )
         valid_games = sided_games_check[sided_games_check['Num_Sides'] >= 2]['Game_Key_Base']
         df_m = df_m[df_m['Game_Key_Base'].isin(valid_games)].copy()
-
+    
         if df_m.empty:
             logger.info(f"ℹ️ After 2-side filter, no rows for {mkt.upper()} — stamping placeholders.")
-                   
             for col, default in [
                 ('Model_Sharp_Win_Prob', np.nan),
                 ('Model_Confidence',     np.nan),
@@ -4038,229 +4139,193 @@ def apply_blended_sharp_score(
                 else:
                     df.loc[mask, col] = default
             continue
+    
+        # ---------- canonical selection ----------
+        if mkt == "spreads":
+            df_m = df_m[df_m['Value'].notna()]
+            df_canon = df_m[df_m['Value'] < 0].copy()
+            df_full_market_m = df_m.copy()
+        elif mkt == "h2h":
+            df_m = df_m[df_m['Odds_Price'].notna()]
+            df_canon = df_m[(df_m['Odds_Price'] < 0) | (df_m['Implied_Prob'] > 0.5)].copy()
+            df_full_market_m = df_m.copy()
+        elif mkt == "totals":
+            df_canon = df_m[df_m['Outcome_Norm'] == 'over'].copy()
+            df_full_market_m = df_m.copy()
         else:
-            # ---------- canonical selection ----------
-            if mkt == "spreads":
-                df_m = df_m[df_m['Value'].notna()]
-                df_canon = df_m[df_m['Value'] < 0].copy()
-                df_full_market_m = df_m.copy()
-            elif mkt == "h2h":
-                df_m = df_m[df_m['Odds_Price'].notna()]
-                df_canon = df_m[(df_m['Odds_Price'] < 0) | (df_m['Implied_Prob'] > 0.5)].copy()
-                df_full_market_m = df_m.copy()
-            elif mkt == "totals":
-                df_canon = df_m[df_m['Outcome_Norm'] == 'over'].copy()
-                df_full_market_m = df_m.copy()
+            df_canon = df_m.copy()
+            df_full_market_m = df_m.copy()
+    
+        df_canon = df_canon.drop_duplicates(subset=['Game_Key','Market','Bookmaker','Outcome'])
+    
+        # ---------- feature guards ----------
+        if 'Line_Delta' not in df_canon.columns: df_canon['Line_Delta'] = 0.0
+        if 'Is_Sharp_Book' not in df_canon.columns: df_canon['Is_Sharp_Book'] = 0
+    
+        df_canon['Line_Move_Magnitude'] = pd.to_numeric(df_canon['Line_Delta'], errors='coerce').abs()
+        df_canon['Line_Magnitude_Abs'] = df_canon['Line_Move_Magnitude']
+    
+        df_canon['Sharp_Line_Delta'] = np.where(df_canon['Is_Sharp_Book'] == 1, df_canon['Line_Delta'], 0.0)
+        df_canon['Rec_Line_Delta']   = np.where(df_canon['Is_Sharp_Book'] == 0, df_canon['Line_Delta'], 0.0)
+        df_canon['Sharp_Line_Magnitude'] = df_canon['Sharp_Line_Delta'].abs()
+        df_canon['Rec_Line_Magnitude']   = df_canon['Rec_Line_Delta'].abs()
+    
+        if 'Odds_Price' in df_canon.columns:
+            df_canon['Odds_Price'] = pd.to_numeric(df_canon['Odds_Price'], errors='coerce')
+        else:
+            df_canon['Odds_Price'] = np.nan
+        df_canon['Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+    
+        df_canon['High_Limit_Flag'] = (
+            (pd.to_numeric(df_canon.get('Sharp_Limit_Total', np.nan), errors='coerce') >= 10000).astype(int)
+        )
+        df_canon['Is_Home_Team_Bet'] = (
+            (df_canon['Outcome'] == df_canon.get('Home_Team_Norm','')).astype(int)
+        )
+        df_canon['Is_Favorite_Bet']  = (pd.to_numeric(df_canon['Value'], errors='coerce') < 0).astype(int)
+    
+        if 'Odds_Shift' in df_canon.columns and 'Sharp_Move_Signal' in df_canon.columns:
+            df_canon['SharpMove_OddsShift'] = df_canon['Sharp_Move_Signal'] * df_canon['Odds_Shift']
+        if 'Implied_Prob_Shift' in df_canon.columns and 'Market_Leader' in df_canon.columns:
+            df_canon['MarketLeader_ImpProbShift'] = df_canon['Market_Leader'] * df_canon['Implied_Prob_Shift']
+    
+        df_canon['SharpLimit_SharpBook']   = df_canon['Is_Sharp_Book'] * df_canon.get('Sharp_Limit_Total', 0)
+        df_canon['LimitProtect_SharpMag']  = df_canon.get('LimitUp_NoMove_Flag', 0) * df_canon['Sharp_Line_Magnitude']
+        df_canon['HomeRecLineMag']         = df_canon.get('Is_Home_Team_Bet', 0)   * df_canon['Rec_Line_Magnitude']
+    
+        df_canon['Delta_Sharp_vs_Rec'] = df_canon['Sharp_Line_Delta'] - df_canon['Rec_Line_Delta']
+        df_canon['Sharp_Leads'] = (df_canon['Sharp_Line_Magnitude'] > df_canon['Rec_Line_Magnitude']).astype(int)
+        df_canon['Same_Direction_Move'] = (
+            (np.sign(df_canon['Sharp_Line_Delta']) == np.sign(df_canon['Rec_Line_Delta'])) &
+            (df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() > 0)
+        ).astype(int)
+        df_canon['Opposite_Direction_Move'] = (
+            (np.sign(df_canon['Sharp_Line_Delta']) != np.sign(df_canon['Rec_Line_Delta'])) &
+            (df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() > 0)
+        ).astype(int)
+        df_canon['Sharp_Move_No_Rec'] = ((df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() == 0)).astype(int)
+        df_canon['Rec_Move_No_Sharp'] = ((df_canon['Rec_Line_Delta'].abs() > 0) & (df_canon['Sharp_Line_Delta'].abs() == 0)).astype(int)
+    
+        for col in ['Open_Value','Open_Odds']:
+            if col not in df_canon.columns:
+                df_canon[col] = np.nan
+    
+        # --- helpers (vectorized American-odds -> prob) ---
+        val_now   = pd.to_numeric(df_canon['Value'],      errors='coerce').astype('float64')
+        val_open  = pd.to_numeric(df_canon['Open_Value'], errors='coerce').astype('float64')
+        odds_now  = pd.to_numeric(df_canon['Odds_Price'], errors='coerce').astype('float64')
+        odds_open = pd.to_numeric(df_canon['Open_Odds'],  errors='coerce').astype('float64')
+    
+        # --- line moves ---
+        net_line = val_now - val_open
+        df_canon['Net_Line_Move_From_Opening'] = net_line
+        df_canon['Abs_Line_Move_From_Opening'] = np.abs(net_line)
+    
+        # --- odds moves (vectorized; avoid .apply) ---
+        imp_now  = implied_prob_vec_raw(odds_now.values)
+        imp_open = implied_prob_vec_raw(odds_open.values)
+        net_odds = (imp_now - imp_open) * 100.0
+        df_canon['Net_Odds_Move_From_Opening'] = net_odds
+        df_canon['Abs_Odds_Move_From_Opening'] = np.abs(net_odds)
+    
+        # --- timing ---
+        ts_game   = pd.to_datetime(df_canon['Game_Start'],           utc=True, errors='coerce')
+        ts_snap   = pd.to_datetime(df_canon['Snapshot_Timestamp'],   utc=True, errors='coerce')
+        mins_to   = (ts_game - ts_snap).dt.total_seconds() / 60.0
+        df_canon['Minutes_To_Game'] = mins_to
+        df_canon['Late_Game_Steam_Flag'] = (mins_to <= 60).astype('int8')
+        df_canon['Minutes_To_Game_Tier'] = pd.cut(
+            mins_to,
+            bins=[-1, 30, 60, 180, 360, 720, np.inf],
+            labels=['🚨 ≤30m','🔥 ≤1h','⚠️ ≤3h','⏳ ≤6h','📅 ≤12h','🕓 >12h']
+        )
+    
+        if 'Value_Reversal_Flag' not in df_canon.columns:
+            df_canon['Value_Reversal_Flag'] = 0
+        else:
+            df_canon['Value_Reversal_Flag'] = pd.to_numeric(df_canon['Value_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
+        if 'Odds_Reversal_Flag' not in df_canon.columns:
+            df_canon['Odds_Reversal_Flag'] = 0
+        else:
+            df_canon['Odds_Reversal_Flag'] = pd.to_numeric(df_canon['Odds_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
+    
+        df_canon['Market_Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+    
+        # Team map fallbacks
+        for col in [
+            'Team_Past_Avg_Model_Prob',
+            'Team_Past_Avg_Model_Prob_Home',
+            'Team_Past_Avg_Model_Prob_Away'
+        ]:
+            if col not in df_canon.columns:
+                df_canon[col] = 0.0
+    
+        df_canon['Market_Mispricing'] = df_canon['Team_Past_Avg_Model_Prob'] - df_canon['Market_Implied_Prob']
+        df_canon['Abs_Market_Mispricing'] = df_canon['Market_Mispricing'].abs()
+        df_canon['Team_Implied_Prob_Gap_Home'] = df_canon['Team_Past_Avg_Model_Prob_Home'] - df_canon['Market_Implied_Prob']
+        df_canon['Team_Implied_Prob_Gap_Away'] = df_canon['Team_Past_Avg_Model_Prob_Away'] - df_canon['Market_Implied_Prob']
+        df_canon['Abs_Team_Implied_Prob_Gap'] = np.where(
+            df_canon['Is_Home_Team_Bet'] == 1,
+            df_canon['Team_Implied_Prob_Gap_Home'].abs(),
+            df_canon['Team_Implied_Prob_Gap_Away'].abs()
+        )
+        df_canon['Team_Mispriced_Flag'] = (df_canon['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
+    
+        # Cross-market alignment (guard for missing pivot cols)
+        if 'Spread_Odds' in df_canon.columns:
+            df_canon['Spread_Implied_Prob'] = df_canon['Spread_Odds'].apply(implied_prob)
+        else:
+            df_canon['Spread_Implied_Prob'] = np.nan
+        if 'H2H_Odds' in df_canon.columns:
+            df_canon['H2H_Implied_Prob']    = df_canon['H2H_Odds'].apply(implied_prob)
+        else:
+            df_canon['H2H_Implied_Prob'] = np.nan
+        if 'Total_Odds' in df_canon.columns:
+            df_canon['Total_Implied_Prob']  = df_canon['Total_Odds'].apply(implied_prob)
+        else:
+            df_canon['Total_Implied_Prob'] = np.nan
+    
+        df_canon['Spread_vs_H2H_Aligned'] = ((df_canon['Value'] < 0) & (df_canon['H2H_Implied_Prob'] > 0.5)).astype(int)
+        df_canon['Total_vs_Spread_Contradiction'] = (
+            (df_canon['Spread_Implied_Prob'] > 0.55) & (df_canon['Total_Implied_Prob'] < 0.48)
+        ).astype(int)
+        df_canon['Spread_vs_H2H_ProbGap'] = df_canon['Spread_Implied_Prob'] - df_canon['H2H_Implied_Prob']
+        df_canon['Total_vs_H2H_ProbGap']  = df_canon['Total_Implied_Prob'] - df_canon['H2H_Implied_Prob']
+        df_canon['Total_vs_Spread_ProbGap'] = df_canon['Total_Implied_Prob'] - df_canon['Spread_Implied_Prob']
+    
+        # Reliability interactions (guarantee base cols)
+        for col in ['Book_Reliability_Score','Book_Reliability_Lift']:
+            if col not in df_canon.columns:
+                df_canon[col] = 0.0
+        df_canon['Book_Reliability_x_Sharp']      = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']
+        df_canon['Book_Reliability_x_Magnitude']  = df_canon['Book_Reliability_Score'] * df_canon['Sharp_Line_Magnitude']
+        df_canon['Book_Reliability_x_PROB_SHIFT'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book'] * df_canon['Implied_Prob_Shift']
+        df_canon['Book_lift_x_Sharp']             = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book']
+        df_canon['Book_lift_x_Magnitude']         = df_canon['Book_Reliability_Lift'] * df_canon['Sharp_Line_Magnitude']
+        df_canon['Book_lift_x_PROB_SHIFT']        = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book'] * df_canon['Implied_Prob_Shift']
+        df_canon['CrossMarket_Prob_Gap_Exists']   = (
+            (df_canon['Spread_vs_H2H_ProbGap'].abs() > 0.05) | (df_canon['Total_vs_Spread_ProbGap'].abs() > 0.05)
+        ).astype(int)
+    
+        # ===== MODEL SCORING =====
+        # Resolve feature_cols (bundle first, else model metadata)
+        feature_cols = []
+        if isinstance(bundle, dict) and isinstance(bundle.get('feature_cols'), (list, tuple)) and bundle['feature_cols']:
+            feature_cols = list(bundle['feature_cols'])
+        elif model is not None:
+            feat_in = getattr(model, 'feature_names_in_', None)
+            if feat_in is not None:
+                feature_cols = list(feat_in)
             else:
-                df_canon = df_m.copy()
-                df_full_market_m = df_m.copy()
-
-            df_canon = df_canon.drop_duplicates(subset=['Game_Key','Market','Bookmaker','Outcome'])
-
-            # ---------- feature guards ----------
-            if 'Line_Delta' not in df_canon.columns: df_canon['Line_Delta'] = 0.0
-            if 'Is_Sharp_Book' not in df_canon.columns: df_canon['Is_Sharp_Book'] = 0
-
-            df_canon['Line_Move_Magnitude'] = pd.to_numeric(df_canon['Line_Delta'], errors='coerce').abs()
-            df_canon['Line_Magnitude_Abs'] = df_canon['Line_Move_Magnitude']
-
-            df_canon['Sharp_Line_Delta'] = np.where(df_canon['Is_Sharp_Book'] == 1, df_canon['Line_Delta'], 0.0)
-            df_canon['Rec_Line_Delta']   = np.where(df_canon['Is_Sharp_Book'] == 0, df_canon['Line_Delta'], 0.0)
-            df_canon['Sharp_Line_Magnitude'] = df_canon['Sharp_Line_Delta'].abs()
-            df_canon['Rec_Line_Magnitude']   = df_canon['Rec_Line_Delta'].abs()
-
-            if 'Odds_Price' in df_canon.columns:
-                df_canon['Odds_Price'] = pd.to_numeric(df_canon['Odds_Price'], errors='coerce')
-            else:
-                df_canon['Odds_Price'] = np.nan
-            df_canon['Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
-
-            df_canon['High_Limit_Flag'] = (
-                (pd.to_numeric(df_canon.get('Sharp_Limit_Total', np.nan), errors='coerce') >= 10000).astype(int)
-            )
-            df_canon['Is_Home_Team_Bet'] = (
-                (df_canon['Outcome'] == df_canon.get('Home_Team_Norm','')).astype(int)
-            )
-            df_canon['Is_Favorite_Bet']  = (pd.to_numeric(df_canon['Value'], errors='coerce') < 0).astype(int)
-
-            if 'Odds_Shift' in df_canon.columns and 'Sharp_Move_Signal' in df_canon.columns:
-                df_canon['SharpMove_OddsShift'] = df_canon['Sharp_Move_Signal'] * df_canon['Odds_Shift']
-            if 'Implied_Prob_Shift' in df_canon.columns and 'Market_Leader' in df_canon.columns:
-                df_canon['MarketLeader_ImpProbShift'] = df_canon['Market_Leader'] * df_canon['Implied_Prob_Shift']
-
-            df_canon['SharpLimit_SharpBook']   = df_canon['Is_Sharp_Book'] * df_canon.get('Sharp_Limit_Total', 0)
-            df_canon['LimitProtect_SharpMag']  = df_canon.get('LimitUp_NoMove_Flag', 0) * df_canon['Sharp_Line_Magnitude']
-            df_canon['HomeRecLineMag']         = df_canon.get('Is_Home_Team_Bet', 0)   * df_canon['Rec_Line_Magnitude']
-
-            df_canon['Delta_Sharp_vs_Rec'] = df_canon['Sharp_Line_Delta'] - df_canon['Rec_Line_Delta']
-            df_canon['Sharp_Leads'] = (df_canon['Sharp_Line_Magnitude'] > df_canon['Rec_Line_Magnitude']).astype(int)
-            df_canon['Same_Direction_Move'] = (
-                (np.sign(df_canon['Sharp_Line_Delta']) == np.sign(df_canon['Rec_Line_Delta'])) &
-                (df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() > 0)
-            ).astype(int)
-            df_canon['Opposite_Direction_Move'] = (
-                (np.sign(df_canon['Sharp_Line_Delta']) != np.sign(df_canon['Rec_Line_Delta'])) &
-                (df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() > 0)
-            ).astype(int)
-            df_canon['Sharp_Move_No_Rec'] = ((df_canon['Sharp_Line_Delta'].abs() > 0) & (df_canon['Rec_Line_Delta'].abs() == 0)).astype(int)
-            df_canon['Rec_Move_No_Sharp'] = ((df_canon['Rec_Line_Delta'].abs() > 0) & (df_canon['Sharp_Line_Delta'].abs() == 0)).astype(int)
-
-            for col in ['Open_Value','Open_Odds']:
-                if col not in df_canon.columns:
-                    df_canon[col] = np.nan
-
-            # --- helpers (vectorized American-odds -> prob) ---
-            
-            val_now   = pd.to_numeric(df_canon['Value'],      errors='coerce').astype('float64')
-            val_open  = pd.to_numeric(df_canon['Open_Value'], errors='coerce').astype('float64')
-            odds_now  = pd.to_numeric(df_canon['Odds_Price'], errors='coerce').astype('float64')
-            odds_open = pd.to_numeric(df_canon['Open_Odds'],  errors='coerce').astype('float64')
-            
-            # --- line moves ---
-            net_line = val_now - val_open
-            df_canon['Net_Line_Move_From_Opening'] = net_line
-            df_canon['Abs_Line_Move_From_Opening'] = np.abs(net_line)
-            
-            # --- odds moves (vectorized; avoid .apply) ---
-            imp_now  = implied_prob_vec_raw(odds_now.values)
-            imp_open = implied_prob_vec_raw(odds_open.values)
-            net_odds = (imp_now - imp_open) * 100.0
-            df_canon['Net_Odds_Move_From_Opening'] = net_odds
-            df_canon['Abs_Odds_Move_From_Opening'] = np.abs(net_odds)
-            
-         
-            
-            # --- timing (parse once + compute) ---
-            ts_game   = pd.to_datetime(df_canon['Game_Start'],           utc=True, errors='coerce')
-            ts_snap   = pd.to_datetime(df_canon['Snapshot_Timestamp'],   utc=True, errors='coerce')
-            mins_to   = (ts_game - ts_snap).dt.total_seconds() / 60.0
-            df_canon['Minutes_To_Game'] = mins_to
-            
-            df_canon['Late_Game_Steam_Flag'] = (mins_to <= 60).astype('int8')
-            
-            df_canon['Minutes_To_Game_Tier'] = pd.cut(
-                mins_to,
-                bins=[-1, 30, 60, 180, 360, 720, np.inf],
-                labels=['🚨 ≤30m','🔥 ≤1h','⚠️ ≤3h','⏳ ≤6h','📅 ≤12h','🕓 >12h']
-            )
-
-            if 'Value_Reversal_Flag' not in df_canon.columns:
-                df_canon['Value_Reversal_Flag'] = 0
-            else:
-                df_canon['Value_Reversal_Flag'] = pd.to_numeric(df_canon['Value_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
-            if 'Odds_Reversal_Flag' not in df_canon.columns:
-                df_canon['Odds_Reversal_Flag'] = 0
-            else:
-                df_canon['Odds_Reversal_Flag'] = pd.to_numeric(df_canon['Odds_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
+                booster = getattr(model, 'get_booster', lambda: None)()
+                names = getattr(booster, 'feature_names', None)
+                feature_cols = list(names) if names is not None else []
     
-            df_canon['Market_Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+        try:
+            feature_cols = [str(c) for c in feature_cols]
+            feature_cols = list(dict.fromkeys(feature_cols))  # de-dupe keep order
     
-            # These require team map; if absent, create zeros to avoid KeyError
-            for col in [
-                'Team_Past_Avg_Model_Prob',
-                'Team_Past_Avg_Model_Prob_Home',
-                'Team_Past_Avg_Model_Prob_Away'
-            ]:
-                if col not in df_canon.columns:
-                    df_canon[col] = 0.0
-    
-            df_canon['Market_Mispricing'] = df_canon['Team_Past_Avg_Model_Prob'] - df_canon['Market_Implied_Prob']
-            df_canon['Abs_Market_Mispricing'] = df_canon['Market_Mispricing'].abs()
-            df_canon['Team_Implied_Prob_Gap_Home'] = df_canon['Team_Past_Avg_Model_Prob_Home'] - df_canon['Market_Implied_Prob']
-            df_canon['Team_Implied_Prob_Gap_Away'] = df_canon['Team_Past_Avg_Model_Prob_Away'] - df_canon['Market_Implied_Prob']
-            df_canon['Abs_Team_Implied_Prob_Gap'] = np.where(
-                df_canon['Is_Home_Team_Bet'] == 1,
-                df_canon['Team_Implied_Prob_Gap_Home'].abs(),
-                df_canon['Team_Implied_Prob_Gap_Away'].abs()
-            )
-            df_canon['Team_Mispriced_Flag'] = (df_canon['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
-    
-            # Cross-market alignment (guard for missing pivot cols)
-            if 'Spread_Odds' in df_canon.columns:
-                df_canon['Spread_Implied_Prob'] = df_canon['Spread_Odds'].apply(implied_prob)
-            else:
-                df_canon['Spread_Implied_Prob'] = np.nan
-            if 'H2H_Odds' in df_canon.columns:
-                df_canon['H2H_Implied_Prob']    = df_canon['H2H_Odds'].apply(implied_prob)
-            else:
-                df_canon['H2H_Implied_Prob'] = np.nan
-            if 'Total_Odds' in df_canon.columns:
-                df_canon['Total_Implied_Prob']  = df_canon['Total_Odds'].apply(implied_prob)
-            else:
-                df_canon['Total_Implied_Prob'] = np.nan
-    
-            df_canon['Spread_vs_H2H_Aligned'] = ((df_canon['Value'] < 0) & (df_canon['H2H_Implied_Prob'] > 0.5)).astype(int)
-            df_canon['Total_vs_Spread_Contradiction'] = (
-                (df_canon['Spread_Implied_Prob'] > 0.55) & (df_canon['Total_Implied_Prob'] < 0.48)
-            ).astype(int)
-            df_canon['Spread_vs_H2H_ProbGap'] = df_canon['Spread_Implied_Prob'] - df_canon['H2H_Implied_Prob']
-            df_canon['Total_vs_H2H_ProbGap']  = df_canon['Total_Implied_Prob'] - df_canon['H2H_Implied_Prob']
-            df_canon['Total_vs_Spread_ProbGap'] = df_canon['Total_Implied_Prob'] - df_canon['Spread_Implied_Prob']
-    
-            # Reliability interactions (guarantee base cols)
-            for col in ['Book_Reliability_Score','Book_Reliability_Lift']:
-                if col not in df_canon.columns:
-                    df_canon[col] = 0.0
-            df_canon['Book_Reliability_x_Sharp']      = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book']
-            df_canon['Book_Reliability_x_Magnitude']  = df_canon['Book_Reliability_Score'] * df_canon['Sharp_Line_Magnitude']
-            df_canon['Book_Reliability_x_PROB_SHIFT'] = df_canon['Book_Reliability_Score'] * df_canon['Is_Sharp_Book'] * df_canon['Implied_Prob_Shift']
-            df_canon['Book_lift_x_Sharp']             = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book']
-            df_canon['Book_lift_x_Magnitude']         = df_canon['Book_Reliability_Lift'] * df_canon['Sharp_Line_Magnitude']
-            df_canon['Book_lift_x_PROB_SHIFT']        = df_canon['Book_Reliability_Lift'] * df_canon['Is_Sharp_Book'] * df_canon['Implied_Prob_Shift']
-            df_canon['CrossMarket_Prob_Gap_Exists']   = (
-                (df_canon['Spread_vs_H2H_ProbGap'].abs() > 0.05) | (df_canon['Total_vs_Spread_ProbGap'].abs() > 0.05)
-            ).astype(int)
-    
-            # Your existing extras
-           
-           
-            # Numeric timing columns
-            hybrid_timing_cols = [
-                'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
-                'SharpMove_Magnitude_Overnight_LateGame','SharpMove_Magnitude_Overnight_Urgent',
-                'SharpMove_Magnitude_Early_VeryEarly','SharpMove_Magnitude_Early_MidRange',
-                'SharpMove_Magnitude_Early_LateGame','SharpMove_Magnitude_Early_Urgent',
-                'SharpMove_Magnitude_Midday_VeryEarly','SharpMove_Magnitude_Midday_MidRange',
-                'SharpMove_Magnitude_Midday_LateGame','SharpMove_Magnitude_Midday_Urgent',
-                'SharpMove_Magnitude_Late_VeryEarly','SharpMove_Magnitude_Late_MidRange',
-                'SharpMove_Magnitude_Late_LateGame','SharpMove_Magnitude_Late_Urgent',
-                'SharpMove_Timing_Magnitude'
-            ]
-            for col in hybrid_timing_cols:
-                df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0) if col in df_canon.columns else 0.0
-    
-            if 'SharpMove_Timing_Dominant' not in df_canon.columns:
-                df_canon['SharpMove_Timing_Dominant'] = 'unknown'
-    
-            hybrid_odds_timing_cols = ['Odds_Move_Magnitude'] + [
-                f'OddsMove_Magnitude_{b}' for b in [
-                    'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-                    'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-                    'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-                    'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-                ]
-            ]
-            for col in hybrid_odds_timing_cols:
-                df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0) if col in df_canon.columns else 0.0
-    
-                    # ===== MODEL SCORING =====
-            feature_cols = []
-            if bundle and isinstance(bundle.get('feature_cols'), (list, tuple)) and bundle['feature_cols']:
-                feature_cols = list(bundle['feature_cols'])
-            elif model is not None:
-                feat_in = getattr(model, 'feature_names_in_', None)
-                if feat_in is not None:
-                    feature_cols = list(feat_in)
-                else:
-                    booster = getattr(model, 'get_booster', lambda: None)()
-                    names = getattr(booster, 'feature_names', None)
-                    feature_cols = list(names) if names is not None else []
-            
-            # ---- scoring (wrapped) ----
-            try:
-                feature_cols = [str(c) for c in feature_cols]
-                feature_cols = list(dict.fromkeys(feature_cols))  # de-dupe, keep order
-            
+            if feature_cols:
                 # coerce only model features
                 for c in feature_cols:
                     if c in df_canon.columns:
@@ -4270,232 +4335,198 @@ def apply_blended_sharp_score(
                                 '': np.nan, 'none': np.nan, 'None': np.nan
                             })
                         df_canon[c] = pd.to_numeric(df_canon[c], errors='coerce')
-            
-                if feature_cols:
-                    # ensure all features exist, then clean
-                    df_canon[feature_cols] = (
-                        df_canon.reindex(columns=feature_cols)
-                                .replace([np.inf, -np.inf], np.nan)
-                                .fillna(0.0)
-                    )
-            
-                # ensure pred cols exist
-                for col, default in [
-                    ('Model_Sharp_Win_Prob', np.nan),
-                    ('Model_Confidence',     np.nan),
-                    ('Scored_By_Model',      False),
-                    ('Scoring_Market',       mkt),
-                ]:
-                    if col not in df_canon.columns:
-                        df_canon[col] = default
-            
-                # predict or stamp unscored
-                if not feature_cols:
-                    logger.info(f"ℹ️ {mkt.upper()} has no feature_cols — stamping unscored columns on canon.")
-                    for col, default in [
-                        ('Model_Sharp_Win_Prob', np.nan),
-                        ('Model_Confidence',     np.nan),
-                        ('Scored_By_Model',      False),
-                        ('Scoring_Market',       mkt),
-                    ]:
-                        df_canon[col] = default
-                else:
-                 
-                    X_can = df_canon.loc[:, feature_cols]
-                    if X_can.empty:
-                        logger.info(f"ℹ️ {mkt.upper()} has empty X_can — stamping unscored columns on canon.")
-                        for col, default in [
-                            ('Model_Sharp_Win_Prob', np.nan),
-                            ('Model_Confidence',     np.nan),
-                            ('Scored_By_Model',      False),
-                            ('Scoring_Market',       mkt),
-                        ]:
-                            df_canon[col] = default
-                    else:
-                        # 🔁 Ensemble-first prediction with fallbacks (uses your bundle)
-                       
-                        preds = predict_blended(bundle, X_can, model=model, iso=iso)
-                        
-                        if preds is None or len(preds) != len(df_canon):
-                            logger.info(f"ℹ️ {mkt.upper()} no usable predictor or length mismatch — stamping unscored.")
-                            for col, default in [
-                                ('Model_Sharp_Win_Prob', np.nan),
-                                ('Model_Confidence',     np.nan),
-                                ('Scored_By_Model',      False),
-                                ('Scoring_Market',       mkt),
-                            ]:
-                                df_canon[col] = default
-                        else:
-                            preds = np.asarray(preds, dtype=float).ravel()
-                            preds = np.clip(preds, 1e-6, 1-1e-6)
-                            df_canon['Model_Sharp_Win_Prob'] = preds
-                            df_canon['Model_Confidence']     = preds
-                            df_canon['Scored_By_Model']      = True
-                            df_canon['Scoring_Market']       = mkt
-                        
-                        # ✅ write back ONLY the prediction columns to the original df
-                        cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
-                        df.loc[mask, cols_to_write] = df_canon[cols_to_write].values
-
-            
-            except Exception as e:
-                logger.error(f"❌ Scoring failed for {mkt.upper()} — stamping unscored columns on canon. Error: {e}")
-                for col, default in [
-                    ('Model_Sharp_Win_Prob', np.nan),
-                    ('Model_Confidence',     np.nan),
-                    ('Scored_By_Model',      False),
-                    ('Scoring_Market',       mkt),
-                ]:
-                    df_canon[col] = default
-            
-            # --- 2) Build INVERSE slice (always outside the try/except) ---
-            if 'Was_Canonical' in df_m.columns:
-                df_inverse = df_m.loc[df_m['Was_Canonical'] == False].copy()
-            else:
-                df_inverse = df_m.loc[~df_m.index.isin(df_canon.index)].copy()
-            
-            if df_inverse.empty or df_canon.empty:
-                logger.info(f"ℹ️ No inverse flip possible for {mkt.upper()} (canon={len(df_canon)}, inverse={len(df_inverse)}).")
-            else:
-                # normalize for joins
-                for frame in (df_canon, df_inverse):
-                    for col in ['Bookmaker','Home_Team_Norm','Away_Team_Norm','Market']:
-                        if col in frame.columns:
-                            frame[col] = frame[col].astype(str).str.lower().str.strip()
-            
-                # build join key (safe against NaNs)
-                for frame in (df_canon, df_inverse):
-                    frame['Team_Key_Base'] = (
-                        frame['Home_Team_Norm'].fillna('').astype(str).str.lower().str.strip() + "_" +
-                        frame['Away_Team_Norm'].fillna('').astype(str).str.lower().str.strip() + "_" +
-                        frame['Commence_Hour'].astype(str) + "_" +
-                        frame['Market'].fillna('').astype(str).str.lower().str.strip()
-                    )
-            
-                df_canon_preds = (
-                    df_canon[['Team_Key_Base','Bookmaker','Model_Sharp_Win_Prob','Model_Confidence']]
-                    .drop_duplicates(subset=['Team_Key_Base','Bookmaker'])
-                    .rename(columns={
-                        'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
-                        'Model_Confidence':     'Model_Confidence_opponent'
-                    })
-                )
-            
-                df_inverse = df_inverse.merge(df_canon_preds, on=['Team_Key_Base','Bookmaker'], how='left')
-                df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_opponent']
-                df_inverse['Model_Confidence']     = 1 - df_inverse['Model_Confidence_opponent']
-                df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent','Model_Confidence_opponent'], inplace=True, errors='ignore')
-            
-                df_inverse['Was_Canonical']   = False
-                df_inverse['Scored_By_Model'] = True
-                df_inverse['Scoring_Market']  = mkt
-                        
-                # Inverse feature engineering (kept as in your code)
-                df_inverse['Line_Move_Magnitude'] = pd.to_numeric(df_inverse['Line_Delta'], errors='coerce').abs()
-                df_inverse['Line_Magnitude_Abs']  = df_inverse['Line_Move_Magnitude']
-                df_inverse['Sharp_Line_Delta']    = np.where(df_inverse['Is_Sharp_Book'] == 1, df_inverse['Line_Delta'], 0)
-                df_inverse['Rec_Line_Delta']      = np.where(df_inverse['Is_Sharp_Book'] == 0, df_inverse['Line_Delta'], 0)
-                df_inverse['Sharp_Line_Magnitude'] = df_inverse['Sharp_Line_Delta'].abs()
-                df_inverse['Rec_Line_Magnitude']   = df_inverse['Rec_Line_Delta'].abs()
-                df_inverse['High_Limit_Flag']      = (df_inverse.get('Sharp_Limit_Total', 0) >= 10000).astype(int)
-            
-                if 'Odds_Shift' in df_inverse.columns:
-                    df_inverse['SharpMove_OddsShift'] = df_inverse['Sharp_Move_Signal'] * df_inverse['Odds_Shift']
-                if 'Implied_Prob_Shift' in df_inverse.columns:
-                    df_inverse['MarketLeader_ImpProbShift'] = df_inverse['Market_Leader'] * df_inverse['Implied_Prob_Shift']
-            
-                df_inverse['SharpLimit_SharpBook']  = df_inverse['Is_Sharp_Book'] * df_inverse.get('Sharp_Limit_Total', 0)
-                df_inverse['LimitProtect_SharpMag'] = df_inverse['LimitUp_NoMove_Flag'] * df_inverse['Sharp_Line_Magnitude']
-                df_inverse['HomeRecLineMag']        = df_inverse['Is_Home_Team_Bet'] * df_inverse['Rec_Line_Magnitude']
-            
-                df_inverse['Delta_Sharp_vs_Rec'] = df_inverse['Sharp_Line_Delta'] - df_inverse['Rec_Line_Delta']
-                df_inverse['Sharp_Leads'] = (df_inverse['Sharp_Line_Magnitude'] > df_inverse['Rec_Line_Magnitude']).astype(int)
-                df_inverse['Same_Direction_Move'] = (
-                    (np.sign(df_inverse['Sharp_Line_Delta']) == np.sign(df_inverse['Rec_Line_Delta'])) &
-                    (df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() > 0)
-                ).astype(int)
-                df_inverse['Opposite_Direction_Move'] = (
-                    (np.sign(df_inverse['Sharp_Line_Delta']) != np.sign(df_inverse['Rec_Line_Delta'])) &
-                    (df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() > 0)
-                ).astype(int)
-                df_inverse['Sharp_Move_No_Rec'] = ((df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() == 0)).astype(int)
-                df_inverse['Rec_Move_No_Sharp'] = ((df_inverse['Rec_Line_Delta'].abs() > 0) & (df_inverse['Sharp_Line_Delta'].abs() == 0)).astype(int)
-            
-                df_inverse['SharpMove_Odds_Up']   = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] > 0)).astype(int)
-                df_inverse['SharpMove_Odds_Down'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] < 0)).astype(int)
-                df_inverse['SharpMove_Odds_Mag']  = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
-            
-                df_inverse['Net_Line_Move_From_Opening'] = df_inverse['Value'] - df_inverse['Open_Value']
-                df_inverse['Abs_Line_Move_From_Opening'] = df_inverse['Net_Line_Move_From_Opening'].abs()
-            
-                # Use implied probability deltas consistently
-                df_inverse['Net_Odds_Move_From_Opening'] = (
-                    df_inverse['Odds_Price'].apply(implied_prob) - df_inverse['Open_Odds'].apply(implied_prob)
-                ) * 100.0
-                df_inverse['Abs_Odds_Move_From_Opening'] = df_inverse['Net_Odds_Move_From_Opening'].abs()
-            
-                
-                df_inverse['Minutes_To_Game'] = (
-                    pd.to_datetime(df_inverse['Game_Start'], utc=True) - pd.to_datetime(df_inverse['Snapshot_Timestamp'], utc=True)
-                ).dt.total_seconds() / 60.0
-                df_inverse['Late_Game_Steam_Flag'] = (df_inverse['Minutes_To_Game'] <= 60).astype(int)
-                df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
-                 
-                # Ensure team columns exist before gaps
-                for col in ['Team_Past_Avg_Model_Prob','Team_Past_Avg_Model_Prob_Home','Team_Past_Avg_Model_Prob_Away']:
-                    if col not in df_inverse.columns:
-                        df_inverse[col] = 0.0
-             
-                df_inverse['Market_Mispricing'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
-                df_inverse['Abs_Mispricing_Gap'] = df_inverse['Market_Mispricing'].abs()
-                df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
-                df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
-                df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
-                df_inverse['Abs_Team_Implied_Prob_Gap'] = np.where(
-                    df_inverse['Is_Home_Team_Bet'] == 1,
-                    df_inverse['Team_Implied_Prob_Gap_Home'].abs(),
-                    df_inverse['Team_Implied_Prob_Gap_Away'].abs()
-                )
-                df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
-                # Reversal diagnostics
-                df_inverse = compute_value_reversal(df_inverse)
-                df_inverse = compute_odds_reversal(df_inverse)
     
-                df_inverse = add_line_and_crossmarket_features(df_inverse)
-                # Guarantee reliability cols
-                for col in ['Book_Reliability_Score','Book_Reliability_Lift']:
-                    if col not in df_inverse.columns: df_inverse[col] = 0.0
-                df_inverse['Book_Reliability_x_Sharp']      = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book']
-                df_inverse['Book_Reliability_x_Magnitude']  = df_inverse['Book_Reliability_Score'] * df_inverse['Sharp_Line_Magnitude']
-                df_inverse['Book_Reliability_x_PROB_SHIFT'] = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book'] * df_inverse['Implied_Prob_Shift']
-                df_inverse['Book_lift_x_Sharp']             = df_inverse['Book_Reliability_Lift'] * df_inverse['Is_Sharp_Book']
-                df_inverse['Book_lift_x_Magnitude']         = df_inverse['Book_Reliability_Lift'] * df_inverse['Sharp_Line_Magnitude']
-                df_inverse['Book_lift_x_PROB_SHIFT']        = df_inverse['Book_Reliability_Lift'] * df_inverse['Is_Sharp_Book'] * df_inverse['Implied_Prob_Shift']
-            
-                df_inverse['Minutes_To_Game_Tier'] = pd.cut(
-                    df_inverse['Minutes_To_Game'], bins=[-1, 30, 60, 180, 360, 720, np.inf],
-                    labels=['🚨 ≤30m','🔥 ≤1h','⚠️ ≤3h','⏳ ≤6h','📅 ≤12h','🕓 >12h']
+                X_can = (
+                    df_canon.reindex(columns=feature_cols)
+                            .replace([np.inf, -np.inf], np.nan)
+                            .fillna(0.0)
                 )
-            
-                for col in hybrid_timing_cols:
-                    df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0) if col in df_inverse.columns else 0.0
-                if 'SharpMove_Timing_Dominant' not in df_inverse.columns:
-                    df_inverse['SharpMove_Timing_Dominant'] = 'unknown'
+            else:
+                X_can = pd.DataFrame(index=df_canon.index)
+    
+            # ensure pred cols
+            for col, default in [
+                ('Model_Sharp_Win_Prob', np.nan),
+                ('Model_Confidence',     np.nan),
+                ('Scored_By_Model',      False),
+                ('Scoring_Market',       mkt),
+            ]:
+                if col not in df_canon.columns:
+                    df_canon[col] = default
+    
+            if not feature_cols or X_can.empty:
+                logger.info(f"ℹ️ {mkt.upper()} has no usable features — stamping unscored on canon subset.")
+            else:
+                preds = predict_blended(bundle, X_can, model=model, iso=iso)
+                if preds is None or len(preds) != len(df_canon):
+                    logger.info(f"ℹ️ {mkt.upper()} no usable predictor or length mismatch — stamping unscored on canon subset.")
                 else:
-                    df_inverse['SharpMove_Timing_Dominant'] = df_inverse['SharpMove_Timing_Dominant'].fillna('unknown').astype(str)
+                    preds = np.clip(np.asarray(preds, dtype=float).ravel(), 1e-6, 1-1e-6)
+                    df_canon['Model_Sharp_Win_Prob'] = preds
+                    df_canon['Model_Confidence']     = preds
+                    df_canon['Scored_By_Model']      = True
+                    df_canon['Scoring_Market']       = mkt
+    
+            # ✅ Write back predictions ONLY to indices we scored (avoids mask/length mismatches)
+            cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
+            df.loc[df_canon.index, cols_to_write] = df_canon[cols_to_write].values
+    
+        except Exception as e:
+            logger.error(f"❌ Scoring failed for {mkt.upper()} — stamping unscored on canon subset. Error: {e}")
+            cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
+            df_canon[cols_to_write] = [np.nan, np.nan, False, mkt]
+            df.loc[df_canon.index, cols_to_write] = df_canon[cols_to_write].values
+    # ===================== END MARKET RESOLUTION + SCORING LOOP =====================
+           
             
-                for col in hybrid_odds_timing_cols:
-                    df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0) if col in df_inverse.columns else 0.0
+        # --- 2) Build INVERSE slice (always outside the try/except) ---
+        if 'Was_Canonical' in df_m.columns:
+            df_inverse = df_m.loc[df_m['Was_Canonical'] == False].copy()
+        else:
+            df_inverse = df_m.loc[~df_m.index.isin(df_canon.index)].copy()
+        
+        if df_inverse.empty or df_canon.empty:
+            logger.info(f"ℹ️ No inverse flip possible for {mkt.upper()} (canon={len(df_canon)}, inverse={len(df_inverse)}).")
+        else:
+            # normalize for joins
+            for frame in (df_canon, df_inverse):
+                for col in ['Bookmaker','Home_Team_Norm','Away_Team_Norm','Market']:
+                    if col in frame.columns:
+                        frame[col] = frame[col].astype(str).str.lower().str.strip()
+        
+            # build join key (safe against NaNs)
+            for frame in (df_canon, df_inverse):
+                frame['Team_Key_Base'] = (
+                    frame['Home_Team_Norm'].fillna('').astype(str).str.lower().str.strip() + "_" +
+                    frame['Away_Team_Norm'].fillna('').astype(str).str.lower().str.strip() + "_" +
+                    frame['Commence_Hour'].astype(str) + "_" +
+                    frame['Market'].fillna('').astype(str).str.lower().str.strip()
+                )
+        
+            df_canon_preds = (
+                df_canon[['Team_Key_Base','Bookmaker','Model_Sharp_Win_Prob','Model_Confidence']]
+                .drop_duplicates(subset=['Team_Key_Base','Bookmaker'])
+                .rename(columns={
+                    'Model_Sharp_Win_Prob': 'Model_Sharp_Win_Prob_opponent',
+                    'Model_Confidence':     'Model_Confidence_opponent'
+                })
+            )
+        
+            df_inverse = df_inverse.merge(df_canon_preds, on=['Team_Key_Base','Bookmaker'], how='left')
+            df_inverse['Model_Sharp_Win_Prob'] = 1 - df_inverse['Model_Sharp_Win_Prob_opponent']
+            df_inverse['Model_Confidence']     = 1 - df_inverse['Model_Confidence_opponent']
+            df_inverse.drop(columns=['Model_Sharp_Win_Prob_opponent','Model_Confidence_opponent'], inplace=True, errors='ignore')
+        
+            df_inverse['Was_Canonical']   = False
+            df_inverse['Scored_By_Model'] = True
+            df_inverse['Scoring_Market']  = mkt
+                    
+            # Inverse feature engineering (kept as in your code)
+            df_inverse['Line_Move_Magnitude'] = pd.to_numeric(df_inverse['Line_Delta'], errors='coerce').abs()
+            df_inverse['Line_Magnitude_Abs']  = df_inverse['Line_Move_Magnitude']
+            df_inverse['Sharp_Line_Delta']    = np.where(df_inverse['Is_Sharp_Book'] == 1, df_inverse['Line_Delta'], 0)
+            df_inverse['Rec_Line_Delta']      = np.where(df_inverse['Is_Sharp_Book'] == 0, df_inverse['Line_Delta'], 0)
+            df_inverse['Sharp_Line_Magnitude'] = df_inverse['Sharp_Line_Delta'].abs()
+            df_inverse['Rec_Line_Magnitude']   = df_inverse['Rec_Line_Delta'].abs()
+            df_inverse['High_Limit_Flag']      = (df_inverse.get('Sharp_Limit_Total', 0) >= 10000).astype(int)
+        
+            if 'Odds_Shift' in df_inverse.columns:
+                df_inverse['SharpMove_OddsShift'] = df_inverse['Sharp_Move_Signal'] * df_inverse['Odds_Shift']
+            if 'Implied_Prob_Shift' in df_inverse.columns:
+                df_inverse['MarketLeader_ImpProbShift'] = df_inverse['Market_Leader'] * df_inverse['Implied_Prob_Shift']
+        
+            df_inverse['SharpLimit_SharpBook']  = df_inverse['Is_Sharp_Book'] * df_inverse.get('Sharp_Limit_Total', 0)
+            df_inverse['LimitProtect_SharpMag'] = df_inverse['LimitUp_NoMove_Flag'] * df_inverse['Sharp_Line_Magnitude']
+            df_inverse['HomeRecLineMag']        = df_inverse['Is_Home_Team_Bet'] * df_inverse['Rec_Line_Magnitude']
+        
+            df_inverse['Delta_Sharp_vs_Rec'] = df_inverse['Sharp_Line_Delta'] - df_inverse['Rec_Line_Delta']
+            df_inverse['Sharp_Leads'] = (df_inverse['Sharp_Line_Magnitude'] > df_inverse['Rec_Line_Magnitude']).astype(int)
+            df_inverse['Same_Direction_Move'] = (
+                (np.sign(df_inverse['Sharp_Line_Delta']) == np.sign(df_inverse['Rec_Line_Delta'])) &
+                (df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() > 0)
+            ).astype(int)
+            df_inverse['Opposite_Direction_Move'] = (
+                (np.sign(df_inverse['Sharp_Line_Delta']) != np.sign(df_inverse['Rec_Line_Delta'])) &
+                (df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() > 0)
+            ).astype(int)
+            df_inverse['Sharp_Move_No_Rec'] = ((df_inverse['Sharp_Line_Delta'].abs() > 0) & (df_inverse['Rec_Line_Delta'].abs() == 0)).astype(int)
+            df_inverse['Rec_Move_No_Sharp'] = ((df_inverse['Rec_Line_Delta'].abs() > 0) & (df_inverse['Sharp_Line_Delta'].abs() == 0)).astype(int)
+        
+            df_inverse['SharpMove_Odds_Up']   = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] > 0)).astype(int)
+            df_inverse['SharpMove_Odds_Down'] = ((df_inverse['Sharp_Move_Signal'] == 1) & (df_inverse['Odds_Shift'] < 0)).astype(int)
+            df_inverse['SharpMove_Odds_Mag']  = df_inverse['Odds_Shift'].abs() * df_inverse['Sharp_Move_Signal']
+        
+            df_inverse['Net_Line_Move_From_Opening'] = df_inverse['Value'] - df_inverse['Open_Value']
+            df_inverse['Abs_Line_Move_From_Opening'] = df_inverse['Net_Line_Move_From_Opening'].abs()
+        
+            # Use implied probability deltas consistently
+            df_inverse['Net_Odds_Move_From_Opening'] = (
+                df_inverse['Odds_Price'].apply(implied_prob) - df_inverse['Open_Odds'].apply(implied_prob)
+            ) * 100.0
+            df_inverse['Abs_Odds_Move_From_Opening'] = df_inverse['Net_Odds_Move_From_Opening'].abs()
+        
             
-                if 'Value_Reversal_Flag' not in df_inverse.columns:
-                    df_inverse['Value_Reversal_Flag'] = 0
-                else:
-                    df_inverse['Value_Reversal_Flag'] = pd.to_numeric(df_inverse['Value_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
-                if 'Odds_Reversal_Flag' not in df_inverse.columns:
-                    df_inverse['Odds_Reversal_Flag'] = 0
-                else:
-                    df_inverse['Odds_Reversal_Flag'] = pd.to_numeric(df_inverse['Odds_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
-            
+            df_inverse['Minutes_To_Game'] = (
+                pd.to_datetime(df_inverse['Game_Start'], utc=True) - pd.to_datetime(df_inverse['Snapshot_Timestamp'], utc=True)
+            ).dt.total_seconds() / 60.0
+            df_inverse['Late_Game_Steam_Flag'] = (df_inverse['Minutes_To_Game'] <= 60).astype(int)
+            df_inverse['Market_Implied_Prob'] = df_inverse['Odds_Price'].apply(implied_prob)
+             
+            # Ensure team columns exist before gaps
+            for col in ['Team_Past_Avg_Model_Prob','Team_Past_Avg_Model_Prob_Home','Team_Past_Avg_Model_Prob_Away']:
+                if col not in df_inverse.columns:
+                    df_inverse[col] = 0.0
+         
+            df_inverse['Market_Mispricing'] = df_inverse['Team_Past_Avg_Model_Prob'] - df_inverse['Market_Implied_Prob']
+            df_inverse['Abs_Mispricing_Gap'] = df_inverse['Market_Mispricing'].abs()
+            df_inverse['Mispricing_Flag'] = (df_inverse['Abs_Mispricing_Gap'] > 0.05).astype(int)
+            df_inverse['Team_Implied_Prob_Gap_Home'] = df_inverse['Team_Past_Avg_Model_Prob_Home'] - df_inverse['Market_Implied_Prob']
+            df_inverse['Team_Implied_Prob_Gap_Away'] = df_inverse['Team_Past_Avg_Model_Prob_Away'] - df_inverse['Market_Implied_Prob']
+            df_inverse['Abs_Team_Implied_Prob_Gap'] = np.where(
+                df_inverse['Is_Home_Team_Bet'] == 1,
+                df_inverse['Team_Implied_Prob_Gap_Home'].abs(),
+                df_inverse['Team_Implied_Prob_Gap_Away'].abs()
+            )
+            df_inverse['Team_Mispriced_Flag'] = (df_inverse['Abs_Team_Implied_Prob_Gap'] > 0.05).astype(int)
+            # Reversal diagnostics
+            df_inverse = compute_value_reversal(df_inverse)
+            df_inverse = compute_odds_reversal(df_inverse)
+
+            df_inverse = add_line_and_crossmarket_features(df_inverse)
+            # Guarantee reliability cols
+            for col in ['Book_Reliability_Score','Book_Reliability_Lift']:
+                if col not in df_inverse.columns: df_inverse[col] = 0.0
+            df_inverse['Book_Reliability_x_Sharp']      = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book']
+            df_inverse['Book_Reliability_x_Magnitude']  = df_inverse['Book_Reliability_Score'] * df_inverse['Sharp_Line_Magnitude']
+            df_inverse['Book_Reliability_x_PROB_SHIFT'] = df_inverse['Book_Reliability_Score'] * df_inverse['Is_Sharp_Book'] * df_inverse['Implied_Prob_Shift']
+            df_inverse['Book_lift_x_Sharp']             = df_inverse['Book_Reliability_Lift'] * df_inverse['Is_Sharp_Book']
+            df_inverse['Book_lift_x_Magnitude']         = df_inverse['Book_Reliability_Lift'] * df_inverse['Sharp_Line_Magnitude']
+            df_inverse['Book_lift_x_PROB_SHIFT']        = df_inverse['Book_Reliability_Lift'] * df_inverse['Is_Sharp_Book'] * df_inverse['Implied_Prob_Shift']
+        
+            df_inverse['Minutes_To_Game_Tier'] = pd.cut(
+                df_inverse['Minutes_To_Game'], bins=[-1, 30, 60, 180, 360, 720, np.inf],
+                labels=['🚨 ≤30m','🔥 ≤1h','⚠️ ≤3h','⏳ ≤6h','📅 ≤12h','🕓 >12h']
+            )
+        
+            for col in hybrid_timing_cols:
+                df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0) if col in df_inverse.columns else 0.0
+            if 'SharpMove_Timing_Dominant' not in df_inverse.columns:
+                df_inverse['SharpMove_Timing_Dominant'] = 'unknown'
+            else:
+                df_inverse['SharpMove_Timing_Dominant'] = df_inverse['SharpMove_Timing_Dominant'].fillna('unknown').astype(str)
+        
+            for col in hybrid_odds_timing_cols:
+                df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0) if col in df_inverse.columns else 0.0
+        
+            if 'Value_Reversal_Flag' not in df_inverse.columns:
+                df_inverse['Value_Reversal_Flag'] = 0
+            else:
+                df_inverse['Value_Reversal_Flag'] = pd.to_numeric(df_inverse['Value_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
+            if 'Odds_Reversal_Flag' not in df_inverse.columns:
+                df_inverse['Odds_Reversal_Flag'] = 0
+            else:
+                df_inverse['Odds_Reversal_Flag'] = pd.to_numeric(df_inverse['Odds_Reversal_Flag'], errors='coerce').fillna(0).astype(int)
+        
             # ===== WRITEBACK: push canon + inverse features/preds back to base df by index =====
             must_cols = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market','Was_Canonical']
             existing_cols = set(df.columns)
