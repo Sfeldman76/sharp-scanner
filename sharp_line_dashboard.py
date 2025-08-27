@@ -5461,7 +5461,15 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 # Optionally build a ratings_map (if you have a simple table of team → rating)
                 # ratings_map = pd.DataFrame({'Team': [...], 'PRating': [...]})
   
-                diagnostics_df = compute_diagnostics_vectorized(diag_source)  # per-book diagnostics
+                diagnostics_df = compute_diagnostics_vectorized(
+                    diag_source,
+                    bundle=bundle,                  # pass the model bundle if you have it
+                    model=model,                    # pass the fitted model if you have it
+                    sport=sport,                    # sport label, needed if timing models load from GCS
+                    gcs_bucket=GCS_BUCKET,
+                    hybrid_timing_features=hybrid_timing_features,
+                    hybrid_odds_timing_features=hybrid_odds_timing_features,
+                )
             
                 rep = df_summary_base[['Game_Key','Market','Outcome','Bookmaker']].drop_duplicates()
                 diagnostics_pick = diagnostics_df.merge(
