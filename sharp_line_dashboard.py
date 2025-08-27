@@ -3116,17 +3116,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ==== Shared helpers / constants ====
         eps = 1e-4  # clip for probabilities
         
+        from pandas.api.types import (
+            is_bool_dtype, is_object_dtype, is_string_dtype, is_categorical_dtype
+        )
+        
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-            """Coerce columns to numeric float32 safely (handles object/category/bool)."""
             out = df[cols].copy()
             for c in cols:
-                if str(out[c].dtype) in ("category", "object", "string", "boolean"):
-                    out[c] = out[c].replace({
-                        'True': 1, 'False': 0, True: 1, False: 0,
-                        '': np.nan, 'none': np.nan, 'None': np.nan
+                col = out[c]
+        
+                # 1) Boolean-like → float (True/False/NA → 1.0/0.0/NaN)
+                if is_bool_dtype(col):
+                    out[c] = col.astype("float32")
+                    continue
+        
+                # 2) Strings/objects/categories → clean then to_numeric
+                if is_object_dtype(col) or is_string_dtype(col) or is_categorical_dtype(col):
+                    out[c] = col.replace({
+                        'True': 1, 'False': 0, 'true': 1, 'false': 0,
+                        True: 1, False: 0,
+                        '': np.nan, 'none': np.nan, 'None': np.nan,
+                        'NA': np.nan, 'NaN': np.nan
                     })
-                out[c] = pd.to_numeric(out[c], errors="coerce")
-            return (out.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32))
+                    out[c] = pd.to_numeric(out[c], errors="coerce")
+                    continue
+        
+                # 3) Everything else → to_numeric safely
+                out[c] = pd.to_numeric(col, errors="coerce")
+        
+            # Final cleanup
+            return (
+                out.replace([np.inf, -np.inf], np.nan)
+                   .astype("float32")
+                   .fillna(0.0)
+            )
+
         #df_market[features] = df_market[features].apply(pd.to_numeric, errors="coerce")
        
         X_full = _to_numeric_block(df_market, features).to_numpy(np.float32)
