@@ -1568,65 +1568,80 @@ def get_xgb_search_space(
     X_rows: int,
     n_jobs: int = 1,
     scale_pos_weight: float = 1.0,
-    features: list[str] | None = None,
-) -> tuple[dict, dict]:
+    features: list[str] | None = None,  # kept for interface compatibility
+) -> tuple[dict, dict, dict]:
     s = sport.upper()
 
-    # ---- base kwargs (same skeleton for all; size-aware max_bin & CPU cores) ----
+    # ---- base kwargs (shared) ----
     base_kwargs = dict(
         objective="binary:logistic",
         eval_metric="logloss",
-        tree_method="hist",           # use "gpu_hist" if on GPU
+        tree_method="hist",           # use "gpu_hist" if you have a GPU
         grow_policy="lossguide",
-        max_leaves=48,                # consider 48 on big leagues
+        max_leaves=48,                # safe cap; depth will still control structure
         max_bin=128 if X_rows < 150_000 else 64,
         sampling_method="uniform",
-        # keep if your xgboost >= 1.7; otherwise remove or guard:
-        single_precision_histogram=True,
+        # single_precision_histogram=True,  # uncomment only if xgboost >= 1.7
         colsample_bynode=0.8,
-    
-        # regularization & stability
-        reg_lambda=2-5,               # mild default
-        min_child_weight=5,           # avoid tiny leaves on small leagues
-        # max_delta_step=0,           # prefer default; set to 1 only if needed
-    
+
+        # regularization & stability (reasonable defaults; the search will override)
+        reg_lambda=5.0,
+        min_child_weight=5,
+
         # parallelism
-        n_jobs=1,                     # if CV uses n_jobs>1
-        scale_pos_weight=scale_pos_weight,
-    
+        n_jobs=int(n_jobs),
+
+        # imbalance
+        scale_pos_weight=float(scale_pos_weight),
+
         random_state=42,
-        importance_type="total_gain", # or "gain" if version complains
-        # predictor="cpu_predictor",  # optional explicitness
+        importance_type="total_gain",
+        # predictor="cpu_predictor",
     )
 
-    # ---- sport-size specific search spaces ----
     if s in SMALL_LEAGUES:
-        param_distributions = {
+        # tighter / more regularized for small data
+        params_ll = {
             "max_depth":        randint(2, 4),            # {2,3}
-            "learning_rate":    loguniform(1e-2, 4e-2),   # 0.01–0.04 (slightly higher ceiling)
-            "subsample":        uniform(0.60, 0.35),      # 0.60–0.95 (more diversity)
+            "learning_rate":    loguniform(1e-2, 4e-2),   # 0.01–0.04
+            "subsample":        uniform(0.60, 0.35),      # 0.60–0.95
             "colsample_bytree": uniform(0.55, 0.35),      # 0.55–0.90
-            # ↓↓↓ key change: lower child weight to let leaves form more easily
-            "min_child_weight": randint(1, 7),            # 2–8  (previously 5–10 / 20–35)
-            # ↓↓↓ allow easier splits (less minimum loss required)
-            "gamma":            uniform(0.00, 0.25),      # 0.00–0.25
-            # ↓↓↓ dial back regularization slightly to reduce underfitting/flattening
+            "min_child_weight": randint(2, 9),            # {2..8}
+            "gamma":            uniform(0.00, 0.25),      # 0–0.25
             "reg_alpha":        loguniform(1e-2, 1.0e1),  # 0.01–10
             "reg_lambda":       loguniform(1.0, 2.5e1),   # 1–25
         }
-    else:
-        # Bigger leagues → allow more expressiveness to expand std dev & AUC
-        param_distributions = {
-            "max_depth":        randint(2, 5),            # {2,3,4}
-            "learning_rate":    loguniform(8e-3, 5e-2),   # 0.008–0.05
-            "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
-            "colsample_bytree": uniform(0.65, 0.25),      # 0.65–0.90
-            "min_child_weight": randint(10, 25),          # 10–25
-            "gamma":            uniform(0.00, 0.40),      # 0–0.40
-            "reg_alpha":        loguniform(1e-2, 1.5e1),  # 0.01–15
-            "reg_lambda":       loguniform(2.0, 3.5e1),   # 2–35
+        # make AUC head slightly more expressive to reduce head correlation
+        params_auc = {
+            **params_ll,
+            "max_depth":        randint(3, 6),            # {3..5}
+            "subsample":        uniform(0.50, 0.40),      # 0.50–0.90
+            "colsample_bytree": uniform(0.50, 0.45),      # 0.50–0.95
+            "min_child_weight": randint(1, 7),            # {1..6}
+            "gamma":            uniform(0.00, 0.20),
         }
-
+    else:
+        # bigger leagues / more data: two distinct spaces
+        params_ll = {
+            "max_depth":        randint(3, 8),            # {3..7}
+            "learning_rate":    loguniform(0.01, 0.08),   # 0.01–0.08
+            "subsample":        uniform(0.65, 0.30),      # 0.65–0.95
+            "colsample_bytree": uniform(0.60, 0.35),      # 0.60–0.95
+            "min_child_weight": randint(3, 15),           # {3..14}
+            "gamma":            uniform(0.00, 0.50),      # 0–0.50
+            "reg_alpha":        loguniform(1e-3, 1e1),    # 0.001–10
+            "reg_lambda":       loguniform(3.0, 5.0e1),   # 3–50
+        }
+        params_auc = {
+            "max_depth":        randint(4, 10),           # {4..9}
+            "learning_rate":    loguniform(5e-3, 5e-2),   # 0.005–0.05
+            "subsample":        uniform(0.50, 0.40),      # 0.50–0.90
+            "colsample_bytree": uniform(0.50, 0.45),      # 0.50–0.95
+            "min_child_weight": randint(1, 10),           # {1..9}
+            "gamma":            uniform(0.00, 0.30),      # 0–0.30
+            "reg_alpha":        loguniform(1e-4, 1.0),    # 0.0001–1
+            "reg_lambda":       loguniform(1.0, 3.0e1),   # 1–30
+        }
     # ---- optional: monotone constraints (no small-book creation) ----
     if features is not None:
         mono = {c: 0 for c in features}
@@ -1654,7 +1669,7 @@ def get_xgb_search_space(
             if c in mono: mono[c] = -1
         base_kwargs["monotone_constraints"] = "(" + ",".join(str(mono.get(c, 0)) for c in features) + ")"
 
-    return base_kwargs, param_distributions
+    return base_kwargs, params_ll, params_auc
 
 def resolve_groups(df: pd.DataFrame) -> np.ndarray:
     # 1) Prefer the per-game key if present
@@ -3218,16 +3233,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
         feature_cols = list(features) 
-        # --- sport-aware kwargs & search space ---
-        base_kwargs, param_distributions = get_xgb_search_space(
+
+        
+        base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
-            X_rows=X_train.shape[0],   # train rows
-            n_jobs=1,                  # keep models single-threaded
-            scale_pos_weight=( (y_train==0).sum() / max(1,(y_train==1).sum()) ),
-            features=feature_cols,
+            X_rows=X_train.shape[0],                 # train rows only
+            n_jobs=1,                                # keep models single-threaded (CV drives parallelism)
+            scale_pos_weight=((y_train == 0).sum() / max(1, (y_train == 1).sum())),
+            features=features,                        # ensures monotone_constraints align to column order
         )
-     
-        # stability regularization (optional but recommended)
+        
+        # Optional: stability nudges for the base (search will override these if sampled)
         base_kwargs.update({
             "n_jobs": 1,
             "max_delta_step": 1,
@@ -3237,16 +3253,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "reg_alpha": base_kwargs.get("reg_alpha", 0.0),
         })
         
-        # lock classifier objective/metric
+        # Lock classifier objective/metric (redundant if set in get_xgb_search_space, but harmless)
         base_kwargs["objective"]   = "binary:logistic"
         base_kwargs["eval_metric"] = "logloss"
         
-        assert "objective"   not in param_distributions
-        assert "eval_metric" not in param_distributions
+        # Ensure the search spaces do NOT try to set objective/metric
+        for d in (params_ll, params_auc):
+            assert "objective" not in d
+            assert "eval_metric" not in d
         
         # CV splitter (TRAIN ONLY)
         cv = PurgedGroupTimeSeriesSplit(
-            n_splits=3,
+            n_splits=5,
             embargo=embargo_td,
             time_values=t_train,
             min_val_size=20,
@@ -3254,9 +3272,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         folds = list(cv.split(X_train, y_train, groups=g_train))
         assert folds, "No usable folds"
         
-        # search base (cap trees; no ES inside CV)
-        search_estimators = 600
-        search_base = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
+        # Search bases (cap trees; no ES inside CV)
+        search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": 600, "random_state": 42})
+        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": 600, "random_state": 137})
         
         # scorers
         def neg_logloss_scorer(est, X, y):
@@ -3269,33 +3287,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # randomized searches (TRAIN ONLY)
         rs_ll = RandomizedSearchCV(
-            estimator=search_base,
-            param_distributions=param_distributions,
+            estimator=search_base_ll,
+            param_distributions=params_ll,
             scoring=neg_logloss_scorer,
             cv=folds,
             n_iter=30,
             n_jobs=1,
-            verbose=1,
             random_state=42,
             refit=True,
+            verbose=1,
             error_score="raise",
         )
         rs_ll.fit(X_train, y_train, groups=g_train)
         
         rs_auc = RandomizedSearchCV(
-            estimator=search_base,
-            param_distributions=param_distributions,
+            estimator=search_base_auc,
+            param_distributions=params_auc,
             scoring=roc_auc_proba_scorer,
             cv=folds,
             n_iter=30,
             n_jobs=1,
-            verbose=1,
             random_state=4242,
             refit=True,
+            verbose=1,
             error_score="raise",
         )
         rs_auc.fit(X_train, y_train, groups=g_train)
         
+                
         # clean best params
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
