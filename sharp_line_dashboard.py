@@ -3080,23 +3080,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     val_end    = val_slice["end"].iloc[-1]
         
                     # 1) PURGE: remove any group that overlaps validation window
-                    overlap_mask = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
-                    purged_groups = set(gmeta.loc[overlap_mask, "group"])
-        
-                    # 2) EMBARGO: drop groups whose *start* falls inside the embargo window around validation
+                    # 1) PURGE: remove any group that overlaps the validation window
+                    purge_mask = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
+                    purged_groups = set(gmeta.loc[purge_mask, "group"])
+                    
+                    # 2) EMBARGO: remove any group that overlaps the extended embargo window
                     emb_lo = val_start - self.embargo
                     emb_hi = val_end + self.embargo
-                    embargo_mask = (gmeta["start"] >= emb_lo) & (gmeta["start"] <= emb_hi)
+                    embargo_mask = ~((gmeta["end"] < emb_lo) | (gmeta["start"] > emb_hi))
                     embargo_groups = set(gmeta.loc[embargo_mask, "group"])
-        
-                    # Training groups = not in val, not purged, not embargoed
-                    train_groups = gmeta.loc[
-                        ~gmeta["group"].isin(val_groups)
-                        & ~gmeta["group"].isin(purged_groups)
-                        & ~gmeta["group"].isin(embargo_groups),
-                        "group"
-                    ].to_numpy()
-        
+                    
+                    # Final training set = not in val, not purged, not embargoed
+                    bad_groups = set(val_groups) | purged_groups | embargo_groups
+                    train_groups = gmeta.loc[~gmeta["group"].isin(bad_groups), "group"].to_numpy()
+
                     # Map back to row indices
                     all_groups = meta["group"].to_numpy()
                     val_idx   = np.flatnonzero(np.isin(all_groups, val_groups))
@@ -3115,15 +3112,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
                     yield train_idx, val_idx
        
-        # 1) Make sure all model features are numeric
-        df_market[features] = df_market[features].apply(pd.to_numeric, errors="coerce")
+      
+        # ==== Shared helpers / constants ====
+        eps = 1e-4  # clip for probabilities
         
-        # 2) Convert pandas NA to np.nan, then remove infs and fill
-        X_full = (df_market[features]
-                  .replace({pd.NA: np.nan})
-                  .replace([np.inf, -np.inf], np.nan)
-                  .fillna(0.0)
-                  .to_numpy(dtype=np.float32))
+        def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+            """Coerce columns to numeric float32 safely (handles object/category/bool)."""
+            out = df[cols].copy()
+            for c in cols:
+                if str(out[c].dtype) in ("category", "object", "string", "boolean"):
+                    out[c] = out[c].replace({
+                        'True': 1, 'False': 0, True: 1, False: 0,
+                        '': np.nan, 'none': np.nan, 'None': np.nan
+                    })
+                out[c] = pd.to_numeric(out[c], errors="coerce")
+            return (out.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32))
+        #df_market[features] = df_market[features].apply(pd.to_numeric, errors="coerce")
+       
+        X_full = _to_numeric_block(df_market, features).to_numpy(np.float32)
+
         
         # 3) Labels: coerce and drop NA rows if any slipped through
         y_series = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
@@ -3152,181 +3159,151 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # 0) Build matrices and folds FIRST
    
         # class balance for scale_pos_weight
-        pos = y_full.sum()
-        neg = len(y_full) - pos
-        scale_pos_weight = (neg / pos) if pos > 0 else 1.0
+        #pos = y_full.sum()
+        #neg = len(y_full) - pos
+        #scale_pos_weight = (neg / pos) if pos > 0 else 1.0
         
         # sport can be "WNBA", "MLB", etc.
         sport_key  = str(sport).upper()
         embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"])
         
-        # CV splitter (after building X_full, y_full, groups, times)
-        cv = PurgedGroupTimeSeriesSplit(
-            n_splits=3,
-            embargo=embargo_td,          # e.g., pd.Timedelta("8h")
-            time_values=times,
-            min_val_size=20,
-        )
         
-        folds = list(cv.split(X_full, y_full, groups=groups))
-        assert folds, "No usable folds"
+
+         # --- define untouched final holdout as last ~15% of GROUPS (safer than rows) ---
+        meta = pd.DataFrame({
+            "group": np.asarray(groups),
+            "time":  pd.to_datetime(times, errors="coerce", utc=True)
+        })
+        gmeta = (meta.groupby("group", as_index=False)["time"]
+                   .agg(start="min", end="max")
+                   .sort_values("start")
+                   .reset_index(drop=True))
         
-        # sport-aware kwargs & search space
-       # --- sport-aware kwargs & search space ---
+        n_groups = len(gmeta)
+        n_hold_g = max(1, int(round(n_groups * 0.15)))
+        hold_g   = gmeta["group"].to_numpy()[-n_hold_g:]
+        train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
+        
+        all_g = meta["group"].to_numpy()
+        hold_idx      = np.flatnonzero(np.isin(all_g, hold_g))
+        train_all_idx = np.flatnonzero(np.isin(all_g, train_g))
+        
+        # Subset arrays for CV / search / OOF (train only)
+        X_train = X_full[train_all_idx]
+        y_train = y_full[train_all_idx]
+        g_train = groups[train_all_idx]
+        t_train = times[train_all_idx]
+        
+        # --- sport-aware kwargs & search space ---
         base_kwargs, param_distributions = get_xgb_search_space(
             sport=sport,
-            X_rows=X_full.shape[0],
-            n_jobs=2,                      # CV-level parallelism; models themselves keep n_jobs=1
-            scale_pos_weight=scale_pos_weight,
+            X_rows=X_train.shape[0],   # train rows
+            n_jobs=1,                  # keep models single-threaded
+            scale_pos_weight=( (y_train==0).sum() / max(1,(y_train==1).sum()) ),
             features=features,
         )
         
-        # helper: let tuned override defaults without duplicate-key errors
-        def merge_safe(base: dict, tuned: dict, **force):
-            """Drop overlapping keys from base so tuned wins; allow explicit overrides via **force."""
-            clean_base = {k: v for k, v in base.items() if k not in tuned}
-            return {**clean_base, **tuned, **force}
+        # stability regularization (optional but recommended)
+        base_kwargs.update({
+            "n_jobs": 1,
+            "max_delta_step": 1,
+            "min_child_weight": max(3, base_kwargs.get("min_child_weight", 1)),
+            "gamma": max(0.1, base_kwargs.get("gamma", 0.0)),
+            "reg_lambda": max(1.0, base_kwargs.get("reg_lambda", 1.0)),
+            "reg_alpha": base_kwargs.get("reg_alpha", 0.0),
+        })
         
-        # lock classifier objective/metric (keep these OUT of param_distributions)
+        # lock classifier objective/metric
         base_kwargs["objective"]   = "binary:logistic"
         base_kwargs["eval_metric"] = "logloss"
-        base_kwargs["n_jobs"]      = 1  # avoid core oversubscription in each model
         
         assert "objective"   not in param_distributions
         assert "eval_metric" not in param_distributions
         
+        # CV splitter (TRAIN ONLY)
+        cv = PurgedGroupTimeSeriesSplit(
+            n_splits=3,
+            embargo=embargo_td,
+            time_values=t_train,
+            min_val_size=20,
+        )
+        folds = list(cv.split(X_train, y_train, groups=g_train))
+        assert folds, "No usable folds"
+        
         # search base (cap trees; no ES inside CV)
         search_estimators = 600
         search_base = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators})
-        assert isinstance(search_base, XGBClassifier)
-        assert getattr(search_base, "_estimator_type", "") == "classifier"
         
-        # custom scorers (callables returning larger-is-better)
+        # scorers
         def neg_logloss_scorer(est, X, y):
-            proba = est.predict_proba(X)[:, 1]   # will raise if a regressor sneaks in
+            proba = est.predict_proba(X)[:, 1]
             return -log_loss(y, proba)
         
         def roc_auc_proba_scorer(est, X, y):
             proba = est.predict_proba(X)[:, 1]
             return roc_auc_score(y, proba)
         
-        # optional one-time debug to surface any bad candidates in Streamlit
-        DEBUG_ONCE = False
-        if DEBUG_ONCE:
-            def neg_logloss_scorer_debug(est, X, y):
-                try:
-                    proba = est.predict_proba(X)[:, 1]
-                    return -log_loss(y, proba)
-                except Exception as e:
-                    try:
-                        xgb_params = est.get_xgb_params()
-                    except Exception:
-                        xgb_params = {}
-                    st.error("Offending candidate encountered during CV:")
-                    st.json({
-                        "estimator_type": type(est).__name__,
-                        "_estimator_type": getattr(est, "_estimator_type", None),
-                        "objective": getattr(est, "objective", None),
-                        "xgb_params": xgb_params,
-                    })
-                    st.exception(e)
-                    raise
+        # randomized searches (TRAIN ONLY)
+        rs_ll = RandomizedSearchCV(
+            estimator=search_base,
+            param_distributions=param_distributions,
+            scoring=neg_logloss_scorer,
+            cv=folds,
+            n_iter=30,
+            n_jobs=1,
+            verbose=1,
+            random_state=42,
+            refit=True,
+            error_score="raise",
+        )
+        rs_ll.fit(X_train, y_train, groups=g_train)
         
-            rs_dbg = RandomizedSearchCV(
-                estimator=search_base,
-                param_distributions=param_distributions,
-                scoring=neg_logloss_scorer_debug,
-                cv=folds,
-                n_iter=5,
-                n_jobs=1,
-                verbose=2,
-                random_state=7,
-                refit=True,
-                error_score="raise",
-            )
-            rs_dbg.fit(X_full, y_full, groups=groups)
-            st.success("DEBUG: All candidates were classifiers with predict_proba ✅")
+        rs_auc = RandomizedSearchCV(
+            estimator=search_base,
+            param_distributions=param_distributions,
+            scoring=roc_auc_proba_scorer,
+            cv=folds,
+            n_iter=30,
+            n_jobs=1,
+            verbose=1,
+            random_state=4242,
+            refit=True,
+            error_score="raise",
+        )
+        rs_auc.fit(X_train, y_train, groups=g_train)
         
-        # ---- randomized searches (logloss / AUC) ----
-        try:
-            rs_ll = RandomizedSearchCV(
-                estimator=search_base,
-                param_distributions=param_distributions,
-                scoring=neg_logloss_scorer,
-                cv=folds,
-                n_iter=40,
-                n_jobs=3,
-                verbose=1,
-                random_state=42,
-                refit=True,
-                error_score="raise",
-            )
-            rs_ll.fit(X_full, y_full, groups=groups)
-        except Exception as e:
-            st.error("❌ Error during RandomizedSearchCV (logloss search)")
-            st.exception(e)
-            st.stop()
-        
-        try:
-            rs_auc = RandomizedSearchCV(
-                estimator=search_base,
-                param_distributions=param_distributions,
-                scoring=roc_auc_proba_scorer,
-                cv=folds,
-                n_iter=40,
-                n_jobs=3,
-                verbose=1,
-                random_state=4242,
-                refit=True,
-                error_score="raise",
-            )
-            rs_auc.fit(X_full, y_full, groups=groups)
-        except Exception as e:
-            st.error("❌ Error during RandomizedSearchCV (AUC search)")
-            st.exception(e)
-            st.stop()
-        
-        # clean best params (strip any unsafe keys that might slip in)
+        # clean best params
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
         
-        # --- final refit with early stopping on forward holdout (last fold) ---
-        (train_idx, val_idx) = folds[-1]
+        # final ES on the last CV fold (TRAIN ONLY)
+        tr_es_rel, va_es_rel = folds[-1]
         final_estimators_cap  = 3000
-        early_stopping_rounds = 150
+        early_stopping_rounds = 100
         
-        # safe-merge so tuned params override defaults without duplicate-key errors
-        model_logloss = XGBClassifier(**merge_safe(base_kwargs, best_ll_params,  n_estimators=final_estimators_cap))
-        model_auc     = XGBClassifier(**merge_safe(base_kwargs, best_auc_params, n_estimators=final_estimators_cap))
+        model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": final_estimators_cap})
+        model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": final_estimators_cap})
         
         model_logloss.fit(
-            X_full[train_idx], y_full[train_idx],
-            eval_set=[(X_full[val_idx], y_full[val_idx])],
+            X_train[tr_es_rel], y_train[tr_es_rel],
+            eval_set=[(X_train[va_es_rel], y_train[va_es_rel])],
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
-        
         model_auc.fit(
-            X_full[train_idx], y_full[train_idx],
-            eval_set=[(X_full[val_idx], y_full[val_idx])],
+            X_train[tr_es_rel], y_train[tr_es_rel],
+            eval_set=[(X_train[va_es_rel], y_train[va_es_rel])],
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
         
-
-        
-        # =========================
-        # VALIDATION + DIAGNOSTICS + OPT BLENDING (DROP-IN)
-        # =========================
-
-        # ---- helpers ---------------------------------------------------------------
+        # ---- OOF predictions on TRAIN subset (tuned rounds) ----
         def best_rounds(clf: XGBClassifier) -> int:
             br = getattr(clf, "best_iteration", None)
-            if br is not None and br >= 0:
-                return int(br + 1)
+            if br is not None and br >= 0: return int(br + 1)
             try:
                 booster = clf.get_booster()
                 if getattr(booster, "best_iteration", None) is not None:
@@ -3337,213 +3314,111 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 pass
             return int(getattr(clf, "n_estimators", 200))
         
-        def safe_auc(y, p):
-            return roc_auc_score(y, p) if np.unique(y).size == 2 else np.nan
-        
-        def safe_ll(y, p):
-            p = np.clip(p, 1e-6, 1-1e-6)
-            return log_loss(y, p, labels=[0,1]) if np.unique(y).size == 2 else np.nan
-        
-        def safe_brier(y, p):
-            return brier_score_loss(y, p) if np.unique(y).size == 2 else np.nan
-        
-        def ks_stat(y_true, p):
-            fpr, tpr, _ = roc_curve(y_true, p)
-            return float(np.max(tpr - fpr))
-        
-        def ECE(y_true, p, n_bins=10):
-            y_true = np.asarray(y_true); p = np.asarray(p)
-            bins = np.linspace(0,1,n_bins+1)
-            idx  = np.digitize(p, bins) - 1
-            ece, total = 0.0, len(p)
-            for b in range(n_bins):
-                m = (idx==b)
-                if np.any(m):
-                    conf = float(np.mean(p[m]))
-                    acc  = float(np.mean(y_true[m]))
-                    ece += (np.sum(m)/total) * abs(acc - conf)
-            return float(ece)
-        
-        def brier_decomp(y_true, p, n_bins=10):
-            y_true = np.asarray(y_true); p = np.asarray(p)
-            base = float(np.mean(y_true))
-            unc = base * (1 - base)
-            bins = np.linspace(0,1,n_bins+1)
-            idx  = np.digitize(p, bins) - 1
-            res = 0.0; rel = 0.0
-            for b in range(n_bins):
-                m = (idx==b)
-                if np.any(m):
-                    py = float(np.mean(y_true[m]))
-                    pp = float(np.mean(p[m]))
-                    w  = float(np.mean(m))
-                    res += w * (py - base)**2
-                    rel += w * (pp - py)**2
-            brier = brier_score_loss(y_true, p)
-            return float(brier), float(unc), float(res), float(rel)
-        
-        def psi_num(a, b, bins=10):
-            qa = np.quantile(a, np.linspace(0,1,bins+1))
-            qa[0] -= 1e-9; qa[-1] += 1e-9
-            ca = np.histogram(a, qa)[0] / max(1, len(a))
-            cb = np.histogram(b, qa)[0] / max(1, len(b))
-            cb = np.where(cb==0, 1e-6, cb); ca = np.where(ca==0, 1e-6, ca)
-            return float(np.sum((ca - cb) * np.log(ca / cb)))
-        
-        # ---- OOF predictions for isotonic (with tuned rounds) ----------------------
         n_trees_ll  = best_rounds(model_logloss)
         n_trees_auc = best_rounds(model_auc)
         
-        oof_pred_logloss = np.full(len(y_full), np.nan, dtype=float)
-        oof_pred_auc     = np.full(len(y_full), np.nan, dtype=float)
+        oof_pred_logloss = np.full(len(y_train), np.nan, dtype=float)
+        oof_pred_auc     = np.full(len(y_train), np.nan, dtype=float)
         
-        for tr_idx, va_idx in folds:
-            m_ll  = XGBClassifier(**merge_safe(base_kwargs, best_ll_params,  n_estimators=int(n_trees_ll)))
-            m_auc = XGBClassifier(**merge_safe(base_kwargs, best_auc_params, n_estimators=int(n_trees_auc)))
-            m_ll.fit(X_full[tr_idx],  y_full[tr_idx],  verbose=False)
-            m_auc.fit(X_full[tr_idx], y_full[tr_idx], verbose=False)
-            oof_pred_logloss[va_idx] = m_ll.predict_proba(X_full[va_idx])[:, 1]
-            oof_pred_auc[va_idx]     = m_auc.predict_proba(X_full[va_idx])[:, 1]
+        for tr_rel, va_rel in folds:
+            m_ll  = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(n_trees_ll)})
+            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc)})
+            m_ll.fit (X_train[tr_rel], y_train[tr_rel], verbose=False)
+            m_auc.fit(X_train[tr_rel], y_train[tr_rel], verbose=False)
+            oof_pred_logloss[va_rel] = m_ll.predict_proba(X_train[va_rel])[:, 1]
+            oof_pred_auc[va_rel]     = m_auc.predict_proba(X_train[va_rel])[:, 1]
         
         mask_oof = ~np.isnan(oof_pred_logloss) & ~np.isnan(oof_pred_auc)
         if mask_oof.sum() < 50:
             raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
         
-        oof_blend_50 = 0.5 * oof_pred_logloss[mask_oof] + 0.5 * oof_pred_auc[mask_oof]
-        y_oof        = y_full[mask_oof].astype(int)
-        
-        iso = IsotonicRegression(out_of_bounds="clip").fit(oof_blend_50, y_oof)
-        
-        # ---- final refit with early stopping on most-recent 15% --------------------
-        # ---- final refit with early stopping on most-recent 15% --------------------
-        n = len(X_full)
-        hold = max(1, int(round(n * 0.15)))
-        val_idx = np.arange(n - hold, n)
-        
-        X_tr  = X_full[: n - hold]
-        y_tr  = y_full[: n - hold].astype(int)
-        X_val = X_full[val_idx]
-        y_val = pd.Series(y_full[val_idx].astype(int), index=val_idx)
-        
-        def fit_with_es(model, X_tr, y_tr, X_va, y_va, es_rounds=100, maximize=False):
-            try:
-                model.fit(
-                    X_tr, y_tr,
-                    eval_set=[(X_va, y_va)],
-                    early_stopping_rounds=es_rounds,
-                    verbose=False,
-                )
-            except TypeError:
-                es = xgb.callback.EarlyStopping(rounds=es_rounds, save_best=True, maximize=maximize)
-                model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], callbacks=[es], verbose=False)
-            return model
-        
-        final_estimators_cap  = 3000
-        early_stopping_rounds = 100
-        
-        final_log = xgb.XGBClassifier(**{**base_kwargs, **model_logloss.get_params(), "n_estimators": final_estimators_cap})
-        final_auc = xgb.XGBClassifier(**{**base_kwargs, **model_auc.get_params(),     "n_estimators": final_estimators_cap})
-        
-        final_log = fit_with_es(final_log, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
-        final_auc = fit_with_es(final_auc, X_tr, y_tr, X_val, y_val.values, early_stopping_rounds)
-        
-        # --- 1) raw probs from FINAL models on TRAIN/OOF slice ---
-        p_raw_logloss_tr = final_log.predict_proba(X_full)[:, 1]
-        p_raw_auc_tr     = final_auc.predict_proba(X_full)[:, 1]
-        
-        # --- 2) fit isotonic calibrators on those raw probs vs y_full ---
-        iso_logloss = IsotonicRegression(out_of_bounds='clip').fit(p_raw_logloss_tr, y_full)
-        iso_auc     = IsotonicRegression(out_of_bounds='clip').fit(p_raw_auc_tr,     y_full)
-        
-        # --- 3) calibrated wrappers (IsoWrapper must be defined at module top-level) ---
-        cal_logloss = IsoWrapper(final_log, iso_logloss)
-        cal_auc     = IsoWrapper(final_auc, iso_auc)
-        
-        # --- 4) calibrated probs (TRAIN & VAL) used downstream (blend weight, metrics) ---
-        prob_logloss     = cal_logloss.predict_proba(X_full)[:, 1]
-        prob_auc         = cal_auc.predict_proba(X_full)[:, 1]
-        val_prob_logloss = cal_logloss.predict_proba(X_val)[:, 1]
-        val_prob_auc     = cal_auc.predict_proba(X_val)[:, 1]
-        
-        # (now do your weight search on prob_logloss/prob_auc vs y_full, then build p_train_blend/p_val_blend)
-        # --- pick ensemble weight by minimizing LOG LOSS (primary metric) ---
+        # choose blend weight on OOF
         grid = np.linspace(0.0, 1.0, 51)
-        def _ll(y, p): 
-            return log_loss(y, np.clip(p, 1e-6, 1-1e-6), labels=[0,1])
-        
         best_w, best_ll = 0.5, 1e9
+        p_oof_log = oof_pred_logloss[mask_oof]
+        p_oof_auc = oof_pred_auc[mask_oof]
+        y_oof     = y_train[mask_oof].astype(int)
+        
         for w in grid:
-            p = w*prob_logloss + (1-w)*prob_auc
-            ll = _ll(y_full, p)
+            p_blend = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
+            ll = log_loss(y_oof, p_blend, labels=[0,1])
             if ll < best_ll:
                 best_ll, best_w = ll, w
         
-        # --- blended probs (train / val), clipped once ---
-        p_train_blend = np.clip(best_w*prob_logloss     + (1-best_w)*prob_auc,     1e-6, 1-1e-6)
-        p_val_blend   = np.clip(best_w*val_prob_logloss + (1-best_w)*val_prob_auc, 1e-6, 1-1e-6)
+        # single isotonic on OOF-blended probs
+        try:
+            iso_blend = IsotonicRegression(out_of_bounds="clip", y_min=eps, y_max=1-eps)
+        except TypeError:
+            iso_blend = IsotonicRegression(out_of_bounds="clip")
+        p_oof_blend = np.clip(best_w*p_oof_log + (1-best_w)*p_oof_auc, eps, 1-eps)
+        iso_blend.fit(p_oof_blend, y_oof)
         
-        # --- canonical aliases used throughout the pipeline ---
-        p_cal     = p_train_blend     # calibrated + blended (train/OOF/full)
-        p_cal_val = p_val_blend       # calibrated + blended (validation/holdout)
-        if isinstance(X_val, pd.DataFrame) and isinstance(y_val, (pd.Series, pd.DataFrame)):
-            y_val = y_val.loc[X_val.index]  # align by index
+        # final predictions: TRAIN (all train rows) + HOLDOUT (untouched groups)
+        p_tr_log = model_logloss.predict_proba(X_full[train_all_idx])[:, 1]
+        p_tr_auc = model_auc    .predict_proba(X_full[train_all_idx])[:, 1]
+        p_ho_log = model_logloss.predict_proba(X_full[hold_idx])[:, 1]
+        p_ho_auc = model_auc    .predict_proba(X_full[hold_idx])[:, 1]
         
-        # Build evaluation vectors with matching lengths
-        y_train_vec = np.asarray(y_full,     dtype=int)
-        p_train_vec = np.asarray(p_cal,      dtype=float)
+        p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
+        p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
-        y_hold_vec  = np.asarray(y_val,      dtype=int)
-        p_hold_vec  = np.asarray(p_cal_val,  dtype=float)
+        p_cal     = iso_blend.predict(p_train_blend_raw)  # TRAIN calibrated
+        p_cal_val = iso_blend.predict(p_hold_blend_raw)   # HOLDOUT calibrated
         
-        # Final sanity checks (fail fast if mismatched)
-        assert len(y_train_vec) == len(p_train_vec), f"train len mismatch: y={len(y_train_vec)} p={len(p_train_vec)}"
-        assert len(y_hold_vec)  == len(p_hold_vec),  f"holdout len mismatch: y={len(y_hold_vec)} p={len(p_hold_vec)}"
-        # --- vectors for downstream code that expects arrays ---
- 
-        p_val_vec   = p_hold_vec  # if some code uses this name
+        # targets aligned
+        y_train_vec = y_full[train_all_idx].astype(int)
+        y_hold_vec  = y_full[hold_idx].astype(int)
         
-  
+        # metrics
+        auc_train = roc_auc_score(y_train_vec, p_cal)
+        auc_val   = roc_auc_score(y_hold_vec,  p_cal_val)
+        brier_tr  = brier_score_loss(y_train_vec, p_cal)
+        brier_val = brier_score_loss(y_hold_vec,  p_cal_val)
         
-        auc_train  = roc_auc_score(y_full, p_cal)
-        auc_val    = roc_auc_score(y_val,  p_cal_val)
-        brier_tr   = brier_score_loss(y_full, p_cal)
-        brier_val  = brier_score_loss(y_val,  p_cal_val)
-        
-         #Optional Streamlit logging
         st.write(f"🔧 Ensemble weight (logloss vs auc): w={best_w:.2f}")
-        st.write(f"📉 LogLoss: train={best_ll:.5f}, val={_ll(y_val, p_cal_val):.5f}")
+        st.write(f"📉 LogLoss: train={log_loss(y_train_vec, np.clip(p_cal,eps,1-eps), labels=[0,1]):.5f}, "
+                 f"val={log_loss(y_hold_vec,  np.clip(p_cal_val,eps,1-eps), labels=[0,1]):.5f}")
         st.write(f"📈 AUC:     train={auc_train:.4f}, val={auc_val:.4f}")
-        st.write(f"🎯 Brier:   train={brier_tr:.4f}, val={brier_val:.4f}")
+        st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
+               
+
         
          #--- quick calibration table (for sanity; full plot optional) ---
+        
         bins = np.linspace(0,1,11)
         idx  = np.digitize(p_cal_val, bins) - 1
+        y_hold_series = pd.Series(y_hold_vec, index=hold_idx)
+        
         cal_tbl = []
         for b in range(10):
-            mask = idx == b
-            if mask.any():
+            mask = (idx == b)
+            if np.any(mask):
                 avg_p = float(p_cal_val[mask].mean())
-                emp   = float(y_val[mask].mean())
-                cal_tbl.append({"bin": f"{bins[b]:.1f}-{bins[b+1]:.1f}", "avg_p": avg_p, "emp_rate": emp, "n": int(mask.sum())})
+                emp   = float(y_hold_vec[mask].mean())
+                cal_tbl.append({"bin": f"{bins[b]:.1f}-{bins[b+1]:.1f}",
+                                "avg_p": avg_p, "emp_rate": emp, "n": int(mask.sum())})
         st.dataframe(pd.DataFrame(cal_tbl))
+
         
 
 
         # ---- headline holdout metrics ----------------------------------------------
-        auc_ho = safe_auc(y_val.values, p_val_blend)
-        ll_ho  = safe_ll (y_val.values, p_val_blend)
-        br_ho  = safe_brier(y_val.values, p_val_blend)
+        auc_ho = roc_auc_score(y_hold_vec, p_cal_val)
+        ll_ho  = log_loss(y_hold_vec, np.clip(p_cal_val, eps, 1-eps), labels=[0,1])
+        br_ho  = brier_score_loss(y_hold_vec, p_cal_val)
         
         st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
         st.write(f"- **Optimal Blend Weight (LogLoss model)**: `{best_w:.2f}`  (AUC weight `{1-best_w:.2f}`)")
         st.write(f"- **Blended + Calibrated AUC**: `{auc_ho:.4f}`")
         st.write(f"- **Holdout LogLoss**: `{ll_ho:.4f}`")
         st.write(f"- **Holdout Brier**: `{br_ho:.4f}`")
+
         
         # ---- sanity sentinels (flatness/entropy) -----------------------------------
-        std_ens = float(np.std(p_train_blend))
-        rng_ens = float(np.max(p_train_blend) - np.min(p_train_blend))
-        entropy = -np.mean(p_train_blend*np.log(p_train_blend+1e-10) + (1-p_train_blend)*np.log(1-p_train_blend+1e-10))
+        std_ens = float(np.std(p_cal))
+        rng_ens = float(np.max(p_cal) - np.min(p_cal))
+        entropy = -np.mean(p_cal*np.log(p_cal+1e-10) + (1-p_cal)*np.log(1-p_cal+1e-10))
+
         
         st.markdown(f"### 🔍 Prediction Confidence Analysis – `{market.upper()}`")
         st.write(f"- Std Dev of Predictions: `{std_ens:.4f}`")
@@ -3554,35 +3429,39 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- model disagreement (diversity) ----------------------------------------
         st.markdown("### 🔀 Model Disagreement")
-        st.write(f"- Corr(train) LogLoss vs AUC: `{float(np.corrcoef(prob_logloss, prob_auc)[0,1]):.3f}`")
-        st.write(f"- Corr(holdout) LogLoss vs AUC: `{float(np.corrcoef(val_prob_logloss, val_prob_auc)[0,1]):.3f}`")
+        corr_train  = float(np.corrcoef(p_tr_log, p_tr_auc)[0,1]) if len(p_tr_log)>1 else np.nan
+        corr_hold   = float(np.corrcoef(p_ho_log, p_ho_auc)[0,1]) if len(p_ho_log)>1 else np.nan
+        st.write(f"- Corr(train) LogLoss vs AUC: `{corr_train:.3f}`")
+        st.write(f"- Corr(holdout) LogLoss vs AUC: `{corr_hold:.3f}`")
+
         
         # ---- threshold sweep (train) -----------------------------------------------
         st.markdown(f"#### 📈 Performance by Threshold – `{market.upper()}` (Train)")
         thresholds = np.arange(0.1, 0.96, 0.05)
         rows=[]
         for t in thresholds:
-            preds = (p_train_blend >= t).astype(int)
+            preds = (p_cal >= t).astype(int)
             rows.append({
                 "Threshold": round(float(t),2),
-                "Accuracy":  accuracy_score(y_full, preds),
-                "Precision": precision_score(y_full, preds, zero_division=0),
-                "Recall":    recall_score(y_full, preds, zero_division=0),
-                "F1":        f1_score(y_full, preds, zero_division=0),
+                "Accuracy":  accuracy_score(y_train_vec, preds),
+                "Precision": precision_score(y_train_vec, preds, zero_division=0),
+                "Recall":    recall_score(y_train_vec, preds, zero_division=0),
+                "F1":        f1_score(y_train_vec, preds, zero_division=0),
             })
         df_thresh = pd.DataFrame(rows)[["Threshold","Accuracy","Precision","Recall","F1"]]
         st.dataframe(df_thresh.style.format({c:"{:.3f}" for c in df_thresh.columns if c!="Threshold"}))
+
         
         # ---- calibration bins (holdout) + ROI per bin ------------------------------
         st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
         bins   = np.linspace(0, 1, 11)
         labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
-        eval_idx = pd.Index(val_idx)
+        eval_idx = pd.Index(hold_idx)
         
         df_eval = pd.DataFrame({
-            "p":    pd.Series(p_val_blend, index=eval_idx),
-            "y":    y_val.astype(int),
-            "odds": pd.to_numeric(df_market.loc[eval_idx, "Odds_Price"], errors="coerce"),
+            "p":    pd.Series(p_cal_val, index=eval_idx),
+            "y":    pd.Series(y_hold_vec, index=eval_idx),
+            "odds": pd.to_numeric(df_market.iloc[hold_idx].get("Odds_Price", np.nan), errors="coerce").values,
         }).dropna(subset=["p","y"])
         
         cuts = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
@@ -3612,97 +3491,91 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_bins = pd.DataFrame(rows, columns=["Prob Bin","N","Hit Rate","Avg ROI (unit)","Avg Pred P"])
         df_bins["N"] = df_bins["N"].astype(int)
         st.dataframe(df_bins)
-        
+
         # quick extremes snapshot
         hi, lo = df_bins.iloc[-1], df_bins.iloc[0]
         st.write(f"**High bin ({hi['Prob Bin']}):** " + (f"N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}" if hi["N"]>0 else "N=0"))
         st.write(f"**Low bin  ({lo['Prob Bin']}):** " + (f"N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}" if lo["N"]>0 else "N=0"))
         
         # ---- overfitting check (train vs holdout) ----------------------------------
-        auc_tr = safe_auc(y_full, p_train_blend)
-        ll_tr  = safe_ll (y_full, p_train_blend)
-        br_tr  = safe_brier(y_full, p_train_blend)
+        auc_tr = roc_auc_score(y_train_vec, p_cal)
+        ll_tr  = log_loss(y_train_vec, np.clip(p_cal, eps, 1-eps), labels=[0,1])
+        br_tr  = brier_score_loss(y_train_vec, p_cal)
         
         st.markdown("### 📉 Overfitting Check – Gap Analysis")
         st.write(f"- AUC Gap (Train - Holdout): `{(auc_tr - auc_ho):.4f}`")
-        st.write(f"- LogLoss Gap (Train - Holdout): `{(ll_tr - ll_ho):.4f}`")
-        st.write(f"- Brier Gap (Train - Holdout): `{(br_tr - br_ho):.4f}`")
+        st.write(f"- LogLoss Gap (Train - Holdout): `{(ll_tr  - ll_ho):.4f}`")
+        st.write(f"- Brier Gap (Train - Holdout): `{(br_tr  - br_ho):.4f}`")
+
         
         # ---- calibration quality: ECE + Brier decomposition ------------------------
-        st.markdown("### 🎯 Calibration Metrics")
-        ece_tr = ECE(y_full, p_train_blend, n_bins=10)
-        brier_tr, unc_tr, res_tr, rel_tr = brier_decomp(y_full, p_train_blend, 10)
-        ece_ho = ECE(y_val.values, p_val_blend, 10)
-        brier_ho, unc_ho, res_ho, rel_ho = brier_decomp(y_val.values, p_val_blend, 10)
-        st.write(f"- ECE(train): `{ece_tr:.4f}` | Brier(train): `{brier_tr:.4f}` = Unc `{unc_tr:.4f}` - Res `{res_tr:.4f}` + Rel `{rel_tr:.4f}`")
-        st.write(f"- ECE(holdout): `{ece_ho:.4f}` | Brier(holdout): `{brier_ho:.4f}` = Unc `{unc_ho:.4f}` - Res `{res_ho:.4f}` + Rel `{rel_ho:.4f}`")
-        
+        ece_tr = ECE(y_train_vec, p_cal, n_bins=10)
+        brier_tr2, unc_tr, res_tr, rel_tr = brier_decomp(y_train_vec, p_cal, 10)
+        ece_ho = ECE(y_hold_vec, p_cal_val, 10)
+        brier_ho2, unc_ho, res_ho, rel_ho = brier_decomp(y_hold_vec, p_cal_val, 10)
+        st.write(f"- ECE(train): `{ece_tr:.4f}` | Brier(train): `{brier_tr2:.4f}` = Unc `{unc_tr:.4f}` - Res `{res_tr:.4f}` + Rel `{rel_tr:.4f}`")
+        st.write(f"- ECE(holdout): `{ece_ho:.4f}` | Brier(holdout): `{brier_ho2:.4f}` = Unc `{unc_ho:.4f}` - Res `{res_ho:.4f}` + Rel `{rel_ho:.4f}`")
+
         # ---- ranking diagnostics: KS + Lift (train) --------------------------------
         st.markdown("### 📈 Ranking Diagnostics")
-        st.write(f"- KS(train):   `{ks_stat(y_full, p_train_blend):.3f}`")
-        st.write(f"- KS(holdout): `{ks_stat(y_val.values, p_val_blend):.3f}`")
+        st.write(f"- KS(train):   `{ks_stat(y_train_vec, p_cal):.3f}`")
+        st.write(f"- KS(holdout): `{ks_stat(y_hold_vec,  p_cal_val):.3f}`")
         
         def lift_table(y_true, p, k=10):
             n = len(p); order = np.argsort(-p)
             y_sorted = np.asarray(y_true)[order]
             rows=[]
+            base = max(1e-9, np.mean(y_true))
             for i in range(k):
                 lo = int(i*n/k); hi = int((i+1)*n/k)
                 segment = y_sorted[lo:hi]
-                base = max(1e-9, np.mean(y_true))
-                rows.append({"Decile": i+1, "N": len(segment), "HitRate": float(np.mean(segment)), "Lift": float(np.mean(segment)/base)})
+                rows.append({"Decile": i+1, "N": len(segment),
+                             "HitRate": float(np.mean(segment)),
+                             "Lift": float(np.mean(segment)/base)})
             return pd.DataFrame(rows)
         
         st.markdown("#### 🚀 Lift (Train, Deciles)")
-        st.dataframe(lift_table(y_full, p_train_blend))
+        st.dataframe(lift_table(y_train_vec, p_cal))
+
         
         # ---- segment diagnostics (holdout) -----------------------------------------
         st.markdown("### 🧩 Segment Diagnostics (Holdout)")
         eval_seg = pd.DataFrame({
-            "p":   p_val_blend,
-            "y":   y_val.astype(int).values,
-            "Book": df_market.loc[val_idx, "Book"].astype(str).values if "Book" in df_market.columns else "NA",
-            "Timing": df_market.loc[val_idx, "SharpMove_Timing_Dominant"].astype(str).values if "SharpMove_Timing_Dominant" in df_market.columns else "NA",
-            "Fav":  df_market.loc[val_idx, "Is_Favorite_Bet"].fillna(0).astype(int).values if "Is_Favorite_Bet" in df_market.columns else 0,
+            "p":   p_cal_val,
+            "y":   y_hold_vec.astype(int),
+            "Book":  (df_market.iloc[hold_idx]["Book"].astype(str).values if "Book" in df_market.columns else "NA"),
+            "Timing":(df_market.iloc[hold_idx]["SharpMove_Timing_Dominant"].astype(str).values if "SharpMove_Timing_Dominant" in df_market.columns else "NA"),
+            "Fav":   (df_market.iloc[hold_idx]["Is_Favorite_Bet"].fillna(0).astype(int).values if "Is_Favorite_Bet" in df_market.columns else 0),
         })
         
         def seg_table(df, by):
             rows=[]
             for k, sub in df.groupby(by):
-                if sub["y"].nunique() < 2 or len(sub) < 30:
-                    auc = np.nan
-                else:
-                    auc = roc_auc_score(sub["y"], sub["p"])
-                rows.append({
-                    by: k, "N": len(sub),
-                    "BaseRate": float(np.mean(sub["y"])),
-                    "AUC": float(auc) if not np.isnan(auc) else np.nan,
-                    "Brier": float(brier_score_loss(sub["y"], sub["p"]))
-                })
+                auc = roc_auc_score(sub["y"], sub["p"]) if (sub["y"].nunique()==2 and len(sub)>=30) else np.nan
+                rows.append({by: k, "N": len(sub),
+                             "BaseRate": float(np.mean(sub["y"])),
+                             "AUC": float(auc) if not np.isnan(auc) else np.nan,
+                             "Brier": float(brier_score_loss(sub["y"], sub["p"]))})
             return pd.DataFrame(rows).sort_values("N", ascending=False)
         
-        st.write("**by Book**")
-        if "Book" in eval_seg.columns:
-            st.dataframe(seg_table(eval_seg, "Book").head(20))
-        st.write("**by Timing**")
-        if "Timing" in eval_seg.columns:
-            st.dataframe(seg_table(eval_seg, "Timing"))
-        st.write("**Favorite vs Dog**")
-        st.dataframe(seg_table(eval_seg, "Fav"))
+        st.write("**by Book**");   st.dataframe(seg_table(eval_seg, "Book").head(20))
+        st.write("**by Timing**"); st.dataframe(seg_table(eval_seg, "Timing"))
+        st.write("**Favorite vs Dog**"); st.dataframe(seg_table(eval_seg, "Fav"))
+
         
         # ---- drift / PSI on a few high-signal features -----------------------------
         st.markdown("### 🌡️ Drift Check (PSI proxy)")
         psi_rows=[]
         feat_check = [c for c in ["Outcome_Market_Spread","Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening","Book_Reliability_Lift"] if c in df_market.columns]
-        if len(val_idx) > 0 and len(feat_check) > 0:
-            train_end = val_idx[0]  # first index of holdout window
+        if len(hold_idx) > 0 and len(feat_check) > 0:
             for col in feat_check:
-                a = pd.to_numeric(df_market.loc[:train_end-1, col], errors="coerce").dropna().values
-                b = pd.to_numeric(df_market.loc[val_idx, col],         errors="coerce").dropna().values
+                a = pd.to_numeric(df_market.iloc[train_all_idx][col], errors="coerce").dropna().values
+                b = pd.to_numeric(df_market.iloc[hold_idx][col],         errors="coerce").dropna().values
                 if len(a)>50 and len(b)>20:
                     psi_rows.append({"Feature": col, "PSI": psi_num(a,b)})
         if psi_rows:
             st.dataframe(pd.DataFrame(psi_rows).sort_values("PSI", ascending=False))
+
         
         # ---- profit vs threshold (holdout) -----------------------------------------
         st.markdown("### 💵 Profit vs Threshold (Holdout)")
@@ -3717,22 +3590,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             roi = yy*profit_on_win - (1-yy)*1.0
             return float(np.mean(roi))
         
-        odds_val = pd.to_numeric(df_market.loc[val_idx, "Odds_Price"], errors="coerce")
-        p_val_ser = pd.Series(p_val_blend, index=val_idx)
+        odds_val = pd.to_numeric(df_market.iloc[hold_idx].get("Odds_Price", np.nan), errors="coerce")
+        p_val_ser = pd.Series(p_cal_val, index=hold_idx)
         rows=[]
         for t in np.round(np.linspace(0.50, 0.80, 13), 2):
-            rows.append({"Thresh": float(t), "N": int(np.sum(p_val_ser>=t)), "AvgROI": profit_at_thresh(p_val_ser, y_val, odds_val, t)})
+            rows.append({"Thresh": float(t),
+                         "N": int(np.sum(p_val_ser>=t)),
+                         "AvgROI": profit_at_thresh(p_val_ser, pd.Series(y_hold_vec, index=hold_idx), odds_val, t)})
         st.dataframe(pd.DataFrame(rows))
-        
-        
+
         # Derive feature_names if not already set
         if 'feature_names' not in locals() or not feature_names:
-            feat_in = getattr(final_log, 'feature_names_in_', None) \
-                      or getattr(final_auc, 'feature_names_in_', None)
+            feat_in = getattr(model_logloss, 'feature_names_in_', None) \
+                      or getattr(model_auc,     'feature_names_in_', None)
             if feat_in is not None:
-                feature_names = [str(c) for c in feat_in]
+                feature_names = [str(c) for c in (feat_in if feat_in is not None else features)]
             else:
-                feature_names = [str(c) for c in features]  # fallback to your training feature list
+                feature_names = [str(c) for c in (feat_in if feat_in is not None else features)]
         
         # Build the feature frame from df_market (no need for a prior X_pd)
         X_features = df_market.reindex(columns=feature_names).copy()
@@ -3769,16 +3643,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- calibration curve table (train) ---------------------------------------
         from sklearn.calibration import calibration_curve
-        prob_true, prob_pred = calibration_curve(y_full, p_train_blend, n_bins=10)
+        prob_true, prob_pred = calibration_curve(y_train_vec, p_cal, n_bins=10)
         calib_df = pd.DataFrame({"Predicted Bin Center": prob_pred, "Actual Hit Rate": prob_true})
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()} (Train)")
         st.dataframe(calib_df)
-        
+
         # ---- CV fold health ---------------------------------------------------------
         st.markdown("### 🧩 CV Fold Health")
         cv_rows=[]
         for i,(tr,va) in enumerate(folds,1):
-            yv = y_full[va].astype(int)
+            yv = y_train[va].astype(int)
             cv_rows.append({
                 "Fold": i,
                 "ValN": int(len(va)),
@@ -3786,6 +3660,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 "ValBothClasses": bool(np.unique(yv).size==2)
             })
         st.dataframe(pd.DataFrame(cv_rows))
+
 
         
         # Start with Game_Key/Team unique combos
@@ -3934,33 +3809,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # === Save ensemble (choose one or both)
         trained_models[market] = {
-            "model_logloss": model_logloss,
-            "calibrator_logloss": cal_logloss,
-            "model_auc": model_auc,
-            "calibrator_auc": cal_auc,
-            "best_w": best_w,   # weight chosen by log loss
-            "team_feature_map": team_feature_map,
-            "book_reliability_map": book_reliability_map,
-            "feature_cols": feature_cols, 
+                "model_logloss": model_logloss,
+                "model_auc":     model_auc,
+                "iso_blend":     iso_blend,
+                "best_w":        float(best_w),
+                "team_feature_map": team_feature_map,
+                "book_reliability_map": book_reliability_map,
+                "feature_cols":  feature_cols,
             
         }
         save_model_to_gcs(
-            model={
-                "model_logloss": model_logloss,
-                "model_auc": model_auc,
-                "best_w": float(best_w),  # ensure JSON/pickle-safe
-                "feature_cols": feature_cols,
-            },
-            calibrator={
-                "cal_logloss": cal_logloss,
-                "cal_auc": cal_auc
-            },
-            sport=sport,
-            market=market,
-            bucket_name=GCS_BUCKET,
+            model={"model_logloss": model_logloss, "model_auc": model_auc,
+                   "best_w": float(best_w), "feature_cols": feature_cols},
+            calibrator={"iso_blend": iso_blend},
+            sport=sport, market=market, bucket_name=GCS_BUCKET,
             team_feature_map=team_feature_map,
             book_reliability_map=book_reliability_map,
         )
+           
         
 
         auc = auc_hold
