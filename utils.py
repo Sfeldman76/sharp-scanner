@@ -3387,6 +3387,320 @@ def _resolve_feature_cols_like_training(bundle, model, df_canon, prefer_saved_on
     return _training_like_feature_selector(df_canon)
 
 
+# Only the columns needed for totals features
+_TOT_SCORE_COLS = (
+    "Sport, Game_Start, Home_Team, Away_Team, "
+    "SAFE_CAST(Score_Home_Score AS FLOAT64) AS Score_Home_Score, "
+    "SAFE_CAST(Score_Away_Score AS FLOAT64) AS Score_Away_Score, "
+    "Merge_Key_Short"
+)
+
+def _downcast_scores_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    df["Game_Start"] = pd.to_datetime(df["Game_Start"], errors="coerce", utc=True)
+    for c in ("Score_Home_Score", "Score_Away_Score"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("float32")
+    for c in ("Sport", "Home_Team", "Away_Team"):
+        if c in df.columns:
+            df[c] = df[c].astype("string").astype("category")
+    if "Merge_Key_Short" in df.columns:
+        df["Merge_Key_Short"] = df["Merge_Key_Short"].astype("string")
+    return df
+
+def _bq_pull_scores_noseason(
+    table_fq: str,
+    *,
+    sport: str | None,
+    days_back: int | None  # None => no time filter
+) -> pd.DataFrame:
+    from google.cloud import bigquery
+    bq = bigquery.Client()
+
+    filters = []
+    params = []
+
+    if days_back is not None:
+        filters.append("Game_Start >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days_back DAY)")
+        params.append(bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)))
+
+    if sport:
+        filters.append("UPPER(Sport) = UPPER(@sport)")
+        params.append(bigquery.ScalarQueryParameter("sport", "STRING", sport))
+
+    where_clause = ""
+    if filters:
+        where_clause = "WHERE " + " AND ".join(filters)
+
+    query = f"""
+      SELECT {_TOT_SCORE_COLS}
+      FROM `{table_fq}`
+      {where_clause}
+    """
+
+    job_config = bigquery.QueryJobConfig(query_parameters=params or None)
+    df = bq.query(query, job_config=job_config).to_dataframe(create_bqstorage_client=True)
+    return _downcast_scores_df(df)
+
+def load_scores_history_cached_backend(
+    *,
+    sport: str | None = None,
+    days_back: int | None = 365,   # ✅ no seasons; set None for all-time if you want
+    table_fq: str = "sharplogger.sharp_data.game_scores_final",
+    ttl_seconds: int = 3600,
+    cache_dir: str = "/tmp"
+) -> pd.DataFrame:
+    """
+    Low-memory, season-free loader for Cloud Run/Functions.
+    Caches a Parquet in /tmp keyed by (sport, days_back, table).
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    sport_key = (sport or "ALL").upper()
+    range_key = f"{int(days_back)}d" if days_back is not None else "ALLTIME"
+    safe_table = table_fq.replace(".", "__")
+    cache_path = os.path.join(cache_dir, f"scores_hist__{safe_table}__{sport_key}__{range_key}.parquet")
+
+    if os.path.exists(cache_path):
+        age = time.time() - os.path.getmtime(cache_path)
+        if age < ttl_seconds:
+            return pd.read_parquet(cache_path)
+
+    df = _bq_pull_scores_noseason(table_fq, sport=sport, days_back=days_back)
+    df.to_parquet(cache_path, index=False)
+    return df
+
+
+
+# =========================
+# 1) Build totals baselines (NO Season)
+# =========================
+def build_totals_training_from_scores(df_scores: pd.DataFrame,
+                                      sport: str | None = None,
+                                      window_games: int = 30,
+                                      shrink: float = 0.30,
+                                      key_col: str = "Merge_Key_Short"
+                                      ) -> pd.DataFrame:
+    """
+    Returns one row per historical game with:
+      {key_col}, TOT_Proj_Total_Baseline, TOT_Off_H, TOT_Def_H, TOT_Off_A, TOT_Def_A,
+      TOT_GT_H, TOT_GT_A, TOT_LgAvg_Total, TOT_Actual_Total
+
+    Leakage-safe via .shift(1). No Season logic; strictly ordered by Game_Start.
+    """
+    if key_col not in df_scores.columns:
+        raise ValueError(f"Expected key_col '{key_col}' in df_scores")
+
+    df = df_scores.copy()
+    # normalize join key
+    df[key_col] = df[key_col].astype(str).str.strip().str.lower()
+    df = df.rename(columns={key_col: "Game_Key"})  # internal
+
+    # filter sport if provided (optional)
+    if sport:
+        df = df[df["Sport"].astype(str).str.upper() == sport.upper()].copy()
+
+    # ensure time & numeric types
+    df["Game_Start"] = pd.to_datetime(df["Game_Start"], errors="coerce", utc=True)
+    df["Score_Home_Score"] = pd.to_numeric(df["Score_Home_Score"], errors="coerce")
+    df["Score_Away_Score"] = pd.to_numeric(df["Score_Away_Score"], errors="coerce")
+
+    # ---- per-game totals (to compute league avg prior across ALL games chronologically) ---
+    g_base = (
+        df[["Sport","Game_Key","Game_Start","Home_Team","Away_Team",
+            "Score_Home_Score","Score_Away_Score"]]
+        .drop_duplicates(subset=["Game_Key"])
+        .sort_values("Game_Start")
+        .reset_index(drop=True)
+    )
+    g_base["Actual_Total"] = g_base["Score_Home_Score"] + g_base["Score_Away_Score"]
+
+    # league avg total prior to each game (single value per Game_Key), no seasons
+    league_avg_prior = (
+        g_base["Actual_Total"]
+        .expanding().mean().shift(1)                # prior games only
+        .fillna(g_base["Actual_Total"].mean())      # early backfill
+    )
+    g_base["LgAvg_Total_Prior"] = league_avg_prior
+
+    # ---- long frame (team rows) with rolling stats by team (no seasons) ----
+    home = df.assign(team=df["Home_Team"], opp=df["Away_Team"],
+                     pts_for=df["Score_Home_Score"], pts_against=df["Score_Away_Score"])
+    away = df.assign(team=df["Away_Team"], opp=df["Home_Team"],
+                     pts_for=df["Score_Away_Score"], pts_against=df["Score_Home_Score"])
+    long = pd.concat([home, away], ignore_index=True)
+
+    long = (
+        long[["Sport","Game_Key","Game_Start","team","opp","pts_for","pts_against"]]
+        .sort_values(["team","Game_Start"])
+        .reset_index(drop=True)
+    )
+    long["game_total"] = long["pts_for"] + long["pts_against"]
+
+    def _roll_mean_prior(x: pd.Series) -> pd.Series:
+        return x.rolling(window_games, min_periods=1).mean().shift(1)  # exclude current
+
+    long["pf_roll"] = long.groupby("team", group_keys=False)["pts_for"].apply(_roll_mean_prior)
+    long["pa_roll"] = long.groupby("team", group_keys=False)["pts_against"].apply(_roll_mean_prior)
+    long["gt_roll"] = long.groupby("team", group_keys=False)["game_total"].apply(_roll_mean_prior)
+
+    # map league avg prior (per game) onto both rows of that game
+    long = long.merge(
+        g_base[["Game_Key","LgAvg_Total_Prior"]],
+        on="Game_Key", how="left"
+    )
+
+    # ratings relative to half the league avg prior (off/def above/below avg)
+    half = long["LgAvg_Total_Prior"] / 2.0
+    long["Off_Rating"] = (1 - shrink) * (long["pf_roll"] - half)
+    long["Def_Rating"] = (1 - shrink) * (long["pa_roll"] - half)
+
+    # reshape to one row per game (H/A)
+    ratings = long[["Sport","Game_Key","Game_Start","team","opp",
+                    "Off_Rating","Def_Rating","gt_roll","LgAvg_Total_Prior"]]
+
+    home_r = ratings.rename(columns={
+        "team":"Home_Team","opp":"Away_Team",
+        "Off_Rating":"Off_H","Def_Rating":"Def_H",
+        "gt_roll":"GT_H","LgAvg_Total_Prior":"LgAvg_H"
+    })
+    away_r = ratings.rename(columns={
+        "team":"Away_Team","opp":"Home_Team",
+        "Off_Rating":"Off_A","Def_Rating":"Def_A",
+        "gt_roll":"GT_A","LgAvg_Total_Prior":"LgAvg_A"
+    })
+
+    g = g_base.merge(
+            home_r[["Game_Key","Home_Team","Away_Team","Off_H","Def_H","GT_H","LgAvg_H"]],
+            on=["Game_Key","Home_Team","Away_Team"], how="left"
+        ).merge(
+            away_r[["Game_Key","Home_Team","Away_Team","Off_A","Def_A","GT_A","LgAvg_A"]],
+            on=["Game_Key","Home_Team","Away_Team"], how="left"
+        )
+
+    # single league avg per game (prefer whichever is present)
+    g["LgAvg_Total"] = g["LgAvg_H"].combine_first(g["LgAvg_A"])
+
+    # baseline total (off+def blend) * pace multiplier (team GT vs league avg)
+    base = (
+        g["LgAvg_Total"]
+        + 0.5*(g["Off_H"].fillna(0) + g["Def_A"].fillna(0))
+        + 0.5*(g["Off_A"].fillna(0) + g["Def_H"].fillna(0))
+    )
+    pace_mult = (
+        (g["GT_H"].fillna(g["LgAvg_Total"]) + g["GT_A"].fillna(g["LgAvg_Total"])) /
+        (2.0 * g["LgAvg_Total"].replace(0, np.nan))
+    ).clip(0.8, 1.2).fillna(1.0)
+
+    g["Proj_Total_Baseline"] = base * pace_mult
+
+    # final outputs
+    out = g.rename(columns={"Game_Key": key_col})
+    cols = [
+        "Proj_Total_Baseline","Off_H","Def_H","Off_A","Def_A",
+        "GT_H","GT_A","LgAvg_Total","Actual_Total"
+    ]
+    out = out[[key_col] + cols].rename(columns={c: f"TOT_{c}" for c in cols})
+    return out
+
+
+# =========================
+# 2) Current per-game total line (median across books)
+# =========================
+def _current_total_line_by_key(df_any_market: pd.DataFrame,
+                               key_col: str = "Merge_Key_Short") -> pd.DataFrame:
+    """
+    From a mixed-market DF, compute one total line per {key_col}:
+      - filter to Market == 'totals'
+      - median Value by {key_col}
+    Returns: [{key_col}, Total_Line_Current]
+    """
+    if key_col not in df_any_market.columns:
+        raise ValueError(f"Expected '{key_col}' in df")
+
+    df_tot = df_any_market.copy()
+    df_tot["Market"] = df_tot["Market"].astype(str).str.strip().str.lower()
+    df_tot[key_col]  = df_tot[key_col].astype(str).str.strip().str.lower()
+
+    df_tot = df_tot[df_tot["Market"] == "totals"].copy()
+    if df_tot.empty:
+        return pd.DataFrame({key_col: [], "Total_Line_Current": []})
+
+    df_tot["Value_num"] = pd.to_numeric(df_tot.get("Value"), errors="coerce")
+    per_key = (
+        df_tot.groupby(key_col, as_index=False)["Value_num"]
+              .median()
+              .rename(columns={"Value_num": "Total_Line_Current"})
+    )
+    return per_key
+
+
+# =========================
+# 3) Features for upcoming (schedule-like DF)
+# =========================
+def totals_features_for_upcoming(df_scores: pd.DataFrame,
+                                 df_schedule_like: pd.DataFrame,
+                                 sport: str | None = None,
+                                 window_games: int = 30,
+                                 shrink: float = 0.30,
+                                 key_col: str = "Merge_Key_Short"
+                                 ) -> pd.DataFrame:
+    """
+    Produces TOT_* features for the keys in df_schedule_like[{key_col}],
+    excluding TOT_Actual_Total (label).
+    """
+    if key_col not in df_scores.columns or key_col not in df_schedule_like.columns:
+        raise ValueError(f"Expected key_col '{key_col}' in both dataframes")
+
+    want = df_schedule_like[[key_col]].copy()
+    want[key_col] = want[key_col].astype(str).str.strip().str.lower()
+
+    hist = build_totals_training_from_scores(
+        df_scores, sport=sport, window_games=window_games, shrink=shrink, key_col=key_col
+    )
+    cols = [c for c in hist.columns if c.startswith("TOT_") and c != "TOT_Actual_Total"]
+    return hist.merge(want, on=key_col, how="right")[[key_col] + cols]
+
+
+# =========================
+# 4) Attach to scoring DF (adds TOT_* and TOT_Mispricing)
+# =========================
+def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
+                                   df_scores_history: pd.DataFrame,
+                                   *,
+                                   sport: str | None = None,
+                                   key_col: str = "Merge_Key_Short",
+                                   window_games: int = 30,
+                                   shrink: float = 0.30,
+                                   compute_mispricing: bool = True
+                                   ) -> pd.DataFrame:
+    """
+    Adds TOT_* baselines to df_scoring by {key_col},
+    plus TOT_Mispricing = TOT_Proj_Total_Baseline - Total_Line_Current (if available).
+    """
+    if key_col not in df_scoring.columns:
+        raise ValueError(f"Expected '{key_col}' in df_scoring")
+
+    df_sc = df_scoring.copy()
+    df_sc[key_col] = df_sc[key_col].astype(str).str.strip().str.lower()
+
+    tot_feats = totals_features_for_upcoming(
+        df_scores=df_scores_history,
+        df_schedule_like=df_sc[[key_col]],
+        sport=sport,
+        window_games=window_games,
+        shrink=shrink,
+        key_col=key_col,
+    )
+
+    df_sc = df_sc.merge(tot_feats, on=key_col, how="left")
+
+    if compute_mispricing:
+        cur_line = _current_total_line_by_key(df_scoring, key_col=key_col)
+        df_sc = df_sc.merge(cur_line, on=key_col, how="left")
+        df_sc["TOT_Mispricing"] = df_sc["TOT_Proj_Total_Baseline"] - df_sc["Total_Line_Current"]
+
+    return df_sc
 
 
 
@@ -4081,6 +4395,26 @@ def apply_blended_sharp_score(
     # Normalize the incoming trained_models without discarding tuples/objects
     trained_models = trained_models or {}
     trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
+    # Pull ~3.3 years of scores, or set days_back=None for all-time
+    df_scores_hist = load_scores_history_cached_backend(
+        sport=sport,
+        days_back=365,   # ← no seasons, pure time window
+        table_fq="sharplogger.sharp_data.game_scores_final",
+        ttl_seconds=3600
+    )
+    
+    # Then enrich your scoring frame (your season-free functions already handle the rest)
+    df = enrich_df_with_totals_features(
+        df_scoring=df,
+        df_scores_history=df_scores_hist,
+        sport=sport,
+        key_col="Merge_Key_Short",
+        window_games=30,
+        shrink=0.30,
+        compute_mispricing=True
+    )
+
+
 
     def _has_any_model(bundle):
         if isinstance(bundle, dict):
