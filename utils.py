@@ -31,6 +31,10 @@ from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
 from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.isotonic import IsotonicRegression  # optional; safe to keep
 
+import cloudpickle as cp
+import gzip
+from google.cloud import storage
+
 # --- XGBoost ---
 import xgboost as xgb
 from xgboost import XGBClassifier
@@ -3178,95 +3182,127 @@ def _suffix_snapshot(df, tag):
     if bad:
         logger.warning("❗ %s introduced %s", tag, bad)
 
-
-def predict_blended(bundle, X, model=None, iso=None):
+def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
     """
-    Return calibrated/blended probs in [1e-6, 1-1e-6] or None.
+    Return calibrated/blended probs in [eps, 1-eps] or None.
+
     Supports:
-      - dict bundles with (model_logloss, calibrator_logloss) and/or (model_auc, calibrator_auc)
-      - dict with (model, calibrator)
-      - tuple/list: (model, calibrator)
-      - single calibrated estimator exposing predict_proba(X)
+      NEW format:
+        - dict with keys:
+            model_logloss, model_auc, best_w, calibrator={"iso_blend": IsotonicRegression}
+          (blend raw model outputs, then apply iso_blend)
+      OLD format:
+        - dict with model_logloss, calibrator_logloss and/or model_auc, calibrator_auc
+          (per-head calibration then blend)
+      Also supports:
+        - dict with {"model": <est>, "calibrator": <cal|{"iso_blend": cal}>}
+        - tuple/list: (model, calibrator)
+        - single calibrated estimator exposing predict_proba(X)
     """
 
     def _predict_one(m, cal, X_):
-        # If we were handed a calibrated estimator (e.g., CalibratedClassifierCV)
+        # CalibratedClassifierCV-like: already calibrated
         if m is not None and hasattr(m, "predict_proba") and cal is None and hasattr(m, "base_estimator_"):
             p = m.predict_proba(X_)
             return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
 
-        # Normal path: get model prob, then calibrate that 1-D vector
+        # Raw score/proba
         p_raw = None
         if m is not None:
             if hasattr(m, "predict_proba"):
                 p = m.predict_proba(X_)
                 p_raw = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
             elif hasattr(m, "decision_function"):
-                # Some models provide a score; map to (0,1) with logistic if calibrator expects that.
                 s = np.asarray(m.decision_function(X_), dtype=float)
-                # If we have a calibrator, pass the raw score; otherwise squash to prob-ish
                 p_raw = s if cal is not None else 1.0 / (1.0 + np.exp(-s))
 
-        # Apply calibrator if present
+        # Apply per-model calibrator
         if cal is not None and p_raw is not None:
-            # IsotonicRegression/Platt/any regressor-like: predict/transform on 1-D inputs
             if hasattr(cal, "predict"):
                 return np.asarray(cal.predict(p_raw), dtype=float)
-            if hasattr(cal, "transform"):  # some isotonic implementations expose transform
+            if hasattr(cal, "transform"):
                 return np.asarray(cal.transform(p_raw), dtype=float)
             if callable(cal):
                 return np.asarray(cal(p_raw), dtype=float)
 
-        # Fallbacks
         if p_raw is not None:
             return np.asarray(p_raw, dtype=float)
 
-        # If no model but calibrator is itself a classifier (rare), allow it
+        # Very rare: calibrator is itself a classifier
         if cal is not None and hasattr(cal, "predict_proba"):
             p = cal.predict_proba(X_)
             return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
         if cal is not None and hasattr(cal, "predict"):
-            # Dangerous unless cal is a calibrated classifier; kept as last resort
             return np.asarray(cal.predict(X_), dtype=float)
 
         return None
 
-    # Unpack tuple/list bundles
+    # Allow tuple/list bundles
     if isinstance(bundle, (tuple, list)) and len(bundle) >= 1 and model is None and iso is None:
         model = bundle[0]
         iso   = bundle[1] if len(bundle) > 1 else None
 
-    # Dict bundle: try 2-model blend (logloss/auc), else single pair (model/calibrator)
+    # Dict bundle path
     if isinstance(bundle, dict):
-        # Two-model blend path
-        if ("model_logloss" in bundle) or ("model_auc" in bundle):
+        # ----- NEW format: single iso_blend that calibrates the blended prob -----
+        calib_bundle = bundle.get("calibrator")
+        if isinstance(calib_bundle, dict) and ("iso_blend" in calib_bundle):
             mL = bundle.get("model_logloss")
-            cL = bundle.get("calibrator_logloss")
             mA = bundle.get("model_auc")
-            cA = bundle.get("calibrator_auc")
+            w  = float(bundle.get("best_w", 0.5))
+            # raw (uncalibrated) head outputs
+            pL = _predict_one(mL, None, X) if mL is not None else None
+            pA = _predict_one(mA, None, X) if mA is not None else None
+
+            if pL is None and pA is None:
+                # fallback: maybe single 'model' key with iso_blend
+                m_single = bundle.get("model")
+                if m_single is None:
+                    return None
+                p_raw = _predict_one(m_single, None, X)
+            else:
+                if pL is not None and pA is not None and len(pL) == len(pA):
+                    p_raw = w * pL + (1.0 - w) * pA
+                else:
+                    p_raw = pL if pL is not None else pA
+
+            p_raw = np.clip(p_raw, eps, 1 - eps)
+            p_cal = calib_bundle["iso_blend"].predict(p_raw)
+            return np.clip(np.asarray(p_cal, dtype=float), eps, 1 - eps)
+
+        # ----- OLD format: per-head calibrators then blend -----
+        if ("model_logloss" in bundle) or ("model_auc" in bundle):
+            mL = bundle.get("model_logloss"); cL = bundle.get("calibrator_logloss")
+            mA = bundle.get("model_auc");     cA = bundle.get("calibrator_auc")
             w  = float(bundle.get("best_w", 1.0))
 
             pL = _predict_one(mL, cL, X) if (mL is not None or cL is not None) else None
             pA = _predict_one(mA, cA, X) if (mA is not None or cA is not None) else None
 
             if pL is not None and pA is not None and len(pL) == len(pA):
-                p = w * pL + (1.0 - w) * pA
-                return np.clip(p, 1e-6, 1 - 1e-6)
+                return np.clip(w * pL + (1.0 - w) * pA, eps, 1 - eps)
             if pL is not None:
-                return np.clip(pL, 1e-6, 1 - 1e-6)
+                return np.clip(pL, eps, 1 - eps)
             if pA is not None:
-                return np.clip(pA, 1e-6, 1 - 1e-6)
+                return np.clip(pA, eps, 1 - eps)
 
-        # Single pair path
+        # ----- Single pair path: {"model": est, "calibrator": cal|{"iso_blend": cal}} -----
         if ("model" in bundle) or ("calibrator" in bundle):
             m = bundle.get("model")
             c = bundle.get("calibrator")
-            p = _predict_one(m, c, X)
-            return np.clip(p, 1e-6, 1 - 1e-6) if p is not None else None
+            if isinstance(c, dict) and "iso_blend" in c:
+                p_raw = _predict_one(m, None, X)
+                if p_raw is None: return None
+                p_raw = np.clip(p_raw, eps, 1 - eps)
+                p_cal = c["iso_blend"].predict(p_raw)
+                return np.clip(np.asarray(p_cal, dtype=float), eps, 1 - eps)
+            else:
+                p = _predict_one(m, c, X)
+                return np.clip(p, eps, 1 - 1e-6) if p is not None else None
 
     # Legacy args path
     p = _predict_one(model, iso, X)
-    return np.clip(p, 1e-6, 1 - 1e-6) if p is not None else None
+    return np.clip(p, eps, 1 - eps) if p is not None else None
 
 def _unwrap_pipeline(est):
     pipe = est if hasattr(est, "named_steps") else None
@@ -6247,119 +6283,151 @@ def detect_cross_market_sharp_support(
     
 
     return df
-
-
-
-import io, pickle, logging
+import io, gzip, logging, pickle, re, time
 import numpy as np
 import pandas as pd
 from google.cloud import storage
 
-# --- Shim for old IsoWrapper pickles ---
+# Try cloudpickle for robustness
+try:
+    import cloudpickle as cp
+except Exception:
+    cp = None
+
+# ---- Shim for old IsoWrapper pickles (kept, single definition) ----
 class _IsoWrapperShim:
     def __init__(self, model=None, calibrator=None):
         self.model = model
         self.calibrator = calibrator
     def predict_proba(self, X):
+        # old pickles called IsoWrapper.predict_proba(X) directly
         if hasattr(self.model, "predict_proba"):
             p = self.model.predict_proba(X)
             p1 = p[:, 1] if getattr(p, "ndim", 1) == 2 else np.asarray(p).ravel()
         else:
             p1 = np.asarray(self.model.predict(X)).ravel()
-        if self.calibrator is not None and hasattr(self.calibrator, "transform"):
-            p1 = np.clip(self.calibrator.transform(p1), 1e-9, 1-1e-9)
+        if self.calibrator is not None:
+            # many old scikit calibrators expose .transform
+            trans = getattr(self.calibrator, "transform", None)
+            if callable(trans):
+                p1 = trans(p1)
+        p1 = np.clip(p1, 1e-9, 1 - 1e-9)
         return np.column_stack([1 - p1, p1])
 
 class _RenamingUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        if (module, name) in {
-            ("__main__", "IsoWrapper"),
-            ("streamlit.runtime.scriptrunner.script_runner", "IsoWrapper"),
-            ("uvicorn", "IsoWrapper"),
-        }:
-            return _IsoWrapperShim
-        return super().find_class(module, name)
-
-def _safe_loads(b: bytes):
-    bio = io.BytesIO(b)
-    try:
-        return _RenamingUnpickler(bio).load()
-    except Exception:
-        bio.seek(0)
-        return pickle.loads(bio.read())
-
-def _to_df(x):
-    if isinstance(x, pd.DataFrame): return x
-    if x is None: return pd.DataFrame()
-    try: return pd.DataFrame(x)
-    except Exception: return pd.DataFrame()
-
-# ---- 1) Add these near your imports ----
-import io, pickle
-
-class _IsoWrapperShim:
-    """Minimal shim so old pickles referencing IsoWrapper can load."""
-    def __init__(self, model=None, calibrator=None):
-        self.model = model
-        self.calibrator = calibrator
-    # pickle will restore attributes; no other methods required here
-
-class _RenamingUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        # be permissive: ANY module with class name 'IsoWrapper' -> shim
+        # Map any IsoWrapper reference to our shim
         if name == "IsoWrapper":
             return _IsoWrapperShim
         return super().find_class(module, name)
 
 def _safe_loads(b: bytes):
     bio = io.BytesIO(b)
+    # First try with our remapping (for old IsoWrapper pickles)
     try:
         return _RenamingUnpickler(bio).load()
     except Exception:
-        bio.seek(0)
-        return pickle.loads(bio.read())
+        pass
+    # Then try cloudpickle (if available)
+    if cp is not None:
+        try:
+            return cp.loads(b)
+        except Exception:
+            pass
+    # Finally, vanilla pickle
+    bio.seek(0)
+    return pickle.loads(bio.read())
 
-def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
-    import io, pickle, logging, pandas as pd
-    from google.cloud import storage
-    
-    sport_l  = str(sport).lower()
-    market_l = str(market).lower()
-    fname    = f"sharp_win_model_{sport_l}_{market_l}.pkl"
+def _slug(s: str) -> str:
+    s = str(s).strip().lower()
+    return re.sub(r"[^\w.-]+", "_", s).strip("_.")
 
-    client = storage.Client()
-    blob   = client.bucket(bucket_name).blob(fname)
+def _maybe_decompress(path: str, data: bytes) -> bytes:
+    return gzip.decompress(data) if path.endswith(".gz") else data
+
+def load_model_from_gcs(
+    sport: str,
+    market: str,
+    bucket_name: str = "sharp-models",
+    project: str | None = None,
+    use_latest: bool = False,        # set True if you saved timestamped files
+) -> dict | None:
+    client = storage.Client(project=project) if project else storage.Client()
+    bucket = client.bucket(bucket_name)
+
+    sport_l, market_l = _slug(sport), _slug(market)
+    base_prefix = f"sharp_win_model_{sport_l}_{market_l}"
+
+    if use_latest:
+        # find most recent object by prefix
+        blobs = list(bucket.list_blobs(prefix=base_prefix))
+        if not blobs:
+            logging.warning(f"⚠️ No artifacts with prefix {base_prefix} in gs://{bucket_name}")
+            return None
+        # pick the newest by updated time
+        blob = sorted(blobs, key=lambda b: b.updated or b.time_created)[-1]
+    else:
+        # static filename (legacy)
+        blob = bucket.blob(f"{base_prefix}.pkl")
 
     try:
         content = blob.download_as_bytes()
     except Exception as e:
-        logging.warning(f"⚠️ No artifact: gs://{bucket_name}/{fname} ({e})")
+        logging.warning(f"⚠️ No artifact: gs://{bucket_name}/{blob.name} ({e})")
         return None
 
     try:
-        data = _safe_loads(content)  # your saves don’t need IsoWrapper anymore
-        logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
+        payload = _safe_loads(_maybe_decompress(blob.name, content))
+        logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{blob.name}")
     except Exception as e:
-        logging.warning(f"⚠️ Failed to unpickle {fname}: {e}")
+        logging.warning(f"⚠️ Failed to unpickle {blob.name}: {e}")
         return None
 
-    # --- Normalize the dict ---
-    if not isinstance(data, dict):
-        logging.error(f"Unexpected payload type in {fname}: {type(data)}")
+    if not isinstance(payload, dict):
+        logging.error(f"Unexpected payload type in {blob.name}: {type(payload)}")
         return None
+
+    # ---- Normalize keys across new/old formats ----
+    # Models
+    model_logloss = payload.get("model_logloss") or payload.get("model")
+    model_auc     = payload.get("model_auc")
+
+    # Calibrators:
+    # NEW: payload["calibrator"] = {"iso_blend": <IsotonicRegression>}
+    # OLD: payload["calibrator_logloss"], payload["calibrator_auc"] (IsoWrapper, etc.)
+    calibrator_bundle = payload.get("calibrator")
+    if isinstance(calibrator_bundle, dict) and ("iso_blend" in calibrator_bundle):
+        calibrator = {"iso_blend": calibrator_bundle["iso_blend"]}
+    else:
+        # fall back to old keys (may be None)
+        calibrator = {
+            "cal_logloss": payload.get("calibrator_logloss"),
+            "cal_auc":     payload.get("calibrator_auc"),
+        }
+        # if both None, keep empty dict
+        if calibrator["cal_logloss"] is None and calibrator["cal_auc"] is None:
+            calibrator = {}
+
+    # Misc
+    feature_cols = payload.get("feature_cols") or payload.get("features") or []
+    team_map = payload.get("team_feature_map")
+    book_map = payload.get("book_reliability_map")
 
     bundle = {
-        "model_logloss":        data.get("model_logloss"),
-        "calibrator_logloss":   data.get("calibrator_logloss"),
-        "model_auc":            data.get("model_auc"),
-        "calibrator_auc":       data.get("calibrator_auc"),
-        "best_w":               float(data.get("best_w", 1.0)),
-        "team_feature_map":     data.get("team_feature_map") if isinstance(data.get("team_feature_map"), pd.DataFrame) else pd.DataFrame(),
-        "book_reliability_map": data.get("book_reliability_map") if isinstance(data.get("book_reliability_map"), pd.DataFrame) else pd.DataFrame(),
-        "feature_cols":         data.get("feature_cols") or [],
-        "meta":                 data.get("meta") or {},
+        "model_logloss":        model_logloss,
+        "model_auc":            model_auc,
+        "calibrator":           calibrator,                 # unified slot
+        "best_w":               float(payload.get("best_w", 0.5)),
+        "feature_cols":         list(feature_cols),
+        "team_feature_map":     team_map if isinstance(team_map, pd.DataFrame) else pd.DataFrame(),
+        "book_reliability_map": book_map if isinstance(book_map, pd.DataFrame) else pd.DataFrame(),
+        "meta":                 payload.get("meta") or {},
+        "_blob_name":           blob.name,
     }
     return bundle
+
+
+
 
 
 DEFAULT_MOVES_VIEW = "sharp_data.moves_with_features_merged"
