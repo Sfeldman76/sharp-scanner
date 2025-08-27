@@ -3757,8 +3757,8 @@ def apply_blended_sharp_score(
     # --- Restore: simple map lookup from  bundles (do this BEFORE enrichment log) ---
     team_feature_map = None
     book_reliability_map = None
-    if isinstance(trained_models_lc, dict):
-        for bundle in trained_models_lc.values():
+    if isinstance(trained_models_norm, dict):
+        for bundle in trained_models_norm.values():
             if isinstance(bundle, dict):
                 if team_feature_map is None:
                     team_feature_map = bundle.get('team_feature_map')
