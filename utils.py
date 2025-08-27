@@ -4397,7 +4397,7 @@ def apply_blended_sharp_score(
     trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
     # Pull ~3.3 years of scores, or set days_back=None for all-time
     df_scores_hist = load_scores_history_cached_backend(
-        sport=sport,
+        
         days_back=365,   # ← no seasons, pure time window
         table_fq="sharplogger.sharp_data.game_scores_final",
         ttl_seconds=3600
@@ -4407,7 +4407,7 @@ def apply_blended_sharp_score(
     df = enrich_df_with_totals_features(
         df_scoring=df,
         df_scores_history=df_scores_hist,
-        sport=sport,
+        
         key_col="Merge_Key_Short",
         window_games=30,
         shrink=0.30,
