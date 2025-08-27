@@ -860,45 +860,57 @@ def update_power_ratings(
 
     # Bring current in sync with latest history for updated sports
 
+   
+
     if updated_sports:
         pm_values = [{"s": s, "m": PREFERRED_METHOD[s]} for s in updated_sports]
-        bq.query(
-            f"""
-            DECLARE pm ARRAY<STRUCT<s STRING, m STRING>>;
-            SET pm = @pm;
     
-            MERGE `{table_current}` T
-            USING (
-              WITH filtered AS (
-                SELECT h.Sport, h.Team, h.Method, h.Rating, h.Updated_At
-                FROM `{table_history}` h
-                JOIN UNNEST(pm) AS x
-                  ON UPPER(h.Sport) = UPPER(x.s) AND LOWER(h.Method) = LOWER(x.m)
-              ),
-              latest AS (
-                SELECT Sport, Team, Method, Rating, Updated_At,
-                       ROW_NUMBER() OVER (PARTITION BY Sport, Team ORDER BY Updated_At DESC) rn
-                FROM filtered
-              )
-              SELECT Sport, Team, Method, Rating, Updated_At
-              FROM latest
-              WHERE rn = 1
-            ) S
-            ON T.Sport = S.Sport AND T.Team = S.Team
-            WHEN MATCHED THEN UPDATE SET
-              T.Rating = S.Rating,
-              T.Method = S.Method,
-              T.Updated_At = S.Updated_At
-            WHEN NOT MATCHED THEN
-              INSERT (Sport, Team, Method, Rating, Updated_At)
-              VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
-            """,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ArrayQueryParameter("pm", "STRUCT<s STRING, m STRING>", pm_values)
-                ]
-            ),
-        ).result()
+        struct_params = [
+            bigquery.StructQueryParameter(
+                "",
+                [
+                    bigquery.ScalarQueryParameter("s", "STRING", item["s"]),
+                    bigquery.ScalarQueryParameter("m", "STRING", item["m"]),
+                ],
+            )
+            for item in pm_values
+        ]
+    
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ArrayQueryParameter("pm", "STRUCT", struct_params)
+            ]
+        )
+    
+        sql = f"""
+        MERGE `{table_current}` T
+        USING (
+          WITH filtered AS (
+            SELECT h.Sport, h.Team, h.Method, h.Rating, h.Updated_At
+            FROM `{table_history}` h
+            JOIN UNNEST(@pm) AS x
+              ON UPPER(h.Sport) = UPPER(x.s) AND LOWER(h.Method) = LOWER(x.m)
+          ),
+          latest AS (
+            SELECT Sport, Team, Method, Rating, Updated_At,
+                   ROW_NUMBER() OVER (PARTITION BY Sport, Team ORDER BY Updated_At DESC) rn
+            FROM filtered
+          )
+          SELECT Sport, Team, Method, Rating, Updated_At
+          FROM latest
+          WHERE rn = 1
+        ) S
+        ON T.Sport = S.Sport AND T.Team = S.Team
+        WHEN MATCHED THEN UPDATE SET
+          T.Rating = S.Rating,
+          T.Method = S.Method,
+          T.Updated_At = S.Updated_At
+        WHEN NOT MATCHED THEN
+          INSERT (Sport, Team, Method, Rating, Updated_At)
+          VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
+        """
+    
+        bq.query(sql, job_config=job_config).result()
 
     # Fill any still-missing current from history (safety)
     fill_missing_current_from_history(None)
