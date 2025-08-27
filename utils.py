@@ -867,23 +867,22 @@ def update_power_ratings(
         pm_values = [{"s": s, "m": PREFERRED_METHOD[s]} for s in updated_sports]
     
         # Each element must be a flat sequence of ScalarQueryParameter
+        # build the array<struct> param correctly
         struct_params = [
             bigquery.StructQueryParameter(
-                "",  # anonymous
-                (
-                    bigquery.ScalarQueryParameter("s", "STRING", item["s"]),
-                    bigquery.ScalarQueryParameter("m", "STRING", item["m"]),
-                ),
+                "",
+                bigquery.ScalarQueryParameter("s", "STRING", item["s"]),
+                bigquery.ScalarQueryParameter("m", "STRING", item["m"]),
             )
             for item in pm_values
         ]
-    
+        
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ArrayQueryParameter("pm", "STRUCT", struct_params)
             ]
         )
-    
+        
         sql = f"""
         MERGE `{table_current}` T
         USING (
@@ -912,7 +911,6 @@ def update_power_ratings(
           VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
         """
         bq.query(sql, job_config=job_config).result()
-
     # Fill any still-missing current from history (safety)
     fill_missing_current_from_history(None)
 
