@@ -3320,14 +3320,28 @@ def _training_like_feature_selector(df):
                 and not str(c).lower().startswith(exclude_prefixes)]
     return [str(c) for c in cols]
 
-def _resolve_feature_cols_like_training(bundle, model, df_canon):
-    # 1) explicit from bundle
+def _resolve_feature_cols_like_training(bundle, model, df_canon, prefer_saved_only: bool = True):
+    """
+    Return the exact training feature list if present in the bundle.
+    If not present and prefer_saved_only=True, return [] (so we stamp unscored
+    instead of guessing). Set prefer_saved_only=False to allow legacy inference.
+    """
+    # 0) pull from bundle (now persisted in GCS)
     if isinstance(bundle, dict):
+        # primary location
         fc = bundle.get("feature_cols")
         if isinstance(fc, (list, tuple)) and fc:
             return [str(c) for c in fc]
+        # optional metadata location
+        fc = bundle.get("metadata", {}).get("feature_cols") if isinstance(bundle.get("metadata"), dict) else None
+        if isinstance(fc, (list, tuple)) and fc:
+            return [str(c) for c in fc]
 
-    # 2) unwrap pipeline and try estimator conventions
+    if prefer_saved_only:
+        # Don’t guess; makes apply stable & prevents silent drift
+        return []
+
+    # ---- legacy discovery (fallbacks) ----
     _, last, pre = _unwrap_pipeline(model)
     names = getattr(last, "feature_names_in_", None)
     if names is not None and len(names):
@@ -3346,6 +3360,7 @@ def _resolve_feature_cols_like_training(bundle, model, df_canon):
         names = getattr(last, attr, None)
         if names:
             return [str(c) for c in names]
+
     if hasattr(last, "booster_"):
         try:
             names = last.booster_.feature_name()
@@ -3353,6 +3368,7 @@ def _resolve_feature_cols_like_training(bundle, model, df_canon):
                 return [str(c) for c in names]
         except Exception:
             pass
+
     get_names = getattr(last, "get_feature_names", None)
     if callable(get_names):
         try:
@@ -3362,14 +3378,14 @@ def _resolve_feature_cols_like_training(bundle, model, df_canon):
         except Exception:
             pass
 
-    # 3) if preprocessor has input names
     if pre is not None:
         raw = getattr(pre, "feature_names_in_", None)
         if raw is not None and len(raw):
             return [str(c) for c in raw]
 
-    # 4) fall back to training-like selector
+    # final fallback (training-like selector)
     return _training_like_feature_selector(df_canon)
+
 
 
 
