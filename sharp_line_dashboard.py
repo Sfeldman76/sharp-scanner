@@ -3392,7 +3392,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # targets aligned
         y_train_vec = y_full[train_all_idx].astype(int)
         y_hold_vec  = y_full[hold_idx].astype(int)
-        
+        p_train_vec = np.asarray(p_cal, dtype=float)
+        p_hold_vec  = np.asarray(p_cal_val, dtype=float)
+
         # metrics
         auc_train = roc_auc_score(y_train_vec, p_cal)
         auc_val   = roc_auc_score(y_hold_vec,  p_cal_val)
