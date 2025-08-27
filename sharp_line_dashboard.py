@@ -3530,20 +3530,69 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.write(f"- AUC Gap (Train - Holdout): `{(auc_tr - auc_ho):.4f}`")
         st.write(f"- LogLoss Gap (Train - Holdout): `{(ll_tr  - ll_ho):.4f}`")
         st.write(f"- Brier Gap (Train - Holdout): `{(br_tr  - br_ho):.4f}`")
+     
+        
+        def ECE(y_true, p, n_bins: int = 10) -> float:
+            y_true = np.asarray(y_true, dtype=float)
+            p = np.asarray(p, dtype=float)
+            bins = np.linspace(0.0, 1.0, n_bins + 1)
+            idx = np.digitize(p, bins) - 1
+            ece = 0.0
+            N = len(p)
+            for b in range(n_bins):
+                m = (idx == b)
+                if np.any(m):
+                    conf = float(np.mean(p[m]))
+                    acc  = float(np.mean(y_true[m]))
+                    ece += (np.sum(m) / N) * abs(acc - conf)
+            return float(ece)
+        
+        def brier_decomp(y_true, p, n_bins: int = 10):
+            y_true = np.asarray(y_true, dtype=float)
+            p = np.asarray(p, dtype=float)
+            base = float(np.mean(y_true))
+            unc  = base * (1.0 - base)
+            bins = np.linspace(0.0, 1.0, n_bins + 1)
+            idx  = np.digitize(p, bins) - 1
+            res = 0.0; rel = 0.0
+            for b in range(n_bins):
+                m = (idx == b)
+                if np.any(m):
+                    py = float(np.mean(y_true[m]))
+                    pp = float(np.mean(p[m]))
+                    w  = float(np.mean(m))
+                    res += w * (py - base) ** 2
+                    rel += w * (pp - py) ** 2
+            brier = brier_score_loss(y_true, p)
+            return float(brier), float(unc), float(res), float(rel)
+        
+        def ks_stat(y_true, p) -> float:
+            fpr, tpr, _ = roc_curve(y_true, p)
+            return float(np.max(tpr - fpr))
 
         
         # ---- calibration quality: ECE + Brier decomposition ------------------------
+        # ---- calibration quality: ECE + Brier decomposition ------------------------
         ece_tr = ECE(y_train_vec, p_cal, n_bins=10)
-        brier_tr2, unc_tr, res_tr, rel_tr = brier_decomp(y_train_vec, p_cal, 10)
+        brier_tr, unc_tr, res_tr, rel_tr = brier_decomp(y_train_vec, p_cal, 10)
+        
         ece_ho = ECE(y_hold_vec, p_cal_val, 10)
-        brier_ho2, unc_ho, res_ho, rel_ho = brier_decomp(y_hold_vec, p_cal_val, 10)
-        st.write(f"- ECE(train): `{ece_tr:.4f}` | Brier(train): `{brier_tr2:.4f}` = Unc `{unc_tr:.4f}` - Res `{res_tr:.4f}` + Rel `{rel_tr:.4f}`")
-        st.write(f"- ECE(holdout): `{ece_ho:.4f}` | Brier(holdout): `{brier_ho2:.4f}` = Unc `{unc_ho:.4f}` - Res `{res_ho:.4f}` + Rel `{rel_ho:.4f}`")
-
+        brier_ho, unc_ho, res_ho, rel_ho = brier_decomp(y_hold_vec, p_cal_val, 10)
+        
+        st.write(
+            f"- ECE(train): `{ece_tr:.4f}` | Brier(train): `{brier_tr:.4f}` = "
+            f"Unc `{unc_tr:.4f}` - Res `{res_tr:.4f}` + Rel `{rel_tr:.4f}`"
+        )
+        st.write(
+            f"- ECE(holdout): `{ece_ho:.4f}` | Brier(holdout): `{brier_ho:.4f}` = "
+            f"Unc `{unc_ho:.4f}` - Res `{res_ho:.4f}` + Rel `{rel_ho:.4f}`"
+        )
+        
         # ---- ranking diagnostics: KS + Lift (train) --------------------------------
         st.markdown("### 📈 Ranking Diagnostics")
         st.write(f"- KS(train):   `{ks_stat(y_train_vec, p_cal):.3f}`")
         st.write(f"- KS(holdout): `{ks_stat(y_hold_vec,  p_cal_val):.3f}`")
+
         
         def lift_table(y_true, p, k=10):
             n = len(p); order = np.argsort(-p)
