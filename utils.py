@@ -3310,7 +3310,10 @@ def apply_blended_sharp_score(
     
     # normalize keys but don’t filter out tuples/objects
     trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
-    
+    # --- Back-compat aliases for older code paths ---
+    trained_models_lc = trained_models_norm
+    trained_models_by_market = trained_models_norm
+    model_markets_lower = sorted(trained_models_norm.keys())
     def _has_any_model(bundle):
         if isinstance(bundle, dict):
             return any(k in bundle for k in (
