@@ -4846,27 +4846,28 @@ import numpy as np
 import pandas as pd
 from google.cloud import storage
 
-# --- Optional shim for very old pickles that referenced IsoWrapper ---
+
+
+
+def _to_df(x):
+    if isinstance(x, pd.DataFrame): return x
+    if x is None: return pd.DataFrame()
+    try: return pd.DataFrame(x)
+    except Exception: return pd.DataFrame()
+
+import io, pickle
+
 class _IsoWrapperShim:
+    """Minimal shim so old pickles referencing IsoWrapper can load."""
     def __init__(self, model=None, calibrator=None):
-        self.model = model; self.calibrator = calibrator
-    def predict_proba(self, X):
-        if hasattr(self.model, "predict_proba"):
-            p = self.model.predict_proba(X)
-            p1 = p[:,1] if getattr(p, "ndim", 1) == 2 else np.asarray(p).ravel()
-        else:
-            p1 = np.asarray(self.model.predict(X)).ravel()
-        if self.calibrator is not None and hasattr(self.calibrator, "transform"):
-            p1 = np.clip(self.calibrator.transform(p1), 1e-9, 1-1e-9)
-        return np.column_stack([1-p1, p1])
+        self.model = model
+        self.calibrator = calibrator
+    # pickle will restore attributes; no other methods required here
 
 class _RenamingUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        if (module, name) in {
-            ("__main__", "IsoWrapper"),
-            ("streamlit.runtime.scriptrunner.script_runner", "IsoWrapper"),
-            ("uvicorn","IsoWrapper"),
-        }:
+        # be permissive: ANY module with class name 'IsoWrapper' -> shim
+        if name == "IsoWrapper":
             return _IsoWrapperShim
         return super().find_class(module, name)
 
@@ -4875,20 +4876,16 @@ def _safe_loads(b: bytes):
     try:
         return _RenamingUnpickler(bio).load()
     except Exception:
-        bio.seek(0); return pickle.loads(bio.read())
+        bio.seek(0)
+        return pickle.loads(bio.read())
 
-def _to_df(x):
-    if isinstance(x, pd.DataFrame): return x
-    if x is None: return pd.DataFrame()
-    try: return pd.DataFrame(x)
-    except Exception: return pd.DataFrame()
-
-def load_model_from_gcs(sport, market, *, bucket_name="sharp-models", timing: bool=False):
-    """Loads legacy flat file: sharp_win_model_{sport}[ _timing]_{market}.pkl"""
+def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
+    import io, pickle, logging, pandas as pd
+    from google.cloud import storage
+    
     sport_l  = str(sport).lower()
     market_l = str(market).lower()
-    prefix   = f"sharp_win_model_{sport_l}_timing_" if timing else f"sharp_win_model_{sport_l}_"
-    fname    = f"{prefix}{market_l}.pkl"
+    fname    = f"sharp_win_model_{sport_l}_{market_l}.pkl"
 
     client = storage.Client()
     blob   = client.bucket(bucket_name).blob(fname)
@@ -4900,39 +4897,31 @@ def load_model_from_gcs(sport, market, *, bucket_name="sharp-models", timing: bo
         return None
 
     try:
-        data = _safe_loads(content)   # handles cloudpickle + legacy class refs
+        data = _safe_loads(content)  # your saves don’t need IsoWrapper anymore
         logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
     except Exception as e:
         logging.warning(f"⚠️ Failed to unpickle {fname}: {e}")
         return None
 
-    # --- Normalize to unified bundle ---
-    # Your current save writes a dict with model_* at top level and calibrator as a dict.
+    # --- Normalize the dict ---
     if not isinstance(data, dict):
-        # super-legacy: single object
-        data = {"model_logloss": getattr(data, "model", data),
-                "calibrator_logloss": getattr(data, "calibrator", None),
-                "best_w": 1.0}
+        logging.error(f"Unexpected payload type in {fname}: {type(data)}")
+        return None
 
-    cal = data.get("calibrator") or {}
     bundle = {
-        # model
-        "model_logloss":        data.get("model_logloss") or data.get("model"),
+        "model_logloss":        data.get("model_logloss"),
+        "calibrator_logloss":   data.get("calibrator_logloss"),
         "model_auc":            data.get("model_auc"),
-
-        # calibrator (map your nested keys -> unified names)
-        "calibrator_logloss":   data.get("calibrator_logloss") or cal.get("cal_logloss"),
-        "calibrator_auc":       data.get("calibrator_auc")     or cal.get("cal_auc"),
-
+        "calibrator_auc":       data.get("calibrator_auc"),
         "best_w":               float(data.get("best_w", 1.0)),
-        "team_feature_map":     _to_df(data.get("team_feature_map")),
-        "book_reliability_map": _to_df(data.get("book_reliability_map")),
-        "feature_cols":         data.get("feature_cols") or [],   # safe default
-        "meta":                 data.get("meta") or {},           # safe default
+        "team_feature_map":     data.get("team_feature_map") if isinstance(data.get("team_feature_map"), pd.DataFrame) else pd.DataFrame(),
+        "book_reliability_map": data.get("book_reliability_map") if isinstance(data.get("book_reliability_map"), pd.DataFrame) else pd.DataFrame(),
+        "feature_cols":         data.get("feature_cols") or [],
+        "meta":                 data.get("meta") or {},
     }
     return bundle
-        
-        
+
+
 
 def fetch_scored_picks_from_bigquery(limit=1000000):
     query = f"""
