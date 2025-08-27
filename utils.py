@@ -5704,32 +5704,20 @@ def _to_df(x):
     try: return pd.DataFrame(x)
     except Exception: return pd.DataFrame()
 
-import io, pickle, logging
-import numpy as np
-import pandas as pd
-from google.cloud import storage
+# ---- 1) Add these near your imports ----
+import io, pickle
 
-# --- Optional shim for very old pickles that referenced IsoWrapper ---
 class _IsoWrapperShim:
+    """Minimal shim so old pickles referencing IsoWrapper can load."""
     def __init__(self, model=None, calibrator=None):
-        self.model = model; self.calibrator = calibrator
-    def predict_proba(self, X):
-        if hasattr(self.model, "predict_proba"):
-            p = self.model.predict_proba(X)
-            p1 = p[:,1] if getattr(p, "ndim", 1) == 2 else np.asarray(p).ravel()
-        else:
-            p1 = np.asarray(self.model.predict(X)).ravel()
-        if self.calibrator is not None and hasattr(self.calibrator, "transform"):
-            p1 = np.clip(self.calibrator.transform(p1), 1e-9, 1-1e-9)
-        return np.column_stack([1-p1, p1])
+        self.model = model
+        self.calibrator = calibrator
+    # pickle will restore attributes; no other methods required here
 
 class _RenamingUnpickler(pickle.Unpickler):
     def find_class(self, module, name):
-        if (module, name) in {
-            ("__main__", "IsoWrapper"),
-            ("streamlit.runtime.scriptrunner.script_runner", "IsoWrapper"),
-            ("uvicorn","IsoWrapper"),
-        }:
+        # be permissive: ANY module with class name 'IsoWrapper' -> shim
+        if name == "IsoWrapper":
             return _IsoWrapperShim
         return super().find_class(module, name)
 
@@ -5738,13 +5726,8 @@ def _safe_loads(b: bytes):
     try:
         return _RenamingUnpickler(bio).load()
     except Exception:
-        bio.seek(0); return pickle.loads(bio.read())
-
-def _to_df(x):
-    if isinstance(x, pd.DataFrame): return x
-    if x is None: return pd.DataFrame()
-    try: return pd.DataFrame(x)
-    except Exception: return pd.DataFrame()
+        bio.seek(0)
+        return pickle.loads(bio.read())
 
 def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
     import io, pickle, logging, pandas as pd
@@ -5764,7 +5747,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         return None
 
     try:
-        data = pickle.loads(content)   # your saves don’t need IsoWrapper anymore
+        data = _safe_loads(content)  # your saves don’t need IsoWrapper anymore
         logging.info(f"✅ Loaded artifact: gs://{bucket_name}/{fname}")
     except Exception as e:
         logging.warning(f"⚠️ Failed to unpickle {fname}: {e}")
