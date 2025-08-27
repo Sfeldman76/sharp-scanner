@@ -3185,26 +3185,14 @@ def _suffix_snapshot(df, tag):
 def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
     """
     Return calibrated/blended probs in [eps, 1-eps] or None.
-
-    Supports:
-      NEW format:
-        - dict with keys:
-            model_logloss, model_auc, best_w, calibrator={"iso_blend": IsotonicRegression}
-          (blend raw model outputs, then apply iso_blend)
-      OLD format:
-        - dict with model_logloss, calibrator_logloss and/or model_auc, calibrator_auc
-          (per-head calibration then blend)
-      Also supports:
-        - dict with {"model": <est>, "calibrator": <cal|{"iso_blend": cal}>}
-        - tuple/list: (model, calibrator)
-        - single calibrated estimator exposing predict_proba(X)
     """
 
     def _predict_one(m, cal, X_):
-        # CalibratedClassifierCV-like: already calibrated
+        # Already-calibrated classifier (e.g., CalibratedClassifierCV)
         if m is not None and hasattr(m, "predict_proba") and cal is None and hasattr(m, "base_estimator_"):
             p = m.predict_proba(X_)
-            return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+            p1 = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+            return np.asarray(p1, dtype=float).ravel()
 
         # Raw score/proba
         p_raw = None
@@ -3214,63 +3202,75 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
                 p_raw = p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
             elif hasattr(m, "decision_function"):
                 s = np.asarray(m.decision_function(X_), dtype=float)
+                # If we’ll calibrate later, pass score; otherwise squash
                 p_raw = s if cal is not None else 1.0 / (1.0 + np.exp(-s))
 
-        # Apply per-model calibrator
+        # Apply per-model calibrator (OLD path)
         if cal is not None and p_raw is not None:
             if hasattr(cal, "predict"):
-                return np.asarray(cal.predict(p_raw), dtype=float)
-            if hasattr(cal, "transform"):
-                return np.asarray(cal.transform(p_raw), dtype=float)
-            if callable(cal):
-                return np.asarray(cal(p_raw), dtype=float)
+                p_cal = cal.predict(p_raw)
+            elif hasattr(cal, "transform"):
+                p_cal = cal.transform(p_raw)
+            elif callable(cal):
+                p_cal = cal(p_raw)
+            else:
+                p_cal = p_raw
+            return np.asarray(p_cal, dtype=float).ravel()
 
         if p_raw is not None:
-            return np.asarray(p_raw, dtype=float)
+            return np.asarray(p_raw, dtype=float).ravel()
 
-        # Very rare: calibrator is itself a classifier
+        # Rare: calibrator acts as classifier
         if cal is not None and hasattr(cal, "predict_proba"):
             p = cal.predict_proba(X_)
-            return p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)
+            return (p[:, 1] if isinstance(p, np.ndarray) and p.ndim > 1 else np.asarray(p, dtype=float)).ravel()
         if cal is not None and hasattr(cal, "predict"):
-            return np.asarray(cal.predict(X_), dtype=float)
+            return np.asarray(cal.predict(X_), dtype=float).ravel()
 
         return None
 
-    # Allow tuple/list bundles
+    # Tuple/list bundle
     if isinstance(bundle, (tuple, list)) and len(bundle) >= 1 and model is None and iso is None:
         model = bundle[0]
         iso   = bundle[1] if len(bundle) > 1 else None
 
-    # Dict bundle path
+    # Dict bundle
     if isinstance(bundle, dict):
-        # ----- NEW format: single iso_blend that calibrates the blended prob -----
+        # NEW: one isotonic over blended prob
         calib_bundle = bundle.get("calibrator")
         if isinstance(calib_bundle, dict) and ("iso_blend" in calib_bundle):
             mL = bundle.get("model_logloss")
             mA = bundle.get("model_auc")
             w  = float(bundle.get("best_w", 0.5))
-            # raw (uncalibrated) head outputs
+
             pL = _predict_one(mL, None, X) if mL is not None else None
             pA = _predict_one(mA, None, X) if mA is not None else None
 
             if pL is None and pA is None:
-                # fallback: maybe single 'model' key with iso_blend
                 m_single = bundle.get("model")
                 if m_single is None:
                     return None
                 p_raw = _predict_one(m_single, None, X)
             else:
-                if pL is not None and pA is not None and len(pL) == len(pA):
-                    p_raw = w * pL + (1.0 - w) * pA
-                else:
-                    p_raw = pL if pL is not None else pA
+                p_raw = (w * pL + (1.0 - w) * pA) if (pL is not None and pA is not None and len(pL) == len(pA)) else (pL if pL is not None else pA)
 
-            p_raw = np.clip(p_raw, eps, 1 - eps)
-            p_cal = calib_bundle["iso_blend"].predict(p_raw)
-            return np.clip(np.asarray(p_cal, dtype=float), eps, 1 - eps)
+            if p_raw is None:
+                return None
+            p_raw = np.clip(np.asarray(p_raw, dtype=float).ravel(), eps, 1 - eps)
 
-        # ----- OLD format: per-head calibrators then blend -----
+            iso = calib_bundle["iso_blend"]
+            if hasattr(iso, "predict"):
+                p_cal = iso.predict(p_raw)
+            elif hasattr(iso, "transform"):
+                p_cal = iso.transform(p_raw)
+            else:
+                # last-resort fallback
+                p_cal = p_raw
+            p_cal = np.asarray(p_cal, dtype=float).ravel()
+            p_cal = np.nan_to_num(p_cal, nan=0.5, posinf=1 - eps, neginf=eps)
+            return np.clip(p_cal, eps, 1 - eps)
+
+        # OLD: per-head calibration, then blend
         if ("model_logloss" in bundle) or ("model_auc" in bundle):
             mL = bundle.get("model_logloss"); cL = bundle.get("calibrator_logloss")
             mA = bundle.get("model_auc");     cA = bundle.get("calibrator_auc")
@@ -3280,29 +3280,38 @@ def predict_blended(bundle, X, model=None, iso=None, eps=1e-6):
             pA = _predict_one(mA, cA, X) if (mA is not None or cA is not None) else None
 
             if pL is not None and pA is not None and len(pL) == len(pA):
-                return np.clip(w * pL + (1.0 - w) * pA, eps, 1 - eps)
+                return np.clip((w * pL + (1.0 - w) * pA).ravel(), eps, 1 - eps)
             if pL is not None:
-                return np.clip(pL, eps, 1 - eps)
+                return np.clip(np.asarray(pL, dtype=float).ravel(), eps, 1 - eps)
             if pA is not None:
-                return np.clip(pA, eps, 1 - eps)
+                return np.clip(np.asarray(pA, dtype=float).ravel(), eps, 1 - eps)
 
-        # ----- Single pair path: {"model": est, "calibrator": cal|{"iso_blend": cal}} -----
+        # Single pair: {"model": est, "calibrator": cal or {"iso_blend": cal}}
         if ("model" in bundle) or ("calibrator" in bundle):
             m = bundle.get("model")
             c = bundle.get("calibrator")
             if isinstance(c, dict) and "iso_blend" in c:
                 p_raw = _predict_one(m, None, X)
                 if p_raw is None: return None
-                p_raw = np.clip(p_raw, eps, 1 - eps)
-                p_cal = c["iso_blend"].predict(p_raw)
-                return np.clip(np.asarray(p_cal, dtype=float), eps, 1 - eps)
+                p_raw = np.clip(np.asarray(p_raw, dtype=float).ravel(), eps, 1 - eps)
+                iso = c["iso_blend"]
+                if hasattr(iso, "predict"):
+                    p_cal = iso.predict(p_raw)
+                elif hasattr(iso, "transform"):
+                    p_cal = iso.transform(p_raw)
+                else:
+                    p_cal = p_raw
+                p_cal = np.asarray(p_cal, dtype=float).ravel()
+                p_cal = np.nan_to_num(p_cal, nan=0.5, posinf=1 - eps, neginf=eps)
+                return np.clip(p_cal, eps, 1 - eps)
             else:
                 p = _predict_one(m, c, X)
-                return np.clip(p, eps, 1 - 1e-6) if p is not None else None
+                return np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps) if p is not None else None
 
     # Legacy args path
     p = _predict_one(model, iso, X)
-    return np.clip(p, eps, 1 - eps) if p is not None else None
+    return np.clip(np.asarray(p, dtype=float).ravel(), eps, 1 - eps) if p is not None else None
+
 
 def _unwrap_pipeline(est):
     pipe = est if hasattr(est, "named_steps") else None
@@ -6342,8 +6351,11 @@ def _slug(s: str) -> str:
     s = str(s).strip().lower()
     return re.sub(r"[^\w.-]+", "_", s).strip("_.")
 
-def _maybe_decompress(path: str, data: bytes) -> bytes:
-    return gzip.decompress(data) if path.endswith(".gz") else data
+def _maybe_decompress(name: str, b: bytes) -> bytes:
+    import gzip, bz2
+    if name.endswith(".gz"):  return gzip.decompress(b)
+    if name.endswith(".bz2"): return bz2.decompress(b)
+    return b
 
 def load_model_from_gcs(
     sport: str,
