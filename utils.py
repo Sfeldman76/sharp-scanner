@@ -860,18 +860,20 @@ def update_power_ratings(
 
     # Bring current in sync with latest history for updated sports
 
-   
-
+       
+    
+    
     if updated_sports:
         pm_values = [{"s": s, "m": PREFERRED_METHOD[s]} for s in updated_sports]
     
+        # Each element must be a flat sequence of ScalarQueryParameter
         struct_params = [
             bigquery.StructQueryParameter(
-                "",
-                [
+                "",  # anonymous
+                (
                     bigquery.ScalarQueryParameter("s", "STRING", item["s"]),
                     bigquery.ScalarQueryParameter("m", "STRING", item["m"]),
-                ],
+                ),
             )
             for item in pm_values
         ]
@@ -909,7 +911,6 @@ def update_power_ratings(
           INSERT (Sport, Team, Method, Rating, Updated_At)
           VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
         """
-    
         bq.query(sql, job_config=job_config).result()
 
     # Fill any still-missing current from history (safety)
