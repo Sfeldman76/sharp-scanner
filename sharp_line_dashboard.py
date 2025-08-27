@@ -2846,7 +2846,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # 🔹 Market response
             #'Sharp_Line_Magnitude',
-            'Is_Home_Team_Bet',
+            'Is_Home_Team_Bet','Line_Moved_Toward_Team'
             'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
@@ -2865,8 +2865,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Abs_Odds_Move_From_Opening',
             'Market_Mispricing','Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
-            'CrossMarket_Prob_Gap_Exists',#'Line_Moved_Away_From_Team',
-            'Line_Moved_Toward_Team_And_Hit',
+            'CrossMarket_Prob_Gap_Exists','Line_Moved_Away_From_Team',
+            
             
             'Pct_Line_Move_From_Opening','Pct_Line_Move_Bin','Potential_Overmove_Flag',
             'Potential_Overmove_Total_Pct_Flag','Mispricing_Flag',
