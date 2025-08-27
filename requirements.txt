@@ -29,9 +29,10 @@ google-cloud-storage
 pandas-gbq
 # === NEW for Option B (Cloud Tasks) ===
 google-cloud-tasks
-
+cloudpickle==3.0.0
 # === Add if you use the gunicorn-based CMD ===
 gunicorn
+
 
 
 
