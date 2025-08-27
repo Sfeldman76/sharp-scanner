@@ -4605,7 +4605,21 @@ def apply_blended_sharp_score(
                 else:
                     df.loc[mask, col] = default
             continue
+        _key = ['Game_Key','Market','Outcome','Bookmaker']
 
+        # If Implied_Prob is needed for H2H canon rule, ensure it's present pre-dedup (cheap)
+        if 'Implied_Prob' not in df_m.columns and 'Odds_Price' in df_m.columns:
+            df_m['Implied_Prob'] = implied_prob_vec(df_m['Odds_Price'])
+        
+        if 'Snapshot_Timestamp' in df_m.columns:
+            df_m = (df_m.sort_values('Snapshot_Timestamp')
+                         .drop_duplicates(subset=_key, keep='last'))
+        else:
+            df_m = df_m.drop_duplicates(subset=_key, keep='last')
+        
+        # (Optional) quick diagnostics
+        logger.info("🧮 %s dedup: rows=%d, unique keys=%d",
+            mkt.upper(), len(df_m), df_m[_key].drop_duplicates().shape[0])
         # ---------- canonical selection ----------
         if mkt == "spreads":
             df_m = df_m[df_m['Value'].notna()]
