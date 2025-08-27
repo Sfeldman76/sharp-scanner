@@ -1686,22 +1686,84 @@ def resolve_groups(df: pd.DataFrame) -> np.ndarray:
 
 
 def _bake_feature_names_in_(est, cols):
-   
-    cols_arr = np.array([str(c) for c in cols], dtype=object)
-    # set on the estimator
-    try: setattr(est, "feature_names_in_", cols_arr)
-    except Exception: pass
-    # if it's a sklearn Pipeline, also set on its last step
-    if hasattr(est, "named_steps"):
+    """
+    Best-effort: stamp the exact training feature names & width onto an estimator,
+    its inner booster (xgboost), the last step of a Pipeline, and common wrappers.
+    """
+    if est is None or cols is None:
+        return
+
+    # 1) normalize list: strings, de-duped, order-preserved
+    cols = [str(c) for c in cols if c is not None]
+    cols = list(dict.fromkeys(cols))
+    cols_arr = np.asarray(cols, dtype=object)
+    n = len(cols)
+
+    def _try_set(obj, attr, value):
         try:
-            last = list(est.named_steps.values())[-1]
-            setattr(last, "feature_names_in_", cols_arr)
+            setattr(obj, attr, value)
+            return True
         except Exception:
-            pass
-    # best-effort for LightGBM / CatBoost
+            return False
+
+    # 2) set on the estimator itself
+    _try_set(est, "feature_names_in_", cols_arr)
+    # sklearn sometimes reads this; not required but helpful for sanity
+    _try_set(est, "n_features_in_", n)
+
+    # 3) xgboost: propagate to Booster if available
+    try:
+        booster = est.get_booster() if hasattr(est, "get_booster") else None
+        if booster is not None:
+            # xgboost uses a Python attribute 'feature_names' during predict/plot
+            _try_set(booster, "feature_names", list(cols))
+    except Exception:
+        pass
+
+    # 4) sklearn Pipeline variants
+    # prefer named_steps, else look at generic steps
+    try:
+        if hasattr(est, "named_steps") and est.named_steps:
+            last = list(est.named_steps.values())[-1]
+            _try_set(last, "feature_names_in_", cols_arr)
+            _try_set(last, "n_features_in_", n)
+            if hasattr(last, "get_booster"):
+                b2 = last.get_booster()
+                if b2 is not None:
+                    _try_set(b2, "feature_names", list(cols))
+        elif hasattr(est, "steps") and est.steps:
+            last = est.steps[-1][1]
+            _try_set(last, "feature_names_in_", cols_arr)
+            _try_set(last, "n_features_in_", n)
+            if hasattr(last, "get_booster"):
+                b2 = last.get_booster()
+                if b2 is not None:
+                    _try_set(b2, "feature_names", list(cols))
+    except Exception:
+        pass
+
+    # 5) common wrappers: CalibratedClassifierCV, custom IsoWrapper, etc.
+    for inner_attr in ("base_estimator", "estimator", "classifier", "model"):
+        inner = getattr(est, inner_attr, None)
+        if inner is not None and inner is not est:
+            _try_set(inner, "feature_names_in_", cols_arr)
+            _try_set(inner, "n_features_in_", n)
+            try:
+                b3 = inner.get_booster() if hasattr(inner, "get_booster") else None
+                if b3 is not None:
+                    _try_set(b3, "feature_names", list(cols))
+            except Exception:
+                pass
+
+    # 6) LightGBM / CatBoost: expose friendly attributes when present
+    # (These are mostly for tooling; many libs don’t *read* them but it helps debugging.)
     for attr in ("feature_name_", "feature_names_"):
-        try: setattr(est, attr, list(map(str, cols)))
-        except Exception: pass
+        _try_set(est, attr, list(cols))
+
+    # 7) if a bundle dict slipped in here, stamp all known slots
+    if isinstance(est, dict):
+        for k in ("model_logloss", "model_auc", "model", "calibrator_logloss", "calibrator_auc"):
+            _bake_feature_names_in_(est.get(k), cols)
 
 
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
@@ -2863,13 +2925,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if missing_in_market:
             st.write(f"ℹ️ Dropping {len(missing_in_market)} missing feature(s): "
                      f"{sorted(missing_in_market)[:20]}{'...' if len(missing_in_market)>20 else ''}")
-        
-        features = [c for c in features if c in df_market.columns]
-        
-        st.markdown(f"### 📈 Features Used: `{len(features)}`")
+
+       
         
         # final dataset for modeling
-        X = df_market[features].apply(pd.to_numeric, errors='coerce').fillna(0.0).astype(float)
+        features = [c for c in features if c in df_market.columns]
+
+        # ✅ lock exact training schema and order
+        feature_cols = [str(c) for c in df_market[features].columns]
+        st.markdown(f"### 📈 Features Used: `{len(features)}`")
+        # final dataset for modeling
+        X = (df_market[feature_cols]
+             .apply(pd.to_numeric, errors='coerce')
+             .replace([np.inf, -np.inf], np.nan)
+             .fillna(0.0)
+             .astype(float))
+
         
         # Correlation check (robust to NaNs/constant columns)
         try:
@@ -3848,15 +3919,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 'Sport','Market','Bookmaker','Book_Reliability_Score','Book_Reliability_Lift'
             ])
 
-        feature_cols = list(X_train.columns)  # <- your exact training matrix column order
+   
+        
+        # safety check (optional but nice)
+        assert X_full.shape[1] == len(feature_cols), "Feature width drifted"
         
         if model_logloss is not None:
             _bake_feature_names_in_(model_logloss, feature_cols)
         if model_auc is not None:
             _bake_feature_names_in_(model_auc, feature_cols)
-        # or if you have a single model:
-        if model is not None:
-            _bake_feature_names_in_(model, feature_cols)
+        
 
         
         # === Save ensemble (choose one or both)
@@ -3868,13 +3940,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "best_w": best_w,   # weight chosen by log loss
             "team_feature_map": team_feature_map,
             "book_reliability_map": book_reliability_map,
+            "feature_cols": feature_cols, 
             
         }
         save_model_to_gcs(
             model={
                 "model_logloss": model_logloss,
                 "model_auc": model_auc,
-                "best_w": float(best_w)  # ensure JSON/pickle-safe
+                "best_w": float(best_w),  # ensure JSON/pickle-safe
+                "feature_cols": feature_cols,
             },
             calibrator={
                 "cal_logloss": cal_logloss,
@@ -4946,7 +5020,7 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         "team_feature_map":     data.get("team_feature_map") if isinstance(data.get("team_feature_map"), pd.DataFrame) else pd.DataFrame(),
         "book_reliability_map": data.get("book_reliability_map") if isinstance(data.get("book_reliability_map"), pd.DataFrame) else pd.DataFrame(),
         "feature_cols":         data.get("feature_cols") or [],
-        "meta":                 data.get("meta") or {},
+     
     }
     return bundle
 
