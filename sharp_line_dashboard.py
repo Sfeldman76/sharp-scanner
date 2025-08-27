@@ -3217,16 +3217,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
-        
+        feature_cols = list(features) 
         # --- sport-aware kwargs & search space ---
         base_kwargs, param_distributions = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],   # train rows
             n_jobs=1,                  # keep models single-threaded
             scale_pos_weight=( (y_train==0).sum() / max(1,(y_train==1).sum()) ),
-            features=features,
+            features=feature_cols,
         )
-        
+     
         # stability regularization (optional but recommended)
         base_kwargs.update({
             "n_jobs": 1,
@@ -3460,18 +3460,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # ---- threshold sweep (train) -----------------------------------------------
-        st.markdown(f"#### 📈 Performance by Threshold – `{market.upper()}` (Train)")
         thresholds = np.arange(0.1, 0.96, 0.05)
         rows=[]
         for t in thresholds:
-            preds = (p_cal >= t).astype(int)
+            preds = (p_train_vec >= t).astype(int)
             rows.append({
                 "Threshold": round(float(t),2),
                 "Accuracy":  accuracy_score(y_train_vec, preds),
                 "Precision": precision_score(y_train_vec, preds, zero_division=0),
                 "Recall":    recall_score(y_train_vec, preds, zero_division=0),
                 "F1":        f1_score(y_train_vec, preds, zero_division=0),
-            })
+        })
         df_thresh = pd.DataFrame(rows)[["Threshold","Accuracy","Precision","Recall","F1"]]
         st.dataframe(df_thresh.style.format({c:"{:.3f}" for c in df_thresh.columns if c!="Threshold"}))
 
@@ -3480,13 +3479,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
         bins   = np.linspace(0, 1, 11)
         labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
-        eval_idx = pd.Index(hold_idx)
         
+        eval_idx = pd.Index(hold_idx)
         df_eval = pd.DataFrame({
-            "p":    pd.Series(p_cal_val, index=eval_idx),
+            "p":    pd.Series(p_hold_vec, index=eval_idx),
             "y":    pd.Series(y_hold_vec, index=eval_idx),
-            "odds": pd.to_numeric(df_market.iloc[hold_idx].get("Odds_Price", np.nan), errors="coerce").values,
+            "odds": pd.to_numeric(df_market.loc[eval_idx, "Odds_Price"], errors="coerce"),
         }).dropna(subset=["p","y"])
+
         
         cuts = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
         
@@ -3573,11 +3573,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- calibration quality: ECE + Brier decomposition ------------------------
         # ---- calibration quality: ECE + Brier decomposition ------------------------
-        ece_tr = ECE(y_train_vec, p_cal, n_bins=10)
-        brier_tr, unc_tr, res_tr, rel_tr = brier_decomp(y_train_vec, p_cal, 10)
+        ece_tr = ECE(y_train_vec, p_train_vec, 10)
+        brier_tr, unc_tr, res_tr, rel_tr = brier_decomp(y_train_vec, p_train_vec, 10)
         
-        ece_ho = ECE(y_hold_vec, p_cal_val, 10)
-        brier_ho, unc_ho, res_ho, rel_ho = brier_decomp(y_hold_vec, p_cal_val, 10)
+        ece_ho = ECE(y_hold_vec, p_hold_vec, 10)
+        brier_ho, unc_ho, res_ho, rel_ho = brier_decomp(y_hold_vec, p_hold_vec, 10)
+
         
         st.write(
             f"- ECE(train): `{ece_tr:.4f}` | Brier(train): `{brier_tr:.4f}` = "
@@ -3590,8 +3591,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- ranking diagnostics: KS + Lift (train) --------------------------------
         st.markdown("### 📈 Ranking Diagnostics")
-        st.write(f"- KS(train):   `{ks_stat(y_train_vec, p_cal):.3f}`")
-        st.write(f"- KS(holdout): `{ks_stat(y_hold_vec,  p_cal_val):.3f}`")
+        st.write(f"- KS(train):   `{ks_stat(y_train_vec, p_train_vec):.3f}`")
+        st.write(f"- KS(holdout): `{ks_stat(y_hold_vec,  p_hold_vec):.3f}`")
 
         
         def lift_table(y_true, p, k=10):
@@ -3862,25 +3863,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if len(yv) != len(pv):
                 return np.nan
             return brier_score_loss(yv, np.clip(pv, 1e-6, 1-1e-6))
+        # targets aligned
+        y_train_vec = y_full[train_all_idx].astype(int)
+        y_hold_vec  = y_full[hold_idx].astype(int)
         
-        # --- TRAIN (in-sample) metrics ---
-        y_train_vec = np.asarray(y_full, dtype=int)                 # use the same target as prob_logloss/prob_auc
-        p_train_vec = np.asarray(ensemble_prob, dtype=float)
+        p_train_vec = np.asarray(p_cal, dtype=float)       # same length as y_train_vec
+        p_hold_vec  = np.asarray(p_cal_val, dtype=float)   # same length as y_hold_vec
         
-        auc_train     = _safe_auc(y_train_vec, p_train_vec)
-        acc_train     = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int)) if np.unique(y_train_vec).size == 2 else np.nan
-        logloss_train = _safe_ll(y_train_vec, p_train_vec)
-        brier_train   = _safe_brier(y_train_vec, p_train_vec)
+        # sanity checks
+        assert len(y_train_vec) == len(p_train_vec), f"train len mismatch: y={len(y_train_vec)} p={len(p_train_vec)}"
+        assert len(y_hold_vec)  == len(p_hold_vec),  f"holdout len mismatch: y={len(y_hold_vec)} p={len(p_hold_vec)}"
+        acc_train = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int)) if np.unique(y_train_vec).size == 2 else np.nan
+        acc_hold  = accuracy_score(y_hold_vec,  (p_hold_vec  >= 0.5).astype(int)) if np.unique(y_hold_vec).size  == 2 else np.nan
         
-        # --- HOLDOUT (validation) metrics ---
-        y_hold_vec = np.asarray(y_val, dtype=int)
-        p_hold_vec = np.asarray(ensemble_prob_val, dtype=float)     # <-- use *_val here, not p_cal
+        auc_train = roc_auc_score(y_train_vec, p_train_vec)
+        auc_hold  = roc_auc_score(y_hold_vec,  p_hold_vec)
         
-        auc_hold     = _safe_auc(y_hold_vec, p_hold_vec)
-        acc_hold     = accuracy_score(y_hold_vec, (p_hold_vec >= 0.5).astype(int)) if np.unique(y_hold_vec).size == 2 else np.nan
-        logloss_hold = _safe_ll(y_hold_vec, p_hold_vec)
-        brier_hold   = _safe_brier(y_hold_vec, p_hold_vec)
+        logloss_train = log_loss(y_train_vec, np.clip(p_train_vec, 1e-6, 1-1e-6), labels=[0,1])
+        logloss_hold  = log_loss(y_hold_vec,  np.clip(p_hold_vec,  1e-6, 1-1e-6), labels=[0,1])
         
+        brier_train = brier_score_loss(y_train_vec, p_train_vec)
+        brier_hold  = brier_score_loss(y_hold_vec,  p_hold_vec)
+
+
         # Streamlit summary (choose what you want to display)
         # st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
         # Train — AUC: {auc_train:.4f} | LogLoss: {logloss_train:.4f} | Brier: {brier_train:.4f} | Acc: {acc_train:.4f}
@@ -3933,7 +3938,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         save_model_to_gcs(
             model={"model_logloss": model_logloss, "model_auc": model_auc,
                    "best_w": float(best_w), "feature_cols": feature_cols},
-            calibrator={"iso_blend": iso_blend},
+            calibrator=iso_blend,
             sport=sport, market=market, bucket_name=GCS_BUCKET,
             team_feature_map=team_feature_map,
             book_reliability_map=book_reliability_map,
@@ -4823,8 +4828,8 @@ def save_model_to_gcs(
     # --- build payload exactly like before ---
     if isinstance(model, dict):
         payload = dict(model)  # shallow copy
-        if calibrator is not None and "calibrator" not in payload:
-            payload["calibrator"] = calibrator
+        if calibrator is not None:
+            payload["iso_blend"] = calibrator
         if team_feature_map is not None and "team_feature_map" not in payload:
             payload["team_feature_map"] = team_feature_map
         if book_reliability_map is not None and "book_reliability_map" not in payload:
@@ -4832,7 +4837,7 @@ def save_model_to_gcs(
     else:
         payload = {
             "model": model,
-            "calibrator": calibrator,
+            "iso_blend": calibrator,
             "team_feature_map": team_feature_map,
             "book_reliability_map": book_reliability_map,
         }
@@ -4931,15 +4936,13 @@ def load_model_from_gcs(sport, market, bucket_name="sharp-models"):
         return None
 
     bundle = {
-        "model_logloss":        data.get("model_logloss"),
-        "calibrator_logloss":   data.get("calibrator_logloss"),
-        "model_auc":            data.get("model_auc"),
-        "calibrator_auc":       data.get("calibrator_auc"),
-        "best_w":               float(data.get("best_w", 1.0)),
+        "model_logloss": data.get("model_logloss"),
+        "model_auc":     data.get("model_auc"),
+        "iso_blend":     data.get("iso_blend"),
+        "best_w":        float(data.get("best_w", 1.0)),
+        "feature_cols":  data.get("feature_cols") or [],
         "team_feature_map":     data.get("team_feature_map") if isinstance(data.get("team_feature_map"), pd.DataFrame) else pd.DataFrame(),
         "book_reliability_map": data.get("book_reliability_map") if isinstance(data.get("book_reliability_map"), pd.DataFrame) else pd.DataFrame(),
-        "feature_cols":         data.get("feature_cols") or [],
-     
     }
     return bundle
 
