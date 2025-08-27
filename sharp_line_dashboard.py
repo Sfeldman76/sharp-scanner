@@ -4669,7 +4669,9 @@ def compute_diagnostics_vectorized(df):
     # === Timing Opportunity Models (unchanged scaffold)
     # === Timing Opportunity (UI-only) — compute on df_summary_base ===
     # Normalize market labels once
-    df_summary_base['Market'] = df_summary_base['Market'].astype(str).str.strip().str.lower()
+    # === Timing Opportunity Models (UI-only) — compute on df ===
+    # Normalize market labels once
+    df['Market'] = df['Market'].astype(str).str.strip().str.lower()
     
     # Load timing models (saved as timing_{market})
     timing_models = {}
@@ -4697,14 +4699,14 @@ def compute_diagnostics_vectorized(df):
     
     # Ensure feature columns exist (UI-only)
     for c in timing_feature_cols:
-        if c not in df_summary_base.columns:
-            df_summary_base[c] = 0.0
+        if c not in df.columns:
+            df[c] = 0.0
     
     # Ensure output columns exist (prevents KeyError downstream)
-    if 'Timing_Opportunity_Score' not in df_summary_base.columns:
-        df_summary_base['Timing_Opportunity_Score'] = np.nan
-    if 'Timing_Stage' not in df_summary_base.columns:
-        df_summary_base['Timing_Stage'] = '—'
+    if 'Timing_Opportunity_Score' not in df.columns:
+        df['Timing_Opportunity_Score'] = np.nan
+    if 'Timing_Stage' not in df.columns:
+        df['Timing_Stage'] = '—'
     
     def _align_X(X, model):
         names = getattr(model, 'feature_names_in_', None)
@@ -4716,16 +4718,16 @@ def compute_diagnostics_vectorized(df):
             return X.reindex(columns=keep, fill_value=0.0)
         return X
     
-    # Score by market on df_summary_base
+    # Score by market on df
     for _m in ['spreads', 'totals', 'h2h']:
         _model = timing_models.get(_m)
         if _model is None:
             continue
-        _mask = df_summary_base['Market'].eq(_m)
+        _mask = df['Market'].eq(_m)
         if not _mask.any():
             continue
     
-        X = (df_summary_base.loc[_mask, timing_feature_cols]
+        X = (df.loc[_mask, timing_feature_cols]
              .apply(pd.to_numeric, errors='coerce')
              .fillna(0.0))
         X = _align_X(X, _model)
@@ -4733,12 +4735,12 @@ def compute_diagnostics_vectorized(df):
         try:
             p = (_model.predict_proba(X)[:, 1] if hasattr(_model, 'predict_proba')
                  else np.clip(_model.predict(X), 0, 1))
-            df_summary_base.loc[_mask, 'Timing_Opportunity_Score'] = p
+            df.loc[_mask, 'Timing_Opportunity_Score'] = p
         except Exception as e:
             st.error(f"⚠️ Timing scoring failed for '{_m}': {e}")
     
     # Clip and bucket
-    df_summary_base['Timing_Opportunity_Score'] = df_summary_base['Timing_Opportunity_Score'].astype(float).clip(0, 1)
+    df['Timing_Opportunity_Score'] = pd.to_numeric(df['Timing_Opportunity_Score'], errors='coerce').fillna(0.0).clip(0, 1)
     
     def _assign_timing_stage(p: pd.Series) -> pd.Series:
         p = p.fillna(0.0)
@@ -4748,7 +4750,8 @@ def compute_diagnostics_vectorized(df):
         idx = np.clip(idx, 0, len(labels)-1)
         return pd.Series([labels[i] for i in idx], index=p.index)
     
-    df_summary_base['Timing_Stage'] = _assign_timing_stage(df_summary_base['Timing_Opportunity_Score'])
+    df['Timing_Stage'] = _assign_timing_stage(df['Timing_Opportunity_Score'])
+
 
     # === Final Output
     # Base diagnostic columns
