@@ -3635,19 +3635,58 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.write("**by Timing**"); st.dataframe(seg_table(eval_seg, "Timing"))
         st.write("**Favorite vs Dog**"); st.dataframe(seg_table(eval_seg, "Fav"))
 
+       
+
+        def psi_num(a: np.ndarray, b: np.ndarray, bins: int = 10, eps: float = 1e-6) -> float:
+            """
+            Population Stability Index between numeric arrays a (baseline/train) and b (target/holdout).
+            Uses quantile bins from 'a' so each bin has mass in baseline.
+            PSI = Σ (p_i - q_i) * ln(p_i / q_i)
+            """
+            a = np.asarray(a, dtype=float)
+            b = np.asarray(b, dtype=float)
+            a = a[np.isfinite(a)]
+            b = b[np.isfinite(b)]
+            if a.size < bins or b.size < bins:
+                return np.nan
         
+            # Quantile edges from baseline
+            q = np.quantile(a, np.linspace(0, 1, bins + 1))
+            # widen edges slightly to include extremes
+            q[0]  = np.nextafter(q[0], -np.inf)
+            q[-1] = np.nextafter(q[-1],  np.inf)
+        
+            pa = np.histogram(a, q)[0].astype(float)
+            pb = np.histogram(b, q)[0].astype(float)
+        
+            pa = pa / max(1.0, a.size)
+            pb = pb / max(1.0, b.size)
+        
+            # avoid zeros
+            pa = np.where(pa <= 0, eps, pa)
+            pb = np.where(pb <= 0, eps, pb)
+        
+            return float(np.sum((pa - pb) * np.log(pa / pb)))
+
         # ---- drift / PSI on a few high-signal features -----------------------------
         st.markdown("### 🌡️ Drift Check (PSI proxy)")
-        psi_rows=[]
-        feat_check = [c for c in ["Outcome_Market_Spread","Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening","Book_Reliability_Lift"] if c in df_market.columns]
+        psi_rows = []
+        feat_check = [c for c in [
+            "Outcome_Market_Spread",
+            "Abs_Line_Move_From_Opening",
+            "Abs_Odds_Move_From_Opening",
+            "Book_Reliability_Lift"
+        ] if c in df_market.columns]
+        
         if len(hold_idx) > 0 and len(feat_check) > 0:
             for col in feat_check:
-                a = pd.to_numeric(df_market.iloc[train_all_idx][col], errors="coerce").dropna().values
-                b = pd.to_numeric(df_market.iloc[hold_idx][col],         errors="coerce").dropna().values
-                if len(a)>50 and len(b)>20:
-                    psi_rows.append({"Feature": col, "PSI": psi_num(a,b)})
+                a = pd.to_numeric(df_market.loc[train_all_idx, col], errors="coerce").dropna().values
+                b = pd.to_numeric(df_market.loc[hold_idx,      col], errors="coerce").dropna().values
+                if a.size >= 50 and b.size >= 20:
+                    psi_rows.append({"Feature": col, "PSI": psi_num(a, b)})
         if psi_rows:
             st.dataframe(pd.DataFrame(psi_rows).sort_values("PSI", ascending=False))
+
 
         
         # ---- profit vs threshold (holdout) -----------------------------------------
