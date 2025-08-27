@@ -1601,24 +1601,27 @@ def get_xgb_search_space(
 
     if s in SMALL_LEAGUES:
         # tighter / more regularized for small data
+        # ---- SMALL LEAGUES (stability-first) ----
         params_ll = {
-            "max_depth":        randint(2, 4),            # {2,3}
-            "learning_rate":    loguniform(1e-2, 4e-2),   # 0.01–0.04
-            "subsample":        uniform(0.60, 0.35),      # 0.60–0.95
-            "colsample_bytree": uniform(0.55, 0.35),      # 0.55–0.90
-            "min_child_weight": randint(2, 9),            # {2..8}
-            "gamma":            uniform(0.00, 0.25),      # 0–0.25
-            "reg_alpha":        loguniform(1e-2, 1.0e1),  # 0.01–10
-            "reg_lambda":       loguniform(1.0, 2.5e1),   # 1–25
+            "max_depth":        randint(2, 3),            # {2}
+            "learning_rate":    loguniform(6e-3, 2.5e-2), # 0.006–0.025
+            "subsample":        uniform(0.85, 0.15),      # 0.85–1.00  (less stochasticity)
+            "colsample_bytree": uniform(0.85, 0.15),      # 0.85–1.00
+            "min_child_weight": randint(8, 20),           # 8–19       (blocks tiny leaves)
+            "gamma":            uniform(0.20, 0.60),      # 0.20–0.80  (require loss to drop to split)
+            "reg_alpha":        loguniform(1e-1, 2.0e1),  # 0.1–20     (L1)
+            "reg_lambda":       loguniform(1.5e1, 1.0e2), # 15–100     (L2)
         }
-        # make AUC head slightly more expressive to reduce head correlation
+        # Keep AUC head only slightly looser to reduce correlation, but still safe:
         params_auc = {
-            **params_ll,
-            "max_depth":        randint(3, 6),            # {3..5}
-            "subsample":        uniform(0.50, 0.40),      # 0.50–0.90
-            "colsample_bytree": uniform(0.50, 0.45),      # 0.50–0.95
-            "min_child_weight": randint(1, 7),            # {1..6}
-            "gamma":            uniform(0.00, 0.20),
+            "max_depth":        randint(2, 4),            # {2,3}
+            "learning_rate":    loguniform(5e-3, 3.0e-2), # 0.005–0.03
+            "subsample":        uniform(0.80, 0.20),      # 0.80–1.00
+            "colsample_bytree": uniform(0.80, 0.20),      # 0.80–1.00
+            "min_child_weight": randint(6, 16),           # 6–15
+            "gamma":            uniform(0.15, 0.45),      # 0.15–0.60
+            "reg_alpha":        loguniform(5e-2, 1.0e1),  # 0.05–10
+            "reg_lambda":       loguniform(1.0e1, 8.0e1), # 10–80
         }
     else:
         # bigger leagues / more data: two distinct spaces
@@ -2839,7 +2842,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Sharp_Move_Signal',
             'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
             'Book_lift_x_Magnitude','Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket',#'Market_Leader','LimitUp_NoMove_Flag',
+            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
         
             # 🔹 Market response
             #'Sharp_Line_Magnitude',
@@ -2863,6 +2866,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Market_Mispricing','Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
             'CrossMarket_Prob_Gap_Exists',#'Line_Moved_Away_From_Team',
+            'Line_Moved_Toward_Team_And_Hit',
+            
             'Pct_Line_Move_From_Opening','Pct_Line_Move_Bin','Potential_Overmove_Flag',
             'Potential_Overmove_Total_Pct_Flag','Mispricing_Flag',
         
@@ -2877,7 +2882,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread','Outcome_Market_Spread',#'Outcome_Spread_Edge',
+            'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
             'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_pts',
             'TOT_Proj_Total_Baseline','TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             'TOT_GT_H','TOT_GT_A','TOT_LgAvg_Total','TOT_Mispricing'
@@ -3181,10 +3186,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_full = y_series.loc[valid_mask].astype(int).to_numpy()
         
         # 4) Groups & times: ensure no NAType
-        groups = resolve_groups(df_market.loc[valid_mask]).astype(str)  # your helper returns ndarray
-        times  = pd.to_datetime(
-            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
-        ).to_numpy()
+        # ---- Groups & times (snapshot-aware) ----
+        groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
+        
+        snap_ts = pd.to_datetime(
+            df_market.loc[valid_mask, "Snapshot_Timestamp"],
+            errors="coerce", utc=True
+        )
+        game_ts = pd.to_datetime(
+            df_market.loc[valid_mask, "Game_Start"],  # or your scheduled kickoff tipoff col
+            errors="coerce", utc=True
+        )
+        
+        # If any game has >1 snapshot, we’re in snapshot regime
+        by_game_snaps = (
+            df_market.loc[valid_mask]
+            .groupby("Game_Key")["Snapshot_Timestamp"]
+            .nunique(dropna=True)
+        )
+        has_snapshots = (by_game_snaps.fillna(0).max() > 1)
+        
+        # Use snapshot times when present; else fall back to game time
+        time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
+        
+        # Embargo: only needed when you truly have multiple snapshots
+        sport_key = str(sport).upper()
+        embargo_td = (
+            SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"])
+            if has_snapshots else pd.Timedelta(0)
+        )
+        
+        # Replace your previous 'groups' and 'times' with these:
+        groups = groups_all
+        times  = time_values_all
+
+        
         
         # 5) Quick guard: no NaT in times
         if pd.isna(times).any():
@@ -3209,10 +3245,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
 
          # --- define untouched final holdout as last ~15% of GROUPS (safer than rows) ---
-        meta = pd.DataFrame({
-            "group": np.asarray(groups),
-            "time":  pd.to_datetime(times, errors="coerce", utc=True)
-        })
+        meta = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
         gmeta = (meta.groupby("group", as_index=False)["time"]
                    .agg(start="min", end="max")
                    .sort_values("start")
@@ -3222,60 +3255,86 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         n_hold_g = max(1, int(round(n_groups * 0.15)))
         hold_g   = gmeta["group"].to_numpy()[-n_hold_g:]
         train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
+                
         
         all_g = meta["group"].to_numpy()
         hold_idx      = np.flatnonzero(np.isin(all_g, hold_g))
         train_all_idx = np.flatnonzero(np.isin(all_g, train_g))
         
-        # Subset arrays for CV / search / OOF (train only)
+        # Subset for TRAIN-only arrays
         X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
-        t_train = times[train_all_idx]
-        feature_cols = list(features) 
-
+        t_train = times[train_all_idx] 
+        feature_cols = list(features)
         
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],                 # train rows only
             n_jobs=1,                                # keep models single-threaded (CV drives parallelism)
             scale_pos_weight=((y_train == 0).sum() / max(1, (y_train == 1).sum())),
-            features=features,                        # ensures monotone_constraints align to column order
+            features=features,                        # keeps monotone_constraints aligned
         )
         
-        # Optional: stability nudges for the base (search will override these if sampled)
+        s = str(sport).upper()  # <-- define 's' before using it
+        
+        # ---- ONLY for small leagues: tighten capacity & regularize more ----
+        if s in SMALL_LEAGUES:
+            base_kwargs.update({
+                "max_delta_step": 1,
+                "min_child_weight": max(8, int(base_kwargs.get("min_child_weight", 0))),
+                "gamma": max(0.25, float(base_kwargs.get("gamma", 0.0))),
+                "reg_lambda": max(20.0, float(base_kwargs.get("reg_lambda", 0.0))),
+                "reg_alpha": max(0.5,  float(base_kwargs.get("reg_alpha", 0.0))),
+                "subsample": min(1.0,  max(0.85, float(base_kwargs.get("subsample", 1.0)))),
+                "colsample_bytree": min(1.0, max(0.85, float(base_kwargs.get("colsample_bytree", 1.0)))),
+            })
+            search_estimators = 300
+            eps = 5e-3   # slightly stronger clipping for stability on tiny data
+        else:
+            search_estimators = 600
+            eps = 1e-4
+        
+        # (Optional) light stability nudge — safe to keep; won’t undo small-league overrides
         base_kwargs.update({
             "n_jobs": 1,
             "max_delta_step": 1,
             "min_child_weight": max(3, base_kwargs.get("min_child_weight", 1)),
             "gamma": max(0.1, base_kwargs.get("gamma", 0.0)),
             "reg_lambda": max(1.0, base_kwargs.get("reg_lambda", 1.0)),
-            "reg_alpha": base_kwargs.get("reg_alpha", 0.0),
+            "reg_alpha": float(base_kwargs.get("reg_alpha", 0.0)),
         })
         
-        # Lock classifier objective/metric (redundant if set in get_xgb_search_space, but harmless)
+        # lock classifier objective/metric (redundant if already in get_xgb_search_space, harmless)
         base_kwargs["objective"]   = "binary:logistic"
         base_kwargs["eval_metric"] = "logloss"
         
-        # Ensure the search spaces do NOT try to set objective/metric
+        # sanity: ensure the search spaces don’t try to set objective/metric
         for d in (params_ll, params_auc):
             assert "objective" not in d
             assert "eval_metric" not in d
         
         # CV splitter (TRAIN ONLY)
+        rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
+        target_games   = 8 if s in SMALL_LEAGUES else 20
+        min_val_size   = max(10 if s in SMALL_LEAGUES else 20, target_games * rows_per_game)
+        
+        n_groups_train = pd.unique(g_train).size
+        target_folds   = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
+        
         cv = PurgedGroupTimeSeriesSplit(
-            n_splits=5,
+            n_splits=target_folds,
             embargo=embargo_td,
             time_values=t_train,
-            min_val_size=20,
+            min_val_size=min_val_size,
         )
+
         folds = list(cv.split(X_train, y_train, groups=g_train))
         assert folds, "No usable folds"
         
-        # Search bases (cap trees; no ES inside CV)
-        search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": 600, "random_state": 42})
-        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": 600, "random_state": 137})
-        
+        # search bases (no ES inside CV)
+        search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
+        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
         # scorers
         def neg_logloss_scorer(est, X, y):
             proba = est.predict_proba(X)[:, 1]
@@ -3325,7 +3384,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # final ES on the last CV fold (TRAIN ONLY)
         tr_es_rel, va_es_rel = folds[-1]
         final_estimators_cap  = 3000
-        early_stopping_rounds = 100
+        early_stopping_rounds = 250
         
         model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": final_estimators_cap})
         model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": final_estimators_cap})
