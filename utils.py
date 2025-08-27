@@ -3268,6 +3268,110 @@ def predict_blended(bundle, X, model=None, iso=None):
     p = _predict_one(model, iso, X)
     return np.clip(p, 1e-6, 1 - 1e-6) if p is not None else None
 
+def _unwrap_pipeline(est):
+    pipe = est if hasattr(est, "named_steps") else None
+    last = est
+    pre  = None
+    if pipe is not None:
+        try:
+            steps = list(pipe.named_steps.values())
+            if steps:
+                last = steps[-1]
+                for s in steps[:-1]:
+                    if hasattr(s, "transform") and hasattr(s, "fit"):
+                        pre = s
+                if pre is None and hasattr(last, "transform") and hasattr(last, "fit"):
+                    pre = last
+        except Exception:
+            pass
+    return pipe, last, pre
+
+def _training_like_feature_selector(df):
+    include_prefixes = (
+        "line_", "sharp_line_", "rec_line_", "line_move_", "line_magnitude_", "net_line_",
+        "odds_", "implied_prob_", "net_odds_", "abs_odds_", "odds_move_", "implied_prob_shift",
+        "minutes_", "late_game_", "sharp_timing", "sharpmove_", "oddsmove_", "sharpmove_timing_",
+        "spread_", "total_", "h2h_", "spread_vs_", "total_vs_", "crossmarket_",
+        "book_reliability_", "book_lift_", "sharp_limit_", "limitprotect_", "high_limit_flag",
+        "team_", "market_mispricing", "abs_market_mispricing", "abs_team_implied_prob_gap",
+        "small_book_", "liquidity_", "market_leader", "unique_sharp_books", "crossmarketsharpsupport",
+        "value_reversal_flag", "odds_reversal_flag",
+    )
+    exclude_prefixes = (
+        "game_", "home_", "away_", "team_key", "game_key",
+        "bookmaker", "book", "market_", "outcome",
+        "snapshot_", "commence_", "event_", "sport", "time",
+        "minutes_to_game_tier",
+    )
+    num_kinds = set("biuf")
+    cols = []
+    for c in df.columns:
+        cl = str(c).lower()
+        kind = getattr(df[c].dtype, "kind", "O")
+        if kind not in num_kinds:       # numeric only
+            continue
+        if any(cl.startswith(p) for p in exclude_prefixes):
+            continue
+        if any(cl.startswith(p) for p in include_prefixes):
+            cols.append(c)
+    if not cols:
+        cols = [c for c in df.columns
+                if getattr(df[c].dtype, "kind", "O") in num_kinds
+                and not str(c).lower().startswith(exclude_prefixes)]
+    return [str(c) for c in cols]
+
+def _resolve_feature_cols_like_training(bundle, model, df_canon):
+    # 1) explicit from bundle
+    if isinstance(bundle, dict):
+        fc = bundle.get("feature_cols")
+        if isinstance(fc, (list, tuple)) and fc:
+            return [str(c) for c in fc]
+
+    # 2) unwrap pipeline and try estimator conventions
+    _, last, pre = _unwrap_pipeline(model)
+    names = getattr(last, "feature_names_in_", None)
+    if names is not None and len(names):
+        return [str(c) for c in names]
+
+    if hasattr(last, "get_booster"):
+        try:
+            booster = last.get_booster()
+            bnames = getattr(booster, "feature_names", None)
+            if bnames:
+                return [str(c) for c in bnames]
+        except Exception:
+            pass
+
+    for attr in ("feature_name_", "feature_names_"):
+        names = getattr(last, attr, None)
+        if names:
+            return [str(c) for c in names]
+    if hasattr(last, "booster_"):
+        try:
+            names = last.booster_.feature_name()
+            if names:
+                return [str(c) for c in names]
+        except Exception:
+            pass
+    get_names = getattr(last, "get_feature_names", None)
+    if callable(get_names):
+        try:
+            n = get_names()
+            if n:
+                return [str(c) for c in n]
+        except Exception:
+            pass
+
+    # 3) if preprocessor has input names
+    if pre is not None:
+        raw = getattr(pre, "feature_names_in_", None)
+        if raw is not None and len(raw):
+            return [str(c) for c in raw]
+
+    # 4) fall back to training-like selector
+    return _training_like_feature_selector(df_canon)
+
+
 
 
 def apply_blended_sharp_score(
@@ -4308,76 +4412,125 @@ def apply_blended_sharp_score(
         df_canon['CrossMarket_Prob_Gap_Exists']   = (
             (df_canon['Spread_vs_H2H_ProbGap'].abs() > 0.05) | (df_canon['Total_vs_Spread_ProbGap'].abs() > 0.05)
         ).astype(int)
-
-        # ===== MODEL SCORING =====
-        # Resolve feature_cols (bundle first, else model metadata)
-        feature_cols = []
-        if isinstance(bundle, dict) and isinstance(bundle.get('feature_cols'), (list, tuple)) and bundle['feature_cols']:
-            feature_cols = list(bundle['feature_cols'])
-        elif model is not None:
-            feat_in = getattr(model, 'feature_names_in_', None)
-            if feat_in is not None:
-                feature_cols = list(feat_in)
+        # ---- derive timing feature column lists robustly ----
+        _timing_cols_auto = [c for c in df_canon.columns if c.startswith('SharpMove_Magnitude_')]
+        _odds_timing_cols_auto = [c for c in df_canon.columns if c.startswith('OddsMove_Magnitude_')]
+        
+        hybrid_timing_cols = _timing_cols_auto + (['SharpMove_Timing_Magnitude'] if 'SharpMove_Timing_Magnitude' in df_canon.columns else [])
+        if not hybrid_timing_cols:
+            hybrid_timing_cols = [
+                'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
+                'SharpMove_Magnitude_Overnight_LateGame','SharpMove_Magnitude_Overnight_Urgent',
+                'SharpMove_Magnitude_Early_VeryEarly','SharpMove_Magnitude_Early_MidRange',
+                'SharpMove_Magnitude_Early_LateGame','SharpMove_Magnitude_Early_Urgent',
+                'SharpMove_Magnitude_Midday_VeryEarly','SharpMove_Magnitude_Midday_MidRange',
+                'SharpMove_Magnitude_Midday_LateGame','SharpMove_Magnitude_Midday_Urgent',
+                'SharpMove_Magnitude_Late_VeryEarly','SharpMove_Magnitude_Late_MidRange',
+                'SharpMove_Magnitude_Late_LateGame','SharpMove_Magnitude_Late_Urgent',
+                'SharpMove_Timing_Magnitude'
+            ]
+        for col in hybrid_timing_cols:
+            if col in df_canon.columns:
+                df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
             else:
-                booster = getattr(model, 'get_booster', lambda: None)()
-                names = getattr(booster, 'feature_names', None)
-                feature_cols = list(names) if names is not None else []
+                df_canon[col] = 0.0
+        
+        hybrid_odds_timing_cols = (['Odds_Move_Magnitude'] if 'Odds_Move_Magnitude' in df_canon.columns else []) + _odds_timing_cols_auto
+        if not hybrid_odds_timing_cols:
+            hybrid_odds_timing_cols = ['Odds_Move_Magnitude'] + [
+                f'OddsMove_Magnitude_{b}' for b in [
+                    'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
+                    'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
+                    'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
+                    'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
+                ]
+            ]
+        for col in hybrid_odds_timing_cols:
+            if col in df_canon.columns:
+                df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
+            else:
+                df_canon[col] = 0.0
 
+   
         try:
-            feature_cols = [str(c) for c in feature_cols]
-            feature_cols = list(dict.fromkeys(feature_cols))  # de-dupe keep order
-
-            if feature_cols:
-                # coerce only model features
-                for c in feature_cols:
-                    if c in df_canon.columns:
-                        if df_canon[c].dtype == object:
-                            df_canon[c] = df_canon[c].replace({
-                                'True': 1, 'False': 0, True: 1, False: 0,
-                                '': np.nan, 'none': np.nan, 'None': np.nan
-                            })
-                        df_canon[c] = pd.to_numeric(df_canon[c], errors='coerce')
-
-                X_can = (
-                    df_canon.reindex(columns=feature_cols)
-                            .replace([np.inf, -np.inf], np.nan)
-                            .fillna(0.0)
-                )
-            else:
-                X_can = pd.DataFrame(index=df_canon.index)
-
-            # ensure pred cols
-            for col, default in [
-                ('Model_Sharp_Win_Prob', np.nan),
-                ('Model_Confidence',     np.nan),
-                ('Scored_By_Model',      False),
-                ('Scoring_Market',       mkt),
-            ]:
+            # ===== MODEL SCORING =====
+            feature_cols = _resolve_feature_cols_like_training(bundle, model, df_canon)
+            # stable de-dup, keep order, drop Nones
+            feature_cols = [str(c) for c in dict.fromkeys(feature_cols) if c is not None]
+            logger.info("🔧 %s: using %d feature cols", mkt.upper(), len(feature_cols))
+        
+            # ---- ensure every feature exists & is numeric
+            for c in feature_cols:
+                if c not in df_canon.columns:
+                    df_canon[c] = 0.0
+                elif df_canon[c].dtype == object:
+                    df_canon[c] = df_canon[c].replace({
+                        'True': 1, 'False': 0, True: 1, False: 0,
+                        '': np.nan, 'none': np.nan, 'None': np.nan
+                    })
+                    df_canon[c] = pd.to_numeric(df_canon[c], errors='coerce')
+        
+            X_can = (
+                df_canon.reindex(columns=feature_cols)
+                        .replace([np.inf, -np.inf], np.nan)
+                        .fillna(0.0)
+                        .astype('float32')
+            )
+        
+            # ---- ensure prediction cols exist on BOTH frames before writeback
+            cols_to_write_defaults = {
+                'Model_Sharp_Win_Prob': np.nan,
+                'Model_Confidence':     np.nan,
+                'Scored_By_Model':      False,
+                'Scoring_Market':       mkt,
+            }
+            for col, default in cols_to_write_defaults.items():
                 if col not in df_canon.columns:
                     df_canon[col] = default
-
-            if not feature_cols or X_can.empty:
-                logger.info(f"ℹ️ {mkt.upper()} has no usable features — stamping unscored on canon subset.")
+                if col not in df.columns:
+                    df[col] = default
+        
+            # ---- predict or stamp unscored
+            if not feature_cols or X_can.shape[1] == 0 or X_can.empty:
+                logger.info("ℹ️ %s has no usable features — stamping unscored on canon subset.", mkt.upper())
+                df_canon['Model_Sharp_Win_Prob'] = np.nan
+                df_canon['Model_Confidence']     = np.nan
+                df_canon['Scored_By_Model']      = False
+                df_canon['Scoring_Market']       = mkt
             else:
                 preds = predict_blended(bundle, X_can, model=model, iso=iso)
                 if preds is None or len(preds) != len(df_canon):
-                    logger.info(f"ℹ️ {mkt.upper()} no usable predictor or length mismatch — stamping unscored on canon subset.")
+                    logger.info("ℹ️ %s no usable predictor or length mismatch — stamping unscored on canon subset.", mkt.upper())
+                    df_canon['Model_Sharp_Win_Prob'] = np.nan
+                    df_canon['Model_Confidence']     = np.nan
+                    df_canon['Scored_By_Model']      = False
+                    df_canon['Scoring_Market']       = mkt
                 else:
                     preds = np.clip(np.asarray(preds, dtype=float).ravel(), 1e-6, 1-1e-6)
                     df_canon['Model_Sharp_Win_Prob'] = preds
                     df_canon['Model_Confidence']     = preds
                     df_canon['Scored_By_Model']      = True
                     df_canon['Scoring_Market']       = mkt
-
-            # ✅ Write back predictions ONLY to indices we scored (avoids mask/length mismatches)
+        
+            # ✅ Write back predictions ONLY to the rows we actually scored
             cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
             df.loc[df_canon.index, cols_to_write] = df_canon[cols_to_write].values
-
+        
         except Exception as e:
-            logger.error(f"❌ Scoring failed for {mkt.upper()} — stamping unscored on canon subset. Error: {e}")
-            cols_to_write = ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']
-            df_canon[cols_to_write] = [np.nan, np.nan, False, mkt]
-            df.loc[df_canon.index, cols_to_write] = df_canon[cols_to_write].values
+            logger.error("❌ Scoring failed for %s — stamping unscored on canon subset. Error: %s", mkt.upper(), e)
+            # Make sure columns exist
+            for col in ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']:
+                if col not in df_canon.columns:
+                    df_canon[col] = np.nan if col != 'Scoring_Market' else mkt
+                if col not in df.columns:
+                    df[col] = np.nan if col != 'Scoring_Market' else mkt
+            df_canon['Model_Sharp_Win_Prob'] = np.nan
+            df_canon['Model_Confidence']     = np.nan
+            df_canon['Scored_By_Model']      = False
+            df_canon['Scoring_Market']       = mkt
+            df.loc[df_canon.index, ['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']] = \
+                df_canon[['Model_Sharp_Win_Prob','Model_Confidence','Scored_By_Model','Scoring_Market']].values
+
     # ===================== END MARKET RESOLUTION + SCORING LOOP ===================== SCORING LOOP =====================
            
             
