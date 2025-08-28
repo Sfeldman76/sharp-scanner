@@ -2280,17 +2280,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market = add_favorite_context_flag(df_market)
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
         
-        # Ensure an "open" column (your schema prefers First_Line_Value)
-        open_col = "First_Line_Value" if "First_Line_Value" in df_market.columns else "Open_Value"
-        if open_col not in df_market.columns or df_market[open_col].isna().all():
-            df_market = df_market.sort_values("Snapshot_Timestamp")
-            earliest = (
-                df_market.dropna(subset=["Value"])
-                         .drop_duplicates(subset=["Game_Key","Market","Bookmaker"], keep="first")
-                         .rename(columns={"Value": "First_Line_Value"})[["Game_Key","Market","Bookmaker","First_Line_Value"]]
-            )
-            df_market = df_market.merge(earliest, on=["Game_Key","Market","Bookmaker"], how="left")
+        # Open line: prefer First_Line_Value, then Open_Value, else fall back to Value
+        if "First_Line_Value" in df_market.columns and df_market["First_Line_Value"].notna().any():
             open_col = "First_Line_Value"
+        else:
+            if "Open_Value" in df_market.columns and df_market["Open_Value"].notna().any():
+                df_market["First_Line_Value"] = df_market["Open_Value"]
+            else:
+                df_market["First_Line_Value"] = df_market["Value"]
+            open_col = "First_Line_Value"
+        
+        # Open odds: prefer First_Odds, then Open_Odds, else fall back to Odds_Price
+        if "First_Odds" in df_market.columns and df_market["First_Odds"].notna().any():
+            open_odds_col = "First_Odds"
+        else:
+            if "Open_Odds" in df_market.columns and df_market["Open_Odds"].notna().any():
+                df_market["First_Odds"] = df_market["Open_Odds"]
+            else:
+                df_market["First_Odds"] = df_market.get("Odds_Price", np.nan)
+            open_odds_col = "First_Odds"
+
         
         # === Low-memory resistance (compute once per (G,M,B), broadcast) ===
         df_market = add_resistance_features_lowmem(
@@ -2302,7 +2311,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             sharp_move_col="Sharp_Move_Signal" if "Sharp_Move_Signal" in df_market.columns else None,
             sharp_prob_shift_col="Sharp_Prob_Shift" if "Sharp_Prob_Shift" in df_market.columns else None,
             emit_levels_str=False,     # training: keep memory small
-            broadcast=True
+            broadcast=True,
+            skip_sort=True
         )
         
         # Small numeric dtypes to save RAM (training only)
