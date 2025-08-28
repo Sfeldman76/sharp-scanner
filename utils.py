@@ -3675,6 +3675,102 @@ def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
     return df_sc
 
 
+# === Key levels registry ===
+TRAIN_KEY_LEVELS = {
+    ("nfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
+    ("ncaaf","spreads"):[1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
+    ("cfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,9.5,10,10.5],
+    ("nba","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
+    ("wnba","spreads"): [1.5,2.5,3,4.5,5.5,6.5,7.5],
+    ("mlb","totals"):   [7,7.5,8,8.5,9,9.5,10],
+    ("nfl","totals"):   [41,43,44.5,47,49.5,51,52.5],
+    ("ncaaf","totals"): [49.5,52.5,55.5,57.5,59.5,61.5],
+    ("nba","totals"):   [210,212.5,215,217.5,220,222.5,225],
+    ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
+    ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
+}
+
+def _keys_for_training(sport: str, market: str) -> np.ndarray:
+    s = (sport or "").strip().lower()
+    m = (market or "").strip().lower()
+    ks = TRAIN_KEY_LEVELS.get((s, m))
+    if ks is None:
+        ks = [1.5,2.5,3,3.5,6,6.5,7] if m == "spreads" else ([7,7.5,8,8.5,9] if m=="totals" else [])
+    return np.asarray(ks, dtype=np.float32)
+
+MICRO_NUMERIC = [
+    "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
+    "Dist_To_Next_Key","Key_Corridor_Pressure",
+    "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
+    "Hybrid_Line_TotalMag","Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
+    "Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
+    "Hybrid_Line_LateShare","Hybrid_Line_EarlyShare","Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare",
+    "Hybrid_Line_Odds_Mag_Ratio","Hybrid_Line_Imbalance_LateVsEarly",
+    "Hybrid_Timing_Entropy_Line","Hybrid_Timing_Entropy_Odds",
+    "Corridor_x_LateShare_Line","Dist_x_LateShare_Line","PctRank_x_LateShare_Line",
+]
+RESIST_NUMERIC = ["Line_Resistance_Crossed_Count","Was_Line_Resistance_Broken","SharpMove_Resistance_Break"]
+
+def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
+    if df_in.empty:
+        for c in MICRO_NUMERIC + RESIST_NUMERIC:
+            if c not in df_in.columns:
+                df_in[c] = 0
+        return df_in
+
+    # Make sure “open” + implied prob exist
+    df_tmp = df_in.copy()
+    if "First_Line_Value" not in df_tmp.columns:
+        # fall back to any open you keep; keep name First_Line_Value for functions
+        if "Open_Value" in df_tmp.columns:
+            df_tmp["First_Line_Value"] = pd.to_numeric(df_tmp["Open_Value"], errors="coerce")
+        else:
+            df_tmp["First_Line_Value"] = pd.to_numeric(df_tmp.get("Value"), errors="coerce")
+
+    if "Implied_Prob" not in df_tmp.columns:
+        # compute from American price if needed
+        p = pd.to_numeric(df_tmp.get("Odds_Price"), errors="coerce")
+        df_tmp["Implied_Prob"] = np.where(
+            p > 0, 100.0 / (p + 100.0),
+            np.where(p < 0, (-p) / ((-p) + 100.0), np.nan)
+        ).astype("float32")
+
+    # Safe de-dup per (G,M,O,B) on latest ts
+    if "Snapshot_Timestamp" in df_tmp.columns:
+        df_tmp = (df_tmp.sort_values("Snapshot_Timestamp")
+                        .drop_duplicates(subset=["Game_Key","Market","Outcome","Bookmaker"], keep="last"))
+
+    # Add snapshot microstructure
+    df_tmp = compute_snapshot_micro_features_training(
+        df_tmp,
+        sport_col="Sport",
+        market_col="Market",
+        value_col="Value",
+        open_col="First_Line_Value",
+        prob_col="Implied_Prob",
+        price_col="Odds_Price",
+    )
+
+    # Add resistance (training-style) features
+    df_tmp = add_resistance_features_training(
+        df_tmp,
+        sport_col="Sport",
+        market_col="Market",
+        emit_levels_str=False,   # flip to True if you want the string column
+    )
+
+    # Hybrid timing derivatives (built from your existing hybrid magnitude cols)
+    df_tmp = compute_hybrid_timing_derivatives_training(df_tmp)
+
+    # Type-safety & fill
+    for c in MICRO_NUMERIC:
+        df_tmp[c] = pd.to_numeric(df_tmp.get(c), errors="coerce").fillna(0).astype("float32")
+    for c in RESIST_NUMERIC:
+        df_tmp[c] = pd.to_numeric(df_tmp.get(c), errors="coerce").fillna(0).astype("uint8")
+
+    return df_tmp
+
+
 
 def apply_blended_sharp_score(
     df,
@@ -4115,18 +4211,41 @@ def apply_blended_sharp_score(
         (df['Limit'] >= 2500) &
         (df['Value'] == df['Open_Value'])
     ).astype(int)
-    df = add_resistance_features_lowmem(
-        df,
-        sport_col="Sport",
-        market_col="Market",
-        value_col="Value",
-        open_col="Open_Value",
-        sharp_move_col="Sharp_Move_Signal",        # if present
-        sharp_prob_shift_col="Sharp_Prob_Shift",   # else fallback
-        emit_levels_str=False,                     # turn on only if UI needs the string
-        broadcast=True
+
+    # === 3b) Line resistance + snapshot microstructure + hybrid timing ===
+
+    # Build latest-per-(G,M,O,B) view to avoid fanout on merge
+    df_pre = (
+        df.sort_values('Snapshot_Timestamp')
+          .drop_duplicates(['Game_Key','Market','Outcome','Bookmaker'], keep='last')
+          .copy()
     )
-     
+    
+    # Compute microstructure, resistance, and hybrid timing rollups
+    df_enrich = _enrich_snapshot_micro_and_resistance(df_pre)
+    
+    # Merge enriched scalars back (many_to_one prevents accidental row multiplication)
+    merge_keys = ['Game_Key','Market','Outcome','Bookmaker']
+    cols_to_bring = merge_keys + MICRO_NUMERIC + RESIST_NUMERIC
+    df = df.merge(
+        df_enrich[cols_to_bring],
+        on=merge_keys,
+        how='left',
+        validate='m:1'
+    )
+    
+    # Type safety (keeps xgb/sklearn happy; compact dtypes)
+    for c in MICRO_NUMERIC:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0).astype('float32')
+    
+    for c in RESIST_NUMERIC:
+        if c not in df.columns:
+            df[c] = 0
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0).astype('uint8')
+    
+         
     
     # === Cross-market support (optional)
     df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
