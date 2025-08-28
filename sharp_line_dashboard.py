@@ -4911,9 +4911,28 @@ from sklearn.model_selection import StratifiedKFold
 def train_timing_opportunity_model(
     sport: str = "NBA",
     days_back: int = 35,
-    table_fq: str = "sharplogger.sharp_data.sharp_scores_full",  # <- use the main scored table
+    table_fq: str = "sharplogger.sharp_data.sharp_scores_full",
+    gcs_bucket: str | None = None,
 ):
+    """
+    Train per-market timing models and (UI-only) compute Timing_Opportunity_Score/Timing_Stage
+    on the same historical df. Saves a payload with the exact feature_list used.
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.calibration import CalibratedClassifierCV
+
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
+
+    # ---- Resolve bucket once (param > global > env); bail if missing ----
+    if gcs_bucket is None:
+        gcs_bucket = globals().get("GCS_BUCKET") or os.getenv("GCS_BUCKET")
+    if not gcs_bucket:
+        st.error("No GCS bucket configured. Pass gcs_bucket=... or set GCS_BUCKET env/global.")
+        return
 
     # === Load historical scored data (robust to Scored being missing) ===
     query = f"""
@@ -4931,13 +4950,12 @@ def train_timing_opportunity_model(
 
     # === Normalize casing + types ===
     df = df.copy()
-    # prefer existing Market if present; fallback to Market_norm if you've standardized there
     if 'Market' in df.columns:
         df['Market'] = df['Market'].astype(str).str.lower().str.strip()
     elif 'Market_norm' in df.columns:
         df['Market'] = df['Market_norm'].astype(str).str.lower().str.strip()
     else:
-        df['Market'] = ""  # will lead to per-market empties and skip
+        df['Market'] = ""  # leads to per-market empties and skip
 
     # canonical-only to avoid inverse duplication
     if 'Was_Canonical' in df.columns:
@@ -4954,6 +4972,9 @@ def train_timing_opportunity_model(
     markets = ['spreads', 'totals', 'h2h']
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
+    # =========================
+    #  TRAIN & SAVE PER MARKET
+    # =========================
     for market in markets:
         df_market = df[df['Market'] == market].copy()
         if df_market.empty:
@@ -4986,7 +5007,7 @@ def train_timing_opportunity_model(
             'Late_Game_Steam_Flag',
         ]
 
-        # Hybrid timing magnitude blocks you’ve standardized
+        # Use your standardized hybrid magnitude blocks
         blocks = [
             'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
             'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
@@ -4998,12 +5019,14 @@ def train_timing_opportunity_model(
 
         feature_cols = [c for c in (base_feats + timing_feats + odds_feats) if c in df_market.columns]
 
-        # Optional: include Minutes_To_Game_Tier if available (handles both numeric and categorical)
+        # Optional: include Minutes_To_Game_Tier if available (numeric or categorical)
         if 'Minutes_To_Game_Tier' in df_market.columns:
             if pd.api.types.is_numeric_dtype(df_market['Minutes_To_Game_Tier']):
                 feature_cols.append('Minutes_To_Game_Tier')
             else:
-                df_market['Minutes_To_Game_Tier_num'] = df_market['Minutes_To_Game_Tier'].astype(str).str.strip().factorize()[0].astype(float)
+                df_market['Minutes_To_Game_Tier_num'] = (
+                    df_market['Minutes_To_Game_Tier'].astype(str).str.strip().factorize()[0].astype(float)
+                )
                 feature_cols.append('Minutes_To_Game_Tier_num')
 
         if not feature_cols:
@@ -5027,19 +5050,15 @@ def train_timing_opportunity_model(
         calibrated = CalibratedClassifierCV(base, method='isotonic', cv=cv)
         calibrated.fit(X, y)
 
-        # --- Save under the timing_{market} namespace; store the model in the "model" slot ---
-        if gcs_bucket is None:
-            gcs_bucket = GCS_BUCKET  # unify naming
-        
-        
+        # --- Save a payload with the exact feature list used ---
         payload = {
             "model": calibrated,
-            "feature_list": feature_cols,   # exact columns used at train time
+            "feature_list": feature_cols,
             "market": market,
             "sport": sport.upper(),
         }
         save_model_to_gcs(
-            model=payload,                  # ok to pickle a dict
+            model=payload,              # okay to pickle a dict
             calibrator=None,
             sport=sport,
             market=f"timing_{market}",
@@ -5513,62 +5532,55 @@ def compute_diagnostics_vectorized(
     # --- 8) Timing Opportunity (UI-only) ---
     # === 8) Timing Opportunity (UI-only) ===
     df['Market'] = df['Market'].astype(str).str.strip().str.lower()
-    
-    # Discover magnitude columns directly from df to avoid name drift
+
+    # Discover magnitude columns directly to avoid name drift
     line_mag_cols = sorted([c for c in df.columns if c.startswith('SharpMove_Magnitude_')])
     odds_mag_cols = sorted([c for c in df.columns if c.startswith('OddsMove_Magnitude_')])
-    
-    base_feats = ['Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag']
-    for c in base_feats:
+
+    base_feats_infer = ['Abs_Line_Move_From_Opening', 'Abs_Odds_Move_From_Opening', 'Late_Game_Steam_Flag']
+    for c in base_feats_infer:
         if c not in df.columns:
             df[c] = 0.0
-    
-    # Build the broad superset we *could* use at inference (will be aligned per-model)
-    timing_feature_superset = base_feats + line_mag_cols + odds_mag_cols
-    
+
+    # Broad superset to build X; we will align per-model using saved feature_list
+    timing_feature_superset = base_feats_infer + line_mag_cols + odds_mag_cols
+
     # Ensure outputs exist
     if 'Timing_Opportunity_Score' not in df.columns:
         df['Timing_Opportunity_Score'] = np.nan
     if 'Timing_Stage' not in df.columns:
         df['Timing_Stage'] = '—'
-    
+
     # --- Load timing models (with their feature lists) ---
-    markets = ['spreads', 'totals', 'h2h']
     timing_models = {}
     if sport and gcs_bucket and ('load_model_from_gcs' in globals()):
         for _m in markets:
             try:
-                payload = load_model_from_gcs(sport=sport, market=f"timing_{_m}", bucket_name=gcs_bucket) or {}
-                mdl = payload.get("model") or payload.get("calibrator") or None
-                cols = payload.get("feature_list")  # may be None if old model
+                pl = load_model_from_gcs(sport=sport, market=f"timing_{_m}", bucket_name=gcs_bucket) or {}
+                mdl = pl.get("model") or pl.get("calibrator") or None
+                cols = pl.get("feature_list")
                 timing_models[_m] = {"mdl": mdl, "cols": cols}
             except Exception:
                 timing_models[_m] = {"mdl": None, "cols": None}
     else:
         timing_models = {m: {"mdl": None, "cols": None} for m in markets}
-    
-    # Optional: visibility while debugging
-    st.write("🧩 Timing models loaded:", {k: v["mdl"] is not None for k, v in timing_models.items()})
-    
+
     def _align_X_for_model(X, mdl, cols_from_payload):
         # Prefer the exact saved train columns
         if cols_from_payload:
             return X.reindex(columns=list(cols_from_payload), fill_value=0.0)
-    
         # Otherwise, try sklearn attributes
         names = getattr(mdl, 'feature_names_in_', None)
         if names is not None:
             return X.reindex(columns=list(names), fill_value=0.0)
-    
         n = getattr(mdl, 'n_features_in_', None)
         if n is not None and X.shape[1] != n:
             keep = timing_feature_superset[:n]
             return X.reindex(columns=keep, fill_value=0.0)
-    
         return X
-    
-    def _heuristic_score(subdf):
-        # Fallback if model is missing: normalize moves within this market slice
+
+    def _heuristic_score(subdf: pd.DataFrame) -> pd.Series:
+        # Fallback if model is missing: invert normalized move size (lower move => better timing)
         L = subdf['Abs_Line_Move_From_Opening'].clip(lower=0).astype(float)
         O = subdf['Abs_Odds_Move_From_Opening'].clip(lower=0).astype(float)
         L90 = float(np.nanquantile(L, 0.90)) if L.notna().any() else 1.0
@@ -5578,20 +5590,20 @@ def compute_diagnostics_vectorized(
         penalty = 0.6 * Lnorm + 0.4 * Onorm + 0.25 * subdf['Late_Game_Steam_Flag'].fillna(0.0).astype(float)
         p = (1.0 - penalty).clip(0, 1)
         return p
-    
+
+    # Score per market
     for _m, pack in timing_models.items():
         mask = df['Market'].eq(_m)
         if not mask.any():
             continue
-    
+
         mdl, cols = pack["mdl"], pack["cols"]
         X = df.loc[mask, timing_feature_superset].apply(pd.to_numeric, errors='coerce').fillna(0.0)
-    
+
         if mdl is None:
-            # No model available → heuristic
             df.loc[mask, 'Timing_Opportunity_Score'] = _heuristic_score(df.loc[mask])
             continue
-    
+
         X = _align_X_for_model(X, mdl, cols)
         try:
             p = (mdl.predict_proba(X)[:, 1] if hasattr(mdl, 'predict_proba')
@@ -5600,34 +5612,37 @@ def compute_diagnostics_vectorized(
         except Exception as e:
             st.warning(f"Timing model inference failed for '{_m}': {e}")
             df.loc[mask, 'Timing_Opportunity_Score'] = _heuristic_score(df.loc[mask])
-    
-    df['Timing_Opportunity_Score'] = pd.to_numeric(df['Timing_Opportunity_Score'], errors='coerce').fillna(0.0).clip(0, 1)
 
-    def assign_stage_by_market(df):
+    df['Timing_Opportunity_Score'] = (
+        pd.to_numeric(df['Timing_Opportunity_Score'], errors='coerce')
+        .fillna(0.0).clip(0, 1)
+    )
+
+    # --- Market-wise quantile staging (adaptive bins) ---
+    def _assign_stage_by_market(_df: pd.DataFrame) -> pd.DataFrame:
         labels = ["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
-        df['Timing_Stage'] = '🔴 Late / Overmoved'  # default
-    
-        for _m in ['spreads', 'totals', 'h2h']:
-            mask = df['Market'].eq(_m) & df['Timing_Opportunity_Score'].notna()
-            if mask.sum() < 10:
-                # small sample → keep static thresholds
-                bins = [0.0, 0.40, 0.66, 1.01]
+        _df['Timing_Stage'] = '🔴 Late / Overmoved'  # default
+        for _m in markets:
+            msk = _df['Market'].eq(_m) & _df['Timing_Opportunity_Score'].notna()
+            if msk.sum() < 10:
+                bins = [0.0, 0.40, 0.66, 1.01]  # fallback static thresholds
             else:
-                q1, q2 = np.quantile(df.loc[mask, 'Timing_Opportunity_Score'], [0.33, 0.66])
-                # ensure strictly increasing cut points
+                q1, q2 = np.quantile(_df.loc[msk, 'Timing_Opportunity_Score'], [0.33, 0.66])
                 q1 = float(np.clip(q1, 0.05, 0.85))
                 q2 = float(np.clip(max(q2, q1 + 1e-4), 0.10, 0.95))
                 bins = [0.0, q1, q2, 1.01]
-    
-            idx = np.digitize(df.loc[mask, 'Timing_Opportunity_Score'].to_numpy(), bins, right=False) - 1
+
+            idx = np.digitize(_df.loc[msk, 'Timing_Opportunity_Score'].to_numpy(), bins, right=False) - 1
             idx = np.clip(idx, 0, 2)
-            df.loc[mask, 'Timing_Stage'] = pd.Categorical.from_codes(idx, labels, ordered=True)
-    
-        return df
-    
-    df = assign_stage_by_market(df)
-    # sanity check
+            _df.loc[msk, 'Timing_Stage'] = pd.Categorical.from_codes(idx, labels, ordered=True)
+        return _df
+
+    df = _assign_stage_by_market(df)
+
+    # Optional quick visibility while debugging
     st.write("⏱️ Timing stage counts:", df['Timing_Stage'].value_counts(dropna=False).to_dict())
+    
+  
 
 
     # --- 9) Return only base + ACTIVE feature columns (so UI stays aligned) ---
