@@ -8,7 +8,7 @@ from datetime import datetime
 import datetime as dt
 
 # --- Data Science ---
-import numpy as np
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -19,7 +19,7 @@ import requests
 from google.cloud import bigquery, storage, bigquery_storage
 from pandas_gbq import to_gbq
 
-# --- Sklearn / ML ---
+# --- Sklearn / ML ---x
 from sklearn.model_selection import (
     train_test_split,
     RandomizedSearchCV,
@@ -32,14 +32,12 @@ from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.isotonic import IsotonicRegression  # optional; safe to keep
 import math
 from typing import Iterable, Optional
+# top of file
+import numpy as np
+from numpy import special as nps  # <-- add this
 
 
-try:
-    _ = np.erf  # NumPy < 2.0
-except AttributeError:
-    from numpy import special as _nps
-    np.erf = _nps.erf      # type: ignore[attr-defined]
-    np.erfc = _nps.erfc    # type: ignore[attr-defined]
+
 
 import pandas as pd
 
@@ -179,7 +177,9 @@ def _levels_to_jsonlike(x):
     except Exception:
         return str([x])
 
-
+def _phi(x):
+    x = np.asarray(x, dtype=np.float64)
+    return 0.5 * (1.0 + nps.erf(x / np.sqrt(2.0)))
 
 BQS = None  # lazy init to avoid global mem
 
@@ -4311,10 +4311,7 @@ def add_internal_consistency_features(
     k = out["Sport"].map(lambda s: k_map.get(str(s).upper(), k_map.get(sport_default, 6.0))).astype("float32")
     spread_mag = pd.to_numeric(out.get("Value"), errors="coerce").abs().astype("float32")
 
-    # Φ(mag/k) ~ favorite strength
-    def _phi(x: np.ndarray) -> np.ndarray:
-        return 0.5 * (1.0 + np.erf(x / np.sqrt(2.0)))
-
+    
     spread_strength = _phi((spread_mag / k).to_numpy(dtype="float64")).astype("float32")
     out["Spread_ML_Prob_Strength"] = spread_strength
 
