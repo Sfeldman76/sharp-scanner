@@ -1702,6 +1702,45 @@ def resolve_groups(df: pd.DataFrame) -> np.ndarray:
 
     raise ValueError("No columns available to form per-game groups")
 
+def _is_value_like(col: str) -> bool:
+    """True if this feature is derived from line/value/spread/resistance (not pure odds)."""
+    c = col.lower()
+    # direct value/line fields
+    if c in {
+        'value','first_line_value','line_delta','line_delta_signed','line_value_abs',
+        'abs_line_move_from_opening','pct_line_move_from_opening','pct_line_move_bin',
+        'abs_line_move_z','pct_line_move_z',
+        'was_line_resistance_broken','line_resistance_crossed_count','sharpmove_resistance_break',
+        'value_reversal_flag',
+        # spread math we never want in H2H
+        'outcome_model_spread','outcome_market_spread','outcome_spread_edge',
+        'z','outcome_cover_prob','edge_pts','k','sigma_pts',
+    }:
+        return True
+    # name patterns that imply line/spread/resistance
+    bad_substrings = ('line_', '_line_', 'spread', 'resistance', 'corridor', 'pctrank_line')
+    return any(s in c for s in bad_substrings)
+
+def strip_value_features_for_h2h(df_market: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """Remove line/value features for H2H; keep odds/book/timing/context."""
+    # 1) prune feature list (what the model will see)
+    features = [f for f in features if not _is_value_like(f)]
+
+    # 2) neutralize any residual value/line cols in the frame (so training == inference)
+    cols_to_zero = [c for c in df_market.columns if _is_value_like(c)]
+    for c in cols_to_zero:
+        # convert to numeric safely; ignore non-numeric after removal from features
+        if c in df_market.columns:
+            if df_market[c].dtype.name == 'category':
+                df_market[c] = df_market[c].astype(str)
+            num = pd.to_numeric(df_market[c], errors='coerce')
+            df_market[c] = num.fillna(0.0)
+
+    # 3) keep odds-only reversal; drop value-based reversal for H2H
+    if 'Odds_Reversal_Flag' in df_market.columns:
+        df_market['Odds_Reversal_Flag'] = df_market['Odds_Reversal_Flag'].fillna(0).astype(int)
+
+    return df_market, features
 
 def _bake_feature_names_in_(est, cols):
     """
@@ -2275,13 +2314,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    # === Existing "as-of" history features (unchanged) ===
     history_cols = [
         #"After_Win_Flag","Revenge_Flag",
-        "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
+        #"Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
         "H2H_Win_Pct_Prior","Opp_WinPct_Prior",
         #"Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
         "Wins_Last5_Prior","Margin_Last5_Prior",
         "Days_Since_Last_Game",
-        "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
-        "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
+        #"Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
+        #"Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
         
         
     ]
@@ -2663,27 +2702,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             emit_levels_str=False,  # keep memory tiny for training
         )
 
-       # === NEW: final-snapshot microstructure + hybrid timing (before normalization/canonical filter) ===
-        df_market = compute_snapshot_micro_features_training(
-            df_market,
-            sport_col="Sport",
-            market_col="Market",
-            value_col="Value",
-            open_col="First_Line_Value" if "First_Line_Value" in df_market.columns else "Open_Value",
-            prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
-            price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
-        )
-        
-        # If you don’t want line-based metrics on H2H, zero them now
-        if market == "h2h":
-            for c in ["Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line",
-                      "Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks"]:
-                if c in df_market.columns:
-                    df_market[c] = 0 if df_market[c].dtype.kind in "iu" else 0.0
-        
-        # Hybrid timing derivatives from your persisted hybrid columns
+        # 1) Timing derivatives are odds-safe; run for all markets
         df_market = compute_hybrid_timing_derivatives_training(df_market)
         
+        # 2) Microstructure / resistance
+        if market == "h2h":
+            # Odds-only microstructure: no line/value inputs
+            df_market = compute_snapshot_micro_features_training(
+                df_market,
+                sport_col="Sport",
+                market_col="Market",
+                value_col=None,                       # <<< disable line/value
+                open_col=None,                        # <<< disable opener/line-based
+                prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
+                price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
+            )
+            df_market['Disable_Line_Move_Features'] = 1
+        
+            # Belt & suspenders: zero any line-ish columns that may have arrived via merges
+            for c in [
+                "Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line",
+                "Book_Line_Diff_vs_SharpMedian","Was_Line_Resistance_Broken",
+                "Line_Resistance_Crossed_Count","SharpMove_Resistance_Break"
+            ]:
+                if c in df_market.columns:
+                    df_market[c] = 0 if df_market[c].dtype.kind in "iu" else 0.0
+        else:
+            # Spreads/Totals: full microstructure + resistance
+            df_market = compute_snapshot_micro_features_training(
+                df_market,
+                sport_col="Sport",
+                market_col="Market",
+                value_col="Value",
+                open_col="First_Line_Value" if "First_Line_Value" in df_market.columns else "Open_Value",
+                prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
+                price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
+            )
+            df_market = add_resistance_features_training(df_market, emit_levels_str=False)
+        
+      
+        # === END NEW ===
+
         # Tight dtypes for small flags
         for c in ["Two_Sided_Offered","Outlier_Flag_SharpBooks"]:
             if c in df_market.columns:
@@ -2748,6 +2807,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
+        if market == "h2h":
+            # enforce odds-only
+            df_market['Disable_Line_Move_Features'] = 1
+            df_market, features = strip_value_features_for_h2h(df_market, features)
+        
+            # also drop cross-market features that implicitly depend on spreads/totals
+            drop_xm = [c for c in features if any(s in c.lower() for s in (
+                'spread_vs_h2h', 'total_vs_spread',
+                'spread_implied_prob', 'total_implied_prob',
+                'spread_value', 'total_value'
+            ))]
+            features = [c for c in features if c not in drop_xm]    
         if market == "spreads":
             # ---- SPREADS training block (leakage-safe) ----
             game_keys = ['Sport', 'Home_Team_Norm', 'Away_Team_Norm']
@@ -3304,7 +3375,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # 🧠 Cross-market alignment
             'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
-            'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Limit_Skew',
+            'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
             #'Book_Reliability_Score',
             'Book_Reliability_Lift','Book_Reliability_x_Sharp',
@@ -3313,10 +3384,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
-            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_pts',
-            'TOT_Proj_Total_Baseline','TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
-            'TOT_GT_H','TOT_GT_A','TOT_LgAvg_Total','TOT_Mispricing'
+            'Outcome_Model_Spread','Outcome_Market_Spread',
+            'Outcome_Spread_Edge',
+            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',#'edge_pts',
+            'TOT_Proj_Total_Baseline','TOT_GT_H','TOT_GT_A','TOT_LgAvg_Total','TOT_Mispricing'
         ]
         
         # ensure uniqueness (order-preserving)
@@ -3369,7 +3440,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Add hybrid timing derivatives (snapshot-safe, computed above)
         extend_unique(features, [
-            "Hybrid_Line_TotalMag","Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
+            "Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
             "Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
             "Hybrid_Line_LateShare","Hybrid_Line_EarlyShare","Hybrid_Line_Imbalance_LateVsEarly",
             "Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare","Hybrid_Line_Odds_Mag_Ratio",
