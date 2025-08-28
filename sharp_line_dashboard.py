@@ -2794,7 +2794,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         .reset_index()
     )
     
-    df_market = df_market.merge(df_cross_market, on="Game_Key", how="left")
+   
     # --- Safe odds/prob scaffolding (post-merge) ---
     
     
@@ -2978,7 +2978,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             s = pd.to_numeric(s, errors="coerce")
             return np.where(s > 0, 100.0/(s+100.0),
                    np.where(s < 0, (-s)/((-s)+100.0), np.nan)).astype("float32")
-        
+        df_market = df_market.merge(df_cross_market, on="Game_Key", how="left")
         # Ensure columns exist; if missing, create as NaN
         for c in ["Spread_Odds","Total_Odds","H2H_Odds"]:
             if c not in df_market.columns:
