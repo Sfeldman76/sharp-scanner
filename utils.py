@@ -32,7 +32,15 @@ from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.isotonic import IsotonicRegression  # optional; safe to keep
 import math
 from typing import Iterable, Optional
-import numpy as np
+
+
+try:
+    _ = np.erf  # NumPy < 2.0
+except AttributeError:
+    from numpy import special as _nps
+    np.erf = _nps.erf      # type: ignore[attr-defined]
+    np.erfc = _nps.erfc    # type: ignore[attr-defined]
+
 import pandas as pd
 
 import cloudpickle as cp
@@ -1824,8 +1832,7 @@ def apply_compute_sharp_metrics_rowwise(
     df: pd.DataFrame,
     df_all_snapshots: pd.DataFrame,
 ) -> pd.DataFrame:
-    import numpy as np
-    import pandas as pd
+    
 
     if df is None or df.empty or df_all_snapshots is None or df_all_snapshots.empty:
         return df
@@ -1979,8 +1986,7 @@ SPORT_ALIAS = {
     'NCAAB': 'NCAAB'
 }
 
-import numpy as np
-import pandas as pd
+
 
 KEY_LEVELS = {
     ("nfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
@@ -3005,6 +3011,7 @@ def enrich_and_grade_for_training(
     out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values,         out['Dog_Cover_Prob'].values).astype('float32')
 
     return out
+import os, psutil, gc, time
 
 def implied_prob_vec(odds):
     # expects numpy/pandas array, returns float32 array
@@ -3013,9 +3020,7 @@ def implied_prob_vec(odds):
         out = np.where(x >= 0, 100.0 / (x + 100.0), (-x) / (-x + 100.0))
     return out.astype('float32', copy=False)
 # --- Memory helpers (near imports) ---
-import os, psutil, gc, time
-import numpy as np
-import pandas as pd
+
 
 _PROC = psutil.Process(os.getpid())
 
@@ -7099,8 +7104,7 @@ def detect_cross_market_sharp_support(
 
     return df
 import io, gzip, logging, pickle, re, time
-import numpy as np
-import pandas as pd
+
 from google.cloud import storage
 
 # Try cloudpickle for robustness
