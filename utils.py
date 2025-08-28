@@ -4078,7 +4078,7 @@ def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
 
     return df_tmp
 
-
+MARKETS = ["spreads","totals","h2h"]
 def build_cross_market_from_apply(df_apply: pd.DataFrame) -> pd.DataFrame:
     """
     Final-snapshot cross-market pivots (Value & Odds) per Game_Key; always
