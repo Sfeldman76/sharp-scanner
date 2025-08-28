@@ -3020,21 +3020,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
    
         
-        # 1) Limit dynamics
-        df_market = add_limit_dynamics_features(df_market)
-        
-        # 2) Bookmaker network features
-        df_market = add_book_network_features(df_market)
-        
-        # 3) Internal consistency (optionally pass your df_cross_market pivot if you have it)
-        df_market = add_internal_consistency_features(df_market, df_cross_market=df_cross_market if 'df_cross_market' in locals() else None, sport_default=sport)
-        
-        # 4) Alt-line curvature (only if you have df_alt for this market; else it safely fills zeros)
-        # df_market = add_altline_curvature(df_market, df_alt_market)  # <- optional
-        
-        # 5) CLV proxy (heuristic by default; will use a tiny side-model if present)
-        df_market = add_clv_proxy_features(df_market, clv_model_path=os.path.join("artifacts","clv_side.joblib"))
-
 
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
@@ -3050,6 +3035,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Market']         = df_market['Market'].astype(str).str.lower().str.strip()
         df_market['Game_Key']       = df_market['Game_Key'].astype(str).str.lower().str.strip()
+        df_market['Spread_Implied_Prob'] = df_market['Spread_Odds'].apply(implied_prob)
+        df_market['H2H_Implied_Prob'] = df_market['H2H_Odds'].apply(implied_prob)
+        df_market['Total_Implied_Prob'] = df_market['Total_Odds'].apply(implied_prob)
+        
+        # 1) Limit dynamics
+        df_market = add_limit_dynamics_features(df_market)
+        
+        # 2) Bookmaker network features
+        df_market = add_book_network_features(df_market)
+        
+        # 3) Internal consistency (optionally pass your df_cross_market pivot if you have it)
+        df_market = add_internal_consistency_features(df_market, df_cross_market=df_cross_market if 'df_cross_market' in locals() else None, sport_default=sport)
+        
+        # 4) Alt-line curvature (only if you have df_alt for this market; else it safely fills zeros)
+        # df_market = add_altline_curvature(df_market, df_alt_market)  # <- optional
+        
+        # 5) CLV proxy (heuristic by default; will use a tiny side-model if present)
+        df_market = add_clv_proxy_features(df_market, clv_model_path=os.path.join("artifacts","clv_side.joblib"))
 
         
         # --- Team / Is_Home (totals anchor to home)
@@ -3421,9 +3424,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #df_market['Is_Team_Over'] = (df_market['Team_Bet_Role'] == 'over').astype(int)
         #df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
         # === Cross-Market Alignment and Gaps ===
-        df_market['Spread_Implied_Prob'] = df_market['Spread_Odds'].apply(implied_prob)
-        df_market['H2H_Implied_Prob'] = df_market['H2H_Odds'].apply(implied_prob)
-        df_market['Total_Implied_Prob'] = df_market['Total_Odds'].apply(implied_prob)
 
         # 1. Spread and H2H line alignment (are both favoring same side)
         df_market['Spread_vs_H2H_Aligned'] = (
