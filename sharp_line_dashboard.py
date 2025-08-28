@@ -1702,45 +1702,6 @@ def resolve_groups(df: pd.DataFrame) -> np.ndarray:
 
     raise ValueError("No columns available to form per-game groups")
 
-def _is_value_like(col: str) -> bool:
-    """True if this feature is derived from line/value/spread/resistance (not pure odds)."""
-    c = col.lower()
-    # direct value/line fields
-    if c in {
-        'value','first_line_value','line_delta','line_delta_signed','line_value_abs',
-        'abs_line_move_from_opening','pct_line_move_from_opening','pct_line_move_bin',
-        'abs_line_move_z','pct_line_move_z',
-        'was_line_resistance_broken','line_resistance_crossed_count','sharpmove_resistance_break',
-        'value_reversal_flag',
-        # spread math we never want in H2H
-        'outcome_model_spread','outcome_market_spread','outcome_spread_edge',
-        'z','outcome_cover_prob','edge_pts','k','sigma_pts',
-    }:
-        return True
-    # name patterns that imply line/spread/resistance
-    bad_substrings = ('line_', '_line_', 'spread', 'resistance', 'corridor', 'pctrank_line')
-    return any(s in c for s in bad_substrings)
-
-def strip_value_features_for_h2h(df_market: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame, list[str]]:
-    """Remove line/value features for H2H; keep odds/book/timing/context."""
-    # 1) prune feature list (what the model will see)
-    features = [f for f in features if not _is_value_like(f)]
-
-    # 2) neutralize any residual value/line cols in the frame (so training == inference)
-    cols_to_zero = [c for c in df_market.columns if _is_value_like(c)]
-    for c in cols_to_zero:
-        # convert to numeric safely; ignore non-numeric after removal from features
-        if c in df_market.columns:
-            if df_market[c].dtype.name == 'category':
-                df_market[c] = df_market[c].astype(str)
-            num = pd.to_numeric(df_market[c], errors='coerce')
-            df_market[c] = num.fillna(0.0)
-
-    # 3) keep odds-only reversal; drop value-based reversal for H2H
-    if 'Odds_Reversal_Flag' in df_market.columns:
-        df_market['Odds_Reversal_Flag'] = df_market['Odds_Reversal_Flag'].fillna(0).astype(int)
-
-    return df_market, features
 
 def _bake_feature_names_in_(est, cols):
     """
@@ -1990,172 +1951,121 @@ def _dist_to_next_key_training(x, keys_arr, is_spread: bool):
 def compute_snapshot_micro_features_training(
     df: pd.DataFrame,
     *,
-    sport_col: str = "Sport",
-    market_col: str = "Market",
-    value_col: str | None = "Value",
-    open_col:  str | None = "First_Line_Value",
-    prob_col:  str | None = "Implied_Prob",
-    price_col: str | None = "Odds_Price",
-):
+    sport_col="Sport",
+    market_col="Market",
+    value_col="Value",
+    open_col="First_Line_Value",
+    prob_col="Implied_Prob",
+    price_col="Odds_Price",
+) -> pd.DataFrame:
+    """
+    Emits per-row (BQ-safe) scalars based on the final snapshot only:
+      - Implied_Hold_Book, Two_Sided_Offered, Juice_Abs_Delta
+      - Dist_To_Next_Key, Key_Corridor_Pressure
+      - Book_PctRank_Line, Book_Line_Diff_vs_SharpMedian, Outlier_Flag_SharpBooks
+    """
+    if df.empty: 
+        return df
+
     out = df.copy()
+    out["_sport_"]  = out[sport_col].astype(str).str.lower().str.strip()
+    out["_market_"] = out[market_col].astype(str).str.lower().str.strip()
+    out["_book_"]   = out["Bookmaker"].astype(str).str.lower().str.strip()
 
-    # --- sanitize optional column names ---
-    def _have(colname: str | None) -> str | None:
-        return colname if (colname and colname in out.columns) else None
+    # per-outcome slice (your training table is already final snapshot)
+    cols = ["Game_Key","Market","Bookmaker","Outcome", value_col, open_col, "_sport_","_market_","_book_"]
+    if prob_col in out.columns:  cols.append(prob_col)
+    if price_col in out.columns: cols.append(price_col)
+    per_outcome = out[cols].copy()
 
-    value_col = _have(value_col)
-    open_col  = _have(open_col)
-    prob_col  = _have(prob_col)
-    price_col = _have(price_col)
+    g = per_outcome.groupby(["Game_Key","Market","Bookmaker"], sort=False)
 
-    odds_only = (value_col is None and open_col is None)
-
-    # --- safe projection for per-outcome grouping ---
-    base_cols = ["Game_Key", market_col, "Outcome", "Bookmaker", "Snapshot_Timestamp", sport_col]
-    base_cols = [c for c in base_cols if c in out.columns]
-    extra_cols = [c for c in (value_col, open_col, prob_col, price_col) if c]
-    per_outcome = out[base_cols + extra_cols].copy()
-
-    keys = ["Game_Key", market_col, "Bookmaker"]
-    keys = [k for k in keys if k in per_outcome.columns]
-    gb = per_outcome.groupby(keys, dropna=False)
-
-    # --- implied hold (sum of probs across outcomes) ---
-    if prob_col:
-        hold_df = gb[prob_col].sum().reset_index(name="Implied_Hold_Book")
-    elif price_col:
-        # uses your existing implied_prob() helper on American odds
-        hold_df = gb[price_col].apply(lambda s: implied_prob(s).sum()).reset_index(name="Implied_Hold_Book")
+    # Hold & juice
+    if prob_col in per_outcome.columns:
+        hold = g[prob_col].sum().rename("Implied_Hold_Book")
+    elif price_col in per_outcome.columns:
+        per_outcome["_p_"] = _amer_to_prob(per_outcome[price_col])
+        hold = g["_p_"].sum().rename("Implied_Hold_Book")
     else:
-        hold_df = per_outcome[keys].drop_duplicates()
-        hold_df["Implied_Hold_Book"] = 0.0
+        hold = pd.Series(dtype="float32", name="Implied_Hold_Book")
 
-    # --- juice spread (max - min price per book) ---
-    if price_col:
-        pm = gb[price_col].agg(["max", "min"]).reset_index()
-        pm["Juice_Abs_Delta"] = (pd.to_numeric(pm["max"], errors="coerce")
-                                 - pd.to_numeric(pm["min"], errors="coerce")).astype("float32")
-        juice_df = pm[keys + ["Juice_Abs_Delta"]]
+    if price_col in per_outcome.columns:
+        pm = g[price_col].agg(["max","min"])
+        juice_abs = (pm["max"] - pm["min"]).astype("float32").rename("Juice_Abs_Delta")
     else:
-        juice_df = per_outcome[keys].drop_duplicates()
-        juice_df["Juice_Abs_Delta"] = 0.0
+        juice_abs = pd.Series(dtype="float32", name="Juice_Abs_Delta")
 
-    # --- do we have two sides offered? ---
-    two_df = gb["Outcome"].nunique().reset_index(name="Two_Sided_Offered")
-    two_df["Two_Sided_Offered"] = two_df["Two_Sided_Offered"].fillna(0).astype("uint8")
+    two_sided = g["Outcome"].nunique().rename("Two_Sided_Offered").astype(np.uint8)
 
-    # --- assemble group-level frame with last/open values when present ---
-    agg = per_outcome[keys].drop_duplicates().copy()
+    # 1 row per (G,M,B)
+    agg = g.agg(
+        sport = ("_sport_", "last"),
+        market= ("_market_","last"),
+        v_last= (value_col, "last"),
+        v_open= (open_col,  "last"),
+    ).join([hold, juice_abs, two_sided]).reset_index()
 
-   # sport / market (for thresholds)
-    # ---- sport: safe to merge (not in keys)
-    if sport_col in per_outcome.columns:
-        sport_df = gb[sport_col].last().reset_index().rename(columns={sport_col: "sport"})
-        agg = agg.merge(sport_df, on=keys, how="left")
-    else:
-        agg["sport"] = "NFL"
-    
-    # ---- market: already in keys → just copy to a working column
-    if market_col in per_outcome.columns and market_col in agg.columns:
-        agg["market"] = agg[market_col].astype(str)
-    else:
-        agg["market"] = "h2h"
+    # Dist / Pressure (uses your training key levels)
+    from math import isfinite  # just in case
+    v      = pd.to_numeric(agg["v_last"], errors="coerce").astype("float32")
+    v_open = pd.to_numeric(agg["v_open"], errors="coerce").astype("float32")
+    dist   = np.full(len(agg), np.nan, dtype="float32")
 
+    for (mk, sp), idx in agg.groupby(["market","sport"]).indices.items():
+        idx = np.asarray(idx, dtype=np.int64)
+        keys_arr = _keys_for_training(sp, mk)  # <- your registry
+        is_spread = (mk == "spreads")
+        for j in idx:
+            dist[j] = _dist_to_next_key_training(v.iloc[j], keys_arr, is_spread)
 
-    # last value / opener (only if columns exist)
-    if value_col:
-        v_last = (per_outcome.sort_values("Snapshot_Timestamp")
-                  .groupby(keys, dropna=False)[value_col].last().reset_index()
-                  .rename(columns={value_col: "v_last"}))
-        agg = agg.merge(v_last, on=keys, how="left")
-    else:
-        agg["v_last"] = np.nan
-    if open_col:
-        v_open = (per_outcome.sort_values("Snapshot_Timestamp")
-                  .groupby(keys, dropna=False)[open_col].last().reset_index()
-                  .rename(columns={open_col: "v_open"}))
-        agg = agg.merge(v_open, on=keys, how="left")
-    else:
-        agg["v_open"] = np.nan
+    agg["Dist_To_Next_Key"] = dist
+    cur = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values)
+    opn = np.where(agg["market"].values == "spreads", np.abs(v_open.values), v_open.values)
+    dv  = np.abs(cur - opn)
+    den = np.where(np.isnan(dist) | (dist <= 0), 1.0, dist)
+    agg["Key_Corridor_Pressure"] = (dv / den).astype("float32")
 
-    # --- line microstructure (only when we actually have line columns) ---
-    if not odds_only and value_col and open_col:
-        v  = pd.to_numeric(agg["v_last"], errors="coerce").astype("float32")
-        vo = pd.to_numeric(agg["v_open"], errors="coerce").astype("float32")
+    # Consensus / outlier (final snapshot)
+    val_norm = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values).astype("float32")
+    agg["_val_norm_"] = val_norm
+    agg["Book_PctRank_Line"] = (
+        agg.groupby(["Game_Key","Market"])["_val_norm_"].rank(pct=True, method="average").astype("float32")
+    )
 
-        # distance to next key & corridor pressure
-        dist = np.full(len(agg), np.nan, dtype="float32")
-        for (mk, sp), idx in agg.groupby(["market", "sport"]).indices.items():
-            idx = np.asarray(idx, dtype=np.int64)
-            keys_arr  = _keys_for_training(sp, mk)       # your registry
-            is_spread = (mk == "spreads")
-            for j in idx:
-                dist[j] = _dist_to_next_key_training(v.iloc[j], keys_arr, is_spread)
-        agg["Dist_To_Next_Key"] = dist
+    # sharp-median diff
+    try:
+        from config import SHARP_BOOKS
+    except Exception:
+        SHARP_BOOKS = set(["pinnacle","betonlineag","lowvig","betfair_ex_uk","betfair_ex_eu","smarkets","betus"])
+    mask_sharp = agg["Bookmaker"].astype(str).str.lower().isin(SHARP_BOOKS)
+    sharp_median = agg.loc[mask_sharp].groupby(["Game_Key","Market"])["_val_norm_"].median()
+    agg = agg.merge(sharp_median.rename("sharp_median"), on=["Game_Key","Market"], how="left")
+    agg["Book_Line_Diff_vs_SharpMedian"] = (
+        agg["_val_norm_"] - agg["sharp_median"].fillna(agg["_val_norm_"])
+    ).astype("float32")
 
-        cur = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values)
-        opn = np.where(agg["market"].values == "spreads", np.abs(vo.values), vo.values)
-        dv  = np.abs(cur - opn)
-        den = np.where(np.isnan(dist) | (dist <= 0), 1.0, dist)
-        agg["Key_Corridor_Pressure"] = (dv / den).astype("float32")
+    # Outlier flag (sport-aware thresholds)
+    OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL = 0.5, 0.5
+    thr = np.where(agg["market"].values == "spreads", OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL).astype("float32")
+    agg["Outlier_Flag_SharpBooks"] = (np.abs(agg["Book_Line_Diff_vs_SharpMedian"].values) >= thr).astype("uint8")
 
-        # percentile rank (line severity) within game/market
-        val_norm = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values).astype("float32")
-        agg["_val_norm_"] = val_norm
-        agg["Book_PctRank_Line"] = agg.groupby(["Game_Key", "market"])["_val_norm_"] \
-                                      .rank(pct=True, method="average").astype("float32")
-
-        # sharp-median diff
-        try:
-            from config import SHARP_BOOKS
-        except Exception:
-            SHARP_BOOKS = set(["pinnacle","betonlineag","lowvig","betfair_ex_uk","betfair_ex_eu","smarkets","betus"])
-        mask_sharp = agg["Bookmaker"].astype(str).str.lower().isin(SHARP_BOOKS)
-        sharp_median = agg.loc[mask_sharp].groupby(["Game_Key","market"])["_val_norm_"].median()
-        agg = agg.merge(sharp_median.rename("sharp_median"), on=["Game_Key","market"], how="left")
-        agg["Book_Line_Diff_vs_SharpMedian"] = (
-            agg["_val_norm_"] - agg["sharp_median"].fillna(agg["_val_norm_"])
-        ).astype("float32")
-
-        # outlier flag (sport-aware thresholds if you want)
-        OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL = 0.5, 0.5
-        thr = np.where(agg["market"].values == "spreads", OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL).astype("float32")
-        agg["Outlier_Flag_SharpBooks"] = (np.abs(agg["Book_Line_Diff_vs_SharpMedian"].values) >= thr).astype("uint8")
-    else:
-        for c in ["Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian"]:
-            agg[c] = 0.0
-        agg["Outlier_Flag_SharpBooks"] = 0
-
-    # --- merge group metrics back, broadcast to rows ---
-    agg = (agg.merge(hold_df,  on=keys, how="left")
-              .merge(juice_df, on=keys, how="left")
-              .merge(two_df,   on=keys, how="left"))
-
-    # map 'market' back to the caller's market_col for merge
-    # map 'market' back only if caller expects a different name AND it doesn't already exist
-    if market_col != "market" and market_col not in agg.columns:
-        agg = agg.rename(columns={"market": market_col})
-    # else: keep both; we only merge using market_col anyway
-
-
+    # Broadcast back to rows
     keep = [
-        "Game_Key", market_col, "Bookmaker",
-        "Implied_Hold_Book", "Two_Sided_Offered", "Juice_Abs_Delta",
+        "Game_Key","Market","Bookmaker",
+        "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
         "Dist_To_Next_Key","Key_Corridor_Pressure",
         "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
     ]
-    out = out.merge(agg[keep], on=["Game_Key", market_col, "Bookmaker"], how="left", copy=False)
+    out = out.merge(agg[keep], on=["Game_Key","Market","Bookmaker"], how="left", copy=False)
 
-    # fill / downcast
-    out["Implied_Hold_Book"]   = pd.to_numeric(out.get("Implied_Hold_Book"), errors="coerce").fillna(0.0).astype("float32")
-    out["Juice_Abs_Delta"]     = pd.to_numeric(out.get("Juice_Abs_Delta"), errors="coerce").fillna(0.0).astype("float32")
-    for c in ["Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian"]:
-        out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0).astype("float32")
-    if "Two_Sided_Offered" in out.columns:
-        out["Two_Sided_Offered"] = out["Two_Sided_Offered"].fillna(0).astype("uint8")
-    else:
-        out["Two_Sided_Offered"] = 0
+    # Fill / downcast
+    u8  = ["Two_Sided_Offered","Outlier_Flag_SharpBooks"]
+    f32 = ["Implied_Hold_Book","Juice_Abs_Delta","Dist_To_Next_Key","Key_Corridor_Pressure",
+           "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian"]
+    for c in u8:  out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0).astype("uint8")
+    for c in f32: out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0).astype("float32")
 
+    out.drop(columns=["_sport_","_market_","_book_"], errors="ignore", inplace=True)
     return out
 
 
@@ -2365,10 +2275,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    # === Existing "as-of" history features (unchanged) ===
     history_cols = [
         #"After_Win_Flag","Revenge_Flag",
-        #"Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
+        "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
         "H2H_Win_Pct_Prior","Opp_WinPct_Prior",
         #"Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
-        "Wins_Last5_Prior","Margin_Last5_Prior",
+        #"Wins_Last5_Prior","Margin_Last5_Prior",
         "Days_Since_Last_Game",
         #"Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
         #"Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
@@ -2401,8 +2311,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # === Opponent mirrors (prior-only, last-5) ===
     opp_cover_cols = [
         "Opp_Cover_Rate_Last5",
-        "Opp_ATS_Cover_Margin_Last5_Prior_Mean",
-        "Opp_ATS_Cover_Margin_Last5_Prior_Std",
+        #"Opp_ATS_Cover_Margin_Last5_Prior_Mean",
+        #"Opp_ATS_Cover_Margin_Last5_Prior_Std",
         "Opp_Cover_Rate_After_Win_Last5",
         "Opp_Cover_Rate_After_Loss_Last5",
         #"Opp_Cover_Rate_Home_After_Home_Win_Last5",
@@ -2753,47 +2663,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             emit_levels_str=False,  # keep memory tiny for training
         )
 
-        # 1) Timing derivatives are odds-safe; run for all markets
-        df_market = compute_hybrid_timing_derivatives_training(df_market)
+       # === NEW: final-snapshot microstructure + hybrid timing (before normalization/canonical filter) ===
+        df_market = compute_snapshot_micro_features_training(
+            df_market,
+            sport_col="Sport",
+            market_col="Market",
+            value_col="Value",
+            open_col="First_Line_Value" if "First_Line_Value" in df_market.columns else "Open_Value",
+            prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
+            price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
+        )
         
-        # 2) Microstructure / resistance
+        # If you don’t want line-based metrics on H2H, zero them now
         if market == "h2h":
-            # Odds-only microstructure: no line/value inputs
-            df_market = compute_snapshot_micro_features_training(
-                df_market,
-                sport_col="Sport",
-                market_col="Market",
-                value_col=None,                       # <<< disable line/value
-                open_col=None,                        # <<< disable opener/line-based
-                prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
-                price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
-            )
-            df_market['Disable_Line_Move_Features'] = 1
-        
-            # Belt & suspenders: zero any line-ish columns that may have arrived via merges
-            for c in [
-                "Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line",
-                "Book_Line_Diff_vs_SharpMedian","Was_Line_Resistance_Broken",
-                "Line_Resistance_Crossed_Count","SharpMove_Resistance_Break"
-            ]:
+            for c in ["Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line",
+                      "Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks"]:
                 if c in df_market.columns:
                     df_market[c] = 0 if df_market[c].dtype.kind in "iu" else 0.0
-        else:
-            # Spreads/Totals: full microstructure + resistance
-            df_market = compute_snapshot_micro_features_training(
-                df_market,
-                sport_col="Sport",
-                market_col="Market",
-                value_col="Value",
-                open_col="First_Line_Value" if "First_Line_Value" in df_market.columns else "Open_Value",
-                prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
-                price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
-            )
-            df_market = add_resistance_features_training(df_market, emit_levels_str=False)
         
-      
-        # === END NEW ===
-
+        # Hybrid timing derivatives from your persisted hybrid columns
+        df_market = compute_hybrid_timing_derivatives_training(df_market)
+        
         # Tight dtypes for small flags
         for c in ["Two_Sided_Offered","Outlier_Flag_SharpBooks"]:
             if c in df_market.columns:
@@ -2858,18 +2748,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
-        if market == "h2h":
-            # enforce odds-only
-            df_market['Disable_Line_Move_Features'] = 1
-            df_market, features = strip_value_features_for_h2h(df_market, features)
-        
-            # also drop cross-market features that implicitly depend on spreads/totals
-            drop_xm = [c for c in features if any(s in c.lower() for s in (
-                'spread_vs_h2h', 'total_vs_spread',
-                'spread_implied_prob', 'total_implied_prob',
-                'spread_value', 'total_value'
-            ))]
-            features = [c for c in features if c not in drop_xm]    
         if market == "spreads":
             # ---- SPREADS training block (leakage-safe) ----
             game_keys = ['Sport', 'Home_Team_Norm', 'Away_Team_Norm']
@@ -3405,7 +3283,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
-            'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec','Sharp_Leads',
+            'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',#'Sharp_Leads',
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag','Odds_Reversal_Flag',
@@ -3426,7 +3304,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # 🧠 Cross-market alignment
             'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
-            'SmallBook_Limit_Skew',
+            'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
             #'Book_Reliability_Score',
             'Book_Reliability_Lift','Book_Reliability_x_Sharp',
@@ -3435,10 +3313,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread','Outcome_Market_Spread',
-            'Outcome_Spread_Edge',
-            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',#'edge_pts',
-            'TOT_Proj_Total_Baseline','TOT_GT_H','TOT_GT_A','TOT_LgAvg_Total','TOT_Mispricing'
+            'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
+            'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
+            #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
+            'TOT_Mispricing'
         ]
         
         # ensure uniqueness (order-preserving)
@@ -3491,7 +3370,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Add hybrid timing derivatives (snapshot-safe, computed above)
         extend_unique(features, [
-            "Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
+            "Hybrid_Line_TotalMag","Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
             "Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
             "Hybrid_Line_LateShare","Hybrid_Line_EarlyShare","Hybrid_Line_Imbalance_LateVsEarly",
             "Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare","Hybrid_Line_Odds_Mag_Ratio",
