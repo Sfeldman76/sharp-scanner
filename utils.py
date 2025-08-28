@@ -33,9 +33,20 @@ from sklearn.isotonic import IsotonicRegression  # optional; safe to keep
 import math
 from typing import Iterable, Optional
 # top of file
-import numpy as np
-from numpy import special as nps  # <-- add this
 
+
+import numpy as np
+try:
+    import numpy.special as _nps
+    _erf = _nps.erf
+except Exception:
+    # Slow fallback, but safe and dependency-free
+    from math import erf as _math_erf
+    _erf = np.vectorize(_math_erf, otypes=[np.float64])
+
+def _phi(x):
+    x = np.asarray(x, dtype=np.float64)
+    return 0.5 * (1.0 + _erf(x / np.sqrt(2.0)))
 
 
 
