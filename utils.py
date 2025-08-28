@@ -30,6 +30,10 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
 from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.isotonic import IsotonicRegression  # optional; safe to keep
+import math
+from typing import Iterable, Optional
+import numpy as np
+import pandas as pd
 
 import cloudpickle as cp
 import gzip
@@ -4073,11 +4077,7 @@ def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
     return df_tmp
 
 # utils.py  — drop-in feature helpers (no Streamlit; no circular imports)
-from __future__ import annotations
-import math
-from typing import Iterable, Optional
-import numpy as np
-import pandas as pd
+
 
 # ----------------------------- small shared helpers -----------------------------
 
