@@ -4975,13 +4975,12 @@ def train_timing_opportunity_model(
     else:
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce').fillna(0.0)
 
-    markets = ['spreads', 'totals', 'h2h']
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     # =========================
     #  TRAIN & SAVE PER MARKET
     # =========================
-    for market in markets:
+    for market in MARKETS:
         df_market = df[df['Market'] == market].copy()
         if df_market.empty:
             st.warning(f"⚠️ No rows for market: {market}")
@@ -5536,7 +5535,10 @@ def compute_diagnostics_vectorized(
         df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
 
     # --- 8) Timing Opportunity (UI-only) ---
-    # === 8) Timing Opportunity (UI-only) ===
+     # =====================================
+    #  8) TIMING OPPORTUNITY (UI-ONLY) RUN
+    # =====================================
+    # Normalize market labels
     df['Market'] = df['Market'].astype(str).str.strip().str.lower()
 
     # Discover magnitude columns directly to avoid name drift
@@ -5560,7 +5562,7 @@ def compute_diagnostics_vectorized(
     # --- Load timing models (with their feature lists) ---
     timing_models = {}
     if sport and gcs_bucket and ('load_model_from_gcs' in globals()):
-        for _m in markets:
+        for _m in MARKETS:
             try:
                 pl = load_model_from_gcs(sport=sport, market=f"timing_{_m}", bucket_name=gcs_bucket) or {}
                 mdl = pl.get("model") or pl.get("calibrator") or None
@@ -5569,7 +5571,7 @@ def compute_diagnostics_vectorized(
             except Exception:
                 timing_models[_m] = {"mdl": None, "cols": None}
     else:
-        timing_models = {m: {"mdl": None, "cols": None} for m in markets}
+        timing_models = {m: {"mdl": None, "cols": None} for m in MARKETS}
 
     def _align_X_for_model(X, mdl, cols_from_payload):
         # Prefer the exact saved train columns
@@ -5628,7 +5630,7 @@ def compute_diagnostics_vectorized(
     def _assign_stage_by_market(_df: pd.DataFrame) -> pd.DataFrame:
         labels = ["🔴 Late / Overmoved", "🟡 Developing", "🟢 Smart Timing"]
         _df['Timing_Stage'] = '🔴 Late / Overmoved'  # default
-        for _m in markets:
+        for _m in MARKETS:
             msk = _df['Market'].eq(_m) & _df['Timing_Opportunity_Score'].notna()
             if msk.sum() < 10:
                 bins = [0.0, 0.40, 0.66, 1.01]  # fallback static thresholds
@@ -5647,9 +5649,6 @@ def compute_diagnostics_vectorized(
 
     # Optional quick visibility while debugging
     st.write("⏱️ Timing stage counts:", df['Timing_Stage'].value_counts(dropna=False).to_dict())
-    
-  
-
 
     # --- 9) Return only base + ACTIVE feature columns (so UI stays aligned) ---
     base_cols = [
