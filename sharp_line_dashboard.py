@@ -3292,7 +3292,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             search_estimators = 300
             eps = 5e-3   # slightly stronger clipping for stability on tiny data
         else:
-            search_estimators = 600
+            search_estimators = 400
             eps = 1e-4
         
         # (Optional) light stability nudge — safe to keep; won’t undo small-league overrides
@@ -3320,7 +3320,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         min_val_size   = max(10 if s in SMALL_LEAGUES else 20, target_games * rows_per_game)
         
         n_groups_train = pd.unique(g_train).size
-        target_folds   = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
+        target_folds   = 3 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
         
         cv = PurgedGroupTimeSeriesSplit(
             n_splits=target_folds,
@@ -3350,7 +3350,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             param_distributions=params_ll,
             scoring=neg_logloss_scorer,
             cv=folds,
-            n_iter=30,
+            n_iter=15,
             n_jobs=1,
             random_state=42,
             refit=True,
@@ -3364,9 +3364,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             param_distributions=params_auc,
             scoring=roc_auc_proba_scorer,
             cv=folds,
-            n_iter=30,
+            n_iter=15,
             n_jobs=1,
-            random_state=4242,
+            random_state=42,
             refit=True,
             verbose=1,
             error_score="raise",
