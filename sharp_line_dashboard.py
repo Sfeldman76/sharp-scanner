@@ -2767,35 +2767,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         project="sharplogger",
     )
     
-
-    # === Pivot line values (e.g., -3.5, 210.5, etc.)
-    value_pivot = df_latest.pivot_table(
-        index='Game_Key',
-        columns='Market',
-        values='Value'
-    ).rename(columns={
-        'spreads': 'Spread_Value',
-        'totals': 'Total_Value',
-        'h2h': 'H2H_Value'
-    })
+    # Force all three markets to exist in the pivot, even if empty
+    MARKETS = ["spreads", "totals", "h2h"]
     
-    # === Pivot odds prices (e.g., -110, +100, etc.)
-    odds_pivot = df_latest.pivot_table(
-        index='Game_Key',
-        columns='Market',
-        values='Odds_Price'
-    ).rename(columns={
-        'spreads': 'Spread_Odds',
-        'totals': 'Total_Odds',
-        'h2h': 'H2H_Odds'
-    })
+    value_pivot = (
+        df_latest.pivot_table(
+            index="Game_Key", columns="Market", values="Value",
+            aggfunc="last", dropna=False  # keep all-NaN columns
+        )
+        .reindex(columns=MARKETS)  # ensure columns exist in this order
+        .rename(columns={"spreads":"Spread_Value", "totals":"Total_Value", "h2h":"H2H_Value"})
+    )
     
-    # === Merge line values and odds into one cross-market frame
+    odds_pivot = (
+        df_latest.pivot_table(
+            index="Game_Key", columns="Market", values="Odds_Price",
+            aggfunc="last", dropna=False
+        )
+        .reindex(columns=MARKETS)
+        .rename(columns={"spreads":"Spread_Odds", "totals":"Total_Odds", "h2h":"H2H_Odds"})
+    )
+    
     df_cross_market = (
         value_pivot
-        .join(odds_pivot, how='outer')
+        .join(odds_pivot, how="outer")
         .reset_index()
     )
+    
 
     
 
