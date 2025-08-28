@@ -42,13 +42,7 @@ from xgboost import XGBClassifier
 # --- Streamlit (dashboard) ---
 import streamlit as st
 # reuse the same helpers you used in training:
-from sharp_line_dashboard import (
-    add_limit_dynamics_features,
-    add_book_network_features,
-    add_internal_consistency_features,
-    add_altline_curvature,          # optional
-    add_clv_proxy_features,         # optional
-)
+
 # --- Pandas dtype helpers ---
 from pandas.api.types import is_categorical_dtype, is_string_dtype
 
@@ -4078,54 +4072,390 @@ def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
 
     return df_tmp
 
-MARKETS = ["spreads","totals","h2h"]
-def build_cross_market_from_apply(df_apply: pd.DataFrame) -> pd.DataFrame:
-    """
-    Final-snapshot cross-market pivots (Value & Odds) per Game_Key; always
-    emits Spread/Total/H2H {_Value,_Odds} columns, even if NaN.
-    """
-    if df_apply.empty:
-        return pd.DataFrame({"Game_Key": []})
-    # get latest per Game_Key/Market/Outcome (like training)
-    df_latest = (
-        df_apply.sort_values("Snapshot_Timestamp")
-                .drop_duplicates(subset=["Game_Key","Market","Outcome"], keep="last")
-    )
-    value_pivot = (
-        df_latest.pivot_table(index="Game_Key", columns="Market", values="Value",
-                              aggfunc="last", dropna=False)
-                 .reindex(columns=MARKETS)
-                 .rename(columns={"spreads":"Spread_Value","totals":"Total_Value","h2h":"H2H_Value"})
-    )
-    odds_pivot = (
-        df_latest.pivot_table(index="Game_Key", columns="Market", values="Odds_Price",
-                              aggfunc="last", dropna=False)
-                 .reindex(columns=MARKETS)
-                 .rename(columns={"spreads":"Spread_Odds","totals":"Total_Odds","h2h":"H2H_Odds"})
-    )
-    return value_pivot.join(odds_pivot, how="outer").reset_index()
+# utils.py  — drop-in feature helpers (no Streamlit; no circular imports)
+from __future__ import annotations
+import math
+from typing import Iterable, Optional
+import numpy as np
+import pandas as pd
 
-def _amer_to_prob_vec(s):
-    s = pd.to_numeric(s, errors="coerce")
-    return np.where(s > 0, 100.0/(s+100.0),
-           np.where(s < 0, (-s)/((-s)+100.0), np.nan)).astype("float32")
+# ----------------------------- small shared helpers -----------------------------
 
-def add_market_implied_probs(df_market: pd.DataFrame, market: str) -> pd.DataFrame:
+def implied_prob_vec(s: pd.Series | np.ndarray) -> np.ndarray:
     """
-    Guarantees *_Odds columns exist and adds *_Implied_Prob with fallback to row Odds_Price.
+    American odds -> implied probability (vectorized).
+    +200 -> 100/(200+100) = 0.3333 ;  -150 -> 150/(150+100) = 0.6
     """
-    out = df_market.copy()
-    m = str(market).lower()
-    mapping = {"spreads":("Spread_Odds","Spread_Implied_Prob"),
-               "totals": ("Total_Odds","Total_Implied_Prob"),
-               "h2h":    ("H2H_Odds","H2H_Implied_Prob")}
-    odds_col, ip_col = mapping[m]
-    # seed odds columns if missing
-    for c in ["Spread_Odds","Total_Odds","H2H_Odds"]:
-        if c not in out.columns: out[c] = np.nan
-    # vectorized fallback to row-level Odds_Price
-    odds_series = out[odds_col].where(out[odds_col].notna(), out.get("Odds_Price"))
-    out[ip_col] = _amer_to_prob_vec(odds_series)
+    o = pd.to_numeric(s, errors="coerce").to_numpy(dtype="float64", na_value=np.nan)
+    p = np.full(o.shape, np.nan, dtype="float64")
+    neg = o < 0
+    pos = ~neg & np.isfinite(o)
+    p[neg] = (-o[neg]) / ((-o[neg]) + 100.0)
+    p[pos] = 100.0 / (o[pos] + 100.0)
+    return p.astype("float32")
+
+def _norm_str(x: pd.Series) -> pd.Series:
+    return x.astype(str).str.strip().str.lower()
+
+def _first_nonnull(a: Optional[pd.Series], b: Optional[pd.Series]) -> pd.Series:
+    if a is None and b is None:
+        return pd.Series([], dtype="float32")
+    if a is None:
+        return pd.to_numeric(b, errors="coerce")
+    if b is None:
+        return pd.to_numeric(a, errors="coerce")
+    a = pd.to_numeric(a, errors="coerce")
+    b = pd.to_numeric(b, errors="coerce")
+    return a.where(a.notna(), b)
+
+def _pick_keys(df: pd.DataFrame, prefs: Iterable[Iterable[str]]) -> list[str]:
+    for ks in prefs:
+        if all(k in df.columns for k in ks):
+            return list(ks)
+    return []
+
+# ----------------------------- 1) Limit dynamics -----------------------------
+
+def add_limit_dynamics_features(
+    df: pd.DataFrame,
+    *,
+    spike_abs: float = 1000.0,      # absolute step-up that counts as a spike
+    spike_rel: float = 0.25,        # or relative step >= 25% of previous
+    epsilon_no_move: float = 1e-6,  # "no-line-move" tolerance in absolute line units
+) -> pd.DataFrame:
+    """
+    Emits (adds columns if missing):
+      - Delta_Limit (current - prev/open)
+      - Limit_Spike_Flag (1/0)   — step-up detected
+      - LimitSpike_x_NoMove      — spike AND line didn't move
+    Prev limit is taken from:
+        1) df['Prev_Limit'] if present,
+        2) else df['Opening_Limit'],
+        3) else 0.
+    'NoMove' is |Value - Open_Value| <= epsilon OR |Line_Delta| <= epsilon.
+    Works with either ('Game_Key','Market') or ('Game','Market') if present.
+    """
+    if df.empty:
+        for c in ("Delta_Limit","Limit_Spike_Flag","LimitSpike_x_NoMove"):
+            df[c] = df.get(c, pd.Series([], dtype="float32" if c=="Delta_Limit" else "int8"))
+        return df
+
+    out = df.copy()
+    out["Limit"] = pd.to_numeric(out.get("Limit", np.nan), errors="coerce")
+    prev_limit = out.get("Prev_Limit")
+    if prev_limit is None:
+        prev_limit = out.get("Opening_Limit")
+    prev_limit = pd.to_numeric(prev_limit, errors="coerce")
+    out["Delta_Limit"] = (out["Limit"] - prev_limit).astype("float32")
+
+    # Spike flag (absolute OR relative to previous)
+    prev_safe = prev_limit.fillna(0.0)
+    spike_by_abs = out["Delta_Limit"] >= float(spike_abs)
+    spike_by_rel = out["Delta_Limit"] >= (prev_safe * float(spike_rel))
+    out["Limit_Spike_Flag"] = (spike_by_abs | spike_by_rel).astype("uint8")
+
+    # No-move detection
+    v_now  = pd.to_numeric(out.get("Value"), errors="coerce")
+    v_open = _first_nonnull(out.get("Open_Value"), out.get("First_Line_Value"))
+    line_delta = _first_nonnull(out.get("Line_Delta"), (v_now - v_open))
+    no_move = line_delta.abs() <= float(epsilon_no_move)
+
+    out["LimitSpike_x_NoMove"] = (out["Limit_Spike_Flag"].astype(bool) & no_move.fillna(False)).astype("uint8")
+    return out
+
+# ----------------------------- 2) Bookmaker network -----------------------------
+
+def add_book_network_features(df: pd.DataFrame, sharp_books: Optional[Iterable[str]] = None) -> pd.DataFrame:
+    """
+    Emits per row:
+      - Sharp_Consensus_Weight (float32)  # weighted fraction of sharp books aligned with row's side
+      - Sharp_vs_Rec_SpreadGap_Q90_Q10 (float32)
+      - Sharp_vs_Rec_SpreadGap_Q50 (float32)
+
+    Requires minimally: Game_Key, Market, Bookmaker, Outcome, Value
+    Optional: Book_Reliability_Score, Is_Favorite_Bet
+    Robust to NaNs and missing columns. Totals use OVER/UNDER, spreads use favorite/dog.
+    """
+    if df.empty:
+        for c in ("Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10","Sharp_vs_Rec_SpreadGap_Q50"):
+            df[c] = df.get(c, pd.Series([], dtype="float32"))
+        return df
+
+    out = df.copy()
+    if sharp_books is None:
+        # sane fallback; override in caller if you have a canonical list
+        sharp_books = {
+            "pinnacle","betonlineag","lowvig","betfair_ex_uk","betfair_ex_eu","smarkets","betus"
+        }
+
+    out["Bookmaker_norm"] = _norm_str(out.get("Bookmaker", pd.Series(index=out.index, dtype="object")))
+    out["Market_norm"]    = _norm_str(out.get("Market",    pd.Series(index=out.index, dtype="object")))
+    out["Outcome_Norm"]   = _norm_str(out.get("Outcome",   pd.Series(index=out.index, dtype="object")))
+
+    # Row side flags
+    fav_num = pd.to_numeric(out.get("Is_Favorite_Bet", np.nan), errors="coerce").fillna(0.0)
+    is_fav_row  = (fav_num > 0.5)
+    is_total    = out["Market_norm"].eq("totals")
+    is_over_row = is_total & out["Outcome_Norm"].eq("over")
+
+    # Base per (G,M,B)
+    base_cols = [c for c in ["Game_Key","Game","Market","Outcome","Bookmaker","Bookmaker_norm","Market_norm","Outcome_Norm","Value","Book_Reliability_Score"] if c in out.columns]
+    base = out[base_cols].drop_duplicates(subset=[c for c in ["Game_Key","Game","Market","Bookmaker"] if c in base_cols]).copy()
+
+    base_val_num = pd.to_numeric(base.get("Value"), errors="coerce")
+    base["Is_Favorite_Bet_b"] = (base_val_num < 0) & base["Market_norm"].eq("spreads")
+    base["Is_Over_Bet_b"]     = base["Outcome_Norm"].eq("over") & base["Market_norm"].eq("totals")
+    base["is_sharp_book"]     = base["Bookmaker_norm"].isin(set(sharp_books)).astype("uint8")
+
+    def _weights(gdf: pd.DataFrame) -> pd.Series:
+        return pd.to_numeric(
+            gdf.get("Book_Reliability_Score", pd.Series(1.0, index=gdf.index)),
+            errors="coerce"
+        ).fillna(1.0).astype("float32")
+
+    rows = []
+    gkeys = ["Game_Key","Market"] if "Game_Key" in base.columns else ["Game","Market"]
+    for (g, m), grp in base.groupby(gkeys, sort=False):
+        sharp_grp = grp.loc[grp["is_sharp_book"] == 1]
+        rec_grp   = grp.loc[grp["is_sharp_book"] == 0]
+        w_sharp   = _weights(sharp_grp)
+        m_lc      = str(m).lower()
+
+        if m_lc == "totals":
+            aligned_mask = sharp_grp["Is_Over_Bet_b"].astype(bool)
+            aligned_w = w_sharp[aligned_mask].sum()
+            w_tot = float(w_sharp.sum())
+            consensus_frac = float(aligned_w / w_tot) if w_tot > 0 else np.nan
+
+            sharp_vals = pd.to_numeric(sharp_grp.get("Value"), errors="coerce").dropna()
+            rec_vals   = pd.to_numeric(rec_grp.get("Value"), errors="coerce").dropna()
+        else:
+            aligned_mask = sharp_grp["Is_Favorite_Bet_b"].astype(bool)
+            aligned_w = w_sharp[aligned_mask].sum()
+            w_tot = float(w_sharp.sum())
+            consensus_frac = float(aligned_w / w_tot) if w_tot > 0 else np.nan
+
+            sharp_vals = pd.to_numeric(sharp_grp.get("Value"), errors="coerce").abs().dropna()
+            rec_vals   = pd.to_numeric(rec_grp.get("Value"), errors="coerce").abs().dropna()
+
+        def q(series, p):
+            return float(series.quantile(p)) if len(series) else np.nan
+
+        gap_q90_q10 = (q(sharp_vals, 0.90) - q(rec_vals, 0.10)) if (len(sharp_vals) and len(rec_vals)) else np.nan
+        gap_q50     = (q(sharp_vals, 0.50) - q(rec_vals, 0.50)) if (len(sharp_vals) and len(rec_vals)) else np.nan
+
+        rows.append({
+            gkeys[0]: g, gkeys[1]: m,
+            "Sharp_Consensus_Frac_tmp": consensus_frac,
+            "Sharp_vs_Rec_SpreadGap_Q90_Q10": gap_q90_q10,
+            "Sharp_vs_Rec_SpreadGap_Q50": gap_q50
+        })
+
+    net = pd.DataFrame(rows)
+    out = out.merge(net, on=gkeys, how="left")
+
+    out["Sharp_Consensus_Weight"] = np.where(
+        is_total,
+        np.where(is_over_row, out["Sharp_Consensus_Frac_tmp"], 1.0 - out["Sharp_Consensus_Frac_tmp"]),
+        np.where(is_fav_row,  out["Sharp_Consensus_Frac_tmp"], 1.0 - out["Sharp_Consensus_Frac_tmp"])
+    ).astype("float32")
+
+    for c in ["Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10","Sharp_vs_Rec_SpreadGap_Q50"]:
+        out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0).astype("float32")
+
+    out.drop(columns=["Bookmaker_norm","Market_norm","Sharp_Consensus_Frac_tmp"], errors="ignore", inplace=True)
+    return out
+
+# ----------------------------- 3) Internal consistency checks -----------------------------
+
+def add_internal_consistency_features(
+    df: pd.DataFrame,
+    *,
+    df_cross_market: Optional[pd.DataFrame] = None,
+    sport_default: str = "NFL",
+) -> pd.DataFrame:
+    """
+    Adds consistency diagnostics between spreads and moneyline (ML), and (lightly) totals.
+    Emits:
+      - Spread_ML_Prob_Strength      (favorite strength implied by spread)
+      - ML_Prob_Strength             (favorite strength from H2H odds; symmetric)
+      - Spread_ML_ProbGap_Signed     (spread_strength - ml_strength)
+      - Spread_ML_ProbGap_Abs
+      - Total_Over_Prob              (from Total_Odds or row Odds_Price if Market=='totals')
+      - Total_vs_Side_ProbGap        (|Total_Over_Prob - 0.5| - |Spread_ML_Prob_Strength - 0.5|)
+    Notes:
+      • Uses a normal-CDF mapping from spread magnitude to favorite win prob with sport-specific scale k.
+      • Symmetric favorite strength from ML uses max(p, 1-p), since team orientation may be unknown post-pivot.
+    """
+    if df.empty:
+        for c in ["Spread_ML_Prob_Strength","ML_Prob_Strength","Spread_ML_ProbGap_Signed","Spread_ML_ProbGap_Abs","Total_Over_Prob","Total_vs_Side_ProbGap"]:
+            df[c] = df.get(c, pd.Series([], dtype="float32"))
+        return df
+
+    out = df.copy()
+    out["Market"] = _norm_str(out.get("Market", pd.Series(index=out.index, dtype="object")))
+    out["Sport"]  = out.get("Sport", sport_default).astype(str).str.upper()
+
+    # sport scale for converting spread -> favorite prob (tunable)
+    k_map = {
+        "NFL": 6.0, "NCAAF": 7.0, "CFL": 6.5,
+        "NBA": 12.0, "WNBA": 10.0, "NCAAB": 10.0,
+        "MLB": 2.0,  # runline approximate (weakly used here)
+        "NHL": 1.8,
+    }
+    k = out["Sport"].map(lambda s: k_map.get(str(s).upper(), k_map.get(sport_default, 6.0))).astype("float32")
+    spread_mag = pd.to_numeric(out.get("Value"), errors="coerce").abs().astype("float32")
+
+    # Φ(mag/k) ~ favorite strength
+    def _phi(x: np.ndarray) -> np.ndarray:
+        return 0.5 * (1.0 + np.erf(x / np.sqrt(2.0)))
+
+    spread_strength = _phi((spread_mag / k).to_numpy(dtype="float64")).astype("float32")
+    out["Spread_ML_Prob_Strength"] = spread_strength
+
+    # ML strength: prefer H2H_Odds / H2H_Implied_Prob (pivot or row) -> symmetric favorite prob
+    h2h_prob = None
+    if df_cross_market is not None and "H2H_Odds" in df_cross_market.columns and "Game_Key" in out.columns:
+        out = out.merge(df_cross_market[["Game_Key","H2H_Odds"]], on="Game_Key", how="left", suffixes=("", "_cm"))
+        h2h_prob = implied_prob_vec(out["H2H_Odds"])
+    if h2h_prob is None or np.all(np.isnan(h2h_prob)):
+        # fallback to row-level Odds_Price if the row itself is H2H
+        row_h2h = np.where(out["Market"].eq("h2h").to_numpy(), implied_prob_vec(out.get("Odds_Price")), np.nan)
+        h2h_prob = row_h2h
+
+    ml_strength = np.maximum(h2h_prob, 1.0 - h2h_prob)  # symmetric "favorite" prob
+    out["ML_Prob_Strength"] = pd.to_numeric(ml_strength, errors="coerce").astype("float32")
+
+    gap_signed = (out["Spread_ML_Prob_Strength"] - out["ML_Prob_Strength"]).astype("float32")
+    out["Spread_ML_ProbGap_Signed"] = gap_signed
+    out["Spread_ML_ProbGap_Abs"]    = gap_signed.abs().astype("float32")
+
+    # Totals: simple over probability from Total_Odds (pivot if present)
+    total_odds = None
+    if df_cross_market is not None and "Total_Odds" in df_cross_market.columns and "Game_Key" in out.columns:
+        out = out.merge(df_cross_market[["Game_Key","Total_Odds"]], on="Game_Key", how="left", suffixes=("", "_cm2"))
+        total_odds = out["Total_Odds"]
+    if total_odds is None:
+        total_odds = out.get("Total_Odds", out.get("Odds_Price"))
+
+    out["Total_Over_Prob"] = implied_prob_vec(total_odds)
+    out["Total_vs_Side_ProbGap"] = (out["Total_Over_Prob"] - 0.5).abs() - (out["Spread_ML_Prob_Strength"] - 0.5).abs()
+    out["Total_vs_Side_ProbGap"] = pd.to_numeric(out["Total_vs_Side_ProbGap"], errors="coerce").fillna(0.0).astype("float32")
+
+    return out
+
+# ----------------------------- 4) Alt-line slope & curvature (optional) -----------------------------
+
+def add_altline_curvature(
+    df: pd.DataFrame,
+    df_alt: pd.DataFrame,
+    *,
+    alt_value_col: str = "Alt_Value",
+    alt_odds_col: str  = "Alt_Odds_Price",
+) -> pd.DataFrame:
+    """
+    Fits prob(x) ~ a*x^2 + b*x + c across alt-lines per (Game_Key, Market, Outcome).
+    Emits on the base df (merged by Game_Key,Market,Outcome):
+      - Implied_Distribution_Slope      (b)
+      - Implied_Distribution_Curvature  (a)
+    Requires df_alt with columns: Game_Key, Market, Outcome, Alt_Value, Alt_Odds_Price (or pass names).
+    """
+    if df.empty or df_alt is None or df_alt.empty:
+        for c in ("Implied_Distribution_Slope","Implied_Distribution_Curvature"):
+            df[c] = df.get(c, pd.Series([], dtype="float32"))
+        return df
+
+    alt = df_alt.copy()
+    for c in ("Game_Key","Market","Outcome"):
+        alt[c] = _norm_str(alt[c])
+    alt["p"] = implied_prob_vec(alt[alt_odds_col])
+    alt["x"] = pd.to_numeric(alt[alt_value_col], errors="coerce").astype("float32")
+
+    rows = []
+    for (g, m, o), gdf in alt.dropna(subset=["x","p"]).groupby(["Game_Key","Market","Outcome"], sort=False):
+        if len(gdf) >= 3:
+            # center x for numeric stability
+            x = gdf["x"].to_numpy(dtype="float64")
+            x0 = x.mean()
+            x_c = x - x0
+            y = gdf["p"].to_numpy(dtype="float64")
+            # fit y ≈ a*x^2 + b*x + c
+            try:
+                coeffs = np.polyfit(x_c, y, deg=2)  # returns [a, b, c]
+                a, b, _ = coeffs
+            except Exception:
+                a, b = np.nan, np.nan
+        else:
+            a, b = np.nan, np.nan
+
+        rows.append({"Game_Key": g, "Market": m, "Outcome": o,
+                     "Implied_Distribution_Slope": b, "Implied_Distribution_Curvature": a})
+
+    curv = pd.DataFrame(rows)
+    base = df.copy()
+    for c in ("Game_Key","Market","Outcome"):
+        if c in base.columns:
+            base[c] = _norm_str(base[c])
+    base = base.merge(curv, on=["Game_Key","Market","Outcome"], how="left")
+    for c in ("Implied_Distribution_Slope","Implied_Distribution_Curvature"):
+        base[c] = pd.to_numeric(base.get(c), errors="coerce").fillna(0.0).astype("float32")
+    return base
+
+# ----------------------------- 5) CLV proxy (optional) -----------------------------
+
+def add_clv_proxy_features(
+    df: pd.DataFrame,
+    clv_model_path: Optional[str] = None,
+    *,
+    horizon_min: int = 15,
+) -> pd.DataFrame:
+    """
+    Adds:
+      - E_Delta_Line_next{horizon_min}m  (expected line change)
+      - E_CLV                             (expected CLV proxy in line units)
+    If clv_model_path provided and loadable via joblib, uses that model on a small
+    feature set. Otherwise, uses a lightweight heuristic based on recent shifts.
+    """
+    if df.empty:
+        for c in (f"E_Delta_Line_next{horizon_min}m","E_CLV"):
+            df[c] = df.get(c, pd.Series([], dtype="float32"))
+        return df
+
+    out = df.copy()
+
+    # Heuristic baseline (if no model)
+    odds_shift = pd.to_numeric(out.get("Implied_Prob_Shift"), errors="coerce").fillna(0.0).astype("float32")
+    line_delta = pd.to_numeric(out.get("Line_Delta"), errors="coerce").fillna(0.0).astype("float32")
+    # small signed expectation: stronger shifts imply more move to come, but damped
+    e_dl = (0.75 * line_delta + 3.5 * (odds_shift - odds_shift.mean())) * 0.15
+    out[f"E_Delta_Line_next{horizon_min}m"] = e_dl.astype("float32")
+    out["E_CLV"] = out[f"E_Delta_Line_next{horizon_min}m"].astype("float32")
+
+    # Try to override with a tiny model if available
+    if clv_model_path:
+        try:
+            from joblib import load  # local import to avoid hard dependency
+            model = load(clv_model_path)
+            feat_candidates = [
+                "Value","Odds_Price","Implied_Prob","Implied_Prob_Shift","Line_Delta",
+                "Sharp_Consensus_Weight","Sharp_Limit_Total","Limit","Delta_Limit",
+                "Sharp_Move_Signal","Book_Reliability_Score"
+            ]
+            cols = [c for c in feat_candidates if c in out.columns]
+            X = out[cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype("float32")
+            pred = None
+            if hasattr(model, "predict"):
+                pred = model.predict(X)
+            elif hasattr(model, "decision_function"):
+                pred = model.decision_function(X)
+            if pred is not None:
+                pred = np.asarray(pred, dtype="float32")
+                out[f"E_Delta_Line_next{horizon_min}m"] = pred
+                out["E_CLV"] = pred
+        except Exception:
+            # keep heuristic values
+            pass
+
     return out
 
 
