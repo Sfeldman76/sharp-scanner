@@ -3827,44 +3827,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # --- sport → embargo (top of file, once) ---
         SPORT_EMBARGO = {
-            "MLB":  pd.Timedelta("12 hours"),
-            "NBA":  pd.Timedelta("12 hours"),
-            "NHL":  pd.Timedelta("12 hours"),
+            "MLB":   pd.Timedelta("12 hours"),
+            "NBA":   pd.Timedelta("12 hours"),
+            "NHL":   pd.Timedelta("12 hours"),
             "NCAAB": pd.Timedelta("12 hours"),
-            "NFL":  pd.Timedelta("3 days"),
+            "NFL":   pd.Timedelta("3 days"),
             "NCAAF": pd.Timedelta("2 days"),
             "WNBA":  pd.Timedelta("24 hours"),
             "MLS":   pd.Timedelta("24 hours"),
             "default": pd.Timedelta("12 hours"),
         }
         def get_embargo_for_sport(sport: str) -> pd.Timedelta:
-            return SPORT_EMBARGO.get(sport, SPORT_EMBARGO["default"])
+            return SPORT_EMBARGO.get(str(sport).upper(), SPORT_EMBARGO["default"])
         
-
-
+        
         class PurgedGroupTimeSeriesSplit(BaseCrossValidator):
             """
             Time-ordered, group-based CV with purge + time embargo.
         
             - Groups (e.g., Game_Key) never straddle train/val.
             - Any group overlapping the validation time window is *purged* from train.
-            - Any group starting within [val_start - embargo, val_end + embargo] is embargoed from train.
+            - Any group overlapping the extended embargo window around validation is embargoed from train.
             - Folds are contiguous in time at the group level.
             """
         
             def __init__(self, n_splits=5, embargo=pd.Timedelta("0 hours"), time_values=None, min_val_size=20):
-                """
-                Parameters
-                ----------
-                n_splits : int
-                    Number of time-ordered folds over *groups*.
-                embargo : pd.Timedelta
-                    Symmetric embargo applied around the validation window.
-                time_values : 1D datetime-like aligned to X rows
-                    Timestamps for each row (e.g., Game_Start or Snapshot_Timestamp).
-                min_val_size : int
-                    Minimum number of validation rows required for a fold to be yielded.
-                """
                 if n_splits < 2:
                     raise ValueError("n_splits must be at least 2")
                 self.n_splits = int(n_splits)
@@ -3880,8 +3867,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     raise ValueError("groups must be provided to split()")
                 if self.time_values is None:
                     raise ValueError("time_values must be set on the splitter")
-        
-                # Align & normalize inputs
                 if len(groups) != len(self.time_values):
                     raise ValueError("groups and time_values must be aligned to X rows")
         
@@ -3892,15 +3877,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 if meta["time"].isna().any():
                     raise ValueError("time_values contain NaT after to_datetime; check your inputs")
         
-                # One row per group with start/end times, ordered by start time
+                # one row per group, ordered by start time
                 gmeta = (meta.groupby("group", as_index=False)["time"]
-                             .agg(start="min", end="max")
-                             .sort_values("start")
-                             .reset_index(drop=True))
+                            .agg(start="min", end="max")
+                            .sort_values("start")
+                            .reset_index(drop=True))
         
                 n_groups = len(gmeta)
                 if n_groups < self.n_splits:
-                    # relax to feasible number of splits, minimum 2
                     self.n_splits = max(2, n_groups)
         
                 # contiguous group folds
@@ -3909,10 +3893,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 edges = np.cumsum(fold_sizes)
         
                 start = 0
-                for k, stop in enumerate(edges):
+                for _k, stop in enumerate(edges):
                     val_slice = gmeta.iloc[start:stop]
                     start = stop
-        
                     if val_slice.empty:
                         continue
         
@@ -3920,46 +3903,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     val_start  = val_slice["start"].iloc[0]
                     val_end    = val_slice["end"].iloc[-1]
         
-                    # 1) PURGE: remove any group that overlaps validation window
-                    # 1) PURGE: remove any group that overlaps the validation window
+                    # 1) PURGE: overlap with [val_start, val_end]
                     purge_mask = ~((gmeta["end"] < val_start) | (gmeta["start"] > val_end))
                     purged_groups = set(gmeta.loc[purge_mask, "group"])
-                    
-                    # 2) EMBARGO: remove any group that overlaps the extended embargo window
+        
+                    # 2) EMBARGO: overlap with [val_start - embargo, val_end + embargo]
                     emb_lo = val_start - self.embargo
-                    emb_hi = val_end + self.embargo
+                    emb_hi = val_end   + self.embargo
                     embargo_mask = ~((gmeta["end"] < emb_lo) | (gmeta["start"] > emb_hi))
                     embargo_groups = set(gmeta.loc[embargo_mask, "group"])
-                    
-                    # Final training set = not in val, not purged, not embargoed
-                    bad_groups = set(val_groups) | purged_groups | embargo_groups
-                    train_groups = gmeta.loc[~gmeta["group"].isin(bad_groups), "group"].to_numpy()
-
-                    # Map back to row indices
-                    all_groups = meta["group"].to_numpy()
-                    val_idx   = np.flatnonzero(np.isin(all_groups, val_groups))
-                    train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
         
-                    # HARDENING
+                    bad_groups   = set(val_groups) | purged_groups | embargo_groups
+                    train_groups = gmeta.loc[~gmeta["group"].isin(bad_groups), "group"].to_numpy()
+        
+                    # map back to row indices
+                    all_groups = meta["group"].to_numpy()
+                    val_idx    = np.flatnonzero(np.isin(all_groups, val_groups))
+                    train_idx  = np.flatnonzero(np.isin(all_groups, train_groups))
+        
+                    # hardening
                     if len(val_idx) == 0 or len(train_idx) == 0:
                         continue
                     if len(val_idx) < self.min_val_size:
                         continue
                     if y is not None:
                         y_arr = np.asarray(y)
-                        # need both classes in validation to drive stable early stopping / metrics
                         if np.unique(y_arr[val_idx]).size < 2:
                             continue
         
                     yield train_idx, val_idx
-       
-      
-        # ==== Shared helpers / constants ====
-        eps = 1e-4  # clip for probabilities
         
-        from pandas.api.types import (
-            is_bool_dtype, is_object_dtype, is_string_dtype, is_categorical_dtype
-        )
+        
+        # ==== Shared helpers / constants ====
+        eps = 1e-4  # default probability clip
+        
+        from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
         
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             out = df[cols].copy()
@@ -3972,7 +3950,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     continue
         
                 # 2) Strings/objects/categories → clean then to_numeric
-                if is_object_dtype(col) or is_string_dtype(col) or is_categorical_dtype(col):
+                if is_object_dtype(col) or is_string_dtype(col) or isinstance(col.dtype, pd.CategoricalDtype):
                     out[c] = col.replace({
                         'True': 1, 'False': 0, 'true': 1, 'false': 0,
                         True: 1, False: 0,
@@ -3985,41 +3963,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # 3) Everything else → to_numeric safely
                 out[c] = pd.to_numeric(col, errors="coerce")
         
-            # Final cleanup
-            return (
-                out.replace([np.inf, -np.inf], np.nan)
-                   .astype("float32")
-                   .fillna(0.0)
-            )
-
-        #df_market[features] = df_market[features].apply(pd.to_numeric, errors="coerce")
-       
+            return (out.replace([np.inf, -np.inf], np.nan)
+                       .astype("float32")
+                       .fillna(0.0))
+        
+        
+        # === Build X / y ===
         X_full = _to_numeric_block(df_market, features).to_numpy(np.float32)
-
         
-        # 3) Labels: coerce and drop NA rows if any slipped through
-        y_series = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
+        y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
         valid_mask = ~y_series.isna()
-        
-        # (optional) Keep rows where label is valid; also ensure features already aligned
         if not valid_mask.all():
             X_full = X_full[valid_mask.to_numpy()]
         y_full = y_series.loc[valid_mask].astype(int).to_numpy()
         
-        # 4) Groups & times: ensure no NAType
+        
+
         # ---- Groups & times (snapshot-aware) ----
         groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
         
         snap_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Snapshot_Timestamp"],
-            errors="coerce", utc=True
+            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
         )
         game_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Game_Start"],  # or your scheduled kickoff tipoff col
-            errors="coerce", utc=True
+            df_market.loc[valid_mask, "Game_Start"], errors="coerce", utc=True
         )
         
-        # If any game has >1 snapshot, we’re in snapshot regime
+        # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
         by_game_snaps = (
             df_market.loc[valid_mask]
             .groupby("Game_Key")["Snapshot_Timestamp"]
@@ -4027,46 +3997,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         has_snapshots = (by_game_snaps.fillna(0).max() > 1)
         
-        # Use snapshot times when present; else fall back to game time
         time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
         
-        # Embargo: only needed when you truly have multiple snapshots
+        # Sport-aware embargo only when we truly have multiple snapshots
         sport_key = str(sport).upper()
-        embargo_td = (
-            SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"])
-            if has_snapshots else pd.Timedelta(0)
-        )
+        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
         
-        # Replace your previous 'groups' and 'times' with these:
+        # Replace previous 'groups' and 'times'
         groups = groups_all
         times  = time_values_all
-
         
-        
-        # 5) Quick guard: no NaT in times
+        # Guard: drop NaT times (rare but fatal for CV)
         if pd.isna(times).any():
-            bad = np.flatnonzero(pd.isna(times))
-            # drop bad rows
+            bad  = np.flatnonzero(pd.isna(times))
             keep = np.setdiff1d(np.arange(len(times)), bad)
-            X_full = X_full[keep]
-            y_full = y_full[keep]
-            groups = groups[keep]
-            times  = times[keep]
-        # 0) Build matrices and folds FIRST
-   
-        # class balance for scale_pos_weight
-        #pos = y_full.sum()
-        #neg = len(y_full) - pos
-        #scale_pos_weight = (neg / pos) if pos > 0 else 1.0
+            X_full = X_full[keep]; y_full = y_full[keep]
+            groups = groups[keep]; times  = times[keep]
         
-        # sport can be "WNBA", "MLB", etc.
-        sport_key  = str(sport).upper()
-        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"])
-        
-        
-
-         # --- define untouched final holdout as last ~15% of GROUPS (safer than rows) ---
-        meta = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
+        # ---- Holdout = last ~15% of groups (time-forward, group-safe) ----
+        meta  = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
         gmeta = (meta.groupby("group", as_index=False)["time"]
                    .agg(start="min", end="max")
                    .sort_values("start")
@@ -4076,31 +4025,111 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         n_hold_g = max(1, int(round(n_groups * 0.15)))
         hold_g   = gmeta["group"].to_numpy()[-n_hold_g:]
         train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
-                
         
-        all_g = meta["group"].to_numpy()
+        all_g        = meta["group"].to_numpy()
         hold_idx      = np.flatnonzero(np.isin(all_g, hold_g))
         train_all_idx = np.flatnonzero(np.isin(all_g, train_g))
         
-        # Subset for TRAIN-only arrays
+        # ---- TRAIN subset arrays (everything downstream uses only TRAIN rows) ----
         X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
-        t_train = times[train_all_idx] 
-        feature_cols = list(features)
+        t_train = times[train_all_idx]
         
-        base_kwargs, params_ll, params_auc = get_xgb_search_space(
-            sport=sport,
-            X_rows=X_train.shape[0],                 # train rows only
-            n_jobs=1,                                # keep models single-threaded (CV drives parallelism)
-            scale_pos_weight=((y_train == 0).sum() / max(1, (y_train == 1).sum())),
-            features=features,                        # keeps monotone_constraints aligned
+        # ---------------------------------------------------------------------------
+        #  Book-aware sample weights: equalize duplicates within each game and tilt
+        #  softly toward sharper books — without discarding any rows.
+        # ---------------------------------------------------------------------------
+        bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
+            "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
         )
         
-        s = str(sport).upper()  # <-- define 's' before using it
+        train_df = df_market.loc[valid_mask].iloc[train_all_idx].copy()
         
-        # ---- ONLY for small leagues: tighten capacity & regularize more ----
+        def _fallback_book_lift(df: pd.DataFrame, book_col: str, label_col: str, prior: float = 100.0):
+            """
+            Empirical-Bayes per-book lift: posterior_mean / global_rate - 1,
+            with Beta prior strength = 'prior' on the global base rate.
+            """
+            if (book_col is None) or (book_col not in df.columns) or (label_col not in df.columns):
+                return pd.Series(dtype=float)
+            dfv = df[[book_col, label_col]].dropna()
+            if dfv.empty:
+                return pd.Series(dtype=float)
+        
+            y = pd.to_numeric(dfv[label_col], errors="coerce")
+            m = float(np.nanmean(y))
+            grp = dfv.groupby(book_col)[label_col].agg(["sum", "count"]).rename(columns={"sum": "hits", "count": "n"})
+            # posterior mean with Beta prior (a=m*prior, b=(1-m)*prior)
+            a = m * prior; b = (1.0 - m) * prior
+            post_mean = (grp["hits"] + a) / (grp["n"] + a + b)
+            lift = (post_mean / max(1e-9, m)) - 1.0
+            return lift
+        
+        if bk_col is None:
+            # No bookmaker column → uniform weights
+            w_train = np.ones(len(train_df), dtype=np.float32)
+        else:
+            if bk_col not in train_df.columns:
+                train_df[bk_col] = "UNK"
+        
+            # Within-game equalization: penalize duplicated (game,book) rows
+            B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
+            n_gb = train_df.groupby(["Game_Key", bk_col]).size()
+        
+            TAU = 0.8  # 0=no penalty, 1=strong equalization for duplicated lines within game
+            def _w_gb(g, b, tau=1.0):
+                Bg  = max(1, int(B_g.get(g, 1)))
+                ngb = max(1, int(n_gb.get((g, b), 1)))
+                return 1.0 / (Bg * (ngb ** tau))
+        
+            w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])], dtype=np.float32)
+        
+            # Reliability tilt toward sharper books (uses prebuilt map if available; else EB fallback on TRAIN only)
+            rel_lift = pd.Series(dtype=float)
+            if "book_reliability_map" in locals() and isinstance(book_reliability_map, pd.DataFrame) and not book_reliability_map.empty:
+                br = book_reliability_map.copy()
+                # prefer sport/market-specific slice if present
+                if {"Sport", "Market"} <= set(br.columns):
+                    msk = (br["Sport"].astype(str).str.upper() == sport_key) & (br["Market"].astype(str).str.upper() == str(market).upper())
+                    if msk.any():
+                        br = br.loc[msk]
+                if "Bookmaker" in br.columns and "Book_Reliability_Lift" in br.columns:
+                    rel_lift = br.groupby("Bookmaker")["Book_Reliability_Lift"].mean()
+            if rel_lift.empty:
+                rel_lift = _fallback_book_lift(train_df, bk_col, "SHARP_HIT_BOOL", prior=120.0)
+        
+            # Robust map to [0,1] and apply tilt
+            r = train_df[bk_col].map(rel_lift).fillna(0.0).astype(float)
+            denom = max(1e-9, r.quantile(0.9) - r.quantile(0.5))
+            r_p = ((r - r.quantile(0.5)) / denom).clip(0, 1)
+        
+            ALPHA = 0.75  # strength of sharp tilt
+            w_train = w_base * (1.0 + ALPHA * r_p.to_numpy(dtype=np.float32))
+        
+            # normalize so average weight ≈ 1
+            s = w_train.sum()
+            if s > 0:
+                w_train *= (len(w_train) / s)
+        
+        # safety: ensure weights align
+        assert len(w_train) == len(X_train), f"sample_weight misaligned: {len(w_train)} vs {len(X_train)}"
+        
+        # ---------------------------------------------------------------------------
+        #  Hyperparam spaces & small-league overrides
+        # ---------------------------------------------------------------------------
+        feature_cols = list(features)
+        base_kwargs, params_ll, params_auc = get_xgb_search_space(
+            sport=sport,
+            X_rows=X_train.shape[0],       # train rows only
+            n_jobs=1,
+            scale_pos_weight=((y_train == 0).sum() / max(1, (y_train == 1).sum())),
+            features=features,
+        )
+        
+        s = sport_key
         if s in SMALL_LEAGUES:
+            # extra stabilization for tiny regimes
             base_kwargs.update({
                 "max_delta_step": 1,
                 "min_child_weight": max(8, int(base_kwargs.get("min_child_weight", 0))),
@@ -4111,12 +4140,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 "colsample_bytree": min(1.0, max(0.85, float(base_kwargs.get("colsample_bytree", 1.0)))),
             })
             search_estimators = 300
-            eps = 5e-3   # slightly stronger clipping for stability on tiny data
+            eps = 5e-3
         else:
             search_estimators = 400
             eps = 1e-4
         
-        # (Optional) light stability nudge — safe to keep; won’t undo small-league overrides
+        # light stability nudges (kept after overrides)
         base_kwargs.update({
             "n_jobs": 1,
             "max_delta_step": 1,
@@ -4125,20 +4154,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "reg_lambda": max(1.0, base_kwargs.get("reg_lambda", 1.0)),
             "reg_alpha": float(base_kwargs.get("reg_alpha", 0.0)),
         })
-        
-        # lock classifier objective/metric (redundant if already in get_xgb_search_space, harmless)
         base_kwargs["objective"]   = "binary:logistic"
         base_kwargs["eval_metric"] = "logloss"
         
-        # sanity: ensure the search spaces don’t try to set objective/metric
         for d in (params_ll, params_auc):
-            assert "objective" not in d
-            assert "eval_metric" not in d
+            assert "objective" not in d and "eval_metric" not in d
         
-        # CV splitter (TRAIN ONLY)
+        # ---------------------------------------------------------------------------
+        #  CV with purge + embargo (snapshot-aware)
+        # ---------------------------------------------------------------------------
+        # choose folds/min size based on data volume
         rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
-        target_games   = 8 if s in SMALL_LEAGUES else 20
-        min_val_size   = max(10 if s in SMALL_LEAGUES else 20, target_games * rows_per_game)
+        target_games  = 8 if s in SMALL_LEAGUES else 20
+        min_val_size  = max(10 if s in SMALL_LEAGUES else 20, target_games * rows_per_game)
         
         n_groups_train = pd.unique(g_train).size
         target_folds   = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
@@ -4149,14 +4177,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             time_values=t_train,
             min_val_size=min_val_size,
         )
-
         folds = list(cv.split(X_train, y_train, groups=g_train))
-        assert folds, "No usable folds"
+        assert len(folds) > 0, "No usable folds"
         
-        # search bases (no ES inside CV)
+        # ---------------------------------------------------------------------------
+        #  Randomized searches (with sample_weight)
+        # ---------------------------------------------------------------------------
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-        # scorers
+        
         def neg_logloss_scorer(est, X, y):
             proba = est.predict_proba(X)[:, 1]
             return -log_loss(y, proba)
@@ -4165,7 +4194,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             proba = est.predict_proba(X)[:, 1]
             return roc_auc_score(y, proba)
         
-        # randomized searches (TRAIN ONLY)
         rs_ll = RandomizedSearchCV(
             estimator=search_base_ll,
             param_distributions=params_ll,
@@ -4178,7 +4206,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             error_score="raise",
         )
-        rs_ll.fit(X_train, y_train, groups=g_train)
+        rs_ll.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
         
         rs_auc = RandomizedSearchCV(
             estimator=search_base_auc,
@@ -4187,22 +4215,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             cv=folds,
             n_iter=15,
             n_jobs=1,
-            random_state=42,
+            random_state=4242,
             refit=True,
             verbose=1,
             error_score="raise",
         )
-        rs_auc.fit(X_train, y_train, groups=g_train)
+        rs_auc.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
         
-                
-        # clean best params
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type"):
-            best_ll_params.pop(k, None)
-            best_auc_params.pop(k, None)
+            best_ll_params.pop(k, None); best_auc_params.pop(k, None)
         
-        # final ES on the last CV fold (TRAIN ONLY)
+        # ---------------------------------------------------------------------------
+        #  Final early-stopped fits on last CV fold (with sample_weight)
+        # ---------------------------------------------------------------------------
         tr_es_rel, va_es_rel = folds[-1]
         final_estimators_cap  = 3000
         early_stopping_rounds = 250
@@ -4213,20 +4240,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         model_logloss.fit(
             X_train[tr_es_rel], y_train[tr_es_rel],
             eval_set=[(X_train[va_es_rel], y_train[va_es_rel])],
+            sample_weight=w_train[tr_es_rel],
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
         model_auc.fit(
             X_train[tr_es_rel], y_train[tr_es_rel],
             eval_set=[(X_train[va_es_rel], y_train[va_es_rel])],
+            sample_weight=w_train[tr_es_rel],
             early_stopping_rounds=early_stopping_rounds,
             verbose=False,
         )
         
-        # ---- OOF predictions on TRAIN subset (tuned rounds) ----
-        def best_rounds(clf: XGBClassifier) -> int:
+        # Helper to get tuned #trees back out
+        def _best_rounds(clf):
             br = getattr(clf, "best_iteration", None)
-            if br is not None and br >= 0: return int(br + 1)
+            if br is not None and br >= 0:
+                return int(br + 1)
             try:
                 booster = clf.get_booster()
                 if getattr(booster, "best_iteration", None) is not None:
@@ -4237,17 +4267,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 pass
             return int(getattr(clf, "n_estimators", 200))
         
-        n_trees_ll  = best_rounds(model_logloss)
-        n_trees_auc = best_rounds(model_auc)
+        n_trees_ll  = _best_rounds(model_logloss)
+        n_trees_auc = _best_rounds(model_auc)
         
+        # ---------------------------------------------------------------------------
+        #  OOF predictions (train-only) with per-fold refits + weights
+        # ---------------------------------------------------------------------------
         oof_pred_logloss = np.full(len(y_train), np.nan, dtype=float)
         oof_pred_auc     = np.full(len(y_train), np.nan, dtype=float)
         
         for tr_rel, va_rel in folds:
             m_ll  = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(n_trees_ll)})
             m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc)})
-            m_ll.fit (X_train[tr_rel], y_train[tr_rel], verbose=False)
-            m_auc.fit(X_train[tr_rel], y_train[tr_rel], verbose=False)
+        
+            m_ll.fit (X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
+            m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
+        
             oof_pred_logloss[va_rel] = m_ll.predict_proba(X_train[va_rel])[:, 1]
             oof_pred_auc[va_rel]     = m_auc.predict_proba(X_train[va_rel])[:, 1]
         
@@ -4255,7 +4290,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if mask_oof.sum() < 50:
             raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
         
-        # choose blend weight on OOF
+        # Blend weight chosen on OOF to minimize logloss
         grid = np.linspace(0.0, 1.0, 51)
         best_w, best_ll = 0.5, 1e9
         p_oof_log = oof_pred_logloss[mask_oof]
@@ -4268,7 +4303,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if ll < best_ll:
                 best_ll, best_w = ll, w
         
-        # single isotonic on OOF-blended probs
+        # One isotonic over the blended OOF probability
         try:
             iso_blend = IsotonicRegression(out_of_bounds="clip", y_min=eps, y_max=1-eps)
         except TypeError:
@@ -4276,7 +4311,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_oof_blend = np.clip(best_w*p_oof_log + (1-best_w)*p_oof_auc, eps, 1-eps)
         iso_blend.fit(p_oof_blend, y_oof)
         
-        # final predictions: TRAIN (all train rows) + HOLDOUT (untouched groups)
+        # ---------------------------------------------------------------------------
+        #  Final blended + calibrated predictions for TRAIN + HOLDOUT
+        # ---------------------------------------------------------------------------
         p_tr_log = model_logloss.predict_proba(X_full[train_all_idx])[:, 1]
         p_tr_auc = model_auc    .predict_proba(X_full[train_all_idx])[:, 1]
         p_ho_log = model_logloss.predict_proba(X_full[hold_idx])[:, 1]
@@ -4285,8 +4322,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
-        p_cal     = iso_blend.predict(p_train_blend_raw)  # TRAIN calibrated
-        p_cal_val = iso_blend.predict(p_hold_blend_raw)   # HOLDOUT calibrated
+        p_cal     = iso_blend.predict(p_train_blend_raw)   # TRAIN calibrated
+        p_cal_val = iso_blend.predict(p_hold_blend_raw)    # HOLDOUT calibrated
+        
         
         # targets aligned
         y_train_vec = y_full[train_all_idx].astype(int)
