@@ -1551,19 +1551,19 @@ def compute_sharp_metrics(
     mtype,
     label,
     gk=None,
-    book=None,
+    book=None,             # fallback if entries don't include book per row
     open_odds=None,
     opening_limit=None,
 ):
     """
-    entries: iterable of (limit, value, ts, game_start, odds)
+    entries: iterable of (limit, value, ts, game_start, odds[, book])
              Prefer ts and game_start as pd.Timestamp or datetime for speed.
+             If 'book' per entry is provided, it should be the 6th element.
     """
     lg_debug = logging.getLogger().isEnabledFor(logging.DEBUG)
     if lg_debug:
         logging.debug("🔍 compute_sharp_metrics outcome=%s market=%s", label, mtype)
 
-    # ── pre-normalize a couple of cheap strings once
     mtype = (mtype or "").strip().lower()
     label = (label or "").strip().lower()
 
@@ -1571,39 +1571,32 @@ def compute_sharp_metrics(
     if entries and not all(entries[i][2] <= entries[i+1][2] for i in range(len(entries)-1)):
         entries = sorted(entries, key=lambda x: x[2])
 
-    move_signal = 0.0
     move_mag_sum = 0.0
     limit_score = 0.0
     total_limit = 0.0
     odds_move_mag_pts = 0.0
 
-    # 16 hybrid timing buckets (4 TOD × 4 MTG) as a small float list
-    # idx = tod_idx*4 + mtg_idx
-    mag_buckets = [0.0]*16
+    # 16 hybrid timing buckets (4 TOD × 4 MTG)
+    mag_buckets  = [0.0]*16
     odds_buckets = [0.0]*16
 
-    # helpers for bucket index (no strings in the loop)
     def _tod_idx(hour: int) -> int:
-        # Overnight[0:5], Early[6:11], Midday[12:15], Late[16:23]
         if 0 <= hour <= 5:   return 0
         if 6 <= hour <= 11:  return 1
         if 12 <= hour <= 15: return 2
         return 3
 
     def _mtg_idx(minutes_to_game: float | None) -> int:
-        # VeryEarly (>720), MidRange (180–720], LateGame (60–180], Urgent (<=60)
-        if minutes_to_game is None:       return 0  # treat as VeryEarly
+        if minutes_to_game is None:       return 0
         if minutes_to_game > 720:         return 0
         if minutes_to_game > 180:         return 1
         if minutes_to_game > 60:          return 2
         return 3
 
     def _bucket_index(ts, game_start) -> int:
-        # ts, game_start should already be Timestamps/datetimes
         try:
             h = ts.hour
         except Exception:
-            # fallback if ts somehow not datetime-like
             h = pd.to_datetime(ts).hour
         mtg = None
         if game_start is not None:
@@ -1613,21 +1606,53 @@ def compute_sharp_metrics(
                 mtg = (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60.0
         return _tod_idx(h) * 4 + _mtg_idx(mtg)
 
+    # --- sharp-book detection helper ---
+    # Uses global SHARP_BOOKS if available; otherwise falls back to high-limit heuristic.
+    try:
+        _SHARP_BOOKS = {str(b).strip().lower() for b in SHARP_BOOKS}  # noqa: F821 (expected in your app)
+    except Exception:
+        _SHARP_BOOKS = set()
+
+    def _is_sharp_book(book_name, lim_val) -> bool:
+        if book_name:
+            if str(book_name).strip().lower() in _SHARP_BOOKS:
+                return True
+        # optional fallback: treat very high-limit as “sharp”
+        try:
+            return float(lim_val) >= 5000 if lim_val is not None else False
+        except Exception:
+            return False
+
     # opening trio may be missing → capture earliest non-null during pass
-    first_val = open_val
-    first_odds = open_odds
+    first_val   = open_val
+    first_odds  = open_odds
     first_limit = opening_limit
 
-    prev_val = None
+    # track previous values PER BOOK so “movement” is book-local
+    prev_val_by_book  = {}
+    prev_odds_by_book = {}
+
+    # aggregate (across all books) for other metrics you already compute
+    prev_val  = None
     prev_odds = None
 
-    net_line_move = None
+    net_line_move     = None
     abs_net_line_move = None
-    net_odds_move = None
+    net_odds_move     = None
     abs_net_odds_move = None
 
-    for i, (lim, curr_val, ts, game_start, curr_odds) in enumerate(entries):
-        # Fast numeric coercion (assume mostly numeric):
+    # === NEW: flag if ANY movement occurs on a sharp book ===
+    sharp_move_seen = False
+
+    for i, row in enumerate(entries):
+        # Unpack with optional per-entry book
+        if len(row) >= 6:
+            lim, curr_val, ts, game_start, curr_odds, row_book = row[:6]
+        else:
+            lim, curr_val, ts, game_start, curr_odds = row[:5]
+            row_book = book  # use function-level fallback
+
+        # Fast numeric coercion
         try:
             if lim is not None and not isinstance(lim, (int, float)):
                 lim = pd.to_numeric(lim, errors="coerce")
@@ -1636,7 +1661,6 @@ def compute_sharp_metrics(
             if curr_odds is not None and not isinstance(curr_odds, (int, float)):
                 curr_odds = pd.to_numeric(curr_odds, errors="coerce")
         except Exception:
-            # ignore bad coercions silently here
             pass
 
         # establish opening trio lazily
@@ -1647,62 +1671,73 @@ def compute_sharp_metrics(
         if first_limit is None and pd.notna(lim):
             first_limit = lim
 
-        # compute bucket index once
         b_idx = _bucket_index(ts, game_start)
 
-        # line movement deltas
+        # ---- book-local movement detection (drives Sharp_Move_Signal) ----
+        pval_book  = prev_val_by_book.get(row_book)
+        pods_book  = prev_odds_by_book.get(row_book)
+
+        # value move at this (sharp?) book
+        if pd.notna(pval_book) and pd.notna(curr_val) and curr_val != pval_book:
+            if _is_sharp_book(row_book, lim):
+                sharp_move_seen = True
+
+        # odds move at this (sharp?) book
+        if pd.notna(pods_book) and pd.notna(curr_odds) and curr_odds != pods_book:
+            if _is_sharp_book(row_book, lim):
+                sharp_move_seen = True
+
+        # ---- keep your existing aggregate metrics (cross-book) ----
         if pd.notna(prev_val) and pd.notna(curr_val):
-            delta = curr_val - prev_val
-            move_mag_sum += float(delta)
+            delta = float(curr_val - prev_val)
+            move_mag_sum += delta
 
             if mtype == "totals":
-                # Under sharp if line drops; Over sharp if line rises
-                if ("under" in label and delta < 0) or ("over" in label and delta > 0):
-                    move_signal += float(delta)
+                mag_buckets[b_idx] += delta
             elif mtype == "spreads":
-                # Push direction: more extreme toward current side
-                if prev_val < 0 and curr_val < prev_val:
-                    move_signal += float(delta)
-                elif prev_val > 0 and curr_val > prev_val:
-                    move_signal += float(delta)
+                mag_buckets[b_idx] += delta
+            else:
+                mag_buckets[b_idx] += delta
 
-            mag_buckets[b_idx] += float(delta)
-
-        # odds movement (convert to prob only when both present)
         if pd.notna(prev_odds) and pd.notna(curr_odds):
             prev_prob = implied_prob(prev_odds)
             curr_prob = implied_prob(curr_odds)
-            odds_delta = curr_prob - prev_prob
-            point_equiv = implied_prob_to_point_move(odds_delta)
+            odds_delta    = curr_prob - prev_prob
+            point_equiv   = implied_prob_to_point_move(odds_delta)
             odds_move_mag_pts += float(point_equiv)
             odds_buckets[b_idx] += float(odds_delta)
 
-        # rolling net-from-open
         if pd.notna(first_val) and pd.notna(curr_val):
-            net_line_move = float(curr_val - first_val)
+            net_line_move     = float(curr_val - first_val)
             abs_net_line_move = abs(net_line_move)
 
         if pd.notna(first_odds) and pd.notna(curr_odds):
-            net_odds_move = float(curr_odds - first_odds)
+            net_odds_move     = float(curr_odds - first_odds)
             abs_net_odds_move = abs(net_odds_move)
 
-        # limit tracking
         if pd.notna(lim):
             f_lim = float(lim)
             total_limit += f_lim
             if f_lim >= 100:
                 limit_score += f_lim
 
-        # advance prevs after using them
+        # advance prevs (aggregate)
         if pd.notna(curr_val):
             prev_val = curr_val
         if pd.notna(curr_odds):
             prev_odds = curr_odds
 
-        if lg_debug and (i < 3 or i == len(entries)-1):  # sample a few logs only
-            logging.debug("…%d/%d val=%s odds=%s lim=%s", i+1, len(entries), curr_val, curr_odds, lim)
+        # advance book-local prevs
+        if pd.notna(curr_val):
+            prev_val_by_book[row_book] = curr_val
+        if pd.notna(curr_odds):
+            prev_odds_by_book[row_book] = curr_odds
 
-    # dominant timing label from the 16 buckets (by absolute magnitude of line deltas)
+        if lg_debug and (i < 3 or i == len(entries)-1):
+            logging.debug("…%d/%d val=%s odds=%s lim=%s book=%s",
+                          i+1, len(entries), curr_val, curr_odds, lim, row_book)
+
+    # dominant timing label from 16 buckets
     if mag_buckets:
         dom_idx = max(range(16), key=lambda k: abs(mag_buckets[k]))
         tods = ["Overnight", "Early", "Midday", "Late"]
@@ -1711,17 +1746,17 @@ def compute_sharp_metrics(
     else:
         dominant_label = "unknown"
 
-    # First_Imp_Prob from the actual opening odds chosen
     first_imp_prob = implied_prob(first_odds) if pd.notna(first_odds) else None
 
-    # flatten buckets into dict keys only once, after the pass
     out = {
         "Open_Value": first_val,
         "Open_Odds": first_odds,
         "Opening_Limit": first_limit,
         "First_Imp_Prob": first_imp_prob,
 
-        "Sharp_Move_Signal": int(move_signal > 0),
+        # === NEW behavior: any movement on a sharp book triggers this ===
+        "Sharp_Move_Signal": int(bool(sharp_move_seen)),
+
         "Sharp_Line_Magnitude": round(move_mag_sum, 2),
         "Sharp_Limit_Jump": int(limit_score >= 10000),
         "Sharp_Limit_Total": round(total_limit, 1),
@@ -1736,14 +1771,14 @@ def compute_sharp_metrics(
         "SharpBetScore": 0.0,
     }
 
-    # attach the 16×2 bucket features (strings created only here)
+    # attach 16×2 bucket features
     tods = ["Overnight", "Early", "Midday", "Late"]
     mtgs = ["VeryEarly", "MidRange", "LateGame", "Urgent"]
     for ti, tod in enumerate(tods):
         for mi, mtg in enumerate(mtgs):
             idx = ti*4 + mi
             out[f"SharpMove_Magnitude_{tod}_{mtg}"] = round(mag_buckets[idx], 3)
-            out[f"OddsMove_Magnitude_{tod}_{mtg}"] = round(odds_buckets[idx], 3)
+            out[f"OddsMove_Magnitude_{tod}_{mtg}"]  = round(odds_buckets[idx], 3)
 
     if lg_debug:
         logging.debug("📊 timing mag (first 6): %s", mag_buckets[:6])
@@ -1910,314 +1945,164 @@ SPORT_ALIAS = {
     'NCAAB': 'NCAAB'
 }
 
-# --- Key line resistance map (plural, lowercase market keys) ---
-KEY_LINE_RESISTANCE = {
-    'NFL':   {'spreads': [3, 7, 10, 14],          'totals': [41, 44, 47, 51]},
-    'NBA':   {'spreads': [2.5, 5, 7, 10],         'totals': [210, 220, 225, 230]},
-    'WNBA':  {'spreads': [1.5, 3.5, 6.5, 9.5],    'totals': [157.5, 162.5, 167.5, 172.5]},
-    'CFL':   {'spreads': [2.5, 4.5, 6.5, 9.5],    'totals': [48.5, 52.5, 55.5, 58.5]},
-    'NCAAF': {'spreads': [3, 7, 10, 14, 17],      'totals': [45, 52, 59, 66]},
-    'NCAAB': {'spreads': [2, 5, 7, 10],           'totals': [125, 135, 145, 150]},
-    'MLB':   {'spreads': [],                       'totals': [6.5, 7, 7.5, 8, 8.5, 9]},
-    'NHL':   {'spreads': [],                       'totals': [5.5, 6, 6.5, 7]},
+import numpy as np
+import pandas as pd
+
+# ---- Key levels (same idea as before; keep tiny) ----
+KEY_LEVELS = {
+    ("nfl","spreads"):  [1.5,2.5,3.0,3.5,6.0,6.5,7.0,7.5,9.5,10.0,10.5,13.5,14.0],
+    ("ncaaf","spreads"):[1.5,2.5,3.0,3.5,6.0,6.5,7.0,7.5,9.5,10.0,10.5,13.5,14.0],
+    ("cfl","spreads"):  [1.5,2.5,3.0,3.5,6.0,6.5,7.0,9.5,10.0,10.5],
+    ("nba","spreads"):  [1.5,2.5,3.0,4.5,5.5,6.5,7.5,9.5],
+    ("wnba","spreads"): [1.5,2.5,3.0,4.5,5.5,6.5,7.5],
+    ("mlb","totals"):   [7.0,7.5,8.0,8.5,9.0,9.5,10.0],
+    ("nfl","totals"):   [41.0,43.0,44.5,47.0,49.5,51.0,52.5],
+    ("ncaaf","totals"): [49.5,52.5,55.5,57.5,59.5,61.5],
+    ("nba","totals"):   [210,212.5,215,217.5,220,222.5,225],
+    ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
+    ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
 }
 
-# --- Flatten helpers (safe 1-D) ---
-def _flatten_keys(raw):
-    """Coerce nested iterables to a flat list of floats."""
-    import numpy as np
-    out = []
-    for k in (raw or []):
-        if k is None:
+def _keys_for(sport: str, market: str) -> np.ndarray:
+    sport = (sport or "").strip().lower()
+    market = (market or "").strip().lower()
+    ks = KEY_LEVELS.get((sport, market))
+    if ks is None:
+        ks = [1.5,2.5,3.0,3.5,6.0,6.5,7.0] if market == "spreads" else ([7.0,7.5,8.0,8.5,9.0] if market=="totals" else [])
+    # small, sorted float32 to reduce memory
+    return np.asarray(sorted(ks), dtype=np.float32)
+
+def add_resistance_features_lowmem(
+    df: pd.DataFrame,
+    *,
+    sport_col="Sport",
+    market_col="Market",
+    value_col="Value",
+    open_col="Open_Value",
+    sharp_move_col="Sharp_Move_Signal",         # optional
+    sharp_prob_shift_col="Sharp_Prob_Shift",    # optional
+    emit_levels_str=False,                      # keep False for lowest memory
+    broadcast=True                              # compute once per (G,M,B)
+) -> pd.DataFrame:
+    if df.empty:
+        for c in ("Was_Line_Resistance_Broken","Line_Resistance_Crossed_Count","SharpMove_Resistance_Break"):
+            df[c] = 0
+        if emit_levels_str:
+            df["Line_Resistance_Crossed_Levels_Str"] = ""
+        return df
+
+    # ---- 1) Build a minimal base frame (latest per Game/Market/Bookmaker) ----
+    keys_base = ["Game_Key","Market","Bookmaker"]
+    pick_cols = list({*keys_base, sport_col, market_col, value_col, open_col, sharp_move_col, sharp_prob_shift_col} - {None})
+    tmp = (
+        df[pick_cols]
+        .sort_values("Snapshot_Timestamp")  # you already have this; if not, drop this line
+        .drop_duplicates(subset=keys_base, keep="last")
+        .copy()
+    )
+
+    # ---- 2) Normalize & downcast (cheap) ----
+    tmp["_sport_"]  = tmp[sport_col].astype(str).str.strip().str.lower()
+    tmp["_market_"] = tmp[market_col].astype(str).str.strip().str.lower()
+
+    o = pd.to_numeric(tmp[open_col],  errors="coerce", downcast="float").astype("float32", copy=False)
+    v = pd.to_numeric(tmp[value_col], errors="coerce", downcast="float").astype("float32", copy=False)
+
+    # Preallocate outputs (small dtypes)
+    n = len(tmp)
+    crossed_count = np.zeros(n, dtype=np.int8)     # max keys < 128 ⇒ int8 is safe
+    broken        = np.zeros(n, dtype=bool)
+    levels_str    = None
+    if emit_levels_str:
+        levels_str = np.full(n, "", dtype=object)  # only if requested
+
+    # ---- 3) Vectorized per-slice computation (few slices ⇒ very light) ----
+    # Avoid per-row loops; we only loop over unique (sport, market) combos.
+    for (sp, mk), idx in tmp.groupby(["_sport_","_market_"]).indices.items():
+        idx = np.asarray(idx, dtype=np.int64)
+        keys = _keys_for(sp, mk)
+        if keys.size == 0:
             continue
-        if isinstance(k, (list, tuple, np.ndarray)):
-            for x in k:
-                try:
-                    out.append(float(x))
-                except Exception:
-                    pass
-        else:
-            try:
-                out.append(float(k))
-            except Exception:
-                pass
-    return out
 
-def _flatten_keys_to_midpoints(raw):
-    """
-    Convert 2-tuples like (141.5, 142.5) to a single midpoint (142.0).
-    Non-pairs are flattened to floats. Always returns a 1-D list of floats.
-    """
-    import numpy as np
-    out = []
-    for k in (raw or []):
-        if k is None:
+        is_spread = (mk == "spreads")
+
+        o_slice = o[idx]
+        v_slice = v[idx]
+        valid   = (~np.isnan(o_slice)) & (~np.isnan(v_slice))
+
+        if not valid.any():
             continue
-        if isinstance(k, (list, tuple, np.ndarray)):
-            kk = []
-            for x in k:
-                try:
-                    kk.append(float(x))
-                except Exception:
-                    pass
-            if len(kk) == 2:
-                out.append(0.5 * (kk[0] + kk[1]))
-            else:
-                out.extend(kk)
-        else:
-            try:
-                out.append(float(k))
-            except Exception:
-                pass
-    return out
 
-def was_line_resistance_broken(open_val, close_val, key_levels, market_type):
-    """Binary resistance check (keys must be scalars)."""
-    import pandas as pd
-    if pd.isna(open_val) or pd.isna(close_val):
-        return 0, []
+        # abs for spreads, raw for totals
+        a = np.where(is_spread, np.abs(o_slice), o_slice)
+        b = np.where(is_spread, np.abs(v_slice), v_slice)
 
-    mkt = (market_type or "").strip().lower()
-    if mkt == "spread":
-        mkt = "spreads"
+        lo = np.minimum(a, b)
+        hi = np.maximum(a, b)
 
-    try:
-        o = float(open_val); c = float(close_val)
-    except Exception:
-        return 0, []
+        # Count keys strictly between lo and hi using searchsorted (vectorized)
+        # left boundary exclusive ⇒ side='right' on lo
+        # right boundary exclusive ⇒ side='left' on hi
+        lo_idx = np.searchsorted(keys, lo[valid], side="right")
+        hi_idx = np.searchsorted(keys, hi[valid], side="left")
+        cnt    = (hi_idx - lo_idx).astype(np.int8)
 
-    ks = _flatten_keys_to_midpoints(key_levels)
+        crossed_count[idx[valid]] = cnt
+        broken[idx[valid]] = cnt > 0
 
-    if mkt == "spreads":
-        o, c = abs(o), abs(c)
-        ks = [abs(k) for k in ks]
+        if emit_levels_str:
+            # Build strings only where cnt>0, slice keys once per row (still light; rows with cnt=0 skip)
+            pos = idx[valid][cnt > 0]
+            if len(pos):
+                # For each row, turn the slice of keys into a compact string
+                for j in pos:
+                    lo_j = lo[j]
+                    hi_j = hi[j]
+                    s = keys[(keys > lo_j) & (keys < hi_j)]
+                    # stringify without trailing .0
+                    levels_str[j] = "|".join(str(float(x)).rstrip('0').rstrip('.') for x in s)
 
-    lo, hi = (min(o, c), max(o, c))
-    crossed = sorted([k for k in ks if (lo < k < hi)])
-    return int(bool(crossed)), crossed
+    # ---- 4) Assign results on the base, then broadcast back ----
+    tmp["Line_Resistance_Crossed_Count"] = crossed_count
+    tmp["Was_Line_Resistance_Broken"]    = broken.astype(np.uint8)
+    if emit_levels_str:
+        tmp["Line_Resistance_Crossed_Levels_Str"] = levels_str
 
-def compute_line_resistance_flag(df, source='moves'):
-    """
-    Adds to df (keeps existing columns intact):
-      - Was_Line_Resistance_Broken      : int {0,1}
-      - Line_Resistance_Crossed_Levels  : list[float]
-      - Line_Resistance_Crossed_Count   : int
-      - Nearest_Key                     : float
-      - Key_Distance                    : float
-      - Signed_Key_Dist                 : float
-      - Within_One_Tick_Of_Key          : bool
-      - Would_Cross_Key_Next            : bool
-      - Keys_Crossed_Since_Open         : int
-      - Crossed_Key_Any                 : bool
-      - Line_Resistance_Factor          : float in [0,1]
-    """
-    import numpy as np, pandas as pd
-
-    # ---- Empty / None → neutral columns ----
-    if df is None or df.empty:
-        out = df.copy()
-        out["Was_Line_Resistance_Broken"] = 0
-        out["Line_Resistance_Crossed_Levels"] = [[]] * len(out)
-        out["Line_Resistance_Crossed_Count"] = 0
-        for c, v in [
-            ("Nearest_Key", np.nan), ("Key_Distance", np.nan), ("Signed_Key_Dist", np.nan),
-            ("Within_One_Tick_Of_Key", False), ("Would_Cross_Key_Next", False),
-            ("Keys_Crossed_Since_Open", 0), ("Crossed_Key_Any", False), ("Line_Resistance_Factor", 0.5),
-        ]:
-            out[c] = v
-        return out
-
-    out = df.copy()
-
-    # ---- helpers ----
-    def _sigmoid(x): return 1.0 / (1.0 + np.exp(-x))
-
-    def _robust_z(x):
-        x = pd.to_numeric(x, errors="coerce").astype(float)
-        med = np.nanmedian(x)
-        mad = np.nanmedian(np.abs(x - med))
-        if not np.isfinite(mad) or mad == 0.0:
-            mad = 1.0
-        return (x - med) / (1.4826 * mad)
-
-    def _key_levels(sport, market):
-        # sport should already be normalized to alias; market is lowercased
-        try:
-            sport = (sport or "")
-            market = (market or "").lower()
-            # support singular/legacy keys too
-            if market == "spread":
-                market = "spreads"
-            if market == "total":
-                market = "totals"
-            # Look up by sport (as-is), fallback to uppercased sport key if needed
-            block = KEY_LINE_RESISTANCE.get(sport) or KEY_LINE_RESISTANCE.get((sport or "").upper(), {})
-            return block.get(market, [])
-        except Exception:
-            return []
-
-    def _opening_line_from_row(row):
-        return row.get("Open_Value") if source == "moves" else row.get("First_Line_Value")
-
-    # ---- Normalize sport/market columns ----
-    sport_raw = out.get("Sport")
-    if sport_raw is not None:
-        sport_up = sport_raw.astype("string").str.upper()
-        # If you have SPORT_ALIAS mapping, apply it; else keep uppercased
-        try:
-            out["Sport"] = sport_up.map(SPORT_ALIAS).fillna(sport_up)
-        except Exception:
-            out["Sport"] = sport_up
+    # Optional tie-in (fully vectorized)
+    if sharp_move_col in tmp.columns:
+        sm = pd.to_numeric(tmp[sharp_move_col], errors="coerce").fillna(0).astype(np.int8)
+        tmp["SharpMove_Resistance_Break"] = ((tmp["Was_Line_Resistance_Broken"] == 1) & (sm == 1)).astype(np.uint8)
+    elif sharp_prob_shift_col in tmp.columns:
+        ps = pd.to_numeric(tmp[sharp_prob_shift_col], errors="coerce").fillna(0.0).astype("float32")
+        tmp["SharpMove_Resistance_Break"] = ((tmp["Was_Line_Resistance_Broken"] == 1) & (ps > 0)).astype(np.uint8)
     else:
-        out["Sport"] = pd.Series(pd.NA, index=out.index, dtype="string")
+        tmp["SharpMove_Resistance_Break"] = tmp["Was_Line_Resistance_Broken"].astype(np.uint8)
 
-    if "Market" in out:
-        out["Market"] = out["Market"].astype("string").str.lower().replace({"spread": "spreads", "total": "totals"})
-    else:
-        out["Market"] = pd.Series("", index=out.index, dtype="string")
+    # Keep only what we need to merge
+    keep_cols = ["Line_Resistance_Crossed_Count","Was_Line_Resistance_Broken","SharpMove_Resistance_Break"]
+    if emit_levels_str:
+        keep_cols.append("Line_Resistance_Crossed_Levels_Str")
+    out = tmp[keys_base + keep_cols]
 
-    # ---- Binary break fields (nested so helpers are visible) ----
-    def _apply_break(row):
-        open_val = _opening_line_from_row(row)
-        close_val = row.get("Value")
-        market = row.get("Market", "")
-        keys = _flatten_keys_to_midpoints(_key_levels(row.get("Sport", ""), market))
-        flag, lvls = was_line_resistance_broken(open_val, close_val, keys, market)
-        return pd.Series({
-            "Was_Line_Resistance_Broken": flag,
-            "Line_Resistance_Crossed_Levels": lvls,
-            "Line_Resistance_Crossed_Count": len(lvls),
-        })
+    if not broadcast:
+        # If you really want row-by-row (not recommended), you could merge on (Game,Market,Bookmaker,Outcome).
+        pass
 
-    break_df = out.apply(_apply_break, axis=1)
-    out = pd.concat([out, break_df], axis=1)
+    # Broadcast to the full df (adds ~3 tiny columns; no list types)
+    df = df.merge(out, on=keys_base, how="left", copy=False)
+    df["Line_Resistance_Crossed_Count"] = df["Line_Resistance_Crossed_Count"].fillna(0).astype("int16")
+    df["Was_Line_Resistance_Broken"]    = df["Was_Line_Resistance_Broken"].fillna(0).astype("uint8")
+    df["SharpMove_Resistance_Break"]    = df["SharpMove_Resistance_Break"].fillna(0).astype("uint8")
+    if emit_levels_str:
+        df["Line_Resistance_Crossed_Levels_Str"] = df["Line_Resistance_Crossed_Levels_Str"].fillna("")
 
-    # ---- Continuous diagnostics ----
-    val_now  = pd.to_numeric(out.get("Value", pd.Series(np.nan, index=out.index)), errors="coerce")
-    val_open = (pd.to_numeric(out.get("Open_Value", pd.Series(np.nan, index=out.index)), errors="coerce")
-                if source == "moves"
-                else pd.to_numeric(out.get("First_Line_Value", pd.Series(np.nan, index=out.index)), errors="coerce"))
-    val_prev = pd.to_numeric(out.get("Prev_Value", pd.Series(np.nan, index=out.index)), errors="coerce")
-    market   = out["Market"]
+    # Clean temp cols
+    for c in ("_sport_","_market_"):
+        if c in df.columns:
+            df.drop(columns=c, inplace=True, errors="ignore")
 
-    is_spread = market.eq("spreads").to_numpy()
+    return df
 
-    val_now_arr  = val_now.to_numpy()
-    val_open_arr = val_open.to_numpy()
-    val_prev_arr = val_prev.to_numpy()
-
-    abs_now  = np.where(is_spread, np.abs(val_now_arr),  val_now_arr)
-    abs_open = np.where(is_spread, np.abs(val_open_arr), val_open_arr)
-    abs_prev = np.where(is_spread, np.abs(val_prev_arr), val_prev_arr)
-
-    # ---- Nearest key (force scalar!) ----
-    nearest_key = np.full(len(out), np.nan, float)
-    key_dist    = np.full(len(out), np.nan, float)
-
-    for i in range(len(out)):
-        keys = _flatten_keys_to_midpoints(_key_levels(out.at[i, "Sport"], out.at[i, "Market"]))
-        if not keys or not np.isfinite(abs_now[i]):
-            continue
-        if is_spread[i]:
-            keys = [abs(float(k)) for k in keys]
-        ks_arr = np.asarray(keys, dtype=float)   # 1-D
-        dists  = np.abs(abs_now[i] - ks_arr)     # (m,)
-        j = int(np.argmin(dists))
-        nearest_key[i] = float(ks_arr[j])        # <- scalar float
-        key_dist[i]    = float(dists[j])         # <- scalar float
-
-    # after computing nearest_key/key_dist arrays:
-    out["Nearest_Key"]  = nearest_key
-    out["Key_Distance"] = key_dist
-    
-    # --- HARD COERCE to 1-D floats; any list/tuple/ndarray becomes NaN ---
-    for col in ["Nearest_Key", "Key_Distance"]:
-        s = out[col]
-        mask_listy = s.apply(lambda x: isinstance(x, (list, tuple, np.ndarray)))
-        if mask_listy.any():
-            s = s.where(~mask_listy, np.nan)
-        out[col] = pd.to_numeric(s, errors="coerce").astype(float)
-
-    # ---- Hard-coerce Nearest_Key to 1-D float array (no list/tuple leakage) ----
-    nk_series = out["Nearest_Key"]
-    nk = pd.to_numeric(
-        nk_series.where(~nk_series.apply(lambda x: isinstance(x, (list, tuple, np.ndarray))), np.nan),
-        errors="coerce"
-    ).astype(float).to_numpy()
-
-    # Vector math (now safe 1-D)
-    prev_d = np.abs(abs_prev - nk)
-    open_d = np.abs(abs_open - nk)
-    now_d  = np.abs(abs_now  - nk)
-
-    has_prev = np.isfinite(abs_prev)
-    has_open = np.isfinite(abs_open)
-
-    toward_prev = (prev_d > now_d)
-    toward_open = (open_d  > now_d)
-
-    toward_mask = np.where(has_prev, toward_prev.astype(float),
-                   np.where(has_open, toward_open.astype(float), np.nan))
-    dir_sign = np.where(np.isnan(toward_mask), 0.0, np.where(toward_mask > 0, 1.0, -1.0))
-    out["Signed_Key_Dist"] = out["Key_Distance"] * (-dir_sign)
-
-    near_window = np.where(is_spread, 0.5, 1.0)
-    out["Within_One_Tick_Of_Key"] = (out["Key_Distance"].to_numpy() <= near_window)
-
-    tick     = np.where(is_spread, 0.5, 1.0)
-    last_dir = np.sign(abs_now - abs_prev)
-    abs_next = np.where(np.isfinite(abs_prev), abs_now + tick * last_dir,
-                        np.where(out["Within_One_Tick_Of_Key"].to_numpy(), abs_now + tick, np.nan))
-    lo = np.minimum(abs_now, abs_next)
-    hi = np.maximum(abs_now, abs_next)
-    would_cross = (lo < nk) & (nk <= hi)
-    out["Would_Cross_Key_Next"] = np.where(np.isnan(abs_next), out["Within_One_Tick_Of_Key"].to_numpy(), would_cross)
-
-    # Cross count since open (flatten keys here too)
-    def _cross_count(a, b, ks, spread_mode):
-        ks = _flatten_keys_to_midpoints(ks)
-        if not (np.isfinite(a) and np.isfinite(b)):
-            return 0
-        if spread_mode:
-            ks = [abs(float(k)) for k in (ks or [])]
-            a, b = abs(a), abs(b)
-        lo_, hi_ = (min(a, b), max(a, b))
-        return int(sum((lo_ <= k <= hi_) for k in ks))
-
-    crossed_counts = []
-    for i in range(len(out)):
-        ks = _key_levels(out.at[i, "Sport"], out.at[i, "Market"])
-        crossed_counts.append(_cross_count(val_open_arr[i], val_now_arr[i], ks, bool(is_spread[i])))
-
-    out["Keys_Crossed_Since_Open"] = crossed_counts
-    out["Crossed_Key_Any"] = (out["Keys_Crossed_Since_Open"] > 0)
-
-    # Sharp book + time terms (no Active_Signal_Count)
-    book = out.get("Book", pd.Series("", index=out.index)).astype("string").str.lower()
-    is_originator = book.isin(SHARP_BOOKS).astype(float)
-
-    if "Minutes_To_Game" in out.columns:
-        mtg = pd.to_numeric(out["Minutes_To_Game"], errors="coerce")
-        time_term = _sigmoid((120.0 - mtg) / 40.0).fillna(0.5)
-    else:
-        time_term = pd.Series(0.5, index=out.index)
-
-    # Final resistance score
-    w_near, w_cross, w_limit, w_orig, w_time, w_toward = 0.45, 0.15, 0.10, 0.12, 0.10, 0.08
-    sigma = 0.35
-    near_term   = np.exp(-(np.square(out["Key_Distance"])) / (2 * sigma * sigma))
-    toward_term = (dir_sign > 0).astype(float)
-    limit_z = _robust_z(out["Limit"]) if "Limit" in out.columns else pd.Series(0.0, index=out.index)
-
-    raw = (w_near * near_term
-           + w_cross  * out["Would_Cross_Key_Next"].astype(float)
-           + w_limit  * np.clip(limit_z, -3, 3)
-           + w_orig   * is_originator
-           + w_time   * time_term
-           + w_toward * toward_term)
-
-    out["Line_Resistance_Factor"] = _sigmoid(raw)
-    return out
 
 
 
@@ -4188,7 +4073,18 @@ def apply_blended_sharp_score(
         (df['Limit'] >= 2500) &
         (df['Value'] == df['Open_Value'])
     ).astype(int)
-        
+    df = add_resistance_features_lowmem(
+        df,
+        sport_col="Sport",
+        market_col="Market",
+        value_col="Value",
+        open_col="Open_Value",
+        sharp_move_col="Sharp_Move_Signal",        # if present
+        sharp_prob_shift_col="Sharp_Prob_Shift",   # else fallback
+        emit_levels_str=False,                     # turn on only if UI needs the string
+        broadcast=True
+    )
+     
     
     # === Cross-market support (optional)
     df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
