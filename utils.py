@@ -1948,15 +1948,14 @@ SPORT_ALIAS = {
 import numpy as np
 import pandas as pd
 
-# ---- Key levels (same idea as before; keep tiny) ----
 KEY_LEVELS = {
-    ("nfl","spreads"):  [1.5,2.5,3.0,3.5,6.0,6.5,7.0,7.5,9.5,10.0,10.5,13.5,14.0],
-    ("ncaaf","spreads"):[1.5,2.5,3.0,3.5,6.0,6.5,7.0,7.5,9.5,10.0,10.5,13.5,14.0],
-    ("cfl","spreads"):  [1.5,2.5,3.0,3.5,6.0,6.5,7.0,9.5,10.0,10.5],
-    ("nba","spreads"):  [1.5,2.5,3.0,4.5,5.5,6.5,7.5,9.5],
-    ("wnba","spreads"): [1.5,2.5,3.0,4.5,5.5,6.5,7.5],
-    ("mlb","totals"):   [7.0,7.5,8.0,8.5,9.0,9.5,10.0],
-    ("nfl","totals"):   [41.0,43.0,44.5,47.0,49.5,51.0,52.5],
+    ("nfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
+    ("ncaaf","spreads"):[1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
+    ("cfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,9.5,10,10.5],
+    ("nba","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
+    ("wnba","spreads"): [1.5,2.5,3,4.5,5.5,6.5,7.5],
+    ("mlb","totals"):   [7,7.5,8,8.5,9,9.5,10],
+    ("nfl","totals"):   [41,43,44.5,47,49.5,51,52.5],
     ("ncaaf","totals"): [49.5,52.5,55.5,57.5,59.5,61.5],
     ("nba","totals"):   [210,212.5,215,217.5,220,222.5,225],
     ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
@@ -1968,56 +1967,83 @@ def _keys_for(sport: str, market: str) -> np.ndarray:
     market = (market or "").strip().lower()
     ks = KEY_LEVELS.get((sport, market))
     if ks is None:
-        ks = [1.5,2.5,3.0,3.5,6.0,6.5,7.0] if market == "spreads" else ([7.0,7.5,8.0,8.5,9.0] if market=="totals" else [])
-    # small, sorted float32 to reduce memory
+        ks = [1.5,2.5,3,3.5,6,6.5,7] if market == "spreads" else ([7,7.5,8,8.5,9] if market=="totals" else [])
     return np.asarray(sorted(ks), dtype=np.float32)
 
 def add_resistance_features_lowmem(
     df: pd.DataFrame,
     *,
-    sport_col="Sport",
-    market_col="Market",
-    value_col="Value",
-    open_col="Open_Value",
-    sharp_move_col="Sharp_Move_Signal",         # optional
-    sharp_prob_shift_col="Sharp_Prob_Shift",    # optional
-    emit_levels_str=False,                      # keep False for lowest memory
-    broadcast=True                              # compute once per (G,M,B)
+    sport_col: str = "Sport",
+    market_col: str = "Market",
+    value_col: str = "Value",
+    odds_col: str = "Odds_Price",
+    open_col: str = "Open_Value",
+    open_odds_col: str = "Open_Odds",
+    sharp_move_col: str | None = "Sharp_Move_Signal",
+    sharp_prob_shift_col: str | None = "Sharp_Prob_Shift",
+    emit_levels_str: bool = False,
+    broadcast: bool = True,
+    skip_sort: bool = False,
 ) -> pd.DataFrame:
     if df.empty:
+        out = df.copy()
         for c in ("Was_Line_Resistance_Broken","Line_Resistance_Crossed_Count","SharpMove_Resistance_Break"):
-            df[c] = 0
+            out[c] = 0
         if emit_levels_str:
-            df["Line_Resistance_Crossed_Levels_Str"] = ""
-        return df
+            out["Line_Resistance_Crossed_Levels_Str"] = ""
+        return out
 
-    # ---- 1) Build a minimal base frame (latest per Game/Market/Bookmaker) ----
-    keys_base = ["Game_Key","Market","Bookmaker"]
-    pick_cols = list({*keys_base, sport_col, market_col, value_col, open_col, sharp_move_col, sharp_prob_shift_col} - {None})
-    tmp = (
-        df[pick_cols]
-        .sort_values("Snapshot_Timestamp")  # you already have this; if not, drop this line
-        .drop_duplicates(subset=keys_base, keep="last")
-        .copy()
-    )
+    df = df.copy()
 
-    # ---- 2) Normalize & downcast (cheap) ----
+    # optional sort only for snapshot-shaped data
+    if (not skip_sort) and ("Snapshot_Timestamp" in df.columns):
+        if not pd.api.types.is_datetime64_any_dtype(df["Snapshot_Timestamp"]):
+            df["Snapshot_Timestamp"] = pd.to_datetime(df["Snapshot_Timestamp"], errors="coerce")
+        df = df.sort_values("Snapshot_Timestamp")
+
+    # ensure one row per key
+    keys_base = [c for c in ["Game_Key","Market","Outcome","Bookmaker"] if c in df.columns]
+    if keys_base:
+        df = df.drop_duplicates(keys_base, keep="last")
+
+    # hydrate fallbacks for opens
+    if open_col not in df.columns:
+        for alt in ["First_Line_Value", value_col]:
+            if alt in df.columns:
+                df[open_col] = df[alt]; break
+        if open_col not in df.columns:
+            df[open_col] = np.nan
+
+    if open_odds_col not in df.columns:
+        for alt in ["First_Odds", odds_col]:
+            if alt in df.columns:
+                df[open_odds_col] = df[alt]; break
+        if open_odds_col not in df.columns:
+            df[open_odds_col] = np.nan
+
+    # numeric coercions
+    for c in (value_col, open_col, odds_col, open_odds_col):
+        if c in df.columns and df[c].dtype == "object":
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # working slice
+    requested = list({*(keys_base or []), sport_col, market_col, value_col, odds_col,
+                      open_col, open_odds_col, sharp_move_col, sharp_prob_shift_col})
+    pick_cols = [c for c in requested if c and c in df.columns]
+    tmp = df[pick_cols].copy()
+
+    # normalize
     tmp["_sport_"]  = tmp[sport_col].astype(str).str.strip().str.lower()
     tmp["_market_"] = tmp[market_col].astype(str).str.strip().str.lower()
-
     o = pd.to_numeric(tmp[open_col],  errors="coerce", downcast="float").astype("float32", copy=False)
     v = pd.to_numeric(tmp[value_col], errors="coerce", downcast="float").astype("float32", copy=False)
 
-    # Preallocate outputs (small dtypes)
     n = len(tmp)
-    crossed_count = np.zeros(n, dtype=np.int8)     # max keys < 128 ⇒ int8 is safe
+    crossed_count = np.zeros(n, dtype=np.int8)
     broken        = np.zeros(n, dtype=bool)
-    levels_str    = None
-    if emit_levels_str:
-        levels_str = np.full(n, "", dtype=object)  # only if requested
+    levels_str    = np.full(n, "", dtype=object) if emit_levels_str else None
 
-    # ---- 3) Vectorized per-slice computation (few slices ⇒ very light) ----
-    # Avoid per-row loops; we only loop over unique (sport, market) combos.
+    # vectorized per (sport, market)
     for (sp, mk), idx in tmp.groupby(["_sport_","_market_"]).indices.items():
         idx = np.asarray(idx, dtype=np.int64)
         keys = _keys_for(sp, mk)
@@ -2025,50 +2051,42 @@ def add_resistance_features_lowmem(
             continue
 
         is_spread = (mk == "spreads")
-
         o_slice = o[idx]
         v_slice = v[idx]
         valid   = (~np.isnan(o_slice)) & (~np.isnan(v_slice))
-
         if not valid.any():
             continue
 
-        # abs for spreads, raw for totals
         a = np.where(is_spread, np.abs(o_slice), o_slice)
         b = np.where(is_spread, np.abs(v_slice), v_slice)
-
         lo = np.minimum(a, b)
         hi = np.maximum(a, b)
 
-        # Count keys strictly between lo and hi using searchsorted (vectorized)
-        # left boundary exclusive ⇒ side='right' on lo
-        # right boundary exclusive ⇒ side='left' on hi
-        lo_idx = np.searchsorted(keys, lo[valid], side="right")
-        hi_idx = np.searchsorted(keys, hi[valid], side="left")
-        cnt    = (hi_idx - lo_idx).astype(np.int8)
+        # count crossed keys (exclusive bounds)
+        lo_v = lo[valid]
+        hi_v = hi[valid]
+        lo_idx = np.searchsorted(keys, lo_v, side="right")
+        hi_idx = np.searchsorted(keys, hi_v, side="left")
+        cnt = (hi_idx - lo_idx).astype(np.int8)
 
-        crossed_count[idx[valid]] = cnt
-        broken[idx[valid]] = cnt > 0
+        target_rows = idx[valid]
+        crossed_count[target_rows] = cnt
+        broken[target_rows] = cnt > 0
 
-        if emit_levels_str:
-            # Build strings only where cnt>0, slice keys once per row (still light; rows with cnt=0 skip)
-            pos = idx[valid][cnt > 0]
-            if len(pos):
-                # For each row, turn the slice of keys into a compact string
-                for j in pos:
-                    lo_j = lo[j]
-                    hi_j = hi[j]
-                    s = keys[(keys > lo_j) & (keys < hi_j)]
-                    # stringify without trailing .0
-                    levels_str[j] = "|".join(str(float(x)).rstrip('0').rstrip('.') for x in s)
+        if emit_levels_str and np.any(cnt > 0):
+            # build strings using relative indices (fixes indexing bug)
+            kpos = np.flatnonzero(cnt > 0)
+            for k in kpos:
+                j = target_rows[k]           # global row index
+                s = keys[(keys > lo_v[k]) & (keys < hi_v[k])]
+                if s.size:
+                    levels_str[j] = "|".join(str(float(x)).rstrip("0").rstrip(".") for x in s)
 
-    # ---- 4) Assign results on the base, then broadcast back ----
     tmp["Line_Resistance_Crossed_Count"] = crossed_count
     tmp["Was_Line_Resistance_Broken"]    = broken.astype(np.uint8)
     if emit_levels_str:
         tmp["Line_Resistance_Crossed_Levels_Str"] = levels_str
 
-    # Optional tie-in (fully vectorized)
     if sharp_move_col in tmp.columns:
         sm = pd.to_numeric(tmp[sharp_move_col], errors="coerce").fillna(0).astype(np.int8)
         tmp["SharpMove_Resistance_Break"] = ((tmp["Was_Line_Resistance_Broken"] == 1) & (sm == 1)).astype(np.uint8)
@@ -2078,31 +2096,26 @@ def add_resistance_features_lowmem(
     else:
         tmp["SharpMove_Resistance_Break"] = tmp["Was_Line_Resistance_Broken"].astype(np.uint8)
 
-    # Keep only what we need to merge
     keep_cols = ["Line_Resistance_Crossed_Count","Was_Line_Resistance_Broken","SharpMove_Resistance_Break"]
     if emit_levels_str:
         keep_cols.append("Line_Resistance_Crossed_Levels_Str")
-    out = tmp[keys_base + keep_cols]
 
-    if not broadcast:
-        # If you really want row-by-row (not recommended), you could merge on (Game,Market,Bookmaker,Outcome).
-        pass
+    # merge back (guard empty key set)
+    if keys_base:
+        df = df.merge(tmp[keys_base + keep_cols], on=keys_base, how="left", copy=False)
+    else:
+        # align by index if no keys to merge on
+        for c in keep_cols:
+            df[c] = tmp[c].values
 
-    # Broadcast to the full df (adds ~3 tiny columns; no list types)
-    df = df.merge(out, on=keys_base, how="left", copy=False)
     df["Line_Resistance_Crossed_Count"] = df["Line_Resistance_Crossed_Count"].fillna(0).astype("int16")
     df["Was_Line_Resistance_Broken"]    = df["Was_Line_Resistance_Broken"].fillna(0).astype("uint8")
     df["SharpMove_Resistance_Break"]    = df["SharpMove_Resistance_Break"].fillna(0).astype("uint8")
     if emit_levels_str:
         df["Line_Resistance_Crossed_Levels_Str"] = df["Line_Resistance_Crossed_Levels_Str"].fillna("")
 
-    # Clean temp cols
-    for c in ("_sport_","_market_"):
-        if c in df.columns:
-            df.drop(columns=c, inplace=True, errors="ignore")
-
+    df.drop(columns=["_sport_","_market_"], inplace=True, errors="ignore")
     return df
-
 
 
 
