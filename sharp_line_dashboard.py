@@ -107,7 +107,7 @@ from google.cloud import storage, bigquery, bigquery_storage_v1
 import pandas_gbq
 from pandas_gbq import to_gbq
 import google.api_core.exceptions
-
+from utils_resistance import add_resistance_features_lowmem
         
 
               
@@ -2255,21 +2255,70 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         status.write(f"🚧 Training model for `{market.upper()}`...")
     
         df_market = df_bt[df_bt['Market'].astype(str).str.lower() == market].copy()
-    
-        # Totals: dedup snapshots
+
+        df_market = df_bt.loc[df_bt['Market'].astype(str).str.lower() == market].copy()
+        if df_market.empty:
+            status.warning(f"⚠️ No data for {market.upper()} — skipping.")
+            pb.progress(min(100, max(0, pct)))
+            continue
+        
+        # Totals: keep latest-per-outcome snapshot
         if market == "totals":
             df_market = (
-                df_market
-                .sort_values(['Snapshot_Timestamp'])
-                .drop_duplicates(subset=['Game_Key','Bookmaker','Market','Outcome'], keep='last')
+                df_market.sort_values(['Snapshot_Timestamp'])
+                         .drop_duplicates(subset=['Game_Key','Bookmaker','Market','Outcome'], keep='last')
+                         .reset_index(drop=True)
             )
-    
-        df_market.reset_index(drop=True, inplace=True)
-    
+        
+        # Defuse categoricals that can raise setitem errors
+        for col in ("Sport","Market","Bookmaker"):
+            if col in df_market.columns and str(df_market[col].dtype).startswith("category"):
+                df_market[col] = df_market[col].astype(str)
+        
+        # Your existing FE before resistance
         df_market = compute_small_book_liquidity_features(df_market)
         df_market = add_favorite_context_flag(df_market)
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
-    
+        
+        # Ensure an "open" column (your schema prefers First_Line_Value)
+        open_col = "First_Line_Value" if "First_Line_Value" in df_market.columns else "Open_Value"
+        if open_col not in df_market.columns or df_market[open_col].isna().all():
+            df_market = df_market.sort_values("Snapshot_Timestamp")
+            earliest = (
+                df_market.dropna(subset=["Value"])
+                         .drop_duplicates(subset=["Game_Key","Market","Bookmaker"], keep="first")
+                         .rename(columns={"Value": "First_Line_Value"})[["Game_Key","Market","Bookmaker","First_Line_Value"]]
+            )
+            df_market = df_market.merge(earliest, on=["Game_Key","Market","Bookmaker"], how="left")
+            open_col = "First_Line_Value"
+        
+        # === Low-memory resistance (compute once per (G,M,B), broadcast) ===
+        df_market = add_resistance_features_lowmem(
+            df_market,
+            sport_col="Sport",
+            market_col="Market",
+            value_col="Value",
+            open_col=open_col,
+            sharp_move_col="Sharp_Move_Signal" if "Sharp_Move_Signal" in df_market.columns else None,
+            sharp_prob_shift_col="Sharp_Prob_Shift" if "Sharp_Prob_Shift" in df_market.columns else None,
+            emit_levels_str=False,     # training: keep memory small
+            broadcast=True
+        )
+        
+        # Small numeric dtypes to save RAM (training only)
+        df_market["Was_Line_Resistance_Broken"]  = df_market["Was_Line_Resistance_Broken"].fillna(0).astype("uint8")
+        df_market["Line_Resistance_Crossed_Count"] = df_market["Line_Resistance_Crossed_Count"].fillna(0).astype("int16")
+        df_market["SharpMove_Resistance_Break"]  = df_market["SharpMove_Resistance_Break"].fillna(0).astype("uint8")
+        
+        # Optional: zero out for h2h if you don't want resistance there
+        if market == "h2h":
+            df_market[["Was_Line_Resistance_Broken","Line_Resistance_Crossed_Count","SharpMove_Resistance_Break"]] = 0
+        
+        # === Make sure these are in your feature set ===
+        resist_feats = ["Was_Line_Resistance_Broken","Line_Resistance_Crossed_Count","SharpMove_Resistance_Break"]
+       
+
+
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
@@ -2839,7 +2888,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- start with your manual core list ---
         features = [
             # 🔹 Core sharp signals
-            'Sharp_Move_Signal',
+            #'Sharp_Move_Signal',
             'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
             'Book_lift_x_Magnitude','Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
@@ -2850,7 +2899,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
-            'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
+            #'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
             'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec','Sharp_Leads',
@@ -2870,6 +2919,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             
             'Pct_Line_Move_From_Opening','Pct_Line_Move_Bin','Potential_Overmove_Flag',
             'Potential_Overmove_Total_Pct_Flag','Mispricing_Flag',
+            'Was_Line_Resistance_Broken','Line_Resistance_Crossed_Count','SharpMove_Resistance_Break',
         
             # 🧠 Cross-market alignment
             'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
