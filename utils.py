@@ -3675,7 +3675,8 @@ def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
     return df_sc
 
 
-# === Key levels registry ===
+
+# Registry for key levels (your list)
 TRAIN_KEY_LEVELS = {
     ("nfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
     ("ncaaf","spreads"):[1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
@@ -3697,6 +3698,306 @@ def _keys_for_training(sport: str, market: str) -> np.ndarray:
     if ks is None:
         ks = [1.5,2.5,3,3.5,6,6.5,7] if m == "spreads" else ([7,7.5,8,8.5,9] if m=="totals" else [])
     return np.asarray(ks, dtype=np.float32)
+
+def _amer_to_prob(o):
+    o = pd.to_numeric(o, errors="coerce")
+    return np.where(o > 0, 100.0 / (o + 100.0),
+           np.where(o < 0, (-o) / ((-o) + 100.0), np.nan))
+
+def _dist_to_next_key_training(x, keys_arr, is_spread: bool):
+    if pd.isna(x) or keys_arr.size == 0: return np.nan
+    v = abs(float(x)) if is_spread else float(x)
+    pos = np.searchsorted(keys_arr, v, side="left")
+    if pos >= len(keys_arr): return 0.0
+    return float(max(0.0, keys_arr[pos] - v))
+
+def compute_snapshot_micro_features_training(
+    df: pd.DataFrame,
+    *,
+    sport_col="Sport",
+    market_col="Market",
+    value_col="Value",
+    open_col="First_Line_Value",
+    prob_col="Implied_Prob",
+    price_col="Odds_Price",
+) -> pd.DataFrame:
+    if df.empty: 
+        return df
+
+    out = df.copy()
+    out["_sport_"]  = out[sport_col].astype(str).str.lower().str.strip()
+    out["_market_"] = out[market_col].astype(str).str.lower().str.strip()
+    out["_book_"]   = out["Bookmaker"].astype(str).str.lower().str.strip()
+
+    cols = ["Game_Key","Market","Bookmaker","Outcome", value_col, open_col, "_sport_","_market_","_book_"]
+    if prob_col in out.columns:  cols.append(prob_col)
+    if price_col in out.columns: cols.append(price_col)
+    per_outcome = out[cols].copy()
+
+    g = per_outcome.groupby(["Game_Key","Market","Bookmaker"], sort=False)
+
+    # Hold & juice
+    if prob_col in per_outcome.columns:
+        hold = g[prob_col].sum().rename("Implied_Hold_Book")
+    elif price_col in per_outcome.columns:
+        per_outcome["_p_"] = _amer_to_prob(per_outcome[price_col])
+        hold = g["_p_"].sum().rename("Implied_Hold_Book")
+    else:
+        hold = pd.Series(dtype="float32", name="Implied_Hold_Book")
+
+    if price_col in per_outcome.columns:
+        pm = g[price_col].agg(["max","min"])
+        juice_abs = (pm["max"] - pm["min"]).astype("float32").rename("Juice_Abs_Delta")
+    else:
+        juice_abs = pd.Series(dtype="float32", name="Juice_Abs_Delta")
+
+    two_sided = g["Outcome"].nunique().rename("Two_Sided_Offered").astype(np.uint8)
+
+    agg = g.agg(
+        sport = ("_sport_", "last"),
+        market= ("_market_","last"),
+        v_last= (value_col, "last"),
+        v_open= (open_col,  "last"),
+    ).join([hold, juice_abs, two_sided]).reset_index()
+
+    # Dist / Pressure
+    v      = pd.to_numeric(agg["v_last"], errors="coerce").astype("float32")
+    v_open = pd.to_numeric(agg["v_open"], errors="coerce").astype("float32")
+    dist   = np.full(len(agg), np.nan, dtype="float32")
+
+    for (mk, sp), idx in agg.groupby(["market","sport"]).indices.items():
+        idx = np.asarray(idx, dtype=np.int64)
+        keys_arr = _keys_for_training(sp, mk)
+        is_spread = (mk == "spreads")
+        for j in idx:
+            dist[j] = _dist_to_next_key_training(v.iloc[j], keys_arr, is_spread)
+
+    agg["Dist_To_Next_Key"] = dist
+    cur = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values)
+    opn = np.where(agg["market"].values == "spreads", np.abs(v_open.values), v_open.values)
+    dv  = np.abs(cur - opn)
+    den = np.where(np.isnan(dist) | (dist <= 0), 1.0, dist)
+    agg["Key_Corridor_Pressure"] = (dv / den).astype("float32")
+
+    # Consensus / outlier (final snapshot)
+    val_norm = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values).astype("float32")
+    agg["_val_norm_"] = val_norm
+    agg["Book_PctRank_Line"] = (
+        agg.groupby(["Game_Key","Market"])["_val_norm_"].rank(pct=True, method="average").astype("float32")
+    )
+
+    try:
+        from config import SHARP_BOOKS  # your registry
+    except Exception:
+        SHARP_BOOKS = set(["pinnacle","betonlineag","lowvig","betfair_ex_uk","betfair_ex_eu","smarkets","betus"])
+    mask_sharp = agg["Bookmaker"].astype(str).str.lower().isin(SHARP_BOOKS)
+    sharp_median = agg.loc[mask_sharp].groupby(["Game_Key","Market"])["_val_norm_"].median()
+    agg = agg.merge(sharp_median.rename("sharp_median"), on=["Game_Key","Market"], how="left")
+    agg["Book_Line_Diff_vs_SharpMedian"] = (
+        agg["_val_norm_"] - agg["sharp_median"].fillna(agg["_val_norm_"])
+    ).astype("float32")
+
+    OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL = 0.5, 0.5
+    thr = np.where(agg["market"].values == "spreads", OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL).astype("float32")
+    agg["Outlier_Flag_SharpBooks"] = (np.abs(agg["Book_Line_Diff_vs_SharpMedian"].values) >= thr).astype("uint8")
+
+    keep = [
+        "Game_Key","Market","Bookmaker",
+        "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
+        "Dist_To_Next_Key","Key_Corridor_Pressure",
+        "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
+    ]
+    out = out.merge(agg[keep], on=["Game_Key","Market","Bookmaker"], how="left", copy=False)
+
+    # Fill / downcast
+    u8  = ["Two_Sided_Offered","Outlier_Flag_SharpBooks"]
+    f32 = ["Implied_Hold_Book","Juice_Abs_Delta","Dist_To_Next_Key","Key_Corridor_Pressure",
+           "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian"]
+    for c in u8:  out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0).astype("uint8")
+    for c in f32: out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0).astype("float32")
+
+    out.drop(columns=["_sport_","_market_","_book_"], errors="ignore", inplace=True)
+    return out
+
+def add_resistance_features_training(
+    df: pd.DataFrame,
+    *,
+    sport_col: str = "Sport",
+    market_col: str = "Market",
+    value_candidates = ("Value","Line_Value","Line"),
+    odds_candidates  = ("Odds_Price","Odds","Price"),
+    open_value_candidates = ("First_Line_Value","Open_Value","Open_Line","Line_Open","Opening_Line"),
+    open_odds_candidates  = ("First_Odds","Open_Odds","Open_Odds_Price","Odds_Open","Opening_Odds"),
+    emit_levels_str: bool = False,
+) -> pd.DataFrame:
+    out = df.copy()
+    if out.empty:
+        out["Line_Resistance_Crossed_Count"] = 0
+        out["Was_Line_Resistance_Broken"] = 0
+        out["SharpMove_Resistance_Break"] = 0
+        if emit_levels_str:
+            out["Line_Resistance_Crossed_Levels_Str"] = ""
+        return out
+
+    keys = [c for c in ["Game_Key","Market","Outcome","Bookmaker"] if c in out.columns]
+    if keys:
+        out = out.drop_duplicates(keys, keep="last")
+
+    def _resolve(cands, fallback=None):
+        for c in cands:
+            if c in out.columns:
+                return c
+        return fallback
+
+    value_col = _resolve(value_candidates, fallback="Value")
+    odds_col  = _resolve(odds_candidates,  fallback="Odds_Price")
+    open_val  = _resolve(open_value_candidates, fallback=None)
+    open_odds = _resolve(open_odds_candidates,  fallback=None)
+
+    if open_val is None:
+        out["First_Line_Value"] = out[value_col]
+        open_val = "First_Line_Value"
+    if open_odds is None:
+        out["First_Odds"] = out.get(odds_col, np.nan)
+        open_odds = "First_Odds"
+
+    for c in (value_col, open_val, odds_col, open_odds):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    out["_sport_"]  = out.get(sport_col, "").astype(str).str.strip().str.lower()
+    out["_market_"] = out.get(market_col, "").astype(str).str.strip().str.lower()
+
+    n = len(out)
+    crossed_count = np.zeros(n, dtype=np.int16)
+    broken        = np.zeros(n, dtype=np.uint8)
+    levels_str    = np.full(n, "", dtype=object) if emit_levels_str else None
+
+    for (sp, mk), idx in out.groupby(["_sport_","_market_"]).indices.items():
+        idx = np.asarray(idx, dtype=np.int64)
+        keys_arr = _keys_for_training(sp, mk)
+        if keys_arr.size == 0:
+            continue
+
+        is_spread = (mk == "spreads")
+        o = out.loc[idx, open_val].to_numpy(dtype=float)
+        v = out.loc[idx, value_col].to_numpy(dtype=float)
+        valid = ~np.isnan(o) & ~np.isnan(v)
+        if not valid.any():
+            continue
+
+        a = np.abs(o[valid]) if is_spread else o[valid]
+        b = np.abs(v[valid]) if is_spread else v[valid]
+        lo = np.minimum(a, b)
+        hi = np.maximum(a, b)
+
+        lo_idx = np.searchsorted(keys_arr, lo, side="right")
+        hi_idx = np.searchsorted(keys_arr, hi, side="left")
+        cnt = (hi_idx - lo_idx).astype(np.int16)
+
+        rows = idx[valid]
+        crossed_count[rows] = cnt
+        broken[rows] = (cnt > 0).astype(np.uint8)
+
+        if emit_levels_str and np.any(cnt > 0):
+            kpos = np.flatnonzero(cnt > 0)
+            for k in kpos:
+                r = rows[k]
+                s_keys = keys_arr[(keys_arr > lo[k]) & (keys_arr < hi[k])]
+                if s_keys.size:
+                    levels_str[r] = "|".join(str(float(x)).rstrip("0").rstrip(".") for x in s_keys)
+
+    out["Line_Resistance_Crossed_Count"] = crossed_count
+    out["Was_Line_Resistance_Broken"] = broken
+    if emit_levels_str:
+        out["Line_Resistance_Crossed_Levels_Str"] = levels_str if levels_str is not None else ""
+
+    if "Sharp_Move_Signal" in out.columns:
+        sm = pd.to_numeric(out["Sharp_Move_Signal"], errors="coerce").fillna(0).astype(np.int8)
+        out["SharpMove_Resistance_Break"] = ((out["Was_Line_Resistance_Broken"] == 1) & (sm == 1)).astype(np.uint8)
+    elif "Sharp_Prob_Shift" in out.columns:
+        ps = pd.to_numeric(out["Sharp_Prob_Shift"], errors="coerce").fillna(0.0).astype("float32")
+        out["SharpMove_Resistance_Break"] = ((out["Was_Line_Resistance_Broken"] == 1) & (ps > 0)).astype(np.uint8)
+    else:
+        out["SharpMove_Resistance_Break"] = out["Was_Line_Resistance_Broken"].astype(np.uint8)
+
+    out.drop(columns=["_sport_","_market_"], inplace=True, errors="ignore")
+    return out
+
+def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty: 
+        return df
+    out = df.copy()
+
+    line_cols = [c for c in out.columns if c.startswith("SharpMove_Magnitude_")]
+    odds_cols = [c for c in out.columns if c.startswith("OddsMove_Magnitude_")]
+    if not line_cols:
+        line_cols += [c for c in out.columns if ("line" in c.lower() or "value" in c.lower()) and "magnitude" in c.lower()]
+    if not odds_cols:
+        odds_cols += [c for c in out.columns if ("odds" in c.lower() or "price" in c.lower() or "prob" in c.lower()) and "magnitude" in c.lower()]
+
+    def _pick(cols, pats):
+        pats = tuple(p.lower() for p in pats)
+        return [c for c in cols if any(p in c.lower() for p in pats)]
+
+    early_l = _pick(line_cols, ("overnight","veryearly","early"))
+    mid_l   = _pick(line_cols, ("midday","midrange"))
+    late_l  = _pick(line_cols, ("late","urgent"))
+
+    early_o = _pick(odds_cols, ("overnight","veryearly","early"))
+    mid_o   = _pick(odds_cols, ("midday","midrange"))
+    late_o  = _pick(odds_cols, ("late","urgent"))
+
+    out["Hybrid_Line_TotalMag"] = (out[line_cols].sum(axis=1) if line_cols else 0.0).astype("float32")
+    out["Hybrid_Line_EarlyMag"] = (out[early_l].sum(axis=1)   if early_l   else 0.0).astype("float32")
+    out["Hybrid_Line_MidMag"]   = (out[mid_l].sum(axis=1)     if mid_l     else 0.0).astype("float32")
+    out["Hybrid_Line_LateMag"]  = (out[late_l].sum(axis=1)    if late_l    else 0.0).astype("float32")
+
+    out["Hybrid_Odds_TotalMag"] = (out[odds_cols].sum(axis=1) if odds_cols else 0.0).astype("float32")
+    out["Hybrid_Odds_EarlyMag"] = (out[early_o].sum(axis=1)   if early_o   else 0.0).astype("float32")
+    out["Hybrid_Odds_MidMag"]   = (out[mid_o].sum(axis=1)     if mid_o     else 0.0).astype("float32")
+    out["Hybrid_Odds_LateMag"]  = (out[late_o].sum(axis=1)    if late_o    else 0.0).astype("float32")
+
+    eps = 1e-6
+    out["Hybrid_Line_LateShare"] = (out["Hybrid_Line_LateMag"] / (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Line_EarlyShare"]= (out["Hybrid_Line_EarlyMag"]/ (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Odds_LateShare"] = (out["Hybrid_Odds_LateMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Odds_EarlyShare"]= (out["Hybrid_Odds_EarlyMag"]/ (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Line_Odds_Mag_Ratio"] = (out["Hybrid_Line_TotalMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
+
+    out["Hybrid_Line_Imbalance_LateVsEarly"] = (
+        (out["Hybrid_Line_LateMag"] - out["Hybrid_Line_EarlyMag"]) / (out["Hybrid_Line_TotalMag"] + eps)
+    ).astype("float32")
+
+    if line_cols:
+        W = out[line_cols].to_numpy(dtype="float32")
+        tot = W.sum(axis=1, keepdims=True)
+        P = np.divide(W, np.maximum(tot, eps), out=np.zeros_like(W), where=tot>0)
+        out["Hybrid_Timing_Entropy_Line"] = (-(np.where(P>0, P*np.log(P), 0.0)).sum(axis=1)).astype("float32")
+    else:
+        out["Hybrid_Timing_Entropy_Line"] = 0.0
+
+    if odds_cols:
+        W2 = out[odds_cols].to_numpy(dtype="float32")
+        tot2 = W2.sum(axis=1, keepdims=True)
+        P2 = np.divide(W2, np.maximum(tot2, eps), out=np.zeros_like(W2), where=tot2>0)
+        out["Hybrid_Timing_Entropy_Odds"] = (-(np.where(P2>0, P2*np.log(P2), 0.0)).sum(axis=1)).astype("float32")
+    else:
+        out["Hybrid_Timing_Entropy_Odds"] = 0.0
+
+    for c in ("Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening"):
+        if c not in out.columns:
+            out[c] = 0.0
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
+
+    if "Key_Corridor_Pressure" in out.columns:
+        out["Corridor_x_LateShare_Line"] = (out["Key_Corridor_Pressure"] * out["Hybrid_Line_LateShare"]).astype("float32")
+    if "Dist_To_Next_Key" in out.columns:
+        out["Dist_x_LateShare_Line"]      = (out["Dist_To_Next_Key"] * out["Hybrid_Line_LateShare"]).astype("float32")
+    if "Book_PctRank_Line" in out.columns:
+        out["PctRank_x_LateShare_Line"]   = (out["Book_PctRank_Line"] * out["Hybrid_Line_LateShare"]).astype("float32")
+
+    return out
+
 
 MICRO_NUMERIC = [
     "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
