@@ -2047,15 +2047,20 @@ def compute_snapshot_micro_features_training(
     # --- assemble group-level frame with last/open values when present ---
     agg = per_outcome[keys].drop_duplicates().copy()
 
-    # sport / market (for thresholds)
+   # sport / market (for thresholds)
+    # ---- sport: safe to merge (not in keys)
     if sport_col in per_outcome.columns:
-        agg = agg.merge(gb[sport_col].last().reset_index().rename(columns={sport_col: "sport"}), on=keys, how="left")
+        sport_df = gb[sport_col].last().reset_index().rename(columns={sport_col: "sport"})
+        agg = agg.merge(sport_df, on=keys, how="left")
     else:
         agg["sport"] = "NFL"
-    if market_col in per_outcome.columns:
-        agg = agg.merge(gb[market_col].last().reset_index().rename(columns={market_col: "market"}), on=keys, how="left")
+    
+    # ---- market: already in keys → just copy to a working column
+    if market_col in per_outcome.columns and market_col in agg.columns:
+        agg["market"] = agg[market_col].astype(str)
     else:
         agg["market"] = "h2h"
+
 
     # last value / opener (only if columns exist)
     if value_col:
@@ -2127,8 +2132,11 @@ def compute_snapshot_micro_features_training(
               .merge(two_df,   on=keys, how="left"))
 
     # map 'market' back to the caller's market_col for merge
-    if market_col != "market":
+    # map 'market' back only if caller expects a different name AND it doesn't already exist
+    if market_col != "market" and market_col not in agg.columns:
         agg = agg.rename(columns={"market": market_col})
+    # else: keep both; we only merge using market_col anyway
+
 
     keep = [
         "Game_Key", market_col, "Bookmaker",
