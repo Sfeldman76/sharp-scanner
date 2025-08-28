@@ -40,8 +40,6 @@ from utils import (
     #compute_all_sharp_metrics,
     implied_prob_to_point_move,
     get_trained_models,
-    was_line_resistance_broken,
-    compute_line_resistance_flag,
     add_line_and_crossmarket_features,
     compute_small_book_liquidity_features,
     normalize_book_name,
