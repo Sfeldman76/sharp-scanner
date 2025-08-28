@@ -3635,7 +3635,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
-            'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',#'Sharp_Leads',
+            #'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',#'Sharp_Leads',
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag','Odds_Reversal_Flag',
@@ -3651,9 +3651,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Line_Moved_Away_From_Team',
             
             
-            'Pct_Line_Move_From_Opening','Pct_Line_Move_Bin','Potential_Overmove_Flag',
+            'Pct_Line_Move_From_Opening',#'Pct_Line_Move_Bin',
+            'Potential_Overmove_Flag',
             #'Potential_Overmove_Total_Pct_Flag',#'Mispricing_Flag',
-            'Was_Line_Resistance_Broken','Line_Resistance_Crossed_Count','SharpMove_Resistance_Break',
+            #'Was_Line_Resistance_Broken',
+            'Line_Resistance_Crossed_Count','SharpMove_Resistance_Break',
         
             # 🧠 Cross-market alignment
             'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
@@ -3661,7 +3663,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
             #'Book_Reliability_Score',
-            'Book_Reliability_Lift','Book_Reliability_x_Sharp',
+            'Book_Reliability_Lift',#'Book_Reliability_x_Sharp',
             'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
         
@@ -3715,7 +3717,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         ])
         
         # add time-context flags
-        extend_unique(features, ['Is_Weekend','Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos'])
+        extend_unique(features, ['Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos'])
         
         extend_unique(features, [
             "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
@@ -3727,9 +3729,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         extend_unique(features, [
             #"Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
             #"Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
-            "Hybrid_Line_LateShare","Hybrid_Line_EarlyShare",
+            #"Hybrid_Line_LateShare","Hybrid_Line_EarlyShare",
             "Hybrid_Line_Imbalance_LateVsEarly",
-            "Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare","Hybrid_Line_Odds_Mag_Ratio",
+            #"Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare",
+            "Hybrid_Line_Odds_Mag_Ratio",
             "Hybrid_Timing_Entropy_Line","Hybrid_Timing_Entropy_Odds",
             #"Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening",
             # interactions (only exist if microstructure ran)
