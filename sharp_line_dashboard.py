@@ -3304,7 +3304,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # 🧠 Cross-market alignment
             'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
-            'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Limit_Skew',
+            #'Abs_Line_Move_Z','Pct_Line_Move_Z',
+            'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
             #'Book_Reliability_Score',
             'Book_Reliability_Lift','Book_Reliability_x_Sharp',
@@ -3370,12 +3371,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Add hybrid timing derivatives (snapshot-safe, computed above)
         extend_unique(features, [
-            "Hybrid_Line_TotalMag","Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
-            "Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
-            "Hybrid_Line_LateShare","Hybrid_Line_EarlyShare","Hybrid_Line_Imbalance_LateVsEarly",
+            #"Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
+            #"Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
+            "Hybrid_Line_LateShare","Hybrid_Line_EarlyShare",
+            "Hybrid_Line_Imbalance_LateVsEarly",
             "Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare","Hybrid_Line_Odds_Mag_Ratio",
             "Hybrid_Timing_Entropy_Line","Hybrid_Timing_Entropy_Odds",
-            "Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening",
+            #"Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening",
             # interactions (only exist if microstructure ran)
             "Corridor_x_LateShare_Line","Dist_x_LateShare_Line","PctRank_x_LateShare_Line",
         ])
