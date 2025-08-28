@@ -107,7 +107,7 @@ from google.cloud import storage, bigquery, bigquery_storage_v1
 import pandas_gbq
 from pandas_gbq import to_gbq
 import google.api_core.exceptions
-from utils_resistance import add_resistance_features_lowmem
+from utils import add_resistance_features_lowmem
         
 
               
