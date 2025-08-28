@@ -1990,121 +1990,164 @@ def _dist_to_next_key_training(x, keys_arr, is_spread: bool):
 def compute_snapshot_micro_features_training(
     df: pd.DataFrame,
     *,
-    sport_col="Sport",
-    market_col="Market",
-    value_col="Value",
-    open_col="First_Line_Value",
-    prob_col="Implied_Prob",
-    price_col="Odds_Price",
-) -> pd.DataFrame:
-    """
-    Emits per-row (BQ-safe) scalars based on the final snapshot only:
-      - Implied_Hold_Book, Two_Sided_Offered, Juice_Abs_Delta
-      - Dist_To_Next_Key, Key_Corridor_Pressure
-      - Book_PctRank_Line, Book_Line_Diff_vs_SharpMedian, Outlier_Flag_SharpBooks
-    """
-    if df.empty: 
-        return df
-
+    sport_col: str = "Sport",
+    market_col: str = "Market",
+    value_col: str | None = "Value",
+    open_col:  str | None = "First_Line_Value",
+    prob_col:  str | None = "Implied_Prob",
+    price_col: str | None = "Odds_Price",
+):
     out = df.copy()
-    out["_sport_"]  = out[sport_col].astype(str).str.lower().str.strip()
-    out["_market_"] = out[market_col].astype(str).str.lower().str.strip()
-    out["_book_"]   = out["Bookmaker"].astype(str).str.lower().str.strip()
 
-    # per-outcome slice (your training table is already final snapshot)
-    cols = ["Game_Key","Market","Bookmaker","Outcome", value_col, open_col, "_sport_","_market_","_book_"]
-    if prob_col in out.columns:  cols.append(prob_col)
-    if price_col in out.columns: cols.append(price_col)
-    per_outcome = out[cols].copy()
+    # --- sanitize optional column names ---
+    def _have(colname: str | None) -> str | None:
+        return colname if (colname and colname in out.columns) else None
 
-    g = per_outcome.groupby(["Game_Key","Market","Bookmaker"], sort=False)
+    value_col = _have(value_col)
+    open_col  = _have(open_col)
+    prob_col  = _have(prob_col)
+    price_col = _have(price_col)
 
-    # Hold & juice
-    if prob_col in per_outcome.columns:
-        hold = g[prob_col].sum().rename("Implied_Hold_Book")
-    elif price_col in per_outcome.columns:
-        per_outcome["_p_"] = _amer_to_prob(per_outcome[price_col])
-        hold = g["_p_"].sum().rename("Implied_Hold_Book")
+    odds_only = (value_col is None and open_col is None)
+
+    # --- safe projection for per-outcome grouping ---
+    base_cols = ["Game_Key", market_col, "Outcome", "Bookmaker", "Snapshot_Timestamp", sport_col]
+    base_cols = [c for c in base_cols if c in out.columns]
+    extra_cols = [c for c in (value_col, open_col, prob_col, price_col) if c]
+    per_outcome = out[base_cols + extra_cols].copy()
+
+    keys = ["Game_Key", market_col, "Bookmaker"]
+    keys = [k for k in keys if k in per_outcome.columns]
+    gb = per_outcome.groupby(keys, dropna=False)
+
+    # --- implied hold (sum of probs across outcomes) ---
+    if prob_col:
+        hold_df = gb[prob_col].sum().reset_index(name="Implied_Hold_Book")
+    elif price_col:
+        # uses your existing implied_prob() helper on American odds
+        hold_df = gb[price_col].apply(lambda s: implied_prob(s).sum()).reset_index(name="Implied_Hold_Book")
     else:
-        hold = pd.Series(dtype="float32", name="Implied_Hold_Book")
+        hold_df = per_outcome[keys].drop_duplicates()
+        hold_df["Implied_Hold_Book"] = 0.0
 
-    if price_col in per_outcome.columns:
-        pm = g[price_col].agg(["max","min"])
-        juice_abs = (pm["max"] - pm["min"]).astype("float32").rename("Juice_Abs_Delta")
+    # --- juice spread (max - min price per book) ---
+    if price_col:
+        pm = gb[price_col].agg(["max", "min"]).reset_index()
+        pm["Juice_Abs_Delta"] = (pd.to_numeric(pm["max"], errors="coerce")
+                                 - pd.to_numeric(pm["min"], errors="coerce")).astype("float32")
+        juice_df = pm[keys + ["Juice_Abs_Delta"]]
     else:
-        juice_abs = pd.Series(dtype="float32", name="Juice_Abs_Delta")
+        juice_df = per_outcome[keys].drop_duplicates()
+        juice_df["Juice_Abs_Delta"] = 0.0
 
-    two_sided = g["Outcome"].nunique().rename("Two_Sided_Offered").astype(np.uint8)
+    # --- do we have two sides offered? ---
+    two_df = gb["Outcome"].nunique().reset_index(name="Two_Sided_Offered")
+    two_df["Two_Sided_Offered"] = two_df["Two_Sided_Offered"].fillna(0).astype("uint8")
 
-    # 1 row per (G,M,B)
-    agg = g.agg(
-        sport = ("_sport_", "last"),
-        market= ("_market_","last"),
-        v_last= (value_col, "last"),
-        v_open= (open_col,  "last"),
-    ).join([hold, juice_abs, two_sided]).reset_index()
+    # --- assemble group-level frame with last/open values when present ---
+    agg = per_outcome[keys].drop_duplicates().copy()
 
-    # Dist / Pressure (uses your training key levels)
-    from math import isfinite  # just in case
-    v      = pd.to_numeric(agg["v_last"], errors="coerce").astype("float32")
-    v_open = pd.to_numeric(agg["v_open"], errors="coerce").astype("float32")
-    dist   = np.full(len(agg), np.nan, dtype="float32")
+    # sport / market (for thresholds)
+    if sport_col in per_outcome.columns:
+        agg = agg.merge(gb[sport_col].last().reset_index().rename(columns={sport_col: "sport"}), on=keys, how="left")
+    else:
+        agg["sport"] = "NFL"
+    if market_col in per_outcome.columns:
+        agg = agg.merge(gb[market_col].last().reset_index().rename(columns={market_col: "market"}), on=keys, how="left")
+    else:
+        agg["market"] = "h2h"
 
-    for (mk, sp), idx in agg.groupby(["market","sport"]).indices.items():
-        idx = np.asarray(idx, dtype=np.int64)
-        keys_arr = _keys_for_training(sp, mk)  # <- your registry
-        is_spread = (mk == "spreads")
-        for j in idx:
-            dist[j] = _dist_to_next_key_training(v.iloc[j], keys_arr, is_spread)
+    # last value / opener (only if columns exist)
+    if value_col:
+        v_last = (per_outcome.sort_values("Snapshot_Timestamp")
+                  .groupby(keys, dropna=False)[value_col].last().reset_index()
+                  .rename(columns={value_col: "v_last"}))
+        agg = agg.merge(v_last, on=keys, how="left")
+    else:
+        agg["v_last"] = np.nan
+    if open_col:
+        v_open = (per_outcome.sort_values("Snapshot_Timestamp")
+                  .groupby(keys, dropna=False)[open_col].last().reset_index()
+                  .rename(columns={open_col: "v_open"}))
+        agg = agg.merge(v_open, on=keys, how="left")
+    else:
+        agg["v_open"] = np.nan
 
-    agg["Dist_To_Next_Key"] = dist
-    cur = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values)
-    opn = np.where(agg["market"].values == "spreads", np.abs(v_open.values), v_open.values)
-    dv  = np.abs(cur - opn)
-    den = np.where(np.isnan(dist) | (dist <= 0), 1.0, dist)
-    agg["Key_Corridor_Pressure"] = (dv / den).astype("float32")
+    # --- line microstructure (only when we actually have line columns) ---
+    if not odds_only and value_col and open_col:
+        v  = pd.to_numeric(agg["v_last"], errors="coerce").astype("float32")
+        vo = pd.to_numeric(agg["v_open"], errors="coerce").astype("float32")
 
-    # Consensus / outlier (final snapshot)
-    val_norm = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values).astype("float32")
-    agg["_val_norm_"] = val_norm
-    agg["Book_PctRank_Line"] = (
-        agg.groupby(["Game_Key","Market"])["_val_norm_"].rank(pct=True, method="average").astype("float32")
-    )
+        # distance to next key & corridor pressure
+        dist = np.full(len(agg), np.nan, dtype="float32")
+        for (mk, sp), idx in agg.groupby(["market", "sport"]).indices.items():
+            idx = np.asarray(idx, dtype=np.int64)
+            keys_arr  = _keys_for_training(sp, mk)       # your registry
+            is_spread = (mk == "spreads")
+            for j in idx:
+                dist[j] = _dist_to_next_key_training(v.iloc[j], keys_arr, is_spread)
+        agg["Dist_To_Next_Key"] = dist
 
-    # sharp-median diff
-    try:
-        from config import SHARP_BOOKS
-    except Exception:
-        SHARP_BOOKS = set(["pinnacle","betonlineag","lowvig","betfair_ex_uk","betfair_ex_eu","smarkets","betus"])
-    mask_sharp = agg["Bookmaker"].astype(str).str.lower().isin(SHARP_BOOKS)
-    sharp_median = agg.loc[mask_sharp].groupby(["Game_Key","Market"])["_val_norm_"].median()
-    agg = agg.merge(sharp_median.rename("sharp_median"), on=["Game_Key","Market"], how="left")
-    agg["Book_Line_Diff_vs_SharpMedian"] = (
-        agg["_val_norm_"] - agg["sharp_median"].fillna(agg["_val_norm_"])
-    ).astype("float32")
+        cur = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values)
+        opn = np.where(agg["market"].values == "spreads", np.abs(vo.values), vo.values)
+        dv  = np.abs(cur - opn)
+        den = np.where(np.isnan(dist) | (dist <= 0), 1.0, dist)
+        agg["Key_Corridor_Pressure"] = (dv / den).astype("float32")
 
-    # Outlier flag (sport-aware thresholds)
-    OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL = 0.5, 0.5
-    thr = np.where(agg["market"].values == "spreads", OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL).astype("float32")
-    agg["Outlier_Flag_SharpBooks"] = (np.abs(agg["Book_Line_Diff_vs_SharpMedian"].values) >= thr).astype("uint8")
+        # percentile rank (line severity) within game/market
+        val_norm = np.where(agg["market"].values == "spreads", np.abs(v.values), v.values).astype("float32")
+        agg["_val_norm_"] = val_norm
+        agg["Book_PctRank_Line"] = agg.groupby(["Game_Key", "market"])["_val_norm_"] \
+                                      .rank(pct=True, method="average").astype("float32")
 
-    # Broadcast back to rows
+        # sharp-median diff
+        try:
+            from config import SHARP_BOOKS
+        except Exception:
+            SHARP_BOOKS = set(["pinnacle","betonlineag","lowvig","betfair_ex_uk","betfair_ex_eu","smarkets","betus"])
+        mask_sharp = agg["Bookmaker"].astype(str).str.lower().isin(SHARP_BOOKS)
+        sharp_median = agg.loc[mask_sharp].groupby(["Game_Key","market"])["_val_norm_"].median()
+        agg = agg.merge(sharp_median.rename("sharp_median"), on=["Game_Key","market"], how="left")
+        agg["Book_Line_Diff_vs_SharpMedian"] = (
+            agg["_val_norm_"] - agg["sharp_median"].fillna(agg["_val_norm_"])
+        ).astype("float32")
+
+        # outlier flag (sport-aware thresholds if you want)
+        OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL = 0.5, 0.5
+        thr = np.where(agg["market"].values == "spreads", OUTLIER_THRESH_SPREAD, OUTLIER_THRESH_TOTAL).astype("float32")
+        agg["Outlier_Flag_SharpBooks"] = (np.abs(agg["Book_Line_Diff_vs_SharpMedian"].values) >= thr).astype("uint8")
+    else:
+        for c in ["Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian"]:
+            agg[c] = 0.0
+        agg["Outlier_Flag_SharpBooks"] = 0
+
+    # --- merge group metrics back, broadcast to rows ---
+    agg = (agg.merge(hold_df,  on=keys, how="left")
+              .merge(juice_df, on=keys, how="left")
+              .merge(two_df,   on=keys, how="left"))
+
+    # map 'market' back to the caller's market_col for merge
+    if market_col != "market":
+        agg = agg.rename(columns={"market": market_col})
+
     keep = [
-        "Game_Key","Market","Bookmaker",
-        "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
+        "Game_Key", market_col, "Bookmaker",
+        "Implied_Hold_Book", "Two_Sided_Offered", "Juice_Abs_Delta",
         "Dist_To_Next_Key","Key_Corridor_Pressure",
         "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
     ]
-    out = out.merge(agg[keep], on=["Game_Key","Market","Bookmaker"], how="left", copy=False)
+    out = out.merge(agg[keep], on=["Game_Key", market_col, "Bookmaker"], how="left", copy=False)
 
-    # Fill / downcast
-    u8  = ["Two_Sided_Offered","Outlier_Flag_SharpBooks"]
-    f32 = ["Implied_Hold_Book","Juice_Abs_Delta","Dist_To_Next_Key","Key_Corridor_Pressure",
-           "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian"]
-    for c in u8:  out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0).astype("uint8")
-    for c in f32: out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0).astype("float32")
+    # fill / downcast
+    out["Implied_Hold_Book"]   = pd.to_numeric(out.get("Implied_Hold_Book"), errors="coerce").fillna(0.0).astype("float32")
+    out["Juice_Abs_Delta"]     = pd.to_numeric(out.get("Juice_Abs_Delta"), errors="coerce").fillna(0.0).astype("float32")
+    for c in ["Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian"]:
+        out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0).astype("float32")
+    if "Two_Sided_Offered" in out.columns:
+        out["Two_Sided_Offered"] = out["Two_Sided_Offered"].fillna(0).astype("uint8")
+    else:
+        out["Two_Sided_Offered"] = 0
 
-    out.drop(columns=["_sport_","_market_","_book_"], errors="ignore", inplace=True)
     return out
 
 
