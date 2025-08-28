@@ -1783,6 +1783,155 @@ def _bake_feature_names_in_(est, cols):
         for k in ("model_logloss", "model_auc", "model", "calibrator_logloss", "calibrator_auc"):
             _bake_feature_names_in_(est.get(k), cols)
 
+import numpy as np
+import pandas as pd
+
+# Compact key levels tuned per sport/market (extend as you like)
+TRAIN_KEY_LEVELS = {
+    ("nfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
+    ("ncaaf","spreads"):[1.5,2.5,3,3.5,6,6.5,7,7.5,9.5,10,10.5,13.5,14],
+    ("cfl","spreads"):  [1.5,2.5,3,3.5,6,6.5,7,9.5,10,10.5],
+    ("nba","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
+    ("wnba","spreads"): [1.5,2.5,3,4.5,5.5,6.5,7.5],
+    ("mlb","totals"):   [7,7.5,8,8.5,9,9.5,10],
+    ("nfl","totals"):   [41,43,44.5,47,49.5,51,52.5],
+    ("ncaaf","totals"): [49.5,52.5,55.5,57.5,59.5,61.5],
+    ("nba","totals"):   [210,212.5,215,217.5,220,222.5,225],
+    ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
+    ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
+}
+
+def _keys_for_training(sport: str, market: str) -> np.ndarray:
+    s = (sport or "").strip().lower()
+    m = (market or "").strip().lower()
+    ks = TRAIN_KEY_LEVELS.get((s, m))
+    if ks is None:
+        ks = [1.5,2.5,3,3.5,6,6.5,7] if m == "spreads" else ([7,7.5,8,8.5,9] if m=="totals" else [])
+    return np.asarray(ks, dtype=np.float32)
+
+def add_resistance_features_training(
+    df: pd.DataFrame,
+    *,
+    sport_col: str = "Sport",
+    market_col: str = "Market",
+    value_candidates = ("Value","Line_Value","Line"),
+    odds_candidates  = ("Odds_Price","Odds","Price"),
+    open_value_candidates = ("First_Line_Value","Open_Value","Open_Line","Line_Open","Opening_Line"),
+    open_odds_candidates  = ("First_Odds","Open_Odds","Open_Odds_Price","Odds_Open","Opening_Odds"),
+    emit_levels_str: bool = False,
+) -> pd.DataFrame:
+    """
+    Training-only, low-memory resistance features.
+    • No timestamp sorting or history needed.
+    • One row per (Game_Key, Market, Outcome, Bookmaker) expected.
+    • Computes:
+        - Line_Resistance_Crossed_Count (int16)
+        - Was_Line_Resistance_Broken    (uint8)
+        - SharpMove_Resistance_Break    (uint8)
+      (and optionally Line_Resistance_Crossed_Levels_Str)
+    """
+    out = df.copy()
+    if out.empty:
+        out["Line_Resistance_Crossed_Count"] = 0
+        out["Was_Line_Resistance_Broken"] = 0
+        out["SharpMove_Resistance_Break"] = 0
+        if emit_levels_str:
+            out["Line_Resistance_Crossed_Levels_Str"] = ""
+        return out
+
+    # 0) ensure one row per key (belt & suspenders)
+    keys = [c for c in ["Game_Key","Market","Outcome","Bookmaker"] if c in out.columns]
+    if keys:
+        out = out.drop_duplicates(keys, keep="last")
+
+    # 1) resolve columns by common aliases
+    def _resolve(cands, fallback=None):
+        for c in cands:
+            if c in out.columns:
+                return c
+        return fallback
+
+    value_col = _resolve(value_candidates, fallback="Value")
+    odds_col  = _resolve(odds_candidates,  fallback="Odds_Price")
+    open_val  = _resolve(open_value_candidates, fallback=None)
+    open_odds = _resolve(open_odds_candidates,  fallback=None)
+
+    # hydrate opens if missing
+    if open_val is None:
+        out["First_Line_Value"] = out[value_col]
+        open_val = "First_Line_Value"
+    if open_odds is None:
+        out["First_Odds"] = out.get(odds_col, np.nan)
+        open_odds = "First_Odds"
+
+    # numeric coercions
+    for c in (value_col, open_val, odds_col, open_odds):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # 2) normalized sport/market
+    out["_sport_"]  = out.get(sport_col, "").astype(str).str.strip().str.lower()
+    out["_market_"] = out.get(market_col, "").astype(str).str.strip().str.lower()
+
+    n = len(out)
+    crossed_count = np.zeros(n, dtype=np.int16)
+    broken        = np.zeros(n, dtype=np.uint8)
+    levels_str    = np.full(n, "", dtype=object) if emit_levels_str else None
+
+    # 3) vectorized per (sport, market)
+    for (sp, mk), idx in out.groupby(["_sport_","_market_"]).indices.items():
+        idx = np.asarray(idx, dtype=np.int64)
+        keys_arr = _keys_for_training(sp, mk)
+        if keys_arr.size == 0:
+            continue
+
+        is_spread = (mk == "spreads")
+        o = out.loc[idx, open_val].to_numpy(dtype=float)
+        v = out.loc[idx, value_col].to_numpy(dtype=float)
+        valid = ~np.isnan(o) & ~np.isnan(v)
+        if not valid.any():
+            continue
+
+        a = np.abs(o[valid]) if is_spread else o[valid]
+        b = np.abs(v[valid]) if is_spread else v[valid]
+        lo = np.minimum(a, b)
+        hi = np.maximum(a, b)
+
+        lo_idx = np.searchsorted(keys_arr, lo, side="right")
+        hi_idx = np.searchsorted(keys_arr, hi, side="left")
+        cnt = (hi_idx - lo_idx).astype(np.int16)
+
+        rows = idx[valid]
+        crossed_count[rows] = cnt
+        broken[rows] = (cnt > 0).astype(np.uint8)
+
+        if emit_levels_str and np.any(cnt > 0):
+            # Build strings only where we actually crossed keys
+            kpos = np.flatnonzero(cnt > 0)
+            for k in kpos:
+                r = rows[k]
+                s_keys = keys_arr[(keys_arr > lo[k]) & (keys_arr < hi[k])]
+                if s_keys.size:
+                    levels_str[r] = "|".join(str(float(x)).rstrip("0").rstrip(".") for x in s_keys)
+
+    # 4) assign outputs (no merges, so no KeyErrors)
+    out["Line_Resistance_Crossed_Count"] = crossed_count
+    out["Was_Line_Resistance_Broken"] = broken
+    if emit_levels_str:
+        out["Line_Resistance_Crossed_Levels_Str"] = levels_str if levels_str is not None else ""
+
+    # 5) tie to sharp signal if available
+    if "Sharp_Move_Signal" in out.columns:
+        sm = pd.to_numeric(out["Sharp_Move_Signal"], errors="coerce").fillna(0).astype(np.int8)
+        out["SharpMove_Resistance_Break"] = ((out["Was_Line_Resistance_Broken"] == 1) & (sm == 1)).astype(np.uint8)
+    elif "Sharp_Prob_Shift" in out.columns:
+        ps = pd.to_numeric(out["Sharp_Prob_Shift"], errors="coerce").fillna(0.0).astype("float32")
+        out["SharpMove_Resistance_Break"] = ((out["Was_Line_Resistance_Broken"] == 1) & (ps > 0)).astype(np.uint8)
+    else:
+        out["SharpMove_Resistance_Break"] = out["Was_Line_Resistance_Broken"].astype(np.uint8)
+
+    # final cleanup
+    out.drop(columns=["_sport_","_market_"], inplace=True, errors="ignore")
+    return out
 
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
@@ -2279,46 +2428,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market = compute_small_book_liquidity_features(df_market)
         df_market = add_favorite_context_flag(df_market)
         df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
-        
-        # Open line: prefer First_Line_Value, then Open_Value, else fall back to Value
-        if "First_Line_Value" in df_market.columns and df_market["First_Line_Value"].notna().any():
-            open_col = "First_Line_Value"
-        else:
-            if "Open_Value" in df_market.columns and df_market["Open_Value"].notna().any():
-                df_market["First_Line_Value"] = df_market["Open_Value"]
-            else:
-                df_market["First_Line_Value"] = df_market["Value"]
-            open_col = "First_Line_Value"
-        
-        # Open odds: prefer First_Odds, then Open_Odds, else fall back to Odds_Price
-        if "First_Odds" in df_market.columns and df_market["First_Odds"].notna().any():
-            open_odds_col = "First_Odds"
-        else:
-            if "Open_Odds" in df_market.columns and df_market["Open_Odds"].notna().any():
-                df_market["First_Odds"] = df_market["Open_Odds"]
-            else:
-                df_market["First_Odds"] = df_market.get("Odds_Price", np.nan)
-            open_odds_col = "First_Odds"
-
-        
-        # === Low-memory resistance (compute once per (G,M,B), broadcast) ===
-        df_market = add_resistance_features_lowmem(
+        # Final-snapshot training slice (no timestamps needed)
+        df_market = add_resistance_features_training(
             df_market,
-            sport_col="Sport",
-            market_col="Market",
-            value_col="Value",
-            open_col=open_col,
-            sharp_move_col="Sharp_Move_Signal" if "Sharp_Move_Signal" in df_market.columns else None,
-            sharp_prob_shift_col="Sharp_Prob_Shift" if "Sharp_Prob_Shift" in df_market.columns else None,
-            emit_levels_str=False,     # training: keep memory small
-            broadcast=True,
-            skip_sort=True
+            emit_levels_str=False,  # keep memory tiny for training
         )
-        
-        # Small numeric dtypes to save RAM (training only)
-        df_market["Was_Line_Resistance_Broken"]  = df_market["Was_Line_Resistance_Broken"].fillna(0).astype("uint8")
-        df_market["Line_Resistance_Crossed_Count"] = df_market["Line_Resistance_Crossed_Count"].fillna(0).astype("int16")
-        df_market["SharpMove_Resistance_Break"]  = df_market["SharpMove_Resistance_Break"].fillna(0).astype("uint8")
+
+   
         
         # Optional: zero out for h2h if you don't want resistance there
         if market == "h2h":
