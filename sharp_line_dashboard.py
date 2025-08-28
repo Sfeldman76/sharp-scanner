@@ -2232,79 +2232,76 @@ def add_limit_dynamics_features(df: pd.DataFrame) -> pd.DataFrame:
 # -------------------------
 def add_book_network_features(df: pd.DataFrame, sharp_books=None) -> pd.DataFrame:
     """
-    Emits (per row):
-      - Sharp_Consensus_Weight (float32): weighted fraction of sharp books aligned with this row's side
-      - Sharp_vs_Rec_SpreadGap_Q90_Q10 (float32): Q90(sharp |line|) - Q10(rec |line|)
-      - Sharp_vs_Rec_SpreadGap_Q50 (float32): median(sharp |line|) - median(rec |line|)
-    Requirements:
-      - Columns: Game_Key, Market, Bookmaker, Outcome, Value
-      - Optional for weighting: Book_Reliability_Score
-      - Optional shortcut: Is_Favorite_Bet (else inferred from Value for spreads/h2h; totals uses Outcome)
+    Emits per row:
+      - Sharp_Consensus_Weight (float32)  # weighted fraction of sharp books aligned with row's side
+      - Sharp_vs_Rec_SpreadGap_Q90_Q10 (float32)
+      - Sharp_vs_Rec_SpreadGap_Q50 (float32)
+    Requires: Game_Key, Market, Bookmaker, Outcome, Value
+    Optional: Book_Reliability_Score, Is_Favorite_Bet
     """
-    if df.empty: return df
+    if df.empty:
+        return df
+
     out = df.copy()
 
-    try:
-        if sharp_books is None:
-            from config import SHARP_BOOKS
-            sharp_books = set(SHARP_BOOKS)
-    except Exception:
-        sharp_books = set(["pinnacle","betonlineag","lowvig","betfair_ex_uk","betfair_ex_eu","smarkets","betus"])
 
+    sharp_books = set(SHARP_BOOKS)
+    # --- normalize / safe helpers
     out["Bookmaker_norm"] = out["Bookmaker"].astype(str).str.lower().str.strip()
     out["Market_norm"]    = out["Market"].astype(str).str.lower().str.strip()
     out["Outcome_Norm"]   = out["Outcome"].astype(str).str.lower().str.strip()
 
-    # Side indicator for this row
-    is_spread = out["Market_norm"].eq("spreads")
-    is_h2h    = out["Market_norm"].eq("h2h")
-    is_total  = out["Market_norm"].eq("totals")
+    # Safe favorite flag for *this row* (used later only for choosing direction)
+    # Prefer explicit Is_Favorite_Bet if present, but coerce numeric + fillna(0)
+    fav_num = pd.to_numeric(out.get("Is_Favorite_Bet", np.nan), errors="coerce").fillna(0.0)
+    is_fav_row = (fav_num > 0.5)
 
-    fav_from_val = pd.to_numeric(out.get("Value"), errors="coerce") < 0
-    this_is_fav  = np.where(is_total, False, fav_from_val)  # totals don't have fav/dog concept
-    if "Is_Favorite_Bet" in out.columns:
-        this_is_fav = out["Is_Favorite_Bet"].astype(bool).values
+    # For totals, treat "favorite" concept as N/A; we’ll use OVER/UNDER instead
+    is_total_row = out["Market_norm"].eq("totals")
+    is_over_row  = is_total_row & out["Outcome_Norm"].eq("over")
 
-    this_is_over = np.where(is_total, out["Outcome_Norm"].eq("over").values, False)
-
-    # Build a reduced pack at game/market/book to compute network stats once
+    # --- build base once per (G,M,B)
     base_cols = ["Game_Key","Market","Bookmaker","Bookmaker_norm","Market_norm","Outcome_Norm","Value"]
     if "Book_Reliability_Score" in out.columns:
         base_cols.append("Book_Reliability_Score")
-    base = out[base_cols].drop_duplicates(["Game_Key","Market","Bookmaker"])
+    base = out[base_cols].drop_duplicates(["Game_Key","Market","Bookmaker"]).copy()
 
-    # For consensus we need "this book's side" too; infer with same logic
-    fav_b = (pd.to_numeric(base["Value"], errors="coerce") < 0) & base["Market_norm"].eq("spreads")
-    over_b= base["Outcome_Norm"].eq("over") & base["Market_norm"].eq("totals")
-    base["Is_Favorite_Bet_b"] = np.where(base["Market_norm"].eq("totals"), False, fav_b)
-    base["Is_Over_Bet_b"]     = np.where(base["Market_norm"].eq("totals"), over_b, False)
+    # Infer book’s side on that outcome (favorite for spreads/h2h, OVER for totals)
+    base_val_num = pd.to_numeric(base["Value"], errors="coerce")
+    base["Is_Favorite_Bet_b"] = (base_val_num < 0) & base["Market_norm"].eq("spreads")
+    base["Is_Over_Bet_b"]     = base["Outcome_Norm"].eq("over") & base["Market_norm"].eq("totals")
+    base["is_sharp_book"]     = base["Bookmaker_norm"].isin(sharp_books).astype("uint8")
 
-    base["is_sharp_book"] = base["Bookmaker_norm"].isin(sharp_books).astype("uint8")
-    w = pd.to_numeric(base.get("Book_Reliability_Score", 1.0), errors="coerce").fillna(1.0).astype("float32")
+    def _weights(gdf):
+        return pd.to_numeric(
+            gdf.get("Book_Reliability_Score", pd.Series(1.0, index=gdf.index)),
+            errors="coerce"
+        ).fillna(1.0).astype("float32")
 
-    # Group once per (G,M)
-    res = []
+    # Aggregate once per (G,M)
+    rows = []
     for (g, m), grp in base.groupby(["Game_Key","Market"], sort=False):
         sharp_grp = grp.loc[grp["is_sharp_book"] == 1]
         rec_grp   = grp.loc[grp["is_sharp_book"] == 0]
 
-        # alignment counts
-        if m.lower() == "totals":
-            # Over alignment among sharps
-            aligned_w = sharp_grp.loc[sharp_grp["Is_Over_Bet_b"] == True, "Book_Reliability_Score"].fillna(1.0) if "Book_Reliability_Score" in sharp_grp else (sharp_grp["Is_Over_Bet_b"].astype(float))
-            sharp_over_weight = aligned_w.sum()
-            sharp_weight_total= (sharp_grp["Book_Reliability_Score"] if "Book_Reliability_Score" in sharp_grp else pd.Series(1.0, index=sharp_grp.index)).sum()
-            consensus_over_frac = float(sharp_over_weight) / float(sharp_weight_total) if sharp_weight_total > 0 else np.nan
-            # gaps on normalized lines (use raw Value for totals)
+        w_sharp = _weights(sharp_grp)
+
+        if str(m).lower() == "totals":
+            # alignment among sharp books for OVER
+            aligned_mask = sharp_grp["Is_Over_Bet_b"].astype(bool)
+            over_w = w_sharp[aligned_mask].sum()
+            w_tot  = float(w_sharp.sum())
+            consensus_frac = float(over_w / w_tot) if w_tot > 0 else np.nan
+
             sharp_vals = pd.to_numeric(sharp_grp["Value"], errors="coerce").dropna()
             rec_vals   = pd.to_numeric(rec_grp["Value"], errors="coerce").dropna()
         else:
-            # Favorite alignment among sharps
-            aligned_w = sharp_grp.loc[sharp_grp["Is_Favorite_Bet_b"] == True, "Book_Reliability_Score"].fillna(1.0) if "Book_Reliability_Score" in sharp_grp else (sharp_grp["Is_Favorite_Bet_b"].astype(float))
-            sharp_over_weight = aligned_w.sum()
-            sharp_weight_total= (sharp_grp["Book_Reliability_Score"] if "Book_Reliability_Score" in sharp_grp else pd.Series(1.0, index=sharp_grp.index)).sum()
-            consensus_over_frac = float(sharp_over_weight) / float(sharp_weight_total) if sharp_weight_total > 0 else np.nan
-            # gaps on |spread|
+            # spreads/h2h: alignment among sharp books for FAVORITE
+            aligned_mask = sharp_grp["Is_Favorite_Bet_b"].astype(bool)
+            fav_w = w_sharp[aligned_mask].sum()
+            w_tot = float(w_sharp.sum())
+            consensus_frac = float(fav_w / w_tot) if w_tot > 0 else np.nan
+
             sharp_vals = pd.to_numeric(sharp_grp["Value"], errors="coerce").abs().dropna()
             rec_vals   = pd.to_numeric(rec_grp["Value"], errors="coerce").abs().dropna()
 
@@ -2314,37 +2311,30 @@ def add_book_network_features(df: pd.DataFrame, sharp_books=None) -> pd.DataFram
         gap_q90_q10 = q(sharp_vals, 0.90) - q(rec_vals, 0.10) if len(sharp_vals) and len(rec_vals) else np.nan
         gap_q50     = q(sharp_vals, 0.50) - q(rec_vals, 0.50) if len(sharp_vals) and len(rec_vals) else np.nan
 
-        res.append({
+        rows.append({
             "Game_Key": g, "Market": m,
-            "Sharp_Consensus_OverFrac_tmp": consensus_over_frac,   # for totals
+            "Sharp_Consensus_Frac_tmp": consensus_frac,   # interpreted per row below
             "Sharp_vs_Rec_SpreadGap_Q90_Q10": gap_q90_q10,
             "Sharp_vs_Rec_SpreadGap_Q50": gap_q50
         })
-    net = pd.DataFrame(res)
 
-    # Broadcast back & choose correct consensus metric per row
+    net = pd.DataFrame(rows)
+
+    # Merge once, then convert consensus to row-side weight:
     out = out.merge(net, on=["Game_Key","Market"], how="left")
 
-    # Final per-row consensus weight:
-    # - totals: over-fraction if row is OVER, else (1 - over_fraction)
-    # - spreads/h2h: treat "over" flag as favorite flag analog; we use row side
-    is_over_row = out["Outcome_Norm"].eq("over") & out["Market_norm"].eq("totals")
-    is_fav_row  = np.where(out["Market_norm"].eq("totals"), False,
-                           (pd.to_numeric(out.get("Is_Favorite_Bet", np.nan), errors="coerce") == 1) |
-                           ((pd.to_numeric(out.get("Value"), errors="coerce") < 0) & out["Market_norm"].eq("spreads")))
-    # If consensus_over_frac missing, keep NaN then fill to 0
     out["Sharp_Consensus_Weight"] = np.where(
-        out["Market_norm"].eq("totals"),
-        np.where(is_over_row, out["Sharp_Consensus_OverFrac_tmp"], 1.0 - out["Sharp_Consensus_OverFrac_tmp"]),
-        # spreads/h2h: use sharp fav fraction ≈ Sharp_Consensus_OverFrac_tmp (we reused the field)
-        np.where(is_fav_row, out["Sharp_Consensus_OverFrac_tmp"], 1.0 - out["Sharp_Consensus_OverFrac_tmp"])
+        is_total_row,
+        np.where(is_over_row, out["Sharp_Consensus_Frac_tmp"], 1.0 - out["Sharp_Consensus_Frac_tmp"]),
+        # spreads/h2h: use favorite fraction; if this row is dog, flip
+        np.where(is_fav_row, out["Sharp_Consensus_Frac_tmp"], 1.0 - out["Sharp_Consensus_Frac_tmp"])
     ).astype("float32")
-    out.drop(columns=["Sharp_Consensus_OverFrac_tmp","Bookmaker_norm","Market_norm"], errors="ignore", inplace=True)
 
-    # Fill gaps
+    # Fill and cast the rest
     for c in ["Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10","Sharp_vs_Rec_SpreadGap_Q50"]:
         out[c] = pd.to_numeric(out.get(c), errors="coerce").fillna(0.0).astype("float32")
 
+    out.drop(columns=["Bookmaker_norm","Market_norm","Sharp_Consensus_Frac_tmp"], errors="ignore", inplace=True)
     return out
 
 # -------------------------
