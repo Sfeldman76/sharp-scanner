@@ -41,7 +41,14 @@ from xgboost import XGBClassifier
 
 # --- Streamlit (dashboard) ---
 import streamlit as st
-
+# reuse the same helpers you used in training:
+from sharp_line_dashboard import (
+    add_limit_dynamics_features,
+    add_book_network_features,
+    add_internal_consistency_features,
+    add_altline_curvature,          # optional
+    add_clv_proxy_features,         # optional
+)
 # --- Pandas dtype helpers ---
 from pandas.api.types import is_categorical_dtype, is_string_dtype
 
@@ -4072,6 +4079,55 @@ def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
     return df_tmp
 
 
+def build_cross_market_from_apply(df_apply: pd.DataFrame) -> pd.DataFrame:
+    """
+    Final-snapshot cross-market pivots (Value & Odds) per Game_Key; always
+    emits Spread/Total/H2H {_Value,_Odds} columns, even if NaN.
+    """
+    if df_apply.empty:
+        return pd.DataFrame({"Game_Key": []})
+    # get latest per Game_Key/Market/Outcome (like training)
+    df_latest = (
+        df_apply.sort_values("Snapshot_Timestamp")
+                .drop_duplicates(subset=["Game_Key","Market","Outcome"], keep="last")
+    )
+    value_pivot = (
+        df_latest.pivot_table(index="Game_Key", columns="Market", values="Value",
+                              aggfunc="last", dropna=False)
+                 .reindex(columns=MARKETS)
+                 .rename(columns={"spreads":"Spread_Value","totals":"Total_Value","h2h":"H2H_Value"})
+    )
+    odds_pivot = (
+        df_latest.pivot_table(index="Game_Key", columns="Market", values="Odds_Price",
+                              aggfunc="last", dropna=False)
+                 .reindex(columns=MARKETS)
+                 .rename(columns={"spreads":"Spread_Odds","totals":"Total_Odds","h2h":"H2H_Odds"})
+    )
+    return value_pivot.join(odds_pivot, how="outer").reset_index()
+
+def _amer_to_prob_vec(s):
+    s = pd.to_numeric(s, errors="coerce")
+    return np.where(s > 0, 100.0/(s+100.0),
+           np.where(s < 0, (-s)/((-s)+100.0), np.nan)).astype("float32")
+
+def add_market_implied_probs(df_market: pd.DataFrame, market: str) -> pd.DataFrame:
+    """
+    Guarantees *_Odds columns exist and adds *_Implied_Prob with fallback to row Odds_Price.
+    """
+    out = df_market.copy()
+    m = str(market).lower()
+    mapping = {"spreads":("Spread_Odds","Spread_Implied_Prob"),
+               "totals": ("Total_Odds","Total_Implied_Prob"),
+               "h2h":    ("H2H_Odds","H2H_Implied_Prob")}
+    odds_col, ip_col = mapping[m]
+    # seed odds columns if missing
+    for c in ["Spread_Odds","Total_Odds","H2H_Odds"]:
+        if c not in out.columns: out[c] = np.nan
+    # vectorized fallback to row-level Odds_Price
+    odds_series = out[odds_col].where(out[odds_col].notna(), out.get("Odds_Price"))
+    out[ip_col] = _amer_to_prob_vec(odds_series)
+    return out
+
 
 def apply_blended_sharp_score(
     df,
@@ -4618,14 +4674,76 @@ def apply_blended_sharp_score(
                     break
 
 
-    # === Cross-Market Odds Pivot
-    odds_pivot = (
-        df.drop_duplicates(subset=['Game_Key', 'Market', 'Outcome'])
-          .pivot_table(index='Game_Key', columns='Market', values='Odds_Price')
-          .rename(columns={'spreads': 'Spread_Odds', 'totals': 'Total_Odds', 'h2h': 'H2H_Odds'})
-          .reset_index()
+    # === Cross-Market Pivots (Value + Odds) with guaranteed columns ===
+    MARKETS = ["spreads","totals","h2h"]
+    
+    df_latest = (
+        df.sort_values("Snapshot_Timestamp")
+          .drop_duplicates(subset=["Game_Key","Market","Outcome"], keep="last")
     )
-    df = df.merge(odds_pivot, on='Game_Key', how='left')
+    
+    value_pivot = (
+        df_latest.pivot_table(index="Game_Key", columns="Market", values="Value",
+                              aggfunc="last", dropna=False)
+                 .reindex(columns=MARKETS)
+                 .rename(columns={"spreads":"Spread_Value","totals":"Total_Value","h2h":"H2H_Value"})
+    )
+    
+    odds_pivot = (
+        df_latest.pivot_table(index="Game_Key", columns="Market", values="Odds_Price",
+                              aggfunc="last", dropna=False)
+                 .reindex(columns=MARKETS)
+                 .rename(columns={"spreads":"Spread_Odds","totals":"Total_Odds","h2h":"H2H_Odds"})
+    )
+    
+    df_cross_market = value_pivot.join(odds_pivot, how="outer").reset_index()
+    
+    # Ensure the expected columns exist even if a market is absent
+    for col in ["Spread_Value","Total_Value","H2H_Value","Spread_Odds","Total_Odds","H2H_Odds"]:
+        if col not in df_cross_market.columns:
+            df_cross_market[col] = np.nan
+    
+    # Merge into the working frame
+    df = df.merge(df_cross_market, on="Game_Key", how="left", validate="m:1")
+    
+    # === Implied probabilities per market (vectorized, with row-level fallback) ===
+    def _series_or_fallback(primary, fallback):
+        return primary.where(primary.notna(), fallback) if fallback is not None else primary
+    
+    if 'Odds_Price' in df.columns:
+        row_odds = pd.to_numeric(df['Odds_Price'], errors='coerce')
+    else:
+        row_odds = None
+    
+    for odds_col, ip_col in [
+        ("Spread_Odds","Spread_Implied_Prob"),
+        ("Total_Odds","Total_Implied_Prob"),
+        ("H2H_Odds","H2H_Implied_Prob"),
+    ]:
+        if odds_col not in df.columns:
+            df[odds_col] = np.nan
+        ser = pd.to_numeric(df[odds_col], errors='coerce')
+        ser = _series_or_fallback(ser, row_odds)
+        df[ip_col] = implied_prob_vec(ser).astype("float32")
+    
+    # === New plumbing features ===
+    # 1) Limit dynamics (spikes, Δlimit, spike×no-move)
+    df = add_limit_dynamics_features(df)
+    
+    # 2) Bookmaker network features (weighted sharp consensus & sharp-vs-rec gaps)
+    #    Call AFTER you merged book reliability above (you already merged 'book_reliability_map' earlier)
+    df = add_book_network_features(df)
+    
+    # 3) Internal consistency checks (Spread↔ML and Total↔Side) using cross-market pivots
+    sport0 = (df['Sport'].dropna().astype(str).str.upper().iloc[0] if df['Sport'].notna().any() else "NFL")
+    df = add_internal_consistency_features(df, df_cross_market=df_cross_market, sport_default=sport0)
+    
+    # Optional extras if/when you have the inputs handy:
+    # if df_alt is available:
+    # df = add_altline_curvature(df, df_alt)
+    # if you train a tiny CLV side-model:
+    # df = add_clv_proxy_features(df, clv_model_path="artifacts/clv_side.joblib")
+
 
     # === Normalize keys for joins (safe no-ops if already normalized)
     if 'Bookmaker' not in df.columns and 'Book' in df.columns:
