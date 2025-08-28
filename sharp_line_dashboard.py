@@ -2794,7 +2794,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         .reset_index()
     )
     
-
+    df_market = df_market.merge(df_cross_market, on="Game_Key", how="left")
+    # --- Safe odds/prob scaffolding (post-merge) ---
+    
     
 
     dedup_cols = [
@@ -2972,7 +2974,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         for col in ("Sport","Market","Bookmaker"):
             if col in df_market.columns and str(df_market[col].dtype).startswith("category"):
                 df_market[col] = df_market[col].astype(str)
+        def _amer_to_prob_vec(s):
+            s = pd.to_numeric(s, errors="coerce")
+            return np.where(s > 0, 100.0/(s+100.0),
+                   np.where(s < 0, (-s)/((-s)+100.0), np.nan)).astype("float32")
         
+        # Ensure columns exist; if missing, create as NaN
+        for c in ["Spread_Odds","Total_Odds","H2H_Odds"]:
+            if c not in df_market.columns:
+                df_market[c] = np.nan
+        
+        # Compute implied probs with row-level fallback to Odds_Price (no KeyError, vectorized)
+        df_market["Spread_Implied_Prob"] = _amer_to_prob_vec(
+            df_market["Spread_Odds"].where(df_market["Spread_Odds"].notna(), df_market.get("Odds_Price"))
+        )
+        df_market["Total_Implied_Prob"] = _amer_to_prob_vec(
+            df_market["Total_Odds"].where(df_market["Total_Odds"].notna(), df_market.get("Odds_Price"))
+        )
+        df_market["H2H_Implied_Prob"] = _amer_to_prob_vec(
+            df_market["H2H_Odds"].where(df_market["H2H_Odds"].notna(), df_market.get("Odds_Price"))
+        )
+
         # Your existing FE before resistance
         df_market = compute_small_book_liquidity_features(df_market)
         df_market = add_favorite_context_flag(df_market)
@@ -3035,9 +3057,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
         df_market['Market']         = df_market['Market'].astype(str).str.lower().str.strip()
         df_market['Game_Key']       = df_market['Game_Key'].astype(str).str.lower().str.strip()
-        df_market['Spread_Implied_Prob'] = df_market['Spread_Odds'].apply(implied_prob)
-        df_market['H2H_Implied_Prob'] = df_market['H2H_Odds'].apply(implied_prob)
-        df_market['Total_Implied_Prob'] = df_market['Total_Odds'].apply(implied_prob)
+        
         
         # 1) Limit dynamics
         df_market = add_limit_dynamics_features(df_market)
@@ -3425,11 +3445,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #df_market['Is_Team_Under'] = (df_market['Team_Bet_Role'] == 'under').astype(int)
         # === Cross-Market Alignment and Gaps ===
 
-        # 1. Spread and H2H line alignment (are both favoring same side)
-        df_market['Spread_vs_H2H_Aligned'] = (
-            (df_market['Spread_Value'] < 0)  &
-            (df_market['H2H_Implied_Prob'] > 0.5)
-        ).astype(int)
 
         
         # 2. Total vs Spread directional contradiction
