@@ -3621,13 +3621,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = [
             # 🔹 Core sharp signals
             #'Sharp_Move_Signal',
-            'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
+            #'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
             'Book_lift_x_Magnitude','Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
-            'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag',
+            'Is_Reinforced_MultiMarket','Market_Leader',#'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
             #'Sharp_Line_Magnitude',
-            'Is_Home_Team_Bet','Line_Moved_Toward_Team'
+            #'Is_Home_Team_Bet',
+            'Line_Moved_Toward_Team'
             'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
@@ -3666,7 +3667,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+            'Outcome_Model_Spread',#'Outcome_Market_Spread',
+            'Outcome_Spread_Edge',
             'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
@@ -3744,7 +3746,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Alt lines (optional)
             "AltLine_Slope","AltLine_Curv",
             # CLV proxies
-            "CLV_Proxy_E_DeltaNext15m","CLV_Proxy_E_CLV",
+            #"CLV_Proxy_E_DeltaNext15m",
+            "CLV_Proxy_E_CLV",
         ])
 
         # merge view-driven features (all_present) without losing order
