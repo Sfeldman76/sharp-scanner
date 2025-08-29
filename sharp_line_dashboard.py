@@ -72,11 +72,17 @@ from datetime import datetime, date, timedelta
 from collections import defaultdict, OrderedDict
 from itertools import product
 from html import escape
+import io, pickle, logging
 
+from google.cloud import storage
 import numpy as np
 import pandas as pd
 from pandas.util import hash_pandas_object
 
+
+from sklearn.model_selection import StratifiedKFold
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.calibration import CalibratedClassifierCV
 import requests
 import pytz
 from pytz import timezone as pytz_timezone
@@ -1068,8 +1074,8 @@ def fetch_training_ratings_window_cached(
     df["Team_Norm"] = df["Team_Norm"].astype(str)
     return df
 
-import numpy as np
-import pandas as pd
+
+
 
 PHASES  = ["Overnight","Early","Midday","Late"]
 URGENCY = ["VeryEarly","MidRange","LateGame","Urgent"]
@@ -1093,7 +1099,7 @@ def _entropy_rowwise(X, eps=1e-12):
     H = H.replace([np.inf, -np.inf], 0).fillna(0.0)
     return H
 
-import numpy as np
+
 
 
 
@@ -2075,8 +2081,7 @@ def add_resistance_features_training(
 
 
 
-# === utils: final-snapshot microstructure (no history needed) ===
-import numpy as np, pandas as pd
+
 
 def _amer_to_prob(o):
     o = pd.to_numeric(o, errors="coerce")
@@ -5109,12 +5114,7 @@ def train_timing_opportunity_model(
     Train per-market timing models and (UI-only) compute Timing_Opportunity_Score/Timing_Stage
     on the same historical df. Saves a payload with the exact feature_list used.
     """
-    import os
-    import numpy as np
-    import pandas as pd
-    from sklearn.model_selection import StratifiedKFold
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.calibration import CalibratedClassifierCV
+
 
     st.info(f"🧠 Training timing opportunity models for {sport.upper()}...")
 
@@ -5556,8 +5556,7 @@ def attach_why_model_likes_it(df_in, bundle, model):
     df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
     df.attrs["active_features_used"] = active  # expose for downstream gating
     return df
-import numpy as np
-import pandas as pd
+
 
 def compute_diagnostics_vectorized(
     df: pd.DataFrame,
@@ -6026,10 +6025,7 @@ def save_model_to_gcs(
         raise
 
 
-import io, pickle, logging
-import numpy as np
-import pandas as pd
-from google.cloud import storage
+
 
 
 
