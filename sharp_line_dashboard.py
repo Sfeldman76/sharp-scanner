@@ -129,7 +129,7 @@ RATINGS_HISTORY_TABLE = "sharplogger.sharp_data.ratings_history"  # <- fully qua
 
 GCS_BUCKET = "sharp-models"
 import os, json
-
+import gc
 
 
 
