@@ -314,6 +314,8 @@ SPORT_ALIASES = {
     # extend as needed
 }
 
+
+sport_aliases = SPORT_ALIASES
 def _is_num(x):
     x = pd.to_numeric(x, errors="coerce")
     return pd.notna(x) and np.isfinite(x)
