@@ -4106,6 +4106,26 @@ def add_resistance_features_training(
     out.drop(columns=["_sport_","_market_"], inplace=True, errors="ignore")
     return out
 
+# --- helper: row-wise entropy with safe math (no warnings, no NaNs) ---
+def _row_entropy(df_like: pd.DataFrame, cols: list[str]) -> pd.Series:
+    if not cols:
+        return pd.Series(0.0, index=df_like.index, dtype="float32")
+    # build matrix (float64 for stability)
+    M = df_like.reindex(columns=cols, fill_value=0.0).to_numpy(dtype="float64", copy=False)
+    # normalize rows to probabilities
+    row_sum = M.sum(axis=1, keepdims=True)  # shape (n,1)
+    # P = M / row_sum, but 0 when row_sum == 0
+    P = np.divide(M, row_sum, out=np.zeros_like(M), where=row_sum > 0)
+
+    # compute log only where P>0, write 0 elsewhere
+    logP = np.zeros_like(P)
+    np.log(P, out=logP, where=(P > 0))
+
+    ent = -(P * logP).sum(axis=1)  # row-wise entropy
+    # Replace any residual non-finite values (paranoia)
+    ent[~np.isfinite(ent)] = 0.0
+    return pd.Series(ent, index=df_like.index, dtype="float32")
+
 def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty: 
         return df
@@ -4113,11 +4133,14 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
 
     line_cols = [c for c in out.columns if c.startswith("SharpMove_Magnitude_")]
     odds_cols = [c for c in out.columns if c.startswith("OddsMove_Magnitude_")]
+    
+  
     if not line_cols:
         line_cols += [c for c in out.columns if ("line" in c.lower() or "value" in c.lower()) and "magnitude" in c.lower()]
     if not odds_cols:
         odds_cols += [c for c in out.columns if ("odds" in c.lower() or "price" in c.lower() or "prob" in c.lower()) and "magnitude" in c.lower()]
-
+    out["Hybrid_Timing_Entropy_Line"] = _row_entropy(out, line_cols)
+    out["Hybrid_Timing_Entropy_Odds"] = _row_entropy(out, odds_cols)
     def _pick(cols, pats):
         pats = tuple(p.lower() for p in pats)
         return [c for c in cols if any(p in c.lower() for p in pats)]
