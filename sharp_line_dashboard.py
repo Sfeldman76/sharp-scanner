@@ -2662,6 +2662,7 @@ def _row_corr(a, b):
     # If numerical issues produce NaN
     val = float(c[0, 1]) if c.shape == (2, 2) else 0.0
     return 0.0 if not np.isfinite(val) else val
+
 def build_timing_aggregates_inplace(df: pd.DataFrame,
                             line_prefix="SharpMove_Magnitude_",
                             odds_prefix="OddsMove_Magnitude_",
@@ -2758,7 +2759,7 @@ def build_timing_aggregates_inplace(df: pd.DataFrame,
     if drop_original:
         df.drop(columns=line_bins_all + odds_bins_all, errors="ignore", inplace=True)
 
-    return df, out_cols
+    return out_cols
 
 
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
