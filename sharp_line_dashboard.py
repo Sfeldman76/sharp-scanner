@@ -923,12 +923,7 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
     mapping['Bookmaker'] = mapping['Bookmaker'].astype(str).str.lower().str.strip()
     
     return mapping
-# --- IMPORTS (must be before helpers) ---
-import streamlit as st
 
-from pandas.api.types import is_categorical_dtype
-from google.cloud import bigquery
-import gc
 
 # --- CACHED CLIENT (resource-level) ---
 @st.cache_resource
@@ -1133,10 +1128,6 @@ def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFram
 # --- TRAINING ENRICHMENT (LEAK-SAFE) ---
 
 
-import gc
-import numpy as np
-import pandas as pd
-from google.cloud import bigquery
 
 def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
@@ -2620,6 +2611,154 @@ def add_clv_proxy_features(df: pd.DataFrame, clv_model_path: str | None = None) 
 
     return out
 
+import numpy as np
+import pandas as pd
+
+PHASES  = ["Overnight","Early","Midday","Late"]
+URGENCY = ["VeryEarly","MidRange","LateGame","Urgent"]
+
+def _bins(prefix):
+    # returns all 16 column names for a timing family
+    return [f"{prefix}{p}_{u}" for p in PHASES for u in URGENCY]
+
+def _sum_cols(df, cols):
+    if not cols: return pd.Series(0.0, index=df.index)
+    return df[cols].sum(axis=1, numeric_only=True)
+
+def _safe_div(a, b, eps=1e-9):
+    return a / (b.abs() + eps)
+
+def _entropy_rowwise(X, eps=1e-12):
+    # X: DataFrame of non-negative magnitudes; returns entropy per row
+    S = X.sum(axis=1)
+    W = X.div(S.replace(0, np.nan), axis=0).clip(lower=eps)  # row-normalize
+    H = -(W * np.log(W)).sum(axis=1)
+    H = H.replace([np.inf, -np.inf], 0).fillna(0.0)
+    return H
+
+def _row_corr(a, b):
+    # Coerce to 1-D float arrays robustly
+    a = np.atleast_1d(np.asarray(a, dtype=float))
+    b = np.atleast_1d(np.asarray(b, dtype=float))
+
+    # Trim to equal length if something went odd
+    if a.size != b.size:
+        n = min(a.size, b.size)
+        a = a[:n]
+        b = b[:n]
+
+    # Handle all-NaN / non-finite cases
+    if not np.isfinite(a).any() or not np.isfinite(b).any():
+        return 0.0
+    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+    b = np.nan_to_num(b, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Zero variance → undefined corr
+    if a.std() == 0.0 or b.std() == 0.0:
+        return 0.0
+
+    # Safe correlation
+    c = np.corrcoef(a, b)
+    # If numerical issues produce NaN
+    val = float(c[0, 1]) if c.shape == (2, 2) else 0.0
+    return 0.0 if not np.isfinite(val) else val
+def build_timing_aggregates_inplace(df: pd.DataFrame,
+                            line_prefix="SharpMove_Magnitude_",
+                            odds_prefix="OddsMove_Magnitude_",
+                            *,
+                            drop_original=False) -> list[str]:
+    """
+    Enriches the DataFrame in-place with timing aggregates.
+    Returns a list of newly created column names.
+    """
+    out_cols = []
+    # --- Gather column groups (only those that exist) ---
+    line_bins_all = [c for c in _bins(line_prefix) if c in df.columns]
+    odds_bins_all = [c for c in _bins(odds_prefix) if c in df.columns]
+
+    # Phase slices
+    line_phase = {p: [f"{line_prefix}{p}_{u}" for u in URGENCY if f"{line_prefix}{p}_{u}" in df.columns] for p in PHASES}
+    odds_phase = {p: [f"{odds_prefix}{p}_{u}" for u in URGENCY if f"{odds_prefix}{p}_{u}" in df.columns] for p in PHASES}
+
+    # --- Totals ---
+    df["Line_TotalMag"] = _sum_cols(df, line_bins_all)
+    df["Odds_TotalMag"] = _sum_cols(df, odds_bins_all)
+    out_cols += ["Line_TotalMag","Odds_TotalMag"]
+
+    # --- Per-phase sums ---
+    for p in PHASES:
+        ln = f"Line_PhaseMag_{p}"
+        od = f"Odds_PhaseMag_{p}"
+        df[ln] = _sum_cols(df, line_phase[p])
+        df[od] = _sum_cols(df, odds_phase[p])
+        out_cols += [ln, od]
+
+    # --- Shares & ratios ---
+    df["Line_UrgentShare"] = _safe_div(
+        df[[c for c in line_bins_all if c.endswith("_Urgent")]].sum(axis=1),
+        df["Line_TotalMag"]
+    )
+    df["Odds_UrgentShare"] = _safe_div(
+        df[[c for c in odds_bins_all if c.endswith("_Urgent")]].sum(axis=1),
+        df["Odds_TotalMag"]
+    )
+    out_cols += ["Line_UrgentShare","Odds_UrgentShare"]
+
+    df["Line_LateShare"] = _safe_div(df["Line_PhaseMag_Late"], df["Line_TotalMag"])
+    df["Odds_LateShare"] = _safe_div(df["Odds_PhaseMag_Late"], df["Odds_TotalMag"])
+    out_cols += ["Line_LateShare","Odds_LateShare"]
+
+    # --- Max bin (spikiness) ---
+    df["Line_MaxBinMag"] = df[line_bins_all].max(axis=1) if line_bins_all else 0.0
+    df["Odds_MaxBinMag"] = df[odds_bins_all].max(axis=1) if odds_bins_all else 0.0
+    out_cols += ["Line_MaxBinMag","Odds_MaxBinMag"]
+
+    # --- Entropy (dispersion of timing) ---
+    df["Line_Entropy"] = _entropy_rowwise(df[line_bins_all]) if line_bins_all else 0.0
+    df["Odds_Entropy"] = _entropy_rowwise(df[odds_bins_all]) if odds_bins_all else 0.0
+    out_cols += ["Line_Entropy","Odds_Entropy"]
+
+    # --- Cross axis confirmations ---
+    df["LineOddsMag_Ratio"] = _safe_div(df["Line_TotalMag"], df["Odds_TotalMag"])
+    out_cols += ["LineOddsMag_Ratio"]
+
+    # Late vs (Overnight+Early+Midday)
+    df["LateVsEarly_Ratio_Line"] = _safe_div(
+        df["Line_PhaseMag_Late"],
+        (df["Line_PhaseMag_Overnight"] + df["Line_PhaseMag_Early"] + df["Line_PhaseMag_Midday"])
+    )
+    df["LateVsEarly_Ratio_Odds"] = _safe_div(
+        df["Odds_PhaseMag_Late"],
+        (df["Odds_PhaseMag_Overnight"] + df["Odds_PhaseMag_Early"] + df["Odds_PhaseMag_Midday"])
+    )
+    out_cols += ["LateVsEarly_Ratio_Line","LateVsEarly_Ratio_Odds"]
+
+    # Timing correlation across 16 aligned bins
+    def _row_corr(a, b):
+        # a,b: arrays of equal length
+        if np.all(a == 0) and np.all(b == 0): return 0.0
+        if np.std(a) == 0 or np.std(b) == 0:  return 0.0
+        return float(np.corrcoef(a, b)[0,1])
+
+    if line_bins_all and odds_bins_all and (len(line_bins_all) == len(odds_bins_all)):
+    # Ensure we pull 1-D arrays for each row
+        df["Timing_Corr_Line_Odds"] = [
+            _row_corr(
+                df.loc[i, line_bins_all].to_numpy(dtype=float, copy=False),
+                df.loc[i, odds_bins_all].to_numpy(dtype=float, copy=False),
+            )
+            for i in df.index
+        ]
+    else:
+        df["Timing_Corr_Line_Odds"] = 0.0
+    out_cols += ["Timing_Corr_Line_Odds"]
+
+
+    # Optionally drop originals (after creating aggregates!)
+    if drop_original:
+        df.drop(columns=line_bins_all + odds_bins_all, errors="ignore", inplace=True)
+
+    return df, out_cols
 
 
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
@@ -5399,154 +5538,6 @@ def attach_ratings_and_edges_for_diagnostics(
 
     return out
 
-# --- 0) Active-feature resolver (tries bundle metadata, booster names, your resolver) ---
-def _resolve_active_features(bundle, model, df_like):
-    cand = None
-    if isinstance(bundle, dict):
-        for k in ("feature_names", "features", "training_features"):
-            if k in bundle and bundle[k]:
-                cand = list(dict.fromkeys([str(c) for c in bundle[k] if c is not None]))
-                break
-    if cand is None and hasattr(model, "get_booster"):
-        try:
-            booster = model.get_booster()
-            if booster is not None and getattr(booster, "feature_names", None):
-                cand = list(dict.fromkeys([str(c) for c in booster.feature_names]))
-        except Exception:
-            pass
-    if cand is None:
-        try:
-            cols = _resolve_feature_cols_like_training(bundle, model, df_like)  # your helper if available
-            cand = list(dict.fromkeys([str(c) for c in cols if c is not None]))
-        except Exception:
-            pass
-    if cand is None:
-        cand = [c for c in df_like.columns if c not in ("y","label","target")]
-    return cand
-
-# --- 1) Safe numeric coercion (handles categoricals/strings) ---
-def _coerce_numeric_inplace(df, cols, fill=0.0):
-    for c in cols:
-        if c not in df.columns:
-            df[c] = fill
-        else:
-            if pd.api.types.is_categorical_dtype(df[c]):
-                df[c] = df[c].astype(object)
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(fill)
-
-# --- 2) Explainer rules (ONLY fire if their features are active) ---
-WHY_RULES = [
-    # Core sharp signals
-    dict(requires=["Sharp_Move_Signal"], check=lambda r: r["Sharp_Move_Signal"] > 0.0, msg="📈 Sharp Move Detected"),
-    dict(requires=["Sharp_Limit_Jump"], check=lambda r: r["Sharp_Limit_Jump"] > 0.0, msg="💰 Limit Jumped"),
-    dict(requires=["Is_Reinforced_MultiMarket"], check=lambda r: r["Is_Reinforced_MultiMarket"] > 0.0, msg="📊 Multi-Market Consensus"),
-    dict(requires=["Book_lift_x_Magnitude"], check=lambda r: r["Book_lift_x_Magnitude"] > 0.0, msg="🏦 Book Lift Supports Move"),
-    dict(requires=["Book_lift_x_PROB_SHIFT"], check=lambda r: r["Book_lift_x_PROB_SHIFT"] > 0.0, msg="📈 Book Lift Aligned with Prob Shift"),
-    dict(requires=["Sharp_Limit_Total"], check=lambda r: r["Sharp_Limit_Total"] >= 10000, msg="💼 High Sharp Limits"),
-
-    # Market response / movement
-    dict(requires=["Sharp_Line_Magnitude"], check=lambda r: r["Sharp_Line_Magnitude"] >= 0.5, msg="📏 Big Line Move"),
-    dict(requires=["Is_Home_Team_Bet"], check=lambda r: r["Is_Home_Team_Bet"] > 0.0, msg="🏠 Home Side Backed"),
-
-    # Odds shift decomposition
-    dict(requires=["SharpMove_Odds_Up"], check=lambda r: r["SharpMove_Odds_Up"] > 0.0, msg="🟢 Odds Moved Up (Steam)"),
-    dict(requires=["SharpMove_Odds_Down"], check=lambda r: r["SharpMove_Odds_Down"] > 0.0, msg="🔻 Odds Moved Down (Buyback)"),
-    dict(requires=["SharpMove_Odds_Mag"], check=lambda r: r["SharpMove_Odds_Mag"] >= 5, msg="💥 Sharp Odds Steam"),
-
-    # Interactions / alignment
-    dict(requires=["MarketLeader_ImpProbShift"], check=lambda r: r["MarketLeader_ImpProbShift"] > 0.0, msg="🏆 Leader Moved with Implied Prob"),
-    dict(requires=["LimitProtect_SharpMag"], check=lambda r: r["LimitProtect_SharpMag"] > 0.0, msg="🛡️ Limit-Protection Behavior"),
-    dict(requires=["Delta_Sharp_vs_Rec"], check=lambda r: r["Delta_Sharp_vs_Rec"] > 0.0, msg="🧭 Sharp vs Rec Divergence"),
-
-    # Reversal logic
-    dict(requires=["Value_Reversal_Flag"], check=lambda r: r["Value_Reversal_Flag"] > 0.0, msg="🔄 Value Reversal"),
-    dict(requires=["Odds_Reversal_Flag"], check=lambda r: r["Odds_Reversal_Flag"] > 0.0, msg="📉 Odds Reversal"),
-
-    # Timing / from-open
-    dict(requires=["Late_Game_Steam_Flag"], check=lambda r: r["Late_Game_Steam_Flag"] > 0.0, msg="⏰ Late Game Steam"),
-    dict(requires=["Abs_Line_Move_From_Opening"], check=lambda r: r["Abs_Line_Move_From_Opening"] >= 1.0, msg="📈 Line Moved from Open"),
-    dict(requires=["Abs_Odds_Move_From_Opening"], check=lambda r: r["Abs_Odds_Move_From_Opening"] >= 5.0, msg="💹 Odds Moved from Open"),
-
-    # Cross-market / mispricing
-    dict(requires=["Market_Mispricing"], check=lambda r: r["Market_Mispricing"] > 0.0, msg="💸 Market Mispricing"),
-    dict(requires=["Spread_vs_H2H_Aligned"], check=lambda r: r["Spread_vs_H2H_Aligned"] > 0.0, msg="🧩 Spread & H2H Align"),
-    dict(requires=["Total_vs_Spread_Contradiction"], check=lambda r: r["Total_vs_Spread_Contradiction"] > 0.0, msg="⚠️ Total Contradicts Spread"),
-    dict(requires=["CrossMarket_Prob_Gap_Exists"], check=lambda r: r["CrossMarket_Prob_Gap_Exists"] > 0.0, msg="🔀 Cross-Market Probability Gap"),
-    dict(requires=["Potential_Overmove_Flag"], check=lambda r: r["Potential_Overmove_Flag"] > 0.0, msg="📊 Line Possibly Overmoved"),
-    dict(requires=["Potential_Overmove_Total_Pct_Flag"], check=lambda r: r["Potential_Overmove_Total_Pct_Flag"] > 0.0, msg="📉 Total Possibly Overmoved"),
-    dict(requires=["Potential_Odds_Overmove_Flag"], check=lambda r: r["Potential_Odds_Overmove_Flag"] > 0.0, msg="🎯 Odds Possibly Overmoved"),
-    dict(requires=["Line_Moved_Toward_Team"], check=lambda r: r["Line_Moved_Toward_Team"] > 0.0, msg="🧲 Line Moved Toward This Team"),
-
-    # Hybrid timing buckets (virtual sums; added dynamically)
-    dict(requires=["__HYBRID_LINE_SUM__"], check=lambda r: r["__HYBRID_LINE_SUM__"] > 0.0, msg="⏱️ Sharp Line Timing Bucket"),
-    dict(requires=["__HYBRID_ODDS_SUM__"], check=lambda r: r["__HYBRID_ODDS_SUM__"] > 0.0, msg="🕰️ Sharp Odds Timing Bucket"),
-
-    # Team history (if used)
-    dict(requires=["Team_Past_Hit_Rate"], check=lambda r: r["Team_Past_Hit_Rate"] > 0.5, msg="⚔️ Team Historically Sharp"),
-    dict(requires=["Team_Past_Avg_Model_Prob"], check=lambda r: r["Team_Past_Avg_Model_Prob"] > 0.5, msg="🔮 Model Favored This Team Historically"),
-]
-
-# --- 3) Attach explainer (creates df["Why Model Likes It"]) ---
-def attach_why_model_likes_it(df_in, bundle, model):
-    df = df_in.copy()
-
-    # Families used for hybrid sums
-    HYBRID_LINE = [f'SharpMove_Magnitude_{b}' for b in [
-        'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-        'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-        'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-        'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-    ]]
-    HYBRID_ODDS = [f'OddsMove_Magnitude_{b}' for b in [
-        'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-        'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-        'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-        'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-    ]]
-
-    # 3a) active features
-    active = _resolve_active_features(bundle, model, df)
-    active_set = set(active)
-
-    # 3b) collect needed columns from rules that are truly active
-    needed = set()
-    for rule in WHY_RULES:
-        for req in rule["requires"]:
-            if req.startswith("__HYBRID_"):
-                continue
-            if req in active_set:
-                needed.add(req)
-    active_hybrid_line = [c for c in HYBRID_LINE if c in active_set]
-    active_hybrid_odds = [c for c in HYBRID_ODDS if c in active_set]
-    needed.update(active_hybrid_line)
-    needed.update(active_hybrid_odds)
-
-    # 3c) coerce numeric (prevents categorical setitem errors)
-    _coerce_numeric_inplace(df, list(needed), fill=0.0)
-
-    # 3d) virtual hybrid sums
-    df["__HYBRID_LINE_SUM__"] = df[active_hybrid_line].sum(axis=1) if active_hybrid_line else 0.0
-    df["__HYBRID_ODDS_SUM__"] = df[active_hybrid_odds].sum(axis=1) if active_hybrid_odds else 0.0
-
-    # 3e) build reasons rowwise
-    msgs = []
-    for _, row in df.iterrows():
-        reasons = []
-        for rule in WHY_RULES:
-            reqs = rule["requires"]
-            if not all((r in active_set) or r.startswith("__HYBRID_") for r in reqs):
-                continue
-            try:
-                if rule["check"](row):
-                    reasons.append(rule["msg"])
-            except Exception:
-                continue
-        msgs.append(" · ".join(reasons) if reasons else "—")
-
-    df["Why Model Likes It"] = msgs
-    df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
-    df.attrs["active_features_used"] = active  # expose for downstream gating
-    return df
 
 
 def compute_diagnostics_vectorized(
