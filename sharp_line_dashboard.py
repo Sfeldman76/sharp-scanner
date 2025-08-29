@@ -1092,12 +1092,8 @@ def _entropy_rowwise(X, eps=1e-12):
     H = -(W * np.log(W)).sum(axis=1)
     H = H.replace([np.inf, -np.inf], 0).fillna(0.0)
     return H
-
-def build_timing_aggregates(df: pd.DataFrame,
-                            line_prefix="SharpMove_Magnitude_",
-                            odds_prefix="OddsMove_Magnitude_",
-                            *,
-                            drop_original=False):
+def build_timing_aggregates_inplace(df: pd.DataFrame, line_prefix="SharpMove_Magnitude_", odds_prefix="OddsMove_Magnitude_", *, drop_original=False) -> list[str]:
+    
     out_cols = []
 
     # --- Gather column groups (only those that exist) ---
@@ -1181,7 +1177,7 @@ def build_timing_aggregates(df: pd.DataFrame,
     if drop_original:
         df.drop(columns=line_bins_all + odds_bins_all, errors="ignore", inplace=True)
 
-    return df, out_cols
+    return out_cols
 
 
 
@@ -3816,12 +3812,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         ]
         #extend_unique(features, hybrid_timing_features)
         #extend_unique(features, hybrid_odds_timing_features)
-        df, timing_cols = build_timing_aggregates(
-            df,
-            line_prefix="SharpMove_Magnitude_",
-            odds_prefix="OddsMove_Magnitude_",
-            drop_original=True  # set False first to compare
-        )
+        timing_cols = build_timing_aggregates_inplace(df)
+
         # extend your feature list with timing_cols (and remove the 32 originals)
         extend_unique(features, timing_cols)
 
