@@ -1114,8 +1114,8 @@ def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market
     return final
 
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
-def _resolve_active_features(bundle, df_columns: tuple[str, ...], *, market: str) -> list[str]:
-
+def _resolve_active_features(bundle, model, df_like):
+    cand = None
     if isinstance(bundle, dict):
         for k in ("feature_names", "features", "training_features"):
             if k in bundle and bundle[k]:
