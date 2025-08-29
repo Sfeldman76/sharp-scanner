@@ -965,258 +965,169 @@ def _parse_table_id(project_default: str, table_id: str):
 
 # --- 1) Cached helper: resolve rating column (trivial for this schema) ---
 @st.cache_data(show_spinner=False)
-def _resolve_rating_col(table_fq: str, project: str | None = None) -> str:
+# ===========================
+# WHY MODEL LIKES IT (v2)
+# ===========================
+
+# --- Active feature resolver (kept from your snippet; safe if already defined) ---
+def _resolve_active_features(bundle, model, df_like):
+    cand = None
+    if isinstance(bundle, dict):
+        for k in ("feature_names", "features", "training_features"):
+            if k in bundle and bundle[k]:
+                cand = list(dict.fromkeys([str(c) for c in bundle[k] if c is not None]))
+                break
+    if cand is None and hasattr(model, "get_booster"):
+        try:
+            booster = model.get_booster()
+            if booster is not None and getattr(booster, "feature_names", None):
+                cand = list(dict.fromkeys([str(c) for c in booster.feature_names]))
+        except Exception:
+            pass
+    if cand is None:
+        try:
+            cols = _resolve_feature_cols_like_training(bundle, model, df_like)  # your helper if available
+            cand = list(dict.fromkeys([str(c) for c in cols if c is not None]))
+        except Exception:
+            pass
+    if cand is None:
+        cand = [c for c in df_like.columns if c not in ("y","label","target")]
+    return cand
+
+# --- Numeric coercion (kept from your snippet; safe if already defined) ---
+def _coerce_numeric_inplace(df, cols, fill=0.0):
+    for c in cols:
+        if c not in df.columns:
+            df[c] = fill
+        else:
+            if pd.api.types.is_categorical_dtype(df[c]):
+                df[c] = df[c].astype(object)
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(fill)
+
+# --- Helper to read first available value across aliases safely ---
+def _rv(row, *names, default=0.0):
+    for n in names:
+        if n in row:
+            try:
+                return float(row[n])
+            except Exception:
+                return default
+    return default
+
+# --- Thresholds (tune lightly per sport if you want) ---
+THR = dict(
+    line_mag_big=0.75,          # Line_TotalMag considered "big"
+    late_share_high=0.50,       # ≥50% of timing in Late phase
+    urgent_share_high=0.20,     # ≥20% in Urgent bins
+    entropy_concentrated=1.25,  # lower entropy = concentrated timing
+    corr_confirm=0.15,          # odds/line timing corr considered confirming
+    odds_overmove_ratio=1.20,   # line/odds mag ratio suggesting line override
+    pct_from_open_big=5.0,      # % line move from open is notable (sport-tune)
+    pr_diff_meaningful=2.0,     # power rating diff magnitude considered meaningful
+    cover_prob_conf=0.55        # cover prob indicates model confidence
+)
+
+# --- Rule schema supports "requires" (all) and "requires_any" (any-of) ---
+WHY_RULES_V2 = [
+    # 🔹 Core sharp/book pressure
+    dict(requires_any=["Book_lift_x_Magnitude"], check=lambda r: _rv(r,"Book_lift_x_Magnitude") > 0.0, msg="🏦 Book Lift Supports Move"),
+    dict(requires_any=["Book_lift_x_PROB_SHIFT"], check=lambda r: _rv(r,"Book_lift_x_PROB_SHIFT") > 0.0, msg="📈 Book Lift Aligned with Prob Shift"),
+    dict(requires_any=["Sharp_Limit_Total"], check=lambda r: _rv(r,"Sharp_Limit_Total") >= 10000, msg="💼 High Sharp Limits"),
+    dict(requires_any=["Is_Reinforced_MultiMarket"], check=lambda r: _rv(r,"Is_Reinforced_MultiMarket") > 0.0, msg="📊 Multi-Market Reinforcement"),
+    dict(requires_any=["Market_Leader"], check=lambda r: _rv(r,"Market_Leader") > 0.0, msg="🏆 Market Leader Led the Move"),
+
+    # 🔹 Market response / mispricing
+    dict(requires_any=["Line_Moved_Toward_Team"], check=lambda r: _rv(r,"Line_Moved_Toward_Team") > 0.0, msg="🧲 Line Moved Toward This Team"),
+    dict(requires_any=["Market_Mispricing"], check=lambda r: _rv(r,"Market_Mispricing") > 0.0, msg="💸 Market Mispricing Detected"),
+    dict(requires_any=["Pct_Line_Move_From_Opening"], check=lambda r: _rv(r,"Pct_Line_Move_From_Opening") >= THR["pct_from_open_big"], msg="📈 Significant Move From Open"),
+
+    # 🔁 Reversal / overmove logic
+    dict(requires_any=["Value_Reversal_Flag"], check=lambda r: _rv(r,"Value_Reversal_Flag") > 0.0, msg="🔄 Value Reversal"),
+    dict(requires_any=["Odds_Reversal_Flag"],  check=lambda r: _rv(r,"Odds_Reversal_Flag")  > 0.0, msg="📉 Odds Reversal"),
+    dict(requires_any=["Potential_Overmove_Flag"], check=lambda r: _rv(r,"Potential_Overmove_Flag") > 0.0, msg="📊 Possible Line Overmove"),
+    dict(requires_any=["Potential_Odds_Overmove_Flag"], check=lambda r: _rv(r,"Potential_Odds_Overmove_Flag") > 0.0, msg="🎯 Possible Odds Overmove"),
+
+    # 🚧 Resistance/levels
+    dict(requires_any=["Line_Resistance_Crossed_Count"], check=lambda r: _rv(r,"Line_Resistance_Crossed_Count") >= 1, msg="🪵 Crossed Key Resistance Levels"),
+    dict(requires_any=["SharpMove_Resistance_Break"],   check=lambda r: _rv(r,"SharpMove_Resistance_Break") > 0.0, msg="🪓 Resistance Broken by Sharp Move"),
+
+    # 🧠 Book reliability / liquidity microstructure
+    dict(requires_any=["Book_Reliability_Lift"], check=lambda r: _rv(r,"Book_Reliability_Lift") > 0.0, msg="✅ Reliable Book Confirms"),
+    dict(requires_any=["SmallBook_Heavy_Liquidity_Flag","SmallBook_Limit_Skew_Flag"],
+         check=lambda r: _rv(r,"SmallBook_Heavy_Liquidity_Flag")+_rv(r,"SmallBook_Limit_Skew_Flag") > 0.0,
+         msg="💧 Liquidity/Limit Skew Signals Pressure"),
+
+    # ⏱️ Timing aggregates (replaces 32 raw bins)
+    dict(requires_any=["Line_TotalMag","Sharp_Line_Magnitude"],
+         check=lambda r: max(_rv(r,"Line_TotalMag"), _rv(r,"Sharp_Line_Magnitude")) >= THR["line_mag_big"],
+         msg="📏 Strong Timing Magnitude"),
+    dict(requires_any=["Line_LateShare"],  check=lambda r: _rv(r,"Line_LateShare")  >= THR["late_share_high"],  msg="🌙 Late-Phase Dominant"),
+    dict(requires_any=["Line_UrgentShare"],check=lambda r: _rv(r,"Line_UrgentShare")>= THR["urgent_share_high"],msg="⏱️ Urgent Push Detected"),
+    dict(requires_any=["Line_MaxBinMag"],  check=lambda r: _rv(r,"Line_MaxBinMag")  > 0.0,                       msg="💥 Sharp Timing Spike"),
+    dict(requires_any=["Line_Entropy"],    check=lambda r: 0.0 < _rv(r,"Line_Entropy") <= THR["entropy_concentrated"], msg="🎯 Concentrated Timing"),
+    dict(requires_any=["Timing_Corr_Line_Odds"], check=lambda r: _rv(r,"Timing_Corr_Line_Odds") >= THR["corr_confirm"], msg="🔗 Odds Confirm Line Timing"),
+    dict(requires_any=["LineOddsMag_Ratio"], check=lambda r: _rv(r,"LineOddsMag_Ratio") >= THR["odds_overmove_ratio"], msg="⚖️ Line > Odds Magnitude"),
+
+    # 📐 Model & pricing agreement
+    dict(requires_any=["model_fav_vs_market_fav_agree"], check=lambda r: _rv(r,"model_fav_vs_market_fav_agree") > 0.0, msg="🧭 Model & Market Agree"),
+    dict(requires_any=["Outcome_Cover_Prob"],            check=lambda r: _rv(r,"Outcome_Cover_Prob") >= THR["cover_prob_conf"], msg="🔮 Strong Cover Probability"),
+
+    # 📊 Power ratings / totals context
+    dict(requires_any=["PR_Rating_Diff","PR_Abs_Rating_Diff"], check=lambda r: max(abs(_rv(r,"PR_Rating_Diff")), _rv(r,"PR_Abs_Rating_Diff")) >= THR["pr_diff_meaningful"], msg="📈 Meaningful Power-Rating Edge"),
+    dict(requires_any=["TOT_Mispricing","TOT_Proj_Total_Baseline"], check=lambda r: _rv(r,"TOT_Mispricing") > 0.0, msg="🧮 Totals Mispricing"),
+]
+
+def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFrame:
     """
-    Your ratings_history table uses 'Rating' (FLOAT).
-    We still confirm via INFORMATION_SCHEMA in case the casing changes.
+    Builds a human-readable 'Why Model Likes It' column using the UPDATED feature set
+    (timing aggregates, microstructure/resistance, mispricing, etc.). Only fires rules
+    when their required columns are present AND used by the model.
     """
-    bq = bigquery.Client(project=project) if project else bigquery.Client()
-    proj, ds, tbl = _parse_table_id(bq.project, table_fq)
+    df = df_in.copy()
 
-    sql = f"""
-        SELECT column_name
-        FROM `{proj}.{ds}.INFORMATION_SCHEMA.COLUMNS`
-        WHERE LOWER(table_name) = LOWER(@tname)
-    """
-    cols = bq.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("tname", "STRING", tbl)]
-        ),
-    ).to_dataframe()["column_name"].str.lower().tolist()
+    # 1) Resolve which features the model actually used
+    active = _resolve_active_features(bundle, model, df)
+    active_set = set(map(str, active))
 
-    if "rating" in cols:
-        return "Rating"  # return actual casing you store
+    # 2) Decide which rule columns are available (either active or simply present in df)
+    needed = set()
+    for rule in WHY_RULES_V2:
+        for req in rule.get("requires", []):
+            if (req in active_set) or (req in df.columns):
+                needed.add(req)
+        for req in rule.get("requires_any", []):
+            if (req in active_set) or (req in df.columns):
+                needed.add(req)
 
-    raise RuntimeError(
-        f"'Rating' column not found in {proj}.{ds}.{tbl}. "
-        f"Available (lowercased): {cols}"
-    )
+    # 3) Coerce only the needed columns to numeric (prevents categorical setitem errors)
+    _coerce_numeric_inplace(df, list(needed), fill=0.0)
 
-# --- 2) Cached main fetch: parameterized, dedup per day, schema-safe ---
-@st.cache_data(show_spinner=True, ttl=600)
-def fetch_training_ratings_window_cached(
-    sport: str,
-    start_iso: str,
-    end_iso: str,
-    table_history: str = "sharplogger.sharp_data.ratings_history",
-    project: str = "sharplogger",
-    method_filter: str | None = None,   # optional
-    source_filter: str | None = None,   # optional
-):
-    """
-    Returns one row per (Sport, Team_Norm, day) with the latest rating as-of that day.
-    Columns: Sport, Team_Norm, AsOfTS, Power_Rating
-    """
-    bq = bigquery.Client(project=project)
-    rating_col = _resolve_rating_col(table_history, project)
+    # 4) Evaluate rules row-wise
+    msgs = []
+    for _, row in df.iterrows():
+        reasons = []
+        for rule in WHY_RULES_V2:
+            req_all  = rule.get("requires", [])
+            req_any  = rule.get("requires_any", [])
+            # Must have all reqs (if any)
+            if req_all and not all(((r in active_set) or (r in df.columns)) for r in req_all):
+                continue
+            # Must have at least one of req_any (if any)
+            if req_any and not any(((r in active_set) or (r in df.columns)) for r in req_any):
+                continue
+            # Try the check
+            try:
+                if rule["check"](row):
+                    reasons.append(rule["msg"])
+            except Exception:
+                # swallow row-level issues
+                continue
+        msgs.append(" · ".join(reasons) if reasons else "—")
 
-    proj, ds, tbl = _parse_table_id(bq.project, table_history)
-    table_fq = f"{proj}.{ds}.{tbl}"
-
-    # Optional filters (Method/Source) as SQL fragments + parameters
-    where_extra = []
-    params = [
-        bigquery.ScalarQueryParameter("sport",    "STRING", sport.upper()),
-        bigquery.ScalarQueryParameter("start_ts", "TIMESTAMP", pd.to_datetime(start_iso).to_pydatetime()),
-        bigquery.ScalarQueryParameter("end_ts",   "TIMESTAMP", pd.to_datetime(end_iso).to_pydatetime()),
-    ]
-    if method_filter:
-        where_extra.append("AND Method = @method")
-        params.append(bigquery.ScalarQueryParameter("method", "STRING", method_filter))
-    if source_filter:
-        where_extra.append("AND Source = @source")
-        params.append(bigquery.ScalarQueryParameter("source", "STRING", source_filter))
-
-    sql = f"""
-      WITH base AS (
-        SELECT
-          UPPER(Sport) AS Sport,
-          LOWER(TRIM(Team)) AS Team_Norm,
-          SAFE_CAST(Updated_At AS TIMESTAMP) AS AsOfTS,
-          CAST(`{rating_col}` AS FLOAT64) AS Power_Rating
-        FROM `{table_fq}`
-        WHERE UPPER(Sport) = @sport
-          AND SAFE_CAST(Updated_At AS TIMESTAMP) BETWEEN @start_ts AND @end_ts
-          {' '.join(where_extra)}
-      ),
-      dedup AS (
-        SELECT *,
-               ROW_NUMBER() OVER (
-                 PARTITION BY Sport, Team_Norm, DATE(AsOfTS)
-                 ORDER BY AsOfTS DESC
-               ) AS rn
-        FROM base
-      )
-      SELECT Sport, Team_Norm, AsOfTS, Power_Rating
-      FROM dedup
-      WHERE rn = 1
-    """
-
-    # Optional dry run
-    bq.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False, query_parameters=params),
-    ).result()
-
-    df = bq.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(use_query_cache=True, query_parameters=params),
-    ).result().to_dataframe()
-
-    if df.empty:
-        return df
-
-    df = df[["Sport", "Team_Norm", "AsOfTS", "Power_Rating"]].copy()
-    df["AsOfTS"] = pd.to_datetime(df["AsOfTS"], utc=True, errors="coerce")
-    df["Power_Rating"] = pd.to_numeric(df["Power_Rating"], errors="coerce").astype("float32")
-    df["Sport"] = df["Sport"].astype(str)
-    df["Team_Norm"] = df["Team_Norm"].astype(str)
+    df["Why Model Likes It"] = msgs
+    df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
+    df.attrs["active_features_used"] = active  # expose for downstream gating
     return df
-
-
-
-
-PHASES  = ["Overnight","Early","Midday","Late"]
-URGENCY = ["VeryEarly","MidRange","LateGame","Urgent"]
-
-def _bins(prefix):
-    # returns all 16 column names for a timing family
-    return [f"{prefix}{p}_{u}" for p in PHASES for u in URGENCY]
-
-def _sum_cols(df, cols):
-    if not cols: return pd.Series(0.0, index=df.index)
-    return df[cols].sum(axis=1, numeric_only=True)
-
-def _safe_div(a, b, eps=1e-9):
-    return a / (b.abs() + eps)
-
-def _entropy_rowwise(X, eps=1e-12):
-    # X: DataFrame of non-negative magnitudes; returns entropy per row
-    S = X.sum(axis=1)
-    W = X.div(S.replace(0, np.nan), axis=0).clip(lower=eps)  # row-normalize
-    H = -(W * np.log(W)).sum(axis=1)
-    H = H.replace([np.inf, -np.inf], 0).fillna(0.0)
-    return H
-
-
-
-
-
-def build_timing_aggregates_inplace(df: pd.DataFrame, line_prefix="SharpMove_Magnitude_", odds_prefix="OddsMove_Magnitude_", *, drop_original=False) -> list[str]:
-    
-    out_cols = []
-
-    # --- Gather column groups (only those that exist) ---
-    line_bins_all = [c for c in _bins(line_prefix) if c in df.columns]
-    odds_bins_all = [c for c in _bins(odds_prefix) if c in df.columns]
-
-    # Phase slices
-    line_phase = {p: [f"{line_prefix}{p}_{u}" for u in URGENCY if f"{line_prefix}{p}_{u}" in df.columns] for p in PHASES}
-    odds_phase = {p: [f"{odds_prefix}{p}_{u}" for u in URGENCY if f"{odds_prefix}{p}_{u}" in df.columns] for p in PHASES}
-
-    # --- Totals ---
-    df["Line_TotalMag"] = _sum_cols(df, line_bins_all)
-    df["Odds_TotalMag"] = _sum_cols(df, odds_bins_all)
-    out_cols += ["Line_TotalMag","Odds_TotalMag"]
-
-    # --- Per-phase sums ---
-    for p in PHASES:
-        ln = f"Line_PhaseMag_{p}"
-        od = f"Odds_PhaseMag_{p}"
-        df[ln] = _sum_cols(df, line_phase[p])
-        df[od] = _sum_cols(df, odds_phase[p])
-        out_cols += [ln, od]
-
-    # --- Shares & ratios ---
-    df["Line_UrgentShare"] = _safe_div(
-        df[[c for c in line_bins_all if c.endswith("_Urgent")]].sum(axis=1),
-        df["Line_TotalMag"]
-    )
-    df["Odds_UrgentShare"] = _safe_div(
-        df[[c for c in odds_bins_all if c.endswith("_Urgent")]].sum(axis=1),
-        df["Odds_TotalMag"]
-    )
-    out_cols += ["Line_UrgentShare","Odds_UrgentShare"]
-
-    df["Line_LateShare"] = _safe_div(df["Line_PhaseMag_Late"], df["Line_TotalMag"])
-    df["Odds_LateShare"] = _safe_div(df["Odds_PhaseMag_Late"], df["Odds_TotalMag"])
-    out_cols += ["Line_LateShare","Odds_LateShare"]
-
-    # --- Max bin (spikiness) ---
-    df["Line_MaxBinMag"] = df[line_bins_all].max(axis=1) if line_bins_all else 0.0
-    df["Odds_MaxBinMag"] = df[odds_bins_all].max(axis=1) if odds_bins_all else 0.0
-    out_cols += ["Line_MaxBinMag","Odds_MaxBinMag"]
-
-    # --- Entropy (dispersion of timing) ---
-    df["Line_Entropy"] = _entropy_rowwise(df[line_bins_all]) if line_bins_all else 0.0
-    df["Odds_Entropy"] = _entropy_rowwise(df[odds_bins_all]) if odds_bins_all else 0.0
-    out_cols += ["Line_Entropy","Odds_Entropy"]
-
-    # --- Cross axis confirmations ---
-    df["LineOddsMag_Ratio"] = _safe_div(df["Line_TotalMag"], df["Odds_TotalMag"])
-    out_cols += ["LineOddsMag_Ratio"]
-
-    # Late vs (Overnight+Early+Midday)
-    df["LateVsEarly_Ratio_Line"] = _safe_div(
-        df["Line_PhaseMag_Late"],
-        (df["Line_PhaseMag_Overnight"] + df["Line_PhaseMag_Early"] + df["Line_PhaseMag_Midday"])
-    )
-    df["LateVsEarly_Ratio_Odds"] = _safe_div(
-        df["Odds_PhaseMag_Late"],
-        (df["Odds_PhaseMag_Overnight"] + df["Odds_PhaseMag_Early"] + df["Odds_PhaseMag_Midday"])
-    )
-    out_cols += ["LateVsEarly_Ratio_Line","LateVsEarly_Ratio_Odds"]
-
-    # Timing correlation across 16 aligned bins
-    def _row_corr(a, b):
-        # Coerce to 1-D float arrays robustly
-        a = np.atleast_1d(np.asarray(a, dtype=float))
-        b = np.atleast_1d(np.asarray(b, dtype=float))
-    
-        # Trim to equal length if something went odd
-        if a.size != b.size:
-            n = min(a.size, b.size)
-            a = a[:n]
-            b = b[:n]
-    
-        # Handle all-NaN / non-finite cases
-        if not np.isfinite(a).any() or not np.isfinite(b).any():
-            return 0.0
-        a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
-        b = np.nan_to_num(b, nan=0.0, posinf=0.0, neginf=0.0)
-    
-        # Zero variance → undefined corr
-        if a.std() == 0.0 or b.std() == 0.0:
-            return 0.0
-    
-        # Safe correlation
-        c = np.corrcoef(a, b)
-        # If numerical issues produce NaN
-        val = float(c[0, 1]) if c.shape == (2, 2) else 0.0
-        return 0.0 if not np.isfinite(val) else val
-
-   
-    if line_bins_all and odds_bins_all and (len(line_bins_all) == len(odds_bins_all)):
-        # Ensure we pull 1-D arrays for each row
-        df["Timing_Corr_Line_Odds"] = [
-            _row_corr(
-                df.loc[i, line_bins_all].to_numpy(dtype=float, copy=False),
-                df.loc[i, odds_bins_all].to_numpy(dtype=float, copy=False),
-            )
-            for i in df.index
-        ]
-    else:
-        df["Timing_Corr_Line_Odds"] = 0.0
-    out_cols += ["Timing_Corr_Line_Odds"]
-
-
-    # Optionally drop originals (after creating aggregates!)
-    if drop_original:
-        df.drop(columns=line_bins_all + odds_bins_all, errors="ignore", inplace=True)
-
-    return out_cols
-
 
 
 # --- TRAINING ENRICHMENT (LEAK-SAFE) ---
