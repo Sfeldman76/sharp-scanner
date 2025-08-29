@@ -96,8 +96,9 @@ SPORTS = {
     "MLB": "baseball_mlb",
     "CFL": "americanfootball_cfl",
     "WNBA": "basketball_wnba",
+    "NCAAF": "americanfootball_ncaaf",
     "NFL": "americanfootball_nfl",     # National Football League
-    "NCAAF": "americanfootball_ncaaf", # NCAA College Football
+   
 }
 
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
