@@ -14,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import psutil
 import requests
-
+import os, psutil, gc, time
 # --- Cloud (BigQuery / GCS) ---
 from google.cloud import bigquery, storage, bigquery_storage
 from pandas_gbq import to_gbq
@@ -3022,7 +3022,7 @@ def enrich_and_grade_for_training(
     out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values,         out['Dog_Cover_Prob'].values).astype('float32')
 
     return out
-import os, psutil, gc, time
+
 
 def implied_prob_vec(odds):
     # expects numpy/pandas array, returns float32 array
@@ -3694,6 +3694,168 @@ def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
         df_sc["TOT_Mispricing"] = df_sc["TOT_Proj_Total_Baseline"] - df_sc["Total_Line_Current"]
 
     return df_sc
+import numpy as np
+import pandas as pd
+
+PHASES  = ["Overnight","Early","Midday","Late"]
+URGENCY = ["VeryEarly","MidRange","LateGame","Urgent"]
+
+def _bins(prefix: str) -> list[str]:
+    return [f"{prefix}{p}_{u}" for p in PHASES for u in URGENCY]
+
+def _sum_cols(df: pd.DataFrame, cols: list[str]) -> pd.Series:
+    if not cols:
+        return pd.Series(0.0, index=df.index)
+    # fast, numeric-only; coerce above
+    return df[cols].sum(axis=1)
+
+def _safe_div(a: pd.Series, b: pd.Series, eps: float = 1e-9) -> pd.Series:
+    return a / (b.abs() + eps)
+
+def _entropy_rowwise(M: pd.DataFrame | np.ndarray, eps: float = 1e-12) -> pd.Series:
+    if isinstance(M, pd.DataFrame):
+        A = M.to_numpy(dtype=float, copy=False)
+    else:
+        A = np.asarray(M, dtype=float)
+    A = np.nan_to_num(A, nan=0.0, posinf=0.0, neginf=0.0)
+    S = A.sum(axis=1, keepdims=True)
+    W = np.divide(A, np.where(S == 0.0, 1.0, S), where=True)
+    W = np.clip(W, eps, None)
+    H = -(W * np.log(W)).sum(axis=1)
+    return pd.Series(H, index=getattr(M, "index", None))
+
+def _rowwise_corr_matrix(X: np.ndarray, Y: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Vectorized per-row Pearson corr between rows of X and Y (same shape)."""
+    X = np.nan_to_num(np.asarray(X, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    Y = np.nan_to_num(np.asarray(Y, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    if X.ndim != 2 or Y.ndim != 2 or X.shape != Y.shape or X.shape[1] == 0:
+        return np.zeros((X.shape[0] if X.ndim == 2 else Y.shape[0],), dtype=float)
+    mx = X.mean(axis=1, keepdims=True)
+    my = Y.mean(axis=1, keepdims=True)
+    Xc = X - mx
+    Yc = Y - my
+    sx = np.sqrt((Xc * Xc).sum(axis=1))
+    sy = np.sqrt((Yc * Yc).sum(axis=1))
+    denom = (sx * sy) + eps
+    num = (Xc * Yc).sum(axis=1)
+    corr = np.where((sx == 0.0) | (sy == 0.0), 0.0, num / denom)
+    return corr
+
+def build_timing_aggregates_inplace(
+    df: pd.DataFrame,
+    *,
+    line_prefix: str = "SharpMove_Magnitude_",
+    odds_prefix: str = "OddsMove_Magnitude_",
+    drop_original: bool = False,
+    include_compat_alias: bool = True,  # write legacy alias names used elsewhere
+) -> list[str]:
+    """
+    Adds denoised timing aggregates into `df` (in-place) for current picks.
+    Returns the list of newly created column names.
+    Safe if some bins are missing; types are coerced to numeric.
+    """
+    out_cols: list[str] = []
+
+    # Gather present bins
+    all_line_bins = [c for c in _bins(line_prefix) if c in df.columns]
+    all_odds_bins = [c for c in _bins(odds_prefix) if c in df.columns]
+
+    # Coerce to numeric (fast column-wise)
+    if all_line_bins:
+        df[all_line_bins] = df[all_line_bins].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if all_odds_bins:
+        df[all_odds_bins] = df[all_odds_bins].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+    # Per-phase groupings (only using columns that exist)
+    line_phase = {p: [f"{line_prefix}{p}_{u}" for u in URGENCY if f"{line_prefix}{p}_{u}" in df.columns] for p in PHASES}
+    odds_phase = {p: [f"{odds_prefix}{p}_{u}" for u in URGENCY if f"{odds_prefix}{p}_{u}" in df.columns] for p in PHASES}
+
+    # Totals
+    df["Line_TotalMag"] = _sum_cols(df, all_line_bins)
+    df["Odds_TotalMag"] = _sum_cols(df, all_odds_bins)
+    out_cols += ["Line_TotalMag", "Odds_TotalMag"]
+
+    # Per-phase sums
+    for p in PHASES:
+        ln = f"Line_PhaseMag_{p}"
+        od = f"Odds_PhaseMag_{p}"
+        df[ln] = _sum_cols(df, line_phase[p])
+        df[od] = _sum_cols(df, odds_phase[p])
+        out_cols += [ln, od]
+
+    # Shares & ratios
+    # Urgent share: sum of *_Urgent over TotalMag
+    line_urgent_cols = [c for c in all_line_bins if c.endswith("_Urgent")]
+    odds_urgent_cols = [c for c in all_odds_bins if c.endswith("_Urgent")]
+    df["Line_UrgentShare"] = _safe_div(_sum_cols(df, line_urgent_cols), df["Line_TotalMag"])
+    df["Odds_UrgentShare"] = _safe_div(_sum_cols(df, odds_urgent_cols), df["Odds_TotalMag"])
+    out_cols += ["Line_UrgentShare", "Odds_UrgentShare"]
+
+    df["Line_LateShare"] = _safe_div(df.get("Line_PhaseMag_Late", pd.Series(0.0, index=df.index)), df["Line_TotalMag"])
+    df["Odds_LateShare"] = _safe_div(df.get("Odds_PhaseMag_Late", pd.Series(0.0, index=df.index)), df["Odds_TotalMag"])
+    out_cols += ["Line_LateShare", "Odds_LateShare"]
+
+    # Max bin magnitude (spikiness)
+    df["Line_MaxBinMag"] = df[all_line_bins].max(axis=1) if all_line_bins else 0.0
+    df["Odds_MaxBinMag"] = df[all_odds_bins].max(axis=1) if all_odds_bins else 0.0
+    out_cols += ["Line_MaxBinMag", "Odds_MaxBinMag"]
+
+    # Entropy (dispersion of timing)
+    df["Line_Entropy"] = _entropy_rowwise(df[all_line_bins]) if all_line_bins else 0.0
+    df["Odds_Entropy"] = _entropy_rowwise(df[all_odds_bins]) if all_odds_bins else 0.0
+    out_cols += ["Line_Entropy", "Odds_Entropy"]
+
+    # Cross-axis confirmations
+    df["LineOddsMag_Ratio"] = _safe_div(df["Line_TotalMag"], df["Odds_TotalMag"])
+    out_cols += ["LineOddsMag_Ratio"]
+
+    # Late vs (Overnight+Early+Midday)
+    df["LateVsEarly_Ratio_Line"] = _safe_div(
+        df.get("Line_PhaseMag_Late", pd.Series(0.0, index=df.index)),
+        (df.get("Line_PhaseMag_Overnight", 0.0) + df.get("Line_PhaseMag_Early", 0.0) + df.get("Line_PhaseMag_Midday", 0.0)),
+    )
+    df["LateVsEarly_Ratio_Odds"] = _safe_div(
+        df.get("Odds_PhaseMag_Late", pd.Series(0.0, index=df.index)),
+        (df.get("Odds_PhaseMag_Overnight", 0.0) + df.get("Odds_PhaseMag_Early", 0.0) + df.get("Odds_PhaseMag_Midday", 0.0)),
+    )
+    out_cols += ["LateVsEarly_Ratio_Line", "LateVsEarly_Ratio_Odds"]
+
+    # Timing correlation across aligned bins (by suffix). If none in common → 0.
+    suffixes = [f"{p}_{u}" for p in PHASES for u in URGENCY]
+    common_line_cols, common_odds_cols = [], []
+    for sfx in suffixes:
+        lc = f"{line_prefix}{sfx}"
+        oc = f"{odds_prefix}{sfx}"
+        if lc in df.columns and oc in df.columns:
+            common_line_cols.append(lc)
+            common_odds_cols.append(oc)
+
+    if common_line_cols and common_odds_cols:
+        X = df[common_line_cols].to_numpy(dtype=float, copy=False)
+        Y = df[common_odds_cols].to_numpy(dtype=float, copy=False)
+        df["Timing_Corr_Line_Odds"] = _rowwise_corr_matrix(X, Y)
+    else:
+        df["Timing_Corr_Line_Odds"] = 0.0
+    out_cols += ["Timing_Corr_Line_Odds"]
+
+    # Optional: legacy/compat aliases some parts of your code expect
+    if include_compat_alias:
+        alias_map = {
+            "Hybrid_Line_Imbalance_LateVsEarly": "LateVsEarly_Ratio_Line",
+            "Hybrid_Line_Odds_Mag_Ratio": "LineOddsMag_Ratio",
+            "Hybrid_Timing_Entropy_Line": "Line_Entropy",
+            "Hybrid_Timing_Entropy_Odds": "Odds_Entropy",
+        }
+        for alias, src in alias_map.items():
+            if alias not in df.columns and src in df.columns:
+                df[alias] = df[src]
+                out_cols.append(alias)
+
+    # Optionally drop the 32 raw bins after aggregation
+    if drop_original:
+        df.drop(columns=all_line_bins + all_odds_bins, errors="ignore", inplace=True)
+
+    return out_cols
 
 
 
@@ -4732,7 +4894,7 @@ def apply_blended_sharp_score(
         m = df[market_col].astype(str).str.lower().str.strip()
         is_spread = m.str.contains('spread', na=False).values
         is_total  = m.str.contains('total',  na=False).values
-        is_h2h    = m.str_contains('h2h',    na=False).values if hasattr(m, "str_contains") else m.str.contains('h2h', na=False).values
+        is_h2h    = m.str.contains('h2h', na=False).values
     
         v_open = pd.to_numeric(df.get('Open_Value'), errors='coerce').astype('float64').values
         v_now  = pd.to_numeric(df.get('Value'),      errors='coerce').astype('float64').values
@@ -4876,9 +5038,15 @@ def apply_blended_sharp_score(
 
     df['Limit_NonZero'] = df['Limit'].where(df['Limit'] > 0)
     # Group keys must exist; your df includes 'Game' and 'Market'
-    df['Limit_Max'] = df.groupby(['Game', 'Market'], dropna=False)['Limit_NonZero'].transform('max')
-    df['Limit_Min'] = df.groupby(['Game', 'Market'], dropna=False)['Limit_NonZero'].transform('min')
 
+    # Use keys that actually exist in this frame
+    grp_keys = [k for k in ['Game_Key', 'Market'] if k in df.columns]
+    if grp_keys:
+        df['Limit_Max'] = df.groupby(grp_keys, dropna=False)['Limit_NonZero'].transform('max')
+        df['Limit_Min'] = df.groupby(grp_keys, dropna=False)['Limit_NonZero'].transform('min')
+    else:
+        df['Limit_Max'] = df['Limit_NonZero']
+        df['Limit_Min'] = df['Limit_NonZero']
     # === Market leader flags (robust to missing df_all_snapshots) ===
     if df_all_snapshots is not None and isinstance(df_all_snapshots, (pd.DataFrame,)):
         try:
@@ -4913,6 +5081,23 @@ def apply_blended_sharp_score(
     ).astype(int)
 
     # === 3b) Line resistance + snapshot microstructure + hybrid timing ===
+    # add timing aggregates for current picks (in-place)
+    timing_cols = build_timing_aggregates_inplace(
+        df,
+        line_prefix="SharpMove_Magnitude_",
+        odds_prefix="OddsMove_Magnitude_",
+        drop_original=True,          # drops the 32 raw bins after aggregation
+        include_compat_alias=True,   # writes Hybrid_* alias columns for back-compat
+    )
+    
+    # tiny sanity log (optional)
+    _expected = [
+        "Line_TotalMag","Line_LateShare","Line_UrgentShare",
+        "Line_MaxBinMag","Line_Entropy","LineOddsMag_Ratio","Timing_Corr_Line_Odds"
+    ]
+    _missing = [c for c in _expected if c not in df.columns]
+    if _missing:
+        logger.warning("Timing aggregates missing (ok if no bins present): %s", _missing)
 
     # Build latest-per-(G,M,O,B) view to avoid fanout on merge
     df_pre = (
@@ -5651,44 +5836,7 @@ def apply_blended_sharp_score(
             (df_canon['Spread_vs_H2H_ProbGap'].abs() > 0.05) | (df_canon['Total_vs_Spread_ProbGap'].abs() > 0.05)
         ).astype(int)
         # ---- derive timing feature column lists robustly ----
-        _timing_cols_auto = [c for c in df_canon.columns if c.startswith('SharpMove_Magnitude_')]
-        _odds_timing_cols_auto = [c for c in df_canon.columns if c.startswith('OddsMove_Magnitude_')]
-        
-        hybrid_timing_cols = _timing_cols_auto + (['SharpMove_Timing_Magnitude'] if 'SharpMove_Timing_Magnitude' in df_canon.columns else [])
-        if not hybrid_timing_cols:
-            hybrid_timing_cols = [
-                'SharpMove_Magnitude_Overnight_VeryEarly','SharpMove_Magnitude_Overnight_MidRange',
-                'SharpMove_Magnitude_Overnight_LateGame','SharpMove_Magnitude_Overnight_Urgent',
-                'SharpMove_Magnitude_Early_VeryEarly','SharpMove_Magnitude_Early_MidRange',
-                'SharpMove_Magnitude_Early_LateGame','SharpMove_Magnitude_Early_Urgent',
-                'SharpMove_Magnitude_Midday_VeryEarly','SharpMove_Magnitude_Midday_MidRange',
-                'SharpMove_Magnitude_Midday_LateGame','SharpMove_Magnitude_Midday_Urgent',
-                'SharpMove_Magnitude_Late_VeryEarly','SharpMove_Magnitude_Late_MidRange',
-                'SharpMove_Magnitude_Late_LateGame','SharpMove_Magnitude_Late_Urgent',
-                'SharpMove_Timing_Magnitude'
-            ]
-        for col in hybrid_timing_cols:
-            if col in df_canon.columns:
-                df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
-            else:
-                df_canon[col] = 0.0
-        
-        hybrid_odds_timing_cols = (['Odds_Move_Magnitude'] if 'Odds_Move_Magnitude' in df_canon.columns else []) + _odds_timing_cols_auto
-        if not hybrid_odds_timing_cols:
-            hybrid_odds_timing_cols = ['Odds_Move_Magnitude'] + [
-                f'OddsMove_Magnitude_{b}' for b in [
-                    'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-                    'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-                    'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-                    'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-                ]
-            ]
-        for col in hybrid_odds_timing_cols:
-            if col in df_canon.columns:
-                df_canon[col] = pd.to_numeric(df_canon[col], errors='coerce').fillna(0.0)
-            else:
-                df_canon[col] = 0.0
-
+       
    
         try:
             # ===== MODEL SCORING =====
@@ -5918,15 +6066,7 @@ def apply_blended_sharp_score(
                 labels=['🚨 ≤30m','🔥 ≤1h','⚠️ ≤3h','⏳ ≤6h','📅 ≤12h','🕓 >12h']
             )
         
-            for col in hybrid_timing_cols:
-                df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0) if col in df_inverse.columns else 0.0
-            if 'SharpMove_Timing_Dominant' not in df_inverse.columns:
-                df_inverse['SharpMove_Timing_Dominant'] = 'unknown'
-            else:
-                df_inverse['SharpMove_Timing_Dominant'] = df_inverse['SharpMove_Timing_Dominant'].fillna('unknown').astype(str)
-        
-            for col in hybrid_odds_timing_cols:
-                df_inverse[col] = pd.to_numeric(df_inverse[col], errors='coerce').fillna(0.0) if col in df_inverse.columns else 0.0
+         
         
             if 'Value_Reversal_Flag' not in df_inverse.columns:
                 df_inverse['Value_Reversal_Flag'] = 0
@@ -6155,22 +6295,6 @@ def apply_blended_sharp_score(
     try:
         df_final = pd.DataFrame()
     
-        hybrid_line_cols = [
-            f'SharpMove_Magnitude_{b}' for b in [
-                'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-                'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-                'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-                'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-            ]
-        ]
-        hybrid_odds_cols = [
-            f'OddsMove_Magnitude_{b}' for b in [
-                'Overnight_VeryEarly','Overnight_MidRange','Overnight_LateGame','Overnight_Urgent',
-                'Early_VeryEarly','Early_MidRange','Early_LateGame','Early_Urgent',
-                'Midday_VeryEarly','Midday_MidRange','Midday_LateGame','Midday_Urgent',
-                'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
-            ]
-        ]
     
         if scored_all:
             # 1) concat all markets
@@ -6200,7 +6324,7 @@ def apply_blended_sharp_score(
                 'Line_Moved_Toward_Team','Line_Moved_Away_From_Team',
                 'Abs_Line_Move_Z','Pct_Line_Move_Z','SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
                 'SmallBook_Total_Limit'
-            ] + hybrid_line_cols + hybrid_odds_cols
+            ]
     
             # Some columns may not exist depending on earlier paths; create them as 0 for counting
             for c in cols_for_count:
@@ -6209,8 +6333,7 @@ def apply_blended_sharp_score(
                 df_final[c] = pd.to_numeric(df_final[c], errors='coerce').fillna(0)
     
             # 4) hybrid timing flags
-            df_final['Hybrid_Line_Timing_Flag'] = (df_final[hybrid_line_cols].sum(axis=1) > 0).astype(int)
-            df_final['Hybrid_Odds_Timing_Flag'] = (df_final[hybrid_odds_cols].sum(axis=1) > 0).astype(int)
+
     
             # 5) signal count (kept; matches UI-style “why” tally)
             # Guard for Rec_Line_Magnitude which may not exist on some paths
@@ -6235,8 +6358,7 @@ def apply_blended_sharp_score(
                 (df_final['Odds_Reversal_Flag'] == 1).astype(int) +
                 (df_final['Abs_Line_Move_From_Opening'] > 1.0).astype(int) +
                 (df_final['Abs_Odds_Move_From_Opening'] > 5).astype(int) +
-                df_final['Hybrid_Line_Timing_Flag'] +
-                df_final['Hybrid_Odds_Timing_Flag'] +
+               
                 (df_final['Team_Past_Hit_Rate'] > 0.6).astype(int) +
                 df_final['Mispricing_Flag'].astype(int) +
                 (df_final['Team_Implied_Prob_Gap_Home'] > 0.05).astype(int) +
