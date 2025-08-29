@@ -1160,67 +1160,129 @@ def _rv(row, *names, default=0.0):
 
 # --- Thresholds (tune lightly per sport if you want) ---
 THR = dict(
-    line_mag_big=0.75,          # Line_TotalMag considered "big"
-    late_share_high=0.50,       # ≥50% of timing in Late phase
-    urgent_share_high=0.20,     # ≥20% in Urgent bins
-    entropy_concentrated=1.25,  # lower entropy = concentrated timing
-    corr_confirm=0.15,          # odds/line timing corr considered confirming
-    odds_overmove_ratio=1.20,   # line/odds mag ratio suggesting line override
-    pct_from_open_big=5.0,      # % line move from open is notable (sport-tune)
-    pr_diff_meaningful=2.0,     # power rating diff magnitude considered meaningful
-    cover_prob_conf=0.55        # cover prob indicates model confidence
+    line_mag_big=0.0,          # Line_TotalMag considered "big"
+    late_share_high=0.00,       # ≥50% of timing in Late phase
+    urgent_share_high=00,     # ≥20% in Urgent bins
+    entropy_concentrated=0,  # lower entropy = concentrated timing
+    corr_confirm=0,          # odds/line timing corr considered confirming
+    odds_overmove_ratio=0,   # line/odds mag ratio suggesting line override
+    pct_from_open_big=0,      # % line move from open is notable (sport-tune)
+    pr_diff_meaningful=0.0,     # power rating diff magnitude considered meaningful
+    cover_prob_conf=0        # cover prob indicates model confidence
 )
 
 # --- Rule schema supports "requires" (all) and "requires_any" (any-of) ---
 WHY_RULES_V2 = [
     # 🔹 Core sharp/book pressure
-    dict(requires_any=["Book_lift_x_Magnitude"], check=lambda r: _rv(r,"Book_lift_x_Magnitude") > 0.0, msg="🏦 Book Lift Supports Move"),
-    dict(requires_any=["Book_lift_x_PROB_SHIFT"], check=lambda r: _rv(r,"Book_lift_x_PROB_SHIFT") > 0.0, msg="📈 Book Lift Aligned with Prob Shift"),
-    dict(requires_any=["Sharp_Limit_Total"], check=lambda r: _rv(r,"Sharp_Limit_Total") >= 10000, msg="💼 High Sharp Limits"),
-    dict(requires_any=["Is_Reinforced_MultiMarket"], check=lambda r: _rv(r,"Is_Reinforced_MultiMarket") > 0.0, msg="📊 Multi-Market Reinforcement"),
-    dict(requires_any=["Market_Leader"], check=lambda r: _rv(r,"Market_Leader") > 0.0, msg="🏆 Market Leader Led the Move"),
+    dict(requires_any=["Book_lift_x_Magnitude"],
+         check=lambda r: _rv(r,"Book_lift_x_Magnitude") > 0.0,
+         msg="🏦 Book Lift Supports Move"),
+    dict(requires_any=["Book_lift_x_PROB_SHIFT"],
+         check=lambda r: _rv(r,"Book_lift_x_PROB_SHIFT") > 0.0,
+         msg="📈 Book Lift Aligned with Prob Shift"),
+    dict(requires_any=["Sharp_Limit_Total"],
+         check=lambda r: _rv(r,"Sharp_Limit_Total") >= 10000,
+         msg="💼 High Sharp Limits"),
+    dict(requires_any=["Is_Reinforced_MultiMarket"],
+         check=lambda r: _rv(r,"Is_Reinforced_MultiMarket") > 0.0,
+         msg="📊 Multi-Market Reinforcement"),
+    dict(requires_any=["Market_Leader"],
+         check=lambda r: _rv(r,"Market_Leader") > 0.0,
+         msg="🏆 Market Leader Led the Move"),
 
     # 🔹 Market response / mispricing
-    dict(requires_any=["Line_Moved_Toward_Team"], check=lambda r: _rv(r,"Line_Moved_Toward_Team") > 0.0, msg="🧲 Line Moved Toward This Team"),
-    dict(requires_any=["Market_Mispricing"], check=lambda r: _rv(r,"Market_Mispricing") > 0.0, msg="💸 Market Mispricing Detected"),
-    dict(requires_any=["Pct_Line_Move_From_Opening"], check=lambda r: _rv(r,"Pct_Line_Move_From_Opening") >= THR["pct_from_open_big"], msg="📈 Significant Move From Open"),
+    dict(requires_any=["Line_Moved_Toward_Team"],
+         check=lambda r: _rv(r,"Line_Moved_Toward_Team") > 0.0,
+         msg="🧲 Line Moved Toward This Team"),
+    dict(requires_any=["Market_Mispricing"],
+         check=lambda r: _rv(r,"Market_Mispricing") > 0.0,
+         msg="💸 Market Mispricing Detected"),
+    dict(requires_any=["Pct_Line_Move_From_Opening"],
+         check=lambda r: _rv(r,"Pct_Line_Move_From_Opening") >= THR["pct_from_open_big"],
+         msg="📈 Significant Move From Open"),
 
     # 🔁 Reversal / overmove logic
-    dict(requires_any=["Value_Reversal_Flag"], check=lambda r: _rv(r,"Value_Reversal_Flag") > 0.0, msg="🔄 Value Reversal"),
-    dict(requires_any=["Odds_Reversal_Flag"],  check=lambda r: _rv(r,"Odds_Reversal_Flag")  > 0.0, msg="📉 Odds Reversal"),
-    dict(requires_any=["Potential_Overmove_Flag"], check=lambda r: _rv(r,"Potential_Overmove_Flag") > 0.0, msg="📊 Possible Line Overmove"),
-    dict(requires_any=["Potential_Odds_Overmove_Flag"], check=lambda r: _rv(r,"Potential_Odds_Overmove_Flag") > 0.0, msg="🎯 Possible Odds Overmove"),
+    dict(requires_any=["Value_Reversal_Flag"],
+         check=lambda r: _rv(r,"Value_Reversal_Flag") > 0.0,
+         msg="🔄 Value Reversal"),
+    dict(requires_any=["Odds_Reversal_Flag"],
+         check=lambda r: _rv(r,"Odds_Reversal_Flag") > 0.0,
+         msg="📉 Odds Reversal"),
+    dict(requires_any=["Potential_Overmove_Flag"],
+         check=lambda r: _rv(r,"Potential_Overmove_Flag") > 0.0,
+         msg="📊 Possible Line Overmove"),
+    dict(requires_any=["Potential_Odds_Overmove_Flag"],
+         check=lambda r: _rv(r,"Potential_Odds_Overmove_Flag") > 0.0,
+         msg="🎯 Possible Odds Overmove"),
 
     # 🚧 Resistance/levels
-    dict(requires_any=["Line_Resistance_Crossed_Count"], check=lambda r: _rv(r,"Line_Resistance_Crossed_Count") >= 1, msg="🪵 Crossed Key Resistance Levels"),
-    dict(requires_any=["SharpMove_Resistance_Break"],   check=lambda r: _rv(r,"SharpMove_Resistance_Break") > 0.0, msg="🪓 Resistance Broken by Sharp Move"),
+    dict(requires_any=["Line_Resistance_Crossed_Count"],
+         check=lambda r: _rv(r,"Line_Resistance_Crossed_Count") >= 1,
+         msg="🪵 Crossed Key Resistance Levels"),
+    dict(requires_any=["SharpMove_Resistance_Break"],
+         check=lambda r: _rv(r,"SharpMove_Resistance_Break") > 0.0,
+         msg="🪓 Resistance Broken by Sharp Move"),
 
     # 🧠 Book reliability / liquidity microstructure
-    dict(requires_any=["Book_Reliability_Lift"], check=lambda r: _rv(r,"Book_Reliability_Lift") > 0.0, msg="✅ Reliable Book Confirms"),
-    dict(requires_any=["SmallBook_Heavy_Liquidity_Flag","SmallBook_Limit_Skew_Flag"],
-         check=lambda r: _rv(r,"SmallBook_Heavy_Liquidity_Flag")+_rv(r,"SmallBook_Limit_Skew_Flag") > 0.0,
+    dict(requires_any=["Book_Reliability_Lift"],
+         check=lambda r: _rv(r,"Book_Reliability_Lift") > 0.0,
+         msg="✅ Reliable Book Confirms"),
+    dict(requires_any=["SmallBook_Heavy_Liquidity_Flag","SmallBook_Limit_Skew_Flag","SmallBook_Limit_Skew"],
+         check=lambda r: _rv(r,"SmallBook_Heavy_Liquidity_Flag")
+                         + _rv(r,"SmallBook_Limit_Skew_Flag")
+                         + max(0.0, _rv(r,"SmallBook_Limit_Skew")) > 0.0,
          msg="💧 Liquidity/Limit Skew Signals Pressure"),
 
-    # ⏱️ Timing aggregates (replaces 32 raw bins)
-    dict(requires_any=["Line_TotalMag","Sharp_Line_Magnitude"],
+    # ⏱️ Timing aggregates (from build_timing_aggregates_inplace)
+    dict(requires_any=["Line_TotalMag","Sharp_Line_Magnitude"],  # support either name
          check=lambda r: max(_rv(r,"Line_TotalMag"), _rv(r,"Sharp_Line_Magnitude")) >= THR["line_mag_big"],
          msg="📏 Strong Timing Magnitude"),
-    dict(requires_any=["Line_LateShare"],  check=lambda r: _rv(r,"Line_LateShare")  >= THR["late_share_high"],  msg="🌙 Late-Phase Dominant"),
-    dict(requires_any=["Line_UrgentShare"],check=lambda r: _rv(r,"Line_UrgentShare")>= THR["urgent_share_high"],msg="⏱️ Urgent Push Detected"),
-    dict(requires_any=["Line_MaxBinMag"],  check=lambda r: _rv(r,"Line_MaxBinMag")  > 0.0,                       msg="💥 Sharp Timing Spike"),
-    dict(requires_any=["Line_Entropy"],    check=lambda r: 0.0 < _rv(r,"Line_Entropy") <= THR["entropy_concentrated"], msg="🎯 Concentrated Timing"),
-    dict(requires_any=["Timing_Corr_Line_Odds"], check=lambda r: _rv(r,"Timing_Corr_Line_Odds") >= THR["corr_confirm"], msg="🔗 Odds Confirm Line Timing"),
-    dict(requires_any=["LineOddsMag_Ratio"], check=lambda r: _rv(r,"LineOddsMag_Ratio") >= THR["odds_overmove_ratio"], msg="⚖️ Line > Odds Magnitude"),
+    dict(requires_any=["Line_LateShare"],
+         check=lambda r: _rv(r,"Line_LateShare") >= THR["late_share_high"],
+         msg="🌙 Late-Phase Dominant"),
+    dict(requires_any=["Line_UrgentShare"],
+         check=lambda r: _rv(r,"Line_UrgentShare") >= THR["urgent_share_high"],
+         msg="⏱️ Urgent Push Detected"),
+    dict(requires_any=["Line_MaxBinMag"],
+         check=lambda r: _rv(r,"Line_MaxBinMag") > 0.0,
+         msg="💥 Sharp Timing Spike"),
+    dict(requires_any=["Line_Entropy","Hybrid_Timing_Entropy_Line"],  # either column works
+         check=lambda r: 0.0 < _rv(r,"Line_Entropy","Hybrid_Timing_Entropy_Line") <= THR["entropy_concentrated"],
+         msg="🎯 Concentrated Timing"),
+    dict(requires_any=["Timing_Corr_Line_Odds"],
+         check=lambda r: _rv(r,"Timing_Corr_Line_Odds") >= THR["corr_confirm"],
+         msg="🔗 Odds Confirm Line Timing"),
+    dict(requires_any=["LineOddsMag_Ratio"],
+         check=lambda r: _rv(r,"LineOddsMag_Ratio") >= THR["odds_overmove_ratio"],
+         msg="⚖️ Line > Odds Magnitude"),
+    dict(requires_any=["Late_Game_Steam_Flag"],
+         check=lambda r: _rv(r,"Late_Game_Steam_Flag") > 0.0,
+         msg="🌙 Late Game Steam"),
 
     # 📐 Model & pricing agreement
-    dict(requires_any=["model_fav_vs_market_fav_agree"], check=lambda r: _rv(r,"model_fav_vs_market_fav_agree") > 0.0, msg="🧭 Model & Market Agree"),
-    dict(requires_any=["Outcome_Cover_Prob"],            check=lambda r: _rv(r,"Outcome_Cover_Prob") >= THR["cover_prob_conf"], msg="🔮 Strong Cover Probability"),
+    dict(requires_any=["model_fav_vs_market_fav_agree"],
+         check=lambda r: _rv(r,"model_fav_vs_market_fav_agree") > 0.0,
+         msg="🧭 Model & Market Agree"),
+    dict(requires_any=["Outcome_Cover_Prob"],
+         check=lambda r: _rv(r,"Outcome_Cover_Prob") >= THR["cover_prob_conf"],
+         msg="🔮 Strong Cover Probability"),
 
     # 📊 Power ratings / totals context
-    dict(requires_any=["PR_Rating_Diff","PR_Abs_Rating_Diff"], check=lambda r: max(abs(_rv(r,"PR_Rating_Diff")), _rv(r,"PR_Abs_Rating_Diff")) >= THR["pr_diff_meaningful"], msg="📈 Meaningful Power-Rating Edge"),
-    dict(requires_any=["TOT_Mispricing","TOT_Proj_Total_Baseline"], check=lambda r: _rv(r,"TOT_Mispricing") > 0.0, msg="🧮 Totals Mispricing"),
-]
+    dict(requires_any=["PR_Rating_Diff","PR_Abs_Rating_Diff"],
+         check=lambda r: max(abs(_rv(r,"PR_Rating_Diff")), _rv(r,"PR_Abs_Rating_Diff")) >= THR["pr_diff_meaningful"],
+         msg="📈 Meaningful Power-Rating Edge"),
+    dict(requires_any=["TOT_Mispricing","TOT_Proj_Total_Baseline"],
+         check=lambda r: _rv(r,"TOT_Mispricing") > 0.0,
+         msg="🧮 Totals Mispricing"),
 
+    # 🔧 Trained cross-terms (you include these in features)
+    dict(requires_any=["Book_Reliability_x_Magnitude"],
+         check=lambda r: _rv(r,"Book_Reliability_x_Magnitude") > 0.0,
+         msg="✅ Reliable Books Driving Magnitude"),
+    dict(requires_any=["Book_Reliability_x_PROB_SHIFT"],
+         check=lambda r: _rv(r,"Book_Reliability_x_PROB_SHIFT") > 0.0,
+         msg="✅ Reliable Books Driving Prob Shift"),
+]
 def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFrame:
     """
     Builds a human-readable 'Why Model Likes It' column using the UPDATED feature set
@@ -5813,13 +5875,13 @@ def compute_diagnostics_vectorized(
                 return np.nan
         return pd.to_numeric(v, errors='coerce')
 
-    emit_model_market = any([
-        _is_active('Outcome_Model_Spread'),
-        _is_active('Outcome_Market_Spread'),
-        _is_active('Outcome_Spread_Edge'),
-        _is_active('Outcome_Cover_Prob'),
-        _is_active('model_fav_vs_market_fav_agree'),
-    ])
+    emit_model_market = True #any([
+        #_is_active('Outcome_Model_Spread'),
+        #_is_active('Outcome_Market_Spread'),
+        #_is_active('Outcome_Spread_Edge'),
+        #_is_active('Outcome_Cover_Prob'),
+        #_is_active('model_fav_vs_market_fav_agree'),
+    #])
 
     if emit_model_market:
         msgs = df["Why Model Likes It"].astype(str).tolist()
