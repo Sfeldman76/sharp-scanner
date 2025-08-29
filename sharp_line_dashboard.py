@@ -1092,6 +1092,11 @@ def _entropy_rowwise(X, eps=1e-12):
     H = -(W * np.log(W)).sum(axis=1)
     H = H.replace([np.inf, -np.inf], 0).fillna(0.0)
     return H
+
+import numpy as np
+
+
+
 def build_timing_aggregates_inplace(df: pd.DataFrame, line_prefix="SharpMove_Magnitude_", odds_prefix="OddsMove_Magnitude_", *, drop_original=False) -> list[str]:
     
     out_cols = []
@@ -1159,19 +1164,46 @@ def build_timing_aggregates_inplace(df: pd.DataFrame, line_prefix="SharpMove_Mag
 
     # Timing correlation across 16 aligned bins
     def _row_corr(a, b):
-        # a,b: arrays of equal length
-        if np.all(a == 0) and np.all(b == 0): return 0.0
-        if np.std(a) == 0 or np.std(b) == 0:  return 0.0
-        return float(np.corrcoef(a, b)[0,1])
+        # Coerce to 1-D float arrays robustly
+        a = np.atleast_1d(np.asarray(a, dtype=float))
+        b = np.atleast_1d(np.asarray(b, dtype=float))
+    
+        # Trim to equal length if something went odd
+        if a.size != b.size:
+            n = min(a.size, b.size)
+            a = a[:n]
+            b = b[:n]
+    
+        # Handle all-NaN / non-finite cases
+        if not np.isfinite(a).any() or not np.isfinite(b).any():
+            return 0.0
+        a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+        b = np.nan_to_num(b, nan=0.0, posinf=0.0, neginf=0.0)
+    
+        # Zero variance → undefined corr
+        if a.std() == 0.0 or b.std() == 0.0:
+            return 0.0
+    
+        # Safe correlation
+        c = np.corrcoef(a, b)
+        # If numerical issues produce NaN
+        val = float(c[0, 1]) if c.shape == (2, 2) else 0.0
+        return 0.0 if not np.isfinite(val) else val
 
-    if line_bins_all and odds_bins_all and len(line_bins_all) == len(odds_bins_all):
+   
+    if line_bins_all and odds_bins_all and (len(line_bins_all) == len(odds_bins_all)):
+        # Ensure we pull 1-D arrays for each row
         df["Timing_Corr_Line_Odds"] = [
-            _row_corr(df.loc[i, line_bins_all].values, df.loc[i, odds_bins_all].values)
+            _row_corr(
+                df.loc[i, line_bins_all].to_numpy(dtype=float, copy=False),
+                df.loc[i, odds_bins_all].to_numpy(dtype=float, copy=False),
+            )
             for i in df.index
         ]
     else:
         df["Timing_Corr_Line_Odds"] = 0.0
     out_cols += ["Timing_Corr_Line_Odds"]
+
 
     # Optionally drop originals (after creating aggregates!)
     if drop_original:
