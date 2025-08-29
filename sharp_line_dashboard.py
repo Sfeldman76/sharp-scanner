@@ -1068,6 +1068,120 @@ def fetch_training_ratings_window_cached(
     df["Team_Norm"] = df["Team_Norm"].astype(str)
     return df
 
+import numpy as np
+import pandas as pd
+
+PHASES  = ["Overnight","Early","Midday","Late"]
+URGENCY = ["VeryEarly","MidRange","LateGame","Urgent"]
+
+def _bins(prefix):
+    # returns all 16 column names for a timing family
+    return [f"{prefix}{p}_{u}" for p in PHASES for u in URGENCY]
+
+def _sum_cols(df, cols):
+    if not cols: return pd.Series(0.0, index=df.index)
+    return df[cols].sum(axis=1, numeric_only=True)
+
+def _safe_div(a, b, eps=1e-9):
+    return a / (b.abs() + eps)
+
+def _entropy_rowwise(X, eps=1e-12):
+    # X: DataFrame of non-negative magnitudes; returns entropy per row
+    S = X.sum(axis=1)
+    W = X.div(S.replace(0, np.nan), axis=0).clip(lower=eps)  # row-normalize
+    H = -(W * np.log(W)).sum(axis=1)
+    H = H.replace([np.inf, -np.inf], 0).fillna(0.0)
+    return H
+
+def build_timing_aggregates(df: pd.DataFrame,
+                            line_prefix="SharpMove_Magnitude_",
+                            odds_prefix="OddsMove_Magnitude_",
+                            *,
+                            drop_original=False):
+    out_cols = []
+
+    # --- Gather column groups (only those that exist) ---
+    line_bins_all = [c for c in _bins(line_prefix) if c in df.columns]
+    odds_bins_all = [c for c in _bins(odds_prefix) if c in df.columns]
+
+    # Phase slices
+    line_phase = {p: [f"{line_prefix}{p}_{u}" for u in URGENCY if f"{line_prefix}{p}_{u}" in df.columns] for p in PHASES}
+    odds_phase = {p: [f"{odds_prefix}{p}_{u}" for u in URGENCY if f"{odds_prefix}{p}_{u}" in df.columns] for p in PHASES}
+
+    # --- Totals ---
+    df["Line_TotalMag"] = _sum_cols(df, line_bins_all)
+    df["Odds_TotalMag"] = _sum_cols(df, odds_bins_all)
+    out_cols += ["Line_TotalMag","Odds_TotalMag"]
+
+    # --- Per-phase sums ---
+    for p in PHASES:
+        ln = f"Line_PhaseMag_{p}"
+        od = f"Odds_PhaseMag_{p}"
+        df[ln] = _sum_cols(df, line_phase[p])
+        df[od] = _sum_cols(df, odds_phase[p])
+        out_cols += [ln, od]
+
+    # --- Shares & ratios ---
+    df["Line_UrgentShare"] = _safe_div(
+        df[[c for c in line_bins_all if c.endswith("_Urgent")]].sum(axis=1),
+        df["Line_TotalMag"]
+    )
+    df["Odds_UrgentShare"] = _safe_div(
+        df[[c for c in odds_bins_all if c.endswith("_Urgent")]].sum(axis=1),
+        df["Odds_TotalMag"]
+    )
+    out_cols += ["Line_UrgentShare","Odds_UrgentShare"]
+
+    df["Line_LateShare"] = _safe_div(df["Line_PhaseMag_Late"], df["Line_TotalMag"])
+    df["Odds_LateShare"] = _safe_div(df["Odds_PhaseMag_Late"], df["Odds_TotalMag"])
+    out_cols += ["Line_LateShare","Odds_LateShare"]
+
+    # --- Max bin (spikiness) ---
+    df["Line_MaxBinMag"] = df[line_bins_all].max(axis=1) if line_bins_all else 0.0
+    df["Odds_MaxBinMag"] = df[odds_bins_all].max(axis=1) if odds_bins_all else 0.0
+    out_cols += ["Line_MaxBinMag","Odds_MaxBinMag"]
+
+    # --- Entropy (dispersion of timing) ---
+    df["Line_Entropy"] = _entropy_rowwise(df[line_bins_all]) if line_bins_all else 0.0
+    df["Odds_Entropy"] = _entropy_rowwise(df[odds_bins_all]) if odds_bins_all else 0.0
+    out_cols += ["Line_Entropy","Odds_Entropy"]
+
+    # --- Cross axis confirmations ---
+    df["LineOddsMag_Ratio"] = _safe_div(df["Line_TotalMag"], df["Odds_TotalMag"])
+    out_cols += ["LineOddsMag_Ratio"]
+
+    # Late vs (Overnight+Early+Midday)
+    df["LateVsEarly_Ratio_Line"] = _safe_div(
+        df["Line_PhaseMag_Late"],
+        (df["Line_PhaseMag_Overnight"] + df["Line_PhaseMag_Early"] + df["Line_PhaseMag_Midday"])
+    )
+    df["LateVsEarly_Ratio_Odds"] = _safe_div(
+        df["Odds_PhaseMag_Late"],
+        (df["Odds_PhaseMag_Overnight"] + df["Odds_PhaseMag_Early"] + df["Odds_PhaseMag_Midday"])
+    )
+    out_cols += ["LateVsEarly_Ratio_Line","LateVsEarly_Ratio_Odds"]
+
+    # Timing correlation across 16 aligned bins
+    def _row_corr(a, b):
+        # a,b: arrays of equal length
+        if np.all(a == 0) and np.all(b == 0): return 0.0
+        if np.std(a) == 0 or np.std(b) == 0:  return 0.0
+        return float(np.corrcoef(a, b)[0,1])
+
+    if line_bins_all and odds_bins_all and len(line_bins_all) == len(odds_bins_all):
+        df["Timing_Corr_Line_Odds"] = [
+            _row_corr(df.loc[i, line_bins_all].values, df.loc[i, odds_bins_all].values)
+            for i in df.index
+        ]
+    else:
+        df["Timing_Corr_Line_Odds"] = 0.0
+    out_cols += ["Timing_Corr_Line_Odds"]
+
+    # Optionally drop originals (after creating aggregates!)
+    if drop_original:
+        df.drop(columns=line_bins_all + odds_bins_all, errors="ignore", inplace=True)
+
+    return df, out_cols
 
 
 
@@ -3628,7 +3742,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 🔹 Market response
             #'Sharp_Line_Magnitude',
             #'Is_Home_Team_Bet',
-            'Line_Moved_Toward_Team'
+            'Line_Moved_Toward_Team',
             'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
@@ -3700,9 +3814,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
             ]
         ]
-        extend_unique(features, hybrid_timing_features)
-        extend_unique(features, hybrid_odds_timing_features)
-        
+        #extend_unique(features, hybrid_timing_features)
+        #extend_unique(features, hybrid_odds_timing_features)
+        df, timing_cols = build_timing_aggregates(
+            df,
+            line_prefix="SharpMove_Magnitude_",
+            odds_prefix="OddsMove_Magnitude_",
+            drop_original=True  # set False first to compare
+        )
+        # extend your feature list with timing_cols (and remove the 32 originals)
+        extend_unique(features, timing_cols)
+
         # add historical/streak features you computed earlier (schema-safe list)
         extend_unique(features, [c for c in history_present if c not in features])
         
