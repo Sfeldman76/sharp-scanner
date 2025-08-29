@@ -1351,24 +1351,28 @@ def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFram
 # --- TRAINING ENRICHMENT (LEAK-SAFE) ---
 
 
-
 def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
-    bq=bq_client,                          # BigQuery client (used here)
-    sport_aliases: dict,
+    sport_aliases: dict | None = None,           # optional
+    bq=None,                                     # pass your bigquery.Client
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 10,
-    allow_forward_hours: float = 0.0,  # 0 = strict backward-only
-    project: str = None,               # unused, kept for signature parity
+    allow_forward_hours: float = 0.0,            # 0 = strict backward-only
+    project: str | None = None,                  # kept for signature parity
 ) -> pd.DataFrame:
     """
     Enrich df with Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
-    by looking up team ratings from ratings_history within a small time window.
-    Uses a tiny in-function cache to avoid repeated BQ reads per (sport, window).
+    by looking up team ratings within a small time window.
+
+    - Works with BOTH ratings_history (filters by Method) and ratings_current (no Method column).
+    - Requires: pass a google.cloud.bigquery.Client as `bq`.
     """
+    sport_aliases = sport_aliases or {}
 
     if df.empty:
-        return df
+        return df.copy()
+    if bq is None:
+        raise ValueError("BigQuery client `bq` is None — pass your bigquery.Client (e.g., bq=bq_client).")
 
     out = df.copy()
 
@@ -1392,10 +1396,9 @@ def enrich_power_for_training_lowmem(
     sport_canon = out['Sport'].iloc[0]
     out = out[out['Sport'] == sport_canon].copy()
     if out.empty:
-        return df
+        return df.copy()
 
     # teams + window for fetch
-    # (teams already normalized above)
     teams = pd.Index(out['Home_Team_Norm']).union(out['Away_Team_Norm']).unique().tolist()
     gmin, gmax = out['Game_Start'].min(), out['Game_Start'].max()
     pad = pd.Timedelta(days=pad_days)
@@ -1407,7 +1410,7 @@ def enrich_power_for_training_lowmem(
         enrich_power_for_training_lowmem._ratings_cache = {}
     _CACHE = enrich_power_for_training_lowmem._ratings_cache
 
-    # Preferred method per sport (keeps one series per team)
+    # Preferred method per sport (history only)
     PREFERRED_METHOD = {
         "MLB":   "poisson",
         "NFL":   "elo_kalman",
@@ -1443,10 +1446,12 @@ def enrich_power_for_training_lowmem(
         if key in _CACHE:
             return _CACHE[key].copy()
 
-        aliases = _aliases_for(sport)
-        method = PREFERRED_METHOD.get(sport.upper())
+        # ratings_current usually has no Method column → skip that filter
+        is_current = 'ratings_current' in str(table_history).lower()
+        method = None if is_current else PREFERRED_METHOD.get(sport.upper())
 
-        # Teams are already normalized like our _norm_team_series, so pass directly
+        # Teams are already normalized; bind params
+        from google.cloud import bigquery
         sql = f"""
         SELECT
           UPPER(CAST(Sport AS STRING))        AS Sport,
@@ -1462,7 +1467,7 @@ def enrich_power_for_training_lowmem(
         """
 
         params = [
-            bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
+            bigquery.ArrayQueryParameter("aliases", "STRING", _aliases_for(sport)),
             bigquery.ArrayQueryParameter("teams", "STRING", teams),
             bigquery.ScalarQueryParameter("start", "TIMESTAMP", pd.Timestamp(start_iso).to_pydatetime()),
             bigquery.ScalarQueryParameter("end",   "TIMESTAMP", pd.Timestamp(end_iso).to_pydatetime()),
@@ -1477,7 +1482,7 @@ def enrich_power_for_training_lowmem(
             return df_r
 
         # Normalize team, ensure types
-        df_r['Team_Norm']   = _norm_team_series(df_r['Team_Norm'])
+        df_r['Team_Norm']    = _norm_team_series(df_r['Team_Norm'])
         df_r['Power_Rating'] = pd.to_numeric(df_r['Power_Rating'], errors='coerce')
         df_r['AsOfTS']       = pd.to_datetime(df_r['AsOfTS'], utc=True, errors='coerce')
         df_r = df_r.dropna(subset=['Team_Norm','Power_Rating','AsOfTS'])
@@ -1487,7 +1492,7 @@ def enrich_power_for_training_lowmem(
         _CACHE[key] = df_r
         return df_r.copy()
 
-    # === Pull history (cached) and filter to these teams ===
+    # === Pull ratings (cached) and filter to these teams ===
     ratings = fetch_training_ratings_window_cached(
         sport=sport_canon,
         start_iso=start_iso,
@@ -1502,7 +1507,6 @@ def enrich_power_for_training_lowmem(
         out['Power_Rating_Diff'] = np.float32(0.0)
         return out
 
-    # compact arrays per team: times + values (sorted)
     ratings = ratings.copy()
     ratings['Team_Norm'] = _norm_team_series(ratings['Team_Norm'])
     ratings = ratings[ratings['Team_Norm'].isin(teams)]
@@ -1513,6 +1517,7 @@ def enrich_power_for_training_lowmem(
         out['Power_Rating_Diff'] = np.float32(0.0)
         return out
 
+    # compact arrays per team: times + values (sorted)
     team_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for team, g in ratings.groupby('Team_Norm', sort=False):
         g = g.sort_values('AsOfTS')
@@ -1520,7 +1525,6 @@ def enrich_power_for_training_lowmem(
             g['AsOfTS'].to_numpy(dtype='datetime64[ns]'),
             g['Power_Rating'].to_numpy(dtype=np.float32),
         )
-    del ratings; gc.collect()
 
     # === Vectorized assignment per team (low-alloc) ===
     base = np.float32(1500.0)
@@ -1533,31 +1537,28 @@ def enrich_power_for_training_lowmem(
     # Home side
     for team, (t_arr, r_arr) in team_series.items():
         mask = (out['Home_Team_Norm'].values == team)
-        if not mask.any():
-            continue
-        # search on (game_start + allow_forward)
-        ts = gs_ns[mask].astype('datetime64[ns]').astype('int64') + allow_ns
-        ts = ts.astype('datetime64[ns]')
-        idx = np.searchsorted(t_arr, ts, side='right') - 1
-        valid = idx >= 0
-        vals = np.full(idx.shape, base, dtype=np.float32)
-        if valid.any():
-            vals[valid] = r_arr[idx[valid]]
-        out.loc[mask, 'Home_Power_Rating'] = vals
+        if mask.any():
+            ts = gs_ns[mask].astype('int64') + allow_ns
+            ts = ts.astype('datetime64[ns]')
+            idx = np.searchsorted(t_arr, ts, side='right') - 1
+            valid = idx >= 0
+            vals = np.full(idx.shape, base, dtype=np.float32)
+            if valid.any():
+                vals[valid] = r_arr[idx[valid]]
+            out.loc[mask, 'Home_Power_Rating'] = vals
 
     # Away side
     for team, (t_arr, r_arr) in team_series.items():
         mask = (out['Away_Team_Norm'].values == team)
-        if not mask.any():
-            continue
-        ts = gs_ns[mask].astype('datetime64[ns]').astype('int64') + allow_ns
-        ts = ts.astype('datetime64[ns]')
-        idx = np.searchsorted(t_arr, ts, side='right') - 1
-        valid = idx >= 0
-        vals = np.full(idx.shape, base, dtype=np.float32)
-        if valid.any():
-            vals[valid] = r_arr[idx[valid]]
-        out.loc[mask, 'Away_Power_Rating'] = vals
+        if mask.any():
+            ts = gs_ns[mask].astype('int64') + allow_ns
+            ts = ts.astype('datetime64[ns]')
+            idx = np.searchsorted(t_arr, ts, side='right') - 1
+            valid = idx >= 0
+            vals = np.full(idx.shape, base, dtype=np.float32)
+            if valid.any():
+                vals[valid] = r_arr[idx[valid]]
+            out.loc[mask, 'Away_Power_Rating'] = vals
 
     out['Power_Rating_Diff'] = (
         pd.to_numeric(out['Home_Power_Rating'], errors='coerce')
@@ -1565,8 +1566,6 @@ def enrich_power_for_training_lowmem(
     ).astype('float32')
 
     return out
-
-
 
 # --- fast Normal CDF (SciPy-free), vectorized, low-temp ---
 def _phi(x):
@@ -1718,74 +1717,6 @@ def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFra
     })
     return g_out
 
-def enrich_and_grade_for_training(
-    df_spread_rows: pd.DataFrame,
-    bq,
-    sport_aliases: dict,
-    value_col: str = "Value",
-    outcome_col: str = "Outcome_Norm",
-    pad_days: int =30,
-    allow_forward_hours: float = 0.0,
-    table_history: str = "sharplogger.sharp_data.ratings_history",
-    project: str = None,
-) -> pd.DataFrame:
-   
-
-    if df_spread_rows.empty:
-        return df_spread_rows
-
-    # 1) leakage-safe ratings (your function)
-    base = enrich_power_for_training_lowmem(
-        df_spread_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-        bq=bq_client,
-        sport_aliases=sport_aliases,
-        table_history=table_history,
-        pad_days=pad_days,
-        allow_forward_hours=allow_forward_hours,
-        project=project,
-    )
-
-    # 2) consensus market spread (k) and favorite
-    g_cons = prep_consensus_market_spread_lowmem(df_spread_rows, value_col=value_col, outcome_col=outcome_col)
-
-    # 3) join → game-level favorite-centric grading (also computes edges & probs)
-    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
-    g_full = base.merge(g_cons, on=game_key, how='left')
-    g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
-
-    # ensure power rating cols exist even if base missed (avoid KeyError later)
-    for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
-        if c not in g_fc.columns and c in g_full.columns:
-            g_fc[c] = g_full[c].values
-        elif c not in g_fc.columns:
-            g_fc[c] = np.nan
-
-    keep_cols = game_key + [
-        'Market_Favorite_Team','Market_Underdog_Team',
-        'Favorite_Market_Spread','Underdog_Market_Spread',
-        'Model_Favorite_Team','Model_Underdog_Team',
-        'Model_Fav_Spread','Model_Dog_Spread',
-        'Fav_Edge_Pts','Dog_Edge_Pts',
-        'Fav_Cover_Prob','Dog_Cover_Prob',
-        'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
-        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
-    ]
-    # backfill any missing keep cols with NaN to avoid KeyError
-    for c in keep_cols:
-        if c not in g_fc.columns:
-            g_fc[c] = np.nan
-    g_fc = g_fc[keep_cols].copy()
-
-    out = df_spread_rows.merge(g_fc, on=game_key, how='left')
-
-    # per-outcome mapping (vectorized, robust to dtype)
-    is_fav = (out[outcome_col].astype(str).values == out['Market_Favorite_Team'].astype(str).values)
-    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'].values, out['Model_Dog_Spread'].values).astype('float32')
-    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'].values, out['Underdog_Market_Spread'].values).astype('float32')
-    out['Outcome_Spread_Edge']   = np.where(is_fav, out['Fav_Edge_Pts'].values, out['Dog_Edge_Pts'].values).astype('float32')
-    out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values, out['Dog_Cover_Prob'].values).astype('float32')
-
-    return out
 
 # --- 0) Build a unified favorite flag where totals use OVER as "favorite"
 def add_favorite_context_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -5639,16 +5570,14 @@ def attach_ratings_and_edges_for_diagnostics(
     project: str = "sharplogger",
     pad_days: int = 30,
     allow_forward_hours: float = 0.0,
-    bq=None,                        # ✅ add this
-) -> pd.DataFrame
-    
+    bq=None,                        # ✅ pass your BigQuery client in
+) -> pd.DataFrame:                  # << ✅ colon here
     UI_EDGE_COLS = [
         'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
         'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
         'Outcome_Cover_Prob','model_fav_vs_market_fav_agree','edge_x_k','mu_x_k'
     ]
 
-    # Fast exit on empty input — keep UI cols present
     if df.empty:
         out = df.copy()
         for c in UI_EDGE_COLS:
@@ -5657,7 +5586,6 @@ def attach_ratings_and_edges_for_diagnostics(
 
     out = df.copy()
 
-    # ---- Safe normalizations (Series-safe defaults)
     def _series(col, default=""):
         return out[col] if col in out.columns else pd.Series(default, index=out.index)
 
@@ -5672,12 +5600,11 @@ def attach_ratings_and_edges_for_diagnostics(
         .astype(str).str.lower().str.strip()
     )
 
-    # Game_Start fallback to Snapshot_Timestamp
     if 'Game_Start' not in out.columns or out['Game_Start'].isna().all():
         out['Game_Start'] = pd.to_datetime(_series('Snapshot_Timestamp', pd.NaT),
                                            utc=True, errors='coerce')
 
-    # We only compute edges for spreads
+    # Only compute edges for spreads; ratings/PRs are needed for spreads logic below
     mask = out['Market'].eq('spreads') & out['Home_Team_Norm'].ne('') & out['Away_Team_Norm'].ne('')
     if not mask.any():
         for c in UI_EDGE_COLS:
@@ -5685,7 +5612,6 @@ def attach_ratings_and_edges_for_diagnostics(
                 out[c] = np.nan
         return out
 
-    # Minimal join key back into the original rows
     need_cols = ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
     d_sp = (
         out.loc[mask, need_cols]
@@ -5694,35 +5620,29 @@ def attach_ratings_and_edges_for_diagnostics(
     )
     d_sp['Value'] = pd.to_numeric(d_sp['Value'], errors='coerce').astype('float32')
 
-    # ---------- KEY FIX: widen the ratings window when using *current* table ----------
     is_current_table = 'ratings_current' in str(table_history).lower()
-    pad_days_eff = (365 if is_current_table else pad_days)  # wide window so older “Updated_At” is included
+    pad_days_eff = (365 if is_current_table else pad_days)
 
-    # 1) Ratings (as-of, low-mem)
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-        bq=bq,                      # ✅ was None — must pass the client
+        bq=bq,
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days_eff,
         allow_forward_hours=allow_forward_hours,
         project=project
     )
-    
-    # 2) Consensus favorite & k
+
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
-    # 3) Game-level model spreads/edges
     game_keys = ['Sport','Home_Team_Norm','Away_Team_Norm']
     g_full = base.merge(cons, on=game_keys, how='left')
     g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
 
-    # Ensure PR columns exist (carry from g_full or set NaN)
     for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
         if c not in g_fc.columns:
             g_fc[c] = g_full[c] if c in g_full.columns else np.nan
 
-    # Map to the row’s bet side
     d_map = d_sp.merge(g_fc, on=game_keys, how='left')
 
     is_fav_row = d_map['Outcome_Norm'].eq(d_map['Market_Favorite_Team'])
@@ -5731,7 +5651,6 @@ def attach_ratings_and_edges_for_diagnostics(
     d_map['Outcome_Spread_Edge']   = np.where(is_fav_row, d_map['Fav_Edge_Pts'], d_map['Dog_Edge_Pts']).astype('float32')
     d_map['Outcome_Cover_Prob']    = np.where(is_fav_row, d_map['Fav_Cover_Prob'], d_map['Dog_Cover_Prob']).astype('float32')
 
-    # Ratings shown for the bet side (home vs away)
     is_home_bet = d_map['Outcome_Norm'].eq(d_map['Home_Team_Norm'])
     d_map['PR_Team_Rating'] = np.where(is_home_bet, d_map['Home_Power_Rating'], d_map['Away_Power_Rating']).astype('float32')
     d_map['PR_Opp_Rating']  = np.where(is_home_bet, d_map['Away_Power_Rating'], d_map['Home_Power_Rating']).astype('float32')
@@ -5740,7 +5659,6 @@ def attach_ratings_and_edges_for_diagnostics(
         pd.to_numeric(d_map['PR_Opp_Rating'],  errors='coerce')
     ).astype('float32')
 
-    # Agreement & scaled edges
     k_abs = (
         pd.to_numeric(d_map.get('Favorite_Market_Spread'),  errors='coerce').abs()
           .combine_first(pd.to_numeric(d_map.get('Underdog_Market_Spread'), errors='coerce').abs())
@@ -5754,18 +5672,14 @@ def attach_ratings_and_edges_for_diagnostics(
     d_map['edge_x_k'] = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce') * k_abs).astype('float32')
     d_map['mu_x_k']   = (pd.to_numeric(d_map['Outcome_Spread_Edge'], errors='coerce').abs() * k_abs).astype('float32')
 
-    # Clean merge back (avoid suffixes)
     out.drop(columns=UI_EDGE_COLS, inplace=True, errors='ignore')
     out = out.merge(d_map[need_cols + UI_EDGE_COLS], on=need_cols, how='left')
 
-    # Ensure UI cols always exist
     for c in UI_EDGE_COLS:
         if c not in out.columns:
             out[c] = np.nan
 
     return out
-
-
 
 def compute_diagnostics_vectorized(
     df: pd.DataFrame,
@@ -6878,12 +6792,26 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 for market in markets_present:
                     market_norm = _canonical_market(market)
                     bundle, model = _resolve_bundle_model_for_market(trained_models if 'trained_models' in locals() else {}, market_norm)
-            
+                    
                     # rows for this market
                     diag_rows = diag_source[diag_source['Market'].astype(str).str.lower().str.strip().map(_canonical_market) == market_norm]
                     if diag_rows.empty:
                         continue
-            
+                    ratings_df = enrich_power_for_training_lowmem(
+                        df=diag_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+                        bq=bq_client,                                  # your BigQuery client
+                        sport_aliases=sport_aliases,                   # pass if you have it
+                        table_history="sharplogger.sharp_data.ratings_current",
+                        pad_days=365,
+                        allow_forward_hours=24*365
+                    )
+                    diag_rows = diag_rows.merge(
+                        ratings_df[['Sport','Home_Team_Norm','Away_Team_Norm',
+                                    'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']],
+                        on=['Sport','Home_Team_Norm','Away_Team_Norm'],
+                        how='left'
+                    )
+                    
                     # compute diagnostics for this market with its matching model
                     chunk = compute_diagnostics_vectorized(
                         diag_rows,
