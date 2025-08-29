@@ -1144,14 +1144,22 @@ def _coerce_numeric_inplace(df, cols, fill=0.0):
         'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','edge_x_k','mu_x_k'
     }
     for c in cols:
+        # create the column if missing
         if c not in df.columns:
             df[c] = (np.nan if c in UI_NUM_COLS else fill)
             continue
-        if pd.api.types.is_categorical_dtype(df[c]):
-            df[c] = df[c].astype(object)
-        vals = pd.to_numeric(df[c], errors="coerce")
-        df[c] = vals if c in UI_NUM_COLS else vals.fillna(fill))
 
+        s = df[c]
+        # avoid categorical assignment issues
+        if pd.api.types.is_categorical_dtype(s.dtype):
+            s = s.astype(object)
+
+        vals = pd.to_numeric(s, errors="coerce")
+        # UI columns should preserve NaN (so the UI can show blanks)
+        if c in UI_NUM_COLS:
+            df[c] = vals
+        else:
+            df[c] = vals.fillna(fill)
 # --- Helper to read first available value across aliases safely ---
 def _rv(row, *names, default=0.0):
     for n in names:
