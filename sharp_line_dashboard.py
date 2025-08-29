@@ -78,7 +78,7 @@ from google.cloud import storage
 import numpy as np
 import pandas as pd
 from pandas.util import hash_pandas_object
-
+from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.ensemble import GradientBoostingClassifier
@@ -963,10 +963,159 @@ def _parse_table_id(project_default: str, table_id: str):
 # ===========================
 # WHY MODEL LIKES IT (v2)
 # ===========================
+def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market: str | None = None) -> list[str]:
+    """
+    Return the exact feature columns used at training time.
+
+    Priority:
+      1) bundle[market]['feature_cols'] or bundle['feature_cols']
+      2) Other common bundle keys: 'feature_names', 'features', 'training_features', etc.
+      3) Names exposed by the model (feature_names_in_, booster.feature_names, etc.)
+      4) Heuristic fallback from df_like (numeric/boolean columns minus obvious IDs/targets)
+
+    Always de-duplicates and (if df_like is provided) filters to columns present in df_like.
+    """
+    import pandas as pd
+    import numpy as np
+
+    # --- unwrap per-market sub-bundle if provided ---
+    sub = bundle
+    if isinstance(bundle, dict) and market and market in bundle and isinstance(bundle[market], dict):
+        sub = bundle[market]
+
+    def _first_nonempty_list(d: dict, keys: tuple) -> list[str] | None:
+        if not isinstance(d, dict):
+            return None
+        for k in keys:
+            v = d.get(k)
+            if isinstance(v, (list, tuple)) and len(v) > 0:
+                return [str(c) for c in v if c is not None]
+        return None
+
+    # 1) Directly from bundle (you save 'feature_cols' explicitly)
+    names = None
+    if isinstance(sub, dict):
+        names = _first_nonempty_list(
+            sub,
+            ("feature_cols", "feature_names", "features", "training_features",
+             "feature_list", "X_cols", "input_cols", "training_columns", "columns")
+        )
+        # look in nested metadata if needed
+        if not names:
+            for meta_key in ("metadata", "meta", "info"):
+                md = sub.get(meta_key)
+                if isinstance(md, dict):
+                    names = _first_nonempty_list(
+                        md,
+                        ("feature_cols", "feature_names", "features", "training_features",
+                         "feature_list", "X_cols", "input_cols")
+                    )
+                    if names:
+                        break
+        # sometimes models live inside the bundle
+        if not names:
+            for mkey in ("model_logloss", "model_auc", "model"):
+                if mkey in sub:
+                    names = None
+                    try:
+                        m = sub[mkey]
+                        # sklearn ≥1.0
+                        fn = getattr(m, "feature_names_in_", None)
+                        if fn is not None and len(fn) > 0:
+                            names = [str(c) for c in list(fn)]
+                        # ColumnTransformer / Pipeline
+                        if not names and hasattr(m, "get_feature_names_out"):
+                            out = m.get_feature_names_out()
+                            if out is not None and len(out) > 0:
+                                names = [str(c) for c in list(out)]
+                        # XGBoost booster
+                        if not names and hasattr(m, "get_booster"):
+                            b = m.get_booster()
+                            if b is not None and getattr(b, "feature_names", None):
+                                names = [str(c) for c in list(b.feature_names)]
+                    except Exception:
+                        pass
+                    if names:
+                        break
+
+    # 2) If still nothing, try the separate model arg
+    if not names and model is not None:
+        try:
+            fn = getattr(model, "feature_names_in_", None)
+            if fn is not None and len(fn) > 0:
+                names = [str(c) for c in list(fn)]
+        except Exception:
+            pass
+        if not names:
+            try:
+                if hasattr(model, "get_feature_names_out"):
+                    out = model.get_feature_names_out()
+                    if out is not None and len(out) > 0:
+                        names = [str(c) for c in list(out)]
+            except Exception:
+                pass
+        if not names:
+            try:
+                booster = getattr(model, "get_booster", None)
+                if callable(booster):
+                    b = booster()
+                    if b is not None and getattr(b, "feature_names", None):
+                        names = [str(c) for c in list(b.feature_names)]
+            except Exception:
+                pass
+
+    # 3) Heuristic fallback from df_like
+    if not names:
+        names = []
+        if isinstance(df_like, pd.DataFrame):
+            bad_exact = {
+                "y","label","target",
+                "Game","Game_Key","Game_Key_Base","Team_Key","Team_Key_Base",
+                "Home_Team","Away_Team","Home_Team_Norm","Away_Team_Norm","Team",
+                "Outcome","Outcome_Norm","Sport","League","Book","Bookmaker",
+                "Snapshot_Timestamp","Insert_Timestamp","Time","Game_Start","Commence_Hour",
+                "Was_Canonical","Scored_By_Model","Scoring_Market",
+                "Model_Sharp_Win_Prob","Model_Confidence","Model_Confidence_Tier","Why_Model_Likes_It",
+            }
+            bad_prefix = ("id","idx","__","Model_","Why_","Team_Key","Game_Key","hash_","raw_")
+            def _is_numeric_like(s: pd.Series) -> bool:
+                from pandas.api.types import is_numeric_dtype, is_bool_dtype
+                try:
+                    return bool(is_numeric_dtype(s) or is_bool_dtype(s))
+                except Exception:
+                    return False
+            cols_numeric = [
+                c for c in df_like.columns
+                if (c not in bad_exact)
+                and (not any(str(c).startswith(p) for p in bad_prefix))
+                and _is_numeric_like(df_like[c])
+            ]
+            # prefer common feature-y prefixes
+            good_prefixes = (
+                "Sharp_","Rec_","Line_","Odds_","Implied_","Limit","Market_",
+                "Hybrid_","Timing_","Spread_","Total_","H2H_",
+                "Book_Reliability","SmallBook_","CrossMarket_",
+                "Team_Past_","Team_","Power_Rating","Net_","Abs_","Pct_","Avg_","Rate_",
+                "Is_","Same_","Opposite_","Potential_","Mispricing_","Value_","Minutes_",
+            )
+            preferred = [c for c in cols_numeric if any(str(c).startswith(p) for p in good_prefixes)]
+            others    = [c for c in cols_numeric if c not in preferred]
+            names = preferred + others
+
+    # 4) Cleanup: drop dupes, keep order, and (if df_like is given) filter to existing cols
+    seen, final = set(), []
+    for c in names or []:
+        c = str(c)
+        if df_like is not None and c not in df_like.columns:
+            continue
+        if c not in seen:
+            seen.add(c)
+            final.append(c)
+    return final
 
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
-def _resolve_active_features(bundle, model, df_like):
-    cand = None
+def _resolve_active_features(bundle, df_columns: tuple[str, ...], *, market: str) -> list[str]:
+
     if isinstance(bundle, dict):
         for k in ("feature_names", "features", "training_features"):
             if k in bundle and bundle[k]:
@@ -4220,7 +4369,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ==== Shared helpers / constants ====
         eps = 1e-4  # default probability clip
         
-        from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
+    
         
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             out = df[cols].copy()
