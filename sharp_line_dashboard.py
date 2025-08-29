@@ -3728,7 +3728,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
             #'Outcome_Model_Spread',#'Outcome_Market_Spread',
-            '#Outcome_Spread_Edge',
+            #'Outcome_Spread_Edge',
             'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
