@@ -2721,9 +2721,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # === New team ATS cover / margin stats (prior-only, last-5) ===
     team_cover_cols = [
         # overall cover signal
-        "Cover_Rate_Last5",
-        "Cover_Rate_After_Win_Last5",
-        "Cover_Rate_After_Loss_Last5",
+        #"Cover_Rate_Last5",
+        #"Cover_Rate_After_Win_Last5",
+        #"Cover_Rate_After_Loss_Last5",
         # 8 situational cover rates (last-5)
         #"Cover_Rate_Home_After_Home_Win_Last5",
         #"Cover_Rate_Home_After_Home_Loss_Last5",
@@ -3758,7 +3758,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             #'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
             #'CrossMarket_Prob_Gap_Exists',
-            'Line_Moved_Away_From_Team',
+            #'Line_Moved_Away_From_Team',
             
             
             'Pct_Line_Move_From_Opening',#'Pct_Line_Move_Bin',
@@ -3768,7 +3768,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Line_Resistance_Crossed_Count','SharpMove_Resistance_Break',
         
             # 🧠 Cross-market alignment
-            'Potential_Odds_Overmove_Flag','Line_Moved_Toward_Team',
+            'Potential_Odds_Overmove_Flag',
             #'Abs_Line_Move_Z','Pct_Line_Move_Z',
             'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
@@ -3779,8 +3779,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread',#'Outcome_Market_Spread',
-            'Outcome_Spread_Edge',
+            #'Outcome_Model_Spread',#'Outcome_Market_Spread',
+            '#Outcome_Spread_Edge',
             'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
@@ -3812,7 +3812,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         ]
         #extend_unique(features, hybrid_timing_features)
         #extend_unique(features, hybrid_odds_timing_features)
-        timing_cols = build_timing_aggregates_inplace(df)
+        timing_cols = build_timing_aggregates_inplace(df_bt)
 
         # extend your feature list with timing_cols (and remove the 32 originals)
         extend_unique(features, timing_cols)
@@ -3834,9 +3834,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         extend_unique(features, ['Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos'])
         
         extend_unique(features, [
-            "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
+            "Implied_Hold_Book",#"Two_Sided_Offered","Juice_Abs_Delta",
             "Dist_To_Next_Key","Key_Corridor_Pressure",
-            "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
+            #"Book_PctRank_Line",
+            "Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
         ])
         
         # Add hybrid timing derivatives (snapshot-safe, computed above)
@@ -3857,11 +3858,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Limit dynamics
             "Limit_Spike_Flag","Delta_Limit","LimitSpike_x_NoMove",
             # Book network
-            "Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10","Sharp_vs_Rec_SpreadGap_Q50",
+            "Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10",#"Sharp_vs_Rec_SpreadGap_Q50",
             # Internal consistency
             "Spread_ML_ProbGap","Spread_ML_Inconsistency","Total_vs_Side_ImpliedDelta",
             # Alt lines (optional)
-            "AltLine_Slope","AltLine_Curv",
+            "AltLine_Slope",#"AltLine_Curv",
             # CLV proxies
             #"CLV_Proxy_E_DeltaNext15m",
             "CLV_Proxy_E_CLV",
