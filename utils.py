@@ -3695,8 +3695,7 @@ def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
         df_sc["TOT_Mispricing"] = df_sc["TOT_Proj_Total_Baseline"] - df_sc["Total_Line_Current"]
 
     return df_sc
-import numpy as np
-import pandas as pd
+
 
 PHASES  = ["Overnight","Early","Midday","Late"]
 URGENCY = ["VeryEarly","MidRange","LateGame","Urgent"]
@@ -5087,10 +5086,10 @@ def apply_blended_sharp_score(
         df,
         line_prefix="SharpMove_Magnitude_",
         odds_prefix="OddsMove_Magnitude_",
-        drop_original=True,          # drops the 32 raw bins after aggregation
-        include_compat_alias=True,   # writes Hybrid_* alias columns for back-compat
+        drop_original=False,           # ← keep raw timing bins so derivatives can see them
+        include_compat_alias=True,
     )
-    
+
     # tiny sanity log (optional)
     _expected = [
         "Line_TotalMag","Line_LateShare","Line_UrgentShare",
