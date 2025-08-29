@@ -3059,11 +3059,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
     # === Opponent mirrors (prior-only, last-5) ===
     opp_cover_cols = [
-        "Opp_Cover_Rate_Last5",
+        #"Opp_Cover_Rate_Last5",
         #"Opp_ATS_Cover_Margin_Last5_Prior_Mean",
         #"Opp_ATS_Cover_Margin_Last5_Prior_Std",
-        "Opp_Cover_Rate_After_Win_Last5",
-        "Opp_Cover_Rate_After_Loss_Last5",
+        #"Opp_Cover_Rate_After_Win_Last5",
+        #"Opp_Cover_Rate_After_Loss_Last5",
         #"Opp_Cover_Rate_Home_After_Home_Win_Last5",
         #"Opp_Cover_Rate_Home_After_Home_Loss_Last5",
         #"Opp_Cover_Rate_Home_After_Away_Win_Last5",
@@ -3081,15 +3081,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     all_feature_cols = (
         history_cols
         + team_cover_cols
-        + opp_cover_cols
+      
     )
     
     # Keep only columns that actually exist
     history_present = [c for c in history_cols if c in df_bt.columns]
     
     team_cover_present = [c for c in team_cover_cols if c in df_bt.columns]
-    opp_cover_present = [c for c in opp_cover_cols if c in df_bt.columns]
-    all_present = history_present + team_cover_present + opp_cover_present
+    #opp_cover_present = [c for c in opp_cover_cols if c in df_bt.columns]
+    all_present = history_present + team_cover_present
  
     
     # Handle NaNs if your model can’t
