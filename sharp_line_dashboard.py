@@ -113,7 +113,7 @@ from google.cloud import storage, bigquery, bigquery_storage_v1
 import pandas_gbq
 from pandas_gbq import to_gbq
 import google.api_core.exceptions
-from utils import fetch_training_ratings_window_cached
+
         
 
               
@@ -1133,17 +1133,25 @@ def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFram
 # --- TRAINING ENRICHMENT (LEAK-SAFE) ---
 
 
+import gc
+import numpy as np
+import pandas as pd
+from google.cloud import bigquery
+
 def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
-    bq,                           # not used inside, kept for signature parity
+    bq,                           # BigQuery client (used here)
     sport_aliases: dict,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 10,
     allow_forward_hours: float = 0.0,  # 0 = strict backward-only
-    project: str = None,
+    project: str = None,               # unused, kept for signature parity
 ) -> pd.DataFrame:
-    
-    from pandas.api.types import is_categorical_dtype
+    """
+    Enrich df with Home_Power_Rating, Away_Power_Rating, Power_Rating_Diff
+    by looking up team ratings from ratings_history within a small time window.
+    Uses a tiny in-function cache to avoid repeated BQ reads per (sport, window).
+    """
 
     if df.empty:
         return df
@@ -1158,9 +1166,10 @@ def enrich_power_for_training_lowmem(
 
     # sport alias → canon
     canon = {}
-    for k, v in sport_aliases.items():
+    for k, v in (sport_aliases or {}).items():
         if isinstance(v, list):
-            for a in v: canon[str(a).upper()] = str(k).upper()
+            for a in v:
+                canon[str(a).upper()] = str(k).upper()
         else:
             canon[str(k).upper()] = str(v).upper()
     out['Sport'] = out['Sport'].map(lambda s: canon.get(s, s))
@@ -1171,12 +1180,98 @@ def enrich_power_for_training_lowmem(
     if out.empty:
         return df
 
-    # teams+window for fetch
+    # teams + window for fetch
+    # (teams already normalized above)
     teams = pd.Index(out['Home_Team_Norm']).union(out['Away_Team_Norm']).unique().tolist()
     gmin, gmax = out['Game_Start'].min(), out['Game_Start'].max()
     pad = pd.Timedelta(days=pad_days)
     start_iso = pd.to_datetime(gmin - pad, utc=True).isoformat()
     end_iso   = pd.to_datetime(gmax + pad, utc=True).isoformat()
+
+    # ---------- tiny in-function cache ----------
+    if not hasattr(enrich_power_for_training_lowmem, "_ratings_cache"):
+        enrich_power_for_training_lowmem._ratings_cache = {}
+    _CACHE = enrich_power_for_training_lowmem._ratings_cache
+
+    # Preferred method per sport (keeps one series per team)
+    PREFERRED_METHOD = {
+        "MLB":   "poisson",
+        "NFL":   "elo_kalman",
+        "NCAAF": "elo_kalman",
+        "NBA":   "elo_kalman",
+        "WNBA":  "elo_kalman",
+        "CFL":   "elo_kalman",
+        "NCAAB": "ridge_massey",
+    }
+
+    def _norm_team_series(s: pd.Series) -> pd.Series:
+        return (s.astype(str).str.lower().str.strip()
+                .str.replace(r'\s+', ' ', regex=True)
+                .str.replace('.', '', regex=False)
+                .str.replace('&', 'and', regex=False)
+                .str.replace('-', ' ', regex=False))
+
+    def _aliases_for(s: str) -> list[str]:
+        s = (s or "").upper()
+        al = sport_aliases.get(s, []) if sport_aliases else []
+        if not isinstance(al, list):
+            al = [al]
+        return sorted({s, *[str(x).upper() for x in al]})
+
+    def fetch_training_ratings_window_cached(
+        sport: str,
+        start_iso: str,
+        end_iso: str,
+        table_history: str,
+        project: str | None = None,
+    ) -> pd.DataFrame:
+        key = (sport.upper(), start_iso, end_iso, table_history, tuple(sorted(teams)))
+        if key in _CACHE:
+            return _CACHE[key].copy()
+
+        aliases = _aliases_for(sport)
+        method = PREFERRED_METHOD.get(sport.upper())
+
+        # Teams are already normalized like our _norm_team_series, so pass directly
+        sql = f"""
+        SELECT
+          UPPER(CAST(Sport AS STRING))        AS Sport,
+          LOWER(TRIM(CAST(Team AS STRING)))   AS Team_Norm,
+          CAST(Rating AS FLOAT64)             AS Power_Rating,
+          TIMESTAMP(Updated_At)               AS AsOfTS
+        FROM `{table_history}`
+        WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
+          AND LOWER(TRIM(CAST(Team AS STRING))) IN UNNEST(@teams)
+          AND TIMESTAMP(Updated_At) >= @start
+          AND TIMESTAMP(Updated_At) <= @end
+          {"AND LOWER(CAST(Method AS STRING)) = @method" if method else ""}
+        """
+
+        params = [
+            bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
+            bigquery.ArrayQueryParameter("teams", "STRING", teams),
+            bigquery.ScalarQueryParameter("start", "TIMESTAMP", pd.Timestamp(start_iso).to_pydatetime()),
+            bigquery.ScalarQueryParameter("end",   "TIMESTAMP", pd.Timestamp(end_iso).to_pydatetime()),
+        ]
+        if method:
+            params.append(bigquery.ScalarQueryParameter("method", "STRING", method.lower()))
+
+        df_r = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
+
+        if df_r.empty:
+            _CACHE[key] = df_r
+            return df_r
+
+        # Normalize team, ensure types
+        df_r['Team_Norm']   = _norm_team_series(df_r['Team_Norm'])
+        df_r['Power_Rating'] = pd.to_numeric(df_r['Power_Rating'], errors='coerce')
+        df_r['AsOfTS']       = pd.to_datetime(df_r['AsOfTS'], utc=True, errors='coerce')
+        df_r = df_r.dropna(subset=['Team_Norm','Power_Rating','AsOfTS'])
+
+        # Keep only this sport (post-alias map)
+        df_r = df_r[df_r['Sport'].str.upper() == sport.upper()]
+        _CACHE[key] = df_r
+        return df_r.copy()
 
     # === Pull history (cached) and filter to these teams ===
     ratings = fetch_training_ratings_window_cached(
@@ -1193,16 +1288,9 @@ def enrich_power_for_training_lowmem(
         out['Power_Rating_Diff'] = np.float32(0.0)
         return out
 
-    # normalize team names again (same way on both sides)
-    def norm_team(s: pd.Series) -> pd.Series:
-        return (s.astype(str).str.lower().str.strip()
-                .str.replace(r'\s+', ' ', regex=True)
-                .str.replace('.', '', regex=False)
-                .str.replace('&', 'and', regex=False)
-                .str.replace('-', ' ', regex=False))
-
+    # compact arrays per team: times + values (sorted)
     ratings = ratings.copy()
-    ratings['Team_Norm'] = norm_team(ratings['Team_Norm'])
+    ratings['Team_Norm'] = _norm_team_series(ratings['Team_Norm'])
     ratings = ratings[ratings['Team_Norm'].isin(teams)]
     if ratings.empty:
         base = np.float32(1500.0)
@@ -1211,66 +1299,58 @@ def enrich_power_for_training_lowmem(
         out['Power_Rating_Diff'] = np.float32(0.0)
         return out
 
-    # compact arrays per team: times + values (sorted)
-    ratings['AsOfTS'] = pd.to_datetime(ratings['AsOfTS'], utc=True, errors='coerce')
-    ratings = ratings.dropna(subset=['AsOfTS', 'Power_Rating', 'Team_Norm'])
-    team_series = {}
+    team_series: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for team, g in ratings.groupby('Team_Norm', sort=False):
         g = g.sort_values('AsOfTS')
         team_series[team] = (
             g['AsOfTS'].to_numpy(dtype='datetime64[ns]'),
             g['Power_Rating'].to_numpy(dtype=np.float32),
         )
+    del ratings; gc.collect()
 
-    # helper: vectorized backward asof via searchsorted
-    def asof_fill(team_col: pd.Series) -> np.ndarray:
-        # returns an array aligned to out.index with ratings for the provided team column
-        vals = np.full(len(out), np.nan, dtype=np.float32)
-        grp = out.groupby(team_col, sort=False)
-        for team, idx in grp.groups.items():
-            if team not in team_series:
-                continue
-            t_times, t_vals = team_series[team]
-            if t_times.size == 0:
-                continue
-            game_times = out.loc[idx, 'Game_Start'].to_numpy(dtype='datetime64[ns]')
-            pos = np.searchsorted(t_times, game_times, side='right') - 1
-            valid = pos >= 0
-            if valid.any():
-                vals_idx = np.asarray(idx)[valid]
-                vals[vals_idx] = t_vals[pos[valid]]
-                if allow_forward_hours > 0:
-                    # optional tiny forward grace for gaps only
-                    need = ~valid
-                    if need.any():
-                        pos_fwd = np.searchsorted(t_times, game_times[need], side='left')
-                        ok = (pos_fwd < t_times.size)
-                        if ok.any():
-                            # within grace?
-                            fwd_dt = (t_times[pos_fwd[ok]] - game_times[need][ok])
-                            ok2 = fwd_dt <= np.timedelta64(int(allow_forward_hours * 3600), 's')
-                            if ok2.any():
-                                dst_idx = np.asarray(idx)[need][ok][ok2]
-                                vals[dst_idx] = t_vals[pos_fwd[ok][ok2]]
-        return vals
+    # === Vectorized assignment per team (low-alloc) ===
+    base = np.float32(1500.0)
+    out['Home_Power_Rating'] = base
+    out['Away_Power_Rating'] = base
 
-    # compute ratings with no giant merges
-    out = out.sort_values('Game_Start', kind='mergesort').reset_index(drop=False)  # keep original index in col 'index'
-    home_pr = asof_fill(out['Home_Team_Norm'])
-    away_pr = asof_fill(out['Away_Team_Norm'])
+    allow_ns = np.int64(round(float(allow_forward_hours) * 3600.0 * 1e9))
+    gs_ns = out['Game_Start'].values.astype('datetime64[ns]')
 
-    out['Home_Power_Rating'] = home_pr
-    out['Away_Power_Rating'] = away_pr
+    # Home side
+    for team, (t_arr, r_arr) in team_series.items():
+        mask = (out['Home_Team_Norm'].values == team)
+        if not mask.any():
+            continue
+        # search on (game_start + allow_forward)
+        ts = gs_ns[mask].astype('datetime64[ns]').astype('int64') + allow_ns
+        ts = ts.astype('datetime64[ns]')
+        idx = np.searchsorted(t_arr, ts, side='right') - 1
+        valid = idx >= 0
+        vals = np.full(idx.shape, base, dtype=np.float32)
+        if valid.any():
+            vals[valid] = r_arr[idx[valid]]
+        out.loc[mask, 'Home_Power_Rating'] = vals
 
-    # baseline fill for any remaining NaNs
-    sport_mean = np.float32(pd.to_numeric(ratings['Power_Rating'], errors='coerce').mean() if not ratings.empty else 1500.0)
-    out['Home_Power_Rating'] = out['Home_Power_Rating'].fillna(sport_mean).astype('float32')
-    out['Away_Power_Rating'] = out['Away_Power_Rating'].fillna(sport_mean).astype('float32')
-    out['Power_Rating_Diff'] = (out['Home_Power_Rating'] - out['Away_Power_Rating']).astype('float32')
+    # Away side
+    for team, (t_arr, r_arr) in team_series.items():
+        mask = (out['Away_Team_Norm'].values == team)
+        if not mask.any():
+            continue
+        ts = gs_ns[mask].astype('datetime64[ns]').astype('int64') + allow_ns
+        ts = ts.astype('datetime64[ns]')
+        idx = np.searchsorted(t_arr, ts, side='right') - 1
+        valid = idx >= 0
+        vals = np.full(idx.shape, base, dtype=np.float32)
+        if valid.any():
+            vals[valid] = r_arr[idx[valid]]
+        out.loc[mask, 'Away_Power_Rating'] = vals
 
-    # restore original row order
-    out = out.sort_values('index').drop(columns=['index']).reset_index(drop=True)
-    return out   
+    out['Power_Rating_Diff'] = (
+        pd.to_numeric(out['Home_Power_Rating'], errors='coerce')
+        - pd.to_numeric(out['Away_Power_Rating'], errors='coerce')
+    ).astype('float32')
+
+    return out
 
 
 
