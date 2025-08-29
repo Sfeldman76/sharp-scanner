@@ -975,8 +975,7 @@ def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market
 
     Always de-duplicates and (if df_like is provided) filters to columns present in df_like.
     """
-    import pandas as pd
-    import numpy as np
+   
 
     # --- unwrap per-market sub-bundle if provided ---
     sub = bundle
@@ -1347,7 +1346,7 @@ def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFram
 
 def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
-    bq,                           # BigQuery client (used here)
+    bq=bq_client,                          # BigQuery client (used here)
     sport_aliases: dict,
     table_history: str = "sharplogger.sharp_data.ratings_history",
     pad_days: int = 10,
@@ -1730,7 +1729,7 @@ def enrich_and_grade_for_training(
     # 1) leakage-safe ratings (your function)
     base = enrich_power_for_training_lowmem(
         df_spread_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-        bq=bq,
+        bq=bq_client,
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days,
@@ -5631,8 +5630,8 @@ def attach_ratings_and_edges_for_diagnostics(
     project: str = "sharplogger",
     pad_days: int = 30,
     allow_forward_hours: float = 0.0,
-    bq=None,   # <— NEW
-) -> pd.DataFrame:
+    bq=None,                        # ✅ add this
+) -> pd.DataFrame
     
     UI_EDGE_COLS = [
         'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
@@ -5693,14 +5692,14 @@ def attach_ratings_and_edges_for_diagnostics(
     # 1) Ratings (as-of, low-mem)
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-        bq=bq,  # <— PASS THE CLIENT
+        bq=bq,                      # ✅ was None — must pass the client
         sport_aliases=sport_aliases,
         table_history=table_history,
         pad_days=pad_days_eff,
         allow_forward_hours=allow_forward_hours,
-        project=project,
+        project=project
     )
-
+    
     # 2) Consensus favorite & k
     cons = prep_consensus_market_spread_lowmem(d_sp, value_col='Value', outcome_col='Outcome_Norm')
 
@@ -5793,16 +5792,20 @@ def compute_diagnostics_vectorized(
     )
 
     # --- 2) Optional: attach ratings/edges (safe if function isn't present) ---
+    # inside compute_diagnostics_vectorized(..., bq=None)
     try:
         df = attach_ratings_and_edges_for_diagnostics(
             df=df,
             sport_aliases=sport_aliases or {},
             table_history=ratings_table_fq,
             project=project,
-            bq=bq,
+            # ✅ allow using the single “current” timestamp for earlier game starts
+            allow_forward_hours=(24*365 if "ratings_current" in str(ratings_table_fq).lower() else 0.0),
+            bq=bq,  # ✅ pass the client through
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # don't swallow silently — at least surface it once while debugging
+        df["Why Model Likes It"] = f"⚠️ Ratings attach failed: {e}"
 
     # --- 3) Tier Δ ---
     TIER_ORDER = {'🪙 Low Probability':1, '🤏 Lean':2, '🔥 Strong Indication':3, '🌋 Steam':4}
@@ -5872,9 +5875,10 @@ def compute_diagnostics_vectorized(
     # --- 7) Model-vs-Market seasoning (only if those cols were active in the model) ---
     ACTIVE_FEATS = set(active_feats)
 
+   
     def _is_active(col: str) -> bool:
         return col in ACTIVE_FEATS
-
+    
     def _num(row, col):
         v = row.get(col)
         if isinstance(v, str):
@@ -5882,41 +5886,37 @@ def compute_diagnostics_vectorized(
             if v in ('', '—', '–'):
                 return np.nan
         return pd.to_numeric(v, errors='coerce')
-
-        emit_model_market =  any([
-            _is_active('Outcome_Model_Spread'),
-            _is_active('Outcome_Market_Spread'),
-            _is_active('Outcome_Spread_Edge'),
-            _is_active('Outcome_Cover_Prob'),
-            _is_active('model_fav_vs_market_fav_agree'),
-        ])
     
-        if emit_model_market:
+    # --- put this at the SAME INDENT as _num (module level inside the function) ---
+    emit_model_market = True  # always append model/market & PR numbers into WHY
+    
+    if emit_model_market:
         msgs = df["Why Model Likes It"].astype(str).tolist()
         recs = df.to_dict('records')
         for i, row in enumerate(recs):
             parts = [] if msgs[i] in ("—", "nan") else [msgs[i]]
     
-            _mod_spread = _num(row, 'Outcome_Model_Spread')
-            _mkt_spread = _num(row, 'Outcome_Market_Spread')
-            if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
-                parts.append(f"📐 Model Spread {_mod_spread:+.1f} vs Market {_mkt_spread:+.1f}")
+            # spreads-only seasonings
+            if str(row.get('Market','')).lower() == 'spreads':
+                _mod_spread = _num(row, 'Outcome_Model_Spread')
+                _mkt_spread = _num(row, 'Outcome_Market_Spread')
+                if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
+                    parts.append(f"📐 Model Spread {_mod_spread:+.1f} vs Market {_mkt_spread:+.1f}")
     
-            _edge = _num(row, 'Outcome_Spread_Edge')
-            if pd.notna(_edge):
-                parts.append(f"🎯 Spread Edge {_edge:+.1f}")
+                _edge = _num(row, 'Outcome_Spread_Edge')
+                if pd.notna(_edge):
+                    parts.append(f"🎯 Spread Edge {_edge:+.1f}")
     
-            _cov = _num(row, 'Outcome_Cover_Prob')
-            if pd.notna(_cov):
-                parts.append(f"🛡️ Cover Prob {_cov:.0%}" + (" ✅" if _cov >= 0.55 else ""))
+                _cov = _num(row, 'Outcome_Cover_Prob')
+                if pd.notna(_cov):
+                    parts.append(f"🛡️ Cover Prob {_cov:.0%}" + (" ✅" if _cov >= THR["cover_prob_conf"] else ""))
     
-            agree_val = row.get('model_fav_vs_market_fav_agree', 0)
-            agree_num = pd.to_numeric(agree_val, errors='coerce')
-            if (pd.notna(agree_num) and int(round(float(agree_num))) == 1) or \
-               (str(agree_val).strip().lower() in ('1','true','yes')):
-                parts.append("🤝 Model & Market Favor Same Team")
+                agree_val = row.get('model_fav_vs_market_fav_agree', 0)
+                agree_num = pd.to_numeric(agree_val, errors='coerce')
+                if pd.notna(agree_num) and int(round(float(agree_num))) == 1:
+                    parts.append("🤝 Model & Market Favor Same Team")
     
-            # ✅ ADD THIS BLOCK to print the power-rating numbers inline
+            # always try to print PR numbers (if ratings merged)
             _pr_team = _num(row, 'PR_Team_Rating')
             _pr_opp  = _num(row, 'PR_Opp_Rating')
             _pr_diff = _num(row, 'PR_Rating_Diff')
@@ -5932,7 +5932,6 @@ def compute_diagnostics_vectorized(
     
         df["Why Model Likes It"] = msgs
         df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
-
           
 
     # --- 8) Timing Opportunity (UI-only) ---
@@ -6049,7 +6048,7 @@ def compute_diagnostics_vectorized(
     df = _assign_stage_by_market(df)
 
     # Optional quick visibility while debugging
-    st.write("⏱️ Timing stage counts:", df['Timing_Stage'].value_counts(dropna=False).to_dict())
+    #st.write("⏱️ Timing stage counts:", df['Timing_Stage'].value_counts(dropna=False).to_dict())
 
     # --- 9) Return only base + ACTIVE feature columns (so UI stays aligned) ---
     base_cols = [
@@ -6883,7 +6882,9 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                         model=model,
                         sport=label,                # you used `label` earlier for loading
                         gcs_bucket=GCS_BUCKET, 
-                        bq=bq, 
+                        bq=bq_client,
+                        ratings_table_fq="sharplogger.sharp_data.ratings_current",
+                        sport_aliases=sport_aliases,
                         hybrid_timing_features=hybrid_timing_features if 'hybrid_timing_features' in globals() else None,
                         hybrid_odds_timing_features=hybrid_odds_timing_features if 'hybrid_odds_timing_features' in globals() else None,
                     )
