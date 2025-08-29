@@ -1140,13 +1140,18 @@ def _resolve_active_features(bundle, model, df_like):
 
 # --- Numeric coercion (kept from your snippet; safe if already defined) ---
 def _coerce_numeric_inplace(df, cols, fill=0.0):
+    UI_NUM_COLS = {
+        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge','Outcome_Cover_Prob',
+        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','edge_x_k','mu_x_k'
+    }
     for c in cols:
         if c not in df.columns:
-            df[c] = fill
-        else:
-            if pd.api.types.is_categorical_dtype(df[c]):
-                df[c] = df[c].astype(object)
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(fill)
+            df[c] = (np.nan if c in UI_NUM_COLS else fill)
+            continue
+        if pd.api.types.is_categorical_dtype(df[c]):
+            df[c] = df[c].astype(object)
+        vals = pd.to_numeric(df[c], errors="coerce")
+        df[c] = vals if c in UI_NUM_COLS else vals.fillna(fill))
 
 # --- Helper to read first available value across aliases safely ---
 def _rv(row, *names, default=0.0):
@@ -1160,15 +1165,15 @@ def _rv(row, *names, default=0.0):
 
 # --- Thresholds (tune lightly per sport if you want) ---
 THR = dict(
-    line_mag_big=0.0,          # Line_TotalMag considered "big"
-    late_share_high=0.00,       # ≥50% of timing in Late phase
-    urgent_share_high=00,     # ≥20% in Urgent bins
-    entropy_concentrated=0,  # lower entropy = concentrated timing
-    corr_confirm=0,          # odds/line timing corr considered confirming
-    odds_overmove_ratio=0,   # line/odds mag ratio suggesting line override
-    pct_from_open_big=0,      # % line move from open is notable (sport-tune)
-    pr_diff_meaningful=0.0,     # power rating diff magnitude considered meaningful
-    cover_prob_conf=0        # cover prob indicates model confidence
+    line_mag_big=0.30,
+    late_share_high=0.50,
+    urgent_share_high=0.20,
+    entropy_concentrated=1.20,
+    corr_confirm=0.35,
+    odds_overmove_ratio=1.10,
+    pct_from_open_big=0.10,
+    pr_diff_meaningful=20.0,
+    cover_prob_conf=0.55,
 )
 
 # --- Rule schema supports "requires" (all) and "requires_any" (any-of) ---
@@ -5622,10 +5627,11 @@ def read_market_weights_from_bigquery():
 def attach_ratings_and_edges_for_diagnostics(
     df: pd.DataFrame,
     sport_aliases: dict,
-    table_history: str = "sharplogger.sharp_data.ratings_current",  # ← current table by default
+    table_history: str = "sharplogger.sharp_data.ratings_current",
     project: str = "sharplogger",
-    pad_days: int = 30,     # normal pad for history tables
+    pad_days: int = 30,
     allow_forward_hours: float = 0.0,
+    bq=None,   # <— NEW
 ) -> pd.DataFrame:
     
     UI_EDGE_COLS = [
@@ -5687,10 +5693,10 @@ def attach_ratings_and_edges_for_diagnostics(
     # 1) Ratings (as-of, low-mem)
     base = enrich_power_for_training_lowmem(
         df=d_sp[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
-        bq=None,
+        bq=bq,  # <— PASS THE CLIENT
         sport_aliases=sport_aliases,
-        table_history=table_history,           # ← points at ratings_current by default
-        pad_days=pad_days_eff,                 # ← wide pad for current table
+        table_history=table_history,
+        pad_days=pad_days_eff,
         allow_forward_hours=allow_forward_hours,
         project=project,
     )
@@ -5756,16 +5762,17 @@ def attach_ratings_and_edges_for_diagnostics(
 def compute_diagnostics_vectorized(
     df: pd.DataFrame,
     *,
-    bundle=None,                 # model bundle for feature resolution
-    model=None,                  # fitted model used to score df
-    sport: str = None,           # needed if loading timing models from GCS
-    gcs_bucket: str = None,      # GCS bucket name for timing model load
-    timing_models: dict | None = None,   # optional preloaded {'spreads': mdl, ...}
+    bundle=None,
+    model=None,
+    sport: str = None,
+    gcs_bucket: str = None,
+    timing_models: dict | None = None,
     hybrid_timing_features: list | None = None,
     hybrid_odds_timing_features: list | None = None,
     sport_aliases: dict | None = None,
     ratings_table_fq: str = "sharplogger.sharp_data.ratings_current",
     project: str = "sharplogger",
+    bq=None,  # <— NEW
 ):
     """
     Returns a diagnostics dataframe with:
@@ -5792,6 +5799,7 @@ def compute_diagnostics_vectorized(
             sport_aliases=sport_aliases or {},
             table_history=ratings_table_fq,
             project=project,
+            bq=bq,
         )
     except Exception:
         pass
@@ -5875,43 +5883,57 @@ def compute_diagnostics_vectorized(
                 return np.nan
         return pd.to_numeric(v, errors='coerce')
 
-    emit_model_market = True #any([
-        #_is_active('Outcome_Model_Spread'),
-        #_is_active('Outcome_Market_Spread'),
-        #_is_active('Outcome_Spread_Edge'),
-        #_is_active('Outcome_Cover_Prob'),
-        #_is_active('model_fav_vs_market_fav_agree'),
-    #])
-
-    if emit_model_market:
+        emit_model_market =  any([
+            _is_active('Outcome_Model_Spread'),
+            _is_active('Outcome_Market_Spread'),
+            _is_active('Outcome_Spread_Edge'),
+            _is_active('Outcome_Cover_Prob'),
+            _is_active('model_fav_vs_market_fav_agree'),
+        ])
+    
+        if emit_model_market:
         msgs = df["Why Model Likes It"].astype(str).tolist()
         recs = df.to_dict('records')
         for i, row in enumerate(recs):
             parts = [] if msgs[i] in ("—", "nan") else [msgs[i]]
-
+    
             _mod_spread = _num(row, 'Outcome_Model_Spread')
             _mkt_spread = _num(row, 'Outcome_Market_Spread')
             if pd.notna(_mod_spread) and pd.notna(_mkt_spread):
                 parts.append(f"📐 Model Spread {_mod_spread:+.1f} vs Market {_mkt_spread:+.1f}")
-
+    
             _edge = _num(row, 'Outcome_Spread_Edge')
             if pd.notna(_edge):
                 parts.append(f"🎯 Spread Edge {_edge:+.1f}")
-
+    
             _cov = _num(row, 'Outcome_Cover_Prob')
             if pd.notna(_cov):
                 parts.append(f"🛡️ Cover Prob {_cov:.0%}" + (" ✅" if _cov >= 0.55 else ""))
-
+    
             agree_val = row.get('model_fav_vs_market_fav_agree', 0)
             agree_num = pd.to_numeric(agree_val, errors='coerce')
             if (pd.notna(agree_num) and int(round(float(agree_num))) == 1) or \
                (str(agree_val).strip().lower() in ('1','true','yes')):
                 parts.append("🤝 Model & Market Favor Same Team")
-
+    
+            # ✅ ADD THIS BLOCK to print the power-rating numbers inline
+            _pr_team = _num(row, 'PR_Team_Rating')
+            _pr_opp  = _num(row, 'PR_Opp_Rating')
+            _pr_diff = _num(row, 'PR_Rating_Diff')
+            if pd.notna(_pr_team) and pd.notna(_pr_opp):
+                if pd.notna(_pr_diff):
+                    parts.append(f"📊 Power Ratings {int(round(_pr_team))} vs {int(round(_pr_opp))} (Δ {_pr_diff:+.0f})")
+                else:
+                    parts.append(f"📊 Power Ratings {int(round(_pr_team))} vs {int(round(_pr_opp))}")
+            elif pd.notna(_pr_diff):
+                parts.append(f"📊 Power Rating Δ {_pr_diff:+.0f}")
+    
             msgs[i] = " · ".join([p for p in parts if p and p != "—"]) or "—"
-
+    
         df["Why Model Likes It"] = msgs
         df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
+
+          
 
     # --- 8) Timing Opportunity (UI-only) ---
      # =====================================
@@ -6036,7 +6058,7 @@ def compute_diagnostics_vectorized(
         'Why Model Likes It','Passes_Gate','Confidence Tier',
         'Model Prob Snapshot','First Prob Snapshot',
         'Model_Confidence_Tier',
-        'Timing_Opportunity_Score','Timing_Stage'
+        'Timing_Opportunity_Score','Timing_Stage',   
     ]
     active_cols_present = [c for c in active_feats if c in df.columns]
     keep_cols = [c for c in base_cols if c in df.columns] + active_cols_present
@@ -6860,7 +6882,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                         bundle=bundle,
                         model=model,
                         sport=label,                # you used `label` earlier for loading
-                        gcs_bucket=GCS_BUCKET,      # assumes defined earlier
+                        gcs_bucket=GCS_BUCKET, 
+                        bq=bq, 
                         hybrid_timing_features=hybrid_timing_features if 'hybrid_timing_features' in globals() else None,
                         hybrid_odds_timing_features=hybrid_odds_timing_features if 'hybrid_odds_timing_features' in globals() else None,
                     )
