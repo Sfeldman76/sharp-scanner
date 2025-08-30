@@ -5234,9 +5234,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_oof_auc = oof_pred_auc[mask_oof].astype(float)
         
         # ----- pick blend weight on OOF (logloss‑based) + fit isotonic; get flipped flag -----
-        best_w, iso_blend, p_oof_blend, _flipped = pick_blend_weight_on_oof(
-            y_oof=y_oof, p_oof_log=p_oof_log, p_oof_auc=p_oof_auc,
-            metric="logloss", grid=None, eps=eps
+        best_w, iso_blend, p_oof_blend = pick_blend_weight_on_oof(
+            y_oof=y_oof,
+            p_oof_log=p_oof_log,
+            p_oof_auc=p_oof_auc,
+            metric="logloss",   # safer when AUC can be NaN
+            grid=None,
+            eps=eps,
         )
         st.write(f"🔎 Selected blend weight (logloss vs AUC): w={best_w:.2f}")
 
