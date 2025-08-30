@@ -5080,40 +5080,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             oof_pred_logloss[va_rel] = m_ll.predict_proba(X_train[va_rel])[:, 1]
             oof_pred_auc[va_rel]     = m_auc.predict_proba(X_train[va_rel])[:, 1]
         
+       
         mask_oof = ~np.isnan(oof_pred_logloss) & ~np.isnan(oof_pred_auc)
         if mask_oof.sum() < 50:
             raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
         
-        # Blend weight chosen on OOF to minimize logloss
-        grid = np.linspace(0.0, 1.0, 51)
+        # --- align names & slice y/preds for OOF ---
+        def _slice_mask(a, m):
+            # works for numpy arrays and pandas Series/DataFrames
+            return a[m] if not hasattr(a, "iloc") else a.iloc[m]
         
-        # You already have OOF preds:
-        # p_oof_log, p_oof_auc, y_oof
+        y_oof     = _slice_mask(y_train, mask_oof).astype(int)
+        p_oof_log = _slice_mask(oof_pred_logloss, mask_oof).astype(float)
+        p_oof_auc = _slice_mask(oof_pred_auc,     mask_oof).astype(float)
         
+        # --- pick best blend weight on OOF & fit isotonic on that blended OOF ---
         best_w, iso_blend, p_oof_blend = pick_blend_weight_on_oof(
             y_oof=y_oof,
             p_oof_log=p_oof_log,
             p_oof_auc=p_oof_auc,
-            metric="auc",      # or "logloss" / "hybrid"
-            grid=None,         # default 0.20..0.80
+            metric="auc",   # or "logloss" / "hybrid"
+            grid=None,      # default 0.20..0.80 by 0.05
             eps=eps,
         )
-        
         st.write(f"🔎 Selected blend weight (logloss vs AUC): w={best_w:.2f} (AUC weight={1-best_w:.2f})")
         
-        # (Optional) show how other weights would have scored, without changing best_w
-        _grid = np.linspace(0.20, 0.80, 13)
-        rows = []
-        for w in _grid:
-            p_tmp = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
-            rows.append({"w_log": w,
-                "AUC": roc_auc_score(y_oof, p_tmp),
-                "LogLoss": log_loss(y_oof, p_tmp, labels=[0,1])})
-        st.dataframe(pd.DataFrame(rows))
+        # (optional) inspect other weights without changing best_w
+        # _grid = np.linspace(0.20, 0.80, 13)
+        # rows = []
+        # for w in _grid:
+        #     p_tmp = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
+        #     rows.append({"w_log": w,
+        #                  "AUC": roc_auc_score(y_oof, p_tmp),
+        #                  "LogLoss": log_loss(y_oof, p_tmp, labels=[0,1])})
+        # st.dataframe(pd.DataFrame(rows))
         
-        #
         # ---------------------------------------------------------------------------
-        #  Final blended + calibrated predictions for TRAIN + HOLDOUT
+        # Final blended + calibrated predictions for TRAIN + HOLDOUT
         # ---------------------------------------------------------------------------
         p_tr_log = model_logloss.predict_proba(X_full[train_all_idx])[:, 1]
         p_tr_auc = model_auc    .predict_proba(X_full[train_all_idx])[:, 1]
@@ -5123,9 +5126,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
-        p_cal     = iso_blend.predict(p_train_blend_raw)   # TRAIN calibrated
-        p_cal_val = iso_blend.predict(p_hold_blend_raw)    # HOLDOUT calibrated
-        
+        p_cal     = iso_blend.predict(p_train_blend_raw)  # TRAIN calibrated
+        p_cal_val = iso_blend.predict(p_hold_blend_raw)   # HOLDOUT calibrated
         
         # targets aligned
         y_train_vec = y_full[train_all_idx].astype(int)
