@@ -1570,8 +1570,6 @@ def implied_prob_to_point_move(prob_delta, base_odds=-110):
     point_equiv = prob_delta / approx_slope
     return point_equiv    
 
-import logging
-import pandas as pd
 
 def compute_sharp_metrics(
     entries,
@@ -1582,67 +1580,45 @@ def compute_sharp_metrics(
     book=None,             # fallback if entries don't include book per row
     open_odds=None,
     opening_limit=None,
+    *,
+    eps_line=1e-6,         # ignore sub‑micropoint wiggles
+    eps_prob=0.001,        # ≈0.1% implied‑prob change = real move
 ):
     """
-    entries: iterable of (limit, value, ts, game_start, odds[, book])
-             Prefer ts and game_start as pd.Timestamp or datetime for speed.
-             If 'book' per entry is provided, it should be the 6th element.
-
-    Behavior (updated):
-      • Timing buckets for LINE (spreads/totals) are based on per-book absolute VALUE (points) deltas.
-      • Timing buckets for ODDS are based on per-book absolute IMPLIED-PROBABILITY deltas (0–1 scale).
-      • Odds_Move_Magnitude aggregates abs odds movement converted to POINT-EQUIVALENT units (via your converter).
-      • Dominant timing label falls back to odds buckets if line buckets are zero.
-      • Net-from-opening odds are reported in both price-delta and probability-delta units.
+    Sharp_Move_Signal logic (UPDATED COMBO):
+      • Always requires odds to strengthen the selected side (prob ↑ for the side).
+      • For spreads/totals:
+          - If the line moves, it must also strengthen the side.
+          - If the line is sticky (no meaningful change), odds‑strengthening alone can trigger.
+      • For H2H: odds‑strengthening alone can trigger.
     """
     lg_debug = logging.getLogger().isEnabledFor(logging.DEBUG)
-    if lg_debug:
-        logging.debug("🔍 compute_sharp_metrics outcome=%s market=%s", label, mtype)
 
     mtype = (mtype or "").strip().lower()
     label = (label or "").strip().lower()
 
-    # ── ensure sorted by timestamp once (skip if caller guaranteed sorted)
     if entries and not all(entries[i][2] <= entries[i+1][2] for i in range(len(entries)-1)):
         entries = sorted(entries, key=lambda x: x[2])
 
-    # aggregates
-    move_mag_sum = 0.0           # abs-sum of per-book line moves (points)
-    odds_move_mag_pts = 0.0      # abs-sum of odds moves in point-equivalent units
+    move_mag_sum = 0.0
+    odds_move_mag_pts = 0.0
     limit_score = 0.0
     total_limit = 0.0
 
-    # 16 hybrid timing buckets (4 TOD × 4 MTG)
-    mag_buckets  = [0.0]*16      # line/value buckets (points; abs per-book deltas)
-    odds_buckets = [0.0]*16      # odds buckets (prob deltas; abs per-book deltas)
+    mag_buckets  = [0.0]*16
+    odds_buckets = [0.0]*16
 
-    def _tod_idx(hour: int) -> int:
-        if 0 <= hour <= 5:   return 0
-        if 6 <= hour <= 11:  return 1
-        if 12 <= hour <= 15: return 2
-        return 3
-
-    def _mtg_idx(minutes_to_game: float | None) -> int:
-        if minutes_to_game is None:       return 0
-        if minutes_to_game > 720:         return 0
-        if minutes_to_game > 180:         return 1
-        if minutes_to_game > 60:          return 2
-        return 3
-
-    def _bucket_index(ts, game_start) -> int:
-        try:
-            h = ts.hour
-        except Exception:
-            h = pd.to_datetime(ts).hour
+    def _tod_idx(h):  return 0 if 0 <= h <= 5 else 1 if 6 <= h <= 11 else 2 if 12 <= h <= 15 else 3
+    def _mtg_idx(m):  return 0 if (m is None or m > 720) else 1 if m > 180 else 2 if m > 60 else 3
+    def _bucket_index(ts, game_start):
+        try: h = ts.hour
+        except Exception: h = pd.to_datetime(ts).hour
         mtg = None
         if game_start is not None:
-            try:
-                mtg = (game_start - ts).total_seconds() / 60.0
-            except Exception:
-                mtg = (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60.0
+            try: mtg = (game_start - ts).total_seconds() / 60.0
+            except Exception: mtg = (pd.to_datetime(game_start) - pd.to_datetime(ts)).total_seconds() / 60.0
         return _tod_idx(h) * 4 + _mtg_idx(mtg)
 
-    # --- sharp-book detection helper ---
     try:
         _SHARP_BOOKS = {str(b).strip().lower() for b in SHARP_BOOKS}  # noqa: F821
     except Exception:
@@ -1655,45 +1631,66 @@ def compute_sharp_metrics(
         nb = _norm_book(book_name)
         if nb in _SHARP_BOOKS:
             return True
-        # optional fallback: treat very high-limit as "sharp"
         try:
             return float(lim_val) >= 5000 if lim_val is not None else False
         except Exception:
             return False
 
-    # opening trio may be missing → capture earliest non-null during pass
+    # ---- directional rules
+    def _line_strengthening(prev_v, curr_v) -> bool:
+        if prev_v is None or curr_v is None or pd.isna(prev_v) or pd.isna(curr_v):
+            return False
+        # spreads
+        if mtype in ("spreads", "spread", "ats"):
+            if abs(prev_v) < eps_line:     # pick'em → ignore
+                return False
+            if prev_v < 0:                 # favorite side
+                return (curr_v + eps_line) < prev_v    # more negative
+            if prev_v > 0:                 # underdog side
+                return (curr_v - eps_line) > prev_v    # more positive
+            return False
+        # totals
+        if mtype in ("totals", "total", "o/u", "ou"):
+            is_over  = ("over" in label) or (label == "o")
+            is_under = ("under" in label) or (label == "u")
+            if is_over:
+                return (curr_v - prev_v) > eps_line     # total rising
+            if is_under:
+                return (prev_v - curr_v) > eps_line     # total falling
+            return False
+        # h2h has no line concept
+        return False
+
+    def _odds_strengthening(prev_odds, curr_odds) -> tuple[bool, float]:
+        if prev_odds is None or curr_odds is None or pd.isna(prev_odds) or pd.isna(curr_odds):
+            return (False, 0.0)
+        pp = implied_prob(prev_odds)   # noqa: F821
+        cp = implied_prob(curr_odds)   # noqa: F821
+        dp = cp - pp                    # prob ↑ means stronger tilt toward this side
+        return (dp > eps_prob, dp)
+
     first_val   = open_val
     first_odds  = open_odds
     first_limit = opening_limit
 
-    # track previous values PER BOOK so “movement” is book-local
-    prev_val_by_book  = {}   # book → last value
-    prev_odds_by_book = {}   # book → last odds (price)
+    prev_val_by_book  = {}
+    prev_odds_by_book = {}
 
-    # keep last seen (cross-book) for net-from-opening reporting
-    last_val  = None
-    last_odds = None
+    net_line_move = abs_net_line_move = None
+    net_odds_move_px = abs_net_odds_move_px = None
+    net_odds_move_prob = abs_net_odds_move_prob = None
 
-    # net-from-opening fields (computed on the fly; last row wins)
-    net_line_move     = None
-    abs_net_line_move = None
-    net_odds_move_px  = None
-    abs_net_odds_move_px = None
-    net_odds_move_prob = None
-    abs_net_odds_move_prob = None
-
-    # === flag if ANY movement occurs on a sharp book ===
     sharp_move_seen = False
+    line_ever_changed_by_book = {}  # book → bool
 
     for i, row in enumerate(entries):
-        # Unpack with optional per-entry book
         if len(row) >= 6:
             lim, curr_val, ts, game_start, curr_odds, row_book = row[:6]
         else:
             lim, curr_val, ts, game_start, curr_odds = row[:5]
-            row_book = book  # use function-level fallback
+            row_book = book
 
-        # Fast numeric coercion
+        # coerce numeric
         try:
             if lim is not None and not isinstance(lim, (int, float)):
                 lim = pd.to_numeric(lim, errors="coerce")
@@ -1704,7 +1701,6 @@ def compute_sharp_metrics(
         except Exception:
             pass
 
-        # establish opening trio lazily
         if first_val is None and pd.notna(curr_val):
             first_val = curr_val
         if first_odds is None and pd.notna(curr_odds):
@@ -1715,73 +1711,67 @@ def compute_sharp_metrics(
         b_idx = _bucket_index(ts, game_start)
         nb = _norm_book(row_book)
 
-        # ---- book-local previous values
-        pval_book  = prev_val_by_book.get(nb)
-        pods_book  = prev_odds_by_book.get(nb)
+        pval = prev_val_by_book.get(nb)
+        pods = prev_odds_by_book.get(nb)
 
-        # ---- movement detection on sharp books
-        if pd.notna(pval_book) and pd.notna(curr_val) and curr_val != pval_book and _is_sharp_book(nb, lim):
-            sharp_move_seen = True
-        if pd.notna(pods_book) and pd.notna(curr_odds) and curr_odds != pods_book and _is_sharp_book(nb, lim):
-            sharp_move_seen = True
+        # track if line ever changed meaningfully for this book
+        if pd.notna(pval) and pd.notna(curr_val):
+            if abs(curr_val - pval) > eps_line:
+                line_ever_changed_by_book[nb] = True
 
-        # ---- per-book timing magnitudes (ABS)
-        # 1) LINE/POINT movement (spreads & totals use values)
-        if pd.notna(pval_book) and pd.notna(curr_val):
-            delta_pts = float(curr_val - pval_book)
+        # ----- magnitude buckets (abs)
+        if pd.notna(pval) and pd.notna(curr_val):
+            delta_pts = float(curr_val - pval)
             mag_buckets[b_idx] += abs(delta_pts)
             move_mag_sum += abs(delta_pts)
 
-        # 2) ODDS movement (prob deltas for buckets; point-equivalent for aggregate)
-        if pd.notna(pods_book) and pd.notna(curr_odds):
-            prev_prob_book = implied_prob(pods_book)                   # noqa: F821
-            curr_prob_book = implied_prob(curr_odds)                   # noqa: F821
-            odds_delta_prob = curr_prob_book - prev_prob_book
-            odds_buckets[b_idx] += abs(odds_delta_prob)
-
-            point_equiv = implied_prob_to_point_move(odds_delta_prob)  # noqa: F821
+        if pd.notna(pods) and pd.notna(curr_odds):
+            pp = implied_prob(pods)          # noqa: F821
+            cp = implied_prob(curr_odds)     # noqa: F821
+            dp = cp - pp
+            odds_buckets[b_idx] += abs(dp)
+            point_equiv = implied_prob_to_point_move(dp)  # noqa: F821
             odds_move_mag_pts += abs(float(point_equiv))
 
-        # ---- net-from-opening (report using last observed row)
+        # ----- net-from-opening (report using last observed row)
         if pd.notna(first_val) and pd.notna(curr_val):
             net_line_move     = float(curr_val - first_val)
             abs_net_line_move = abs(net_line_move)
-
-        if pd.notna(first_odds) and pd.notna(curr_odds):
-            # price-based net
+        if pd.notna(first_odds) and pd.notna(curr_odds)):
             net_odds_move_px      = float(curr_odds - first_odds)
             abs_net_odds_move_px  = abs(net_odds_move_px)
-            # probability-based net
             net_odds_move_prob     = implied_prob(curr_odds) - implied_prob(first_odds)  # noqa: F821
             abs_net_odds_move_prob = abs(net_odds_move_prob)
 
-        # ---- limit aggregation
-        if pd.notna(lim):
-            f_lim = float(lim)
-            total_limit += f_lim
-            if f_lim >= 100:
-                limit_score += f_lim
+        # ===== COMBO TRIGGER (core change) =====
+        if _is_sharp_book(nb, lim) and pd.notna(pods) and pd.notna(curr_odds):
+            odds_ok, _dp = _odds_strengthening(pods, curr_odds)
+            if odds_ok:
+                if mtype in ("spreads", "spread", "ats", "totals", "total", "o/u", "ou"):
+                    # require line to be strengthening IF it moved; else allow odds-only if sticky
+                    line_moved = (pd.notna(pval) and pd.notna(curr_val) and abs(curr_val - pval) > eps_line)
+                    if line_moved:
+                        if _line_strengthening(pval, curr_val):
+                            sharp_move_seen = True
+                    else:
+                        # sticky line: odds-strengthening alone suffices
+                        sharp_move_seen = True
+                else:
+                    # h2h: odds-strengthening alone
+                    sharp_move_seen = True
 
-        # ---- advance book-local prevs
+        # advance book-local prevs
         if pd.notna(curr_val):
             prev_val_by_book[nb] = curr_val
-            last_val = curr_val
         if pd.notna(curr_odds):
             prev_odds_by_book[nb] = curr_odds
-            last_odds = curr_odds
 
         if lg_debug and (i < 3 or i == len(entries)-1):
             logging.debug("…%d/%d val=%s odds=%s lim=%s book=%s",
                           i+1, len(entries), curr_val, curr_odds, lim, nb)
 
-    # dominant timing label from 16 buckets (prefer line; fallback to odds)
-    if any(mag_buckets):
-        dom_src = mag_buckets
-    elif any(odds_buckets):
-        dom_src = odds_buckets
-    else:
-        dom_src = None
-
+    # dominant timing label
+    dom_src = mag_buckets if any(mag_buckets) else (odds_buckets if any(odds_buckets) else None)
     if dom_src is not None:
         dom_idx = max(range(16), key=lambda k: abs(dom_src[k]))
         tods = ["Overnight", "Early", "Midday", "Late"]
@@ -1798,48 +1788,42 @@ def compute_sharp_metrics(
         "Opening_Limit": first_limit,
         "First_Imp_Prob": first_imp_prob,
 
-        # movement presence on sharp books
+        # combo rule
         "Sharp_Move_Signal": int(bool(sharp_move_seen)),
 
         # magnitudes
-        "Sharp_Line_Magnitude": round(move_mag_sum, 3),                      # points (abs-sum per book)
-        "Odds_Move_Magnitude": round(odds_move_mag_pts, 3),                  # points (abs-sum via prob→points)
+        "Sharp_Line_Magnitude": round(move_mag_sum, 3),
+        "Odds_Move_Magnitude": round(odds_move_mag_pts, 3),
         "Sharp_Limit_Jump": int(limit_score >= 10000),
         "Sharp_Limit_Total": round(total_limit, 1),
 
-        # timing summary
+        # timing
         "SharpMove_Timing_Dominant": dominant_label,
 
         # net-from-opening (line)
         "Net_Line_Move_From_Opening": round(net_line_move, 3) if net_line_move is not None else None,
         "Abs_Line_Move_From_Opening": round(abs_net_line_move, 3) if abs_net_line_move is not None else None,
 
-        # net-from-opening (odds) — price & probability units
-        "Net_Odds_Move_From_Opening": round(net_odds_move_px, 3) if net_odds_move_px is not None else None,            # price delta
-        "Abs_Odds_Move_From_Opening": round(abs_net_odds_move_px, 3) if abs_net_odds_move_px is not None else None,    # price delta
-        "Net_Odds_Prob_Move_From_Opening": round(net_odds_move_prob, 6) if net_odds_move_prob is not None else None,   # prob delta
-        "Abs_Odds_Prob_Move_From_Opening": round(abs_net_odds_move_prob, 6) if abs_net_odds_move_prob is not None else None,  # prob delta
+        # net-from-opening (odds)
+        "Net_Odds_Move_From_Opening": round(net_odds_move_px, 3) if net_odds_move_px is not None else None,
+        "Abs_Odds_Move_From_Opening": round(abs_net_odds_move_px, 3) if abs_net_odds_move_px is not None else None,
+        "Net_Odds_Prob_Move_From_Opening": round(net_odds_move_prob, 6) if net_odds_move_prob is not None else None,
+        "Abs_Odds_Prob_Move_From_Opening": round(abs_net_odds_move_prob, 6) if abs_net_odds_move_prob is not None else None,
 
-        # legacy / reserved
-        "SharpMove_Timing_Magnitude": round(move_mag_sum, 3),  # same as Sharp_Line_Magnitude (kept for backward-compat)
+        "SharpMove_Timing_Magnitude": round(move_mag_sum, 3),
         "SharpBetScore": 0.0,
     }
 
-    # attach 16×2 bucket features
+    # attach 16×2 timing buckets
     tods = ["Overnight", "Early", "Midday", "Late"]
     mtgs = ["VeryEarly", "MidRange", "LateGame", "Urgent"]
     for ti, tod in enumerate(tods):
         for mi, mtg in enumerate(mtgs):
             idx = ti*4 + mi
-            out[f"SharpMove_Magnitude_{tod}_{mtg}"] = round(mag_buckets[idx], 3)   # points
-            out[f"OddsMove_Magnitude_{tod}_{mtg}"]  = round(odds_buckets[idx], 6)  # probability
-
-    if lg_debug:
-        logging.debug("📊 timing mag (first 6): %s", mag_buckets[:6])
-        logging.debug("📊 odds mag (first 6): %s", odds_buckets[:6])
+            out[f"SharpMove_Magnitude_{tod}_{mtg}"] = round(mag_buckets[idx], 3)
+            out[f"OddsMove_Magnitude_{tod}_{mtg}"]  = round(odds_buckets[idx], 6)
 
     return out
-
 def apply_compute_sharp_metrics_rowwise(
     df: pd.DataFrame,
     df_all_snapshots: pd.DataFrame,
