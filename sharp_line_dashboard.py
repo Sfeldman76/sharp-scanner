@@ -1114,6 +1114,44 @@ def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market
             final.append(c)
     return final
 
+def get_holdout_by_last_n_games(groups: np.ndarray,
+                                 times: np.ndarray,
+                                 n_hold_games: int = 10,
+                                 min_train_games: int = 20) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Returns train_all_idx, hold_idx for holdout = last `n_hold_games` groups (by time).
+
+    - `groups`: array of Game_Keys (one per row)
+    - `times`: array of Snapshot_Timestamp or Game_Start (same length as groups)
+    - `n_hold_games`: how many full games to hold out
+    - `min_train_games`: minimum # of games required for training
+    """
+    meta = pd.DataFrame({
+        "group": groups,
+        "time": pd.to_datetime(times, utc=True)
+    })
+    gmeta = (meta.groupby("group", as_index=False)["time"]
+                 .agg(start="min", end="max")
+                 .sort_values("start")
+                 .reset_index(drop=True))
+
+    total_games = len(gmeta)
+    if total_games <= n_hold_games + min_train_games:
+        # Not enough games — fallback to 1-game holdout or raise
+        if total_games <= min_train_games:
+            raise ValueError(f"Not enough games for training: only {total_games}")
+        n_hold_games = 1
+
+    hold_g = gmeta["group"].to_numpy()[-n_hold_games:]
+    train_g = gmeta["group"].to_numpy()[:-n_hold_games]
+
+    all_g = meta["group"].to_numpy()
+    hold_idx = np.flatnonzero(np.isin(all_g, hold_g))
+    train_idx = np.flatnonzero(np.isin(all_g, train_g))
+
+    return train_idx, hold_idx
+
+
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
 def _resolve_active_features(bundle, model, df_like):
     cand = None
@@ -4796,9 +4834,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                    .sort_values("start")
                    .reset_index(drop=True))
         
+        
+        
         n_groups = len(gmeta)
-        n_hold_g = max(1, int(round(n_groups * 0.15)))
-        hold_g   = gmeta["group"].to_numpy()[-n_hold_g:]
+        
+
+        
+        
+        # Example config per sport
+        SPORT_HOLDOUT_GAMES = {
+            "NFL": 5,
+            "NCAAF": 5,
+            "NBA": 15,
+            "MLB": 15,
+            "WNBA": 4,
+            "NHL": 15,
+            "default": 10,
+            "CFL": 4
+        }
+        n_hold_games = SPORT_HOLDOUT_GAMES.get(sport.upper(), SPORT_HOLDOUT_GAMES["default"])
+        
+        # groups = Game_Key per row
+        # times = Snapshot_Timestamp or Game_Start per row
+        train_all_idx, hold_idx = get_holdout_by_last_n_games(
+            groups=groups,
+            times=times,
+            n_hold_games=n_hold_games,
+            min_train_games=20  # or 30 if you want stronger guarantees
+        )
+        
         train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
         
         all_g        = meta["group"].to_numpy()
