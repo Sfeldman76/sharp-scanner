@@ -487,7 +487,76 @@ def tier_from_prob(p: float) -> str:
     return "✅ Coinflip"
 
 
-    
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import roc_auc_score, log_loss
+import numpy as np
+
+def pos_col_index(est, positive=1):
+    cls = getattr(est, "classes_", None)
+    if cls is None:
+        raise RuntimeError("Estimator has no classes_. Was it fitted?")
+    hits = np.where(cls == positive)[0]
+    if len(hits) == 0:
+        raise RuntimeError(f"Positive class {positive!r} not in classes_={cls}.")
+    return int(hits[0])
+
+def pos_proba(est, X, positive=1):
+    return est.predict_proba(X)[:, pos_col_index(est, positive=positive)]
+
+def _auc_safe(y, p):
+    # returns (auc, has_both_classes)
+    y = np.asarray(y, int); p = np.asarray(p, float)
+    ok = (np.unique(y).size == 2) and np.isfinite(p).all() and (p.min() >= 0) and (p.max() <= 1)
+    if not ok: return (np.nan, False)
+    return (roc_auc_score(y, p), True)
+
+def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, grid=None, eps=1e-4,
+                             metric="logloss", hybrid_alpha=0.9):
+    """
+    Choose w for blended prob = w*logloss_model + (1-w)*auc_model on OOF.
+    - metric="logloss" (recommended) or "hybrid": hybrid = alpha*logloss + (1-alpha)*(1-AUC).
+    Locks polarity using OOF before fitting isotonic.
+    """
+    y = np.asarray(y_oof, int)
+    a = np.clip(np.asarray(p_oof_log, float), eps, 1-eps)
+    b = np.clip(np.asarray(p_oof_auc, float), eps, 1-eps)
+    if grid is None:
+        grid = np.round(np.linspace(0.20, 0.80, 13), 2)
+
+    # polarity lock (AUC is symmetric; logloss is not)
+    auc_raw, ok = _auc_safe(y, 0.5*(a+b))
+    if ok:
+        auc_flip, _ = _auc_safe(y, 1.0 - 0.5*(a+b))
+        if np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw):
+            a, b = 1.0 - a, 1.0 - b  # flip both streams
+
+    best_w, best_score = None, +1e9
+    for w in grid:
+        p = np.clip(w*a + (1-w)*b, eps, 1-eps)
+        if metric == "logloss":
+            score = log_loss(y, p, labels=[0,1])
+        else:  # "hybrid"
+            auc, _ = _auc_safe(y, p)
+            # lower is better
+            score = hybrid_alpha*log_loss(y, p, labels=[0,1]) + (1-hybrid_alpha)*(1.0 - np.nan_to_num(auc))
+        if score < best_score:
+            best_score, best_w = score, float(w)
+
+    # final blended OOF (post-polarity lock)
+    p_oof_blend = np.clip(best_w*a + (1-best_w)*b, eps, 1-eps)
+
+    # isotonic on OOF (needs both classes; if not, return identity calibrator)
+    if np.unique(y).size == 2:
+        iso = IsotonicRegression(out_of_bounds="clip").fit(p_oof_blend, y)
+    else:
+        class _Identity:
+            def predict(self, x): return np.asarray(x, float)
+        iso = _Identity()
+
+    return best_w, iso, p_oof_blend, (a is not p_oof_log)  # flipped flag (bool)
+
+
+
 def normalize_team(t):
     return str(t).strip().lower().replace('.', '').replace('&', 'and')
 
@@ -5142,11 +5211,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  OOF predictions (train-only) with per-fold refits + weights
         # ---------------------------------------------------------------------------
-        oof_pred_logloss = np.full(len(y_train), np.nan, dtype=float)
-        oof_pred_auc     = np.full(len(y_train), np.nan, dtype=float)
-        
-        pos_ll  = None
-        pos_auc = None
+        # ----- OOF predictions -----
+        oof_pred_logloss = np.full(len(y_train), np.nan, float)
+        oof_pred_auc     = np.full(len(y_train), np.nan, float)
         
         for tr_rel, va_rel in folds:
             m_ll  = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(n_trees_ll)})
@@ -5155,40 +5222,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             m_ll.fit (X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
             m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
         
-            if pos_ll is None:  pos_ll  = pos_col_index(m_ll,  positive=1)
-            if pos_auc is None: pos_auc = pos_col_index(m_auc, positive=1)
+            oof_pred_logloss[va_rel] = pos_proba(m_ll,  X_train[va_rel], positive=1)
+            oof_pred_auc[va_rel]     = pos_proba(m_auc, X_train[va_rel], positive=1)
         
-            oof_pred_logloss[va_rel] = m_ll.predict_proba(X_train[va_rel])[:, pos_ll]
-            oof_pred_auc[va_rel]     = m_auc.predict_proba(X_train[va_rel])[:, pos_auc]
-                
-       
-        mask_oof = ~np.isnan(oof_pred_logloss) & ~np.isnan(oof_pred_auc)
+        mask_oof = np.isfinite(oof_pred_logloss) & np.isfinite(oof_pred_auc)
         if mask_oof.sum() < 50:
             raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
-        
-        # --- align names & slice y/preds for OOF ---
-        def _slice_mask(a, m):
-            # works for numpy arrays and pandas Series/DataFrames
-            return a[m] if not hasattr(a, "iloc") else a.iloc[m]
-        # align target labels for OOF indices
-        
-        
-       # Safe across pandas Series and NumPy arrays
         
         y_oof     = y_train[mask_oof].astype(int)
         p_oof_log = oof_pred_logloss[mask_oof].astype(float)
         p_oof_auc = oof_pred_auc[mask_oof].astype(float)
-        # --- pick best blend weight on OOF & fit isotonic on that blended OOF ---
-        best_w, iso_blend, p_oof_blend = pick_blend_weight_on_oof(
-            y_oof=y_oof,
-            p_oof_log=p_oof_log,
-            p_oof_auc=p_oof_auc,
-            metric="auc",   # or "logloss" / "hybrid"
-            grid=None,      # default 0.20..0.80 by 0.05
-            eps=eps,
-        )
-        st.write(f"🔎 Selected blend weight (logloss vs AUC): w={best_w:.2f} (AUC weight={1-best_w:.2f})")
         
+        # ----- pick blend weight on OOF (logloss‑based) + fit isotonic; get flipped flag -----
+        best_w, iso_blend, p_oof_blend, _flipped = pick_blend_weight_on_oof(
+            y_oof=y_oof, p_oof_log=p_oof_log, p_oof_auc=p_oof_auc,
+            metric="logloss", grid=None, eps=eps
+        )
+        st.write(f"🔎 Selected blend weight (logloss vs AUC): w={best_w:.2f}")
+
         # (optional) inspect other weights without changing best_w
         # _grid = np.linspace(0.20, 0.80, 13)
         # rows = []
@@ -5205,27 +5256,30 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         pos_ll_final  = pos_col_index(model_logloss, positive=1)
         pos_auc_final = pos_col_index(model_auc,     positive=1)
         
-        p_tr_log = model_logloss.predict_proba(X_full[train_all_idx])[:, pos_ll_final]
-        p_tr_auc = model_auc    .predict_proba(X_full[train_all_idx])[:, pos_auc_final]
-        p_ho_log = model_logloss.predict_proba(X_full[hold_idx])[:,    pos_ll_final]
-        p_ho_auc = model_auc    .predict_proba(X_full[hold_idx])[:,    pos_auc_final]
+        p_tr_log = pos_proba(model_logloss, X_full[train_all_idx], positive=1)
+        p_tr_auc = pos_proba(model_auc,     X_full[train_all_idx], positive=1)
+        p_ho_log = pos_proba(model_logloss, X_full[hold_idx],      positive=1)
+        p_ho_auc = pos_proba(model_auc,     X_full[hold_idx],      positive=1)
         
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
-        p_cal     = iso_blend.predict(p_train_blend_raw)  # TRAIN calibrated
-        p_cal_val = iso_blend.predict(p_hold_blend_raw)   # HOLDOUT calibrated
+        p_cal     = iso_blend.predict(p_train_blend_raw)
+        p_cal_val = iso_blend.predict(p_hold_blend_raw)
         
-        # --- Orientation guard: flip if flipped AUC is better ---
-        try:
-            auc_raw  = roc_auc_score(y_full[hold_idx].astype(int), p_cal_val)
-            auc_flip = roc_auc_score(y_full[hold_idx].astype(int), 1.0 - p_cal_val)
-            if auc_flip > auc_raw:
-                st.warning(f"⚠️ Detected inverted orientation on holdout (raw AUC={auc_raw:.4f} < flipped AUC={auc_flip:.4f}). Flipping probabilities for reporting.")
+        # Guard against holdout having one class → AUC would be nan
+        y_hold_vec = y_full[hold_idx].astype(int)
+        if np.unique(y_hold_vec).size < 2:
+            auc_ho = np.nan
+        else:
+            # final safety: flip if needed (should rarely trigger after OOF lock)
+            auc_raw, _ = _auc_safe(y_hold_vec, p_cal_val)
+            auc_flip, _ = _auc_safe(y_hold_vec, 1.0 - p_cal_val)
+            if np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw):
                 p_cal_val = 1.0 - p_cal_val
-                p_cal     = 1.0 - p_cal  # keep train metrics consistent
-        except Exception as _e:
-            pass
+                p_cal     = 1.0 - p_cal
+            auc_ho = roc_auc_score(y_hold_vec, p_cal_val)
+        
         
         # targets aligned
         y_train_vec = y_full[train_all_idx].astype(int)
