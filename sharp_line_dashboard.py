@@ -1984,25 +1984,32 @@ def get_xgb_search_space(
         }
     else:
         # bigger leagues / more data: two distinct spaces
+        # --- Search spaces tuned for H2H (reduce overfit, improve calibration) ---
+        # Larger leagues (more data) explore a bit wider, but still regularized.
         params_ll = {
-            "max_depth":        randint(3, 8),            # {3..7}
-            "learning_rate":    loguniform(0.01, 0.08),   # 0.01–0.08
-            "subsample":        uniform(0.65, 0.30),      # 0.65–0.95
-            "colsample_bytree": uniform(0.60, 0.35),      # 0.60–0.95
-            "min_child_weight": randint(3, 15),           # {3..14}
-            "gamma":            uniform(0.00, 0.50),      # 0–0.50
-            "reg_alpha":        loguniform(1e-3, 1e1),    # 0.001–10
-            "reg_lambda":       loguniform(3.0, 5.0e1),   # 3–50
+            # shallower trees; constrain split greediness
+            "max_depth":        randint(3, 6),             # {3..5}
+            "max_leaves":       randint(8, 24),            # control complexity w/ lossguide
+            "learning_rate":    loguniform(1e-2, 4e-2),    # 0.01–0.04 (calibration-friendly)
+            "subsample":        uniform(0.60, 0.30),       # 0.60–0.90
+            "colsample_bytree": uniform(0.55, 0.30),       # 0.55–0.85
+            "min_child_weight": randint(15, 45),           # {15..44} (kill small noisy leaves)
+            "gamma":            uniform(0.50, 2.50),       # 0.5–3.0 (require gain to split)
+            "reg_alpha":        loguniform(1e-3, 3.0),     # 0.001–3
+            "reg_lambda":       loguniform(5.0, 8.0e1),    # 5–80
         }
+        
         params_auc = {
-            "max_depth":        randint(4, 10),           # {4..9}
-            "learning_rate":    loguniform(5e-3, 5e-2),   # 0.005–0.05
-            "subsample":        uniform(0.50, 0.40),      # 0.50–0.90
-            "colsample_bytree": uniform(0.50, 0.45),      # 0.50–0.95
-            "min_child_weight": randint(1, 10),           # {1..9}
-            "gamma":            uniform(0.00, 0.30),      # 0–0.30
-            "reg_alpha":        loguniform(1e-4, 1.0),    # 0.0001–1
-            "reg_lambda":       loguniform(1.0, 3.0e1),   # 1–30
+            # slightly deeper than LL space, but still conservative
+            "max_depth":        randint(3, 7),             # {3..6}
+            "max_leaves":       randint(12, 28),
+            "learning_rate":    loguniform(5e-3, 3e-2),    # 0.005–0.03 (lets AUC model learn gently)
+            "subsample":        uniform(0.55, 0.30),       # 0.55–0.85
+            "colsample_bytree": uniform(0.55, 0.35),       # 0.55–0.90
+            "min_child_weight": randint(10, 35),           # {10..34}
+            "gamma":            uniform(0.40, 2.10),       # 0.4–2.5
+            "reg_alpha":        loguniform(1e-4, 1.0),     # 0.0001–1
+            "reg_lambda":       loguniform(3.0, 5.0e1),    # 3
         }
     # ---- optional: monotone constraints (no small-book creation) ----
     if features is not None:
@@ -4847,23 +4854,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         feature_cols = list(features)
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
-            X_rows=X_train.shape[0],       # train rows only
+            X_rows=X_train.shape[0],
             n_jobs=1,
             scale_pos_weight=((y_train == 0).sum() / max(1, (y_train == 1).sum())),
             features=features,
         )
+        
+        # lock in generalization-friendly defaults
+        base_kwargs.update({
+            "objective":      "binary:logistic",
+            "eval_metric":    "logloss",
+            "tree_method":    "hist",
+            "grow_policy":    "lossguide",   # pairs with max_leaves
+            "max_delta_step": 1,             # stabilizes prob updates on imbalance
+            "lambda":         max(5.0, float(base_kwargs.get("reg_lambda", 5.0))),  # alias safe
+            "reg_lambda":     max(5.0, float(base_kwargs.get("reg_lambda", 5.0))),
+            "alpha":          float(base_kwargs.get("reg_alpha", 0.0)),
+            "reg_alpha":      float(base_kwargs.get("reg_alpha", 0.0)),
+            "gamma":          max(0.4, float(base_kwargs.get("gamma", 0.0))),
+            "min_child_weight": max(12, int(base_kwargs.get("min_child_weight", 12))),
+            "subsample":        min(0.90, max(0.65, float(base_kwargs.get("subsample", 0.80)))),
+            "colsample_bytree": min(0.90, max(0.60, float(base_kwargs.get("colsample_bytree", 0.75)))),
+        })
         
         s = sport_key
         if s in SMALL_LEAGUES:
             # extra stabilization for tiny regimes
             base_kwargs.update({
                 "max_delta_step": 1,
-                "min_child_weight": max(8, int(base_kwargs.get("min_child_weight", 0))),
-                "gamma": max(0.25, float(base_kwargs.get("gamma", 0.0))),
-                "reg_lambda": max(20.0, float(base_kwargs.get("reg_lambda", 0.0))),
-                "reg_alpha": max(0.5,  float(base_kwargs.get("reg_alpha", 0.0))),
-                "subsample": min(1.0,  max(0.85, float(base_kwargs.get("subsample", 1.0)))),
-                "colsample_bytree": min(1.0, max(0.85, float(base_kwargs.get("colsample_bytree", 1.0)))),
+                "min_child_weight": max(20, int(base_kwargs.get("min_child_weight", 20))),
+                "gamma":            max(1.0, float(base_kwargs.get("gamma", 1.0))),
+                "reg_lambda":       max(30.0, float(base_kwargs.get("reg_lambda", 30.0))),
+                "reg_alpha":        max(1.0,  float(base_kwargs.get("reg_alpha", 1.0))),
+                "subsample":        min(1.0,  max(0.80, float(base_kwargs.get("subsample", 0.85)))),
+                "colsample_bytree": min(1.0,  max(0.80, float(base_kwargs.get("colsample_bytree", 0.85)))),
+                "max_depth":        min(5, int(base_kwargs.get("max_depth", 4))),
             })
             search_estimators = 300
             eps = 5e-3
@@ -4871,7 +4896,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             search_estimators = 400
             eps = 1e-4
         
-        # light stability nudges (kept after overrides)
+        # keep these nudges (after overrides)
+        
         base_kwargs.update({
             "n_jobs": 1,
             "max_delta_step": 1,
