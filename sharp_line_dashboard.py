@@ -5089,10 +5089,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         def _slice_mask(a, m):
             # works for numpy arrays and pandas Series/DataFrames
             return a[m] if not hasattr(a, "iloc") else a.iloc[m]
+        # align target labels for OOF indices
         
-        y_oof     = _slice_mask(y_train, mask_oof).astype(int)
-        p_oof_log = _slice_mask(oof_pred_logloss, mask_oof).astype(float)
-        p_oof_auc = _slice_mask(oof_pred_auc,     mask_oof).astype(float)
+        
+       # Safe across pandas Series and NumPy arrays
+        y_oof     = y_train[mask_oof].to_numpy().astype(int)  # ← safe for Series or array
+        p_oof_log = oof_pred_logloss[mask_oof].astype(float)
+        p_oof_auc = oof_pred_auc[mask_oof].astype(float)
         
         # --- pick best blend weight on OOF & fit isotonic on that blended OOF ---
         best_w, iso_blend, p_oof_blend = pick_blend_weight_on_oof(
