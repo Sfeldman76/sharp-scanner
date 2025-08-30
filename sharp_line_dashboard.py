@@ -3343,41 +3343,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    
 
     # Get sport and market
-    sport_cur = str(df_market['Sport'].dropna().astype(str).str.upper().iloc[0]) if not df_market.empty else sport
-    market_cur = market.lower()  # from your training loop: "spreads", "totals", "h2h"
     
-    # Optionally derive the season period ("pre", "reg", "post")
-    def _derive_period(s: pd.Series) -> str:
-        if s.isna().all(): return "reg"
-        m = pd.to_datetime(s, errors="coerce", utc=True).dt.month.mode(dropna=True)
-        m = int(m.iloc[0]) if len(m) else 1
-        if m in (9,10): return "pre"
-        elif m in (11,12,1,2,3,4): return "reg"
-        else: return "post"
-    
-    period_cur = _derive_period(df_market.get("Game_Start", pd.Series(dtype="datetime64[ns]")))
-    
-    # Build priors
-    priors = build_team_ats_priors_market_sport(
-        df_market,
-        sport=sport_cur,
-        market=market_cur,
-        period=period_cur,
-        team_col="Team",
-        game_col="Game_Key",
-        ts_col="Snapshot_Timestamp",
-        is_home_col="Is_Home",
-        cover_bool_col="SHARP_HIT_BOOL",
-        cover_margin_col="ATS_Cover_Margin" if "ATS_Cover_Margin" in df_market.columns else None,
-        suffix=None  # or f"_{market_cur.capitalize()}"
-    )
-    
-    # Normalize & merge into training set
-    for _df in (df_market, priors):
-        _df["Game_Key"] = _df["Game_Key"].astype(str).str.lower().str.strip()
-        _df["Team"]     = _df["Team"].astype(str).str.lower().str.strip()
-    
-    df_market = df_market.merge(priors, on=["Game_Key", "Team"], how="left")
         
     # ✅ Make sure helper won't choke if these are missing
     if 'Is_Sharp_Book' not in df_bt.columns:
@@ -3815,6 +3781,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
+
+                # === Build & merge market-specific team priors (EB) ===
+        # Runs for ANY market (spreads / totals / h2h) before branching.
+        sport_cur = (
+            str(df_market["Sport"].dropna().astype(str).str.upper().iloc[0])
+            if not df_market.empty else "NBA"
+        )
+        # If you already defined _derive_period earlier, this will work; else default to "reg"
+        try:
+            period_cur = _derive_period(df_market.get("Game_Start", pd.Series(dtype="datetime64[ns]")))
+        except NameError:
+            period_cur = "reg"
+
+        priors = build_team_ats_priors_market_sport(
+            df_market,
+            sport=sport_cur,
+            market=market,                 # <- "spreads" | "totals" | "h2h"
+            period=period_cur,
+            team_col="Team",
+            game_col="Game_Key",
+            ts_col="Snapshot_Timestamp",
+            is_home_col="Is_Home",
+            cover_bool_col="SHARP_HIT_BOOL",
+            cover_margin_col=("ATS_Cover_Margin" if "ATS_Cover_Margin" in df_market.columns else None),
+            add_home_away_splits=True,
+            suffix=None
+        )
+
+        # Normalize keys & merge priors
+        for _df in (df_market, priors):
+            _df["Game_Key"] = _df["Game_Key"].astype(str).str.lower().str.strip()
+            _df["Team"]     = _df["Team"].astype(str).str.lower().str.strip()
+
+        df_market = df_market.merge(priors, on=["Game_Key","Team"], how="left")
+
+        # Safe defaults for any missing prior columns
+        for c in priors.columns:
+            if c not in ("Game_Key","Team") and c not in df_market.columns:
+                df_market[c] = 0.0
+        df_market.fillna({c:0.0 for c in priors.columns if c not in ("Game_Key","Team")}, inplace=True)
+        
         if market == "spreads":
             # ---- SPREADS training block (leakage-safe) ----
             game_keys = ['Sport', 'Home_Team_Norm', 'Away_Team_Norm']
