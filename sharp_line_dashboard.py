@@ -4356,7 +4356,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             #'Abs_Line_Move_From_Opening',
             #'Abs_Odds_Move_From_Opening',
-            'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
+            #'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             #'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
             #'CrossMarket_Prob_Gap_Exists',
             #'Line_Moved_Away_From_Team',
@@ -4435,7 +4435,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'Team_Past_Avg_Model_Prob_Home',
             #'Team_Past_Hit_Rate_Home',
             #'Team_Past_Avg_Model_Prob_Away',
-            '#Team_Past_Hit_Rate_Away',
+            #'Team_Past_Hit_Rate_Away',
             
             'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
             'Avg_Recent_Cover_Streak_Away'
@@ -4469,14 +4469,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Limit dynamics
             "Limit_Spike_Flag","Delta_Limit","LimitSpike_x_NoMove",
             # Book network
-            "Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10",#"Sharp_vs_Rec_SpreadGap_Q50",
+            "Sharp_Consensus_Weight",#"Sharp_vs_Rec_SpreadGap_Q90_Q10",#"Sharp_vs_Rec_SpreadGap_Q50",
             # Internal consistency
             "Spread_ML_ProbGap","Spread_ML_Inconsistency","Total_vs_Side_ImpliedDelta",
             # Alt lines (optional)
             "AltLine_Slope",#"AltLine_Curv",
             # CLV proxies
             #"CLV_Proxy_E_DeltaNext15m",
-            "CLV_Proxy_E_CLV",
+            #"CLV_Proxy_E_CLV",
         ])
 
         # merge view-driven features (all_present) without losing order
