@@ -4177,13 +4177,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             # Power ratings / edges
             #'PR_Team_Rating',#'PR_Opp_Rating',
-            'PR_Rating_Diff','PR_Abs_Rating_Diff',
-            'Outcome_Model_Spread','Outcome_Market_Spread',
+            'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
+            #'Outcome_Model_Spread','Outcome_Market_Spread',
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
-            'TOT_Mispricing'
+            #'TOT_Mispricing'
         ]
         
         # ensure uniqueness (order-preserving)
@@ -4621,7 +4621,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             denom = max(1e-9, r.quantile(0.9) - r.quantile(0.5))
             r_p = ((r - r.quantile(0.5)) / denom).clip(0, 1)
         
-            ALPHA = 0.75  # strength of sharp tilt
+            ALPHA = 0.80  # strength of sharp tilt
             w_train = w_base * (1.0 + ALPHA * r_p.to_numpy(dtype=np.float32))
         
             # normalize so average weight ≈ 1
@@ -4749,7 +4749,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         tr_es_rel, va_es_rel = folds[-1]
         final_estimators_cap  = 3000
-        early_stopping_rounds = 250
+        early_stopping_rounds = 500
         
         model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": final_estimators_cap})
         model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": final_estimators_cap})
