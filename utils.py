@@ -1737,7 +1737,7 @@ def compute_sharp_metrics(
         if pd.notna(first_val) and pd.notna(curr_val):
             net_line_move     = float(curr_val - first_val)
             abs_net_line_move = abs(net_line_move)
-        if pd.notna(first_odds) and pd.notna(curr_odds)):
+        if pd.notna(first_odds) and pd.notna(curr_odds):
             net_odds_move_px      = float(curr_odds - first_odds)
             abs_net_odds_move_px  = abs(net_odds_move_px)
             net_odds_move_prob     = implied_prob(curr_odds) - implied_prob(first_odds)  # noqa: F821
