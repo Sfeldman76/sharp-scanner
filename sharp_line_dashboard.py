@@ -3777,28 +3777,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             (df_market["Team"] == df_market["Home_Team_Norm"]).astype(int)
         ).astype(int)
         
-        # --- 2) Collapse to one snapshot per (Game_Key, Team) to prevent many-to-many
+        # --- 2) Build a slim, latest-snapshot view ONLY for priors ---
+        # Keep df_market intact (no dedup here)
         if "Snapshot_Timestamp" in df_market.columns:
-            df_market["Snapshot_Timestamp"] = pd.to_datetime(df_market["Snapshot_Timestamp"], errors="coerce", utc=True)
-            df_market = (
-                df_market.sort_values(["Game_Key","Team","Snapshot_Timestamp"])
-                         .groupby(["Game_Key","Team"], as_index=False)
-                         .tail(1)
+            df_market["Snapshot_Timestamp"] = pd.to_datetime(
+                df_market["Snapshot_Timestamp"], errors="coerce", utc=True
+            )
+            df_prior_input = (
+                df_market
+                .sort_values(["Game_Key","Team","Snapshot_Timestamp"])
+                .groupby(["Game_Key","Team"], as_index=False)
+                .tail(1)    # latest snapshot PER (Game_Key, Team) just for priors
+                .loc[:, ["Game_Key","Team","Is_Home","Snapshot_Timestamp",
+                         "SHARP_HIT_BOOL","Sport","Game_Start"]]  # only what priors need
+                .drop_duplicates(subset=["Game_Key","Team"])
             )
         else:
-            df_market = df_market.drop_duplicates(subset=["Game_Key","Team"])
+            df_prior_input = (
+                df_market
+                .loc[:, ["Game_Key","Team","Is_Home","SHARP_HIT_BOOL","Sport","Game_Start"]]
+                .drop_duplicates(subset=["Game_Key","Team"])
+            )
         
-        base_rows = len(df_market)
-        
-        # --- 3) Build market-specific priors (EB), leakage-safe (LOO inside helper)
-        sport_cur = df_market["Sport"].iloc[0] if not df_market.empty else "NBA"
+        # --- 3) Build market-specific priors on the slim view (leakage-safe) ---
+        sport_cur = df_prior_input["Sport"].iloc[0] if not df_prior_input.empty else "NBA"
         try:
-            period_cur = _derive_period(df_market.get("Game_Start", pd.Series(dtype="datetime64[ns]")))
+            period_cur = _derive_period(df_prior_input.get("Game_Start", pd.Series(dtype="datetime64[ns]")))
         except NameError:
             period_cur = "reg"
         
         priors = build_team_ats_priors_market_sport(
-            df_market,
+            df_prior_input,
             sport=sport_cur,
             market=market,   # "spreads" | "totals" | "h2h"
             period=period_cur,
@@ -3812,31 +3821,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             suffix=None
         )
         
-        # --- 4) Ensure priors are one row per (Game_Key, Team)
+        # --- 4) Normalize keys in priors and force uniqueness there ---
         for c in ("Game_Key","Team"):
-            if c in priors.columns:
-                priors[c] = _norm_lower(priors[c])
-        if "Snapshot_Timestamp" in priors.columns:
-            priors = (priors.sort_values(["Game_Key","Team","Snapshot_Timestamp"])
-                            .drop_duplicates(subset=["Game_Key","Team"], keep="last"))
-        else:
-            priors = priors.drop_duplicates(subset=["Game_Key","Team"])
+            priors[c] = priors[c].astype(str).str.lower().str.strip()
+        priors = priors.drop_duplicates(subset=["Game_Key","Team"])
         
-        # --- 5) Merge priors with validation (no blow-ups)
-        try:
-            df_market = df_market.merge(priors, on=["Game_Key","Team"], how="left", validate="one_to_one")
-        except Exception as e:
-            dup_left  = df_market.duplicated(subset=["Game_Key","Team"], keep=False).sum()
-            dup_right = priors.duplicated(subset=["Game_Key","Team"], keep=False).sum()
-            print(f"[WARN] one_to_one validation failed: {e}\nLeft dups={dup_left}, Right dups={dup_right}")
-            df_market = (
-                df_market.drop_duplicates(subset=["Game_Key","Team"])
-                         .merge(priors.drop_duplicates(subset=["Game_Key","Team"]),
-                                on=["Game_Key","Team"], how="left")
+        # --- 5) Merge priors back WITHOUT collapsing df_market rows ---
+        before_rows = len(df_market)
+        df_market = df_market.merge(
+            priors, on=["Game_Key","Team"], how="left", validate="many_to_one"
+        )
+        after_rows = len(df_market)
+        if after_rows != before_rows:
+            raise RuntimeError(f"merge priors changed row count {before_rows} → {after_rows}")
+        
+        # --- 6) Safe fill for prior fields (only those present) ---
+        prior_fill_cols = [
+            c for c in ("ATS_EB_Rate","ATS_EB_Margin","ATS_Roll_Margin_Decay",
+                        "ATS_EB_Rate_Home","ATS_EB_Rate_Away")
+            if c in df_market.columns
+        ]
+        if prior_fill_cols:
+            df_market[prior_fill_cols] = (
+                df_market[prior_fill_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0.0)
+                .astype("float32")
             )
-        
-        _assert_no_growth(base_rows, df_market, "merge priors")
-        
         # --- 6) Safe fill for prior fields (only those present)
         prior_fill_cols = [
             c for c in ("ATS_EB_Rate","ATS_EB_Margin","ATS_Roll_Margin_Decay",
