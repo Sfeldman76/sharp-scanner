@@ -3222,10 +3222,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         'NBA': 35,      # 35 days for NBA
         'NFL': 60,      # 20 days for NFL
         'CFL': 60,      # 20 days for NFL
-        'WNBA': 30,     # 30 days for WNBA
-        'MLB': 50,      # 50 days for MLB
-        'NCAAF': 30,    # 20 days for NCAAF
-        'NCAAB': 30,    # 30 days for NCAAB
+        'WNBA': 60,     # 30 days for WNBA
+        'MLB': 60,      # 50 days for M
+        'NCAAF': 60,    # 20 days for NCAAF
+        'NCAAB': 60,    # 30 days for NCAAB
         # Add more sports as needed
     }
 
@@ -4640,15 +4640,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # --- sport → embargo (top of file, once) ---
         SPORT_EMBARGO = {
-            "MLB":   pd.Timedelta("12 hours"),
-            "NBA":   pd.Timedelta("12 hours"),
-            "NHL":   pd.Timedelta("12 hours"),
-            "NCAAB": pd.Timedelta("12 hours"),
-            "NFL":   pd.Timedelta("3 days"),
-            "NCAAF": pd.Timedelta("2 days"),
-            "WNBA":  pd.Timedelta("24 hours"),
-            "MLS":   pd.Timedelta("24 hours"),
-            "default": pd.Timedelta("12 hours"),
+            "MLB":   pd.Timedelta("1 hours"),
+            "NBA":   pd.Timedelta("1 hours"),
+            "NHL":   pd.Timedelta("1 hours"),
+            "NCAAB": pd.Timedelta("11 hours"),
+            "NFL":   pd.Timedelta("1 days"),
+            "NCAAF": pd.Timedelta("1 days"),
+            "WNBA":  pd.Timedelta("1 hours"),
+            "MLS":   pd.Timedelta("1 hours"),
+            "default": pd.Timedelta("1 hours"),
         }
         def get_embargo_for_sport(sport: str) -> pd.Timedelta:
             return SPORT_EMBARGO.get(str(sport).upper(), SPORT_EMBARGO["default"])
@@ -4846,11 +4846,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "NFL": 5,
             "NCAAF": 5,
             "NBA": 15,
-            "MLB": 15,
-            "WNBA": 4,
+            "MLB": 30,
+            "WNBA": 8,
             "NHL": 15,
             "default": 10,
-            "CFL": 4
+            "CFL": 5
         }
         n_hold_games = SPORT_HOLDOUT_GAMES.get(sport.upper(), SPORT_HOLDOUT_GAMES["default"])
         
@@ -4860,7 +4860,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             groups=groups,
             times=times,
             n_hold_games=n_hold_games,
-            min_train_games=20  # or 30 if you want stronger guarantees
+            min_train_games=30  # or 30 if you want stronger guarantees
         )
         
         #train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
