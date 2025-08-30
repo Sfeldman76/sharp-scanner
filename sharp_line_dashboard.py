@@ -3127,49 +3127,7 @@ def build_team_ats_priors_market_sport(
         out = out.drop(columns=all_na)
     return out
 
-# ---------------- Example call (market="spreads") ----------------
-# Assumes df_market has columns:
-#   ["Game_Key","Team","Is_Home","Snapshot_Timestamp","SHARP_HIT_BOOL","ATS_Cover_Margin", "Sport"]
-# If you don't have ATS_Cover_Margin for spreads, set cover_margin_col=None.
 
-sport_cur = str(df_market['Sport'].dropna().astype(str).str.upper().iloc[0]) if not df_market.empty else "NBA"
-
-# simple period derivation (tweak per sport if you want)
-def _derive_period(s: pd.Series) -> str:
-    if s.isna().all(): return "reg"
-    m = pd.to_datetime(s, errors="coerce", utc=True).dt.month.mode(dropna=True)
-    m = int(m.iloc[0]) if len(m) else 1
-    if   m in (9,10):             return "pre"
-    elif m in (11,12,1,2,3,4):    return "reg"
-    else:                         return "post"
-
-period_cur = _derive_period(df_market.get('Game_Start', pd.Series(dtype='datetime64[ns]')))
-
-priors_spreads = build_team_ats_priors_market_sport(
-    df_market,
-    sport=sport_cur,
-    market="spreads",
-    period=period_cur,
-    team_col="Team",
-    game_col="Game_Key",
-    ts_col="Snapshot_Timestamp",
-    is_home_col="Is_Home",
-    cover_bool_col="SHARP_HIT_BOOL",          # 1 if team covered spread; else 0
-    cover_margin_col="ATS_Cover_Margin",      # (team_pts - opp_pts) - closing_spread_for_team
-    add_home_away_splits=True,
-    suffix=None  # or "_Spreads"
-)
-
-# normalize keys & merge back
-for _df in (df_market, priors_spreads):
-    _df["Game_Key"] = _df["Game_Key"].astype(str).str.lower().str.strip()
-    _df["Team"]     = _df["Team"].astype(str).str.lower().str.strip()
-
-df_market = df_market.merge(priors_spreads, on=["Game_Key","Team"], how="left")
-
-# optional: fill NaNs for model input
-cols_to_fill = [c for c in ["ATS_EB_Rate","ATS_EB_Rate_Home","ATS_EB_Rate_Away","ATS_EB_Margin","ATS_Roll_Margin_Decay"] if c in df_market.columns]
-df_market[cols_to_fill] = df_market[cols_to_fill].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype("float32")
 
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
@@ -3776,35 +3734,79 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_market = df_market[pd.to_numeric(df_market['Value'], errors='coerce') < 0]
     
         # labels
+        
         df_market = df_market[df_market['SHARP_HIT_BOOL'].isin([0, 1])]
         if df_market.empty or df_market['SHARP_HIT_BOOL'].nunique() < 2:
             status.warning(f"⚠️ Not enough label variety for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
 
-                # === Build & merge market-specific team priors (EB) ===
-        # Runs for ANY market (spreads / totals / h2h) before branching.
-        sport_cur = (
-            str(df_market["Sport"].dropna().astype(str).str.upper().iloc[0])
-            if not df_market.empty else "NBA"
+        # === Normalize core keys used by priors & team assignment (DO THIS BEFORE PRIORS) ===
+        df_market['Market']         = df_market['Market'].astype(str).str.lower().str.strip()
+        df_market['Sport']          = df_market['Sport'].astype(str).str.upper().str.strip()
+        df_market['Outcome_Norm']   = df_market['Outcome'].astype(str).str.lower().str.strip()
+        df_market['Home_Team_Norm'] = df_market['Home_Team_Norm'].astype(str).str.lower().str.strip()
+        df_market['Away_Team_Norm'] = df_market['Away_Team_Norm'].astype(str).str.lower().str.strip()
+        df_market['Game_Key']       = df_market['Game_Key'].astype(str).str.lower().str.strip()
+
+        # === Define Team / Is_Home exactly once (needed by priors) ===
+        is_totals = df_market['Market'].eq('totals')
+        df_market['Team'] = (
+            df_market['Outcome_Norm']            # spreads/h2h = picked side
+            .where(~is_totals, df_market['Home_Team_Norm'])  # totals anchor to home
+            .astype(str).str.lower().str.strip()
         )
-        # If you already defined _derive_period earlier, this will work; else default to "reg"
+        df_market['Is_Home'] = np.where(
+            is_totals,
+            1,
+            (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)
+        ).astype(int)
+
+        # === Build & merge market-specific team priors (EB) ===
+        sport_cur = (df_market['Sport'].dropna().astype(str).str.upper().iloc[0]
+                     if not df_market.empty else sport.upper())
+
+        # Period helper (fallback = "reg")
         try:
             period_cur = _derive_period(df_market.get("Game_Start", pd.Series(dtype="datetime64[ns]")))
         except NameError:
-            period_cur = "reg"
+            def _derive_period(s: pd.Series) -> str:
+                if s.isna().all(): return "reg"
+                m = pd.to_datetime(s, errors="coerce", utc=True).dt.month.mode(dropna=True)
+                m = int(m.iloc[0]) if len(m) else 1
+                if   m in (9,10):             return "pre"
+                elif m in (11,12,1,2,3,4):    return "reg"
+                else:                         return "post"
+            period_cur = _derive_period(df_market.get("Game_Start", pd.Series(dtype="datetime64[ns]")))
+
+        # Choose margin column per market
+        if market == "spreads":
+            cm_col = "ATS_Cover_Margin" if "ATS_Cover_Margin" in df_market.columns else None
+        elif market == "totals":
+            # ensure totals margin exists: (home+away) - line_total (Value)
+            if "ATS_Cover_Margin" not in df_market.columns:
+                if {"Score_Home_Score","Score_Away_Score","Value"}.issubset(df_market.columns):
+                    actual_total = pd.to_numeric(df_market["Score_Home_Score"], errors="coerce") + \
+                                   pd.to_numeric(df_market["Score_Away_Score"], errors="coerce")
+                    line_total  = pd.to_numeric(df_market["Value"], errors="coerce")
+                    df_market["ATS_Cover_Margin"] = (actual_total - line_total).astype("float32")
+                else:
+                    df_market["ATS_Cover_Margin"] = np.nan
+            cm_col = "ATS_Cover_Margin"
+        else:  # h2h
+            cm_col = None
 
         priors = build_team_ats_priors_market_sport(
             df_market,
             sport=sport_cur,
-            market=market,                 # <- "spreads" | "totals" | "h2h"
+            market=market,                     # "spreads" | "totals" | "h2h"
             period=period_cur,
             team_col="Team",
             game_col="Game_Key",
             ts_col="Snapshot_Timestamp",
             is_home_col="Is_Home",
-            cover_bool_col="SHARP_HIT_BOOL",
-            cover_margin_col=("ATS_Cover_Margin" if "ATS_Cover_Margin" in df_market.columns else None),
+            cover_bool_col="SHARP_HIT_BOOL",   # table already market-specific 0/1
+            cover_margin_col=cm_col,           # per market
             add_home_away_splits=True,
             suffix=None
         )
@@ -3817,11 +3819,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market = df_market.merge(priors, on=["Game_Key","Team"], how="left")
 
         # Safe defaults for any missing prior columns
-        for c in priors.columns:
-            if c not in ("Game_Key","Team") and c not in df_market.columns:
-                df_market[c] = 0.0
-        df_market.fillna({c:0.0 for c in priors.columns if c not in ("Game_Key","Team")}, inplace=True)
-        
+        fill_cols = [c for c in priors.columns if c not in ("Game_Key","Team")]
+        if fill_cols:
+            df_market[fill_cols] = (
+                df_market[fill_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0.0)
+                .astype("float32")
+            )
+
         if market == "spreads":
             # ---- SPREADS training block (leakage-safe) ----
             game_keys = ['Sport', 'Home_Team_Norm', 'Away_Team_Norm']
