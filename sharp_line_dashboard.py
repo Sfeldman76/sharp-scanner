@@ -1636,6 +1636,8 @@ def _phi(x):
     # reflect for negative x
     return np.where(x >= 0, cdf_ax, 1.0 - cdf_ax).astype(np.float32)
 
+
+
 SPORT_SPREAD_CFG = {
     "NFL":   dict(points_per_elo=np.float32(25.0), HFA=np.float32(1.6), sigma_pts=np.float32(13.2)),
     "NCAAF": dict(points_per_elo=np.float32(28.0), HFA=np.float32(2.4), sigma_pts=np.float32(16.0)),
@@ -4748,8 +4750,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         
         # ==== Shared helpers / constants ====
+        # ==== Shared helpers / constants ====
         eps = 1e-4  # default probability clip
         
+        def pos_col_index(est, positive=1):
+            cls = getattr(est, "classes_", None)
+            if cls is None:
+                raise RuntimeError("Estimator has no classes_. Was it fitted?")
+            hits = np.where(cls == positive)[0]
+            if len(hits) == 0:
+                raise RuntimeError(f"Positive class {positive!r} not found in classes_={cls}. Check label encoding.")
+            return int(hits[0])
     
         
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -5134,6 +5145,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         oof_pred_logloss = np.full(len(y_train), np.nan, dtype=float)
         oof_pred_auc     = np.full(len(y_train), np.nan, dtype=float)
         
+        pos_ll  = None
+        pos_auc = None
+        
         for tr_rel, va_rel in folds:
             m_ll  = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(n_trees_ll)})
             m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc)})
@@ -5141,9 +5155,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             m_ll.fit (X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
             m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
         
-            oof_pred_logloss[va_rel] = m_ll.predict_proba(X_train[va_rel])[:, 1]
-            oof_pred_auc[va_rel]     = m_auc.predict_proba(X_train[va_rel])[:, 1]
+            if pos_ll is None:  pos_ll  = pos_col_index(m_ll,  positive=1)
+            if pos_auc is None: pos_auc = pos_col_index(m_auc, positive=1)
         
+            oof_pred_logloss[va_rel] = m_ll.predict_proba(X_train[va_rel])[:, pos_ll]
+            oof_pred_auc[va_rel]     = m_auc.predict_proba(X_train[va_rel])[:, pos_auc]
+                
        
         mask_oof = ~np.isnan(oof_pred_logloss) & ~np.isnan(oof_pred_auc)
         if mask_oof.sum() < 50:
@@ -5185,10 +5202,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         # Final blended + calibrated predictions for TRAIN + HOLDOUT
         # ---------------------------------------------------------------------------
-        p_tr_log = model_logloss.predict_proba(X_full[train_all_idx])[:, 1]
-        p_tr_auc = model_auc    .predict_proba(X_full[train_all_idx])[:, 1]
-        p_ho_log = model_logloss.predict_proba(X_full[hold_idx])[:, 1]
-        p_ho_auc = model_auc    .predict_proba(X_full[hold_idx])[:, 1]
+        pos_ll_final  = pos_col_index(model_logloss, positive=1)
+        pos_auc_final = pos_col_index(model_auc,     positive=1)
+        
+        p_tr_log = model_logloss.predict_proba(X_full[train_all_idx])[:, pos_ll_final]
+        p_tr_auc = model_auc    .predict_proba(X_full[train_all_idx])[:, pos_auc_final]
+        p_ho_log = model_logloss.predict_proba(X_full[hold_idx])[:,    pos_ll_final]
+        p_ho_auc = model_auc    .predict_proba(X_full[hold_idx])[:,    pos_auc_final]
         
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
@@ -5196,9 +5216,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_cal     = iso_blend.predict(p_train_blend_raw)  # TRAIN calibrated
         p_cal_val = iso_blend.predict(p_hold_blend_raw)   # HOLDOUT calibrated
         
+        # --- Orientation guard: flip if flipped AUC is better ---
+        try:
+            auc_raw  = roc_auc_score(y_full[hold_idx].astype(int), p_cal_val)
+            auc_flip = roc_auc_score(y_full[hold_idx].astype(int), 1.0 - p_cal_val)
+            if auc_flip > auc_raw:
+                st.warning(f"⚠️ Detected inverted orientation on holdout (raw AUC={auc_raw:.4f} < flipped AUC={auc_flip:.4f}). Flipping probabilities for reporting.")
+                p_cal_val = 1.0 - p_cal_val
+                p_cal     = 1.0 - p_cal  # keep train metrics consistent
+        except Exception as _e:
+            pass
+        
         # targets aligned
         y_train_vec = y_full[train_all_idx].astype(int)
         y_hold_vec  = y_full[hold_idx].astype(int)
+        
+        # targets aligned
+       
         p_train_vec = np.asarray(p_cal, dtype=float)
         p_hold_vec  = np.asarray(p_cal_val, dtype=float)
 
