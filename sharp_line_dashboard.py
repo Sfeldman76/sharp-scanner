@@ -4863,11 +4863,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             min_train_games=20  # or 30 if you want stronger guarantees
         )
         
-        train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
+        #train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
         
-        all_g        = meta["group"].to_numpy()
-        hold_idx      = np.flatnonzero(np.isin(all_g, hold_g))
-        train_all_idx = np.flatnonzero(np.isin(all_g, train_g))
+        #all_g        = meta["group"].to_numpy()
+        #hold_idx      = np.flatnonzero(np.isin(all_g, hold_g))
+        #train_all_idx = np.flatnonzero(np.isin(all_g, train_g))
         
         # ---- TRAIN subset arrays (everything downstream uses only TRAIN rows) ----
         X_train = X_full[train_all_idx]
