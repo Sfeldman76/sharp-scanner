@@ -4431,7 +4431,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # add recent team model performance stats
         extend_unique(features, [
             #'Team_Past_Avg_Model_Prob',
-            'Team_Past_Hit_Rate',
+            #'Team_Past_Hit_Rate',
             #'Team_Past_Avg_Model_Prob_Home',
             #'Team_Past_Hit_Rate_Home',
             #'Team_Past_Avg_Model_Prob_Away',
