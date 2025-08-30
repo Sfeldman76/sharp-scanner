@@ -2067,7 +2067,49 @@ def resolve_groups(df: pd.DataFrame) -> np.ndarray:
         return base.to_numpy()
 
     raise ValueError("No columns available to form per-game groups")
+# --- 1) Choose blend weight via small grid on OOF (before fitting iso_blend) ---
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import roc_auc_score, log_loss
+import numpy as np
 
+def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, *, 
+                             metric="auc", grid=None, eps=1e-4):
+    """
+    Returns: best_w, iso_blend (fitted on best blended OOF), p_oof_blend (best)
+    metric ∈ {"auc","logloss","hybrid"}.
+      - "auc": maximize AUC
+      - "logloss": minimize logloss
+      - "hybrid": maximize (AUC - normalized logloss)
+    """
+    y_oof = np.asarray(y_oof).astype(int)
+    p_oof_log = np.clip(np.asarray(p_oof_log, float), eps, 1-eps)
+    p_oof_auc = np.clip(np.asarray(p_oof_auc, float), eps, 1-eps)
+    if grid is None:
+        grid = np.linspace(0.20, 0.80, 13)  # 0.20..0.80 step 0.05
+
+    def score_vec(p):
+        if metric == "auc":
+            return roc_auc_score(y_oof, p)
+        elif metric == "logloss":
+            return -log_loss(y_oof, p, labels=[0,1])  # higher is better
+        elif metric == "hybrid":
+            # scale logloss into ~[0,1] band for stability
+            ll = log_loss(y_oof, p, labels=[0,1])
+            auc = roc_auc_score(y_oof, p)
+            return auc - ll  # simple tradeoff: tune if you like
+        else:
+            raise ValueError("metric must be 'auc', 'logloss', or 'hybrid'")
+
+    best_w, best_score, best_p = None, -1e9, None
+    for w in grid:
+        p = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
+        s = score_vec(p)
+        # tie-break toward mid weights for stability
+        if (s > best_score) or (np.isclose(s, best_score) and (best_w is None or abs(w-0.5) < abs(best_w-0.5))):
+            best_score, best_w, best_p = s, w, p
+
+    iso = IsotonicRegression(out_of_bounds="clip").fit(best_p, y_oof)
+    return float(best_w), iso, best_p
 
 def _bake_feature_names_in_(est, cols):
     """
@@ -5044,25 +5086,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Blend weight chosen on OOF to minimize logloss
         grid = np.linspace(0.0, 1.0, 51)
-        best_w, best_ll = 0.5, 1e9
-        p_oof_log = oof_pred_logloss[mask_oof]
-        p_oof_auc = oof_pred_auc[mask_oof]
-        y_oof     = y_train[mask_oof].astype(int)
         
-        for w in grid:
-            p_blend = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
-            ll = log_loss(y_oof, p_blend, labels=[0,1])
-            if ll < best_ll:
-                best_ll, best_w = ll, w
+        # You already have OOF preds:
+        # p_oof_log, p_oof_auc, y_oof
         
-        # One isotonic over the blended OOF probability
-        try:
-            iso_blend = IsotonicRegression(out_of_bounds="clip", y_min=eps, y_max=1-eps)
-        except TypeError:
-            iso_blend = IsotonicRegression(out_of_bounds="clip")
-        p_oof_blend = np.clip(best_w*p_oof_log + (1-best_w)*p_oof_auc, eps, 1-eps)
-        iso_blend.fit(p_oof_blend, y_oof)
+        best_w, iso_blend, p_oof_blend = pick_blend_weight_on_oof(
+            y_oof=y_oof,
+            p_oof_log=p_oof_log,
+            p_oof_auc=p_oof_auc,
+            metric="auc",      # or "logloss" / "hybrid"
+            grid=None,         # default 0.20..0.80
+            eps=eps,
+        )
         
+        st.write(f"🔎 Selected blend weight (logloss vs AUC): w={best_w:.2f} (AUC weight={1-best_w:.2f})")
+        
+        # (Optional) show how other weights would have scored, without changing best_w
+        _grid = np.linspace(0.20, 0.80, 13)
+        rows = []
+        for w in _grid:
+            p_tmp = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
+            rows.append({"w_log": w,
+                "AUC": roc_auc_score(y_oof, p_tmp),
+                "LogLoss": log_loss(y_oof, p_tmp, labels=[0,1])})
+        st.dataframe(pd.DataFrame(rows))
+        
+        #
         # ---------------------------------------------------------------------------
         #  Final blended + calibrated predictions for TRAIN + HOLDOUT
         # ---------------------------------------------------------------------------
