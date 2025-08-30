@@ -4137,7 +4137,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'Sharp_Line_Magnitude',
             #'Is_Home_Team_Bet',
             'Line_Moved_Toward_Team',
-            'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
+            #'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
             #'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
@@ -4221,9 +4221,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # add recent team model performance stats
         extend_unique(features, [
-            'Team_Past_Avg_Model_Prob','Team_Past_Hit_Rate',
-            'Team_Past_Avg_Model_Prob_Home','Team_Past_Hit_Rate_Home',
-            'Team_Past_Avg_Model_Prob_Away','Team_Past_Hit_Rate_Away',
+            #'Team_Past_Avg_Model_Prob',
+            'Team_Past_Hit_Rate',
+            #'Team_Past_Avg_Model_Prob_Home',
+            'Team_Past_Hit_Rate_Home',
+            #'Team_Past_Avg_Model_Prob_Away',
+            'Team_Past_Hit_Rate_Away',
             
             'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
             'Avg_Recent_Cover_Streak_Away'
