@@ -2991,6 +2991,186 @@ def build_timing_aggregates_inplace(df: pd.DataFrame,
     return out_cols
 
 
+
+
+# ---- sport/period tuning (defaults) ----
+SPORT_PRIOR_CFG = {
+    "NBA":  {"m_prior": 15, "alpha": 0.5, "min_n": 4},
+    "NFL":  {"m_prior": 25, "alpha": 0.6, "min_n": 3},
+    "WNBA": {"m_prior": 12, "alpha": 0.5, "min_n": 3},
+    "MLB":  {"m_prior": 18, "alpha": 0.4, "min_n": 7},
+    "CFL":  {"m_prior": 20, "alpha": 0.5, "min_n": 3},
+    "NCAAF":{"m_prior": 22, "alpha": 0.55,"min_n": 3},
+    "NCAAB":{"m_prior": 16, "alpha": 0.5, "min_n": 5},
+}
+SPORT_PERIOD_OVERRIDES = {
+    "NBA": {
+        "pre":  {"m_prior": 8,  "alpha": 0.4, "min_n": 2},
+        "reg":  {"m_prior": 15, "alpha": 0.5, "min_n": 4},
+        "post": {"m_prior": 20, "alpha": 0.6, "min_n": 4},
+    },
+    "NFL": {
+        "pre":  {"m_prior": 12, "alpha": 0.4, "min_n": 2},
+        "reg":  {"m_prior": 25, "alpha": 0.6, "min_n": 3},
+        "post": {"m_prior": 28, "alpha": 0.65,"min_n": 3},
+    },
+}
+
+def _cfg_for_sport_period(sport: str, period: str | None = None):
+    s = (sport or "").upper()
+    base = SPORT_PRIOR_CFG.get(s, {"m_prior": 15, "alpha": 0.5, "min_n": 4}).copy()
+    if period:
+        per = SPORT_PERIOD_OVERRIDES.get(s, {}).get(period, {})
+        base.update(per)
+    return base
+
+def _eb_shrink(mean_team, n_team, global_mean, m_prior):
+    n = np.asarray(n_team, dtype="float64")
+    return (n * mean_team + m_prior * global_mean) / np.clip(n + m_prior, 1e-6, None)
+
+def build_team_ats_priors_market_sport(
+    df: pd.DataFrame,
+    *,
+    sport: str,
+    market: str,                 # "spreads" | "totals" | "h2h"
+    period: str | None = None,
+    team_col="Team",
+    game_col="Game_Key",
+    ts_col="Snapshot_Timestamp",
+    is_home_col="Is_Home",
+    cover_bool_col="SHARP_HIT_BOOL",     # 0/1: covered/over/won (per market)
+    cover_margin_col=None,               # e.g., spread margin or (actual_total - line)
+    add_home_away_splits=True,
+    suffix=None,
+) -> pd.DataFrame:
+    """
+    Leakage-safe EB priors per (game, team) for the given market.
+    Output includes:
+        ATS_EB_Rate{suffix}
+        ATS_EB_Margin{suffix}              (if cover_margin_col provided)
+        ATS_Roll_Margin_Decay{suffix}      (if cover_margin_col provided)
+        ATS_EB_Rate_Home{suffix}, ATS_EB_Rate_Away{suffix} (if add_home_away_splits)
+    """
+    if suffix is None:
+        suffix = ""  # or f"_{market.capitalize()}"
+
+    cfg = _cfg_for_sport_period(sport, period)
+    m_prior = float(cfg["m_prior"])
+    alpha   = float(cfg["alpha"])
+    min_n   = int(cfg["min_n"])
+
+    df = df.copy()
+    # enforce types
+    if ts_col in df.columns:
+        df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
+        sort_cols = [team_col, ts_col]
+    else:
+        # fallback order by game if no snapshot
+        sort_cols = [team_col, game_col]
+    df = df.sort_values(sort_cols)
+
+    # targets
+    y_hit = pd.to_numeric(df.get(cover_bool_col, 0), errors="coerce").fillna(0.0).astype(float)
+    have_margin = bool(cover_margin_col) and (cover_margin_col in df.columns)
+    if have_margin:
+        y_mrg = pd.to_numeric(df[cover_margin_col], errors="coerce").fillna(0.0).astype(float)
+    else:
+        y_mrg = pd.Series(np.zeros(len(df), dtype="float64"), index=df.index)
+
+    # global means
+    g_mean_hit = float(np.nanmean(y_hit)) if len(y_hit) else 0.5
+    g_mean_mrg = float(np.nanmean(y_mrg)) if len(y_mrg) else 0.0
+
+    # cumulative prior-only stats per team (LOO via shift)
+    grp = df[team_col]
+    df["cum_n"]   = grp.groupby(grp).cumcount()  # number of prior games
+    df["cum_hit"] = y_hit.groupby(grp).cumsum().shift(1)
+    df["cum_mrg"] = y_mrg.groupby(grp).cumsum().shift(1) if have_margin else np.nan
+
+    n_eff = df["cum_n"].astype(float)
+    # smooth min_n by increasing prior weight when n small
+    m_adj = m_prior * np.clip(min_n / np.clip(n_eff, 1.0, None), 0.25, 4.0)
+
+    loo_hit = df["cum_hit"] / n_eff.replace(0, np.nan)
+    loo_mrg = (df["cum_mrg"] / n_eff.replace(0, np.nan)) if have_margin else np.nan
+
+    df[f"ATS_EB_Rate{suffix}"] = _eb_shrink(loo_hit, n_eff, g_mean_hit, m_adj)
+    if have_margin:
+        df[f"ATS_EB_Margin{suffix}"] = _eb_shrink(loo_mrg, n_eff, g_mean_mrg, m_adj)
+
+        # EWMA of recent *prior* margins (1-step shift to avoid leakage)
+        prev_m = y_mrg.groupby(grp).shift(1)
+        df[f"ATS_Roll_Margin_Decay{suffix}"] = (
+            prev_m.groupby(df[team_col]).transform(lambda s: s.ewm(alpha=alpha, min_periods=1).mean())
+        )
+
+    # optional home/away EB splits
+    if add_home_away_splits and is_home_col in df.columns:
+        mask_home = df[is_home_col].fillna(False).astype(bool)
+        for lab, mask in [("Home", mask_home), ("Away", ~mask_home)]:
+            s = y_hit.where(mask, np.nan)
+            c = s.groupby(df[team_col]).cumsum().shift(1)
+            loo = c / n_eff.replace(0, np.nan)
+            df[f"ATS_EB_Rate_{lab}{suffix}"] = _eb_shrink(loo, n_eff, g_mean_hit, m_adj)
+
+    # keep tiny output
+    keep = [game_col, team_col, f"ATS_EB_Rate{suffix}"]
+    for c in (f"ATS_EB_Margin{suffix}", f"ATS_Roll_Margin_Decay{suffix}",
+              f"ATS_EB_Rate_Home{suffix}", f"ATS_EB_Rate_Away{suffix}"):
+        if c in df.columns:
+            keep.append(c)
+
+    out = df[keep].copy()
+    # drop all-NA (e.g., margin fields if not provided)
+    all_na = [c for c in out.columns if c not in (game_col, team_col) and out[c].notna().sum() == 0]
+    if all_na:
+        out = out.drop(columns=all_na)
+    return out
+
+# ---------------- Example call (market="spreads") ----------------
+# Assumes df_market has columns:
+#   ["Game_Key","Team","Is_Home","Snapshot_Timestamp","SHARP_HIT_BOOL","ATS_Cover_Margin", "Sport"]
+# If you don't have ATS_Cover_Margin for spreads, set cover_margin_col=None.
+
+sport_cur = str(df_market['Sport'].dropna().astype(str).str.upper().iloc[0]) if not df_market.empty else "NBA"
+
+# simple period derivation (tweak per sport if you want)
+def _derive_period(s: pd.Series) -> str:
+    if s.isna().all(): return "reg"
+    m = pd.to_datetime(s, errors="coerce", utc=True).dt.month.mode(dropna=True)
+    m = int(m.iloc[0]) if len(m) else 1
+    if   m in (9,10):             return "pre"
+    elif m in (11,12,1,2,3,4):    return "reg"
+    else:                         return "post"
+
+period_cur = _derive_period(df_market.get('Game_Start', pd.Series(dtype='datetime64[ns]')))
+
+priors_spreads = build_team_ats_priors_market_sport(
+    df_market,
+    sport=sport_cur,
+    market="spreads",
+    period=period_cur,
+    team_col="Team",
+    game_col="Game_Key",
+    ts_col="Snapshot_Timestamp",
+    is_home_col="Is_Home",
+    cover_bool_col="SHARP_HIT_BOOL",          # 1 if team covered spread; else 0
+    cover_margin_col="ATS_Cover_Margin",      # (team_pts - opp_pts) - closing_spread_for_team
+    add_home_away_splits=True,
+    suffix=None  # or "_Spreads"
+)
+
+# normalize keys & merge back
+for _df in (df_market, priors_spreads):
+    _df["Game_Key"] = _df["Game_Key"].astype(str).str.lower().str.strip()
+    _df["Team"]     = _df["Team"].astype(str).str.lower().str.strip()
+
+df_market = df_market.merge(priors_spreads, on=["Game_Key","Team"], how="left")
+
+# optional: fill NaNs for model input
+cols_to_fill = [c for c in ["ATS_EB_Rate","ATS_EB_Rate_Home","ATS_EB_Rate_Away","ATS_EB_Margin","ATS_Roll_Margin_Decay"] if c in df_market.columns]
+df_market[cols_to_fill] = df_market[cols_to_fill].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype("float32")
+
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Dictionary specifying days_back for each sport
     SPORT_DAYS_BACK = {
@@ -3102,62 +3282,45 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
             
    # === Existing "as-of" history features (unchanged) ===
+    # === Columns we expect from the view ===
     history_cols = [
-        #"After_Win_Flag","Revenge_Flag",
+        # "After_Win_Flag","Revenge_Flag",
         "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
-        "H2H_Win_Pct_Prior",#"Opp_WinPct_Prior",
-        #"Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
-        #"Wins_Last5_Prior",
+        "H2H_Win_Pct_Prior",  # "Opp_WinPct_Prior",
+        # "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
+        # "Wins_Last5_Prior",
         "Margin_Last5_Prior",
         "Days_Since_Last_Game",
-        #"Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
-        #"Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
-        
-        
+        # "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
+        # "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
     ]
     
     # === New team ATS cover / margin stats (prior-only, last-5) ===
     team_cover_cols = [
-        # overall cover signal
-        #"Cover_Rate_Last5",
-        #"Cover_Rate_After_Win_Last5",
-        #"Cover_Rate_After_Loss_Last5",
-        # 8 situational cover rates (last-5)
-        #"Cover_Rate_Home_After_Home_Win_Last5",
-        #"Cover_Rate_Home_After_Home_Loss_Last5",
-        #"Cover_Rate_Home_After_Away_Win_Last5",
-        #"Cover_Rate_Home_After_Away_Loss_Last5",
-        #"Cover_Rate_Away_After_Home_Win_Last5",
-        #"Cover_Rate_Away_After_Home_Loss_Last5",
-        #"Cover_Rate_Away_After_Away_Win_Last5",
-        #"Cover_Rate_Away_After_Away_Loss_Last5",
+        # overall cover signal (intentionally off for now)
+        # "Cover_Rate_Last5",
+        # "Cover_Rate_After_Win_Last5",
+        # "Cover_Rate_After_Loss_Last5",
+        # situational cover rates (intentionally off for now)
+        # "Cover_Rate_Home_After_Home_Win_Last5",
+        # "Cover_Rate_Home_After_Home_Loss_Last5",
+        # "Cover_Rate_Home_After_Away_Win_Last5",
+        # "Cover_Rate_Home_After_Away_Loss_Last5",
+        # "Cover_Rate_Away_After_Home_Win_Last5",
+        # "Cover_Rate_Away_After_Home_Loss_Last5",
+        # "Cover_Rate_Away_After_Away_Win_Last5",
+        # "Cover_Rate_Away_After_Away_Loss_Last5",
         # margin distribution
         "ATS_Cover_Margin_Last5_Prior_Mean",
-        #"ATS_Cover_Margin_Last5_Prior_Std",
-        # (optional per-game instantaneous margin if you want it)
-       
+        # "ATS_Cover_Margin_Last5_Prior_Std",
     ]
     
-    # === Opponent mirrors (prior-only, last-5) ===
-    opp_cover_cols = [
-        #"Opp_Cover_Rate_Last5",
-        #"Opp_ATS_Cover_Margin_Last5_Prior_Mean",
-        #"Opp_ATS_Cover_Margin_Last5_Prior_Std",
-        #"Opp_Cover_Rate_After_Win_Last5",
-        #"Opp_Cover_Rate_After_Loss_Last5",
-        #"Opp_Cover_Rate_Home_After_Home_Win_Last5",
-        #"Opp_Cover_Rate_Home_After_Home_Loss_Last5",
-        #"Opp_Cover_Rate_Home_After_Away_Win_Last5",
-        #"Opp_Cover_Rate_Home_After_Away_Loss_Last5",
-        #"Opp_Cover_Rate_Away_After_Home_Win_Last5",
-        #"Opp_Cover_Rate_Away_After_Home_Loss_Last5",
-        #"Opp_Cover_Rate_Away_After_Away_Win_Last5",
-        #"Opp_Cover_Rate_Away_After_Away_Loss_Last5",
-    ]
+    # (Opponent mirrors intentionally excluded per your note)
     
-    # === (Optional but recommended) Team-vs-Opp diffs ===
-    # These often help the model; they’ll be created only if both sides exist.
-   
+    # =============== Schema-safe selection & typing ===============
+    all_feature_cols = history_cols + team_cover_cols
+
+
     # =============== Schema-safe selection ===============
     all_feature_cols = (
         history_cols
@@ -3178,6 +3341,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
 
    
+
+    # Get sport and market
+    sport_cur = str(df_market['Sport'].dropna().astype(str).str.upper().iloc[0]) if not df_market.empty else sport
+    market_cur = market.lower()  # from your training loop: "spreads", "totals", "h2h"
+    
+    # Optionally derive the season period ("pre", "reg", "post")
+    def _derive_period(s: pd.Series) -> str:
+        if s.isna().all(): return "reg"
+        m = pd.to_datetime(s, errors="coerce", utc=True).dt.month.mode(dropna=True)
+        m = int(m.iloc[0]) if len(m) else 1
+        if m in (9,10): return "pre"
+        elif m in (11,12,1,2,3,4): return "reg"
+        else: return "post"
+    
+    period_cur = _derive_period(df_market.get("Game_Start", pd.Series(dtype="datetime64[ns]")))
+    
+    # Build priors
+    priors = build_team_ats_priors_market_sport(
+        df_market,
+        sport=sport_cur,
+        market=market_cur,
+        period=period_cur,
+        team_col="Team",
+        game_col="Game_Key",
+        ts_col="Snapshot_Timestamp",
+        is_home_col="Is_Home",
+        cover_bool_col="SHARP_HIT_BOOL",
+        cover_margin_col="ATS_Cover_Margin" if "ATS_Cover_Margin" in df_market.columns else None,
+        suffix=None  # or f"_{market_cur.capitalize()}"
+    )
+    
+    # Normalize & merge into training set
+    for _df in (df_market, priors):
+        _df["Game_Key"] = _df["Game_Key"].astype(str).str.lower().str.strip()
+        _df["Team"]     = _df["Team"].astype(str).str.lower().str.strip()
+    
+    df_market = df_market.merge(priors, on=["Game_Key", "Team"], how="left")
         
     # ✅ Make sure helper won't choke if these are missing
     if 'Is_Sharp_Book' not in df_bt.columns:
@@ -4183,7 +4383,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
             'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
-            #'TOT_Mispricing'
+            #'TOT_Mispricing', 
+            'ATS_EB_Rate',
+            'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
+            'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
+            'ATS_EB_Rate_Home',
+            'ATS_EB_Rate_Away',
+            
         ]
         
         # ensure uniqueness (order-preserving)
