@@ -4658,58 +4658,68 @@ def add_clv_proxy_features(
 
 def wire_ats_features_inplace(df: pd.DataFrame) -> pd.DataFrame:
     """
-    In-place rewiring of ATS features based on market context.
-    Keeps original column names:
-      - ATS_EB_Rate
-      - ATS_EB_Rate_Home
-      - ATS_EB_Rate_Away
-      - ATS_EB_Margin
-      - ATS_Roll_Margin_Decay
-    Applies NaNs to H2H or non-spread markets where appropriate.
-    Also adds: ATS_EB_Rate_Selected (home/away split based on pick side).
+    Wires ATS features that already exist on df (from the SQL view) into
+    market-aware columns used at training/scoring time.
+
+    Expects on df:
+      ATS_EB_Rate, ATS_EB_Rate_Home, ATS_EB_Rate_Away,
+      ATS_EB_Margin, ATS_Roll_Margin_Decay,
+      Home_Team_Norm, Outcome or Outcome_Norm, Market
+    Produces:
+      MA_ATS_EB_Rate, MA_ATS_EB_Rate_Home, MA_ATS_EB_Rate_Away,
+      MA_ATS_EB_Rate_Selected, MA_ATS_EB_Margin, MA_ATS_Roll_Margin_Decay
     """
     if df.empty:
-        for c in ["ATS_EB_Rate", "ATS_EB_Rate_Home", "ATS_EB_Rate_Away",
-                  "ATS_EB_Margin", "ATS_Roll_Margin_Decay", "ATS_EB_Rate_Selected"]:
+        for c in ["MA_ATS_EB_Rate","MA_ATS_EB_Rate_Home","MA_ATS_EB_Rate_Away",
+                  "MA_ATS_EB_Rate_Selected","MA_ATS_EB_Margin","MA_ATS_Roll_Margin_Decay"]:
             if c not in df.columns:
                 df[c] = np.float32(np.nan)
         return df
 
-    m = df.get('Market', pd.Series(index=df.index)).astype('string').str.lower().str.strip()
-    on = df.get('Outcome_Norm', df.get('Outcome', pd.Series(index=df.index))).astype('string').str.lower().str.strip()
-    ht = df.get('Home_Team_Norm', pd.Series(index=df.index)).astype('string').str.lower().str.strip()
+    # --- normalize once ---
+    m  = df.get('Market', pd.Series(index=df.index, dtype='object')).astype('string').str.lower().str.strip()
+    on = df.get('Outcome_Norm', df.get('Outcome', pd.Series(index=df.index, dtype='object'))).astype('string').str.lower().str.strip()
+    ht = df.get('Home_Team_Norm', pd.Series(index=df.index, dtype='object')).astype('string').str.lower().str.strip()
 
-    is_spread = m.isin(['spreads', 'spread'])
-    is_total  = m.isin(['totals', 'total'])
-    is_h2h    = m.isin(['h2h', 'moneyline', 'ml'])
+    is_spread = m.isin(['spreads','spread'])
+    is_total  = m.isin(['totals','total'])
+    is_h2h    = m.isin(['h2h','moneyline','ml'])
+    is_st     = (is_spread | is_total)
+
     is_home_pick = (on == ht)
 
-    # Ensure source columns exist and cast correctly
-    for col in ["ATS_EB_Rate", "ATS_EB_Rate_Home", "ATS_EB_Rate_Away",
-                "ATS_EB_Margin", "ATS_Roll_Margin_Decay"]:
-        if col not in df.columns:
-            df[col] = np.nan
-        df[col] = pd.to_numeric(df[col], errors='coerce').astype('float32')
+    # --- ensure sources exist & numeric ---
+    for src in ["ATS_EB_Rate","ATS_EB_Rate_Home","ATS_EB_Rate_Away",
+                "ATS_EB_Margin","ATS_Roll_Margin_Decay"]:
+        if src not in df.columns:
+            df[src] = np.float32(np.nan)
+        df[src] = pd.to_numeric(df[src], errors='coerce').astype('float32')
 
-    # Wipe ATS stats from H2H rows
-    df.loc[is_h2h, ["ATS_EB_Rate", "ATS_EB_Rate_Home", "ATS_EB_Rate_Away"]] = np.nan
+    # ---- build full-length outputs, then mask ----
+    ma_rate            = df["ATS_EB_Rate"].astype('float32')
+    ma_rate_home       = df["ATS_EB_Rate_Home"].astype('float32')
+    ma_rate_away       = df["ATS_EB_Rate_Away"].astype('float32')
+    ma_rate_selected   = np.where(is_home_pick, ma_rate_home, ma_rate_away).astype('float32')
 
-    # Wipe margin-based stats for non-spread rows
-    df.loc[~is_spread, ["ATS_EB_Margin", "ATS_Roll_Margin_Decay"]] = np.nan
+    # mask out markets that aren't spreads/totals (h2h)
+    ma_rate          = ma_rate.where(is_st, np.nan).astype('float32')
+    ma_rate_home     = ma_rate_home.where(is_st, np.nan).astype('float32')
+    ma_rate_away     = ma_rate_away.where(is_st, np.nan).astype('float32')
+    ma_rate_selected = pd.Series(ma_rate_selected, index=df.index).where(is_st, np.nan).astype('float32')
 
-    # Add venue-selected rate (based on whether this is a home/away bet)
-    if 'ATS_EB_Rate_Selected' not in df.columns:
-        df['ATS_EB_Rate_Selected'] = np.nan
+    # margins only for spreads (leave NaN for totals unless you’ve built totals margin)
+    ma_margin        = df["ATS_EB_Margin"].where(is_spread, np.nan).astype('float32')
+    ma_roll_decay    = df["ATS_Roll_Margin_Decay"].where(is_spread, np.nan).astype('float32')
 
-    df.loc[is_spread | is_total, 'ATS_EB_Rate_Selected'] = np.where(
-        is_home_pick,
-        df['ATS_EB_Rate_Home'],
-        df['ATS_EB_Rate_Away']
-    ).astype('float32')
+    # write once (no masked assignment of mismatched arrays)
+    df["MA_ATS_EB_Rate"]            = ma_rate
+    df["MA_ATS_EB_Rate_Home"]       = ma_rate_home
+    df["MA_ATS_EB_Rate_Away"]       = ma_rate_away
+    df["MA_ATS_EB_Rate_Selected"]   = ma_rate_selected
+    df["MA_ATS_EB_Margin"]          = ma_margin
+    df["MA_ATS_Roll_Margin_Decay"]  = ma_roll_decay
 
     return df
-
-
 
 def apply_blended_sharp_score(
     df,
