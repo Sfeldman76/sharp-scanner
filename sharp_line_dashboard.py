@@ -1654,6 +1654,79 @@ def prep_consensus_market_spread_lowmem(
     g['Underdog_Market_Spread']  =  g['k'].astype('float32')
     return g
 
+
+def enrich_and_grade_for_training(
+    df_spread_rows: pd.DataFrame,
+    bq,                                   # required BigQuery client
+    sport_aliases: dict,
+    value_col: str = "Value",
+    outcome_col: str = "Outcome_Norm",
+    pad_days: int = 30,
+    allow_forward_hours: float = 0.0,
+    table_history: str = "sharplogger.sharp_data.ratings_history",  # override to ratings_current for live
+    project: str | None = None,
+) -> pd.DataFrame:
+    """
+    Attach leakage-safe power ratings + consensus market k, then compute
+    model-vs-market spreads/edges and cover probs mapped to each outcome row.
+    Expects spreads only.
+    """
+    if df_spread_rows.empty:
+        return df_spread_rows.copy()
+
+    # 1) Ratings (as-of) for the unique games in this batch
+    base = enrich_power_for_training_lowmem(
+        df=df_spread_rows[['Sport','Home_Team_Norm','Away_Team_Norm','Game_Start']].drop_duplicates(),
+        bq=bq,
+        sport_aliases=sport_aliases,
+        table_history=table_history,
+        pad_days=pad_days,
+        allow_forward_hours=allow_forward_hours,
+        project=project,
+    )
+
+    # 2) Consensus market (favorite + absolute spread “k”)
+    g_cons = prep_consensus_market_spread_lowmem(
+        df_spread_rows, value_col=value_col, outcome_col=outcome_col
+    )
+
+    # 3) Join → game-level, compute model favorite/dog edges + probs
+    game_key = ['Sport','Home_Team_Norm','Away_Team_Norm']
+    g_full = base.merge(g_cons, on=game_key, how='left')
+    g_fc   = favorite_centric_from_powerdiff_lowmem(g_full)
+
+    # Ensure PR cols exist even if base missed
+    for c in ['Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff']:
+        if c not in g_fc.columns and c in g_full.columns:
+            g_fc[c] = g_full[c].values
+        elif c not in g_fc.columns:
+            g_fc[c] = np.nan
+
+    keep_cols = game_key + [
+        'Market_Favorite_Team','Market_Underdog_Team',
+        'Favorite_Market_Spread','Underdog_Market_Spread',
+        'Model_Favorite_Team','Model_Underdog_Team',
+        'Model_Fav_Spread','Model_Dog_Spread',
+        'Fav_Edge_Pts','Dog_Edge_Pts',
+        'Fav_Cover_Prob','Dog_Cover_Prob',
+        'Model_Expected_Margin','Model_Expected_Margin_Abs','Sigma_Pts',
+        'Home_Power_Rating','Away_Power_Rating','Power_Rating_Diff'
+    ]
+    for c in keep_cols:
+        if c not in g_fc.columns:
+            g_fc[c] = np.nan
+    g_fc = g_fc[keep_cols].copy()
+
+    out = df_spread_rows.merge(g_fc, on=game_key, how='left')
+
+    # Map game-level numbers to the row’s outcome side
+    is_fav = (out[outcome_col].astype(str).values == out['Market_Favorite_Team'].astype(str).values)
+    out['Outcome_Model_Spread']  = np.where(is_fav, out['Model_Fav_Spread'].values, out['Model_Dog_Spread'].values).astype('float32')
+    out['Outcome_Market_Spread'] = np.where(is_fav, out['Favorite_Market_Spread'].values, out['Underdog_Market_Spread'].values).astype('float32')
+    out['Outcome_Spread_Edge']   = np.where(is_fav, out['Fav_Edge_Pts'].values, out['Dog_Edge_Pts'].values).astype('float32')
+    out['Outcome_Cover_Prob']    = np.where(is_fav, out['Fav_Cover_Prob'].values, out['Dog_Cover_Prob'].values).astype('float32')
+
+    return out
 def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFrame:
    
     g = df_games.copy()
@@ -3196,7 +3269,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         sport_aliases=SPORT_ALIASES,
         value_col="Value",
         outcome_col="Outcome_Norm",
-        pad_days=10,
+        pad_days=30,
         allow_forward_hours=0.0,  # strict backward-only
         table_history="sharplogger.sharp_data.ratings_history",
         project="sharplogger",
