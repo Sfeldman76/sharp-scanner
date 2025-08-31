@@ -3818,7 +3818,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     
         df_market = df_bt[df_bt['Market'].astype(str).str.lower() == market].copy()
 
-        df_market = df_bt.loc[df_bt['Market'].astype(str).str.lower() == market].copy()
+       
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
@@ -3860,7 +3860,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Your existing FE before resistance
         df_market = compute_small_book_liquidity_features(df_market)
         df_market = add_favorite_context_flag(df_market)
-        df_market = df_market.merge(df_cross_market, on='Game_Key', how='left')
+        
         # Final-snapshot training slice (no timestamps needed)
         df_market = add_resistance_features_training(
             df_market,
@@ -4078,17 +4078,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 .fillna(0.0)
                 .astype("float32")
             )
-        # --- 6) Safe fill for prior fields (only those present)
-        prior_fill_cols = [
-            c for c in ("ATS_EB_Rate","ATS_EB_Margin","ATS_Roll_Margin_Decay",
-                        "ATS_EB_Rate_Home","ATS_EB_Rate_Away")
-            if c in df_market.columns
-        ]
-        if prior_fill_cols:
-            df_market[prior_fill_cols] = (
-                df_market[prior_fill_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).astype("float32")
-            )
-        
+       
+       
         # ===================== SPREADS branch =====================
         if market == "spreads":
             game_keys = ["Sport","Home_Team_Norm","Away_Team_Norm"]
@@ -4296,8 +4287,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             np.where(df_market['Line_Delta'] < 0, 0, -1)
         ).astype(int)
         df_market['Line_Value_Abs'] = df_market['Value'].abs()
-       
-        df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(df_market['Value'])
+        val_num = pd.to_numeric(df_market['Value'], errors='coerce').fillna(0.0)
+        df_market['Line_Delta_Signed'] = df_market['Line_Delta'] * np.sign(val_num)
         
         
         df_market['Book_Norm'] = df_market['Bookmaker'].str.lower().str.strip()
@@ -4364,7 +4355,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
        
 
-        df_market['Market_Implied_Prob'] = df_market['Odds_Price'].apply(implied_prob)
+        df_market['Market_Implied_Prob'] = _amer_to_prob_vec(df_market['Odds_Price'])
 
         df_market['Market_Mispricing'] = df_market['Team_Past_Avg_Model_Prob'] - df_market['Market_Implied_Prob']
         df_market['Abs_Market_Mispricing'] = df_market['Market_Mispricing'].abs()
@@ -4426,8 +4417,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # === Absolute Line and Odds Movement
         df_market['Abs_Line_Move_From_Opening'] = (df_market['Value'] - df_market['First_Line_Value']).abs()
         df_market['Odds_Shift'] = df_market['Odds_Price'] - df_market['First_Odds']
+        
+        # With this (uses the same vectorizer you already defined):
         df_market['Implied_Prob_Shift'] = (
-            calc_implied_prob(df_market['Odds_Price']) - calc_implied_prob(df_market['First_Odds'])
+            _amer_to_prob_vec(df_market['Odds_Price']) - _amer_to_prob_vec(df_market['First_Odds'])
         )
         
         # === Directional Movement Flags
