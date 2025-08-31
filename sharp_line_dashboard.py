@@ -115,6 +115,10 @@ from pandas_gbq import to_gbq
 import google.api_core.exceptions
 from google.cloud import bigquery, bigquery_storage
 
+from pandas.api.types import (
+    is_bool_dtype, is_numeric_dtype, is_categorical_dtype, is_datetime64_any_dtype,
+    is_period_dtype, is_interval_dtype, is_object_dtype
+)
               
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -3330,6 +3334,120 @@ def build_team_ats_priors_market_sport(
     return out
 
 
+def audit_dataframe(df: pd.DataFrame, name: str = "DataFrame"):
+    """Show a Streamlit audit of columns, dtypes, null/inf, and JSON-serializability risks."""
+    st.markdown(f"### 🔎 Schema audit — **{name}**")
+
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        st.info("No rows.")
+        return
+
+    # quick overview
+    st.write("Shape:", df.shape)
+
+    # helpers to detect problematic cell types
+    def _has_numpy_scalar(s: pd.Series) -> bool:
+        return bool(s.map(lambda x: isinstance(x, np.generic)).any())
+
+    def _has_array_like(s: pd.Series) -> bool:
+        return bool(s.map(lambda x: isinstance(x, (np.ndarray, list, tuple, dict, set))).any())
+
+    def _has_interval(s: pd.Series) -> bool:
+        return is_interval_dtype(s) or s.map(lambda x: hasattr(x, "left") and hasattr(x, "right")).any()
+
+    def _has_nonfinite(s: pd.Series) -> tuple[int, int]:
+        # counts of ±inf, NaN
+        s_num = pd.to_numeric(s, errors="coerce")
+        inf_cnt = int(np.isinf(s_num.to_numpy(dtype=float)).sum())
+        nan_cnt = int(np.isnan(s_num.to_numpy(dtype=float)).sum())
+        return inf_cnt, nan_cnt
+
+    rows = []
+    for c in df.columns:
+        s = df[c]
+        dtype = str(s.dtype)
+        is_num = is_numeric_dtype(s)
+        is_bool = is_bool_dtype(s)
+        is_dt = is_datetime64_any_dtype(s)
+        is_cat = is_categorical_dtype(s)
+        is_obj = is_object_dtype(s)
+        is_period = is_period_dtype(s)
+        is_interval = is_interval_dtype(s)
+
+        inf_cnt, nan_cnt = _has_nonfinite(s)
+        nunique = int(s.nunique(dropna=False))
+        numpy_scalar = _has_numpy_scalar(s)
+        array_like = _has_array_like(s)
+        interval_like = _has_interval(s)
+
+        # take a small sample value (repr truncated)
+        try:
+            sample_val = next((repr(x) for x in s.head(10).tolist() if pd.notna(x)), "None")
+        except Exception:
+            sample_val = "<?>"
+
+        # high-level risk flag for streamlit/React JSON
+        risk = (
+            (nan_cnt > 0) or (inf_cnt > 0) or numpy_scalar or array_like or interval_like or
+            is_cat or is_period
+        )
+
+        # suggested fix
+        fix = []
+        if numpy_scalar: fix.append("np.generic → .item() / float/int/bool")
+        if array_like:   fix.append("arrays/tuples/dicts → str()")
+        if interval_like or is_interval: fix.append("Interval → str(label)")
+        if is_cat:       fix.append("Categorical → .astype(str) or .cat.codes")
+        if is_period:    fix.append("Period → str()")
+        if nan_cnt:      fix.append("NaN → fillna(None/0)")
+        if inf_cnt:      fix.append("±inf → replace with NaN")
+        suggested = "; ".join(fix) if fix else ""
+
+        rows.append(dict(
+            Column=str(c),
+            DType=dtype,
+            IsNumeric=bool(is_num),
+            IsDatetime=bool(is_dt),
+            IsCategorical=bool(is_cat),
+            NonFinite_NaN=nan_cnt,
+            NonFinite_Inf=inf_cnt,
+            NUnique=nunique,
+            HasNumpyScalar=bool(numpy_scalar),
+            HasArrayLike=bool(array_like),
+            HasIntervalLike=bool(interval_like),
+            RiskyForUI=bool(risk),
+            Sample=sample_val[:180],
+            SuggestedFix=suggested[:200],
+        ))
+
+    rep = pd.DataFrame(rows).sort_values(["RiskyForUI","Column"], ascending=[False, True])
+    st.dataframe(rep, use_container_width=True)
+
+def df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce a DF to be safe for st.dataframe/st.table."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    df = df.copy()
+    df.columns = [str(c) for c in df.columns]
+    # replace ±inf → NaN
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    # unwrap numpy scalars & stringify arrays/intervals
+    def _coerce(x):
+        if isinstance(x, np.generic):
+            try: return x.item()
+            except Exception: return float(x)
+        if isinstance(x, (np.ndarray, list, tuple, dict, set)):
+            return str(x)
+        # pandas Interval/Period or anything with left/right
+        if hasattr(x, "left") and hasattr(x, "right"):
+            return f"[{x.left}, {x.right})"
+        return x
+    for c in df.columns:
+        df[c] = df[c].map(_coerce)
+    # turn NaN into None (clean JSON)
+    df = df.where(pd.notna(df), None)
+    return df
+
 
 @st.cache_resource(show_spinner=False)
 def get_bq_clients():
@@ -5236,6 +5354,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         n_trees_ll  = _best_rounds(model_logloss)
         n_trees_auc = _best_rounds(model_auc)
+
+        # Audit the features actually used to train
+        audit_dataframe(df_market[features], name=f"Features ({len(features)})")
+        
+        # Audit any pane before rendering
+        
         # ---------------------------------------------------------------------------
         #  OOF predictions (train-only) with per-fold refits + weights
         # ---------------------------------------------------------------------------
