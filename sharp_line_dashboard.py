@@ -2068,136 +2068,121 @@ def get_xgb_search_space(
     X_rows: int,
     n_jobs: int = 1,
     scale_pos_weight: float = 1.0,
-    features: list[str] | None = None,  # kept for interface compatibility
+    features: list[str] | None = None,
+    use_monotone: bool = False,   # ← make constraints opt‑in
 ) -> tuple[dict, dict, dict]:
     """
     Returns (base_kwargs, params_ll, params_auc) for XGBClassifier randomized searches.
-    - base_kwargs: fixed, classifier-safe defaults
-    - params_ll / params_auc: search spaces scrubbed of any dangerous keys
+    Tuned to avoid flat models on low-variance feature sets.
     """
     s = str(sport).upper()
 
-    # ---- base kwargs (shared) ----
+    # ---- base kwargs (lighter regularization; no colsample_bynode) ----
     base_kwargs = dict(
-        # classifier semantics (kept explicit; scrub below and re-assert)
         objective="binary:logistic",
         eval_metric="logloss",
 
-        # speed/structure
         tree_method="hist",
         grow_policy="lossguide",
-        max_leaves=48,                              # pairs with lossguide
+        max_leaves=48,
         max_bin=(128 if X_rows < 150_000 else 64),
         sampling_method="uniform",
-        colsample_bynode=0.8,
 
-        # reasonable regularization (search will override)
-        reg_lambda=5.0,
-        min_child_weight=5,
+        # ⚠️ was 0.8; this + bytree colsampling can starve splits
+        # Remove per-node col sampling; keep only bytree in the search
+        # colsample_bynode=0.8,  # ← drop
 
-        # parallelism & stability
+        # gentler defaults (search can override)
+        reg_lambda=3.0,          # was 5.0
+        min_child_weight=2,      # was 5
+
         n_jobs=int(n_jobs),
         random_state=42,
         importance_type="total_gain",
 
-        # imbalance prior
         scale_pos_weight=float(scale_pos_weight),
     )
 
+    # ---- search spaces (wider & friendlier) ----
     if s in SMALL_LEAGUES:
-        # ---- SMALL LEAGUES (stability-first) ----
         params_ll = {
-            "max_depth":        randint(2, 3),             # {2}
-            "learning_rate":    loguniform(6e-3, 2.5e-2),  # 0.006–0.025
-            "subsample":        uniform(0.85, 0.15),       # 0.85–1.00
-            "colsample_bytree": uniform(0.85, 0.15),       # 0.85–1.00
-            "min_child_weight": randint(8, 20),            # 8–19
-            "gamma":            uniform(0.20, 0.60),       # 0.20–0.80
-            "reg_alpha":        loguniform(1e-1, 2.0e1),   # 0.1–20
-            "reg_lambda":       loguniform(1.5e1, 1.0e2),  # 15–100
-            "max_leaves":       randint(8, 18),
+            "max_depth":        randint(2, 5),
+            "learning_rate":    loguniform(5e-3, 4e-2),
+            "subsample":        uniform(0.80, 0.20),     # 0.80–1.00
+            "colsample_bytree": uniform(0.80, 0.20),     # 0.80–1.00
+            "min_child_weight": randint(1, 7),           # 1–6  ← allow easy splits
+            "gamma":            uniform(0.00, 0.60),     # 0.00–0.60 (0 allowed)
+            "reg_alpha":        loguniform(1e-2, 1e1),   # 0.01–10
+            "reg_lambda":       loguniform(2.0, 3.0e1),  # 2–30
+            "max_leaves":       randint(12, 28),
         }
         params_auc = {
-            "max_depth":        randint(2, 4),             # {2,3}
-            "learning_rate":    loguniform(5e-3, 3.0e-2),  # 0.005–0.03
-            "subsample":        uniform(0.80, 0.20),       # 0.80–1.00
-            "colsample_bytree": uniform(0.80, 0.20),       # 0.80–1.00
-            "min_child_weight": randint(6, 16),            # 6–15
-            "gamma":            uniform(0.15, 0.45),       # 0.15–0.60
-            "reg_alpha":        loguniform(5e-2, 1.0e1),   # 0.05–10
-            "reg_lambda":       loguniform(1.0e1, 8.0e1),  # 10–80
-            "max_leaves":       randint(10, 20),
+            "max_depth":        randint(2, 6),
+            "learning_rate":    loguniform(4e-3, 3.5e-2),
+            "subsample":        uniform(0.75, 0.25),     # 0.75–1.00
+            "colsample_bytree": uniform(0.75, 0.25),     # 0.75–1.00
+            "min_child_weight": randint(1, 6),           # 1–5
+            "gamma":            uniform(0.00, 0.50),     # 0.00–0.50
+            "reg_alpha":        loguniform(5e-3, 5.0),   # 0.005–5
+            "reg_lambda":       loguniform(1.5, 2.5e1),  # 1.5–25
+            "max_leaves":       randint(14, 32),
         }
     else:
-        # ---- BIGGER LEAGUES ----
         params_ll = {
-            "max_depth":        randint(3, 6),             # {3..5}
-            "max_leaves":       randint(8, 24),
-            "learning_rate":    loguniform(1e-2, 4e-2),    # 0.01–0.04
-            "subsample":        uniform(0.60, 0.30),       # 0.60–0.90
-            "colsample_bytree": uniform(0.55, 0.30),       # 0.55–0.85
-            "min_child_weight": randint(15, 45),           # {15..44}
-            "gamma":            uniform(0.50, 2.50),       # 0.50–3.00
-            "reg_alpha":        loguniform(1e-3, 3.0),     # 0.001–3
-            "reg_lambda":       loguniform(5.0, 8.0e1),    # 5–80
+            "max_depth":        randint(3, 7),           # 3..6
+            "max_leaves":       randint(16, 40),
+            "learning_rate":    loguniform(8e-3, 4.5e-2),
+            "subsample":        uniform(0.65, 0.30),     # 0.65–0.95
+            "colsample_bytree": uniform(0.65, 0.30),     # 0.65–0.95
+            "min_child_weight": randint(1, 9),           # 1–8  ← was 15–45
+            "gamma":            uniform(0.00, 1.20),     # 0.00–1.20
+            "reg_alpha":        loguniform(1e-3, 3.0),   # 0.001–3
+            "reg_lambda":       loguniform(2.0, 3.0e1),  # 2–30  ← was up to 80
         }
         params_auc = {
-            "max_depth":        randint(3, 7),             # {3..6}
-            "max_leaves":       randint(12, 28),
-            "learning_rate":    loguniform(5e-3, 3e-2),    # 0.005–0.03
-            "subsample":        uniform(0.55, 0.30),       # 0.55–0.85
-            "colsample_bytree": uniform(0.55, 0.35),       # 0.55–0.90
-            "min_child_weight": randint(10, 35),           # {10..34}
-            "gamma":            uniform(0.40, 2.10),       # 0.40–2.50
-            "reg_alpha":        loguniform(1e-4, 1.0),     # 0.0001–1
-            "reg_lambda":       loguniform(3.0, 5.0e1),    # 3–50
+            "max_depth":        randint(3, 8),           # 3..7
+            "max_leaves":       randint(18, 48),
+            "learning_rate":    loguniform(6e-3, 3.5e-2),
+            "subsample":        uniform(0.60, 0.35),     # 0.60–0.95
+            "colsample_bytree": uniform(0.60, 0.35),     # 0.60–0.95
+            "min_child_weight": randint(1, 8),           # 1–7
+            "gamma":            uniform(0.00, 1.00),     # 0.00–1.00
+            "reg_alpha":        loguniform(1e-4, 1.0),   # 0.0001–1
+            "reg_lambda":       loguniform(2.0, 2.5e1),  # 2–25
         }
 
-    # ---- scrub any keys that could flip estimator semantics ----
-    for d in (params_ll, params_auc):
-        for k in ("objective", "_estimator_type", "response_method"):
-            d.pop(k, None)
+    # ---- scrub dangerous keys (defensive) ----
+    danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric"}
+    def _scrub(d: dict) -> dict: return {k: v for k, v in d.items() if k not in danger_keys}
+    params_ll  = _scrub(params_ll)
+    params_auc = _scrub(params_auc)
     base_kwargs.update({"objective": "binary:logistic", "eval_metric": "logloss"})
 
-    danger_keys = {"objective", "_estimator_type", "response_method"} 
-    
-    def _scrub_grid(d: dict) -> dict:
-        return {k: v for k, v in d.items() if k not in danger_keys}
-
-    params_ll  = _scrub_grid(params_ll)
-    params_auc = _scrub_grid(params_auc)
-
-    # ---- optional: monotone constraints (only on numeric features) ----
-    if features:
-        # start neutral
+    # ---- (optional) monotone constraints — only when explicitly enabled ----
+    if use_monotone and features:
         mono = {c: 0 for c in features}
-
-        # strictly keep *numeric* signals here (drop categorical like Pct_Line_Move_Bin)
+        # Use only clearly numeric / directional fields
         plus_1 = [
-            "Abs_Odds_Move_From_Opening",
-            "Pct_Line_Move_From_Opening",
+            "Abs_Odds_Move_From_Opening", "Pct_Line_Move_From_Opening",
             "Abs_Line_Move_Z", "Pct_Line_Move_Z",
-            "Line_Moved_Toward_Team",
-            "Outcome_Cover_Prob",
+            "Line_Moved_Toward_Team", "Outcome_Cover_Prob",
             "Book_Reliability_Lift", "Book_Reliability_x_Sharp", "Book_Reliability_x_PROB_SHIFT",
-        ] + [c for c in features if c.startswith("SharpMove_Magnitude_")
-                              or c.startswith("OddsMove_Magnitude_")]
+        ]
         minus_1 = [
             "Value_Reversal_Flag", "Odds_Reversal_Flag",
             "Potential_Overmove_Flag", "Potential_Odds_Overmove_Flag",
             "Total_vs_Spread_Contradiction",
         ]
-
         for c in plus_1:
             if c in mono: mono[c] = 1
         for c in minus_1:
             if c in mono: mono[c] = -1
-
-        # build constraint vector aligned to current features order
         base_kwargs["monotone_constraints"] = "(" + ",".join(str(mono.get(c, 0)) for c in features) + ")"
+    else:
+        # make sure we don't accidentally carry an old value
+        base_kwargs.pop("monotone_constraints", None)
 
     return base_kwargs, params_ll, params_auc
-
 def resolve_groups(df: pd.DataFrame) -> np.ndarray:
     # 1) Prefer the per-game key if present
     if "Merge_Key_Short" in df.columns and df["Merge_Key_Short"].notna().any():
