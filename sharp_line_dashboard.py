@@ -136,9 +136,10 @@ from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import RandomizedSearchCV
-from sklearn.base import is_classifier as sk_is_classifier
-from xgboost import XGBClassifier
 
+from xgboost import XGBClassifier
+# put near your imports (only once)
+from sklearn.base import is_classifier as sk_is_classifier
 
 
 from sklearn.calibration import calibration_curve
@@ -2133,17 +2134,12 @@ def get_xgb_search_space(
         }
 
     # ---- scrub any keys that could flip estimator semantics ----
-    danger_keys = {"objective", "_estimator_type", "response_method"}
-    for k in list(danger_keys):
-        base_kwargs.pop(k, None)
+    for d in (params_ll, params_auc):
+        for k in ("objective", "_estimator_type", "response_method"):
+            d.pop(k, None)
+    base_kwargs.update({"objective": "binary:logistic", "eval_metric": "logloss"})
 
-    # re-assert classifier semantics explicitly
-    base_kwargs.update({
-        "objective":   "binary:logistic",
-        "eval_metric": "logloss",
-        "tree_method": "hist",
-    })
-
+ 
     def _scrub_grid(d: dict) -> dict:
         return {k: v for k, v in d.items() if k not in danger_keys}
 
@@ -5089,12 +5085,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
         
-        def _assert_classifier(est, name):
-            is_clf_tag = getattr(est, "_estimator_type", None) == "classifier"
-            if not (sk_is_classifier(est) and is_clf_tag and hasattr(est, "predict_proba")):
+        
+                
+        def _assert_classifier(est, name: str):
+            # robust, no fitting required
+            tag = getattr(est, "_estimator_type", None)
+            has_pp = callable(getattr(est, "predict_proba", None))
+            params = getattr(est, "get_params", lambda: {})()
+            obj = params.get("objective", None)
+        
+            ok = (
+                sk_is_classifier(est)            # uses _estimator_type internally
+                and tag == "classifier"
+                and has_pp
+                and (obj is None or str(obj).startswith("binary:"))
+            )
+            if not ok:
+                subset = {k: params.get(k) for k in (
+                    "objective","eval_metric","tree_method",
+                    "max_depth","max_leaves","reg_lambda","reg_alpha"
+                )}
                 raise AssertionError(
-                    f"{name} not classifier. type={type(est)} "
-                    f"_estimator_type={getattr(est, '_estimator_type', None)}"
+                    f"{name} not classifier.\n"
+                    f"type={type(est)}\n"
+                    f"_estimator_type={tag}\n"
+                    f"has_predict_proba={has_pp}\n"
+                    f"params={subset}"
                 )
         
         _assert_classifier(search_base_ll,  "search_base_ll")
