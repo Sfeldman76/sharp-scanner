@@ -3333,7 +3333,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # Work with a single frame going forward
     
 
-    df_bt = df_bt.copy()
+    df_bt = df.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
     # Normalize keys
     df_bt['Game_Key'] = df_bt['Game_Key'].astype(str).str.strip().str.lower()
