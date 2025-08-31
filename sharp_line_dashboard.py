@@ -260,32 +260,25 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
     return _alias_lookup(book_raw), _alias_lookup(bm_raw)
 
 
-def safe_row_entropy(M, eps=1e-12):
+def safe_row_entropy(W: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """
-    M: array-like, nonnegative magnitudes per 'bucket' (shape: n_rows x n_buckets)
-    Returns: entropy per row (float32), 0.0 if a row sums to 0.
+    Row-wise Shannon entropy for nonnegative weights matrix W (n_rows x n_cols).
+    - Handles rows with zero total mass safely (entropy -> 0).
+    - Avoids NaN/inf and broadcasting issues.
     """
-    M = np.asarray(M, dtype=np.float64)
-    M = np.where(np.isfinite(M), M, 0.0)     # drop NaN/inf -> 0
-    M = np.maximum(M, 0.0)                   # no negatives
+    W = np.asarray(W, dtype=np.float32)
+    # sanitize inputs
+    W = np.nan_to_num(W, nan=0.0, posinf=0.0, neginf=0.0)
+    W = np.maximum(W, 0.0)
 
-    row_sum = M.sum(axis=1, keepdims=True)
-    has_mass = (row_sum > 0)
+    row_sum = W.sum(axis=1, keepdims=True)             # shape (n, 1)
+    # probability rows; where sum==0 produce zeros
+    P = np.divide(W, np.maximum(row_sum, eps), out=np.zeros_like(W), where=row_sum > 0)
 
-    P = np.zeros_like(M, dtype=np.float64)
-    if has_mass.any():
-        P[has_mass[:, 0]] = M[has_mass[:, 0]] / row_sum[has_mass]
-
-    # Only compute entropy where we have mass; elsewhere leave 0
-    H = np.zeros(M.shape[0], dtype=np.float64)
-    if has_mass.any():
-        P_sub = np.clip(P[has_mass[:, 0]], eps, 1.0)
-        # with no warnings
-        with np.errstate(divide='ignore', invalid='ignore'):
-            H[has_mass[:, 0]] = -np.sum(P_sub * np.log(P_sub), axis=1)
-
-    return H.astype("float32")
-
+    # entropy per row: -sum(p*log p)
+    # compute only where p>0 to avoid log(0)
+    ent = -(np.where(P > 0, P * np.log(P), 0.0)).sum(axis=1).astype(np.float32)
+    return ent
 
 BOOKMAKER_REGIONS = {
     # 🔹 Sharp Books
@@ -2692,36 +2685,51 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
     out["Hybrid_Odds_EarlyShare"]= (out["Hybrid_Odds_EarlyMag"]/ (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
     out["Hybrid_Line_Odds_Mag_Ratio"] = (out["Hybrid_Line_TotalMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
 
-    # Imbalance & entropies
-    out["Hybrid_Line_Imbalance_LateVsEarly"] = (
-        (out["Hybrid_Line_LateMag"] - out["Hybrid_Line_EarlyMag"]) / (out["Hybrid_Line_TotalMag"] + eps)
-    ).astype("float32")
-
-    if line_cols:
-        W = out[line_cols].to_numpy(dtype="float32")
-        out["Hybrid_Timing_Entropy_Line"] = safe_row_entropy(W)
-    else:
-        out["Hybrid_Timing_Entropy_Line"] = 0.0
+    # assume: eps = 1e-12 (or your chosen small constant)
     
-    if odds_cols:
-        W2 = out[odds_cols].to_numpy(dtype="float32")
-        out["Hybrid_Timing_Entropy_Odds"] = safe_row_entropy(W2)
+    # Imbalance (guard denom) + cast
+    out["Hybrid_Line_Imbalance_LateVsEarly"] = (
+        (out["Hybrid_Line_LateMag"] - out["Hybrid_Line_EarlyMag"]) /
+        (out["Hybrid_Line_TotalMag"].astype("float32") + eps)
+    ).astype("float32")
+    
+    # Filter to columns that actually exist (in case lists contain extras)
+    _line_cols = [c for c in (line_cols or []) if c in out.columns]
+    _odds_cols = [c for c in (odds_cols or []) if c in out.columns]
+    
+    if _line_cols:
+        W = out[_line_cols].to_numpy(dtype="float32")
+        out["Hybrid_Timing_Entropy_Line"] = safe_row_entropy(W).astype("float32")
     else:
-        out["Hybrid_Timing_Entropy_Odds"] = 0.0
-        # Ensure your “absolute from open” live in float32 (if present)
-        for c in ("Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening"):
-            if c not in out.columns:
-                out[c] = 0.0
-            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
-
-    # Interactions with snapshot microstructure (if those exist already)
+        out["Hybrid_Timing_Entropy_Line"] = np.float32(0.0)
+    
+    if _odds_cols:
+        W2 = out[_odds_cols].to_numpy(dtype="float32")
+        out["Hybrid_Timing_Entropy_Odds"] = safe_row_entropy(W2).astype("float32")
+    else:
+        out["Hybrid_Timing_Entropy_Odds"] = np.float32(0.0)
+    
+    # Ensure absolute-from-open columns exist & are float32
+    for c in ("Abs_Line_Move_From_Opening", "Abs_Odds_Move_From_Opening"):
+        if c not in out.columns:
+            out[c] = 0.0
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
+    
+    # Interactions with snapshot microstructure (float32)
     if "Key_Corridor_Pressure" in out.columns:
-        out["Corridor_x_LateShare_Line"] = (out["Key_Corridor_Pressure"] * out["Hybrid_Line_LateShare"]).astype("float32")
+        out["Corridor_x_LateShare_Line"] = (
+            out["Key_Corridor_Pressure"].astype("float32") * out["Hybrid_Line_LateShare"].astype("float32")
+        ).astype("float32")
     if "Dist_To_Next_Key" in out.columns:
-        out["Dist_x_LateShare_Line"]      = (out["Dist_To_Next_Key"] * out["Hybrid_Line_LateShare"]).astype("float32")
+        out["Dist_x_LateShare_Line"] = (
+            out["Dist_To_Next_Key"].astype("float32") * out["Hybrid_Line_LateShare"].astype("float32")
+        ).astype("float32")
     if "Book_PctRank_Line" in out.columns:
-        out["PctRank_x_LateShare_Line"]   = (out["Book_PctRank_Line"] * out["Hybrid_Line_LateShare"]).astype("float32")
-
+        out["PctRank_x_LateShare_Line"] = (
+            out["Book_PctRank_Line"].astype("float32") * out["Hybrid_Line_LateShare"].astype("float32")
+        ).astype("float32")
+        # Ensure your “absolute from open” live in float32 (if present)
+  
     return out
 
 
