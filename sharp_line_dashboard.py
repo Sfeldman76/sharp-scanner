@@ -3478,6 +3478,61 @@ def fetch_scores_with_features(sport: str, days_back: int):
     # Fast path, but stable because we reuse a cached BigQueryReadClient
     return bq.query(sql, job_config=job_cfg).to_dataframe(bqstorage_client=bqs)
 
+import pandas as pd
+import numpy as np
+import json
+import uuid
+import streamlit as st
+
+def debug_streamlit_dataframe_crash(df: pd.DataFrame, name: str = ""):
+    """
+    Run diagnostic checks to detect what might crash st.dataframe() or st.table().
+    - Shows types, detects bad columns, tests JSON safety.
+    - Writes a local .parquet file for full offline inspection.
+    """
+    title = f"🧪 Debugging Streamlit DataFrame Crash — {name}" if name else "🧪 Debugging Streamlit DataFrame Crash"
+    st.subheader(title)
+
+    try:
+        st.markdown("#### 📋 Column Types")
+        st.write(df.dtypes.to_frame("dtype").T)
+
+        dupes = df.columns[df.columns.duplicated()].tolist()
+        if dupes:
+            st.error(f"❌ Duplicate columns detected: {dupes}")
+
+        st.markdown("#### 🔍 Sample Rows")
+        st.write(df.head(5))
+
+        st.markdown("#### 🧪 JSON Serialization Check")
+        try:
+            sample_json = json.dumps(df.head(100).to_dict(orient="records"), default=str)
+            st.success("✅ JSON serialization passed — Streamlit should not crash")
+        except Exception as je:
+            st.error(f"❌ JSON serialization failed — UI likely to crash")
+            st.exception(je)
+
+        # Optional: check for object or list-type cells
+        bad_cols = []
+        for col in df.columns:
+            if df[col].apply(lambda x: isinstance(x, (list, dict, tuple, set))).any():
+                bad_cols.append(col)
+        if bad_cols:
+            st.warning(f"⚠️ Columns with nested/list/dict data: {bad_cols}")
+
+        # Optional: check for infinite or NA values
+        inf_cols = df.columns[df.replace([np.inf, -np.inf], np.nan).isna().any()]
+        if len(inf_cols):
+            st.info(f"ℹ️ Columns with inf or NaN: {list(inf_cols)}")
+
+        # Save for offline deep dive
+        filename = f"/tmp/streamlit_debug_{name}_{uuid.uuid4().hex[:6]}.parquet"
+        df.to_parquet(filename, index=False)
+        st.caption(f"💾 Snapshot saved for debugging: `{filename}`")
+
+    except Exception as e:
+        st.error("❌ Debug function itself failed")
+        st.exception(e)
 
 def clean_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
     """Sanitize feature columns for modeling + UI. Drop or coerce unsafe dtypes."""
@@ -4874,7 +4929,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
              .fillna(0.0)
              .astype('float32'))
 
+        # Before your st.dataframe(show)
+        debug_streamlit_dataframe_crash(show, name="high_corr_pairs")
         
+        # Then (if safe):
+        st.dataframe(show)
         # ---- Robust correlation scan (UI-safe) ------------------------------------
         st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
         
