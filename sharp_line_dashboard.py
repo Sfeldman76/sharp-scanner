@@ -131,7 +131,13 @@ RATINGS_HISTORY_TABLE = "sharplogger.sharp_data.ratings_history"  # <- fully qua
 GCS_BUCKET = "sharp-models"
 import os, json
 import gc
-
+  
+from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import RandomizedSearchCV
+from sklearn.base import is_classifier as sk_is_classifier
+from xgboost import XGBClassifier
 
 
 
@@ -2033,6 +2039,7 @@ from scipy.stats import randint, uniform, loguniform
 
 SMALL_LEAGUES = {"WNBA", "CFL"}
 BIG_LEAGUES   = {"MLB", "NBA", "NFL", "NCAAF", "NCAAB"}  # extend as needed
+from scipy.stats import randint, uniform, loguniform  # ensure these are imported at top
 
 def get_xgb_search_space(
     sport: str,
@@ -2042,58 +2049,62 @@ def get_xgb_search_space(
     scale_pos_weight: float = 1.0,
     features: list[str] | None = None,  # kept for interface compatibility
 ) -> tuple[dict, dict, dict]:
-    s = sport.upper()
+    """
+    Returns (base_kwargs, params_ll, params_auc) for XGBClassifier randomized searches.
+    - base_kwargs: fixed, classifier-safe defaults
+    - params_ll / params_auc: search spaces scrubbed of any dangerous keys
+    """
+    s = str(sport).upper()
 
     # ---- base kwargs (shared) ----
     base_kwargs = dict(
+        # classifier semantics (kept explicit; scrub below and re-assert)
         objective="binary:logistic",
         eval_metric="logloss",
-        tree_method="hist",           # use "gpu_hist" if you have a GPU
+
+        # speed/structure
+        tree_method="hist",
         grow_policy="lossguide",
-        max_leaves=48,                # safe cap; depth will still control structure
-        max_bin=128 if X_rows < 150_000 else 64,
+        max_leaves=48,                              # pairs with lossguide
+        max_bin=(128 if X_rows < 150_000 else 64),
         sampling_method="uniform",
-        # single_precision_histogram=True,  # uncomment only if xgboost >= 1.7
         colsample_bynode=0.8,
 
-        # regularization & stability (reasonable defaults; the search will override)
+        # reasonable regularization (search will override)
         reg_lambda=5.0,
         min_child_weight=5,
 
-        # parallelism
+        # parallelism & stability
         n_jobs=int(n_jobs),
-
-        # imbalance
-        scale_pos_weight=float(scale_pos_weight),
-
         random_state=42,
         importance_type="total_gain",
-        # predictor="cpu_predictor",
+
+        # imbalance prior
+        scale_pos_weight=float(scale_pos_weight),
     )
 
     if s in SMALL_LEAGUES:
         # ---- SMALL LEAGUES (stability-first) ----
         params_ll = {
-            "max_depth":        randint(2, 3),            # {2}
-            "learning_rate":    loguniform(6e-3, 2.5e-2), # 0.006–0.025
-            "subsample":        uniform(0.85, 0.15),      # 0.85–1.00
-            "colsample_bytree": uniform(0.85, 0.15),      # 0.85–1.00
-            "min_child_weight": randint(8, 20),           # 8–19
-            "gamma":            uniform(0.20, 0.60),      # 0.20–0.80
-            "reg_alpha":        loguniform(1e-1, 2.0e1),  # 0.1–20
-            "reg_lambda":       loguniform(1.5e1, 1.0e2), # 15–100
-            # Optional if using lossguide: control leaf count too
+            "max_depth":        randint(2, 3),             # {2}
+            "learning_rate":    loguniform(6e-3, 2.5e-2),  # 0.006–0.025
+            "subsample":        uniform(0.85, 0.15),       # 0.85–1.00
+            "colsample_bytree": uniform(0.85, 0.15),       # 0.85–1.00
+            "min_child_weight": randint(8, 20),            # 8–19
+            "gamma":            uniform(0.20, 0.60),       # 0.20–0.80
+            "reg_alpha":        loguniform(1e-1, 2.0e1),   # 0.1–20
+            "reg_lambda":       loguniform(1.5e1, 1.0e2),  # 15–100
             "max_leaves":       randint(8, 18),
         }
         params_auc = {
-            "max_depth":        randint(2, 4),            # {2,3}
-            "learning_rate":    loguniform(5e-3, 3.0e-2), # 0.005–0.03
-            "subsample":        uniform(0.80, 0.20),      # 0.80–1.00
-            "colsample_bytree": uniform(0.80, 0.20),      # 0.80–1.00
-            "min_child_weight": randint(6, 16),           # 6–15
-            "gamma":            uniform(0.15, 0.45),      # 0.15–0.60
-            "reg_alpha":        loguniform(5e-2, 1.0e1),  # 0.05–10
-            "reg_lambda":       loguniform(1.0e1, 8.0e1), # 10–80
+            "max_depth":        randint(2, 4),             # {2,3}
+            "learning_rate":    loguniform(5e-3, 3.0e-2),  # 0.005–0.03
+            "subsample":        uniform(0.80, 0.20),       # 0.80–1.00
+            "colsample_bytree": uniform(0.80, 0.20),       # 0.80–1.00
+            "min_child_weight": randint(6, 16),            # 6–15
+            "gamma":            uniform(0.15, 0.45),       # 0.15–0.60
+            "reg_alpha":        loguniform(5e-2, 1.0e1),   # 0.05–10
+            "reg_lambda":       loguniform(1.0e1, 8.0e1),  # 10–80
             "max_leaves":       randint(10, 20),
         }
     else:
@@ -2120,49 +2131,52 @@ def get_xgb_search_space(
             "reg_alpha":        loguniform(1e-4, 1.0),     # 0.0001–1
             "reg_lambda":       loguniform(3.0, 5.0e1),    # 3–50
         }
-    
-    # Scrub dangerous keys for BOTH branches
+
+    # ---- scrub any keys that could flip estimator semantics ----
     danger_keys = {"objective", "_estimator_type", "response_method"}
-    for k in danger_keys:
+    for k in list(danger_keys):
         base_kwargs.pop(k, None)
-    
-    # then force classifier semantics
+
+    # re-assert classifier semantics explicitly
     base_kwargs.update({
         "objective":   "binary:logistic",
         "eval_metric": "logloss",
         "tree_method": "hist",
     })
-    def scrub_grid(d):
+
+    def _scrub_grid(d: dict) -> dict:
         return {k: v for k, v in d.items() if k not in danger_keys}
-    
-    params_ll  = scrub_grid(params_ll)
-    params_auc = scrub_grid(params_auc)
-    
-    # ---- optional: monotone constraints (no small-book creation) ----
-    if features is not None:
+
+    params_ll  = _scrub_grid(params_ll)
+    params_auc = _scrub_grid(params_auc)
+
+    # ---- optional: monotone constraints (only on numeric features) ----
+    if features:
+        # start neutral
         mono = {c: 0 for c in features}
+
+        # strictly keep *numeric* signals here (drop categorical like Pct_Line_Move_Bin)
         plus_1 = [
             "Abs_Odds_Move_From_Opening",
-            "Pct_Line_Move_From_Opening", "Pct_Line_Move_Bin",
+            "Pct_Line_Move_From_Opening",
             "Abs_Line_Move_Z", "Pct_Line_Move_Z",
             "Line_Moved_Toward_Team",
-            *[c for c in features if c.startswith("SharpMove_Magnitude_")],
-            *[c for c in features if c.startswith("OddsMove_Magnitude_")],
-            "Spread_vs_H2H_Aligned",
-            "MarketLeader_ImpProbShift", "LimitProtect_SharpMag",
-            "Delta_Sharp_vs_Rec", "Sharp_Leads",
-            "Book_Reliability_Lift", "Book_Reliability_x_Sharp", "Book_Reliability_x_PROB_SHIFT",
             "Outcome_Cover_Prob",
-        ]
+            "Book_Reliability_Lift", "Book_Reliability_x_Sharp", "Book_Reliability_x_PROB_SHIFT",
+        ] + [c for c in features if c.startswith("SharpMove_Magnitude_")
+                              or c.startswith("OddsMove_Magnitude_")]
         minus_1 = [
             "Value_Reversal_Flag", "Odds_Reversal_Flag",
             "Potential_Overmove_Flag", "Potential_Odds_Overmove_Flag",
             "Total_vs_Spread_Contradiction",
         ]
+
         for c in plus_1:
             if c in mono: mono[c] = 1
         for c in minus_1:
             if c in mono: mono[c] = -1
+
+        # build constraint vector aligned to current features order
         base_kwargs["monotone_constraints"] = "(" + ",".join(str(mono.get(c, 0)) for c in features) + ")"
 
     return base_kwargs, params_ll, params_auc
@@ -4850,9 +4864,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     yield train_idx, val_idx
         
         
-        # ==== Shared helpers / constants ====
-        # ==== Shared helpers / constants ====
+     
+        
         eps = 1e-4  # default probability clip
+        
         
         def pos_col_index(est, positive=1):
             cls = getattr(est, "classes_", None)
@@ -4862,7 +4877,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if len(hits) == 0:
                 raise RuntimeError(f"Positive class {positive!r} not found in classes_={cls}. Check label encoding.")
             return int(hits[0])
-    
+        
         
         def _to_numeric_block(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
             out = df[cols].copy()
@@ -4875,7 +4890,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     continue
         
                 # 2) Strings/objects/categories → clean then to_numeric
-                if is_object_dtype(col) or is_string_dtype(col) or isinstance(col.dtype, pd.CategoricalDtype):
+                if is_object_dtype(col) or is_string_dtype(col) or str(col.dtype).startswith("category"):
                     out[c] = col.replace({
                         'True': 1, 'False': 0, 'true': 1, 'false': 0,
                         True: 1, False: 0,
@@ -4902,8 +4917,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X_full = X_full[valid_mask.to_numpy()]
         y_full = y_series.loc[valid_mask].astype(int).to_numpy()
         
-        
-
         # ---- Groups & times (snapshot-aware) ----
         groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
         
@@ -4939,47 +4952,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X_full = X_full[keep]; y_full = y_full[keep]
             groups = groups[keep]; times  = times[keep]
         
-        # ---- Holdout = last ~15% of groups (time-forward, group-safe) ----
+        # ---- Holdout = last ~N groups (time-forward, group-safe) ----
         meta  = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
         gmeta = (meta.groupby("group", as_index=False)["time"]
                    .agg(start="min", end="max")
                    .sort_values("start")
                    .reset_index(drop=True))
         
-        
-        
-        n_groups = len(gmeta)
-        
-
-        
-        
-        # Example config per sport
+        # pick per-sport holdout games
         SPORT_HOLDOUT_GAMES = {
-            "NFL": 5,
-            "NCAAF": 5,
-            "NBA": 15,
-            "MLB": 30,
-            "WNBA": 8,
-            "NHL": 15,
-            "default": 10,
-            "CFL": 5
+            "NFL": 5, "NCAAF": 5, "NBA": 15, "MLB": 30, "WNBA": 8, "NHL": 15, "CFL": 5, "default": 10
         }
-        n_hold_games = SPORT_HOLDOUT_GAMES.get(sport.upper(), SPORT_HOLDOUT_GAMES["default"])
+        n_hold_games = SPORT_HOLDOUT_GAMES.get(sport_key, SPORT_HOLDOUT_GAMES["default"])
         
-        # groups = Game_Key per row
-        # times = Snapshot_Timestamp or Game_Start per row
         train_all_idx, hold_idx = get_holdout_by_last_n_games(
             groups=groups,
             times=times,
             n_hold_games=n_hold_games,
-            min_train_games=25  # or 30 if you want stronger guarantees
+            min_train_games=25,
         )
-        
-        #train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
-        
-        #all_g        = meta["group"].to_numpy()
-        #hold_idx      = np.flatnonzero(np.isin(all_g, hold_g))
-        #train_all_idx = np.flatnonzero(np.isin(all_g, train_g))
         
         # ---- TRAIN subset arrays (everything downstream uses only TRAIN rows) ----
         X_train = X_full[train_all_idx]
@@ -4988,8 +4979,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         t_train = times[train_all_idx]
         
         # ---------------------------------------------------------------------------
-        #  Book-aware sample weights: equalize duplicates within each game and tilt
-        #  softly toward sharper books — without discarding any rows.
+        #  Book-aware sample weights (equalize duplicates per game; tilt toward sharp)
         # ---------------------------------------------------------------------------
         bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
             "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
@@ -4998,10 +4988,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         train_df = df_market.loc[valid_mask].iloc[train_all_idx].copy()
         
         def _fallback_book_lift(df: pd.DataFrame, book_col: str, label_col: str, prior: float = 100.0):
-            """
-            Empirical-Bayes per-book lift: posterior_mean / global_rate - 1,
-            with Beta prior strength = 'prior' on the global base rate.
-            """
             if (book_col is None) or (book_col not in df.columns) or (label_col not in df.columns):
                 return pd.Series(dtype=float)
             dfv = df[[book_col, label_col]].dropna()
@@ -5011,24 +4997,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             y = pd.to_numeric(dfv[label_col], errors="coerce")
             m = float(np.nanmean(y))
             grp = dfv.groupby(book_col)[label_col].agg(["sum", "count"]).rename(columns={"sum": "hits", "count": "n"})
-            # posterior mean with Beta prior (a=m*prior, b=(1-m)*prior)
             a = m * prior; b = (1.0 - m) * prior
             post_mean = (grp["hits"] + a) / (grp["n"] + a + b)
             lift = (post_mean / max(1e-9, m)) - 1.0
             return lift
         
         if bk_col is None:
-            # No bookmaker column → uniform weights
             w_train = np.ones(len(train_df), dtype=np.float32)
         else:
             if bk_col not in train_df.columns:
                 train_df[bk_col] = "UNK"
         
-            # Within-game equalization: penalize duplicated (game,book) rows
             B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
             n_gb = train_df.groupby(["Game_Key", bk_col]).size()
         
-            TAU = 0.8  # 0=no penalty, 1=strong equalization for duplicated lines within game
+            TAU = 0.8
             def _w_gb(g, b, tau=1.0):
                 Bg  = max(1, int(B_g.get(g, 1)))
                 ngb = max(1, int(n_gb.get((g, b), 1)))
@@ -5036,13 +5019,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])], dtype=np.float32)
         
-            # Reliability tilt toward sharper books (uses prebuilt map if available; else EB fallback on TRAIN only)
             rel_lift = pd.Series(dtype=float)
             if "book_reliability_map" in locals() and isinstance(book_reliability_map, pd.DataFrame) and not book_reliability_map.empty:
                 br = book_reliability_map.copy()
-                # prefer sport/market-specific slice if present
                 if {"Sport", "Market"} <= set(br.columns):
-                    msk = (br["Sport"].astype(str).str.upper() == sport_key) & (br["Market"].astype(str).str.upper() == str(market).upper())
+                    msk = (br["Sport"].astype(str).str.upper() == sport_key) & (br["Market"].astype(str).str.lower() == str(market).lower())
                     if msk.any():
                         br = br.loc[msk]
                 if "Bookmaker" in br.columns and "Book_Reliability_Lift" in br.columns:
@@ -5050,27 +5031,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if rel_lift.empty:
                 rel_lift = _fallback_book_lift(train_df, bk_col, "SHARP_HIT_BOOL", prior=120.0)
         
-            # Robust map to [0,1] and apply tilt
             r = train_df[bk_col].map(rel_lift).fillna(0.0).astype(float)
             denom = max(1e-9, r.quantile(0.9) - r.quantile(0.5))
             r_p = ((r - r.quantile(0.5)) / denom).clip(0, 1)
         
-            ALPHA = 0.80  # strength of sharp tilt
+            ALPHA = 0.80
             w_train = w_base * (1.0 + ALPHA * r_p.to_numpy(dtype=np.float32))
         
-            # normalize so average weight ≈ 1
             s = w_train.sum()
             if s > 0:
                 w_train *= (len(w_train) / s)
         
-        # safety: ensure weights align
         assert len(w_train) == len(X_train), f"sample_weight misaligned: {len(w_train)} vs {len(X_train)}"
         
         # ---------------------------------------------------------------------------
-        #  Hyperparam spaces & small-league overrides
-        # ---------------------------------------------------------------------------
-                # ---------------------------------------------------------------------------
-        #  Hyperparam spaces & small-league overrides
+        #  Hyperparam spaces & small-league overrides (use the fixed helper)
         # ---------------------------------------------------------------------------
         feature_cols = list(features)
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
@@ -5081,51 +5056,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             features=features,
         )
         
-        # Generalization-friendly defaults (use canonical xgb names)
-        base_kwargs.update({
-            "objective":        "binary:logistic",
-            "eval_metric":      "logloss",
-            "tree_method":      "hist",
-            "grow_policy":      "lossguide",   # pairs with max_leaves (if you use it)
-            "max_delta_step":   1,
-            "reg_lambda":       max(5.0, float(base_kwargs.get("reg_lambda", 5.0))),
-            "reg_alpha":        float(base_kwargs.get("reg_alpha", 0.0)),
-            "gamma":            max(0.4, float(base_kwargs.get("gamma", 0.0))),
-            "min_child_weight": max(12, int(base_kwargs.get("min_child_weight", 12))),
-            "subsample":        min(0.90, max(0.65, float(base_kwargs.get("subsample", 0.80)))),
-            "colsample_bytree": min(0.90, max(0.60, float(base_kwargs.get("colsample_bytree", 0.75)))),
-            "n_jobs":           1,
-        })
-        
-        s = sport_key
-        if s in SMALL_LEAGUES:
-            base_kwargs.update({
-                "max_delta_step":    1,
-                "min_child_weight":  max(20, int(base_kwargs.get("min_child_weight", 20))),
-                "gamma":             max(1.0, float(base_kwargs.get("gamma", 1.0))),
-                "reg_lambda":        max(30.0, float(base_kwargs.get("reg_lambda", 30.0))),
-                "reg_alpha":         max(1.0,  float(base_kwargs.get("reg_alpha", 1.0))),
-                "subsample":         min(1.0,  max(0.80, float(base_kwargs.get("subsample", 0.85)))),
-                "colsample_bytree":  min(1.0,  max(0.80, float(base_kwargs.get("colsample_bytree", 0.85)))),
-                "max_depth":         min(5, int(base_kwargs.get("max_depth", 4))),
-            })
+        # sport-aware tweaks
+        if sport_key in SMALL_LEAGUES:
             search_estimators = 300
             eps = 5e-3
         else:
             search_estimators = 400
             eps = 1e-4
         
-        # Ensure spaces don't set objective/eval_metric
-        for d in (params_ll, params_auc):
-            d.pop("objective", None)
-            d.pop("eval_metric", None)
-        
         # ---------------------------------------------------------------------------
         #  CV with purge + embargo (snapshot-aware)
         # ---------------------------------------------------------------------------
         rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
-        target_games  = 8 if s in SMALL_LEAGUES else 20
-        min_val_size  = max(10 if s in SMALL_LEAGUES else 20, target_games * rows_per_game)
+        target_games  = 8 if sport_key in SMALL_LEAGUES else 20
+        min_val_size  = max(10 if sport_key in SMALL_LEAGUES else 20, target_games * rows_per_game)
         
         n_groups_train = pd.unique(g_train).size
         target_folds   = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
@@ -5140,42 +5084,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert len(folds) > 0, "No usable folds"
         
         # ---------------------------------------------------------------------------
-        #  Randomized searches (with sample_weight)
+        #  Estimators & safety checks
         # ---------------------------------------------------------------------------
-         from sklearn.base import is_classifier
-        from pprint import pformat
-
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
-        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})     
+        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
         
-        
-
-
         def _assert_classifier(est, name):
-            from pprint import pformat
-            # Check the tag directly in addition to using sklearn's helper
             is_clf_tag = getattr(est, "_estimator_type", None) == "classifier"
             if not (sk_is_classifier(est) and is_clf_tag and hasattr(est, "predict_proba")):
-                msg = (
-                    f"{name} not classifier.\n"
-                    f"type={type(est)}\n"
-                    f"_estimator_type={getattr(est, '_estimator_type', None)}\n"
-                    f"has_predict_proba={hasattr(est, 'predict_proba')}\n"
-                    f"xgb_params={getattr(est, 'get_xgb_params', lambda: {})()}"
+                raise AssertionError(
+                    f"{name} not classifier. type={type(est)} "
+                    f"_estimator_type={getattr(est, '_estimator_type', None)}"
                 )
-                raise AssertionError(msg)
-        # Right before CV:
+        
         _assert_classifier(search_base_ll,  "search_base_ll")
         _assert_classifier(search_base_auc, "search_base_auc")
-       
-                
         
-       
-       # Log-loss search
+        # ---------------------------------------------------------------------------
+        #  Randomized searches (built-in scorers support sample_weight)
+        # ---------------------------------------------------------------------------
         rs_ll = RandomizedSearchCV(
-            estimator=search_base_ll,           # or your Pipeline
+            estimator=search_base_ll,
             param_distributions=params_ll,
-            scoring="neg_log_loss",             # ✅ built-in, supports sample_weight
+            scoring="neg_log_loss",     # supports sample_weight
             cv=folds,
             n_iter=15,
             n_jobs=1,
@@ -5186,11 +5117,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         rs_ll.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
         
-        # AUC search
         rs_auc = RandomizedSearchCV(
             estimator=search_base_auc,
             param_distributions=params_auc,
-            scoring="roc_auc",                  # ✅ built-in, supports sample_weight
+            scoring="roc_auc",          # supports sample_weight
             cv=folds,
             n_iter=15,
             n_jobs=1,
@@ -5200,13 +5130,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             error_score="raise",
         )
         rs_auc.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
-                
+        
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
-                
         # ---------------------------------------------------------------------------
         #  Final early-stopped fits on last CV fold (with sample_weight)
         # ---------------------------------------------------------------------------
