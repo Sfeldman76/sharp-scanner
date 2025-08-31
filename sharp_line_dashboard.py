@@ -4963,10 +4963,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                    .reset_index(drop=True))
         
         # pick per-sport holdout games
-        SPORT_HOLDOUT_GAMES = {
-            "NFL": 5, "NCAAF": 5, "NBA": 15, "MLB": 30, "WNBA": 8, "NHL": 15, "CFL": 5, "default": 10
-        }
-        n_hold_games = SPORT_HOLDOUT_GAMES.get(sport_key, SPORT_HOLDOUT_GAMES["default"])
+        # === Time-forward % split (e.g. last 20% for holdout) ===
+        pct_holdout = 0.20  # ← You can tune this per sport if needed
+        meta = pd.DataFrame({
+            "idx": np.arange(len(groups)),
+            "group": groups,
+            "time": pd.to_datetime(times, utc=True)
+        })
+        meta = meta.sort_values("time").reset_index(drop=True)
+        
+        n_hold = int(len(meta) * pct_holdout)
+        n_hold = max(1, n_hold)  # prevent empty holdout
+        
+        hold_idx = meta.iloc[-n_hold:]["idx"].to_numpy()
+        train_all_idx = meta.iloc[:-n_hold]["idx"].to_numpy()
         
         train_all_idx, hold_idx = get_holdout_by_last_n_games(
             groups=groups,
@@ -4974,7 +4984,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_hold_games=n_hold_games,
             min_train_games=25,
         )
+        # Diagnostic checks
+        y_hold_vec = y_full[hold_idx]
+        y_train_vec = y_full[train_all_idx]
         
+        st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
+        st.write(f"Train class balance: {np.bincount(y_train_vec)}")
+        st.write(f"Holdout class balance: {np.bincount(y_hold_vec)}")
+        st.write(f"Train label distribution: {np.bincount(y_train_vec)} (Total: {len(y_train_vec)})")
+        st.write(f"Holdout label distribution: {np.bincount(y_hold_vec)} (Total: {len(y_hold_vec)})")
         # ---- TRAIN subset arrays (everything downstream uses only TRAIN rows) ----
         X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
