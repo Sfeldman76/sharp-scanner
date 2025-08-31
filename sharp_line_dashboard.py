@@ -2187,6 +2187,98 @@ def get_xgb_search_space(
         base_kwargs.pop("monotone_constraints", None)
 
     return base_kwargs, params_ll, params_auc
+
+import os, glob
+import pandas as pd
+import numpy as np
+import streamlit as st
+
+def read_parquet_safe(path: str) -> pd.DataFrame:
+    """
+    Try pyarrow first; fall back to fastparquet if needed.
+    """
+    try:
+        return pd.read_parquet(path, engine="pyarrow")
+    except Exception:
+        return pd.read_parquet(path, engine="fastparquet")
+
+def show_df_diagnostics(df: pd.DataFrame, name: str = "DataFrame"):
+    st.subheader(f"📦 {name} — Preview & Diagnostics")
+
+    # Basic shape + memory
+    st.write(f"Shape: {df.shape[0]:,} rows × {df.shape[1]:,} columns")
+    mem_mb = df.memory_usage(deep=True).sum() / (1024**2)
+    st.write(f"Approx. memory: {mem_mb:.2f} MB")
+
+    # Dtypes table
+    st.markdown("**Dtypes**")
+    st.table(df.dtypes.rename("dtype"))
+
+    # Nulls / infs
+    with st.expander("🧼 Nulls & Infs by Column", expanded=False):
+        nulls = df.isna().sum()
+        pos_inf = np.isposinf(df.select_dtypes(include=[np.number])).sum()
+        neg_inf = np.isneginf(df.select_dtypes(include=[np.number])).sum()
+        out = pd.DataFrame({
+            "nulls": nulls,
+            "pos_inf": pos_inf.reindex(df.columns).fillna(0).astype(int),
+            "neg_inf": neg_inf.reindex(df.columns).fillna(0).astype(int),
+        })
+        st.table(out.sort_values(["nulls","pos_inf","neg_inf"], ascending=False))
+
+    # Mixed-type check (object columns that mix numbers/strings/bools, etc.)
+    with st.expander("🧪 Mixed-Type Columns (first 1k rows sampled)", expanded=False):
+        sample = df.head(1000)
+        mixed_info = []
+        for c in sample.columns:
+            try:
+                types = set(type(x).__name__ for x in sample[c].dropna().iloc[:500])
+            except Exception:
+                types = {"<error>"}
+            if len(types) > 1:
+                mixed_info.append({"column": c, "types_seen": ", ".join(sorted(types))})
+        if mixed_info:
+            st.table(pd.DataFrame(mixed_info).sort_values("column"))
+        else:
+            st.info("No mixed Python types detected in the first 1k rows.")
+
+    # Preview (cap rows to keep UI snappy)
+    with st.expander("👀 Data preview", expanded=True):
+        preview = df.head(200).copy()
+        st.dataframe(preview, use_container_width=True)
+
+    # Download helper
+    with st.expander("⬇️ Download file", expanded=False):
+        with open(selected_path, "rb") as f:
+            st.download_button("Download Parquet", f, file_name=os.path.basename(selected_path))
+
+st.markdown("### 🗂️ Debug Parquet Viewer")
+
+# Find your debug files (adjust the glob if your filenames differ)
+candidates = sorted(glob.glob("/tmp/streamlit_debug_*.parquet"))
+default_path_hint = "/tmp/streamlit_debug_high_corr_pairs_9d4195.parquet"
+if default_path_hint not in candidates and os.path.exists(default_path_hint):
+    candidates.append(default_path_hint)
+
+if not candidates:
+    st.info("No debug Parquet files found under /tmp. (Expected pattern: `/tmp/streamlit_debug_*.parquet`)")
+else:
+    selected_path = st.selectbox("Choose a debug Parquet:", candidates, index=len(candidates)-1)
+    try:
+        df_debug = read_parquet_safe(selected_path)
+        show_df_diagnostics(df_debug, name=os.path.basename(selected_path))
+
+        # Optional: if this file is specifically your high-corr pairs, do a quick check
+        if {"Feature_1","Feature_2","Correlation"}.issubset(df_debug.columns):
+            st.markdown("**High-corr pairs summary**")
+            st.table(
+                df_debug.head(50)[["Feature_1","Feature_2","Correlation"]].assign(
+                    Correlation=lambda d: d["Correlation"].round(4)
+                )
+            )
+    except Exception as e:
+        st.error(f"Failed to read `{selected_path}`: {e}")
+
 def resolve_groups(df: pd.DataFrame) -> np.ndarray:
     # 1) Prefer the per-game key if present
     if "Merge_Key_Short" in df.columns and df["Merge_Key_Short"].notna().any():
@@ -4987,11 +5079,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             
                 # 🔍 DEBUG ONLY AFTER `show` is defined
                 debug_streamlit_dataframe_crash(show, name="high_corr_pairs")
-            
+
+                # (optional) mount the viewer only once per run
+                if not st.session_state.get("_debug_viewer_mounted", False):
+                    with st.expander("🧪 View Debug Parquet Files", expanded=False):
+                        show_debug_parquet_viewer()
+                    st.session_state["_debug_viewer_mounted"] = True
+                
                 # --- Final hardening before render ---
-                show = show.copy()
+                # keep only expected cols (in order) if present
                 expected = ["Feature_1", "Feature_2", "Correlation"]
-                show = show[[c for c in expected if c in show.columns]]
+                present = [c for c in expected if c in show.columns]
+                show = show.loc[:, present].copy()
+            
+               
         
                 if "Feature_1" in show: show["Feature_1"] = show["Feature_1"].astype("string")
                 if "Feature_2" in show: show["Feature_2"] = show["Feature_2"].astype("string")
