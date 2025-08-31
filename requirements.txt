@@ -1,6 +1,6 @@
 # === Web App & Frontend ===
-streamlit==1.35.0
-streamlit-autorefresh==1.0.1
+streamlit
+streamlit-autorefresh
 altair
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
@@ -32,6 +32,7 @@ google-cloud-tasks
 cloudpickle==3.0.0
 # === Add if you use the gunicorn-based CMD ===
 gunicorn
+
 
 
 
