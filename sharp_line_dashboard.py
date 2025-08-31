@@ -5131,20 +5131,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-        neg_logloss = make_scorer(
-            log_loss,
-            greater_is_better=False,
-            needs_proba=True
-        )
+        
 
-        # Use built-in scorers that accept sample_weight
+       # Log-loss search
         rs_ll = RandomizedSearchCV(
-            estimator=search_base_ll,
+            estimator=search_base_ll,           # or your Pipeline
             param_distributions=params_ll,
-            scoring=neg_logloss,
+            scoring="neg_log_loss",             # ✅ built-in, supports sample_weight
             cv=folds,
             n_iter=15,
-            n_jobs=1,            # safer on small containers
+            n_jobs=1,
             random_state=42,
             refit=True,
             verbose=1,
@@ -5152,10 +5148,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         rs_ll.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
         
+        # AUC search
         rs_auc = RandomizedSearchCV(
             estimator=search_base_auc,
             param_distributions=params_auc,
-            scoring="roc_auc",
+            scoring="roc_auc",                  # ✅ built-in, supports sample_weight
             cv=folds,
             n_iter=15,
             n_jobs=1,
@@ -5165,7 +5162,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             error_score="raise",
         )
         rs_auc.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
-        
+                
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type"):
