@@ -4739,7 +4739,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
             #'Book_Reliability_Score',
-            'Book_Reliability_Lift',#'Book_Reliability_x_Sharp',
+            #'Book_Reliability_Lift',#'Book_Reliability_x_Sharp',
             'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
         
@@ -4875,7 +4875,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
              .astype('float32'))
 
         
-        # Correlation check (robust to NaNs/constant columns)
         # ---- Robust correlation scan (UI-safe) ------------------------------------
         st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
         
@@ -4883,8 +4882,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=feature_cols if 'feature_cols' in locals() else None)
         
-        Xc = (X.apply(pd.to_numeric, errors="coerce")
-                .replace([np.inf, -np.inf], np.nan))
+        Xc = (
+            X.apply(pd.to_numeric, errors="coerce")
+             .replace([np.inf, -np.inf], np.nan)
+        )
         
         # 2) Remove all-NA and constant columns (they break/degenerate corr)
         na_only_cols = [c for c in Xc.columns if Xc[c].isna().all()]
@@ -4896,11 +4897,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if Xc.shape[1] == 0:
             st.info("No valid numeric, non-constant features available for correlation.")
         else:
-            # Optional: downcast to float32 to save memory on big frames
+            # Downcast to save memory
             Xc = Xc.astype("float32")
         
             # 4) Compute abs corr with pairwise complete obs
-            # (fillna=0 is NOT used to avoid fake correlations)
             try:
                 corr_matrix = Xc.corr(method="pearson", min_periods=2).abs()
             except Exception as e:
@@ -4922,15 +4922,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if not pairs:
                 st.success("✅ No highly correlated feature pairs found")
             else:
-                df_corr = (pd.DataFrame(pairs, columns=["Feature_1","Feature_2","Correlation"])
-                             .sort_values("Correlation", ascending=False))
+                df_corr = (
+                    pd.DataFrame(pairs, columns=["Feature_1","Feature_2","Correlation"])
+                    .sort_values("Correlation", ascending=False)
+                )
         
                 # 6) UI safety: cap rows & round
-                max_rows = 500  # keep Streamlit happy
+                max_rows = 500
                 show = df_corr.head(max_rows).copy()
                 show["Correlation"] = show["Correlation"].round(4)
         
-                # 7) Surface helpful diagnostics
+                # 7) Diagnostics
                 title_market = market.upper() if 'market' in locals() else 'MARKET'
                 st.write(
                     f"Found {len(df_corr):,} high‑corr pairs > {threshold:.2f} "
@@ -4939,8 +4941,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 if na_only_cols:
                     st.caption(f"⚠️ Dropped {len(na_only_cols)} all‑NA features")
                 if const_cols:
-                    st.caption(f"⚠️ Dropped {len(const_cols)} constant features "
-                               f"(e.g., {', '.join(const_cols[:5])}{'…' if len(const_cols)>5 else ''})")
+                    st.caption(
+                        "⚠️ Dropped {n} constant features (e.g., {ex})".format(
+                            n=len(const_cols),
+                            ex=", ".join(map(str, const_cols[:5])) + ("…" if len(const_cols) > 5 else "")
+                        )
+                    )
+        
+                # --- Final hardening before render ---
+                show = show.copy()
+                expected = ["Feature_1", "Feature_2", "Correlation"]
+                show = show[[c for c in expected if c in show.columns]]
+        
+                if "Feature_1" in show: show["Feature_1"] = show["Feature_1"].astype("string")
+                if "Feature_2" in show: show["Feature_2"] = show["Feature_2"].astype("string")
+                if "Correlation" in show:
+                    show["Correlation"] = (
+                        pd.to_numeric(show["Correlation"], errors="coerce")
+                          .replace([np.inf, -np.inf], np.nan)
+                          .astype("float64")
+                          .round(4)
+                    )
+        
+                show = show.dropna(how="all").drop_duplicates().head(500).reset_index(drop=True)
         
                 # 8) Render
                 try:
@@ -4955,7 +4978,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                         },
                     )
                 except Exception:
-                    st.table(show)
+                    # Ultra‑robust fallback with pure Python scalars
+                    safe = show.applymap(
+                        lambda x: float(x) if isinstance(x, (np.floating,)) else (str(x) if not pd.isna(x) else None)
+                    )
+                    st.table(safe)
         
         # target
         # target
