@@ -4720,17 +4720,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
         
         # final dataset for modeling
-        features = [c for c in features if c in df_market.columns]
-
-        # ✅ lock exact training schema and order
-        feature_cols = [str(c) for c in df_market[features].columns]
-        st.markdown(f"### 📈 Features Used: `{len(features)}`")
+        
         # final dataset for modeling
+        feature_cols = [str(c) for c in features]
+        st.markdown(f"### 📈 Features Used: `{len(features)}`")
         X = (df_market[feature_cols]
              .apply(pd.to_numeric, errors='coerce')
              .replace([np.inf, -np.inf], np.nan)
              .fillna(0.0)
-             .astype(float))
+             .astype('float32'))
 
         
         # Correlation check (robust to NaNs/constant columns)
@@ -4929,7 +4927,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         
         # === Build X / y ===
-        X_full = _to_numeric_block(df_market, features).to_numpy(np.float32)
+        X_full = _to_numeric_block(df_market, feature_cols).to_numpy(np.float32)
         
         y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
         valid_mask = ~y_series.isna()
@@ -5067,7 +5065,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  Hyperparam spaces & small-league overrides (use the fixed helper)
         # ---------------------------------------------------------------------------
-        feature_cols = list(features)
+       
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],
@@ -5303,7 +5301,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Guard against holdout having one class → AUC would be nan
         y_hold_vec = y_full[hold_idx].astype(int)
         if np.unique(y_hold_vec).size < 2:
-            auc_ho = np.nan
+            auc_ho = float(auc_ho) if not np.isnan(auc_ho) else np.nan
         else:
             # final safety: flip if needed (should rarely trigger after OOF lock)
             auc_raw, _ = _auc_safe(y_hold_vec, p_cal_val)
@@ -5798,8 +5796,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         ensemble_prob     = p_cal        # train/OOF blended + calibrated
         ensemble_prob_val = p_cal_val    # holdout/val blended + calibrated
         
-        # If X_val is a DataFrame, align y_val to it (prevents length mismatches)
-        if isinstance('X_val' in locals() and X_val, pd.DataFrame) and isinstance(y_val, (pd.Series, pd.DataFrame)):
+        if ('X_val' in locals() and isinstance(X_val, pd.DataFrame)) \
+           and ('y_val' in locals() and isinstance(y_val, (pd.Series, pd.DataFrame))):
             y_val = y_val.loc[X_val.index]
         
         # Safe metric helpers
@@ -5869,14 +5867,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    
         
         # safety check (optional but nice)
+       
         assert X_full.shape[1] == len(feature_cols), "Feature width drifted"
-        
-        if model_logloss is not None:
-            _bake_feature_names_in_(model_logloss, feature_cols)
-        if model_auc is not None:
-            _bake_feature_names_in_(model_auc, feature_cols)
-        
-
+        _bake_feature_names_in_(model_logloss, feature_cols)
+        _bake_feature_names_in_(model_auc, feature_cols)
+       
         
         # === Save ensemble (choose one or both)
         trained_models[market] = {
