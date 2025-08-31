@@ -3306,20 +3306,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
 
     # ✅ Load from sharp_scores_full with all necessary columns up front
-    query = f"""
-        SELECT *
-        FROM `sharplogger.sharp_data.scores_with_features`
-        WHERE Sport = '{sport.upper()}'
-          AND Scored = TRUE
-          AND SHARP_HIT_BOOL IS NOT NULL
-          AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL {days_back} DAY)
+    sql = """
+    SELECT *
+    FROM `sharplogger.sharp_data.scores_with_features`
+    WHERE UPPER(Sport) = @sport
+      AND Scored = TRUE
+      AND SHARP_HIT_BOOL IS NOT NULL
+      AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
     """
-
-    df_bt = bq_client.query(query).to_dataframe()
-
-    if df_bt.empty:
+    
+    bq_client = bigquery.Client()
+    job_cfg = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
+            bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)),
+        ]
+    )
+    
+    with st.spinner("Pulling training data from BigQuery..."):
+        # Avoid BQ Storage thread-pool race in Streamlit
+        df = bq_client.query(sql, job_config=job_cfg).to_dataframe(create_bqstorage_client=False)
+    
+    # Guard: no rows
+    if df.empty:
         st.warning("⚠️ No historical sharp picks available to train model.")
         return
+    
+    # Work with a single frame going forward
+    df_bt = df.copy(
 
     df_bt = df_bt.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
