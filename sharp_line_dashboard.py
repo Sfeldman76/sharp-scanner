@@ -3286,54 +3286,47 @@ def build_team_ats_priors_market_sport(
     return out
 
 
+# Cache the *dataframe* keyed by sport + days_back
+@st.cache_data(ttl=15 * 60, show_spinner=False)  # 15 min TTL; tweak as you like
+def fetch_scores_with_features(sport: str, days_back: int):
+    bq = get_bq_client()
 
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
-    # Dictionary specifying days_back for each sport
-    SPORT_DAYS_BACK = {
-        'NBA': 35,      # 35 days for NBA
-        'NFL': 60,      # 20 days for NFL
-        'CFL': 60,      # 20 days for NFL
-        'WNBA': 60,     # 30 days for WNBA
-        'MLB': 60,      # 50 days for M
-        'NCAAF': 60,    # 20 days for NCAAF
-        'NCAAB': 60,    # 30 days for NCAAB
-        # Add more sports as needed
-    }
-
-    # Get the days_back from the dictionary, or use the default if sport is not in the dictionary
-    days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
-    
-    st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
-
-    # ✅ Load from sharp_scores_full with all necessary columns up front
     sql = """
-    SELECT *
+    SELECT
+      -- pull only what you train on if you want smaller frames
+      *
     FROM `sharplogger.sharp_data.scores_with_features`
     WHERE UPPER(Sport) = @sport
       AND Scored = TRUE
       AND SHARP_HIT_BOOL IS NOT NULL
       AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
     """
-    
-    bq_client = bigquery.Client()
     job_cfg = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
             bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)),
-        ]
+        ],
+        use_query_cache=True,  # leverage BigQuery’s own result cache too
     )
-    
-    with st.spinner("Pulling training data from BigQuery..."):
-        # Avoid BQ Storage thread-pool race in Streamlit
-        df = bq_client.query(sql, job_config=job_cfg).to_dataframe(create_bqstorage_client=False)
-    
-    # Guard: no rows
+    # Avoid the BQ Storage threadpool (prevents Streamlit shutdown race)
+    df = bq.query(sql, job_config=job_cfg).to_dataframe(create_bqstorage_client=False)
+    return df
+
+# Use it in training
+def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
+    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 60, "CFL": 60, "WNBA": 60, "MLB": 60, "NCAAF": 60, "NCAAB": 60}
+    days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
+
+    st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
+    with st.spinner("Pulling training data (cached)…"):
+        df = fetch_scores_with_features(sport, days_back)
     if df.empty:
-        st.warning("⚠️ No historical sharp picks available to train model.")
+        st.warning("No rows returned for training after filters.")
         return
+   
     
     # Work with a single frame going forward
-    df_bt = df.copy(
+    
 
     df_bt = df_bt.copy()
     df_bt['SHARP_HIT_BOOL'] = pd.to_numeric(df_bt['SHARP_HIT_BOOL'], errors='coerce')
