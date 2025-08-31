@@ -258,6 +258,35 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
         return book_raw, book_raw
 
     return _alias_lookup(book_raw), _alias_lookup(bm_raw)
+
+
+def safe_row_entropy(M, eps=1e-12):
+    """
+    M: array-like, nonnegative magnitudes per 'bucket' (shape: n_rows x n_buckets)
+    Returns: entropy per row (float32), 0.0 if a row sums to 0.
+    """
+    M = np.asarray(M, dtype=np.float64)
+    M = np.where(np.isfinite(M), M, 0.0)     # drop NaN/inf -> 0
+    M = np.maximum(M, 0.0)                   # no negatives
+
+    row_sum = M.sum(axis=1, keepdims=True)
+    has_mass = (row_sum > 0)
+
+    P = np.zeros_like(M, dtype=np.float64)
+    if has_mass.any():
+        P[has_mass[:, 0]] = M[has_mass[:, 0]] / row_sum[has_mass]
+
+    # Only compute entropy where we have mass; elsewhere leave 0
+    H = np.zeros(M.shape[0], dtype=np.float64)
+    if has_mass.any():
+        P_sub = np.clip(P[has_mass[:, 0]], eps, 1.0)
+        # with no warnings
+        with np.errstate(divide='ignore', invalid='ignore'):
+            H[has_mass[:, 0]] = -np.sum(P_sub * np.log(P_sub), axis=1)
+
+    return H.astype("float32")
+
+
 BOOKMAKER_REGIONS = {
     # 🔹 Sharp Books
     'pinnacle': 'eu',
@@ -2670,25 +2699,20 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
 
     if line_cols:
         W = out[line_cols].to_numpy(dtype="float32")
-        tot = W.sum(axis=1, keepdims=True)
-        P = np.divide(W, np.maximum(tot, eps), out=np.zeros_like(W), where=tot>0)
-        out["Hybrid_Timing_Entropy_Line"] = (-(np.where(P>0, P*np.log(P), 0.0)).sum(axis=1)).astype("float32")
+        out["Hybrid_Timing_Entropy_Line"] = safe_row_entropy(W)
     else:
         out["Hybrid_Timing_Entropy_Line"] = 0.0
-
+    
     if odds_cols:
         W2 = out[odds_cols].to_numpy(dtype="float32")
-        tot2 = W2.sum(axis=1, keepdims=True)
-        P2 = np.divide(W2, np.maximum(tot2, eps), out=np.zeros_like(W2), where=tot2>0)
-        out["Hybrid_Timing_Entropy_Odds"] = (-(np.where(P2>0, P2*np.log(P2), 0.0)).sum(axis=1)).astype("float32")
+        out["Hybrid_Timing_Entropy_Odds"] = safe_row_entropy(W2)
     else:
         out["Hybrid_Timing_Entropy_Odds"] = 0.0
-
-    # Ensure your “absolute from open” live in float32 (if present)
-    for c in ("Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening"):
-        if c not in out.columns:
-            out[c] = 0.0
-        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
+        # Ensure your “absolute from open” live in float32 (if present)
+        for c in ("Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening"):
+            if c not in out.columns:
+                out[c] = 0.0
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
 
     # Interactions with snapshot microstructure (if those exist already)
     if "Key_Corridor_Pressure" in out.columns:
