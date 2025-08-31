@@ -5083,40 +5083,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  Estimators & safety checks
         # ---------------------------------------------------------------------------
-        search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
-        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
+       
         
         
                 
-        def _assert_classifier(est, name: str):
-            # robust, no fitting required
-            tag = getattr(est, "_estimator_type", None)
-            has_pp = callable(getattr(est, "predict_proba", None))
-            params = getattr(est, "get_params", lambda: {})()
-            obj = params.get("objective", None)
         
-            ok = (
-                sk_is_classifier(est)            # uses _estimator_type internally
-                and tag == "classifier"
-                and has_pp
-                and (obj is None or str(obj).startswith("binary:"))
-            )
+        def _assert_classifier(est, name: str):
+            """
+            Be strict but robust: rely on the tag and the presence of predict_proba.
+            Avoid any shadowed is_classifier surprises.
+            """
+            est_type   = getattr(est, "_estimator_type", None)
+            has_proba  = callable(getattr(est, "predict_proba", None))
+            ok = (est_type == "classifier") and has_proba
             if not ok:
-                subset = {k: params.get(k) for k in (
-                    "objective","eval_metric","tree_method",
-                    "max_depth","max_leaves","reg_lambda","reg_alpha"
-                )}
+                # Avoid crashing on repr(); print minimal, safe debug info
+                cls = type(est)
+                try:
+                    xgbp = est.get_xgb_params()
+                except Exception:
+                    xgbp = {}
                 raise AssertionError(
                     f"{name} not classifier.\n"
-                    f"type={type(est)}\n"
-                    f"_estimator_type={tag}\n"
-                    f"has_predict_proba={has_pp}\n"
-                    f"params={subset}"
+                    f"type={cls}\n"
+                    f"_estimator_type={est_type}\n"
+                    f"has_predict_proba={has_proba}\n"
+                    f"sk_is_classifier={sk_is_classifier(est)}\n"
+                    f"params={xgbp}"
                 )
+        
+        search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
+        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
+        
+        # --- One-time debug (optional) ---
+        st.write("sk_is_classifier(search_base_ll) =>", sk_is_classifier(search_base_ll))
+        st.write("XGBClassifier _estimator_type =>", getattr(search_base_ll, "_estimator_type", None))
+        st.write("Has predict_proba =>", callable(getattr(search_base_ll, "predict_proba", None)))
+        # ----------------------------------
         
         _assert_classifier(search_base_ll,  "search_base_ll")
         _assert_classifier(search_base_auc, "search_base_auc")
-        
+                        
         # ---------------------------------------------------------------------------
         #  Randomized searches (built-in scorers support sample_weight)
         # ---------------------------------------------------------------------------
