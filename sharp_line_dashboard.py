@@ -2139,7 +2139,8 @@ def get_xgb_search_space(
             d.pop(k, None)
     base_kwargs.update({"objective": "binary:logistic", "eval_metric": "logloss"})
 
- 
+    danger_keys = {"objective", "_estimator_type", "response_method"} 
+    
     def _scrub_grid(d: dict) -> dict:
         return {k: v for k, v in d.items() if k not in danger_keys}
 
