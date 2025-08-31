@@ -2123,6 +2123,15 @@ def get_xgb_search_space(
     
     # Scrub dangerous keys for BOTH branches
     danger_keys = {"objective", "_estimator_type", "response_method"}
+    for k in danger_keys:
+        base_kwargs.pop(k, None)
+    
+    # then force classifier semantics
+    base_kwargs.update({
+        "objective":   "binary:logistic",
+        "eval_metric": "logloss",
+        "tree_method": "hist",
+    })
     def scrub_grid(d):
         return {k: v for k, v in d.items() if k not in danger_keys}
     
@@ -5133,12 +5142,42 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  Randomized searches (with sample_weight)
         # ---------------------------------------------------------------------------
-        
-        
+        from sklearn.base import is_classifier
+
+        def _assert_classifier(est, name):
+            msg = (
+                f"{name} not classifier. type={type(est)} "
+                f"_estimator_type={getattr(est, '_estimator_type', None)} "
+                f"objective={getattr(est, 'objective', None)} "
+                f"get_xgb_params={getattr(est, 'get_xgb_params', lambda: {})()}"
+            )
+            assert is_classifier(est), msg
+            assert hasattr(est, "predict_proba"), f"{name} missing predict_proba()"
         
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
 
+
+        from sklearn.base import is_classifier
+        from pprint import pformat
+        
+        def _assert_classifier(est, name):
+            msg = (
+                f"{name} not classifier.\n"
+                f"type={type(est)} "
+                f"_estimator_type={getattr(est, '_estimator_type', None)}\n"
+                f"xgb_params={getattr(est, 'get_xgb_params', lambda: {})()}"
+            )
+            assert is_classifier(est), msg
+            assert hasattr(est, "predict_proba"), f"{name} missing predict_proba()"
+        
+        # Right before CV:
+        _assert_classifier(search_base_ll,  "search_base_ll")
+        _assert_classifier(search_base_auc, "search_base_auc")
+       
+                
+        
+       
        # Log-loss search
         rs_ll = RandomizedSearchCV(
             estimator=search_base_ll,           # or your Pipeline
@@ -5171,10 +5210,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
-        for k in ("objective", "eval_metric", "_estimator_type"):
+        for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
-        
+                
         # ---------------------------------------------------------------------------
         #  Final early-stopped fits on last CV fold (with sample_weight)
         # ---------------------------------------------------------------------------
