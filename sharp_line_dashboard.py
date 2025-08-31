@@ -4929,11 +4929,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
              .fillna(0.0)
              .astype('float32'))
 
-        # Before your st.dataframe(show)
+        # Optional debug: diagnose DataFrame if st.dataframe() fails downstream
         debug_streamlit_dataframe_crash(show, name="high_corr_pairs")
         
-        # Then (if safe):
-        st.dataframe(show)
+        # Safely render the correlation pairs
+        try:
+            st.dataframe(
+                show,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Feature_1": st.column_config.TextColumn("Feature 1"),
+                    "Feature_2": st.column_config.TextColumn("Feature 2"),
+                    "Correlation": st.column_config.NumberColumn("Corr |ρ|", format="%.4f"),
+                },
+            )
+        except Exception:
+            st.warning("🔁 Falling back to basic rendering (table)")
+            st.table(show)
         # ---- Robust correlation scan (UI-safe) ------------------------------------
         st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
         
