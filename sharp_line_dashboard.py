@@ -4964,29 +4964,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # pick per-sport holdout games
         # === Time-forward % split (e.g. last 20% for holdout) ===
-        pct_holdout = 0.20  # ← You can tune this per sport if needed
+        # === Time-forward % split (rows) ===
+        pct_holdout = 0.20  # tune per sport if desired
+        
         meta = pd.DataFrame({
-            "idx": np.arange(len(groups)),
-            "group": groups,
-            "time": pd.to_datetime(times, utc=True)
-        })
-        meta = meta.sort_values("time").reset_index(drop=True)
+            "idx":    np.arange(len(groups)),
+            "time":   pd.to_datetime(times, utc=True)
+        }).sort_values("time").reset_index(drop=True)
         
-        n_hold = int(len(meta) * pct_holdout)
-        n_hold = max(1, n_hold)  # prevent empty holdout
-        
-        hold_idx = meta.iloc[-n_hold:]["idx"].to_numpy()
+        n_hold = max(1, int(len(meta) * pct_holdout))
+        hold_idx      = meta.iloc[-n_hold:]["idx"].to_numpy()
         train_all_idx = meta.iloc[:-n_hold]["idx"].to_numpy()
         
-        train_all_idx, hold_idx = get_holdout_by_last_n_games(
-            groups=groups,
-            times=times,
-            n_hold_games=n_hold_games,
-            min_train_games=25,
-        )
-        # Diagnostic checks
-        y_hold_vec = y_full[hold_idx]
+        # REMOVE the old call — do NOT overwrite the indices again
+        # train_all_idx, hold_idx = get_holdout_by_last_n_games(...)
+        
+        # Diagnostics
+        y_hold_vec  = y_full[hold_idx]
         y_train_vec = y_full[train_all_idx]
+        st.write("Holdout class counts:", np.bincount(y_hold_vec) if len(y_hold_vec) else [])
+        st.write("Train class counts:",   np.bincount(y_train_vec) if len(y_train_vec) else [])
+      
         
         st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
         st.write(f"Train class balance: {np.bincount(y_train_vec)}")
