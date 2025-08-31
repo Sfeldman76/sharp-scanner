@@ -5389,19 +5389,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # ---- threshold sweep (train) -----------------------------------------------
-        thresholds = np.arange(0.1, 0.96, 0.05)
-        rows=[]
+        thresholds = np.arange(0.10, 0.96, 0.05)
+        rows = []
         for t in thresholds:
             preds = (p_train_vec >= t).astype(int)
             rows.append({
-                "Threshold": round(float(t),2),
-                "Accuracy":  accuracy_score(y_train_vec, preds),
-                "Precision": precision_score(y_train_vec, preds, zero_division=0),
-                "Recall":    recall_score(y_train_vec, preds, zero_division=0),
-                "F1":        f1_score(y_train_vec, preds, zero_division=0),
-        })
-        df_thresh = pd.DataFrame(rows)[["Threshold","Accuracy","Precision","Recall","F1"]]
-        st.dataframe(df_thresh.style.format({c:"{:.3f}" for c in df_thresh.columns if c!="Threshold"}))
+                "Threshold": float(np.round(t, 2)),
+                "Accuracy":  float(accuracy_score(y_train_vec, preds)),
+                "Precision": float(precision_score(y_train_vec, preds, zero_division=0)),
+                "Recall":    float(recall_score(y_train_vec, preds, zero_division=0)),
+                "F1":        float(f1_score(y_train_vec, preds, zero_division=0)),
+            })
+        
+        df_thresh = pd.DataFrame(rows, columns=["Threshold","Accuracy","Precision","Recall","F1"])
+        # clean any accidental non-finite values
+        df_thresh.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df_thresh.fillna(0.0, inplace=True)
+        
+        # ✅ Prefer st.dataframe with column_config for formatting
+        try:
+            st.dataframe(
+                df_thresh,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
+                    "Accuracy":  st.column_config.NumberColumn("Accuracy",  format="%.3f"),
+                    "Precision": st.column_config.NumberColumn("Precision", format="%.3f"),
+                    "Recall":    st.column_config.NumberColumn("Recall",    format="%.3f"),
+                    "F1":        st.column_config.NumberColumn("F1",        format="%.3f"),
+                },
+            )
+        except Exception:
+            # Fallback for older Streamlit without column_config
+            df_show = df_thresh.copy()
+            df_show[["Accuracy","Precision","Recall","F1"]] = df_show[["Accuracy","Precision","Recall","F1"]].round(3)
+            df_show["Threshold"] = df_show["Threshold"].round(2)
+            st.table(df_show)
 
         
         # ---- calibration bins (holdout) + ROI per bin ------------------------------
