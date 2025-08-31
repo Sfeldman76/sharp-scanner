@@ -3478,6 +3478,45 @@ def fetch_scores_with_features(sport: str, days_back: int):
     # Fast path, but stable because we reuse a cached BigQueryReadClient
     return bq.query(sql, job_config=job_cfg).to_dataframe(bqstorage_client=bqs)
 
+
+def clean_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
+    """Sanitize feature columns for modeling + UI. Drop or coerce unsafe dtypes."""
+    kept = []
+    for c in features:
+        if c not in df.columns:
+            continue
+        s = df[c]
+
+        # --- Drop if it's array, list, dict, or weird object ---
+        if not s.map(pd.api.types.is_scalar).all():
+            continue
+
+        # --- Handle booleans → numeric ---
+        if pd.api.types.is_bool_dtype(s):
+            df[c] = s.astype("int8")
+
+        # --- Coerce strings/objects/categories to str, then drop ---
+        elif pd.api.types.is_object_dtype(s) or pd.api.types.is_categorical_dtype(s):
+            df[c] = s.astype(str)
+
+        # --- Convert to float64 for model safety ---
+        elif pd.api.types.is_numeric_dtype(s):
+            df[c] = pd.to_numeric(s, errors="coerce").astype("float64")
+
+        # --- Drop tz-aware or weird datetimes ---
+        elif pd.api.types.is_datetime64_any_dtype(s):
+            try:
+                df[c] = pd.to_datetime(s, errors="coerce").dt.tz_localize(None)
+            except Exception:
+                continue
+
+        # --- Fill any remaining NaNs ---
+        df[c] = df[c].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+        kept.append(c)
+
+    return kept
+
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     SPORT_DAYS_BACK = {"NBA": 35, "NFL": 60, "CFL": 60, "WNBA": 60, "MLB": 60, "NCAAF": 60, "NCAAB": 60}
@@ -4812,6 +4851,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ======= IMPORTANT: work with df_market from here on =======
         
         # Make sure df_market has placeholders for requested feature columns (0 default)
+        # Make sure df_market has placeholders for requested feature columns (0 default)
         df_market = ensure_columns(df_market, features, 0)
         
         # Now prune to columns that actually exist (or were just ensured)
@@ -4819,13 +4859,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if missing_in_market:
             st.write(f"ℹ️ Dropping {len(missing_in_market)} missing feature(s): "
                      f"{sorted(missing_in_market)[:20]}{'...' if len(missing_in_market)>20 else ''}")
-
-       
         
-        # final dataset for modeling
+        # 🔧 CLEAN FEATURES SAFELY (inplace mutation)
+        features = clean_features_inplace(df_market, features)
         
-        # final dataset for modeling
+        # Final dataset for modeling
         feature_cols = [str(c) for c in features]
+        
+       
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
         X = (df_market[feature_cols]
              .apply(pd.to_numeric, errors='coerce')
