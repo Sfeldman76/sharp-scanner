@@ -3444,8 +3444,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # margin distribution
         "ATS_Cover_Margin_Last5_Prior_Mean",
         # "ATS_Cover_Margin_Last5_Prior_Std",
-        "Market_Bucket",
-        "Market_OddsProb_Bucket"
+        #"Market_Bucket",
+        #"Market_OddsProb_Bucket"
     ]
     
     # (Opponent mirrors intentionally excluded per your note)
@@ -4957,7 +4957,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             groups=groups,
             times=times,
             n_hold_games=n_hold_games,
-            min_train_games=30  # or 30 if you want stronger guarantees
+            min_train_games=25  # or 30 if you want stronger guarantees
         )
         
         #train_g  = gmeta["group"].to_numpy()[:-n_hold_g]
