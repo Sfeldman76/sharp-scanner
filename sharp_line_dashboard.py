@@ -2072,19 +2072,19 @@ def get_xgb_search_space(
     )
 
     if s in SMALL_LEAGUES:
-        # tighter / more regularized for small data
         # ---- SMALL LEAGUES (stability-first) ----
         params_ll = {
             "max_depth":        randint(2, 3),            # {2}
             "learning_rate":    loguniform(6e-3, 2.5e-2), # 0.006–0.025
-            "subsample":        uniform(0.85, 0.15),      # 0.85–1.00  (less stochasticity)
+            "subsample":        uniform(0.85, 0.15),      # 0.85–1.00
             "colsample_bytree": uniform(0.85, 0.15),      # 0.85–1.00
-            "min_child_weight": randint(8, 20),           # 8–19       (blocks tiny leaves)
-            "gamma":            uniform(0.20, 0.60),      # 0.20–0.80  (require loss to drop to split)
-            "reg_alpha":        loguniform(1e-1, 2.0e1),  # 0.1–20     (L1)
-            "reg_lambda":       loguniform(1.5e1, 1.0e2), # 15–100     (L2)
+            "min_child_weight": randint(8, 20),           # 8–19
+            "gamma":            uniform(0.20, 0.60),      # 0.20–0.80
+            "reg_alpha":        loguniform(1e-1, 2.0e1),  # 0.1–20
+            "reg_lambda":       loguniform(1.5e1, 1.0e2), # 15–100
+            # Optional if using lossguide: control leaf count too
+            "max_leaves":       randint(8, 18),
         }
-        # Keep AUC head only slightly looser to reduce correlation, but still safe:
         params_auc = {
             "max_depth":        randint(2, 4),            # {2,3}
             "learning_rate":    loguniform(5e-3, 3.0e-2), # 0.005–0.03
@@ -2094,36 +2094,41 @@ def get_xgb_search_space(
             "gamma":            uniform(0.15, 0.45),      # 0.15–0.60
             "reg_alpha":        loguniform(5e-2, 1.0e1),  # 0.05–10
             "reg_lambda":       loguniform(1.0e1, 8.0e1), # 10–80
+            "max_leaves":       randint(10, 20),
         }
     else:
-        # bigger leagues / more data: two distinct spaces
-        # --- Search spaces tuned for H2H (reduce overfit, improve calibration) ---
-        # Larger leagues (more data) explore a bit wider, but still regularized.
+        # ---- BIGGER LEAGUES ----
         params_ll = {
-            # shallower trees; constrain split greediness
             "max_depth":        randint(3, 6),             # {3..5}
-            "max_leaves":       randint(8, 24),            # control complexity w/ lossguide
-            "learning_rate":    loguniform(1e-2, 4e-2),    # 0.01–0.04 (calibration-friendly)
+            "max_leaves":       randint(8, 24),
+            "learning_rate":    loguniform(1e-2, 4e-2),    # 0.01–0.04
             "subsample":        uniform(0.60, 0.30),       # 0.60–0.90
             "colsample_bytree": uniform(0.55, 0.30),       # 0.55–0.85
-            "min_child_weight": randint(15, 45),           # {15..44} (kill small noisy leaves)
-            "gamma":            uniform(0.50, 2.50),       # 0.5–3.0 (require gain to split)
+            "min_child_weight": randint(15, 45),           # {15..44}
+            "gamma":            uniform(0.50, 2.50),       # 0.50–3.00
             "reg_alpha":        loguniform(1e-3, 3.0),     # 0.001–3
             "reg_lambda":       loguniform(5.0, 8.0e1),    # 5–80
         }
-        
         params_auc = {
-            # slightly deeper than LL space, but still conservative
             "max_depth":        randint(3, 7),             # {3..6}
             "max_leaves":       randint(12, 28),
-            "learning_rate":    loguniform(5e-3, 3e-2),    # 0.005–0.03 (lets AUC model learn gently)
+            "learning_rate":    loguniform(5e-3, 3e-2),    # 0.005–0.03
             "subsample":        uniform(0.55, 0.30),       # 0.55–0.85
             "colsample_bytree": uniform(0.55, 0.35),       # 0.55–0.90
             "min_child_weight": randint(10, 35),           # {10..34}
-            "gamma":            uniform(0.40, 2.10),       # 0.4–2.5
+            "gamma":            uniform(0.40, 2.10),       # 0.40–2.50
             "reg_alpha":        loguniform(1e-4, 1.0),     # 0.0001–1
-            "reg_lambda":       loguniform(3.0, 5.0e1),    # 3
+            "reg_lambda":       loguniform(3.0, 5.0e1),    # 3–50
         }
+    
+    # Scrub dangerous keys for BOTH branches
+    danger_keys = {"objective", "_estimator_type", "response_method"}
+    def scrub_grid(d):
+        return {k: v for k, v in d.items() if k not in danger_keys}
+    
+    params_ll  = scrub_grid(params_ll)
+    params_auc = scrub_grid(params_auc)
+    
     # ---- optional: monotone constraints (no small-book creation) ----
     if features is not None:
         mono = {c: 0 for c in features}
@@ -4708,15 +4713,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             st.write(f"Correlation check skipped: {e}")
         
         # target
+        # target
         if 'SHARP_HIT_BOOL' not in df_market.columns:
             st.warning("⚠️ Missing SHARP_HIT_BOOL in df_market — skipping.")
-            # handle skip/continue in your loop as appropriate
-        else:
-            y = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(int)
-            if y.nunique() < 2:
-                title_market = market.upper() if 'market' in locals() else 'MARKET'
-                st.warning(f"⚠️ Skipping {title_market} — only one label class.")
-        # continue / return in your loop
+            return  # or `continue` if inside a loop
+        
+        y = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(int)
+        if y.nunique() < 2:
+            title_market = market.upper() if 'market' in locals() else 'MARKET'
+            st.warning(f"⚠️ Skipping {title_market} — only one label class.")
+            return  # or `continue`
       
         # ===============================
         # Purged Group Time-Series CV (PGTSCV) + Embargo
@@ -5129,9 +5135,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         
         
+        
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-        
 
        # Log-loss search
         rs_ll = RandomizedSearchCV(
