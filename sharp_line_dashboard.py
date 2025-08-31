@@ -4929,25 +4929,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
              .fillna(0.0)
              .astype('float32'))
 
-        # Optional debug: diagnose DataFrame if st.dataframe() fails downstream
-        debug_streamlit_dataframe_crash(show, name="high_corr_pairs")
-        
-        # Safely render the correlation pairs
-        try:
-            st.dataframe(
-                show,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Feature_1": st.column_config.TextColumn("Feature 1"),
-                    "Feature_2": st.column_config.TextColumn("Feature 2"),
-                    "Correlation": st.column_config.NumberColumn("Corr |ρ|", format="%.4f"),
-                },
-            )
-        except Exception:
-            st.warning("🔁 Falling back to basic rendering (table)")
-            st.table(show)
-        # ---- Robust correlation scan (UI-safe) ------------------------------------
+       
         st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
         
         # 1) Ensure X is a clean numeric DataFrame
@@ -4993,33 +4975,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             if not pairs:
                 st.success("✅ No highly correlated feature pairs found")
+           
             else:
-                df_corr = (
-                    pd.DataFrame(pairs, columns=["Feature_1","Feature_2","Correlation"])
-                    .sort_values("Correlation", ascending=False)
-                )
-        
+                df_corr = (pd.DataFrame(pairs, columns=["Feature_1","Feature_2","Correlation"])
+                             .sort_values("Correlation", ascending=False))
+            
                 # 6) UI safety: cap rows & round
                 max_rows = 500
                 show = df_corr.head(max_rows).copy()
                 show["Correlation"] = show["Correlation"].round(4)
-        
-                # 7) Diagnostics
-                title_market = market.upper() if 'market' in locals() else 'MARKET'
-                st.write(
-                    f"Found {len(df_corr):,} high‑corr pairs > {threshold:.2f} "
-                    f"(showing {min(len(show), max_rows):,}) — {title_market}"
-                )
-                if na_only_cols:
-                    st.caption(f"⚠️ Dropped {len(na_only_cols)} all‑NA features")
-                if const_cols:
-                    st.caption(
-                        "⚠️ Dropped {n} constant features (e.g., {ex})".format(
-                            n=len(const_cols),
-                            ex=", ".join(map(str, const_cols[:5])) + ("…" if len(const_cols) > 5 else "")
-                        )
-                    )
-        
+            
+                # 🔍 DEBUG ONLY AFTER `show` is defined
+                debug_streamlit_dataframe_crash(show, name="high_corr_pairs")
+            
                 # --- Final hardening before render ---
                 show = show.copy()
                 expected = ["Feature_1", "Feature_2", "Correlation"]
