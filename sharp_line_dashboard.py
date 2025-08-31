@@ -3288,29 +3288,36 @@ def build_team_ats_priors_market_sport(
 
 # Cache the *dataframe* keyed by sport + days_back
 @st.cache_data(ttl=15 * 60, show_spinner=False)  # 15 min TTL; tweak as you like
-def fetch_scores_with_features(sport: str, days_back: int):
-    bq = get_bq_client()
 
+from google.cloud import bigquery, bigquery_storage
+
+@st.cache_resource(show_spinner=False)
+def get_bq_clients():
+    return bigquery.Client(), bigquery_storage.BigQueryReadClient()
+
+def fetch_scores_with_features(sport: str, days_back: int):
+    bq, bqs = get_bq_clients()
+
+    # === EXACT logic as your original f-string, but parameterized ===
     sql = """
-    SELECT
-      -- pull only what you train on if you want smaller frames
-      *
+    SELECT *
     FROM `sharplogger.sharp_data.scores_with_features`
-    WHERE UPPER(Sport) = @sport
+    WHERE Sport = @sport
       AND Scored = TRUE
       AND SHARP_HIT_BOOL IS NOT NULL
       AND DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL @days_back DAY)
     """
+
     job_cfg = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("sport", "STRING", sport.upper()),
             bigquery.ScalarQueryParameter("days_back", "INT64", int(days_back)),
         ],
-        use_query_cache=True,  # leverage BigQuery’s own result cache too
+        use_query_cache=True,
     )
-    # Avoid the BQ Storage threadpool (prevents Streamlit shutdown race)
-    df = bq.query(sql, job_config=job_cfg).to_dataframe(create_bqstorage_client=False)
-    return df
+
+    # Fast path, but stable because we reuse a cached BigQueryReadClient
+    return bq.query(sql, job_config=job_cfg).to_dataframe(bqstorage_client=bqs)
 
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
