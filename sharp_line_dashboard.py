@@ -113,6 +113,7 @@ from google.cloud import storage, bigquery, bigquery_storage_v1
 import pandas_gbq
 from pandas_gbq import to_gbq
 import google.api_core.exceptions
+from google.cloud import bigquery, bigquery_storage
 
         
 
@@ -3286,15 +3287,12 @@ def build_team_ats_priors_market_sport(
     return out
 
 
-# Cache the *dataframe* keyed by sport + days_back
-@st.cache_data(ttl=15 * 60, show_spinner=False)  # 15 min TTL; tweak as you like
-
-from google.cloud import bigquery, bigquery_storage
 
 @st.cache_resource(show_spinner=False)
 def get_bq_clients():
     return bigquery.Client(), bigquery_storage.BigQueryReadClient()
 
+@st.cache_data(ttl=15 * 60, show_spinner=False)
 def fetch_scores_with_features(sport: str, days_back: int):
     bq, bqs = get_bq_clients()
 
