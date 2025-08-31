@@ -4876,26 +4876,86 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # Correlation check (robust to NaNs/constant columns)
-        try:
-            corr_matrix = X.corr(numeric_only=True).abs()
+        # ---- Robust correlation scan (UI-safe) ------------------------------------
+        st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
+        
+        # 1) Ensure X is a clean numeric DataFrame
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X, columns=feature_cols if 'feature_cols' in locals() else None)
+        
+        Xc = (X.apply(pd.to_numeric, errors="coerce")
+                .replace([np.inf, -np.inf], np.nan))
+        
+        # 2) Remove all-NA and constant columns (they break/degenerate corr)
+        na_only_cols = [c for c in Xc.columns if Xc[c].isna().all()]
+        const_cols   = [c for c in Xc.columns if Xc[c].nunique(dropna=True) <= 1]
+        keep_cols    = [c for c in Xc.columns if c not in set(na_only_cols) | set(const_cols)]
+        Xc = Xc[keep_cols].copy()
+        
+        # 3) If nothing left, bail gracefully
+        if Xc.shape[1] == 0:
+            st.info("No valid numeric, non-constant features available for correlation.")
+        else:
+            # Optional: downcast to float32 to save memory on big frames
+            Xc = Xc.astype("float32")
+        
+            # 4) Compute abs corr with pairwise complete obs
+            # (fillna=0 is NOT used to avoid fake correlations)
+            try:
+                corr_matrix = Xc.corr(method="pearson", min_periods=2).abs()
+            except Exception as e:
+                st.warning(f"Primary corr failed: {e}. Retrying with Spearman…")
+                corr_matrix = Xc.corr(method="spearman", min_periods=2).abs()
+        
+            # 5) Find high-corr pairs
             threshold = 0.85
-            high_corr_pairs = []
             cols = corr_matrix.columns.tolist()
+            pairs = []
             for i in range(len(cols)):
-                for j in range(i + 1, len(cols)):
-                    corr = corr_matrix.iat[i, j]
-                    if pd.notna(corr) and corr > threshold:
-                        high_corr_pairs.append((cols[i], cols[j], corr))
-            if high_corr_pairs:
-                df_corr = (pd.DataFrame(high_corr_pairs, columns=['Feature_1','Feature_2','Correlation'])
-                             .sort_values('Correlation', ascending=False))
-                title_market = market.upper() if 'market' in locals() else 'MARKET'
-                st.subheader(f"🔁 Highly Correlated Features — {title_market}")
-                st.dataframe(df_corr)
-            else:
+                ci = cols[i]
+                # Skip self-corr and NaNs quickly
+                row = corr_matrix.iloc[i, i+1:].dropna()
+                hits = row[row > threshold]
+                if not hits.empty:
+                    pairs.extend([(ci, cj, float(hits[cj])) for cj in hits.index])
+        
+            if not pairs:
                 st.success("✅ No highly correlated feature pairs found")
-        except Exception as e:
-            st.write(f"Correlation check skipped: {e}")
+            else:
+                df_corr = (pd.DataFrame(pairs, columns=["Feature_1","Feature_2","Correlation"])
+                             .sort_values("Correlation", ascending=False))
+        
+                # 6) UI safety: cap rows & round
+                max_rows = 500  # keep Streamlit happy
+                show = df_corr.head(max_rows).copy()
+                show["Correlation"] = show["Correlation"].round(4)
+        
+                # 7) Surface helpful diagnostics
+                title_market = market.upper() if 'market' in locals() else 'MARKET'
+                st.write(
+                    f"Found {len(df_corr):,} high‑corr pairs > {threshold:.2f} "
+                    f"(showing {min(len(show), max_rows):,}) — {title_market}"
+                )
+                if na_only_cols:
+                    st.caption(f"⚠️ Dropped {len(na_only_cols)} all‑NA features")
+                if const_cols:
+                    st.caption(f"⚠️ Dropped {len(const_cols)} constant features "
+                               f"(e.g., {', '.join(const_cols[:5])}{'…' if len(const_cols)>5 else ''})")
+        
+                # 8) Render
+                try:
+                    st.dataframe(
+                        show,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Feature_1": st.column_config.TextColumn("Feature 1"),
+                            "Feature_2": st.column_config.TextColumn("Feature 2"),
+                            "Correlation": st.column_config.NumberColumn("Corr |ρ|", format="%.4f"),
+                        },
+                    )
+                except Exception:
+                    st.table(show)
         
         # target
         # target
@@ -5554,45 +5614,82 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # ---- threshold sweep (train) -----------------------------------------------
-        thresholds = np.arange(0.10, 0.96, 0.05)
-        rows = []
-        for t in thresholds:
-            preds = (p_train_vec >= t).astype(int)
-            rows.append({
-                "Threshold": float(np.round(t, 2)),
-                "Accuracy":  float(accuracy_score(y_train_vec, preds)),
-                "Precision": float(precision_score(y_train_vec, preds, zero_division=0)),
-                "Recall":    float(recall_score(y_train_vec, preds, zero_division=0)),
-                "F1":        float(f1_score(y_train_vec, preds, zero_division=0)),
-            })
+        st.markdown("### 🔎 Threshold Sweep (Train)")
         
-        df_thresh = pd.DataFrame(rows, columns=["Threshold","Accuracy","Precision","Recall","F1"])
-        # clean any accidental non-finite values
-        df_thresh.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df_thresh.fillna(0.0, inplace=True)
+        # Align & sanitize first
+        eps = 1e-6
+        idx_tr = pd.Index(train_all_idx)
         
-        # ✅ Prefer st.dataframe with column_config for formatting
-        try:
-            st.dataframe(
-                df_thresh,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
-                    "Accuracy":  st.column_config.NumberColumn("Accuracy",  format="%.3f"),
-                    "Precision": st.column_config.NumberColumn("Precision", format="%.3f"),
-                    "Recall":    st.column_config.NumberColumn("Recall",    format="%.3f"),
-                    "F1":        st.column_config.NumberColumn("F1",        format="%.3f"),
-                },
-            )
-        except Exception:
-            # Fallback for older Streamlit without column_config
-            df_show = df_thresh.copy()
-            df_show[["Accuracy","Precision","Recall","F1"]] = df_show[["Accuracy","Precision","Recall","F1"]].round(3)
-            df_show["Threshold"] = df_show["Threshold"].round(2)
-            st.table(df_show)
-
+        p_tr_ser = pd.Series(np.asarray(p_train_vec, dtype=float), index=idx_tr)
+        y_tr_ser = pd.Series(np.asarray(y_train_vec, dtype=int),   index=idx_tr)
         
+        # Clean probs/labels
+        p_tr_ser = (p_tr_ser.replace([np.inf, -np.inf], np.nan)
+                             .fillna(0.0)
+                             .clip(eps, 1 - eps)
+                             .astype(float))
+        y_tr_ser = (y_tr_ser.replace([np.inf, -np.inf], np.nan)
+                             .fillna(0)
+                             .astype(int))
+        
+        # If only one class in train, metrics like precision/recall aren’t meaningful
+        if y_tr_ser.nunique() < 2:
+            st.info("Train set has a single class after filtering — skipping threshold sweep.")
+        else:
+            thresholds = np.arange(0.10, 0.96, 0.05)
+            rows = []
+        
+            # tiny helpers that never throw
+            def _acc(y, yhat):  return float(accuracy_score(y, yhat)) if len(y) else 0.0
+            def _prec(y, yhat): return float(precision_score(y, yhat, zero_division=0)) if len(y) else 0.0
+            def _rec(y, yhat):  return float(recall_score(y, yhat, zero_division=0))    if len(y) else 0.0
+            def _f1(y, yhat):   return float(f1_score(y, yhat, zero_division=0))        if len(y) else 0.0
+        
+            for t in thresholds:
+                preds = (p_tr_ser >= t).astype(int)
+                rows.append({
+                    "Threshold": float(np.round(t, 2)),
+                    "SelectedN": int(preds.sum()),
+                    "BaseN":     int(len(preds)),
+                    "PosRate":   float(y_tr_ser.mean()),
+                    "Accuracy":  _acc(y_tr_ser, preds),
+                    "Precision": _prec(y_tr_ser, preds),
+                    "Recall":    _rec(y_tr_ser, preds),
+                    "F1":        _f1(y_tr_ser, preds),
+                })
+        
+            df_thresh = pd.DataFrame(rows)[
+                ["Threshold","SelectedN","BaseN","PosRate","Accuracy","Precision","Recall","F1"]
+            ]
+        
+            # Final Streamlit-safe cleanup
+            df_thresh.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_thresh.fillna(0.0, inplace=True)
+            for c in ["Accuracy","Precision","Recall","F1","PosRate"]:
+                df_thresh[c] = df_thresh[c].astype(float)
+        
+            try:
+                st.dataframe(
+                    df_thresh,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
+                        "SelectedN": st.column_config.NumberColumn("Selected N", format="%d"),
+                        "BaseN":     st.column_config.NumberColumn("Total N",    format="%d"),
+                        "PosRate":   st.column_config.NumberColumn("Base Rate",  format="%.3f"),
+                        "Accuracy":  st.column_config.NumberColumn("Accuracy",   format="%.3f"),
+                        "Precision": st.column_config.NumberColumn("Precision",  format="%.3f"),
+                        "Recall":    st.column_config.NumberColumn("Recall",     format="%.3f"),
+                        "F1":        st.column_config.NumberColumn("F1",         format="%.3f"),
+                    },
+                )
+            except Exception:
+                df_show = df_thresh.copy()
+                for c in ["Accuracy","Precision","Recall","F1","PosRate"]:
+                    df_show[c] = df_show[c].round(3)
+                df_show["Threshold"] = df_show["Threshold"].round(2)
+                st.table(df_show)
         # ---- calibration bins (holdout) + ROI per bin ------------------------------
         st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
         bins   = np.linspace(0, 1, 11)
@@ -5732,30 +5829,80 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- segment diagnostics (holdout) -----------------------------------------
         st.markdown("### 🧩 Segment Diagnostics (Holdout)")
-        eval_seg = pd.DataFrame({
-            "p":   p_cal_val,
-            "y":   y_hold_vec.astype(int),
-            "Book":  (df_market.iloc[hold_idx]["Book"].astype(str).values if "Book" in df_market.columns else "NA"),
-            "Timing":(df_market.iloc[hold_idx]["SharpMove_Timing_Dominant"].astype(str).values if "SharpMove_Timing_Dominant" in df_market.columns else "NA"),
-            "Fav":   (df_market.iloc[hold_idx]["Is_Favorite_Bet"].fillna(0).astype(int).values if "Is_Favorite_Bet" in df_market.columns else 0),
-        })
         
-        def seg_table(df, by):
-            rows=[]
-            for k, sub in df.groupby(by):
-                auc = roc_auc_score(sub["y"], sub["p"]) if (sub["y"].nunique()==2 and len(sub)>=30) else np.nan
-                rows.append({by: k, "N": len(sub),
-                             "BaseRate": float(np.mean(sub["y"])),
-                             "AUC": float(auc) if not np.isnan(auc) else np.nan,
-                             "Brier": float(brier_score_loss(sub["y"], sub["p"]))})
-            return pd.DataFrame(rows).sort_values("N", ascending=False)
+        # Early exit if no holdout
+        if len(hold_idx) == 0:
+            st.info("No holdout rows available for segment diagnostics.")
+        else:
+            # 1) Build clean, aligned Series (index = hold_idx)
+            idx_eval = pd.Index(hold_idx)
         
-        st.write("**by Book**");   st.dataframe(seg_table(eval_seg, "Book").head(20))
-        st.write("**by Timing**"); st.dataframe(seg_table(eval_seg, "Timing"))
-        st.write("**Favorite vs Dog**"); st.dataframe(seg_table(eval_seg, "Fav"))
-
-       
-
+            p_ser = pd.Series(np.asarray(p_cal_val, dtype=float), index=idx_eval)
+            y_ser = pd.Series(y_hold_vec.astype(int),             index=idx_eval)
+        
+            # Optional segment keys (string, NA-safe)
+            book_ser   = (df_market.loc[idx_eval, "Book"].astype(str)
+                          if "Book" in df_market.columns else pd.Series("NA", index=idx_eval))
+            timing_ser = (df_market.loc[idx_eval, "SharpMove_Timing_Dominant"].astype(str)
+                          if "SharpMove_Timing_Dominant" in df_market.columns else pd.Series("NA", index=idx_eval))
+            fav_ser    = (df_market.loc[idx_eval, "Is_Favorite_Bet"].fillna(0).astype(int)
+                          if "Is_Favorite_Bet" in df_market.columns else pd.Series(0, index=idx_eval))
+        
+            # 2) Sanitize numeric targets/scores to avoid UI/metric crashes
+            p_ser = p_ser.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
+            y_ser = y_ser.replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
+        
+            eval_seg = pd.DataFrame({
+                "p": p_ser.values,
+                "y": y_ser.values,
+                "Book":   book_ser.astype(str).fillna("NA").values,
+                "Timing": timing_ser.astype(str).fillna("NA").values,
+                "Fav":    fav_ser.values.astype(int),
+            }, index=idx_eval)
+        
+            # Safe metric helpers -----------------------------------------------------
+            def _safe_auc(y, p):
+                if len(y) < 2 or pd.Series(y).nunique() < 2:
+                    return np.nan
+                return float(roc_auc_score(y, p))
+        
+            def _safe_brier(y, p):
+                if len(y) == 0:
+                    return np.nan
+                return float(brier_score_loss(y, p))
+        
+            def seg_table(df: pd.DataFrame, by: str) -> pd.DataFrame:
+                rows = []
+                for k, sub in df.groupby(by, dropna=False):
+                    yv = sub["y"].astype(int).values
+                    pv = sub["p"].astype(float).values
+                    auc = _safe_auc(yv, pv)
+                    brier = _safe_brier(yv, pv)
+                    rows.append({
+                        by: str(k),
+                        "N": int(len(sub)),
+                        "BaseRate": float(np.mean(yv)) if len(yv) else np.nan,
+                        "AUC": auc if not np.isnan(auc) else np.nan,
+                        "Brier": brier if not np.isnan(brier) else np.nan,
+                    })
+                out = pd.DataFrame(rows).sort_values("N", ascending=False)
+                # Streamlit-safe cleanup
+                out.replace([np.inf, -np.inf], np.nan, inplace=True)
+                out.fillna(0.0, inplace=True)
+                out["N"] = out["N"].astype(int)
+                out["BaseRate"] = out["BaseRate"].astype(float).round(3)
+                out["AUC"] = out["AUC"].astype(float).round(3)
+                out["Brier"] = out["Brier"].astype(float).round(4)
+                return out
+        
+            st.write("**by Book**")
+            st.dataframe(seg_table(eval_seg, "Book").head(20), use_container_width=True)
+        
+            st.write("**by Timing**")
+            st.dataframe(seg_table(eval_seg, "Timing"), use_container_width=True)
+        
+            st.write("**Favorite vs Dog**")
+            st.dataframe(seg_table(eval_seg, "Fav"), use_container_width=True)
         def psi_num(a: np.ndarray, b: np.ndarray, bins: int = 10, eps: float = 1e-6) -> float:
             """
             Population Stability Index between numeric arrays a (baseline/train) and b (target/holdout).
@@ -5810,51 +5957,92 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- profit vs threshold (holdout) -----------------------------------------
         st.markdown("### 💵 Profit vs Threshold (Holdout)")
-        def profit_at_thresh(p_series, y_series, odds_series, t):
-            sel = p_series >= t
-            if not np.any(sel): return np.nan
-            o  = odds_series[sel]; yy = y_series[sel].astype(int)
-            profit_pos = o.where(o>0, np.nan)/100.0
-            profit_neg = 100.0/o.abs()
-            profit_on_win = np.where(o>0, profit_pos, profit_neg)
-            profit_on_win = pd.Series(profit_on_win, index=o.index).fillna(0.0).values
-            roi = yy*profit_on_win - (1-yy)*1.0
-            return float(np.mean(roi))
         
-        odds_val = pd.to_numeric(df_market.iloc[hold_idx].get("Odds_Price", np.nan), errors="coerce")
-        p_val_ser = pd.Series(p_cal_val, index=hold_idx)
-        rows=[]
-        for t in np.round(np.linspace(0.50, 0.80, 13), 2):
-            rows.append({"Thresh": float(t),
-                         "N": int(np.sum(p_val_ser>=t)),
-                         "AvgROI": profit_at_thresh(p_val_ser, pd.Series(y_hold_vec, index=hold_idx), odds_val, t)})
-        st.dataframe(pd.DataFrame(rows))
-
-        # Derive feature_names if not already set
+        # 1) Guard: empty/degenerate holdout → early exit with empty table
+        if len(hold_idx) == 0 or np.unique(y_full[hold_idx]).size < 1:
+            st.info("No holdout rows available for profit table.")
+        else:
+            # 2) Build clean, aligned Series for p, y, odds (numeric, same index)
+            idx_eval  = pd.Index(hold_idx)
+            p_val_ser = pd.Series(np.asarray(p_cal_val, dtype=float), index=idx_eval)
+            y_val_ser = pd.Series(y_full[hold_idx].astype(int),       index=idx_eval)
+            odds_val  = pd.to_numeric(df_market.loc[idx_eval, "Odds_Price"], errors="coerce")
+        
+            # replace infs/nans in all 3 (but keep selection behavior predictable)
+            p_val_ser = p_val_ser.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            y_val_ser = y_val_ser.replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
+            odds_val  = odds_val.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        
+            def profit_at_thresh(p_series: pd.Series, y_series: pd.Series, odds_series: pd.Series, t: float) -> float:
+                sel = (p_series >= t)
+                if not np.any(sel.values):
+                    return float("nan")
+                o  = odds_series[sel]
+                yy = y_series[sel].astype(int)
+        
+                # vectorized payout per 1u stake
+                profit_pos = o.where(o > 0, np.nan) / 100.0        # +odds
+                profit_neg = 100.0 / o.abs().where(o < 0, np.nan)  # -odds
+                profit_on_win = np.where(o > 0, profit_pos, profit_neg)
+                profit_on_win = pd.Series(profit_on_win, index=o.index).fillna(0.0).values
+        
+                roi = yy.values * profit_on_win - (1 - yy.values) * 1.0
+                return float(np.mean(roi)) if roi.size else float("nan")
+        
+            rows = []
+            for t in np.round(np.linspace(0.50, 0.80, 13), 2):
+                n_sel = int((p_val_ser >= t).sum())
+                avg_roi = profit_at_thresh(p_val_ser, y_val_ser, odds_val, float(t))
+                rows.append({"Threshold": float(t), "N": n_sel, "Avg ROI (unit)": avg_roi})
+        
+            # 3) Streamlit-safe DataFrame (numeric only, finite, rounded)
+            df_profit = pd.DataFrame(rows)
+            for c in df_profit.columns:
+                df_profit[c] = pd.to_numeric(df_profit[c], errors="ignore")
+            df_profit.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_profit.fillna(0.0, inplace=True)
+            if "Avg ROI (unit)" in df_profit.columns:
+                df_profit["Avg ROI (unit)"] = df_profit["Avg ROI (unit)"].astype(float).round(4)
+        
+            try:
+                st.dataframe(
+                    df_profit,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Threshold":      st.column_config.NumberColumn("Threshold", format="%.2f"),
+                        "N":              st.column_config.NumberColumn("N", format="%d"),
+                        "Avg ROI (unit)": st.column_config.NumberColumn("Avg ROI (unit)", format="%.4f"),
+                    },
+                )
+            except Exception:
+                # fallback for older Streamlit
+                st.table(df_profit)
+        
+        # ---- Build feature matrix for downstream use (clean like before) ------------
+        # Derive feature_names if needed
         if 'feature_names' not in locals() or not feature_names:
-            feat_in = getattr(model_logloss, 'feature_names_in_', None) \
-                      or getattr(model_auc,     'feature_names_in_', None)
-            if feat_in is not None:
-                feature_names = [str(c) for c in (feat_in if feat_in is not None else features)]
-            else:
-                feature_names = [str(c) for c in (feat_in if feat_in is not None else features)]
+            feat_in = getattr(model_logloss, 'feature_names_in_', None) or getattr(model_auc, 'feature_names_in_', None)
+            feature_names = [str(c) for c in (feat_in if feat_in is not None else features)]
         
-        # Build the feature frame from df_market (no need for a prior X_pd)
         X_features = df_market.reindex(columns=feature_names).copy()
         
-        # Coerce types and clean
+        # Coerce common string/boolean tokens → numeric, then numeric+finite cleanup
         for c in feature_names:
             if X_features[c].dtype == object:
                 X_features[c] = X_features[c].replace({
                     'True': 1, 'False': 0, True: 1, False: 0,
-                    '': np.nan, 'none': np.nan, 'None': np.nan
+                    '': np.nan, 'none': np.nan, 'None': np.nan, 'NA': np.nan, 'NaN': np.nan, 'unknown': np.nan
                 })
-        X_features = (X_features
-                      .apply(pd.to_numeric, errors='coerce')
-                      .replace([np.inf, -np.inf], np.nan)
-                      .fillna(0.0))
         
-        # If downstream still expects X_pd, alias it:
+        X_features = (
+            X_features
+            .apply(pd.to_numeric, errors='coerce')
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+        )
+        
+        # If downstream still expects X_pd
         X_pd = X_features
         # ---- Feature importance + directional sign (robust) --------------------------
         try:
