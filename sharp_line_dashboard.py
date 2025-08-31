@@ -115,8 +115,6 @@ from pandas_gbq import to_gbq
 import google.api_core.exceptions
 from google.cloud import bigquery, bigquery_storage
 
-        
-
               
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
@@ -140,7 +138,7 @@ from sklearn.model_selection import RandomizedSearchCV
 from xgboost import XGBClassifier
 # put near your imports (only once)
 from sklearn.base import is_classifier as sk_is_classifier
-
+import sys, inspect, xgboost, sklearn
 
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
@@ -5114,12 +5112,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
+        # ✅ INSERT THIS FOR DEBUGGING
+        with st.expander("🔍 Debug: Classifier Check"):
+            
         
-        # --- One-time debug (optional) ---
-        st.write("sk_is_classifier(search_base_ll) =>", sk_is_classifier(search_base_ll))
-        st.write("XGBClassifier _estimator_type =>", getattr(search_base_ll, "_estimator_type", None))
-        st.write("Has predict_proba =>", callable(getattr(search_base_ll, "predict_proba", None)))
-        # ----------------------------------
+            st.code(f"xgboost version        : {xgboost.__version__}")
+            st.code(f"scikit-learn version  : {sklearn.__version__}")
+            st.code(f"type(search_base_ll)  : {type(search_base_ll)}")
+            st.code(f"class module           : {type(search_base_ll).__module__}")
+            st.code(f"_estimator_type       : {getattr(search_base_ll, '_estimator_type', None)}")
+            st.code(f"has predict_proba?    : {callable(getattr(search_base_ll, 'predict_proba', None))}")
+            st.code(f"sk_is_classifier(...) : {sk_is_classifier(search_base_ll)}")
+        
+            try:
+                source_line = inspect.getsource(sk_is_classifier).splitlines()[0]
+                st.code(f"sk_is_classifier source: {source_line}")
+            except Exception as e:
+                st.warning(f"Could not read is_classifier source: {e}")
+        
+       
         
         _assert_classifier(search_base_ll,  "search_base_ll")
         _assert_classifier(search_base_auc, "search_base_auc")
