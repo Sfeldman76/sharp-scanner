@@ -5856,21 +5856,102 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # If downstream still expects X_pd, alias it:
         X_pd = X_features
-        # ---- feature importance + directional sign (AUC model) ---------------------
-        importances = model_auc.feature_importances_
-        feature_names = features[:len(importances)]
-        X_features = X_pd[feature_names]
-        preds_auc  = model_auc.predict_proba(X_features)[:, 1]
-        correlations = np.array([
-            np.corrcoef(X_features[col], preds_auc)[0, 1] if np.std(X_features[col]) > 0 else 0.0
-            for col in feature_names
-        ])
-        impact_directions = np.where(correlations > 0, "↑ Increases", "↓ Decreases")
-        importance_df = pd.DataFrame({"Feature": feature_names, "Importance": importances, "Impact": impact_directions}) \
+        # ---- Feature importance + directional sign (robust) --------------------------
+        try:
+            # 1) Get the feature names the AUC model was actually fit on
+            feat_in = getattr(model_auc, "feature_names_in_", None)
+            if feat_in is None:
+                # fall back to our current list, but keep types consistent
+                feat_in = np.array([str(c) for c in features], dtype=object)
+        
+            # 2) Align to columns that exist in df_market (and keep the model’s order)
+            available = [c for c in feat_in if c in df_market.columns]
+            missing   = [c for c in feat_in if c not in df_market.columns]
+        
+            if len(available) == 0:
+                st.error("❌ Feature-importance skipped: none of the model's features are present in df_market.")
+                st.write({"model_features": list(map(str, feat_in))[:30],
+                          "df_columns_sample": df_market.columns.tolist()[:30]})
+            else:
+                # 3) Build a clean numeric matrix for those features (no NaN/inf, no objects)
+                X_features = (df_market[available]
+                              .apply(pd.to_numeric, errors="coerce")
+                              .replace([np.inf, -np.inf], np.nan)
+                              .fillna(0.0)
+                              .astype("float32"))
+        
+                # Guard zero rows
+                if X_features.shape[0] == 0:
+                    st.error("❌ Feature-importance skipped: X_features has 0 rows after cleaning.")
+                else:
+                    # 4) Importances vector must match model n_features
+                    importances = np.asarray(getattr(model_auc, "feature_importances_", None))
+                    if importances is None or importances.size == 0:
+                        st.error("❌ model_auc.feature_importances_ is empty. (Was the model fit?)")
+                    else:
+                        # If lengths disagree, align defensively
+                        n_model_feats = importances.size
+                        if n_model_feats != len(feat_in):
+                            st.warning(f"⚠️ model n_features ({n_model_feats}) != feature_names_in_ ({len(feat_in)}). "
+                                       "Truncating to the smaller size for display.")
+                            k = min(n_model_feats, len(available))
+                            available   = available[:k]
+                            X_features  = X_features.iloc[:, :k]
+                            importances = importances[:k]
+        
+                        # 5) Predict proba on the same cleaned matrix (safe if tiny sample)
+                        try:
+                            preds_auc = model_auc.predict_proba(X_features)[:, 1]
+                        except Exception as e:
+                            st.exception(RuntimeError(f"predict_proba failed on X_features: {e}"))
+                            preds_auc = np.full(X_features.shape[0], np.nan, dtype=float)
+        
+                        # 6) Correlations (avoid NaNs/0‑variance)
+                        corrs = []
+                        for col in X_features.columns:
+                            x = X_features[col].to_numpy()
+                            if np.std(x) <= 0 or not np.isfinite(x).any() or not np.isfinite(preds_auc).any():
+                                corrs.append(0.0)
+                            else:
+                                c = np.corrcoef(x[np.isfinite(x) & np.isfinite(preds_auc)],
+                                                preds_auc[np.isfinite(x) & np.isfinite(preds_auc)])
+                                corrs.append(float(np.nan_to_num(c[0, 1], nan=0.0)))
+        
+                        impact = np.where(np.asarray(corrs) > 0, "↑ Increases", "↓ Decreases")
+        
+                        importance_df = (
+                            pd.DataFrame({
+                                "Feature": list(map(str, available)),
+                                "Importance": importances.astype(float),
+                                "Impact": impact,
+                            })
                             .sort_values("Importance", ascending=False)
-        st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
-        active_features = importance_df[importance_df["Importance"] > 0]
-        st.dataframe(active_features.reset_index(drop=True) if len(active_features) > 30 else active_features)
+                            .reset_index(drop=True)
+                        )
+        
+                        st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
+                        if (importance_df["Importance"] > 0).any():
+                            st.dataframe(
+                                importance_df[importance_df["Importance"] > 0],
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                        else:
+                            st.info("No non‑zero importances to display (model is very regularized or features pruned).")
+        
+                        # 7) Debug panel: show what we dropped/massaged
+                        with st.expander("🔧 Debug: feature-importance inputs"):
+                            st.write({
+                                "missing_model_features": missing[:40],
+                                "used_features": available[:40],
+                                "X_features_shape": X_features.shape,
+                                "any_nonfinite_preds": (not np.isfinite(preds_auc).all()),
+                            })
+        
+        except Exception as e:
+            # Last-resort guard so the UI doesn't throw React #185
+            st.error("Feature-importance block failed safely.")
+            st.exception(e)
         
         # ---- calibration curve table (train) ---------------------------------------
         from sklearn.calibration import calibration_curve
