@@ -140,6 +140,7 @@ from sklearn.metrics import confusion_matrix
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
 from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
+from sklearn.metrics import log_loss, make_scorer
 
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
@@ -545,6 +546,8 @@ def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, grid=None, eps=1e-4,
 
     # final blended OOF (post-polarity lock)
     p_oof_blend = np.clip(best_w*a + (1-best_w)*b, eps, 1-eps)
+
+    
 
     # isotonic on OOF (needs both classes; if not, return identity calibrator)
     if np.unique(y).size == 2:
@@ -5051,6 +5054,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  Hyperparam spaces & small-league overrides
         # ---------------------------------------------------------------------------
+                # ---------------------------------------------------------------------------
+        #  Hyperparam spaces & small-league overrides
+        # ---------------------------------------------------------------------------
         feature_cols = list(features)
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
@@ -5060,35 +5066,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             features=features,
         )
         
-        # lock in generalization-friendly defaults
+        # Generalization-friendly defaults (use canonical xgb names)
         base_kwargs.update({
-            "objective":      "binary:logistic",
-            "eval_metric":    "logloss",
-            "tree_method":    "hist",
-            "grow_policy":    "lossguide",   # pairs with max_leaves
-            "max_delta_step": 1,             # stabilizes prob updates on imbalance
-            "lambda":         max(5.0, float(base_kwargs.get("reg_lambda", 5.0))),  # alias safe
-            "reg_lambda":     max(5.0, float(base_kwargs.get("reg_lambda", 5.0))),
-            "alpha":          float(base_kwargs.get("reg_alpha", 0.0)),
-            "reg_alpha":      float(base_kwargs.get("reg_alpha", 0.0)),
-            "gamma":          max(0.4, float(base_kwargs.get("gamma", 0.0))),
+            "objective":        "binary:logistic",
+            "eval_metric":      "logloss",
+            "tree_method":      "hist",
+            "grow_policy":      "lossguide",   # pairs with max_leaves (if you use it)
+            "max_delta_step":   1,
+            "reg_lambda":       max(5.0, float(base_kwargs.get("reg_lambda", 5.0))),
+            "reg_alpha":        float(base_kwargs.get("reg_alpha", 0.0)),
+            "gamma":            max(0.4, float(base_kwargs.get("gamma", 0.0))),
             "min_child_weight": max(12, int(base_kwargs.get("min_child_weight", 12))),
             "subsample":        min(0.90, max(0.65, float(base_kwargs.get("subsample", 0.80)))),
             "colsample_bytree": min(0.90, max(0.60, float(base_kwargs.get("colsample_bytree", 0.75)))),
+            "n_jobs":           1,
         })
         
         s = sport_key
         if s in SMALL_LEAGUES:
-            # extra stabilization for tiny regimes
             base_kwargs.update({
-                "max_delta_step": 1,
-                "min_child_weight": max(20, int(base_kwargs.get("min_child_weight", 20))),
-                "gamma":            max(1.0, float(base_kwargs.get("gamma", 1.0))),
-                "reg_lambda":       max(30.0, float(base_kwargs.get("reg_lambda", 30.0))),
-                "reg_alpha":        max(1.0,  float(base_kwargs.get("reg_alpha", 1.0))),
-                "subsample":        min(1.0,  max(0.80, float(base_kwargs.get("subsample", 0.85)))),
-                "colsample_bytree": min(1.0,  max(0.80, float(base_kwargs.get("colsample_bytree", 0.85)))),
-                "max_depth":        min(5, int(base_kwargs.get("max_depth", 4))),
+                "max_delta_step":    1,
+                "min_child_weight":  max(20, int(base_kwargs.get("min_child_weight", 20))),
+                "gamma":             max(1.0, float(base_kwargs.get("gamma", 1.0))),
+                "reg_lambda":        max(30.0, float(base_kwargs.get("reg_lambda", 30.0))),
+                "reg_alpha":         max(1.0,  float(base_kwargs.get("reg_alpha", 1.0))),
+                "subsample":         min(1.0,  max(0.80, float(base_kwargs.get("subsample", 0.85)))),
+                "colsample_bytree":  min(1.0,  max(0.80, float(base_kwargs.get("colsample_bytree", 0.85)))),
+                "max_depth":         min(5, int(base_kwargs.get("max_depth", 4))),
             })
             search_estimators = 300
             eps = 5e-3
@@ -5096,26 +5100,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             search_estimators = 400
             eps = 1e-4
         
-        # keep these nudges (after overrides)
-        
-        base_kwargs.update({
-            "n_jobs": 1,
-            "max_delta_step": 1,
-            "min_child_weight": max(3, base_kwargs.get("min_child_weight", 1)),
-            "gamma": max(0.1, base_kwargs.get("gamma", 0.0)),
-            "reg_lambda": max(1.0, base_kwargs.get("reg_lambda", 1.0)),
-            "reg_alpha": float(base_kwargs.get("reg_alpha", 0.0)),
-        })
-        base_kwargs["objective"]   = "binary:logistic"
-        base_kwargs["eval_metric"] = "logloss"
-        
+        # Ensure spaces don't set objective/eval_metric
         for d in (params_ll, params_auc):
-            assert "objective" not in d and "eval_metric" not in d
+            d.pop("objective", None)
+            d.pop("eval_metric", None)
         
         # ---------------------------------------------------------------------------
         #  CV with purge + embargo (snapshot-aware)
         # ---------------------------------------------------------------------------
-        # choose folds/min size based on data volume
         rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
         target_games  = 8 if s in SMALL_LEAGUES else 20
         min_val_size  = max(10 if s in SMALL_LEAGUES else 20, target_games * rows_per_game)
@@ -5135,24 +5127,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  Randomized searches (with sample_weight)
         # ---------------------------------------------------------------------------
+        
+        
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-        
-        def neg_logloss_scorer(est, X, y):
-            proba = est.predict_proba(X)[:, 1]
-            return -log_loss(y, proba)
-        
-        def roc_auc_proba_scorer(est, X, y):
-            proba = est.predict_proba(X)[:, 1]
-            return roc_auc_score(y, proba)
-        
+        neg_logloss = make_scorer(
+            log_loss,
+            greater_is_better=False,
+            needs_proba=True
+        )
+
+        # Use built-in scorers that accept sample_weight
         rs_ll = RandomizedSearchCV(
             estimator=search_base_ll,
             param_distributions=params_ll,
-            scoring=neg_logloss_scorer,
+            scoring=neg_logloss,
             cv=folds,
             n_iter=15,
-            n_jobs=1,
+            n_jobs=1,            # safer on small containers
             random_state=42,
             refit=True,
             verbose=1,
@@ -5163,7 +5155,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         rs_auc = RandomizedSearchCV(
             estimator=search_base_auc,
             param_distributions=params_auc,
-            scoring=roc_auc_proba_scorer,
+            scoring="roc_auc",
             cv=folds,
             n_iter=15,
             n_jobs=1,
@@ -5177,7 +5169,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type"):
-            best_ll_params.pop(k, None); best_auc_params.pop(k, None)
+            best_ll_params.pop(k, None)
+            best_auc_params.pop(k, None)
         
         # ---------------------------------------------------------------------------
         #  Final early-stopped fits on last CV fold (with sample_weight)
@@ -5204,7 +5197,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
         )
         
-        # Helper to get tuned #trees back out
         def _best_rounds(clf):
             br = getattr(clf, "best_iteration", None)
             if br is not None and br >= 0:
@@ -5221,7 +5213,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         n_trees_ll  = _best_rounds(model_logloss)
         n_trees_auc = _best_rounds(model_auc)
-        
         # ---------------------------------------------------------------------------
         #  OOF predictions (train-only) with per-fold refits + weights
         # ---------------------------------------------------------------------------
