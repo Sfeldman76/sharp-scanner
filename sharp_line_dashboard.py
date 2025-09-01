@@ -79,7 +79,7 @@ import numpy as np
 import pandas as pd
 from pandas.util import hash_pandas_object
 from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
-
+import re, hashlib  # ← for safe DOM keys
 from sklearn.model_selection import StratifiedKFold
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV
@@ -7174,7 +7174,43 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
 
     with container:
         st.subheader(f"📡 Scanning {label} Sharp Signals")
-
+        # Inject JS patch to log InvalidCharacterError with class/id context (browser console)
+        st.markdown("""
+        <script>
+        (function(){
+          function wrap(obj, method){
+            const orig = obj && obj[method];
+            if (!orig) return;
+            obj[method] = function(...args){
+              try { return orig.apply(this, args); }
+              catch(e){
+                if (e && e.name === 'InvalidCharacterError'){
+                  console.error('[InvalidCharacterError]', method, 'args=', args);
+                  try {
+                    const el = (this instanceof Element) ? this : null;
+                    if (el) console.error('element=', el, 'outerHTML=', el.outerHTML);
+                  } catch(_) {}
+                }
+                throw e;
+              }
+            };
+          }
+          const DTP = DOMTokenList && DOMTokenList.prototype;
+          if (DTP){
+            ['add','remove','toggle','replace'].forEach(m => wrap(DTP, m));
+          }
+          const EP = Element && Element.prototype;
+          if (EP){
+            wrap(EP, 'setAttribute');
+          }
+          const DP = Document && Document.prototype;
+          if (DP){
+            ['querySelector','querySelectorAll','getElementById','getElementsByClassName']
+              .forEach(m => wrap(DP, m));
+          }
+        })();
+        </script>
+        """, unsafe_allow_html=True)
         # === 0) History (used later for trends)
         HOURS = 24
         df_all_snapshots = get_recent_history(hours=HOURS, sport=label)
@@ -7784,11 +7820,17 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             
        
             # === Build Market + Date Filters
-            market_options = ["All"] + sorted(summary_df['Market'].dropna().unique())
-            selected_market = st.selectbox(f"📊 Filter {label} by Market", market_options, key=f"{label}_market_summary")
+            selected_market = st.selectbox(
+                f"📊 Filter {label} by Market",
+                ["All"] + sorted(summary_df['Market'].dropna().unique()),
+                key=f"{_title_key}-market"
+            )
             
-            date_only_options = ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique())
-            selected_date = st.selectbox(f"📅 Filter {label} by Date", date_only_options, key=f"{label}_date_filter")
+            selected_date = st.selectbox(
+                f"📅 Filter {label} by Date",
+                ["All"] + sorted(summary_df['Event_Date_Only'].dropna().unique()),
+                key=f"{_title_key}-date"
+            )
             
             filtered_df = summary_df.copy()
             
@@ -7872,7 +7914,13 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
     
             summary_grouped = summary_grouped[view_cols]
     
-            
+            # ---- Build a visible title (emoji OK) + a DOM/React-safe key (ASCII only) ----
+            _title_text = f"📊 Sharp vs Rec Book Summary Table – {label}"
+            _key_base = re.sub(r'[^a-z0-9_-]+', '-', _title_text.lower()).strip('-')
+            if not _key_base or _key_base[0].isdigit():
+                _key_base = f"k-{_key_base}"
+            _key_hash = hashlib.blake2b(_title_text.encode('utf-8'), digest_size=4).hexdigest()
+            _title_key = f"{_key_base}-{_key_hash}"          # e.g., sharp-vs-rec-book-summary-table-ncaaf-3af2c9d1
             # === Final Output
             st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
             st.info(f"✅ Summary table shape: {summary_grouped.shape}")
@@ -7954,13 +8002,19 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             """, unsafe_allow_html=True)
             
     
-            
-            # === Render Sharp Picks Table (HTML Version)
             table_df = summary_grouped[view_cols].copy()
             table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
-            st.markdown(f"<div class='scrollable-table-container'>{table_html}</div>", unsafe_allow_html=True)
+            
+            # ✅ Safe id; visible emoji stays only in text, not in ids/classes
+            safe_id = f"tbl-{_title_key}"
+            st.markdown(
+                f"<div id='{safe_id}' class='scrollable-table-container'>{table_html}</div>",
+                unsafe_allow_html=True
+            )
+            
             st.success("✅ Finished rendering sharp picks table.")
             st.caption(f"Showing {len(table_df)} rows")
+            # === Render Sharp Picks Table (HTML Version)
             pass
     # === 2. Render Live Odds Snapshot Table
     with st.container():  # or a dedicated tab/expander if you want
