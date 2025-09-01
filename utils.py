@@ -5768,7 +5768,7 @@ def apply_blended_sharp_score(
         if 'Model_Confidence_Tier' not in base.columns:
             base['Model_Confidence_Tier'] = pd.Categorical(
                 values=['❔ No Model'] * len(base),
-                categories=["❔ No Model", "✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
+                categories=["❔ No Model", "✅ Low", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
             )
         else:
             base['Model_Confidence_Tier'] = '❔ No Model'
@@ -6529,8 +6529,8 @@ def apply_blended_sharp_score(
             # Confidence tier (bins are inclusive on right by default)
             df_scored['Model_Confidence_Tier'] = pd.cut(
                 df_scored['Model_Sharp_Win_Prob'],
-                bins=[0, 0.4, 0.6, 0.8, 1.0],
-                labels=["✅ Coinflip","⭐ Lean","🔥 Strong Indication","🔥 Steam"],
+                bins=[0, 0.5, 0.55, 0.7, 1.0],
+                labels=["✅ Low","⭐ Lean","🔥 Strong Indication","🔥 Steam"],
                 include_lowest=True
             )
             
