@@ -1777,6 +1777,58 @@ def enrich_power_for_training_lowmem(
 
     return out
 
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+
+def fit_robust_calibrator(p_oof, y_oof, *, eps=1e-4, min_unique=200, prefer_beta=True):
+    """
+    Fit a calibrator on OOF predictions with a safe fallback:
+      - If enough unique preds → Isotonic
+      - Else → BetaCalibration (if available) or Platt (LogisticRegression)
+    Returns tuple: (kind, model)
+    """
+    p = np.asarray(p_oof, float)
+    y = np.asarray(y_oof, int)
+
+    # clip to avoid 0/1 extremes
+    p = np.clip(p, eps, 1 - eps)
+
+    # uniqueness check (rounded to 4dp to avoid misleading float noise)
+    nuniq = np.unique(np.round(p, 4)).size
+
+    # Prefer BetaCalibration for thin data if installed
+    if nuniq < min_unique and prefer_beta:
+        try:
+            from betacal import BetaCalibration
+            beta = BetaCalibration(parameters="abm")  # a,b,m
+            beta.fit(p.reshape(-1, 1), y)
+            return ("beta", beta)
+        except Exception:
+            pass  # fall through to Platt
+
+    if nuniq >= min_unique:
+        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        iso.fit(p, y)
+        return ("iso", iso)
+
+    # Platt fallback (logistic regression on the score)
+    lr = LogisticRegression(max_iter=2000)
+    lr.fit(p.reshape(-1, 1), y)
+    return ("platt", lr)
+
+def apply_calibrator(cal_tuple, p, *, clip=(0.01, 0.99)):
+    kind, model = cal_tuple
+    p = np.asarray(p, float)
+    if kind == "iso":
+        out = model.transform(p)
+    elif kind == "beta":
+        out = model.predict(p.reshape(-1, 1))
+    else:  # "platt"
+        out = model.predict_proba(p.reshape(-1, 1))[:, 1]
+    if clip:
+        lo, hi = clip
+        out = np.clip(out, lo, hi)
+    return out
 # --- fast Normal CDF (SciPy-free), vectorized, low-temp ---
 def _phi(x):
     """
@@ -2228,50 +2280,92 @@ def get_xgb_search_space(
 
     # ---- search spaces (wider & friendlier) ----
     if s in SMALL_LEAGUES:
+        
+        # 🔥 Agresssive but small‑data aware — logloss search
         params_ll = {
-            "max_depth":        randint(2, 5),
-            "learning_rate":    loguniform(5e-3, 4e-2),
-            "subsample":        uniform(0.80, 0.20),     # 0.80–1.00
-            "colsample_bytree": uniform(0.80, 0.20),     # 0.80–1.00
-            "min_child_weight": randint(1, 7),           # 1–6  ← allow easy splits
-            "gamma":            uniform(0.00, 0.60),     # 0.00–0.60 (0 allowed)
-            "reg_alpha":        loguniform(1e-2, 1e1),   # 0.01–10
-            "reg_lambda":       loguniform(2.0, 3.0e1),  # 2–30
-            "max_leaves":       randint(12, 28),
+            # a bit shallower than big leagues; still allows interactions
+            "max_depth":        randint(3, 6),            # {3,4,5}
+            "max_leaves":       randint(16, 64),          # 16–63  (use with grow_policy='lossguide' if you like)
+        
+            # slightly hotter than your original small-league band, but not too hot
+            "learning_rate":    loguniform(8e-3, 6.0e-2), # 0.008–0.06 (log scale)
+        
+            # moderate bagging to reduce variance with thin data
+            "subsample":        uniform(0.70, 0.25),      # 0.70–0.95
+            "colsample_bytree": uniform(0.70, 0.25),      # 0.70–0.95
+        
+            # allow easy splits but avoid the noisiest (don’t use 1-only everywhere)
+            "min_child_weight": randint(2, 8),            # {2..7}
+        
+            # require a bit of gain to split (stability with thin data)
+            "gamma":            uniform(0.10, 0.80),      # 0.10–0.90
+        
+            # keep weak signals, but with guardrails
+            "reg_alpha":        loguniform(1e-3, 2.0),    # 0.001–2
+            "reg_lambda":       loguniform(3.0, 2.0e1),   # 3–20
         }
+        
+        # 🔥 Aggressive AUC search (rank pickup) with small‑data stability
         params_auc = {
-            "max_depth":        randint(2, 6),
-            "learning_rate":    loguniform(4e-3, 3.5e-2),
-            "subsample":        uniform(0.75, 0.25),     # 0.75–1.00
-            "colsample_bytree": uniform(0.75, 0.25),     # 0.75–1.00
-            "min_child_weight": randint(1, 6),           # 1–5
-            "gamma":            uniform(0.00, 0.50),     # 0.00–0.50
-            "reg_alpha":        loguniform(5e-3, 5.0),   # 0.005–5
-            "reg_lambda":       loguniform(1.5, 2.5e1),  # 1.5–25
-            "max_leaves":       randint(14, 32),
+            "max_depth":        randint(3, 7),            # {3,4,5,6}
+            "max_leaves":       randint(20, 80),          # 20–79
+        
+            "learning_rate":    loguniform(8e-3, 8.0e-2), # 0.008–0.08
+        
+            "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
+            "colsample_bytree": uniform(0.75, 0.20),      # 0.75–0.95
+        
+            # a hair looser than ll for pickup, but still not ultra‑fragile
+            "min_child_weight": randint(1, 6),            # {1..5}
+        
+            # allow smaller gains than ll (pickup), but not zero
+            "gamma":            uniform(0.05, 0.55),      # 0.05–0.60
+        
+            # light L1, moderate L2
+            "reg_alpha":        loguniform(1e-4, 1.0),    # 0.0001–1
+            "reg_lambda":       loguniform(2.0, 1.5e1),   # 2–15
         }
     else:
+        
         params_ll = {
-            "max_depth":        randint(3, 7),           # 3..6
-            "max_leaves":       randint(16, 40),
-            "learning_rate":    loguniform(8e-3, 4.5e-2),
-            "subsample":        uniform(0.65, 0.30),     # 0.65–0.95
-            "colsample_bytree": uniform(0.65, 0.30),     # 0.65–0.95
-            "min_child_weight": randint(1, 9),           # 1–8  ← was 15–45
-            "gamma":            uniform(0.00, 1.20),     # 0.00–1.20
-            "reg_alpha":        loguniform(1e-3, 3.0),   # 0.001–3
-            "reg_lambda":       loguniform(2.0, 3.0e1),  # 2–30  ← was up to 80
+            # deeper trees + more leaves → stronger interactions (pickup)
+            "max_depth":        randint(5, 9),            # 5–8
+            "max_leaves":       randint(32, 96),          # 32–95
+        
+            # a bit hotter lr than your current; still calibratable
+            "learning_rate":    loguniform(4.0e-2, 1.0e-1),  # 0.04–0.10 (log scale)
+        
+            # use most rows/features per tree (less bagging = more pickup)
+            "subsample":        uniform(0.80, 0.20),      # 0.80–1.00
+            "colsample_bytree": uniform(0.80, 0.20),      # 0.80–1.00
+        
+            # allow small, high‑variance splits
+            "min_child_weight": randint(1, 4),            # 1–3
+        
+            # allow weaker splits; small gamma
+            "gamma":            uniform(0.00, 0.40),      # 0.00–0.40
+        
+            # lighter regularization so weak signals survive
+            "reg_alpha":        loguniform(1e-4, 2.0e-1), # 0.0001–0.2
+            "reg_lambda":       loguniform(1.0, 6.0),     # ~1–6
         }
+        
         params_auc = {
-            "max_depth":        randint(3, 8),           # 3..7
-            "max_leaves":       randint(18, 48),
-            "learning_rate":    loguniform(6e-3, 3.5e-2),
-            "subsample":        uniform(0.60, 0.35),     # 0.60–0.95
-            "colsample_bytree": uniform(0.60, 0.35),     # 0.60–0.95
-            "min_child_weight": randint(1, 8),           # 1–7
-            "gamma":            uniform(0.00, 1.00),     # 0.00–1.00
-            "reg_alpha":        loguniform(1e-4, 1.0),   # 0.0001–1
-            "reg_lambda":       loguniform(2.0, 2.5e1),  # 2–25
+            # AUC search can be a hair more aggressive
+            "max_depth":        randint(6, 10),           # 6–9
+            "max_leaves":       randint(48, 128),         # 48–127
+        
+            "learning_rate":    loguniform(5.0e-2, 1.2e-1),  # 0.05–0.12
+        
+            "subsample":        uniform(0.85, 0.15),      # 0.85–1.00
+            "colsample_bytree": uniform(0.85, 0.15),      # 0.85–1.00
+        
+            "min_child_weight": randint(1, 3),            # 1–2
+        
+            "gamma":            uniform(0.00, 0.30),      # 0.00–0.30
+        
+            "reg_alpha":        loguniform(1e-4, 1.0e-1), # 0.0001–0.1
+            "reg_lambda":       loguniform(0.8, 4.0),     # ~0.8–4
         }
 
     # ---- scrub dangerous keys (defensive) ----
@@ -5556,7 +5650,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             search_estimators = 300
             eps = 5e-3
         else:
-            search_estimators = 400
+            search_estimators = 600
             eps = 1e-4
         
         # ---------------------------------------------------------------------------
@@ -5648,7 +5742,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             param_distributions=params_ll,
             scoring="neg_log_loss",
             cv=cv_splits,                 # ← use filtered folds
-            n_iter=15,
+            n_iter=25,
             n_jobs=1,
             random_state=42,
             refit=True,
@@ -5662,7 +5756,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             param_distributions=params_auc,
             scoring="roc_auc",
             cv=cv_splits,                 # ← use filtered folds
-            n_iter=15,
+            n_iter=25,
             n_jobs=1,
             random_state=4242,
             refit=True,
@@ -5744,18 +5838,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_oof     = y_train[mask_oof].astype(int)
         p_oof_log = oof_pred_logloss[mask_oof].astype(float)
         p_oof_auc = oof_pred_auc[mask_oof].astype(float)
-        
+        p_oof_log = np.clip(p_oof_log, eps, 1 - eps)
+        p_oof_auc = np.clip(p_oof_auc, eps, 1 - eps)
         # ----- pick blend weight on OOF (logloss‑based) + fit isotonic; get flipped flag -----
-        best_w, iso_blend, p_oof_blend = pick_blend_weight_on_oof(
-            y_oof=y_oof,
-            p_oof_log=p_oof_log,
-            p_oof_auc=p_oof_auc,
-            metric="logloss",   # safer when AUC can be NaN
-            grid=None,
-            eps=eps,
+        
+        best_w, _, p_oof_blend = pick_blend_weight_on_oof(
+            y_oof=y_oof, p_oof_log=p_oof_log, p_oof_auc=p_oof_auc,
+            metric="logloss", grid=None, eps=eps,
         )
-        st.write(f"🔎 Selected blend weight (logloss vs AUC): w={best_w:.2f}")
 
+        # ⛑️ NEW: fit robust calibrator on the OOF blend (iso → else beta/platt)
+        cal_blend = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps, min_unique=200, prefer_beta=True)
+        
+        # Optional: log what we chose
+        kind = cal_blend[0]
+        print(f"Calibration chosen on OOF blend: {kind}")
+
+        
         # (optional) inspect other weights without changing best_w
         # _grid = np.linspace(0.20, 0.80, 13)
         # rows = []
