@@ -1352,6 +1352,7 @@ def _rv(row, *names, default=0.0):
     return default
 
 # --- Thresholds (tune lightly per sport if you want) ---
+# --- Thresholds (tune per sport if needed) ---
 THR = dict(
     line_mag_big=0.30,
     late_share_high=0.50,
@@ -1362,9 +1363,12 @@ THR = dict(
     pct_from_open_big=0.10,
     pr_diff_meaningful=20.0,
     cover_prob_conf=0.55,
+    # 🆕 ATS thresholds
+    ats_rate_strong=0.58,          # e.g., Elo/EB-style ATS rate >= 58% is notable
+    ats_margin_meaningful=2.5,     # avg cover margin (pts) viewed as meaningful
+    ats_roll_decay_hot=0.5,        # rolling/decay-weighted margin showing momentum
 )
 
-# --- Rule schema supports "requires" (all) and "requires_any" (any-of) ---
 WHY_RULES_V2 = [
     # 🔹 Core sharp/book pressure
     dict(requires_any=["Book_lift_x_Magnitude"],
@@ -1394,7 +1398,7 @@ WHY_RULES_V2 = [
          check=lambda r: _rv(r,"Pct_Line_Move_From_Opening") >= THR["pct_from_open_big"],
          msg="📈 Significant Move From Open"),
 
-    # 🔁 Reversal / overmove logic
+    # 🔁 Reversal / overmove
     dict(requires_any=["Value_Reversal_Flag"],
          check=lambda r: _rv(r,"Value_Reversal_Flag") > 0.0,
          msg="🔄 Value Reversal"),
@@ -1426,8 +1430,8 @@ WHY_RULES_V2 = [
                          + max(0.0, _rv(r,"SmallBook_Limit_Skew")) > 0.0,
          msg="💧 Liquidity/Limit Skew Signals Pressure"),
 
-    # ⏱️ Timing aggregates (from build_timing_aggregates_inplace)
-    dict(requires_any=["Line_TotalMag","Sharp_Line_Magnitude"],  # support either name
+    # ⏱️ Timing aggregates
+    dict(requires_any=["Line_TotalMag","Sharp_Line_Magnitude"],
          check=lambda r: max(_rv(r,"Line_TotalMag"), _rv(r,"Sharp_Line_Magnitude")) >= THR["line_mag_big"],
          msg="📏 Strong Timing Magnitude"),
     dict(requires_any=["Line_LateShare"],
@@ -1439,7 +1443,7 @@ WHY_RULES_V2 = [
     dict(requires_any=["Line_MaxBinMag"],
          check=lambda r: _rv(r,"Line_MaxBinMag") > 0.0,
          msg="💥 Sharp Timing Spike"),
-    dict(requires_any=["Line_Entropy","Hybrid_Timing_Entropy_Line"],  # either column works
+    dict(requires_any=["Line_Entropy","Hybrid_Timing_Entropy_Line"],
          check=lambda r: 0.0 < _rv(r,"Line_Entropy","Hybrid_Timing_Entropy_Line") <= THR["entropy_concentrated"],
          msg="🎯 Concentrated Timing"),
     dict(requires_any=["Timing_Corr_Line_Odds"],
@@ -1468,13 +1472,30 @@ WHY_RULES_V2 = [
          check=lambda r: _rv(r,"TOT_Mispricing") > 0.0,
          msg="🧮 Totals Mispricing"),
 
-    # 🔧 Trained cross-terms (you include these in features)
+    # 🔧 Trained cross-terms
     dict(requires_any=["Book_Reliability_x_Magnitude"],
          check=lambda r: _rv(r,"Book_Reliability_x_Magnitude") > 0.0,
          msg="✅ Reliable Books Driving Magnitude"),
     dict(requires_any=["Book_Reliability_x_PROB_SHIFT"],
          check=lambda r: _rv(r,"Book_Reliability_x_PROB_SHIFT") > 0.0,
          msg="✅ Reliable Books Driving Prob Shift"),
+
+    # 🆕 ATS trend signals
+    dict(requires_any=["ATS_EB_Rate"],
+         check=lambda r: _rv(r,"ATS_EB_Rate") >= THR["ats_rate_strong"],
+         msg="🏟️ Strong ATS Trend"),
+    dict(requires_any=["ATS_EB_Rate_Home"],
+         check=lambda r: _rv(r,"ATS_EB_Rate_Home") >= THR["ats_rate_strong"],
+         msg="🏠 Strong Home ATS Trend"),
+    dict(requires_any=["ATS_EB_Rate_Away"],
+         check=lambda r: _rv(r,"ATS_EB_Rate_Away") >= THR["ats_rate_strong"],
+         msg="🧳 Strong Away ATS Trend"),
+    dict(requires_any=["ATS_EB_Margin"],
+         check=lambda r: _rv(r,"ATS_EB_Margin") >= THR["ats_margin_meaningful"],
+         msg="➕ Winning vs Spread (Margin)"),
+    dict(requires_any=["ATS_Roll_Margin_Decay"],
+         check=lambda r: _rv(r,"ATS_Roll_Margin_Decay") >= THR["ats_roll_decay_hot"],
+         msg="🔥 Recent ATS Momentum"),
 ]
 def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFrame:
     """
