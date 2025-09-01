@@ -5008,9 +5008,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Limit dynamics
             "Limit_Spike_Flag","Delta_Limit","LimitSpike_x_NoMove",
             # Book network
-            "Sharp_Consensus_Weight",#"Sharp_vs_Rec_SpreadGap_Q90_Q10",#"Sharp_vs_Rec_SpreadGap_Q50",
+            "Sharp_Consensus_Weight","Sharp_vs_Rec_SpreadGap_Q90_Q10",#"Sharp_vs_Rec_SpreadGap_Q50",
             # Internal consistency
-            "Spread_ML_ProbGap","Spread_ML_Inconsistency","Total_vs_Side_ImpliedDelta",
+            #"Spread_ML_ProbGap",
+            "Spread_ML_Inconsistency","Total_vs_Side_ImpliedDelta",
             # Alt lines (optional)
             #"AltLine_Slope",#"AltLine_Curv",
             # CLV proxies
@@ -5497,7 +5498,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
             n_gb = train_df.groupby(["Game_Key", bk_col]).size()
         
-            TAU = 0.8
+            TAU = 0.6
             def _w_gb(g, b, tau=1.0):
                 Bg  = max(1, int(B_g.get(g, 1)))
                 ngb = max(1, int(n_gb.get((g, b), 1)))
