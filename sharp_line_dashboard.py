@@ -4973,7 +4973,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Safe feature matrix + high‑corr report (Arrow/Streamlit‑proof)
         # ─────────────────────────────────────────────────────────────────────────────
         # Expect: df_market, feature_cols (list-like), market, st, np, pd in scope
-        
+        _fc = list(dict.fromkeys([str(c) for c in (feature_cols or [])]))
         # 1) Build numeric X (all float32), no Inf/NaN, no exotic dtypes
         if not _fc:
             st.info("No features provided.")
