@@ -5850,9 +5850,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ⛑️ NEW: fit robust calibrator on the OOF blend (iso → else beta/platt)
         cal_blend = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps, min_unique=200, prefer_beta=True)
         
-        # Optional: log what we chose
-        kind = cal_blend[0]
-        print(f"Calibration chosen on OOF blend: {kind}")
+
+        class _CalAdapter:
+            def __init__(self, cal_tuple, clip=(0.01, 0.99)):
+                self.kind, self.model = cal_tuple   # kind ∈ {"iso","beta","platt"}
+                self.clip = clip
+            def predict(self, p):
+                p = np.asarray(p, float)
+                if self.kind == "iso":
+                    out = self.model.transform(p)
+                elif self.kind == "beta":
+                    out = self.model.predict(p.reshape(-1, 1))
+                else:  # "platt"
+                    out = self.model.predict_proba(p.reshape(-1, 1))[:, 1]
+                if self.clip:
+                    lo, hi = self.clip
+                    out = np.clip(out, lo, hi)
+                return out
+        
+        iso_blend = _CalAdapter(cal_blend) 
+                # Optional: log what we chose
+                kind = cal_blend[0]
+                print(f"Calibration chosen on OOF blend: {kind}")
 
         
         # (optional) inspect other weights without changing best_w
