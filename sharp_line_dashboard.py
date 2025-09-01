@@ -262,7 +262,26 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
         return book_raw, book_raw
 
     return _alias_lookup(book_raw), _alias_lookup(bm_raw)
+import glob
 
+def show_debug_parquet_viewer(folder="/tmp", pattern="streamlit_debug_*.parquet", max_files=10):
+    import os
+    import streamlit as st
+    import pandas as pd
+
+    files = sorted(glob.glob(os.path.join(folder, pattern)), key=os.path.getmtime, reverse=True)
+    if not files:
+        st.info("No debug parquet files found.")
+        return
+
+    sel_file = st.selectbox("🗂 Choose a debug parquet file to view", files[:max_files])
+    if sel_file:
+        try:
+            df = pd.read_parquet(sel_file)
+            st.write(f"📄 `{os.path.basename(sel_file)}` — shape: {df.shape}")
+            st.dataframe(df, use_container_width=True)
+        except Exception as e:
+            st.error(f"Failed to load: {e}")
 
 def safe_row_entropy(W: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """
