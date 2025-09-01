@@ -5879,8 +5879,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
-        p_cal     = iso_blend.predict(p_train_blend_raw)
-        p_cal_val = iso_blend.predict(p_hold_blend_raw)
+        p_cal     = apply_calibrator(cal_blend, p_train_blend_raw)
+        p_cal_val = apply_calibrator(cal_blend, p_hold_blend_raw)
         
         # Guard against holdout having one class → AUC would be nan
         y_hold_vec = y_full[hold_idx].astype(int)
