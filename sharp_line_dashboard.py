@@ -73,7 +73,7 @@ from collections import defaultdict, OrderedDict
 from itertools import product
 from html import escape
 import io, pickle, logging
-
+import traceback
 from google.cloud import storage
 import numpy as np
 import pandas as pd
@@ -2054,6 +2054,59 @@ def build_totals_training_from_scores(df_scores: pd.DataFrame,
     g = g[[key_col] + cols].rename(columns={c: f"TOT_{c}" for c in cols})
     return g
 
+def probe_streamlit_table_crash(df: pd.DataFrame, title: str = "probe"):
+   
+    st.markdown(f"#### 🔬 Probe: {title}")
+
+    # 0) header sanity
+    dupes = df.columns[df.columns.duplicated()].tolist()
+    if dupes:
+        st.error(f"Duplicate column names: {dupes}")
+
+    # 1) per-column probe
+    bad_cols = []
+    for c in df.columns:
+        try:
+            st.empty().table(df[[c]].head(50))  # render a single column
+        except Exception as e:
+            bad_cols.append((c, repr(e)))
+    if bad_cols:
+        st.error(f"Columns that failed to render: {[c for c,_ in bad_cols]}")
+        with st.expander("Column errors"):
+            for c, err in bad_cols:
+                st.write(f"**{c}** → {err}")
+
+        # show types present in each bad column
+        for c, _ in bad_cols:
+            types = df[c].head(200).apply(lambda x: type(x).__name__).value_counts(dropna=False)
+            st.write(f"**Type mix in {c}**"); st.write(types)
+
+    # 2) chunk probe (find a bad row range)
+    n = len(df)
+    step = max(1, n // 10)
+    bad_ranges = []
+    for start in range(0, n, step):
+        end = min(n, start + step)
+        try:
+            st.empty().table(df.iloc[start:end])
+        except Exception as e:
+            bad_ranges.append((start, end, repr(e)))
+
+    if bad_ranges:
+        st.warning(f"Bad row chunks: {bad_ranges}")
+        # zoom further into the first bad chunk
+        s, e, _ = bad_ranges[0]
+        for r in range(s, e):
+            try:
+                st.empty().table(df.iloc[r:r+1])
+            except Exception as e2:
+                st.error(f"Row {r} fails; showing raw values:")
+                st.write(df.iloc[r:r+1].to_dict(orient="records")[0])
+                st.caption(repr(e2))
+                break
+
+    if not bad_cols and not bad_ranges and not dupes:
+        st.success("Probe passed: no per-column or chunk rendering failures detected.")
 
 def totals_features_for_upcoming(df_scores: pd.DataFrame,
                                  df_schedule_like: pd.DataFrame,
@@ -5083,7 +5136,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 st.success("✅ No highly correlated feature pairs found")
            
             else:
-                df_corr = (pd.DataFrame(pairs, columns=["Feature_1","Feature_2","Correlation"])
+                df_corr = (pd.DataFrame(pairs, columns=["Feature_1", "Feature_2", "Correlation"])
                              .sort_values("Correlation", ascending=False))
             
                 # 6) UI safety: cap rows & round
@@ -5091,15 +5144,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 show = df_corr.head(max_rows).copy()
                 show["Correlation"] = show["Correlation"].round(4)
             
-                # 🔍 DEBUG ONLY AFTER `show` is defined
+                # 🔍 DEBUG CSV-only (safe for Streamlit)
+                
+                debug_streamlit_dataframe_crash_csv(show, name="high_corr_pairs")
+                probe_streamlit_table_crash(show, title="high_corr_pairs")
+                # Dynamically resolve the same file path
+                import glob
+                matched_files = glob.glob("/tmp/streamlit_debug_high_corr_pairs_*.csv")
+                latest_file = max(matched_files, key=os.path.getctime) if matched_files else None
+            
                 with st.expander("🧪 Debug CSV Preview (high_corr_pairs)", expanded=False):
-                try:
-                    path = "/tmp/streamlit_debug_high_corr_pairs_<yourhash>.csv"  # replace <yourhash> or glob it
-                    df_preview = pd.read_csv(path)
-                    st.dataframe(df_preview.head(50))
-                except Exception as e:
-                    st.error(f"Could not load debug CSV: {e}")
-
+                    if latest_file:
+                        try:
+                            df_preview = pd.read_csv(latest_file)
+                            st.dataframe(df_preview.head(50))
+                            st.caption(f"📎 Loaded from: `{latest_file}`")
+                        except Exception as e:
+                            st.error(f"Could not load debug CSV: {e}")
+                    else:
+                        st.info("No debug CSV file found.")
                
                 
                 # --- Final hardening before render ---
@@ -6142,66 +6205,63 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---- profit vs threshold (holdout) -----------------------------------------
         st.markdown("### 💵 Profit vs Threshold (Holdout)")
         
-        # 1) Guard: empty/degenerate holdout → early exit with empty table
-        if len(hold_idx) == 0 or np.unique(y_full[hold_idx]).size < 1:
-            st.info("No holdout rows available for profit table.")
-        else:
-            # 2) Build clean, aligned Series for p, y, odds (numeric, same index)
-            idx_eval  = pd.Index(hold_idx)
-            p_val_ser = pd.Series(np.asarray(p_cal_val, dtype=float), index=idx_eval)
-            y_val_ser = pd.Series(y_full[hold_idx].astype(int),       index=idx_eval)
-            odds_val  = pd.to_numeric(df_market.loc[idx_eval, "Odds_Price"], errors="coerce")
+        # --- Profit vs Threshold (Holdout) — UI-hardened ---
+        st.markdown("### 💵 Profit vs Threshold (Holdout)")
         
-            # replace infs/nans in all 3 (but keep selection behavior predictable)
-            p_val_ser = p_val_ser.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            y_val_ser = y_val_ser.replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
-            odds_val  = odds_val.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        def profit_at_thresh(p_series, y_series, odds_series, t: float):
+            sel = p_series >= t
+            if not np.any(sel):
+                return np.nan
+            o  = odds_series[sel]
+            yy = y_series[sel].astype(int)
         
-            def profit_at_thresh(p_series: pd.Series, y_series: pd.Series, odds_series: pd.Series, t: float) -> float:
-                sel = (p_series >= t)
-                if not np.any(sel.values):
-                    return float("nan")
-                o  = odds_series[sel]
-                yy = y_series[sel].astype(int)
+            # unit profit given American odds
+            profit_pos = o.where(o > 0, np.nan) / 100.0     # e.g., +150 -> +1.5
+            profit_neg = 100.0 / o.abs()                    # e.g., -120 -> +0.8333
+            profit_on_win = np.where(o > 0, profit_pos, profit_neg)
+            profit_on_win = pd.Series(profit_on_win, index=o.index).fillna(0.0).values
         
-                # vectorized payout per 1u stake
-                profit_pos = o.where(o > 0, np.nan) / 100.0        # +odds
-                profit_neg = 100.0 / o.abs().where(o < 0, np.nan)  # -odds
-                profit_on_win = np.where(o > 0, profit_pos, profit_neg)
-                profit_on_win = pd.Series(profit_on_win, index=o.index).fillna(0.0).values
+            roi = yy * profit_on_win - (1 - yy) * 1.0
+            return float(np.mean(roi)) if len(roi) else np.nan
         
-                roi = yy.values * profit_on_win - (1 - yy.values) * 1.0
-                return float(np.mean(roi)) if roi.size else float("nan")
+        # Ensure all series align on hold_idx
+        idx = pd.Index(hold_idx)
+        p_val_ser = pd.Series(p_cal_val, index=idx)
+        y_val_ser = pd.Series(y_hold_vec.astype(int), index=idx)
+        odds_val  = pd.to_numeric(df_market.loc[idx, "Odds_Price"], errors="coerce")
         
-            rows = []
-            for t in np.round(np.linspace(0.50, 0.80, 13), 2):
-                n_sel = int((p_val_ser >= t).sum())
-                avg_roi = profit_at_thresh(p_val_ser, y_val_ser, odds_val, float(t))
-                rows.append({"Threshold": float(t), "N": n_sel, "Avg ROI (unit)": avg_roi})
+        # 1) Build rows
+        rows = []
+        for t in np.round(np.linspace(0.50, 0.80, 13), 2):
+            n_sel = int((p_val_ser >= t).sum())
+            avg_roi = profit_at_thresh(p_val_ser, y_val_ser, odds_val, float(t))
+            rows.append({"Threshold": float(t), "N": n_sel, "Avg ROI (unit)": avg_roi})
         
-            # 3) Streamlit-safe DataFrame (numeric only, finite, rounded)
-            df_profit = pd.DataFrame(rows)
-            for c in df_profit.columns:
-                df_profit[c] = pd.to_numeric(df_profit[c], errors="ignore")
-            df_profit.replace([np.inf, -np.inf], np.nan, inplace=True)
-            df_profit.fillna(0.0, inplace=True)
-            if "Avg ROI (unit)" in df_profit.columns:
-                df_profit["Avg ROI (unit)"] = df_profit["Avg ROI (unit)"].astype(float).round(4)
+        # 2) Streamlit-safe DataFrame (numeric only, finite, rounded)
+        df_profit = pd.DataFrame(rows)
+        for c in df_profit.columns:
+            df_profit[c] = pd.to_numeric(df_profit[c], errors="coerce")
+        df_profit.replace([np.inf, -np.inf], np.nan, inplace=True)
+        # choose: keep NaN to signal no bets or fill with 0.0
+        df_profit["Avg ROI (unit)"] = df_profit["Avg ROI (unit)"].round(4)
         
-            try:
-                st.dataframe(
-                    df_profit,
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Threshold":      st.column_config.NumberColumn("Threshold", format="%.2f"),
-                        "N":              st.column_config.NumberColumn("N", format="%d"),
-                        "Avg ROI (unit)": st.column_config.NumberColumn("Avg ROI (unit)", format="%.4f"),
-                    },
-                )
-            except Exception:
-                # fallback for older Streamlit
-                st.table(df_profit)
+        # Optional: probe to pinpoint UI issues if any
+        probe_streamlit_table_crash(df_profit, title="profit")
+        
+        # 3) Render
+        try:
+            st.dataframe(
+                df_profit,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Threshold":      st.column_config.NumberColumn("Threshold", format="%.2f"),
+                    "N":              st.column_config.NumberColumn("N", format="%d"),
+                    "Avg ROI (unit)": st.column_config.NumberColumn("Avg ROI (unit)", format="%.4f"),
+                },
+            )
+        except Exception:
+            st.table(df_profit)
         
         # ---- Build feature matrix for downstream use (clean like before) ------------
         # Derive feature_names if needed
