@@ -51,7 +51,8 @@ def _phi(x):
 
 
 import pandas as pd
-
+from google.cloud import bigquery, bigquery_storage
+import pandas as pd, datetime as dt, gc, pyarrow as pa
 import cloudpickle as cp
 import gzip
 from google.cloud import storage
@@ -215,14 +216,48 @@ def to_cats(df: pd.DataFrame, cols) -> pd.DataFrame:
             df[c] = df[c].astype("string").str.strip().astype("category")
     return df
 
-from google.cloud import bigquery, bigquery_storage
-import pandas as pd, datetime as dt, gc, pyarrow as pa
+
 
 def _bqs_singleton():
     if not hasattr(_bqs_singleton, "_c"):
         _bqs_singleton._c = bigquery_storage.BigQueryReadClient()
     return _bqs_singleton._c
 
+
+def coerce_for_bq(df: pd.DataFrame) -> pd.DataFrame:
+    # 1) Strings (must be bytes/str for Arrow)
+    str_cols = [
+        'Game_Key','Game','Sport','Market','Outcome','Bookmaker','Book','Event_Date',
+        'Home_Team_Norm','Away_Team_Norm','Market_Norm','Outcome_Norm','Merge_Key_Short',
+        'Line_Hash','SHARP_HIT_BOOL','SHARP_COVER_RESULT','SupportKey','SharpMove_Timing_Dominant',
+        'Team_Key','Scored'  # BQ=STRING but sometimes Int64 in pandas
+    ]
+    for c in str_cols:
+        if c in df.columns:
+            df[c] = df[c].astype('string')
+            df[c] = df[c].where(df[c].notna(), None)
+
+    # 2) Floats (object → float)
+    for c in ['Delta_vs_Sharp','Sharp_Time_Score','Open_Book_Value',
+              'Final_Confidence_Score','Sharp_Move_Magnitude_Score']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').astype('float64')
+
+    # 3) Integers that might be floats (round then Int64 nullable)
+    for c in ['Direction_Aligned','Late_Game_Steam_Flag','SharpMove_Odds_Up','SharpMove_Odds_Down']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce').round().astype('Int64')
+
+    # 4) Booleans stored as numbers/ints
+    for c in ['Market_Leader','Is_Reinforced_MultiMarket','Scored_By_Model']:
+        if c in df.columns:
+            ser = pd.to_numeric(df[c], errors='coerce')
+            if ser.notna().any():
+                df[c] = ser.astype('Int64').astype('boolean')
+            else:
+                df[c] = df[c].astype('boolean')
+
+    return df
 def _to_bq_params(params: dict | None):
     if not params:
         return None
@@ -1447,7 +1482,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         logging.warning("⚠️ Odds_Price or Implied_Prob missing from DataFrame before upload")
 
     logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
-
+    df = coerce_for_bq(df) 
     # ======= 🚀 Write to BigQuery (with rich error diagnostics) =======
     try:
         logging.info(f"📤 Uploading to `{table}`...")
