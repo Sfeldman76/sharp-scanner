@@ -5337,31 +5337,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])], dtype=np.float32)
         
            # --- Sharp-book tilt only (no reliability map) --------------------------------
-            # Required in scope:
-            #   train_df : pd.DataFrame
-            #   w_base   : array-like base weights
-            #   bk_col   : str, name of bookmaker column (e.g., "Bookmaker")
-            #   SHARP_BOOKS : iterable of exact bookmaker names you already use
+            # Requires: train_df, w_base, bk_col, SHARP_BOOKS
             
             if bk_col not in train_df.columns:
                 raise KeyError(f"bk_col '{bk_col}' not found in train_df columns")
             
-            # Prefer your precomputed flag if present; otherwise use SHARP_BOOKS directly
+            # sharp flag
             if "Is_Sharp_Book" in train_df.columns:
-                is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).astype(int)
+                is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).astype(np.float32).to_numpy()
             else:
-                is_sharp = train_df[bk_col].isin(SHARP_BOOKS).astype(int)
+                is_sharp = train_df[bk_col].isin(SHARP_BOOKS).astype(np.float32).to_numpy()
             
-           
+            ALPHA_SHARP = 0.80
             
-            ALPHA_SHARP = 0.80  # same overall tilt strength you were using
+            # base multiplier from sharp tilt
+            mult = 1.0 + ALPHA_SHARP * is_sharp
             
-            w_train = (
-                pd.Series(w_base, index=train_df.index).astype(float)
-                * (1.0 + ALPHA_SHARP * is_sharp.to_numpy(dtype=np.float32)
-                   + BETA_LIMIT * (np.asarray(high_limit, dtype=np.float32)))
-            ).to_numpy(dtype=np.float32)
+            # optional tiny boost for high-limit rows (remove this block if not desired)
+            if "High_Limit_Flag" in train_df.columns:
+                high_limit = train_df["High_Limit_Flag"].fillna(False).astype(bool).astype(np.float32).to_numpy()
+                mult = mult + 0.10 * high_limit  # adjust or delete
             
+            # final weights
+            w_train = pd.Series(w_base, index=train_df.index).astype(np.float32).to_numpy() * mult.astype(np.float32)
         
             s = w_train.sum()
             if s > 0:
