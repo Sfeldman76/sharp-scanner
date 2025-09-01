@@ -1,41 +1,43 @@
 # === Web App & Frontend ===
 streamlit==1.36.0
+streamlit-autorefresh==1.0.1
+streamlit-option-menu==0.3.6
+altair==5.3.0
+
+# === Core Libraries ===
+numpy==1.26.4
 pandas==2.2.2
 pyarrow==16.1.0
-altair==5.3.0
-numpy==1.26.4
-streamlit-autorefresh
-fastapi==0.110.0
-uvicorn[standard]==0.27.1
-# === Data Handling ===
-requests
-pytz
-# Required for BigQuery pandas interface
-joblib    # For saving isotonic calibrators
-streamlit-option-menu
-psutil
+scipy==1.12.0
+joblib==1.3.2
+requests==2.31.0
+pytz==2024.1
+psutil==5.9.8
+
 # === Machine Learning ===
 xgboost==1.7.6
-scikit-learn==1.3.2
-scipy>=1.10,<1.13
+scikit-learn==1.3.2  # (1.4.x breaks some XGBoost compatibility still)
+
+# === FastAPI / Backend Server ===
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+gunicorn==21.2.0
+
 # === Google Cloud SDKs ===
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
-oauth2client
-pydrive2
-google-cloud-bigquery
-google-cloud-bigquery-storage
-google-cloud-storage
-pandas-gbq
-# === NEW for Option B (Cloud Tasks) ===
-google-cloud-tasks
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.130.0
+oauth2client==4.1.3
+pydrive2==1.19.0
+google-cloud-bigquery==3.17.2
+google-cloud-bigquery-storage==2.24.0
+google-cloud-storage==2.16.0
+google-cloud-tasks==2.16.2
+pandas-gbq==0.19.2
+
+# === Misc ===
 cloudpickle==3.0.0
-# === Add if you use the gunicorn-based CMD ===
-gunicorn
-
-
 
 
 
