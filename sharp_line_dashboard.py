@@ -4932,7 +4932,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Internal consistency
             "Spread_ML_ProbGap","Spread_ML_Inconsistency","Total_vs_Side_ImpliedDelta",
             # Alt lines (optional)
-            "AltLine_Slope",#"AltLine_Curv",
+            #"AltLine_Slope",#"AltLine_Curv",
             # CLV proxies
             #"CLV_Proxy_E_DeltaNext15m",
             #"CLV_Proxy_E_CLV",
@@ -4966,15 +4966,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
              .replace([np.inf, -np.inf], np.nan)
              .fillna(0.0)
              .astype('float32'))
+                
+     
         
         # ─────────────────────────────────────────────────────────────────────────────
         # Safe feature matrix + high‑corr report (Arrow/Streamlit‑proof)
         # ─────────────────────────────────────────────────────────────────────────────
         # Expect: df_market, feature_cols (list-like), market, st, np, pd in scope
-        
-        # 0) Header (tolerate missing/dup features)
-        _fc = list(dict.fromkeys([str(c) for c in (feature_cols or [])]))
-        st.markdown(f"### 📈 Features Used: `{len(_fc)}`")
         
         # 1) Build numeric X (all float32), no Inf/NaN, no exotic dtypes
         if not _fc:
@@ -5067,18 +5065,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     show["Feature_2"] = show["Feature_2"].astype(str)
                     show["Correlation"] = pd.to_numeric(show["Correlation"], errors="coerce").round(4)
         
-                    # Final sanitization for Arrow
-                    show = show.replace([np.inf, -np.inf], np.nan)
-                    show = show.dropna(how="all").drop_duplicates().reset_index(drop=True)
-                    show = show.astype({"Feature_1": "object", "Feature_2": "object", "Correlation": "float64"})
+                    # Final sanitization for Arrow / React (#185)
+                    # - Replace NaN in object columns with ""
+                    # - Ensure pure Python scalars
+                    show = show.replace([np.inf, -np.inf], np.nan).dropna(how="all").drop_duplicates().reset_index(drop=True)
+                    # Ensure no NaNs in string/object cols
+                    for c in ["Feature_1", "Feature_2"]:
+                        if c in show.columns:
+                            show[c] = show[c].astype(object).where(pd.notna(show[c]), "")
+                            # Force Python str
+                            show[c] = show[c].map(lambda v: str(v) if v is not None else "")
+                    # Force float64 for the numeric col
+                    if "Correlation" in show.columns:
+                        show["Correlation"] = show["Correlation"].astype("float64")
+                    # Arrow prefers no NaN in object cells; use None
+                    show = show.where(pd.notna(show), None)
         
-                    # ✅ Add the title here
+                    # 6) Title + Render correlated feature pairs
                     st.markdown("#### 🔗 Highly Correlated Feature Pairs (|r| > 0.85)")
                     try:
                         st.dataframe(show, hide_index=True, use_container_width=True)
-                    except Exception:
-                        # last‑ditch: plain table
+                    except Exception as e:
+                        st.warning(f"Dataframe render failed, using fallback table. ({e})")
                         st.table(show)
+                        # Optional: CSV download fallback
+                        try:
+                            csv_bytes = show.to_csv(index=False).encode("utf-8")
+                            st.download_button("⬇️ Download correlated pairs (CSV)", data=csv_bytes, file_name="high_corr_pairs.csv", mime="text/csv")
+                        except Exception:
+                            pass
             else:
                 st.info("Correlation matrix is empty or unavailable.")
         
@@ -5095,7 +5110,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             title_market = str(market).upper() if 'market' in locals() else 'MARKET'
             st.warning(f"⚠️ Skipping {title_market} — only one label class.")
             return  # or `continue`
-        
+                
   
       
         # ===============================
