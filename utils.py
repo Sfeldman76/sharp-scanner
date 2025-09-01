@@ -5397,7 +5397,7 @@ def apply_blended_sharp_score(
     df.loc[~is_h2h, ['PR_Model_Alignment_H2H','PR_Market_Alignment_H2H']] = "—"
     
     
-        _suffix_snapshot(df, "after detect cross market")
+    _suffix_snapshot(df, "after detect cross market")
     # === Confidence scores and tiers
     try:
         if weights:
