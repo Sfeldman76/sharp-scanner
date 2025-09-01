@@ -1240,8 +1240,8 @@ def holdout_by_percent_groups(
     Returns (train_idx, hold_idx) as row indices.
     """
     SPORT_HOLDOUT_PCT = {
-        "NFL": 0.20, "NCAAF": 0.20, "NBA": 0.18, "WNBA": 0.18,
-        "NHL": 0.18, "MLB": 0.15, "MLS": 0.18, "CFL": 0.20, "DEFAULT": 0.20,
+        "NFL": 0.10, "NCAAF": 0.10, "NBA": 0.18, "WNBA": 0.10,
+        "NHL": 0.18, "MLB": 0.12, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
     }
     if pct_holdout is None:
         key = (sport or "DEFAULT").upper()
@@ -5291,9 +5291,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---- Quick diagnostics (optional but handy) ----
         y_hold_vec  = y_full[hold_idx]
         y_train_vec = y_full[train_all_idx]
-        st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
-        if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
-        if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
+        #st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
+        #if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
+        #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
         
         # ---------------------------------------------------------------------------
         #  Book-aware sample weights (equalize duplicates per game; tilt toward sharp)
@@ -5336,24 +5336,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])], dtype=np.float32)
         
-            rel_lift = pd.Series(dtype=float)
-            if "book_reliability_map" in locals() and isinstance(book_reliability_map, pd.DataFrame) and not book_reliability_map.empty:
-                br = book_reliability_map.copy()
-                if {"Sport", "Market"} <= set(br.columns):
-                    msk = (br["Sport"].astype(str).str.upper() == sport_key) & (br["Market"].astype(str).str.lower() == str(market).lower())
-                    if msk.any():
-                        br = br.loc[msk]
-                if "Bookmaker" in br.columns and "Book_Reliability_Lift" in br.columns:
-                    rel_lift = br.groupby("Bookmaker")["Book_Reliability_Lift"].mean()
-            if rel_lift.empty:
-                rel_lift = _fallback_book_lift(train_df, bk_col, "SHARP_HIT_BOOL", prior=120.0)
-        
-            r = train_df[bk_col].map(rel_lift).fillna(0.0).astype(float)
-            denom = max(1e-9, r.quantile(0.9) - r.quantile(0.5))
-            r_p = ((r - r.quantile(0.5)) / denom).clip(0, 1)
-        
-            ALPHA = 0.80
-            w_train = w_base * (1.0 + ALPHA * r_p.to_numpy(dtype=np.float32))
+           # --- Sharp-book tilt only (no reliability map) --------------------------------
+            # Required in scope:
+            #   train_df : pd.DataFrame
+            #   w_base   : array-like base weights
+            #   bk_col   : str, name of bookmaker column (e.g., "Bookmaker")
+            #   SHARP_BOOKS : iterable of exact bookmaker names you already use
+            
+            if bk_col not in train_df.columns:
+                raise KeyError(f"bk_col '{bk_col}' not found in train_df columns")
+            
+            # Prefer your precomputed flag if present; otherwise use SHARP_BOOKS directly
+            if "Is_Sharp_Book" in train_df.columns:
+                is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).astype(int)
+            else:
+                is_sharp = train_df[bk_col].isin(SHARP_BOOKS).astype(int)
+            
+           
+            
+            ALPHA_SHARP = 0.80  # same overall tilt strength you were using
+            
+            w_train = (
+                pd.Series(w_base, index=train_df.index).astype(float)
+                * (1.0 + ALPHA_SHARP * is_sharp.to_numpy(dtype=np.float32)
+                   + BETA_LIMIT * (np.asarray(high_limit, dtype=np.float32)))
+            ).to_numpy(dtype=np.float32)
+            
         
             s = w_train.sum()
             if s > 0:
@@ -5518,10 +5526,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         n_trees_ll  = _best_rounds(model_logloss)
         n_trees_auc = _best_rounds(model_auc)
 
-        # Audit the features actually used to train
-        audit_dataframe(df_market[features], name=f"Features ({len(features)})")
-        
-        # Audit any pane before rendering
+  
         
         # ---------------------------------------------------------------------------
         #  OOF predictions (train-only) with per-fold refits + weights
