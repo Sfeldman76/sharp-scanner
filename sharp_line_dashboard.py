@@ -262,21 +262,8 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
         return book_raw, book_raw
 
     return _alias_lookup(book_raw), _alias_lookup(bm_raw)
-import glob
-import hashlib
-import os
-import pandas as pd
 
-def debug_streamlit_dataframe_crash_csv(df: pd.DataFrame, name: str):
-    
-    try:
-        name = str(name).strip().lower().replace(" ", "_")
-        hash_str = hashlib.md5(pd.util.hash_pandas_object(df).values).hexdigest()[:6]
-        path = f"/tmp/streamlit_debug_{name}_{hash_str}.csv"
-        df.to_csv(path, index=False)
-        print(f"✅ Saved debug CSV to: {path}")
-    except Exception as e:
-        print(f"❌ Failed to save debug CSV for {name}: {e}")
+
 
 def safe_row_entropy(W: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """
@@ -2255,96 +2242,8 @@ def get_xgb_search_space(
 
     return base_kwargs, params_ll, params_auc
 
-import os, glob
-import pandas as pd
-import numpy as np
-import streamlit as st
 
-def read_parquet_safe(path: str) -> pd.DataFrame:
-    """
-    Try pyarrow first; fall back to fastparquet if needed.
-    """
-    try:
-        return pd.read_parquet(path, engine="pyarrow")
-    except Exception:
-        return pd.read_parquet(path, engine="fastparquet")
 
-def show_df_diagnostics(df: pd.DataFrame, name: str = "DataFrame"):
-    st.subheader(f"📦 {name} — Preview & Diagnostics")
-
-    # Basic shape + memory
-    st.write(f"Shape: {df.shape[0]:,} rows × {df.shape[1]:,} columns")
-    mem_mb = df.memory_usage(deep=True).sum() / (1024**2)
-    st.write(f"Approx. memory: {mem_mb:.2f} MB")
-
-    # Dtypes table
-    st.markdown("**Dtypes**")
-    st.table(df.dtypes.rename("dtype"))
-
-    # Nulls / infs
-    with st.expander("🧼 Nulls & Infs by Column", expanded=False):
-        nulls = df.isna().sum()
-        pos_inf = np.isposinf(df.select_dtypes(include=[np.number])).sum()
-        neg_inf = np.isneginf(df.select_dtypes(include=[np.number])).sum()
-        out = pd.DataFrame({
-            "nulls": nulls,
-            "pos_inf": pos_inf.reindex(df.columns).fillna(0).astype(int),
-            "neg_inf": neg_inf.reindex(df.columns).fillna(0).astype(int),
-        })
-        st.table(out.sort_values(["nulls","pos_inf","neg_inf"], ascending=False))
-
-    # Mixed-type check (object columns that mix numbers/strings/bools, etc.)
-    with st.expander("🧪 Mixed-Type Columns (first 1k rows sampled)", expanded=False):
-        sample = df.head(1000)
-        mixed_info = []
-        for c in sample.columns:
-            try:
-                types = set(type(x).__name__ for x in sample[c].dropna().iloc[:500])
-            except Exception:
-                types = {"<error>"}
-            if len(types) > 1:
-                mixed_info.append({"column": c, "types_seen": ", ".join(sorted(types))})
-        if mixed_info:
-            st.table(pd.DataFrame(mixed_info).sort_values("column"))
-        else:
-            st.info("No mixed Python types detected in the first 1k rows.")
-
-    # Preview (cap rows to keep UI snappy)
-    with st.expander("👀 Data preview", expanded=True):
-        preview = df.head(200).copy()
-        st.dataframe(preview, use_container_width=True)
-
-    # Download helper
-    with st.expander("⬇️ Download file", expanded=False):
-        with open(selected_path, "rb") as f:
-            st.download_button("Download Parquet", f, file_name=os.path.basename(selected_path))
-
-st.markdown("### 🗂️ Debug Parquet Viewer")
-
-# Find your debug files (adjust the glob if your filenames differ)
-candidates = sorted(glob.glob("/tmp/streamlit_debug_*.parquet"))
-default_path_hint = "/tmp/streamlit_debug_high_corr_pairs_9d4195.parquet"
-if default_path_hint not in candidates and os.path.exists(default_path_hint):
-    candidates.append(default_path_hint)
-
-if not candidates:
-    st.info("No debug Parquet files found under /tmp. (Expected pattern: `/tmp/streamlit_debug_*.parquet`)")
-else:
-    selected_path = st.selectbox("Choose a debug Parquet:", candidates, index=len(candidates)-1)
-    try:
-        df_debug = read_parquet_safe(selected_path)
-        show_df_diagnostics(df_debug, name=os.path.basename(selected_path))
-
-        # Optional: if this file is specifically your high-corr pairs, do a quick check
-        if {"Feature_1","Feature_2","Correlation"}.issubset(df_debug.columns):
-            st.markdown("**High-corr pairs summary**")
-            st.table(
-                df_debug.head(50)[["Feature_1","Feature_2","Correlation"]].assign(
-                    Correlation=lambda d: d["Correlation"].round(4)
-                )
-            )
-    except Exception as e:
-        st.error(f"Failed to read `{selected_path}`: {e}")
 
 def resolve_groups(df: pd.DataFrame) -> np.ndarray:
     # 1) Prefer the per-game key if present
@@ -3642,56 +3541,218 @@ import numpy as np
 import json
 import uuid
 import streamlit as st
+import pandas as pd
+import numpy as np
+import streamlit as st
 
-def debug_streamlit_dataframe_crash(df: pd.DataFrame, name: str = ""):
-    """
-    Run diagnostic checks to detect what might crash st.dataframe() or st.table().
-    - Shows types, detects bad columns, tests JSON safety.
-    - Writes a local .parquet file for full offline inspection.
-    """
-    title = f"🧪 Debugging Streamlit DataFrame Crash — {name}" if name else "🧪 Debugging Streamlit DataFrame Crash"
-    st.subheader(title)
-
+def _is_extension_dtype(dtype) -> bool:
     try:
-        st.markdown("#### 📋 Column Types")
-        st.write(df.dtypes.to_frame("dtype").T)
+        # catches pandas nullable dtypes: Int64, boolean, string, etc.
+        return pd.api.types.is_extension_array_dtype(dtype)
+    except Exception:
+        return False
 
-        dupes = df.columns[df.columns.duplicated()].tolist()
-        if dupes:
-            st.error(f"❌ Duplicate columns detected: {dupes}")
+def _series_type_set(s: pd.Series, sample=500) -> set:
+    vals = s.dropna().head(sample)
+    tset = set(type(v) for v in vals)
+    # also flag nested containers
+    for v in vals:
+        if isinstance(v, (list, dict, set, tuple)):
+            tset.add(("nested", type(v)))
+    return tset
 
-        st.markdown("#### 🔍 Sample Rows")
-        st.write(df.head(5))
+def _col_issues(s: pd.Series) -> list[str]:
+    issues = []
+    dtype = s.dtype
 
-        st.markdown("#### 🧪 JSON Serialization Check")
+    # NaN/Inf
+    if pd.api.types.is_numeric_dtype(dtype):
+        if np.isinf(s.to_numpy(dtype="float64", copy=False)).any():
+            issues.append("contains ±inf")
+    if s.isna().any():
+        issues.append("contains NaN/None")
+
+    # mixed python types for object/unknown
+    if dtype == "object" or _is_extension_dtype(dtype):
+        tset = _series_type_set(s)
+        if len({t for t in tset if not (isinstance(t, tuple) and t[0] == "nested")}) > 1:
+            issues.append(f"mixed python types {sorted([str(t) for t in tset])}")
+        if any(isinstance(v, (list, dict, set, tuple)) for v in s.dropna().head(500)):
+            issues.append("nested values (list/dict/tuple/set)")
+
+        # bytes
+        if any(isinstance(v, (bytes, bytearray)) for v in s.dropna().head(500)):
+            issues.append("bytes/bytearray values")
+
+    # datetimes with tz
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        # If tz‑aware, pandas stores it in dtype with tz info or object
+        # Quick probe: try .dt.tz
         try:
-            sample_json = json.dumps(df.head(100).to_dict(orient="records"), default=str)
-            st.success("✅ JSON serialization passed — Streamlit should not crash")
-        except Exception as je:
-            st.error(f"❌ JSON serialization failed — UI likely to crash")
-            st.exception(je)
+            if getattr(s.dt, "tz", None) is not None:
+                issues.append(f"tz-aware datetimes: {s.dt.tz}")
+        except Exception:
+            # some mixed datetime/object series blow up here too
+            pass
 
-        # Optional: check for object or list-type cells
-        bad_cols = []
-        for col in df.columns:
-            if df[col].apply(lambda x: isinstance(x, (list, dict, tuple, set))).any():
-                bad_cols.append(col)
-        if bad_cols:
-            st.warning(f"⚠️ Columns with nested/list/dict data: {bad_cols}")
+    # categoricals
+    if pd.api.types.is_categorical_dtype(dtype):
+        # categories can be non-string/non-numeric which can confuse Arrow
+        cats = s.cat.categories
+        cat_types = set(type(v) for v in cats)
+        if len(cat_types) > 1:
+            issues.append(f"category with mixed category types {sorted([str(t) for t in cat_types])}")
 
-        # Optional: check for infinite or NA values
-        inf_cols = df.columns[df.replace([np.inf, -np.inf], np.nan).isna().any()]
-        if len(inf_cols):
-            st.info(f"ℹ️ Columns with inf or NaN: {list(inf_cols)}")
+    # very long strings (can balloon the table)
+    try:
+        if s.dtype == "object" or str(dtype) == "string":
+            lengths = s.dropna().astype(str).str.len()
+            if (lengths > 20000).any():
+                issues.append("extremely long strings (>20k chars)")
+    except Exception:
+        pass
 
-        # Save for offline deep dive
-        filename = f"/tmp/streamlit_debug_{name}_{uuid.uuid4().hex[:6]}.parquet"
-        df.to_parquet(filename, index=False)
-        st.caption(f"💾 Snapshot saved for debugging: `{filename}`")
+    return issues
 
+def _arrow_roundtrip_ok(df: pd.DataFrame) -> tuple[bool, str | None]:
+    try:
+        import pyarrow as pa
+        _ = pa.Table.from_pandas(df, preserve_index=False)
+        return True, None
     except Exception as e:
-        st.error("❌ Debug function itself failed")
-        st.exception(e)
+        return False, str(e)
+
+def _suggest_fixes(issues: dict) -> list[str]:
+    tips = []
+    if any("±inf" in " | ".join(v) for v in issues.values()):
+        tips.append("Replace ±inf with NaN → `df.replace([np.inf, -np.inf], np.nan, inplace=True)`.")
+    if any("NaN/None" in " | ".join(v) for v in issues.values()):
+        tips.append("Decide on NaN policy (keep or fill) → `df.fillna(0)` or keep as `None`.")
+    if any("mixed python types" in " | ".join(v) for v in issues.values()):
+        tips.append("Unify types per column (e.g., `astype(str)` or `pd.to_numeric(..., errors='coerce')`).")
+    if any("nested values" in " | ".join(v) for v in issues.values()):
+        tips.append("Flatten nested cells (e.g., map lists/dicts to JSON strings).")
+    if any("bytes/bytearray" in " | ".join(v) for v in issues.values()):
+        tips.append("Decode bytes to str (e.g., UTF‑8) or base64‑encode strings.")
+    if any("tz-aware datetimes" in " | ".join(v) for v in issues.values()):
+        tips.append("Make datetimes tz‑naive → `df[col] = df[col].dt.tz_convert(None)` or `.dt.tz_localize(None)`.")
+    if any("category" in " | ".join(v) for v in issues.values()):
+        tips.append("Consider converting categoricals to strings → `df[col] = df[col].astype(str)`.")
+    if any("extremely long strings" in " | ".join(v) for v in issues.values()):
+        tips.append("Truncate long strings before render.")
+    return tips
+
+def probe_streamlit_render(df: pd.DataFrame, title: str = "DataFrame probe", sample_rows: int = 2000):
+    """
+    Run this just before st.dataframe(df).
+    Produces a report and tries to isolate unrenderable columns/rows.
+    """
+    st.subheader(f"🔎 Render Probe — {title}")
+
+    # Light sample for speed (keeps original dtypes)
+    if len(df) > sample_rows:
+        probe = df.head(sample_rows).copy()
+    else:
+        probe = df.copy()
+
+    # Column scans
+    issues_by_col = {}
+    for c in probe.columns:
+        try:
+            issues = _col_issues(probe[c])
+            if issues:
+                issues_by_col[c] = issues
+        except Exception as e:
+            issues_by_col[c] = [f"column scan error: {e}"]
+
+    ok_arrow, arrow_err = _arrow_roundtrip_ok(probe)
+
+    # Try quick per‑column render to isolate offenders
+    failing_cols = []
+    for c in probe.columns:
+        try:
+            # Use table (simpler path)
+            st.table(probe[[c]].head(10))
+        except Exception as e:
+            failing_cols.append((c, str(e)))
+
+    # If still ambiguous, try to find failing rows in failing columns
+    row_offenders = []
+    for c, _ in failing_cols:
+        s = probe[c]
+        # binary search‑ish: test chunks
+        try:
+            # Find specific rows that blow up Arrow conversion
+            import pyarrow as pa
+            bad_idx = []
+            for idx, val in s.head(500).items():
+                try:
+                    _ = pa.Table.from_pandas(pd.DataFrame({c: [val]}))
+                except Exception:
+                    bad_idx.append(idx)
+            if bad_idx:
+                row_offenders.append((c, bad_idx[:10], s.loc[bad_idx[:10]].tolist()))
+        except Exception:
+            # skip if pyarrow probing not available
+            pass
+
+    # Report
+    st.markdown("**Arrow round‑trip:** " + ("✅ OK" if ok_arrow else f"❌ Failed: `{arrow_err}`"))
+    if issues_by_col:
+        st.markdown("**Column issues detected:**")
+        st.table(pd.DataFrame(
+            [{"column": k, "issues": " | ".join(v)} for k, v in issues_by_col.items()]
+        ))
+    else:
+        st.markdown("**Column issues detected:** none")
+
+    if failing_cols:
+        st.markdown("**Columns that failed a minimal render attempt:**")
+        st.table(pd.DataFrame(
+            [{"column": c, "exception": e} for c, e in failing_cols]
+        ))
+    else:
+        st.markdown("**Minimal per‑column render attempts:** all OK")
+
+    if row_offenders:
+        st.markdown("**Example offending cells (per failing column):**")
+        for c, idxs, vals in row_offenders:
+            st.write(f"- `{c}` rows {idxs}: {vals}")
+
+    suggestions = _suggest_fixes(issues_by_col)
+    if suggestions:
+        st.markdown("**Suggested fixes:**")
+        for tip in suggestions:
+            st.write("• " + tip)
+
+    # Finally, attempt a safe render of a sanitized preview (to prove fix path)
+    st.markdown("**Sanitized preview (non-destructive):**")
+    safe = probe.copy()
+    for c in safe.columns:
+        if c in issues_by_col:
+            if any("tz-aware" in x for x in issues_by_col[c]):
+                try:
+                    safe[c] = safe[c].dt.tz_convert(None)
+                except Exception:
+                    try:
+                        safe[c] = safe[c].dt.tz_localize(None)
+                    except Exception:
+                        pass
+            if any(("nested" in x) or ("bytes" in x) for x in issues_by_col[c]) or safe[c].dtype == "object":
+                # stringify problematic objects
+                safe[c] = safe[c].apply(lambda v: v.decode("utf-8", "ignore") if isinstance(v, (bytes, bytearray))
+                                        else (str(v) if isinstance(v, (list, dict, set, tuple)) else v))
+        # Replace inf
+        if pd.api.types.is_numeric_dtype(safe[c].dtype):
+            arr = pd.to_numeric(safe[c], errors="coerce")
+            arr = arr.replace([np.inf, -np.inf], np.nan)
+            safe[c] = arr
+    safe = safe.where(pd.notna(safe), None)
+    try:
+        st.dataframe(safe.head(50), hide_index=True, use_container_width=True)
+    except Exception:
+        st.table(safe.head(50))
+
 
 def clean_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
     """Sanitize feature columns for modeling + UI. Drop or coerce unsafe dtypes."""
@@ -5091,6 +5152,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
         st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
         
+        # ---- Robust correlation scan (UI‑safe) ------------------------------------
+        st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
+        
         # 1) Ensure X is a clean numeric DataFrame
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=feature_cols if 'feature_cols' in locals() else None)
@@ -5100,33 +5164,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
              .replace([np.inf, -np.inf], np.nan)
         )
         
-        # 2) Remove all-NA and constant columns (they break/degenerate corr)
+        # 2) Remove all‑NA and constant columns (they break/degenerate corr)
         na_only_cols = [c for c in Xc.columns if Xc[c].isna().all()]
         const_cols   = [c for c in Xc.columns if Xc[c].nunique(dropna=True) <= 1]
         keep_cols    = [c for c in Xc.columns if c not in set(na_only_cols) | set(const_cols)]
         Xc = Xc[keep_cols].copy()
         
-        # 3) If nothing left, bail gracefully
         if Xc.shape[1] == 0:
-            st.info("No valid numeric, non-constant features available for correlation.")
+            st.info("No valid numeric, non‑constant features available for correlation.")
         else:
-            # Downcast to save memory
-            Xc = Xc.astype("float32")
-        
-            # 4) Compute abs corr with pairwise complete obs
+            # 3) Compute abs corr (pairwise complete obs)
             try:
                 corr_matrix = Xc.corr(method="pearson", min_periods=2).abs()
             except Exception as e:
                 st.warning(f"Primary corr failed: {e}. Retrying with Spearman…")
                 corr_matrix = Xc.corr(method="spearman", min_periods=2).abs()
         
-            # 5) Find high-corr pairs
+            # 4) Find high‑corr pairs
             threshold = 0.85
             cols = corr_matrix.columns.tolist()
             pairs = []
             for i in range(len(cols)):
                 ci = cols[i]
-                # Skip self-corr and NaNs quickly
                 row = corr_matrix.iloc[i, i+1:].dropna()
                 hits = row[row > threshold]
                 if not hits.empty:
@@ -5134,76 +5193,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
             if not pairs:
                 st.success("✅ No highly correlated feature pairs found")
-           
             else:
-                df_corr = (pd.DataFrame(pairs, columns=["Feature_1", "Feature_2", "Correlation"])
-                             .sort_values("Correlation", ascending=False))
-            
-                # 6) UI safety: cap rows & round
+                df_corr = (
+                    pd.DataFrame(pairs, columns=["Feature_1", "Feature_2", "Correlation"])
+                      .sort_values("Correlation", ascending=False)
+                )
+        
+                # 5) UI safety: cap rows & round
                 max_rows = 500
                 show = df_corr.head(max_rows).copy()
-                show["Correlation"] = show["Correlation"].round(4)
-            
-                # 🔍 DEBUG CSV-only (safe for Streamlit)
-                
-                debug_streamlit_dataframe_crash_csv(show, name="high_corr_pairs")
-                probe_streamlit_table_crash(show, title="high_corr_pairs")
-                # Dynamically resolve the same file path
-                import glob
-                matched_files = glob.glob("/tmp/streamlit_debug_high_corr_pairs_*.csv")
-                latest_file = max(matched_files, key=os.path.getctime) if matched_files else None
-            
-                with st.expander("🧪 Debug CSV Preview (high_corr_pairs)", expanded=False):
-                    if latest_file:
-                        try:
-                            df_preview = pd.read_csv(latest_file)
-                            st.dataframe(df_preview.head(50))
-                            st.caption(f"📎 Loaded from: `{latest_file}`")
-                        except Exception as e:
-                            st.error(f"Could not load debug CSV: {e}")
-                    else:
-                        st.info("No debug CSV file found.")
-               
-                
-                # --- Final hardening before render ---
+                show["Correlation"] = pd.to_numeric(show["Correlation"], errors="coerce").round(4)
+        
                 # keep only expected cols (in order) if present
                 expected = ["Feature_1", "Feature_2", "Correlation"]
                 present = [c for c in expected if c in show.columns]
                 show = show.loc[:, present].copy()
-            
-               
         
-                if "Feature_1" in show: show["Feature_1"] = show["Feature_1"].astype("string")
-                if "Feature_2" in show: show["Feature_2"] = show["Feature_2"].astype("string")
-                if "Correlation" in show:
-                    show["Correlation"] = (
-                        pd.to_numeric(show["Correlation"], errors="coerce")
-                          .replace([np.inf, -np.inf], np.nan)
-                          .astype("float64")
-                          .round(4)
-                    )
+                # ⚠️ Use plain Python strings, not Pandas StringDtype
+                if "Feature_1" in show: show["Feature_1"] = show["Feature_1"].astype(str)
+                if "Feature_2" in show: show["Feature_2"] = show["Feature_2"].astype(str)
         
-                show = show.dropna(how="all").drop_duplicates().head(500).reset_index(drop=True)
+                # Final cleanups
+                show = show.replace([np.inf, -np.inf], np.nan)
+                show = show.dropna(how="all").drop_duplicates().reset_index(drop=True)
         
-                # 8) Render
+                # Make sure everything is Arrow‑friendly (plain Python scalars)
+                def _to_py(v):
+                    if isinstance(v, (np.generic,)):
+                        return v.item()
+                    return v
+                show = show.applymap(_to_py)
+                show = show.where(pd.notna(show), None)  # NaN -> None
+        
+                # 6) Render safely (avoid column_config for now)
                 try:
-                    st.dataframe(
-                        show,
-                        hide_index=True,
-                        use_container_width=True,
-                        column_config={
-                            "Feature_1": st.column_config.TextColumn("Feature 1"),
-                            "Feature_2": st.column_config.TextColumn("Feature 2"),
-                            "Correlation": st.column_config.NumberColumn("Corr |ρ|", format="%.4f"),
-                        },
-                    )
+                    st.dataframe(show, hide_index=True, use_container_width=True)
                 except Exception:
-                    # Ultra‑robust fallback with pure Python scalars
-                    safe = show.applymap(
-                        lambda x: float(x) if isinstance(x, (np.floating,)) else (str(x) if not pd.isna(x) else None)
-                    )
-                    st.table(safe)
-        
+                    st.table(show)
         # target
         # target
         if 'SHARP_HIT_BOOL' not in df_market.columns:
@@ -5602,23 +5628,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-        # ✅ INSERT THIS FOR DEBUGGING
-        with st.expander("🔍 Debug: Classifier Check"):
-            
-        
-            st.code(f"xgboost version        : {xgboost.__version__}")
-            st.code(f"scikit-learn version  : {sklearn.__version__}")
-            st.code(f"type(search_base_ll)  : {type(search_base_ll)}")
-            st.code(f"class module           : {type(search_base_ll).__module__}")
-            st.code(f"_estimator_type       : {getattr(search_base_ll, '_estimator_type', None)}")
-            st.code(f"has predict_proba?    : {callable(getattr(search_base_ll, 'predict_proba', None))}")
-            st.code(f"sk_is_classifier(...) : {sk_is_classifier(search_base_ll)}")
-        
-            try:
-                source_line = inspect.getsource(sk_is_classifier).splitlines()[0]
-                st.code(f"sk_is_classifier source: {source_line}")
-            except Exception as e:
-                st.warning(f"Could not read is_classifier source: {e}")
         
        
         
@@ -6244,10 +6253,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_profit.replace([np.inf, -np.inf], np.nan, inplace=True)
         # choose: keep NaN to signal no bets or fill with 0.0
         df_profit["Avg ROI (unit)"] = df_profit["Avg ROI (unit)"].round(4)
-        
-        # Optional: probe to pinpoint UI issues if any
-        probe_streamlit_table_crash(df_profit, title="profit")
-        
+        probe_streamlit_render(show, title="High‑corr pairs")
+        st.dataframe(show)  # or st.table(show)
         # 3) Render
         try:
             st.dataframe(
