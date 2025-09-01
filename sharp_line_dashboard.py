@@ -1361,12 +1361,12 @@ THR = dict(
     corr_confirm=0.35,
     odds_overmove_ratio=1.10,
     pct_from_open_big=0.10,
-    pr_diff_meaningful=20.0,
-    cover_prob_conf=0.55,
+    pr_diff_meaningful=4.0,
+    cover_prob_conf=0.51,
     # 🆕 ATS thresholds
-    ats_rate_strong=0.58,          # e.g., Elo/EB-style ATS rate >= 58% is notable
-    ats_margin_meaningful=2.5,     # avg cover margin (pts) viewed as meaningful
-    ats_roll_decay_hot=0.5,        # rolling/decay-weighted margin showing momentum
+    ats_rate_strong=0.55,          # e.g., Elo/EB-style ATS rate >= 58% is notable
+    ats_margin_meaningful=2,     # avg cover margin (pts) viewed as meaningful
+    ats_roll_decay_hot=0.4,        # rolling/decay-weighted margin showing momentum
 )
 
 WHY_RULES_V2 = [
@@ -1455,6 +1455,14 @@ WHY_RULES_V2 = [
     dict(requires_any=["Late_Game_Steam_Flag"],
          check=lambda r: _rv(r,"Late_Game_Steam_Flag") > 0.0,
          msg="🌙 Late Game Steam"),
+        # 🧠 Power Rating Agreement (H2H)
+    dict(requires_any=["PR_Model_Agree_H2H_Flag"],
+         check=lambda r: _rv(r,"PR_Model_Agree_H2H_Flag") > 0.0,
+         msg="🧠 Power Ratings Agree with Model"),
+    
+    dict(requires_any=["PR_Market_Agree_H2H_Flag"],
+         check=lambda r: _rv(r,"PR_Market_Agree_H2H_Flag") > 0.0,
+         msg="📊 Power Ratings Agree with Market"),
 
     # 📐 Model & pricing agreement
     dict(requires_any=["model_fav_vs_market_fav_agree"],
