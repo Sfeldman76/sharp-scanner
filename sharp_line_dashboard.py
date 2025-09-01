@@ -5272,7 +5272,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return (out.replace([np.inf, -np.inf], np.nan)
                        .astype("float32")
                        .fillna(0.0))
-        
+      
         
         # === Build X / y ===
         X_full = _to_numeric_block(df_market, feature_cols).to_numpy(np.float32)
@@ -5343,7 +5343,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
-        
+        # --- Filter CV folds to ensure both train and val have class 0 and 1 ---z
         # ---- Quick diagnostics (optional but handy) ----
         y_hold_vec  = y_full[hold_idx]
         y_train_vec = y_full[train_all_idx]
@@ -5427,6 +5427,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #  Hyperparam spaces & small-league overrides (use the fixed helper)
         # ---------------------------------------------------------------------------
        
+        # ---------------------------------------------------------------------------
+        #  Search space + sport-aware tweaks
+        # ---------------------------------------------------------------------------
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],
@@ -5435,7 +5438,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             features=features,
         )
         
-        # sport-aware tweaks
         if sport_key in SMALL_LEAGUES:
             search_estimators = 300
             eps = 5e-3
@@ -5459,77 +5461,75 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             time_values=t_train,
             min_val_size=min_val_size,
         )
-        folds = list(cv.split(X_train, y_train, groups=g_train))
-        assert len(folds) > 0, "No usable folds"
+        
+        # --- Ensure binary labels and filter folds so both train & val have {0,1} ----
+        def _has_both_classes(idx, y):
+            u = set(np.unique(y[idx]))
+            return (0 in u) and (1 in u)
+        
+        def filter_cv_splits(cv_obj, X, y, groups=None):
+            safe = []
+            for tr, va in cv_obj.split(X, y, groups):
+                if _has_both_classes(tr, y) and _has_both_classes(va, y):
+                    safe.append((tr, va))
+            return safe
+        
+        y_train = pd.Series(y_train).astype(int).clip(0, 1).to_numpy()
+        
+        cv_splits = filter_cv_splits(cv, X_train, y_train, groups=g_train)
+        # Optional: inspect how many survived
+        # print(f"kept {len(cv_splits)} balanced CV folds")
+        
+        # Fallback if none survive: single 80/20 split, only if both sides are dual-class
+        if not cv_splits:
+            n = len(y_train)
+            cut = max(1, int(0.8 * n))
+            tr = np.arange(cut)
+            va = np.arange(cut, n)
+            if _has_both_classes(tr, y_train) and _has_both_classes(va, y_train):
+                cv_splits = [(tr, va)]
+            else:
+                # Still single-class → consider your 0.50 placeholder path here
+                # For now, raise to make the situation explicit
+                raise RuntimeError("No class-balanced CV splits available; widen data or use placeholder model.")
         
         # ---------------------------------------------------------------------------
         #  Estimators & safety checks
         # ---------------------------------------------------------------------------
-       
-        
-        
-                
-        
-        def _assert_classifier(est, name: str):
-            """
-            Be strict but robust: rely on the tag and the presence of predict_proba.
-            Avoid any shadowed is_classifier surprises.
-            """
-            est_type   = getattr(est, "_estimator_type", None)
-            has_proba  = callable(getattr(est, "predict_proba", None))
-            ok = (est_type == "classifier") and has_proba
-            if not ok:
-                # Avoid crashing on repr(); print minimal, safe debug info
-                cls = type(est)
-                try:
-                    xgbp = est.get_xgb_params()
-                except Exception:
-                    xgbp = {}
-                raise AssertionError(
-                    f"{name} not classifier.\n"
-                    f"type={cls}\n"
-                    f"_estimator_type={est_type}\n"
-                    f"has_predict_proba={has_proba}\n"
-                    f"sk_is_classifier={sk_is_classifier(est)}\n"
-                    f"params={xgbp}"
-                )
-        
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
         
-       
-        
         _assert_classifier(search_base_ll,  "search_base_ll")
         _assert_classifier(search_base_auc, "search_base_auc")
-                        
+        
         # ---------------------------------------------------------------------------
-        #  Randomized searches (built-in scorers support sample_weight)
+        #  Randomized searches (use filtered cv_splits)
         # ---------------------------------------------------------------------------
         rs_ll = RandomizedSearchCV(
             estimator=search_base_ll,
             param_distributions=params_ll,
-            scoring="neg_log_loss",     # supports sample_weight
-            cv=folds,
+            scoring="neg_log_loss",
+            cv=cv_splits,                 # ← use filtered folds
             n_iter=15,
             n_jobs=1,
             random_state=42,
             refit=True,
             verbose=1,
-            error_score="raise",
+            error_score=np.nan,           # ← don’t crash on occasional bad candidates
         )
         rs_ll.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
         
         rs_auc = RandomizedSearchCV(
             estimator=search_base_auc,
             param_distributions=params_auc,
-            scoring="roc_auc",          # supports sample_weight
-            cv=folds,
+            scoring="roc_auc",
+            cv=cv_splits,                 # ← use filtered folds
             n_iter=15,
             n_jobs=1,
             random_state=4242,
             refit=True,
             verbose=1,
-            error_score="raise",
+            error_score=np.nan,
         )
         rs_auc.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
         
