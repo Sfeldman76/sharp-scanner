@@ -2301,8 +2301,8 @@ def get_xgb_search_space(
             "gamma": uniform(0.00, 0.40),      # 0.10–0.90
         
             # keep weak signals, but with guardrails
-            "reg_lambda": loguniform(1.0, 6.0)     # 1–6
-            "reg_alpha":  loguniform(1e-4, 0.5)    # 3–20
+            "reg_lambda": loguniform(1.0, 6.0),     # 1–6
+            "reg_alpha":  loguniform(1e-4, 0.5),    # 3–20
         }
         
         # 🔥 Aggressive AUC search (rank pickup) with small‑data stability
@@ -2322,8 +2322,8 @@ def get_xgb_search_space(
             "gamma": uniform(0.00, 0.40),      # 0.05–0.60
         
             # light L1, moderate L2
-            "reg_lambda": loguniform(1.0, 6.0)     # 1–6
-            "reg_alpha":  loguniform(1e-4, 0.5)   # 2–15
+            "reg_lambda": loguniform(1.0, 6.0),     # 1–6
+            "reg_alpha":  loguniform(1e-4, 0.5),   # 2–15
         }
     else:
         
