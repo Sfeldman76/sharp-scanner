@@ -4969,10 +4969,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
              .astype('float32'))
 
        
-        st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
-        
-        # ---- Robust correlation scan (UI‑safe) ------------------------------------
-        st.markdown("### 🔁 Highly Correlated Features (Pearson | abs)")
         
         # 1) Ensure X is a clean numeric DataFrame
         if not isinstance(X, pd.DataFrame):
@@ -5901,43 +5897,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             pb = np.where(pb <= 0, eps, pb)
         
             return float(np.sum((pa - pb) * np.log(pa / pb)))
-
-
         
-        # ---- Build feature matrix for downstream use (clean like before) ------------
-        # Derive feature_names if needed
-        if 'feature_names' not in locals() or not feature_names:
-            feat_in = getattr(model_logloss, 'feature_names_in_', None) or getattr(model_auc, 'feature_names_in_', None)
-            feature_names = [str(c) for c in (feat_in if feat_in is not None else features)]
-        
-        X_features = df_market.reindex(columns=feature_names).copy()
-        
-        # Coerce common string/boolean tokens → numeric, then numeric+finite cleanup
-        for c in feature_names:
-            if X_features[c].dtype == object:
-                X_features[c] = X_features[c].replace({
-                    'True': 1, 'False': 0, True: 1, False: 0,
-                    '': np.nan, 'none': np.nan, 'None': np.nan, 'NA': np.nan, 'NaN': np.nan, 'unknown': np.nan
-                })
-        
-        X_features = (
-            X_features
-            .apply(pd.to_numeric, errors='coerce')
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0.0)
-        )
-        
-        # If downstream still expects X_pd
-        X_pd = X_features
-        # ---- Feature importance + directional sign (robust) --------------------------
+        # ---- Feature importance + directional sign (robust & UI‑safe) -------------------
         try:
-            # 1) Get the feature names the AUC model was actually fit on
+            # 1) Derive model feature names (order matters)
             feat_in = getattr(model_auc, "feature_names_in_", None)
             if feat_in is None:
-                # fall back to our current list, but keep types consistent
                 feat_in = np.array([str(c) for c in features], dtype=object)
         
-            # 2) Align to columns that exist in df_market (and keep the model’s order)
+            # 2) Align to columns that exist in df_market
             available = [c for c in feat_in if c in df_market.columns]
             missing   = [c for c in feat_in if c not in df_market.columns]
         
@@ -5946,50 +5914,51 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 st.write({"model_features": list(map(str, feat_in))[:30],
                           "df_columns_sample": df_market.columns.tolist()[:30]})
             else:
-                # 3) Build a clean numeric matrix for those features (no NaN/inf, no objects)
+                # 3) Build clean numeric matrix
                 X_features = (df_market[available]
                               .apply(pd.to_numeric, errors="coerce")
                               .replace([np.inf, -np.inf], np.nan)
                               .fillna(0.0)
                               .astype("float32"))
         
-                # Guard zero rows
                 if X_features.shape[0] == 0:
                     st.error("❌ Feature-importance skipped: X_features has 0 rows after cleaning.")
                 else:
-                    # 4) Importances vector must match model n_features
+                    # 4) Importances (length must match model n_features)
                     importances = np.asarray(getattr(model_auc, "feature_importances_", None))
                     if importances is None or importances.size == 0:
                         st.error("❌ model_auc.feature_importances_ is empty. (Was the model fit?)")
                     else:
-                        # If lengths disagree, align defensively
                         n_model_feats = importances.size
                         if n_model_feats != len(feat_in):
-                            st.warning(f"⚠️ model n_features ({n_model_feats}) != feature_names_in_ ({len(feat_in)}). "
-                                       "Truncating to the smaller size for display.")
-                            k = min(n_model_feats, len(available))
-                            available   = available[:k]
-                            X_features  = X_features.iloc[:, :k]
-                            importances = importances[:k]
+                            st.warning(
+                                f"⚠️ model n_features ({n_model_feats}) != feature_names_in_ ({len(feat_in)}). "
+                                "Truncating to the smaller size for display."
+                            )
+                        # Align lengths safely
+                        k = min(n_model_feats, len(available))
+                        available   = available[:k]
+                        X_features  = X_features.iloc[:, :k]
+                        importances = importances[:k]
         
-                        # 5) Predict proba on the same cleaned matrix (safe if tiny sample)
+                        # 5) Predict proba to get directional sign (safe)
                         try:
                             preds_auc = model_auc.predict_proba(X_features)[:, 1]
                         except Exception as e:
                             st.exception(RuntimeError(f"predict_proba failed on X_features: {e}"))
                             preds_auc = np.full(X_features.shape[0], np.nan, dtype=float)
         
-                        # 6) Correlations (avoid NaNs/0‑variance)
+                        # 6) Correlations → impact direction
                         corrs = []
+                        finite_mask = np.isfinite(preds_auc)
                         for col in X_features.columns:
                             x = X_features[col].to_numpy()
-                            if np.std(x) <= 0 or not np.isfinite(x).any() or not np.isfinite(preds_auc).any():
+                            m = finite_mask & np.isfinite(x)
+                            if m.sum() < 3 or np.std(x[m]) <= 0:
                                 corrs.append(0.0)
                             else:
-                                c = np.corrcoef(x[np.isfinite(x) & np.isfinite(preds_auc)],
-                                                preds_auc[np.isfinite(x) & np.isfinite(preds_auc)])
+                                c = np.corrcoef(x[m], preds_auc[m])
                                 corrs.append(float(np.nan_to_num(c[0, 1], nan=0.0)))
-        
                         impact = np.where(np.asarray(corrs) > 0, "↑ Increases", "↓ Decreases")
         
                         importance_df = (
@@ -6002,18 +5971,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                             .reset_index(drop=True)
                         )
         
-                        st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
-                        if (importance_df["Importance"] > 0).any():
-                            st.dataframe(
-                                importance_df[importance_df["Importance"] > 0],
-                                use_container_width=True,
-                                hide_index=True,
-                            )
-                        else:
-                            st.info("No non‑zero importances to display (model is very regularized or features pruned).")
+                        # 7) ACTIVE rows (Importance > 0)
+                        active = importance_df[importance_df["Importance"] > 0].copy().reset_index(drop=True)
         
-                        # 7) Debug panel: show what we dropped/massaged
-                        with st.expander("🔧 Debug: feature-importance inputs"):
+                        # ---- UI HARDENING (inline, no external helpers) ----
+                        def _to_streamlit_scalar(x):
+                            if x is None: return None
+                            if isinstance(x, (bool, int, float, str)): return x
+                            if isinstance(x, (np.bool_, np.integer, np.floating)): return x.item()
+                            return str(x)
+        
+                        # Normalize dtypes & sanitize cells
+                        if not active.empty:
+                            active["Feature"]    = active["Feature"].astype("string")
+                            active["Impact"]     = active["Impact"].astype("string")
+                            active["Importance"] = (
+                                pd.to_numeric(active["Importance"], errors="coerce")
+                                  .replace([np.inf, -np.inf], np.nan)
+                                  .fillna(0.0)
+                                  .astype(float)
+                                  .round(6)
+                            )
+                            active = active.applymap(_to_streamlit_scalar)
+        
+                        st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
+                        if active.empty:
+                            st.info("No non‑zero importances to display (model very regularized or features pruned).")
+                        else:
+                            # Use modern width API; fall back to table if needed
+                            try:
+                                st.dataframe(active, width="stretch", hide_index=True)
+                            except Exception:
+                                st.table(active)
+        
+                        # Debug panel (kept lightweight)
+                        with st.expander("🔧 Debug: feature‑importance inputs"):
                             st.write({
                                 "missing_model_features": missing[:40],
                                 "used_features": available[:40],
@@ -6022,10 +6014,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                             })
         
         except Exception as e:
-            # Last-resort guard so the UI doesn't throw React #185
-            st.error("Feature-importance block failed safely.")
-            st.exception(e)
-        
+            st.error("Feature‑importance block failed safely.")
+            st.exception(e)   
         # ---- calibration curve table (train) ---------------------------------------
         from sklearn.calibration import calibration_curve
         prob_true, prob_pred = calibration_curve(y_train_vec, p_cal, n_bins=10)
