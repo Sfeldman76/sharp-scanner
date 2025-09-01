@@ -2284,46 +2284,46 @@ def get_xgb_search_space(
         # 🔥 Agresssive but small‑data aware — logloss search
         params_ll = {
             # a bit shallower than big leagues; still allows interactions
-            "max_depth":        randint(3, 6),            # {3,4,5}
-            "max_leaves":       randint(16, 64),          # 16–63  (use with grow_policy='lossguide' if you like)
+            "max_depth": randint(4, 7),      # 4–6
+            "max_leaves": randint(48, 96),         # 16–63  (use with grow_policy='lossguide' if you like)
         
             # slightly hotter than your original small-league band, but not too hot
-            "learning_rate":    loguniform(8e-3, 6.0e-2), # 0.008–0.06 (log scale)
+            "learning_rate": loguniform(3e-2, 0.10), # 0.008–0.06 (log scale)
         
             # moderate bagging to reduce variance with thin data
             "subsample":        uniform(0.70, 0.25),      # 0.70–0.95
             "colsample_bytree": uniform(0.70, 0.25),      # 0.70–0.95
         
             # allow easy splits but avoid the noisiest (don’t use 1-only everywhere)
-            "min_child_weight": randint(2, 8),            # {2..7}
+            'min_child_weight": randint(1, 5),           # {2..7}
         
             # require a bit of gain to split (stability with thin data)
-            "gamma":            uniform(0.10, 0.80),      # 0.10–0.90
+            "gamma": uniform(0.00, 0.40),      # 0.10–0.90
         
             # keep weak signals, but with guardrails
-            "reg_alpha":        loguniform(1e-3, 2.0),    # 0.001–2
-            "reg_lambda":       loguniform(3.0, 2.0e1),   # 3–20
+            "reg_lambda": loguniform(1.0, 6.0)     # 1–6
+            "reg_alpha":  loguniform(1e-4, 0.5)    # 3–20
         }
         
         # 🔥 Aggressive AUC search (rank pickup) with small‑data stability
         params_auc = {
-            "max_depth":        randint(3, 7),            # {3,4,5,6}
-            "max_leaves":       randint(20, 80),          # 20–79
+            "max_depth": randint(3, 8),      # 4–6
+            "max_leaves": randint(48, 96),         # 20–79
         
-            "learning_rate":    loguniform(8e-3, 8.0e-2), # 0.008–0.08
+            "learning_rate": loguniform(3e-2, 0.10), # 0.008–0.08
         
             "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
             "colsample_bytree": uniform(0.75, 0.20),      # 0.75–0.95
         
             # a hair looser than ll for pickup, but still not ultra‑fragile
-            "min_child_weight": randint(1, 6),            # {1..5}
+            'min_child_weight": randint(1, 6),            # {1..5}
         
             # allow smaller gains than ll (pickup), but not zero
-            "gamma":            uniform(0.05, 0.55),      # 0.05–0.60
+            "gamma": uniform(0.00, 0.40),      # 0.05–0.60
         
             # light L1, moderate L2
-            "reg_alpha":        loguniform(1e-4, 1.0),    # 0.0001–1
-            "reg_lambda":       loguniform(2.0, 1.5e1),   # 2–15
+            "reg_lambda": loguniform(1.0, 6.0)     # 1–6
+            "reg_alpha":  loguniform(1e-4, 0.5)   # 2–15
         }
     else:
         
