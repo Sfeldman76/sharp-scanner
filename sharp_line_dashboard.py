@@ -263,25 +263,20 @@ def normalize_book_and_bookmaker(book_key: str, bookmaker_key: str | None = None
 
     return _alias_lookup(book_raw), _alias_lookup(bm_raw)
 import glob
+import hashlib
+import os
+import pandas as pd
 
-def show_debug_parquet_viewer(folder="/tmp", pattern="streamlit_debug_*.parquet", max_files=10):
-    import os
-    import streamlit as st
-    import pandas as pd
-
-    files = sorted(glob.glob(os.path.join(folder, pattern)), key=os.path.getmtime, reverse=True)
-    if not files:
-        st.info("No debug parquet files found.")
-        return
-
-    sel_file = st.selectbox("🗂 Choose a debug parquet file to view", files[:max_files])
-    if sel_file:
-        try:
-            df = pd.read_parquet(sel_file)
-            st.write(f"📄 `{os.path.basename(sel_file)}` — shape: {df.shape}")
-            st.dataframe(df, use_container_width=True)
-        except Exception as e:
-            st.error(f"Failed to load: {e}")
+def debug_streamlit_dataframe_crash_csv(df: pd.DataFrame, name: str):
+    
+    try:
+        name = str(name).strip().lower().replace(" ", "_")
+        hash_str = hashlib.md5(pd.util.hash_pandas_object(df).values).hexdigest()[:6]
+        path = f"/tmp/streamlit_debug_{name}_{hash_str}.csv"
+        df.to_csv(path, index=False)
+        print(f"✅ Saved debug CSV to: {path}")
+    except Exception as e:
+        print(f"❌ Failed to save debug CSV for {name}: {e}")
 
 def safe_row_entropy(W: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """
@@ -5097,13 +5092,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 show["Correlation"] = show["Correlation"].round(4)
             
                 # 🔍 DEBUG ONLY AFTER `show` is defined
-                debug_streamlit_dataframe_crash(show, name="high_corr_pairs")
+                with st.expander("🧪 Debug CSV Preview (high_corr_pairs)", expanded=False):
+                try:
+                    path = "/tmp/streamlit_debug_high_corr_pairs_<yourhash>.csv"  # replace <yourhash> or glob it
+                    df_preview = pd.read_csv(path)
+                    st.dataframe(df_preview.head(50))
+                except Exception as e:
+                    st.error(f"Could not load debug CSV: {e}")
 
-                # (optional) mount the viewer only once per run
-                if not st.session_state.get("_debug_viewer_mounted", False):
-                    with st.expander("🧪 View Debug Parquet Files", expanded=False):
-                        show_debug_parquet_viewer()
-                    st.session_state["_debug_viewer_mounted"] = True
+               
                 
                 # --- Final hardening before render ---
                 # keep only expected cols (in order) if present
