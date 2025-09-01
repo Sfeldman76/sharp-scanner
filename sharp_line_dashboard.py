@@ -5498,7 +5498,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-        
+        from sklearn.base import is_classifier as sk_is_classifier
+
+        def _assert_classifier(est, name: str):
+            """
+            Be strict but robust: rely on the tag and the presence of predict_proba.
+            Avoid any shadowed is_classifier surprises.
+            """
+            est_type   = getattr(est, "_estimator_type", None)
+            has_proba  = callable(getattr(est, "predict_proba", None))
+            ok = (est_type == "classifier") and has_proba
+            if not ok:
+                # Avoid crashing on repr(); print minimal, safe debug info
+                cls = type(est)
+                try:
+                    xgbp = est.get_xgb_params()
+                except Exception:
+                    xgbp = {}
+                raise AssertionError(
+                    f"{name} not classifier.\n"
+                    f"type={cls}\n"
+                    f"_estimator_type={est_type}\n"
+                    f"has_predict_proba={has_proba}\n"
+                    f"sk_is_classifier={sk_is_classifier(est)}\n"
+                    f"params={xgbp}"
+                )
         _assert_classifier(search_base_ll,  "search_base_ll")
         _assert_classifier(search_base_auc, "search_base_auc")
         
