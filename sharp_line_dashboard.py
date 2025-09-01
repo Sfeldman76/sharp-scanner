@@ -5565,7 +5565,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # Still single-class → consider your 0.50 placeholder path here
                 # For now, raise to make the situation explicit
                 raise RuntimeError("No class-balanced CV splits available; widen data or use placeholder model.")
-        
+        folds = cv_split
         # ---------------------------------------------------------------------------
         #  Estimators & safety checks
         # ---------------------------------------------------------------------------
