@@ -3735,8 +3735,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # margin distribution
         "ATS_Cover_Margin_Last5_Prior_Mean",
         # "ATS_Cover_Margin_Last5_Prior_Std",
-        #"Market_Bucket",
-        #"Market_OddsProb_Bucket"
+        "Market_Bucket",
+        "Market_OddsProb_Bucket"
     ]
     
     # (Opponent mirrors intentionally excluded per your note)
