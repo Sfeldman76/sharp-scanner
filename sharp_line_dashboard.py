@@ -4956,106 +4956,147 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # 🔧 CLEAN FEATURES SAFELY (inplace mutation)
         features = clean_features_inplace(df_market, features)
-        
+       
         # Final dataset for modeling
         feature_cols = [str(c) for c in features]
         
-       
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
         X = (df_market[feature_cols]
              .apply(pd.to_numeric, errors='coerce')
              .replace([np.inf, -np.inf], np.nan)
              .fillna(0.0)
              .astype('float32'))
-
-       
         
-        # 1) Ensure X is a clean numeric DataFrame
+        # ─────────────────────────────────────────────────────────────────────────────
+        # Safe feature matrix + high‑corr report (Arrow/Streamlit‑proof)
+        # ─────────────────────────────────────────────────────────────────────────────
+        # Expect: df_market, feature_cols (list-like), market, st, np, pd in scope
+        
+        # 0) Header (tolerate missing/dup features)
+        _fc = list(dict.fromkeys([str(c) for c in (feature_cols or [])]))
+        st.markdown(f"### 📈 Features Used: `{len(_fc)}`")
+        
+        # 1) Build numeric X (all float32), no Inf/NaN, no exotic dtypes
+        if not _fc:
+            st.info("No features provided.")
+            return
+        
+        X_raw = df_market.reindex(columns=_fc, fill_value=np.nan)
+        
+        # Coerce everything → numeric
+        X = (
+            X_raw.apply(pd.to_numeric, errors='coerce')
+                 .replace([np.inf, -np.inf], np.nan)
+                 .fillna(0.0)
+                 .astype('float32', copy=False)
+        )
+        
+        # 1a) Ensure DataFrame & Arrow‑friendly column names (strings, unique)
         if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X, columns=feature_cols if 'feature_cols' in locals() else None)
+            X = pd.DataFrame(X, columns=_fc)
+        X.columns = [str(c) for c in X.columns]
         
+        # 2) Secondary clean for correlation input
         Xc = (
             X.apply(pd.to_numeric, errors="coerce")
              .replace([np.inf, -np.inf], np.nan)
         )
         
-        # 2) Remove all‑NA and constant columns (they break/degenerate corr)
+        # 2a) Drop all‑NA and constant columns (corr degeneracy)
         na_only_cols = [c for c in Xc.columns if Xc[c].isna().all()]
         const_cols   = [c for c in Xc.columns if Xc[c].nunique(dropna=True) <= 1]
-        keep_cols    = [c for c in Xc.columns if c not in set(na_only_cols) | set(const_cols)]
+        drop_cols    = set(na_only_cols) | set(const_cols)
+        keep_cols    = [c for c in Xc.columns if c not in drop_cols]
         Xc = Xc[keep_cols].copy()
         
+        # 2b) Cap width for safety (very wide matrices can choke Arrow/corr)
+        MAX_CORR_COLS = 400  # tune if needed
+        if Xc.shape[1] > MAX_CORR_COLS:
+            st.warning(f"Feature count {Xc.shape[1]} too wide for corr; sampling {MAX_CORR_COLS}.")
+            # prefer most variable columns (more informative)
+            variances = Xc.var(numeric_only=True).sort_values(ascending=False)
+            sel = [c for c in variances.index.tolist() if c in Xc.columns][:MAX_CORR_COLS]
+            Xc = Xc[sel].copy()
+        
+        # 2c) If nothing viable, bail gracefully
         if Xc.shape[1] == 0:
             st.info("No valid numeric, non‑constant features available for correlation.")
         else:
-            # 3) Compute abs corr (pairwise complete obs)
+            # 3) Compute abs corr with fallback + size cap on rows to avoid memory spikes
+            # Downsample rows if extremely tall
+            MAX_CORR_ROWS = 20000
+            if len(Xc) > MAX_CORR_ROWS:
+                Xc = Xc.sample(n=MAX_CORR_ROWS, random_state=13)
+        
             try:
                 corr_matrix = Xc.corr(method="pearson", min_periods=2).abs()
             except Exception as e:
-                st.warning(f"Primary corr failed: {e}. Retrying with Spearman…")
-                corr_matrix = Xc.corr(method="spearman", min_periods=2).abs()
-        
-            # 4) Find high‑corr pairs
-            threshold = 0.85
-            cols = corr_matrix.columns.tolist()
-            pairs = []
-            for i in range(len(cols)):
-                ci = cols[i]
-                row = corr_matrix.iloc[i, i+1:].dropna()
-                hits = row[row > threshold]
-                if not hits.empty:
-                    pairs.extend([(ci, cj, float(hits[cj])) for cj in hits.index])
-        
-            if not pairs:
-                st.success("✅ No highly correlated feature pairs found")
-            else:
-                df_corr = (
-                    pd.DataFrame(pairs, columns=["Feature_1", "Feature_2", "Correlation"])
-                      .sort_values("Correlation", ascending=False)
-                )
-        
-                # 5) UI safety: cap rows & round
-                max_rows = 500
-                show = df_corr.head(max_rows).copy()
-                show["Correlation"] = pd.to_numeric(show["Correlation"], errors="coerce").round(4)
-        
-                # keep only expected cols (in order) if present
-                expected = ["Feature_1", "Feature_2", "Correlation"]
-                present = [c for c in expected if c in show.columns]
-                show = show.loc[:, present].copy()
-        
-                # ⚠️ Use plain Python strings, not Pandas StringDtype
-                if "Feature_1" in show: show["Feature_1"] = show["Feature_1"].astype(str)
-                if "Feature_2" in show: show["Feature_2"] = show["Feature_2"].astype(str)
-        
-                # Final cleanups
-                show = show.replace([np.inf, -np.inf], np.nan)
-                show = show.dropna(how="all").drop_duplicates().reset_index(drop=True)
-        
-                # Make sure everything is Arrow‑friendly (plain Python scalars)
-                def _to_py(v):
-                    if isinstance(v, (np.generic,)):
-                        return v.item()
-                    return v
-                show = show.applymap(_to_py)
-                show = show.where(pd.notna(show), None)  # NaN -> None
-        
-                # 6) Render safely (avoid column_config for now)
+                st.warning(f"Primary (pearson) corr failed: {e}. Retrying with Spearman…")
                 try:
-                    st.dataframe(show, hide_index=True, use_container_width=True)
-                except Exception:
-                    st.table(show)
-        # target
-        # target
+                    corr_matrix = Xc.corr(method="spearman", min_periods=2).abs()
+                except Exception as e2:
+                    st.error(f"Spearman corr also failed: {e2}. Skipping corr view.")
+                    corr_matrix = None
+        
+            # 4) Extract high‑corr pairs safely
+            if corr_matrix is not None and not corr_matrix.empty:
+                threshold = 0.85
+                cols = corr_matrix.columns.tolist()
+                pairs = []
+                # Avoid self-pairs; iterate upper triangle only
+                for i, ci in enumerate(cols):
+                    row = corr_matrix.iloc[i, i+1:]
+                    if row is not None and hasattr(row, "dropna"):
+                        hits = row.dropna()
+                        hits = hits[hits > threshold]
+                        if not hits.empty:
+                            for cj, val in hits.items():
+                                # enforce plain Python scalars (Arrow‑safe)
+                                pairs.append((str(ci), str(cj), float(val)))
+        
+                if not pairs:
+                    st.success("✅ No highly correlated feature pairs found")
+                else:
+                    df_corr = pd.DataFrame(pairs, columns=["Feature_1", "Feature_2", "Correlation"])
+                    df_corr = df_corr.sort_values("Correlation", ascending=False)
+        
+                    # 5) UI safety: cap rows & round; enforce pure Python types
+                    MAX_ROWS_SHOW = 500
+                    show = df_corr.head(MAX_ROWS_SHOW).copy()
+                    show["Feature_1"] = show["Feature_1"].astype(str)
+                    show["Feature_2"] = show["Feature_2"].astype(str)
+                    show["Correlation"] = pd.to_numeric(show["Correlation"], errors="coerce").round(4)
+        
+                    # Final sanitization for Arrow
+                    show = show.replace([np.inf, -np.inf], np.nan)
+                    show = show.dropna(how="all").drop_duplicates().reset_index(drop=True)
+                    show = show.astype({"Feature_1": "object", "Feature_2": "object", "Correlation": "float64"})
+        
+                    # ✅ Add the title here
+                    st.markdown("#### 🔗 Highly Correlated Feature Pairs (|r| > 0.85)")
+                    try:
+                        st.dataframe(show, hide_index=True, use_container_width=True)
+                    except Exception:
+                        # last‑ditch: plain table
+                        st.table(show)
+            else:
+                st.info("Correlation matrix is empty or unavailable.")
+        
+        # ── Target checks (Arrow‑ and training‑safe) ──────────────────────────────────
         if 'SHARP_HIT_BOOL' not in df_market.columns:
             st.warning("⚠️ Missing SHARP_HIT_BOOL in df_market — skipping.")
             return  # or `continue` if inside a loop
         
-        y = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce').fillna(0).astype(int)
-        if y.nunique() < 2:
-            title_market = market.upper() if 'market' in locals() else 'MARKET'
+        y = pd.to_numeric(df_market['SHARP_HIT_BOOL'], errors='coerce')
+        # Treat any non‑{0,1} as 0; fill NaN to 0 explicitly
+        y = y.where(y.isin([0, 1]), 0).fillna(0).astype('int8')
+        
+        if y.nunique(dropna=True) < 2:
+            title_market = str(market).upper() if 'market' in locals() else 'MARKET'
             st.warning(f"⚠️ Skipping {title_market} — only one label class.")
             return  # or `continue`
+        
+  
       
         # ===============================
         # Purged Group Time-Series CV (PGTSCV) + Embargo
@@ -5794,113 +5835,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         
-        # ---- segment diagnostics (holdout) -----------------------------------------
-        st.markdown("### 🧩 Segment Diagnostics (Holdout)")
-        
-        # Early exit if no holdout
-        if len(hold_idx) == 0:
-            st.info("No holdout rows available for segment diagnostics.")
-        else:
-            # 1) Build clean, aligned Series (index = hold_idx)
-            idx_eval = pd.Index(hold_idx)
-        
-            p_ser = pd.Series(np.asarray(p_cal_val, dtype=float), index=idx_eval)
-            y_ser = pd.Series(y_hold_vec.astype(int),             index=idx_eval)
-        
-            # Optional segment keys (string, NA-safe)
-            book_ser   = (df_market.loc[idx_eval, "Book"].astype(str)
-                          if "Book" in df_market.columns else pd.Series("NA", index=idx_eval))
-            timing_ser = (df_market.loc[idx_eval, "SharpMove_Timing_Dominant"].astype(str)
-                          if "SharpMove_Timing_Dominant" in df_market.columns else pd.Series("NA", index=idx_eval))
-            fav_ser    = (df_market.loc[idx_eval, "Is_Favorite_Bet"].fillna(0).astype(int)
-                          if "Is_Favorite_Bet" in df_market.columns else pd.Series(0, index=idx_eval))
-        
-            # 2) Sanitize numeric targets/scores to avoid UI/metric crashes
-            p_ser = p_ser.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
-            y_ser = y_ser.replace([np.inf, -np.inf], np.nan).fillna(0).astype(int)
-        
-            eval_seg = pd.DataFrame({
-                "p": p_ser.values,
-                "y": y_ser.values,
-                "Book":   book_ser.astype(str).fillna("NA").values,
-                "Timing": timing_ser.astype(str).fillna("NA").values,
-                "Fav":    fav_ser.values.astype(int),
-            }, index=idx_eval)
-        
-            # Safe metric helpers -----------------------------------------------------
-            def _safe_auc(y, p):
-                if len(y) < 2 or pd.Series(y).nunique() < 2:
-                    return np.nan
-                return float(roc_auc_score(y, p))
-        
-            def _safe_brier(y, p):
-                if len(y) == 0:
-                    return np.nan
-                return float(brier_score_loss(y, p))
-        
-            def seg_table(df: pd.DataFrame, by: str) -> pd.DataFrame:
-                rows = []
-                for k, sub in df.groupby(by, dropna=False):
-                    yv = sub["y"].astype(int).values
-                    pv = sub["p"].astype(float).values
-                    auc = _safe_auc(yv, pv)
-                    brier = _safe_brier(yv, pv)
-                    rows.append({
-                        by: str(k),
-                        "N": int(len(sub)),
-                        "BaseRate": float(np.mean(yv)) if len(yv) else np.nan,
-                        "AUC": auc if not np.isnan(auc) else np.nan,
-                        "Brier": brier if not np.isnan(brier) else np.nan,
-                    })
-                out = pd.DataFrame(rows).sort_values("N", ascending=False)
-                # Streamlit-safe cleanup
-                out.replace([np.inf, -np.inf], np.nan, inplace=True)
-                out.fillna(0.0, inplace=True)
-                out["N"] = out["N"].astype(int)
-                out["BaseRate"] = out["BaseRate"].astype(float).round(3)
-                out["AUC"] = out["AUC"].astype(float).round(3)
-                out["Brier"] = out["Brier"].astype(float).round(4)
-                return out
-        
-            st.write("**by Book**")
-            st.dataframe(seg_table(eval_seg, "Book").head(20), use_container_width=True)
-        
-            st.write("**by Timing**")
-            st.dataframe(seg_table(eval_seg, "Timing"), use_container_width=True)
-        
-            st.write("**Favorite vs Dog**")
-            st.dataframe(seg_table(eval_seg, "Fav"), use_container_width=True)
-        def psi_num(a: np.ndarray, b: np.ndarray, bins: int = 10, eps: float = 1e-6) -> float:
-            """
-            Population Stability Index between numeric arrays a (baseline/train) and b (target/holdout).
-            Uses quantile bins from 'a' so each bin has mass in baseline.
-            PSI = Σ (p_i - q_i) * ln(p_i / q_i)
-            """
-            a = np.asarray(a, dtype=float)
-            b = np.asarray(b, dtype=float)
-            a = a[np.isfinite(a)]
-            b = b[np.isfinite(b)]
-            if a.size < bins or b.size < bins:
-                return np.nan
-        
-            # Quantile edges from baseline
-            q = np.quantile(a, np.linspace(0, 1, bins + 1))
-            # widen edges slightly to include extremes
-            q[0]  = np.nextafter(q[0], -np.inf)
-            q[-1] = np.nextafter(q[-1],  np.inf)
-        
-            pa = np.histogram(a, q)[0].astype(float)
-            pb = np.histogram(b, q)[0].astype(float)
-        
-            pa = pa / max(1.0, a.size)
-            pb = pb / max(1.0, b.size)
-        
-            # avoid zeros
-            pa = np.where(pa <= 0, eps, pa)
-            pb = np.where(pb <= 0, eps, pb)
-        
-            return float(np.sum((pa - pb) * np.log(pa / pb)))
-        
+
         # ---- Feature importance + directional sign (robust & UI‑safe) -------------------
         try:
             # 1) Derive model feature names (order matters)
