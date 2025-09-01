@@ -2295,7 +2295,7 @@ def get_xgb_search_space(
             "colsample_bytree": uniform(0.70, 0.25),      # 0.70–0.95
         
             # allow easy splits but avoid the noisiest (don’t use 1-only everywhere)
-            'min_child_weight": randint(1, 5),           # {2..7}
+            "min_child_weight": randint(1, 5),           # {2..7}
         
             # require a bit of gain to split (stability with thin data)
             "gamma": uniform(0.00, 0.40),      # 0.10–0.90
@@ -2316,7 +2316,7 @@ def get_xgb_search_space(
             "colsample_bytree": uniform(0.75, 0.20),      # 0.75–0.95
         
             # a hair looser than ll for pickup, but still not ultra‑fragile
-            'min_child_weight": randint(1, 6),            # {1..5}
+            "min_child_weight": randint(1, 6),            # {1..5}
         
             # allow smaller gains than ll (pickup), but not zero
             "gamma": uniform(0.00, 0.40),      # 0.05–0.60
