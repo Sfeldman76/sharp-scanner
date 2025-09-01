@@ -5346,7 +5346,40 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                        .astype("float32")
                        .fillna(0.0))
       
+        # ==== Remove PR_* features for SPREADS only ==================================
+        # Determine market label (use your local variable if you already have one)
+        try:
+            market_label = str(market).lower()  # if you have `market` in scope
+        except NameError:
+            # Fallback: infer from df_market (safe if single market slice)
+            market_label = str(df_market["Market"].iloc[0]).lower() if "Market" in df_market.columns and len(df_market) else ""
         
+        # Normalize your working feature list name
+        feature_cols = list(features) if "features" in locals() else list(feature_cols)
+        
+        if market_label.startswith("spread") or market_label == "spreads":
+            # Explicit PR features you've seen + any columns with PR_ prefix
+            PR_EXPLICIT = {
+                "PR_Team_Rating",
+                "PR_Opp_Rating",
+                "PR_Abs_Rating_Diff",
+                "PR_Rating_Diff",
+            }
+            def _is_pr(col: str) -> bool:
+                c = str(col)
+                return c.startswith("PR_") or (c in PR_EXPLICIT)
+        
+            before = len(feature_cols)
+            feature_cols = [c for c in feature_cols if not _is_pr(c)]
+            removed = before - len(feature_cols)
+            if removed:
+                print(f"🧹 Removed {removed} PR features for SPREADS.")
+        
+        # Keep a single source of truth for downstream code
+        features = feature_cols
+        # ============================================================================
+        
+       
         # === Build X / y ===
         X_full = _to_numeric_block(df_market, feature_cols).to_numpy(np.float32)
         
