@@ -515,10 +515,10 @@ def build_game_key(df: pd.DataFrame) -> pd.DataFrame:
 # === Tiers from probability (unified) ===
 def tier_from_prob(p: float) -> str:
     if pd.isna(p): return "⚠️ Missing"
-    if p >= 0.90: return "🔥 Steam"
-    if p >= 0.75: return "🔥 Strong Indication"
-    if p >= 0.60: return "⭐ Lean"
-    return "✅ Coinflip"
+    if p >= 0.70: return "🔥 Steam"
+    if p >= 0.55: return "🔥 Strong Indication"
+    if p >= 0.51: return "⭐ Lean"
+    return "✅ Low"
 
 
 from sklearn.isotonic import IsotonicRegression
@@ -1078,7 +1078,7 @@ def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market
       1) bundle[market]['feature_cols'] or bundle['feature_cols']
       2) Other common bundle keys: 'feature_names', 'features', 'training_features', etc.
       3) Names exposed by the model (feature_names_in_, booster.feature_names, etc.)
-      4) Heuristic fallback from df_like (numeric/boolean columns minus obvious IDs/targets)
+      4) Heuristic fallback from df_like (numeric/boo columns minus obvious IDs/targets)
 
     Always de-duplicates and (if df_like is provided) filters to columns present in df_like.
     """
@@ -1208,7 +1208,7 @@ def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market
             others    = [c for c in cols_numeric if c not in preferred]
             names = preferred + others
 
-    # 4) Cleanup: drop dupes, keep order, and (if df_like is given) filter to existing cols
+    # 4) Cup: drop dupes, keep order, and (if df_like is given) filter to existing cols
     seen, final = set(), []
     for c in names or []:
         c = str(c)
@@ -2699,7 +2699,7 @@ def add_resistance_features_training(
     else:
         out["SharpMove_Resistance_Break"] = out["Was_Line_Resistance_Broken"].astype(np.uint8)
 
-    # final cleanup
+    # final cup
     out.drop(columns=["_sport_","_market_"], inplace=True, errors="ignore")
     return out
 
@@ -3661,7 +3661,7 @@ def df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
         return x
     for c in df.columns:
         df[c] = df[c].map(_coerce)
-    # turn NaN into None (clean JSON)
+    # turn NaN into None (c JSON)
     df = df.where(pd.notna(df), None)
     return df
 
@@ -3696,7 +3696,7 @@ def fetch_scores_with_features(sport: str, days_back: int):
     return bq.query(sql, job_config=job_cfg).to_dataframe(bqstorage_client=bqs)
 
 
-def clean_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
+def c_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
     """Sanitize feature columns for modeling + UI. Drop or coerce unsafe dtypes."""
     kept = []
     for c in features:
@@ -3708,7 +3708,7 @@ def clean_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
         if not s.map(pd.api.types.is_scalar).all():
             continue
 
-        # --- Handle booleans → numeric ---
+        # --- Handle boos → numeric ---
         if pd.api.types.is_bool_dtype(s):
             df[c] = s.astype("int8")
 
@@ -4679,7 +4679,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['Is_Favorite_Bet'] = (df_market['Value'] < 0).astype(int)
       
         
-        # Ensure NA-safe boolean logic and conversion
+        # Ensure NA-safe boo logic and conversion
         df_market['SharpMove_Odds_Up'] = (
             ((df_market['Sharp_Move_Signal'] == 1) & (df_market['Odds_Shift'] > 0))
             .fillna(False)
@@ -5129,8 +5129,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             st.write(f"ℹ️ Dropping {len(missing_in_market)} missing feature(s): "
                      f"{sorted(missing_in_market)[:20]}{'...' if len(missing_in_market)>20 else ''}")
         
-        # 🔧 CLEAN FEATURES SAFELY (inplace mutation)
-        features = clean_features_inplace(df_market, features)
+        # 🔧 C FEATURES SAFELY (inplace mutation)
+        features = c_features_inplace(df_market, features)
        
         # Final dataset for modeling
         feature_cols = [str(c) for c in features]
@@ -5169,7 +5169,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X = pd.DataFrame(X, columns=_fc)
         X.columns = [str(c) for c in X.columns]
         
-        # 2) Secondary clean for correlation input
+        # 2) Secondary c for correlation input
         Xc = (
             X.apply(pd.to_numeric, errors="coerce")
              .replace([np.inf, -np.inf], np.nan)
@@ -5425,12 +5425,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             for c in cols:
                 col = out[c]
         
-                # 1) Boolean-like → float (True/False/NA → 1.0/0.0/NaN)
+                # 1) Boo-like → float (True/False/NA → 1.0/0.0/NaN)
                 if is_bool_dtype(col):
                     out[c] = col.astype("float32")
                     continue
         
-                # 2) Strings/objects/categories → clean then to_numeric
+                # 2) Strings/objects/categories → c then to_numeric
                 if is_object_dtype(col) or is_string_dtype(col) or str(col.dtype).startswith("category"):
                     out[c] = col.replace({
                         'True': 1, 'False': 0, 'true': 1, 'false': 0,
@@ -6123,7 +6123,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 st.write({"model_features": list(map(str, feat_in))[:30],
                           "df_columns_sample": df_market.columns.tolist()[:30]})
             else:
-                # 3) Build clean numeric matrix
+                # 3) Build c numeric matrix
                 X_features = (df_market[available]
                               .apply(pd.to_numeric, errors="coerce")
                               .replace([np.inf, -np.inf], np.nan)
@@ -6131,7 +6131,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                               .astype("float32"))
         
                 if X_features.shape[0] == 0:
-                    st.error("❌ Feature-importance skipped: X_features has 0 rows after cleaning.")
+                    st.error("❌ Feature-importance skipped: X_features has 0 rows after cing.")
                 else:
                     # 4) Importances (length must match model n_features)
                     importances = np.asarray(getattr(model_auc, "feature_importances_", None))
@@ -8378,8 +8378,8 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
         df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
 
         # === Bin probabilities
-        prob_bins = [0, 0.4, 0.6, 0.8, 1.0]
-        bin_labels = ["✅ Coinflip", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
+        prob_bins = [0, 0.50, 0.55, 0.70, 1.0]
+        bin_labels = ["✅ Low", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
 
         
         df['Confidence_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels)
