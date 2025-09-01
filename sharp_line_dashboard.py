@@ -4791,18 +4791,68 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         is_home_bet = (df_market['Outcome_Norm'] == df_market['Home_Team_Norm'])
         
+        # --- Power rating columns (already in your code) ---
         df_market['PR_Team_Rating'] = np.where(is_home_bet, df_market['Home_Power_Rating'], df_market['Away_Power_Rating'])
         df_market['PR_Opp_Rating']  = np.where(is_home_bet, df_market['Away_Power_Rating'], df_market['Home_Power_Rating'])
-        #df_market['PR_Team_Off']    = np.where(is_home_bet, df_market['Home_PR_Off'], df_market['Away_PR_Off'])
-        #df_market['PR_Team_Def']    = np.where(is_home_bet, df_market['Home_PR_Def'], df_market['Away_PR_Def'])
-        #df_market['PR_Opp_Off']     = np.where(is_home_bet, df_market['Away_PR_Off'], df_market['Home_PR_Off'])
-        #df_market['PR_Opp_Def']     = np.where(is_home_bet, df_market['Away_PR_Def'], df_market['Home_PR_Def'])
-        
         df_market['PR_Rating_Diff']     = df_market['PR_Team_Rating'] - df_market['PR_Opp_Rating']
         df_market['PR_Abs_Rating_Diff'] = df_market['PR_Rating_Diff'].abs()
-        #df_market['PR_Total_Est']       = (df_market['PR_Team_Off'] + df_market['PR_Opp_Off'] - df_market['PR_Team_Def'] - df_market['PR_Opp_Def'])
+        
+        # ---- H2H-only power rating alignment flags ---------------------------------
+        mkt = df_market['Market'].astype(str).str.strip().str.lower()
+        is_h2h = mkt.isin(['h2h', 'moneyline', 'ml', 'headtohead'])
+        
+        # Choose the model prob column
+        prob_col = 'Model Prob' if 'Model Prob' in df_market.columns else 'Model_Sharp_Win_Prob'
+        if prob_col not in df_market.columns:
+            df_market[prob_col] = np.nan
+        p_model = pd.to_numeric(df_market[prob_col], errors='coerce')
+        
+        # --- (A) PR ↔ MODEL agreement (H2H only) ---
+        df_market['PR_Model_Agree_H2H'] = np.where(
+            is_h2h & p_model.notna(),
+            ((df_market['PR_Rating_Diff'] > 0) & (p_model > 0.5)) |
+            ((df_market['PR_Rating_Diff'] < 0) & (p_model < 0.5)),
+            np.nan
+        )
+        
+        # --- (B) PR ↔ MARKET agreement (H2H only) ---
+        if 'Implied_Prob' in df_market.columns:
+            p_mkt = pd.to_numeric(df_market['Implied_Prob'], errors='coerce')
+        else:
+            odds_ = pd.to_numeric(df_market.get('Odds_Price', np.nan), errors='coerce')
+            p_mkt = pd.Series(np.where(
+                odds_.notna(),
+                np.where(odds_ < 0, (-odds_) / ((-odds_) + 100.0), 100.0 / (odds_ + 100.0)),
+                np.nan
+            ), index=df_market.index)
+        
+        df_market['PR_Market_Agree_H2H'] = np.where(
+            is_h2h & p_mkt.notna(),
+            ((df_market['PR_Rating_Diff'] > 0) & (p_mkt > 0.5)) |
+            ((df_market['PR_Rating_Diff'] < 0) & (p_mkt < 0.5)),
+            np.nan
+        )
+        
+        # Optional UI strings
+        df_market['PR_Model_Alignment_H2H'] = np.select(
+            [df_market['PR_Model_Agree_H2H'] == True, df_market['PR_Model_Agree_H2H'] == False],
+            ["✅ PR ↔ Model Agree", "❌ PR ≠ Model"],
+            default="—"
+        )
+        df_market['PR_Market_Alignment_H2H'] = np.select(
+            [df_market['PR_Market_Agree_H2H'] == True, df_market['PR_Market_Agree_H2H'] == False],
+            ["✅ PR ↔ Market Agree", "❌ PR ≠ Market"],
+            default="—"
+        )
+        
+        # Ensure non-H2H rows show blanks
+        df_market.loc[~is_h2h, ['PR_Model_Agree_H2H', 'PR_Market_Agree_H2H']] = np.nan
+        df_market.loc[~is_h2h, ['PR_Model_Alignment_H2H', 'PR_Market_Alignment_H2H']] = "—"
+        
+        # (Optional) numeric flags for modeling
+        df_market['PR_Model_Agree_H2H_Flag']  = (df_market['PR_Model_Agree_H2H']  == True).astype('Int8')
+        df_market['PR_Market_Agree_H2H_Flag'] = (df_market['PR_Market_Agree_H2H'] == True).astype('Int8')
 
-        # helper to extend without dupes (order-preserving)
         def extend_unique(base, items):
             for c in items:
                 if c not in base:
@@ -4872,6 +4922,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             'ATS_EB_Rate_Home',
             'ATS_EB_Rate_Away',
+            'PR_Rating_Diff','PR_Abs_Rating_Diff',
+            'PR_Model_Agree_H2H_Flag','PR_Market_Agree_H2H_Flag'
             
         ]
         
