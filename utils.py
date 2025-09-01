@@ -5304,9 +5304,11 @@ def apply_blended_sharp_score(
     # === Cross-market support (optional)
     df = detect_cross_market_sharp_support(df, SHARP_BOOKS)
     df['CrossMarketSharpSupport'] = df['CrossMarketSharpSupport'].fillna(0).astype(int)
-    df['Unique_Sharp_Books'] = df['Unique_Sharp_Books'].fillna(0).astype(int)
-    df['LimitUp_NoMove_Flag'] = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
-    df['Market_Leader'] = df['Market_Leader'].fillna(False).astype(int)
+    df['Unique_Sharp_Books']      = df['Unique_Sharp_Books'].fillna(0).astype(int)
+    df['LimitUp_NoMove_Flag']     = df['LimitUp_NoMove_Flag'].fillna(False).astype(int)
+    df['Market_Leader']           = df['Market_Leader'].fillna(False).astype(int)
+    
+    # ---- Power ratings enrich (current) -----------------------------------------
     try:
         enrich_power_from_current_inplace(
             df,
@@ -5320,10 +5322,82 @@ def apply_blended_sharp_score(
         df["Home_Power_Rating"] = np.float32(1500.0)
         df["Away_Power_Rating"] = np.float32(1500.0)
         df["Power_Rating_Diff"] = np.float32(0.0)
-
-  
     
-    _suffix_snapshot(df, "after detect cross market")
+    # ---- Bet-side team vs opponent PR columns -----------------------------------
+    if 'is_home_bet' not in df.columns:
+        # Derive: Outcome matches home team
+        home_norm    = df.get('Home_Team_Norm', '').astype(str).str.lower().str.strip()
+        outcome_norm = df['Outcome'].astype(str).str.lower().str.strip()
+        df['is_home_bet'] = (outcome_norm == home_norm)
+    
+    is_home_bet = df['is_home_bet']
+    
+    df['PR_Team_Rating'] = np.where(is_home_bet, df['Home_Power_Rating'], df['Away_Power_Rating']).astype('float32')
+    df['PR_Opp_Rating']  = np.where(is_home_bet, df['Away_Power_Rating'], df['Home_Power_Rating']).astype('float32')
+    df['PR_Rating_Diff']     = (df['PR_Team_Rating'] - df['PR_Opp_Rating']).astype('float32')
+    df['PR_Abs_Rating_Diff'] = df['PR_Rating_Diff'].abs().astype('float32')
+    
+    # ---- H2H-only alignment flags (Model & Market vs PR) ------------------------
+    mkt    = df['Market'].astype(str).str.strip().str.lower()
+    is_h2h = mkt.isin(['h2h','moneyline','ml','headtohead'])
+    
+    # Pick the model prob column
+    prob_col = 'Model Prob' if 'Model Prob' in df.columns else 'Model_Sharp_Win_Prob'
+    if prob_col not in df.columns:
+        df[prob_col] = np.nan
+    p_model = pd.to_numeric(df[prob_col], errors='coerce')
+    
+    # Model vs PR
+    df['PR_Model_Agree_H2H'] = np.where(
+        is_h2h & p_model.notna(),
+        ((df['PR_Rating_Diff'] > 0) & (p_model > 0.5)) |
+        ((df['PR_Rating_Diff'] < 0) & (p_model < 0.5)),
+        np.nan
+    )
+    
+    # Market vs PR (use Implied_Prob if present; else derive from Odds_Price)
+    if 'Implied_Prob' in df.columns:
+        p_mkt = pd.to_numeric(df['Implied_Prob'], errors='coerce')
+    else:
+        odds_ = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+        p_mkt = pd.Series(np.where(
+            odds_.notna(),
+            np.where(odds_ < 0, (-odds_) / ((-odds_) + 100.0), 100.0 / (odds_ + 100.0)),
+            np.nan
+        ), index=df.index)
+    
+    df['PR_Market_Agree_H2H'] = np.where(
+        is_h2h & p_mkt.notna(),
+        ((df['PR_Rating_Diff'] > 0) & (p_mkt > 0.5)) |
+        ((df['PR_Rating_Diff'] < 0) & (p_mkt < 0.5)),
+        np.nan
+    )
+    
+    # UI-friendly labels (optional)
+    df['PR_Model_Alignment_H2H'] = np.select(
+        [df['PR_Model_Agree_H2H'] == True, df['PR_Model_Agree_H2H'] == False],
+        ["✅ PR ↔ Model Agree", "❌ PR ≠ Model"],
+        default="—"
+    )
+    df['PR_Market_Alignment_H2H'] = np.select(
+        [df['PR_Market_Agree_H2H'] == True, df['PR_Market_Agree_H2H'] == False],
+        ["✅ PR ↔ Market Agree", "❌ PR ≠ Market"],
+        default="—"
+    )
+    
+    # Numeric flags (nullable Int8). Use where() to avoid broadcast shape issues.
+    df['PR_Model_Agree_H2H_Flag']  = (df['PR_Model_Agree_H2H']  == True).astype('Int8')
+    df['PR_Market_Agree_H2H_Flag'] = (df['PR_Market_Agree_H2H'] == True).astype('Int8')
+    
+    df['PR_Model_Agree_H2H_Flag']  = df['PR_Model_Agree_H2H_Flag'].where(is_h2h, pd.NA)
+    df['PR_Market_Agree_H2H_Flag'] = df['PR_Market_Agree_H2H_Flag'].where(is_h2h, pd.NA)
+    
+    # Ensure non-H2H rows show blanks/—
+    df.loc[~is_h2h, ['PR_Model_Agree_H2H','PR_Market_Agree_H2H']] = np.nan
+    df.loc[~is_h2h, ['PR_Model_Alignment_H2H','PR_Market_Alignment_H2H']] = "—"
+    
+    
+        _suffix_snapshot(df, "after detect cross market")
     # === Confidence scores and tiers
     try:
         if weights:
