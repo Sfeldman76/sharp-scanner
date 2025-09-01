@@ -7212,7 +7212,18 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
         </script>
         """, unsafe_allow_html=True)
         # === 0) History (used later for trends)
+        # --- Build a visible title + safe key EARLY so it's always defined ---
+        _summary_title_text = f"📊 Sharp vs Rec Book Summary Table – {label}"  # emoji OK in visible text
+        _key_base = re.sub(r'[^a-z0-9_-]+', '-', _summary_title_text.lower()).strip('-')
+        if not _key_base or _key_base[0].isdigit():
+            _key_base = f"k-{_key_base}"
+        _key_hash = hashlib.blake2b(_summary_title_text.encode('utf-8'), digest_size=4).hexdigest()
+        _title_key = f"{_key_base}-{_key_hash}"   # ← use everywhere for keys/ids
+    
+        # === 0) History (used later for trends)
+        
         HOURS = 24
+        
         df_all_snapshots = get_recent_history(hours=HOURS, sport=label)
 
         # === 1) Load/cached sharp moves
@@ -7913,14 +7924,10 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             summary_grouped['Model Prob'] = summary_grouped['Model Prob'].apply(lambda x: f"{round(x * 100, 1)}%" if pd.notna(x) else "—")
     
             summary_grouped = summary_grouped[view_cols]
-    
-            # ---- Build a visible title (emoji OK) + a DOM/React-safe key (ASCII only) ----
-            _title_text = f"📊 Sharp vs Rec Book Summary Table – {label}"
-            _key_base = re.sub(r'[^a-z0-9_-]+', '-', _title_text.lower()).strip('-')
-            if not _key_base or _key_base[0].isdigit():
-                _key_base = f"k-{_key_base}"
-            _key_hash = hashlib.blake2b(_title_text.encode('utf-8'), digest_size=4).hexdigest()
-            _title_key = f"{_key_base}-{_key_hash}"          # e.g., sharp-vs-rec-book-summary-table-ncaaf-3af2c9d1
+            # --- Build a visible title + safe key EARLY so it's always defined ---
+           
+            
+            
             # === Final Output
             st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
             st.info(f"✅ Summary table shape: {summary_grouped.shape}")
