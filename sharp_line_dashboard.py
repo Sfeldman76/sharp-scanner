@@ -1256,6 +1256,81 @@ def get_holdout_by_last_n_games(groups: np.ndarray,
 
     return train_idx, hold_idx
 
+import numpy as np
+import pandas as pd
+
+def holdout_by_percent_groups(
+    groups: np.ndarray,         # e.g., df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
+    times:  np.ndarray,         # e.g., snapshot_ts or game_ts (pd.Timestamp, same length as groups)
+    y:      np.ndarray,         # labels aligned to rows (for diversity checks)
+    pct_holdout: float = 0.20,  # 20% of games in holdout (by time)
+    min_train_games: int = 25,  # keep at least this many games in train
+    min_hold_games: int  = 8,   # ensure holdout isn’t trivially small
+    ensure_label_diversity: bool = True
+):
+    """
+    Returns (train_idx, hold_idx) where hold_idx corresponds to the last ~pct_holdout of games
+    by start time. All rows for those games go to holdout; the rest to train.
+    """
+    assert 0 < pct_holdout < 1, "pct_holdout must be (0,1)."
+    n = len(groups)
+    if n == 0:
+        return np.array([], dtype=int), np.array([], dtype=int)
+
+    meta = pd.DataFrame({
+        "idx":  np.arange(n, dtype=int),
+        "grp":  groups.astype(str),
+        "time": pd.to_datetime(times, utc=True, errors="coerce"),
+        "y":    y.astype(int)
+    })
+    # Drop NaT (can’t time-order these safely)
+    meta = meta.dropna(subset=["time"]).reset_index(drop=True)
+
+    # One row per group with time span
+    gmeta = (meta.groupby("grp", as_index=False)["time"]
+                .agg(start="min", end="max")
+                .sort_values("start")
+                .reset_index(drop=True))
+
+    n_groups = len(gmeta)
+    if n_groups == 0:
+        return np.array([], dtype=int), np.array([], dtype=int)
+
+    # Target #holdout games from percent (bounded)
+    target_hold = max(min_hold_games, int(round(n_groups * pct_holdout)))
+    target_hold = min(max(1, target_hold), max(1, n_groups - min_train_games))
+
+    # Take the last target_hold groups as holdout
+    hold_groups = gmeta.iloc[-target_hold:]["grp"].to_numpy()
+    train_groups = gmeta.iloc[:-target_hold]["grp"].to_numpy()
+
+    # Map back to row indices
+    all_groups = meta["grp"].to_numpy()
+    hold_mask  = np.isin(all_groups, hold_groups)
+    train_mask = np.isin(all_groups, train_groups)
+
+    hold_idx  = meta.loc[hold_mask, "idx"].to_numpy()
+    train_idx = meta.loc[train_mask, "idx"].to_numpy()
+
+    # Optional: ensure label diversity (both classes) if possible
+    if ensure_label_diversity:
+        y_hold = meta.loc[hold_mask, "y"].to_numpy()
+        if np.unique(y_hold).size < 2 and target_hold < n_groups - min_train_games:
+            # Expand the holdout window forward (more recent games) until we get 2 classes or hit the cap
+            k = target_hold
+            while np.unique(y_hold).size < 2 and k < (n_groups - min_train_games):
+                k += 1
+                hold_groups = gmeta.iloc[-k:]["grp"].to_numpy()
+                train_groups = gmeta.iloc[:-k]["grp"].to_numpy()
+                hold_mask = np.isin(all_groups, hold_groups)
+                y_hold = meta.loc[hold_mask, "y"].to_numpy()
+            hold_idx  = meta.loc[hold_mask, "idx"].to_numpy()
+            train_idx = meta.loc[np.isin(all_groups, train_groups), "idx"].to_numpy()
+
+    # Final sanity
+    train_idx = np.sort(train_idx.astype(int))
+    hold_idx  = np.sort(hold_idx.astype(int))
+    return train_idx, hold_idx
 
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
 def _resolve_active_features(bundle, model, df_like):
@@ -5237,40 +5312,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                    .sort_values("start")
                    .reset_index(drop=True))
         
-        # pick per-sport holdout games
-        # === Time-forward % split (e.g. last 20% for holdout) ===
-        # === Time-forward % split (rows) ===
-        pct_holdout = 0.20  # tune per sport if desired
+        # pick per-sport holdout 
+        # === Time-forward % split by groups (contiguous last block) ===
+        train_all_idx, hold_idx = holdout_by_percent_groups(
+            sport=sport,               # e.g., "NBA"
+            groups=groups,             # Game_Key per row
+            times=times,               # Snapshot_Timestamp if multi-snapshot else Game_Start
+            y=y_full,                  # labels aligned to rows
+            pct_holdout=None,          # use SPORT_HOLDOUT_PCT default; or override with a float
+            min_train_games=25,
+            min_hold_games=8,
+            ensure_label_diversity=True
+        )
         
-        meta = pd.DataFrame({
-            "idx":    np.arange(len(groups)),
-            "time":   pd.to_datetime(times, utc=True)
-        }).sort_values("time").reset_index(drop=True)
-        
-        n_hold = max(1, int(len(meta) * pct_holdout))
-        hold_idx      = meta.iloc[-n_hold:]["idx"].to_numpy()
-        train_all_idx = meta.iloc[:-n_hold]["idx"].to_numpy()
-        
-        # REMOVE the old call — do NOT overwrite the indices again
-        # train_all_idx, hold_idx = get_holdout_by_last_n_games(...)
-        
-        # Diagnostics
-        y_hold_vec  = y_full[hold_idx]
-        y_train_vec = y_full[train_all_idx]
-        st.write("Holdout class counts:", np.bincount(y_hold_vec) if len(y_hold_vec) else [])
-        st.write("Train class counts:",   np.bincount(y_train_vec) if len(y_train_vec) else [])
-      
-        
-        st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
-        st.write(f"Train class balance: {np.bincount(y_train_vec)}")
-        st.write(f"Holdout class balance: {np.bincount(y_hold_vec)}")
-        st.write(f"Train label distribution: {np.bincount(y_train_vec)} (Total: {len(y_train_vec)})")
-        st.write(f"Holdout label distribution: {np.bincount(y_hold_vec)} (Total: {len(y_hold_vec)})")
         # ---- TRAIN subset arrays (everything downstream uses only TRAIN rows) ----
         X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
+        
+        # ---- Quick diagnostics (optional but handy) ----
+        y_hold_vec  = y_full[hold_idx]
+        y_train_vec = y_full[train_all_idx]
+        st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
+        if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
+        if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
         
         # ---------------------------------------------------------------------------
         #  Book-aware sample weights (equalize duplicates per game; tilt toward sharp)
