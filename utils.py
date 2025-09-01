@@ -1193,10 +1193,7 @@ def compute_market_weights(df):
     # Temporary shim to keep new loader working
     return compute_and_write_market_weights(df)
 
-
-
-
-def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'): 
+def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     if df is None or df.empty:
         logging.warning("⚠️ No sharp moves to write.")
         return
@@ -1205,28 +1202,24 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     df = build_game_key(df)
 
     allowed_books = SHARP_BOOKS + REC_BOOKS
-    # Apply normalization early
     # ✅ Normalize book names before any filtering
-    df['Book'] = df['Book'].str.lower()
-    
-
-    
-    # ✅ Now apply the filtering with normalized names
-    df = df[df['Book'].isin(allowed_books)]
-    
-
+    if 'Book' in df.columns:
+        df['Book'] = df['Book'].astype(str).str.lower()
+        # ✅ Now filter using normalized names
+        df = df[df['Book'].isin([b.lower() for b in allowed_books])]
 
     if 'Game_Key' not in df.columns or df['Game_Key'].isnull().all():
         logging.warning("❌ No valid Game_Key present — skipping upload.")
-        logging.debug(df[['Game', 'Game_Start', 'Market', 'Outcome']].head().to_string())
+        cols = [c for c in ['Game','Game_Start','Market','Outcome'] if c in df.columns]
+        if cols:
+            logging.debug(df[cols].head().to_string())
         return
+
     # ❌ Don't write any rows that are already past game start
     if 'Post_Game' in df.columns:
         pre_filter = len(df)
         df = df[df['Post_Game'] == False]
         logging.info(f"🧹 Removed {pre_filter - len(df)} post-game rows before writing to sharp_moves_master")
-
-      
 
     logging.info(f"🧪 Sharp moves ready to write: {len(df)}")
 
@@ -1236,13 +1229,12 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
 
     if 'Time' in df.columns:
         df['Time'] = pd.to_datetime(df['Time'], errors='coerce', utc=True)
-   
 
-   
     # Convert object columns safely
     for col in df.columns:
         if df[col].dtype == 'object':
             df[col] = df[col].where(df[col].notna(), None)
+
     # enforce sport short form before upload
     SPORT_KEY_TO_LABEL = {
         "baseball_mlb": "MLB",
@@ -1251,14 +1243,10 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         "football_ncaaf": "NCAAF",
         "basketball_wnba": "WNBA",
         "canadianfootball_cfl": "CFL",
-        # extend if needed
     }
- 
     if 'Sport' in df.columns:
-        # normalize only known long forms → short label
         df['Sport'] = df['Sport'].astype(str).str.strip()
-        df['Sport'] = df['Sport'].replace(SPORT_KEY_TO_LABEL)  # maps keys like baseball_mlb → MLB
-        # also handle legacy uppercased values like BASEBALL_MLB
+        df['Sport'] = df['Sport'].replace(SPORT_KEY_TO_LABEL)
         df['Sport'] = df['Sport'].str.upper().replace({
             'BASEBALL_MLB': 'MLB',
             'BASKETBALL_NBA': 'NBA',
@@ -1275,6 +1263,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Enhanced_Sharp_Confidence_Score', 'True_Sharp_Confidence_Score',
         'Final_Confidence_Score', 'Model_Confidence'
     ]
+
     # Define the full expected schema
     ALLOWED_COLS = [
         # Metadata
@@ -1303,18 +1292,17 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'Is_Home_Team_Bet',
         'Is_Favorite_Bet',
         'High_Limit_Flag',
-        'Line_Delta',               # ✅ Add this
-        'Line_Magnitude_Abs',       # Already present
-        'Direction_Aligned','Odds_Price', 'Implied_Prob', 
+        'Line_Delta',
+        'Line_Magnitude_Abs',
+        'Direction_Aligned','Odds_Price', 'Implied_Prob',
         'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds',
-        'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds', 
+        'Value_Reversal_Flag', 'Odds_Reversal_Flag','Open_Odds',
         'Late_Game_Steam_Flag', 'Sharp_Line_Magnitude',
         'Rec_Line_Magnitude',
         'SharpMove_Odds_Up',
         'SharpMove_Odds_Down',
         'SharpMove_Odds_Mag',
-        
-        'Active_Signal_Count', 
+        'Active_Signal_Count',
         'SharpMove_Magnitude_Overnight_VeryEarly', 'SharpMove_Magnitude_Overnight_MidRange',
         'SharpMove_Magnitude_Overnight_LateGame', 'SharpMove_Magnitude_Overnight_Urgent',
         'SharpMove_Magnitude_Early_VeryEarly', 'SharpMove_Magnitude_Early_MidRange',
@@ -1324,14 +1312,13 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         'SharpMove_Magnitude_Late_VeryEarly', 'SharpMove_Magnitude_Late_MidRange',
         'SharpMove_Magnitude_Late_LateGame', 'SharpMove_Magnitude_Late_Urgent',
         'SharpMove_Timing_Dominant',
-        'SharpMove_Timing_Magnitude',# === Net movement columns
+        'SharpMove_Timing_Magnitude',
         'Net_Line_Move_From_Opening',
         'Abs_Line_Move_From_Opening',
         'Net_Odds_Move_From_Opening',
         'Abs_Odds_Move_From_Opening',
     ]
-    
-    # 🧩 Add schema-consistent consensus fields from summarize_consensus()
+
     ALLOWED_ODDS_MOVE_COLUMNS = [
         f'OddsMove_Magnitude_{b}' for b in [
             'Overnight_VeryEarly', 'Overnight_MidRange', 'Overnight_LateGame', 'Overnight_Urgent',
@@ -1339,27 +1326,28 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
             'Midday_VeryEarly', 'Midday_MidRange', 'Midday_LateGame', 'Midday_Urgent',
             'Late_VeryEarly', 'Late_MidRange', 'Late_LateGame', 'Late_Urgent'
         ]
-    ] + ['Odds_Move_Magnitude']  # ✅ Add this total field
-    
+    ] + ['Odds_Move_Magnitude']
     ALLOWED_COLS += ALLOWED_ODDS_MOVE_COLUMNS
-    # Ensure all required columns exist
+
+    # Ensure columns exist
     df = ensure_columns(df, ALLOWED_COLS, fill_value=None)
-    df['Odds_Price'] = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
+    df['Odds_Price']  = pd.to_numeric(df.get('Odds_Price'), errors='coerce')
     df['Implied_Prob'] = pd.to_numeric(df.get('Implied_Prob'), errors='coerce')
 
-    # 🔍 Add required column check before filtering
+    # Required minimal columns
     required_cols = ['Snapshot_Timestamp', 'Model_Sharp_Win_Prob']
     missing = [col for col in required_cols if col not in df.columns]
     if missing:
         logging.error(f"❌ Missing required columns before upload: {missing}")
         return
 
-    # Log any remaining mismatches
+    # Check for any ALLOWED_COLS not present (shouldn't happen after ensure_columns)
     missing_cols = [col for col in ALLOWED_COLS if col not in df.columns]
     if missing_cols:
         logging.error(f"❌ Missing required columns for BigQuery upload: {missing_cols}")
         return
-    # === Deduplicate using Line_Hash from previous uploads ===
+
+    # Deduplicate recent Line_Hash
     try:
         client = bigquery.Client(project=GCP_PROJECT_ID, location="us")
         df_prev = client.query("""
@@ -1367,64 +1355,135 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
             FROM `sharplogger.sharp_data.sharp_moves_master`
             WHERE DATE(Snapshot_Timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
         """).to_dataframe()
-    
         if not df_prev.empty and 'Line_Hash' in df.columns:
             before = len(df)
             df = df[~df['Line_Hash'].isin(df_prev['Line_Hash'])]
             logging.info(f"🧼 Line_Hash dedup: removed {before - len(df)} duplicate rows")
     except Exception as e:
         logging.warning(f"⚠️ Failed to deduplicate using Line_Hash: {e}")
-    
-    # ⛔ Exit early if nothing to write
+
     if df.empty:
         logging.info("🛑 No new rows after Line_Hash deduplication — exiting.")
         return
+
     logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
-    # Filter to allowed schema
-    # === Force float type on columns that might fail if BigQuery expects INT64
-    # === Cast known float columns safely
+
+    # Cast some known numeric columns explicitly (best effort)
     known_float_cols = [
-        'SharpMove_Odds_Mag', 'HomeRecLineMag',
-        'Rec_Line_Delta', 'Sharp_Line_Delta',
+        'SharpMove_Odds_Mag', 'HomeRecLineMag', 'Rec_Line_Delta', 'Sharp_Line_Delta',
         'Odds_Shift', 'Implied_Prob_Shift', 'Line_Delta',
-        'Sharp_Line_Magnitude', 'Rec_Line_Magnitude',
-        'Delta_Sharp_vs_Rec','Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds'
+        'Sharp_Line_Magnitude', 'Rec_Line_Magnitude', 'Delta_Sharp_vs_Rec',
+        'Max_Value', 'Min_Value', 'Max_Odds', 'Min_Odds'
     ]
     for col in known_float_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
-    
-    # === Cast known INT64 columns to nullable Int64
+
     int_cols = [
         'Sharp_Limit_Total', 'Limit_Jump', 'LimitUp_NoMove_Flag',
         'SHARP_SIDE_TO_BET', 'Sharp_Move_Signal', 'Sharp_Limit_Jump',
         'Scored', 'Scored_By_Model', 'Is_Home_Team_Bet',
-        'Is_Favorite_Bet', 'High_Limit_Flag', 'CrossMarketSharpSupport','Value_Reversal_Flag', 'Odds_Reversal_Flag'
+        'Is_Favorite_Bet', 'High_Limit_Flag', 'CrossMarketSharpSupport',
+        'Value_Reversal_Flag', 'Odds_Reversal_Flag'
     ]
     for col in int_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').round().astype('Int64')
+
+    # ======= 🔎 BQ schema-aware preflight diagnostics (logs likely culprit) =======
+    try:
+        client = bigquery.Client(project=GCP_PROJECT_ID, location="us")
+        tbl = client.get_table(f"sharplogger.{table}") if not table.startswith("sharplogger.") else client.get_table(table)
+        bq_types = {f.name: f.field_type.upper() for f in tbl.schema}
+        # summarize sample python types per column
+        def _sample_types(s):
+            vals = s.dropna().head(8).tolist()
+            return list({type(v).__name__ for v in vals}) if vals else []
+
+        # find suspicious pairs
+        suspects = []
+        for c, t in bq_types.items():
+            if c not in df.columns:
+                continue
+            pytypes = _sample_types(df[c])
+            if t == "BYTES" and any(tn in ("date","datetime","Timestamp","datetime64","TimestampTZ") for tn in pytypes):
+                suspects.append((c, t, pytypes, "BYTES receiving date/datetime → ArrowTypeError likely"))
+            if t in ("TIMESTAMP","DATETIME") and any(tn in ("str","bytes","bytearray") for tn in pytypes):
+                suspects.append((c, t, pytypes, "time column receives strings/bytes"))
+            if t == "BOOL" and any(tn in ("str","object") for tn in pytypes):
+                suspects.append((c, t, pytypes, "BOOL receives strings"))
+        if suspects:
+            logging.warning("🔎 Preflight schema/type suspects (column, bq_type, sample_py_types, note):")
+            for s in suspects:
+                logging.warning("   • %s", s)
+
+        # also log all BYTES columns & samples, if any
+        bytes_cols = [c for c, t in bq_types.items() if t == "BYTES"]
+        if bytes_cols:
+            logging.info(f"📦 BYTES columns in BQ: {bytes_cols}")
+            for c in bytes_cols:
+                if c in df.columns:
+                    logging.info(f"   ↳ {c} sample types: {_sample_types(df[c])}")
+    except Exception as e:
+        logging.warning(f"⚠️ Could not run BQ schema preflight: {e}")
+
+    # Filter to allowed schema/ordering
     df = df[ALLOWED_COLS]
-    
+
     logging.info("🧪 Preview of model columns being written:")
-    logging.info(df[model_cols].dropna(how='all').head(5).to_string())
-    # 🔍 Preview Odds_Price and Implied_Prob distribution
+    try:
+        logging.info(df[model_cols].dropna(how='all').head(5).to_string())
+    except Exception:
+        pass
+
     if 'Odds_Price' in df.columns and 'Implied_Prob' in df.columns:
         logging.info("🎯 Odds_Price sample:\n" + df['Odds_Price'].dropna().astype(str).head().to_string(index=False))
         logging.info("🎯 Implied_Prob sample:\n" + df['Implied_Prob'].dropna().round(4).astype(str).head().to_string(index=False))
     else:
         logging.warning("⚠️ Odds_Price or Implied_Prob missing from DataFrame before upload")
+
     logging.info(f"📦 Final row count to upload after filtering and dedup: {len(df)}")
-    # Write to BigQuery
+
+    # ======= 🚀 Write to BigQuery (with rich error diagnostics) =======
     try:
         logging.info(f"📤 Uploading to `{table}`...")
         to_gbq(df, table, project_id=GCP_PROJECT_ID, if_exists='append')
         logging.info(f"✅ Wrote {len(df)} new rows to `{table}`")
     except Exception as e:
         logging.exception(f"❌ Upload to `{table}` failed.")
-        logging.debug("Schema:\n" + df.dtypes.to_string())
-        logging.debug("Preview:\n" + df.head(5).to_string())
-        
+        # dump dtypes & first rows
+        logging.debug("Schema (pandas dtypes):\n" + df.dtypes.to_string())
+        logging.debug("Preview (head):\n" + df.head(5).to_string())
+
+        # Deep-dive: show, per BQ field, the pandas dtype and sample python types
+        try:
+            client = bigquery.Client(project=GCP_PROJECT_ID, location="us")
+            tbl = client.get_table(f"sharplogger.{table}") if not table.startswith("sharplogger.") else client.get_table(table)
+            bq_types = {f.name: f.field_type.upper() for f in tbl.schema}
+
+            def _sample_types(s):
+                vals = s.dropna().head(8).tolist()
+                return list({type(v).__name__ for v in vals}) if vals else []
+
+            logging.error("🔬 Column-by-column type map vs BQ:")
+            for c in df.columns:
+                bq_t = bq_types.get(c, "<not-in-BQ>")
+                logging.error(" • %-30s pandas=%-12s   BQ=%-10s   samples=%s",
+                              c, str(df[c].dtype), bq_t, _sample_types(df[c]))
+
+            # Special highlight for BYTES columns getting date-likes
+            bytes_cols = [c for c, t in bq_types.items() if t == "BYTES"]
+            for c in bytes_cols:
+                if c in df.columns:
+                    samples = df[c].dropna().head(20).tolist()
+                    bad = [v for v in samples if isinstance(v, (pd.Timestamp, datetime.datetime, datetime.date, np.datetime64))]
+                    if bad:
+                        logging.error(f"🚨 BYTES column '{c}' has date-like sample values (showing up to 5): {bad[:5]}")
+        except Exception as ee:
+            logging.warning(f"⚠️ Post-failure schema diff also failed: {ee}")
+
+        # re-raise if you want the caller to know it failed
+        # raise
 
 
 def normalize_label(label):
