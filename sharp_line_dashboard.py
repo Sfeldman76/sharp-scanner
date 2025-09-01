@@ -4922,7 +4922,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             'ATS_EB_Rate_Home',
             'ATS_EB_Rate_Away',
-            'PR_Rating_Diff','PR_Abs_Rating_Diff',
             'PR_Model_Agree_H2H_Flag','PR_Market_Agree_H2H_Flag'
             
         ]
@@ -4969,8 +4968,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'Team_Past_Avg_Model_Prob_Away',
             #'Team_Past_Hit_Rate_Away',
             
-            'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
-            'Avg_Recent_Cover_Streak_Away'
+            #'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
+            #'Avg_Recent_Cover_Streak_Away'
         ])
         
         # add time-context flags
@@ -4985,14 +4984,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Add hybrid timing derivatives (snapshot-safe, computed above)
         extend_unique(features, [
-            #"Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
-            #"Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
-            #"Hybrid_Line_LateShare","Hybrid_Line_EarlyShare",
+            "Hybrid_Line_EarlyMag","Hybrid_Line_MidMag","Hybrid_Line_LateMag",
+            "Hybrid_Odds_TotalMag","Hybrid_Odds_EarlyMag","Hybrid_Odds_MidMag","Hybrid_Odds_LateMag",
+            "Hybrid_Line_LateShare","Hybrid_Line_EarlyShare",
             "Hybrid_Line_Imbalance_LateVsEarly",
-            #"Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare",
+            "Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare",
             "Hybrid_Line_Odds_Mag_Ratio",
-            "Hybrid_Timing_Entropy_Line","Hybrid_Timing_Entropy_Odds",
-            #"Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening",
+            #"Hybrid_Timing_Entropy_Line","Hybrid_Timing_Entropy_Odds",
+            "Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening",
             # interactions (only exist if microstructure ran)
             "Corridor_x_LateShare_Line","Dist_x_LateShare_Line","PctRank_x_LateShare_Line",
         ])
