@@ -1042,30 +1042,6 @@ def _iso(ts) -> str:
     return pd.to_datetime(ts, utc=True).isoformat()
 
 
-
-
-# ---------- Tiny helper to parse table id safely ----------
-def _parse_table_id(project_default: str, table_id: str):
-    """
-    Accepts:
-      - project.dataset.table
-      - `project.dataset.table`
-      - dataset.table  (fills project from project_default)
-    Returns: (project, dataset, table)
-    """
-    tid = str(table_id).strip().strip("`").strip()
-    parts = [p for p in tid.split(".") if p]
-
-    if len(parts) == 3:
-        return parts[0], parts[1], parts[2]
-    elif len(parts) == 2:
-        if not project_default:
-            raise ValueError(f"Missing project for '{table_id}'. Provide project or use a 3-part id.")
-        return project_default, parts[0], parts[1]
-    else:
-        raise ValueError(f"Invalid table id '{table_id}'. Expected dataset.table or project.dataset.table.")
-
-# --- 1) Cached helper: resolve rating column (trivial for this schema) ---
 @st.cache_data(show_spinner=False)
 # ===========================
 # WHY MODEL LIKES IT (v2)
@@ -1220,8 +1196,6 @@ def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market
     return final
 
 
-import numpy as np
-import pandas as pd
 
 def holdout_by_percent_groups(
     *,
@@ -1292,6 +1266,96 @@ def holdout_by_percent_groups(
             train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
 
     return train_idx, hold_idx
+
+
+def sharp_row_weights(df, a_sharp=0.8, b_limit=0.15, c_liq=0.10, d_steam=0.10):
+
+    w = np.ones(len(df), dtype=np.float32)
+
+    if "Is_Sharp_Book" in df.columns:
+        w += a_sharp * df["Is_Sharp_Book"].fillna(False).astype(np.float32)
+
+    if "Limit" in df.columns:
+        lim = pd.to_numeric(df["Limit"], errors="coerce").fillna(0.0)
+        med = lim.median(); mad = (np.abs(lim - med).median() + 1e-9)
+        z = np.clip((lim - med) / (1.4826 * mad + 1e-9), -3, 3)
+        w += b_limit * z.astype(np.float32)
+
+    if "SmallBook_Heavy_Liquidity_Flag" in df.columns:
+        w += c_liq * df["SmallBook_Heavy_Liquidity_Flag"].fillna(False).astype(np.float32)
+
+    if "Late_Game_Steam_Flag" in df.columns:
+        w += d_steam * df["Late_Game_Steam_Flag"].fillna(False).astype(np.float32)
+
+    return w
+def build_game_market_sharpaware(
+    df,
+    feature_cols,
+    label_col="SHARP_HIT_BOOL",
+    embargo_td=pd.Timedelta("6h"),
+    book_col="Bookmaker",
+    time_col="Snapshot_Timestamp",
+    start_col="Game_Start",
+    game_col="Game_Key",
+    market_col="Market_Type",   # e.g. "SPREAD" | "TOTAL" | "H2H"
+):
+    import numpy as np, pandas as pd
+
+    d = df.copy()
+
+    # --- keep only snapshots safely before game start (embargo-aware) ---
+    ts = pd.to_datetime(d[time_col],  errors="coerce", utc=True)
+    gs = pd.to_datetime(d[start_col], errors="coerce", utc=True)
+    ok = ts.notna() & gs.notna() & (ts <= gs - embargo_td)
+    d = d.loc[ok].copy()
+
+    # --- latest pre-embargo per (Game, Market, Book) ---
+    d = (
+        d.sort_values([game_col, market_col, book_col, time_col])
+         .groupby([game_col, market_col, book_col], as_index=False)
+         .tail(1)
+    )
+
+    # --- weights (sharp-aware) ---
+    w = sharp_row_weights(d)  # from helper above
+    d["_w"] = w
+
+    # --- numeric features (only from your feature_cols) ---
+    num = d[feature_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).fillna(0.0)
+
+    # group keys: one row per (Game, Market)
+    gkeys = [game_col, market_col]
+
+    # normalize weights within each (Game, Market)
+    w_norm = d["_w"] / (d.groupby(gkeys)["_w"].transform("sum").replace(0, 1.0))
+    d["_wn"] = w_norm.astype(np.float32)
+
+    # weighted means
+    wm = (num.mul(d["_wn"].to_numpy().reshape(-1,1), axis=0)).groupby(d[gkeys]).sum()
+    wm.columns = [f"{c}__wm" for c in wm.columns]
+
+    # disagreement (unweighted std across books)
+    std = num.groupby(d[gkeys]).std(ddof=0).fillna(0.0)
+    std.columns = [f"{c}__std" for c in std.columns]
+
+    # counts
+    n_books = d.groupby(gkeys)[book_col].nunique().to_frame("N_books")
+    n_rows  = d.groupby(gkeys).size().to_frame("N_rows")
+
+    # label & time (assumed consistent per (Game, Market))
+    y = pd.to_numeric(d[label_col], errors="coerce").groupby(d[gkeys]).max().astype(int)
+    t = d.groupby(gkeys)[start_col].max().pipe(pd.to_datetime, utc=True)
+
+    out = wm.join([std, n_books, n_rows], how="left")
+    out["y"] = y
+    out["Game_Start"] = t
+    out = out.reset_index()
+
+    # one row per (Game, Market) — assert to catch any issues
+    assert out[[game_col, market_col]].drop_duplicates().shape[0] == out.shape[0], \
+        "Aggregation failed: duplicate (Game, Market) rows."
+
+    return out
 
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
 def _resolve_active_features(bundle, model, df_like):
@@ -2158,59 +2222,6 @@ def build_totals_training_from_scores(df_scores: pd.DataFrame,
     g = g[[key_col] + cols].rename(columns={c: f"TOT_{c}" for c in cols})
     return g
 
-def probe_streamlit_table_crash(df: pd.DataFrame, title: str = "probe"):
-   
-    st.markdown(f"#### 🔬 Probe: {title}")
-
-    # 0) header sanity
-    dupes = df.columns[df.columns.duplicated()].tolist()
-    if dupes:
-        st.error(f"Duplicate column names: {dupes}")
-
-    # 1) per-column probe
-    bad_cols = []
-    for c in df.columns:
-        try:
-            st.empty().table(df[[c]].head(50))  # render a single column
-        except Exception as e:
-            bad_cols.append((c, repr(e)))
-    if bad_cols:
-        st.error(f"Columns that failed to render: {[c for c,_ in bad_cols]}")
-        with st.expander("Column errors"):
-            for c, err in bad_cols:
-                st.write(f"**{c}** → {err}")
-
-        # show types present in each bad column
-        for c, _ in bad_cols:
-            types = df[c].head(200).apply(lambda x: type(x).__name__).value_counts(dropna=False)
-            st.write(f"**Type mix in {c}**"); st.write(types)
-
-    # 2) chunk probe (find a bad row range)
-    n = len(df)
-    step = max(1, n // 10)
-    bad_ranges = []
-    for start in range(0, n, step):
-        end = min(n, start + step)
-        try:
-            st.empty().table(df.iloc[start:end])
-        except Exception as e:
-            bad_ranges.append((start, end, repr(e)))
-
-    if bad_ranges:
-        st.warning(f"Bad row chunks: {bad_ranges}")
-        # zoom further into the first bad chunk
-        s, e, _ = bad_ranges[0]
-        for r in range(s, e):
-            try:
-                st.empty().table(df.iloc[r:r+1])
-            except Exception as e2:
-                st.error(f"Row {r} fails; showing raw values:")
-                st.write(df.iloc[r:r+1].to_dict(orient="records")[0])
-                st.caption(repr(e2))
-                break
-
-    if not bad_cols and not bad_ranges and not dupes:
-        st.success("Probe passed: no per-column or chunk rendering failures detected.")
 
 def totals_features_for_upcoming(df_scores: pd.DataFrame,
                                  df_schedule_like: pd.DataFrame,
@@ -2394,40 +2405,6 @@ def get_xgb_search_space(
 
     return base_kwargs, params_ll, params_auc
 
-
-
-
-def resolve_groups(df: pd.DataFrame) -> np.ndarray:
-    # 1) Prefer the per-game key if present
-    if "Merge_Key_Short" in df.columns and df["Merge_Key_Short"].notna().any():
-        return df["Merge_Key_Short"].astype(str).to_numpy()
-
-    # 2) If Merge_Key_Short missing, derive a per-game key
-    #    Build from normalized teams + commence time (already in your table)
-    cols_ok = all(c in df.columns for c in ["Home_Team_Norm","Away_Team_Norm","Commence_Hour"])
-    if cols_ok:
-        return (
-            df["Home_Team_Norm"].astype(str)
-            + "|" + df["Away_Team_Norm"].astype(str)
-            + "|" + pd.to_datetime(df["Commence_Hour"], errors="coerce", utc=True).astype(str)
-        ).to_numpy()
-
-    # 3) Last-resort: strip market/outcome from Game_Key if possible
-    #    Keep the substring up to the commence timestamp (first 19 chars of ISO datetime)
-    if "Game_Key" in df.columns:
-        # Example Game_Key pattern: "..._2025-07-20 01:00:00+00:00_h2h_los angeles dodgers"
-        base = df["Game_Key"].astype(str).str.replace(r"_\d{4}-\d{2}-\d{2} .*", "", regex=True)
-        # Reattach a normalized commence time if available for stability
-        if "Commence_Hour" in df.columns:
-            ch = pd.to_datetime(df["Commence_Hour"], errors="coerce", utc=True).astype(str)
-            return (base + "|" + ch).to_numpy()
-        return base.to_numpy()
-
-    raise ValueError("No columns available to form per-game groups")
-# --- 1) Choose blend weight via small grid on OOF (before fitting iso_blend) ---
-from sklearn.isotonic import IsotonicRegression
-from sklearn.metrics import roc_auc_score, log_loss
-import numpy as np
 
 def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, *, 
                              metric="auc", grid=None, eps=1e-4):
@@ -2929,11 +2906,7 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
         ).astype("float32")
         # Ensure your “absolute from open” live in float32 (if present)
   
-    return out
 
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
-import numpy as np
 
 # (Optional) better iso for big leagues: fit on quantile means → avoids middle compression
 def fit_regularized_isotonic(p_oof, y_oof, q=80, eps=1e-4):
@@ -3242,48 +3215,6 @@ def add_internal_consistency_features(df: pd.DataFrame, df_cross_market: pd.Data
 # -------------------------
 # 4) Curvature from Alt Lines (optional data)
 # -------------------------
-def add_altline_curvature(df: pd.DataFrame, df_alt: pd.DataFrame | None) -> pd.DataFrame:
-    """
-    If you have an alt-lines table (points, price/prob per (Game, Market, Bookmaker)):
-      df_alt columns expected: [Game_Key, Market, Bookmaker, Alt_Point, Alt_Odds or Alt_Prob]
-    Emits (broadcast to df rows by Game_Key/Market/Bookmaker):
-      - AltLine_Slope   (float32)  linear slope d(prob)/d(point)
-      - AltLine_Curv    (float32)  quadratic curvature from polyfit degree 2
-    If df_alt is None or insufficient points (<3), fills 0.
-    """
-    if df.empty: return df
-    out = df.copy()
-    if df_alt is None or df_alt.empty:
-        out["AltLine_Slope"] = np.float32(0.0)
-        out["AltLine_Curv"]  = np.float32(0.0)
-        return out
-
-    alt = df_alt.copy()
-    if "Alt_Prob" not in alt.columns and "Alt_Odds" in alt.columns:
-        alt["Alt_Prob"] = _amer_to_prob(alt["Alt_Odds"])
-    alt["Alt_Point"] = pd.to_numeric(alt["Alt_Point"], errors="coerce")
-    alt["Alt_Prob"]  = pd.to_numeric(alt["Alt_Prob"],  errors="coerce")
-
-    packs = []
-    for (g, m, b), grp in alt.groupby(["Game_Key","Market","Bookmaker"]):
-        g2 = grp.dropna(subset=["Alt_Point","Alt_Prob"])
-        if len(g2) < 2:
-            slope, curv = 0.0, 0.0
-        elif len(g2) == 2:
-            x, y = g2["Alt_Point"].values, g2["Alt_Prob"].values
-            slope = float((y[1]-y[0]) / max(1e-6, (x[1]-x[0]))); curv = 0.0
-        else:
-            x, y = g2["Alt_Point"].values, g2["Alt_Prob"].values
-            coefs = np.polyfit(x, y, deg=2)  # y ≈ ax^2 + bx + c
-            curv  = float(coefs[0])
-            slope = float(coefs[1])
-        packs.append({"Game_Key":g,"Market":m,"Bookmaker":b,"AltLine_Slope":slope,"AltLine_Curv":curv})
-    alt_stats = pd.DataFrame(packs)
-
-    out = out.merge(alt_stats, on=["Game_Key","Market","Bookmaker"], how="left")
-    out["AltLine_Slope"] = pd.to_numeric(out.get("AltLine_Slope"), errors="coerce").fillna(0.0).astype("float32")
-    out["AltLine_Curv"]  = pd.to_numeric(out.get("AltLine_Curv"),  errors="coerce").fillna(0.0).astype("float32")
-    return out
 
 # -------------------------
 # 5) CLV-Proxy Features
@@ -3335,8 +3266,6 @@ def add_clv_proxy_features(df: pd.DataFrame, clv_model_path: str | None = None) 
 
     return out
 
-import numpy as np
-import pandas as pd
 
 PHASES  = ["Overnight","Early","Midday","Late"]
 URGENCY = ["VeryEarly","MidRange","LateGame","Urgent"]
@@ -3623,119 +3552,6 @@ def build_team_ats_priors_market_sport(
     return out
 
 
-def audit_dataframe(df: pd.DataFrame, name: str = "DataFrame"):
-    """Show a Streamlit audit of columns, dtypes, null/inf, and JSON-serializability risks."""
-    st.markdown(f"### 🔎 Schema audit — **{name}**")
-
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        st.info("No rows.")
-        return
-
-    # quick overview
-    st.write("Shape:", df.shape)
-
-    # helpers to detect problematic cell types
-    def _has_numpy_scalar(s: pd.Series) -> bool:
-        return bool(s.map(lambda x: isinstance(x, np.generic)).any())
-
-    def _has_array_like(s: pd.Series) -> bool:
-        return bool(s.map(lambda x: isinstance(x, (np.ndarray, list, tuple, dict, set))).any())
-
-    def _has_interval(s: pd.Series) -> bool:
-        return is_interval_dtype(s) or s.map(lambda x: hasattr(x, "left") and hasattr(x, "right")).any()
-
-    def _has_nonfinite(s: pd.Series) -> tuple[int, int]:
-        # counts of ±inf, NaN
-        s_num = pd.to_numeric(s, errors="coerce")
-        inf_cnt = int(np.isinf(s_num.to_numpy(dtype=float)).sum())
-        nan_cnt = int(np.isnan(s_num.to_numpy(dtype=float)).sum())
-        return inf_cnt, nan_cnt
-
-    rows = []
-    for c in df.columns:
-        s = df[c]
-        dtype = str(s.dtype)
-        is_num = is_numeric_dtype(s)
-        is_bool = is_bool_dtype(s)
-        is_dt = is_datetime64_any_dtype(s)
-        is_cat = is_categorical_dtype(s)
-        is_obj = is_object_dtype(s)
-        is_period = is_period_dtype(s)
-        is_interval = is_interval_dtype(s)
-
-        inf_cnt, nan_cnt = _has_nonfinite(s)
-        nunique = int(s.nunique(dropna=False))
-        numpy_scalar = _has_numpy_scalar(s)
-        array_like = _has_array_like(s)
-        interval_like = _has_interval(s)
-
-        # take a small sample value (repr truncated)
-        try:
-            sample_val = next((repr(x) for x in s.head(10).tolist() if pd.notna(x)), "None")
-        except Exception:
-            sample_val = "<?>"
-
-        # high-level risk flag for streamlit/React JSON
-        risk = (
-            (nan_cnt > 0) or (inf_cnt > 0) or numpy_scalar or array_like or interval_like or
-            is_cat or is_period
-        )
-
-        # suggested fix
-        fix = []
-        if numpy_scalar: fix.append("np.generic → .item() / float/int/bool")
-        if array_like:   fix.append("arrays/tuples/dicts → str()")
-        if interval_like or is_interval: fix.append("Interval → str(label)")
-        if is_cat:       fix.append("Categorical → .astype(str) or .cat.codes")
-        if is_period:    fix.append("Period → str()")
-        if nan_cnt:      fix.append("NaN → fillna(None/0)")
-        if inf_cnt:      fix.append("±inf → replace with NaN")
-        suggested = "; ".join(fix) if fix else ""
-
-        rows.append(dict(
-            Column=str(c),
-            DType=dtype,
-            IsNumeric=bool(is_num),
-            IsDatetime=bool(is_dt),
-            IsCategorical=bool(is_cat),
-            NonFinite_NaN=nan_cnt,
-            NonFinite_Inf=inf_cnt,
-            NUnique=nunique,
-            HasNumpyScalar=bool(numpy_scalar),
-            HasArrayLike=bool(array_like),
-            HasIntervalLike=bool(interval_like),
-            RiskyForUI=bool(risk),
-            Sample=sample_val[:180],
-            SuggestedFix=suggested[:200],
-        ))
-
-    rep = pd.DataFrame(rows).sort_values(["RiskyForUI","Column"], ascending=[False, True])
-    st.dataframe(rep, use_container_width=True)
-
-def df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce a DF to be safe for st.dataframe/st.table."""
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return df
-    df = df.copy()
-    df.columns = [str(c) for c in df.columns]
-    # replace ±inf → NaN
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    # unwrap numpy scalars & stringify arrays/intervals
-    def _coerce(x):
-        if isinstance(x, np.generic):
-            try: return x.item()
-            except Exception: return float(x)
-        if isinstance(x, (np.ndarray, list, tuple, dict, set)):
-            return str(x)
-        # pandas Interval/Period or anything with left/right
-        if hasattr(x, "left") and hasattr(x, "right"):
-            return f"[{x.left}, {x.right})"
-        return x
-    for c in df.columns:
-        df[c] = df[c].map(_coerce)
-    # turn NaN into None (c JSON)
-    df = df.where(pd.notna(df), None)
-    return df
 
 
 @st.cache_resource(show_spinner=False)
@@ -3808,7 +3624,7 @@ def c_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
 
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
-    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 60, "CFL": 60, "WNBA": 60, "MLB": 60, "NCAAF": 60, "NCAAB": 60}
+    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 60, "CFL": 60, "WNBA": 60, "MLB": 90, "NCAAF": 60, "NCAAB": 60}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
     st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
@@ -4361,8 +4177,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # 3) Internal consistency (optionally pass your df_cross_market pivot if you have it)
         df_market = add_internal_consistency_features(df_market, df_cross_market=df_cross_market if 'df_cross_market' in locals() else None, sport_default=sport)
         
-        # 4) Alt-line curvature (only if you have df_alt for this market; else it safely fills zeros)
-        # df_market = add_altline_curvature(df_market, df_alt_market)  # <- optional
+        
         
         # 5) CLV proxy (heuristic by default; will use a tiny side-model if present)
         df_market = add_clv_proxy_features(df_market, clv_model_path=os.path.join("artifacts","clv_side.joblib"))
@@ -5553,7 +5368,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = feature_cols
         # ============================================================================
         
-       
+        df_gm = build_game_market_sharpaware(
+            df=df_market,
+            feature_cols=feature_cols,           # after your PR removal
+            label_col="SHARP_HIT_BOOL",
+            embargo_td=embargo_td,
+            book_col=("Bookmaker" if "Bookmaker" in df_market.columns else
+                      "Bookmaker_Norm"),
+            time_col="Snapshot_Timestamp",
+            start_col="Game_Start",
+            game_col="Game_Key",
+            market_col=("Market" if "Market" in df_market.columns else "Market_Type"),
+        )
+        
+        # Choose which aggregated features to model with
+        # (weighted means + disagreement stds are most useful)
+        _non_feat = {"Game_Key","Game_Start","y","Market","Market_Type","N_books","N_rows"}
+        agg_cols = [c for c in df_gm.columns
+                    if (c not in _non_feat) and (c.endswith("__wm") or c.endswith("__std"))]
+        
+        # === Build X / y FROM THE AGGREGATED TABLE ===
+        X_full = df_gm[agg_cols].astype("float32").replace([np.inf,-np.inf], np.nan).fillna(0.0).to_numpy()
+        y_full = df_gm["y"].astype(int).to_numpy()
+        
+        # ---- Groups & times (one row per game/market) ----
+        # Strictest leakage guard: group by game so *all markets* of a game stay together.
+        #groups = df_gm["Game_Key"].astype(str).to_numpy()
+        # If you prefer to split markets independently per game, use:
+        groups = (df_gm["Game_Key"].astype(str) + "::" + df_gm.get("Market", df_gm.get("Market_Type","")).astype(str)).to_numpy()
+        
+        times = pd.to_datetime(df_gm["Game_Start"], utc=True).to_numpy()
+
         # === Build X / y ===
         X_full = _to_numeric_block(df_market, feature_cols).to_numpy(np.float32)
         
