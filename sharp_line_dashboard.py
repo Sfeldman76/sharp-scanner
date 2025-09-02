@@ -1269,11 +1269,22 @@ def holdout_by_percent_groups(
 
 
 def sharp_row_weights(df, a_sharp=0.8, b_limit=0.15, c_liq=0.10, d_steam=0.10):
-
+    import numpy as np, pandas as pd
     w = np.ones(len(df), dtype=np.float32)
 
-    if "Is_Sharp_Book" in df.columns:
-        w += a_sharp * df["Is_Sharp_Book"].fillna(False).astype(np.float32)
+    # sharp‑ish signals available in your schema
+    if "Market_Leader" in df.columns:
+        # if your Market_Leader is boolean (0/1 or True/False)
+        try:
+            w += 0.25 * df["Market_Leader"].fillna(False).astype(float)
+        except Exception:
+            pass
+
+    if "High_Limit_Flag" in df.columns:
+        w += 0.10 * df["High_Limit_Flag"].fillna(False).astype(float)
+
+    if "Late_Game_Steam_Flag" in df.columns:
+        w += d_steam * df["Late_Game_Steam_Flag"].fillna(False).astype(float)
 
     if "Limit" in df.columns:
         lim = pd.to_numeric(df["Limit"], errors="coerce").fillna(0.0)
@@ -1281,92 +1292,95 @@ def sharp_row_weights(df, a_sharp=0.8, b_limit=0.15, c_liq=0.10, d_steam=0.10):
         z = np.clip((lim - med) / (1.4826 * mad + 1e-9), -3, 3)
         w += b_limit * z.astype(np.float32)
 
-    if "SmallBook_Heavy_Liquidity_Flag" in df.columns:
-        w += c_liq * df["SmallBook_Heavy_Liquidity_Flag"].fillna(False).astype(np.float32)
+    # if you later add a boolean "Is_Sharp_Book", include it:
+    if "Is_Sharp_Book" in df.columns:
+        w += a_sharp * df["Is_Sharp_Book"].fillna(False).astype(float)
 
-    if "Late_Game_Steam_Flag" in df.columns:
-        w += d_steam * df["Late_Game_Steam_Flag"].fillna(False).astype(np.float32)
+    return w.astype(np.float32)
 
-    return w
-def build_game_market_sharpaware(
-    df,
-    feature_cols,
-    label_col="SHARP_HIT_BOOL",
-    embargo_td=pd.Timedelta("6h"),
-    book_col="Bookmaker",
-    time_col="Snapshot_Timestamp",
-    start_col="Game_Start",
-    game_col="Game_Key",
-    market_col="Market_Type",   # e.g. "SPREAD" | "TOTAL" | "H2H"
-):
+
+def build_game_market_sharpaware_schema(df, feature_cols):
     import numpy as np, pandas as pd
+
+    if df is None or df.empty or not feature_cols:
+        return pd.DataFrame()
+
+    # column names per your schema
+    game_col   = "Merge_Key_Short"
+    market_col = "Market"
+    book_col   = "Bookmaker"
+    time_col   = "Snapshot_Timestamp"
+    start_col  = "Commence_Hour"
+    label_col  = "SHARP_HIT_BOOL"
 
     d = df.copy()
 
-    # --- keep only snapshots safely before game start (embargo-aware) ---
-    ts = pd.to_datetime(d[time_col],  errors="coerce", utc=True)
-    gs = pd.to_datetime(d[start_col], errors="coerce", utc=True)
-    ok = ts.notna() & gs.notna() & (ts <= gs - embargo_td)
-    d = d.loc[ok].copy()
+    # robust parse
+    d[time_col]  = pd.to_datetime(d[time_col],  errors="coerce", utc=True)
+    d[start_col] = pd.to_datetime(d[start_col], errors="coerce", utc=True)
 
-    # --- latest pre-embargo per (Game, Market, Book) ---
-    d = (
-        d.sort_values([game_col, market_col, book_col, time_col])
-         .groupby([game_col, market_col, book_col], as_index=False)
-         .tail(1)
-    )
+    # keep valid
+    d = d[d[game_col].notna() & d[start_col].notna()]
+    if d.empty: 
+        return pd.DataFrame()
 
-    # --- weights (sharp-aware) ---
-    w = sharp_row_weights(d)  # from helper above
-    d["_w"] = w
+    # latest pre‑start per (game, market, book) — NO embargo here yet; you’ll apply embargo before calling this if you want
+    d1 = (d[d[time_col].notna() & (d[time_col] <= d[start_col])]
+            .sort_values([game_col, market_col, book_col, time_col])
+            .groupby([game_col, market_col, book_col], as_index=False)
+            .tail(1))
+    if d1.empty:
+        # fallback: latest with a timestamp at all
+        d1 = (d[d[time_col].notna()]
+                .sort_values([game_col, market_col, book_col, time_col])
+                .groupby([game_col, market_col, book_col], as_index=False)
+                .tail(1))
+        if d1.empty:
+            return pd.DataFrame()
 
-    # --- numeric features (only from your feature_cols) ---
-    num = d[feature_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf,-np.inf], np.nan).fillna(0.0)
+    # weights
+    w = sharp_row_weights(d1)
+    d1["_w"] = w
 
-    # group keys: one row per (Game, Market)
+    # numeric features from your list
+    num = d1[feature_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    # normalize weights within (game, market)
     gkeys = [game_col, market_col]
-    
-    # if market_col might be missing, synthesize a single market value
-    if market_col not in d.columns:
-        d[market_col] = "GEN"
-    
-    # normalize weights within each (Game, Market)
-    w_norm = d["_w"] / (d.groupby(gkeys)["_w"].transform("sum").replace(0, 1.0))
-    d["_wn"] = w_norm.astype(np.float32)
-    
-    # use a list of Series for all groupbys (safe & consistent)
-    keys = [d[k] for k in gkeys]
-    
-    # numeric features (already built as `num`) → weighted means
-    wm = (num.mul(d["_wn"].to_numpy().reshape(-1, 1), axis=0)).groupby(keys).sum()
+    w_norm = d1["_w"] / (d1.groupby(gkeys)["_w"].transform("sum").replace(0, 1.0))
+    d1["_wn"] = w_norm.astype(np.float32)
+
+    # safe grouping (list of Series)
+    keys = [d1[k] for k in gkeys]
+
+    # weighted means
+    wm = (num.mul(d1["_wn"].to_numpy().reshape(-1,1), axis=0)).groupby(keys).sum()
     wm.columns = [f"{c}__wm" for c in wm.columns]
-    
-    # disagreement (unweighted std across books)
+
+    # disagreement (std across books)
     std = num.groupby(keys).std(ddof=0).fillna(0.0)
     std.columns = [f"{c}__std" for c in std.columns]
-    
-    # counts
-    n_books = d.groupby(gkeys)[book_col].nunique().to_frame("N_books")
-    n_rows  = d.groupby(gkeys).size().to_frame("N_rows")
-    
-    # label & time (keep same grouping style everywhere)
-    y = (pd.to_numeric(d[label_col], errors="coerce")
-           .groupby(keys).max().astype(int))
-    t = (d.groupby(keys)[start_col]
-           .max()
-           .pipe(pd.to_datetime, utc=True))
 
+    # counts
+    n_books = d1.groupby(gkeys)[book_col].nunique().to_frame("N_books")
+    n_rows  = d1.groupby(gkeys).size().to_frame("N_rows")
+
+    # label (assumed consistent within game×market)
+    y = (pd.to_numeric(d1[label_col], errors="coerce")
+           .groupby(keys).max().astype(int))
+    # time
+    t = (d1.groupby(keys)[start_col].max().pipe(pd.to_datetime, utc=True))
 
     out = wm.join([std, n_books, n_rows], how="left")
     out["y"] = y
     out["Game_Start"] = t
     out = out.reset_index()
 
-    # one row per (Game, Market) — assert to catch any issues
+    # ensure unique rows per (game, market)
     assert out[[game_col, market_col]].drop_duplicates().shape[0] == out.shape[0], \
-        "Aggregation failed: duplicate (Game, Market) rows."
-
+        "Duplicate (game, market) after aggregation."
     return out
+
 
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
 def _resolve_active_features(bundle, model, df_like):
@@ -5389,59 +5403,55 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
           # ---- Groups & times (snapshot-aware) ----
 
+        # snapshot mode?
         has_snapshots = (
-            df_market.groupby("Game_Key")["Snapshot_Timestamp"]
+            df_market.groupby("Merge_Key_Short")["Snapshot_Timestamp"]
             .nunique(dropna=True)
-            .fillna(0)
-            .max() > 1
+            .fillna(0).max() > 1
         )
-        # --- (1) embargo must be defined earlier (and has_snapshots computed). ---
+        
         sport_key  = str(sport).upper()
-        #has_snapshots = ...  # compute this before (as you did earlier)
         embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
         
-        # --- (2) aggregate to one sharp‑aware row per (Game, Market) ---
-        df_gm = build_game_market_sharpaware(
-            df=df_market,
-            feature_cols=feature_cols,      # after your PR removal
-            label_col="SHARP_HIT_BOOL",
-            embargo_td=embargo_td,
-            book_col=("Bookmaker" if "Bookmaker" in df_market.columns else "Bookmaker_Norm"),
-            time_col="Snapshot_Timestamp",
-            start_col="Game_Start",
-            game_col="Game_Key",
-            market_col=("Market" if "Market" in df_market.columns else "Market_Type"),
-        )
+        # if you want to apply embargo before building: filter df_market first
+        if has_snapshots and embargo_td > pd.Timedelta(0):
+            ts = pd.to_datetime(df_market["Snapshot_Timestamp"], errors="coerce", utc=True)
+            gs = pd.to_datetime(df_market["Commence_Hour"],      errors="coerce", utc=True)
+            df_market_emb = df_market[ts.notna() & gs.notna() & (ts <= gs - embargo_td)].copy()
+        else:
+            df_market_emb = df_market
+
+        df_gm = build_game_market_sharpaware_schema(df_market_emb, feature_cols)
+
         if df_gm is None or df_gm.empty:
             st.warning("⛔ Aggregation produced no rows; skipping this slice.")
             return
         
         # --- (3) choose aggregated features (weighted means + disagreement stds) ---
-        _non_feat = {"Game_Key","Game_Start","y","Market","Market_Type","N_books","N_rows"}
-        agg_cols = [c for c in df_gm.columns
-                    if (c not in _non_feat) and (c.endswith("__wm") or c.endswith("__std"))]
+
+        _non_feat = {"Merge_Key_Short","Game_Start","y","Market","N_books","N_rows"}
+        agg_cols = [c for c in df_gm.columns if (c not in _non_feat) and (c.endswith("__wm") or c.endswith("__std"))]
         if not agg_cols:
-            raise RuntimeError("No aggregated feature columns found (…__wm / …__std).")
+            raise RuntimeError("No aggregated features found (…__wm / …__std).")
+
         
         # --- (4) Build X / y / groups / times from df_gm ONLY (no valid_mask here) ---
-        X_full = (df_gm[agg_cols]
-                  .astype("float32")
-                  .replace([np.inf, -np.inf], np.nan)
-                  .fillna(0.0)
-                  .to_numpy())
+
+        X_full = (df_gm[agg_cols].astype("float32")
+                  .replace([np.inf,-np.inf], np.nan).fillna(0.0).to_numpy())
         y_full = df_gm["y"].astype(int).to_numpy()
-        
+
         # Strictest leakage guard: keep all markets of same game together
         # (If you need markets split independently, use the "::" choice instead.)
         # groups = df_gm["Game_Key"].astype(str).to_numpy()
-        groups = (df_gm["Game_Key"].astype(str) + "::" +
-                  df_gm.get("Market", df_gm.get("Market_Type","")).astype(str)).to_numpy()
+        groups = (df_gm["Merge_Key_Short"].astype(str) + "::" + df_gm["Market"].astype(str)).to_numpy()
+
         
         times  = pd.to_datetime(df_gm["Game_Start"], utc=True).to_numpy()
         
         # --- (5) optional sample weights at aggregated level (simple & aligned) ---
         w_base = df_gm["N_books"].astype(np.float32).to_numpy()
-        wg     = pd.Series(w_base).groupby(df_gm["Game_Key"]).transform("sum").replace(0, 1.0).to_numpy()
+        wg     = pd.Series(w_base).groupby(df_gm["Merge_Key_Short"]).transform("sum").replace(0,1.0).to_numpy()
         w_full = (w_base / wg).astype(np.float32)
         
         # --- (6) drop NaT times if any (rare) ---
