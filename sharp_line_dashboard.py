@@ -584,7 +584,65 @@ class _IdentityCal:
         p = np.clip(p, self.eps, 1.0 - self.eps)
         return np.c_[1.0 - p, p]
 
+import numpy as np
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
+class _IdentityIsoCal:
+    def __init__(self, eps=1e-6): self.eps = eps
+    def transform(self, p):
+        p = np.asarray(p, float).reshape(-1)
+        return np.clip(p, self.eps, 1.0 - self.eps)
+
+class _BetaCalibrator:
+    """Logistic on [logit(p), logit(p)^2]; exposes .predict(probs)->calibrated_probs."""
+    def __init__(self, eps=1e-6):
+        self.eps = eps
+        self.model = LogisticRegression(solver="lbfgs", max_iter=1000)
+    @staticmethod
+    def _logit(x, eps):
+        x = np.clip(np.asarray(x, float).reshape(-1), eps, 1.0 - eps)
+        return np.log(x / (1.0 - x))
+    def fit(self, p, y):
+        z = self._logit(p, self.eps)
+        X = np.c_[z, z*z]
+        self.model.fit(X, np.asarray(y, int))
+        return self
+    def predict(self, p):
+        z = self._logit(p, self.eps)
+        X = np.c_[z, z*z]
+        return self.model.predict_proba(X)[:, 1]
+
+def fit_robust_calibrator(p_oof, y_oof, *, eps=1e-6, min_unique=200, prefer_beta=True):
+    """
+    Returns (kind, model) where kind ∈ {'iso','platt','beta'} compatible with your _CalAdapter.
+    - If enough unique probabilities & both classes → IsotonicRegression
+    - Else → Beta calibrator (if prefer_beta) or Platt (logistic) as fallback
+    """
+    p = np.clip(np.asarray(p_oof, float).reshape(-1), eps, 1.0 - eps)
+    y = np.asarray(y_oof, int).reshape(-1)
+    mask = np.isfinite(p) & np.isfinite(y) & ((y == 0) | (y == 1))
+    p, y = p[mask], y[mask]
+
+    # Need both classes
+    if np.unique(y).size < 2 or p.size < 2:
+        return ("iso", _IdentityIsoCal(eps=eps))
+
+    # Prefer isotonic when we have enough support
+    if np.unique(p).size >= int(min_unique):
+        iso = IsotonicRegression(out_of_bounds="clip").fit(p, y)
+        # sklearn's iso uses .predict; your code calls .transform → wrap isn’t needed if upstream handled it
+        # but return raw; you already have an ensure-transform shim, otherwise add:
+        return ("iso", iso)
+
+    # Otherwise, parametric fallback
+    if prefer_beta:
+        beta = _BetaCalibrator(eps=eps).fit(p, y)
+        return ("beta", beta)
+    else:
+        platt = LogisticRegression(solver="lbfgs", max_iter=1000)
+        platt.fit(p.reshape(-1, 1), y)
+        return ("platt", platt)
 
 def pos_col_index(est, positive=1):
     cls = getattr(est, "classes_", None)
