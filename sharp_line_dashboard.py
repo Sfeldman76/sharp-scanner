@@ -5375,7 +5375,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Keep a single source of truth for downstream code
         features = feature_cols
         # ============================================================================
+                # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
+          # ---- Groups & times (snapshot-aware) ----
+        groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
         
+        snap_ts = pd.to_datetime(
+            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
+        )
+        game_ts = pd.to_datetime(
+            df_market.loc[valid_mask, "Game_Start"], errors="coerce", utc=True
+        )
+        by_game_snaps = (
+            df_market.loc[valid_mask]
+            .groupby("Game_Key")["Snapshot_Timestamp"]
+            .nunique(dropna=True)
+        )
+        has_snapshots = (by_game_snaps.fillna(0).max() > 1)
+        
+        sport_key = str(sport).upper()
+        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
         df_gm = build_game_market_sharpaware(
             df=df_market,
             feature_cols=feature_cols,           # after your PR removal
@@ -5416,30 +5434,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X_full = X_full[valid_mask.to_numpy()]
         y_full = y_series.loc[valid_mask].astype(int).to_numpy()
         
-        # ---- Groups & times (snapshot-aware) ----
-        groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
-        
-        snap_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
-        )
-        game_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Game_Start"], errors="coerce", utc=True
-        )
-        
-        # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
-        by_game_snaps = (
-            df_market.loc[valid_mask]
-            .groupby("Game_Key")["Snapshot_Timestamp"]
-            .nunique(dropna=True)
-        )
-        has_snapshots = (by_game_snaps.fillna(0).max() > 1)
-        
         time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
         
         # Sport-aware embargo only when we truly have multiple snapshots
-        sport_key = str(sport).upper()
-        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
-        
+       
         # Replace previous 'groups' and 'times'
         groups = groups_all
         times  = time_values_all
