@@ -5557,12 +5557,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
         
         # --- (6) drop NaT times if any (rare) ---
+        # --- (6) drop NaT times if any (rare) ---
         if pd.isna(times).any():
             bad  = np.flatnonzero(pd.isna(times))
             keep = np.setdiff1d(np.arange(len(times)), bad)
-            X_full = X_full[keep]; y_full = y_full[keep]
-            groups = groups[keep]; times  = times[keep]
-            w_full = w_full[keep]
+        
+            X_full = X_full.iloc[keep]         # ✅ use .iloc for DataFrame
+            y_full = y_full[keep]              # numpy → ok
+            groups = groups[keep]              # numpy → ok
+            times  = times[keep]               # numpy → ok
+            w_full = w_full[keep]              # numpy → ok
+
         
         # --- (7) time‑forward, group‑safe holdout as before ---
         train_all_idx, hold_idx = holdout_by_percent_groups(
@@ -5576,12 +5581,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             ensure_label_diversity=True
         )
         
-        # --- (8) TRAIN subsets (aligned) ---
-        X_train = X_full[train_all_idx]
+        # Make sure indices are positional (ints or boolean masks)
+        # If your splitter returns numpy arrays of ints, you’re fine.
+        # If it returns pandas Index, cast to numpy:
+        train_all_idx = np.asarray(train_all_idx)
+        hold_idx      = np.asarray(hold_idx)
+        
+               # --- (8) TRAIN subsets (aligned) ---
+        X_train = X_full.iloc[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
-        w_train = w_full[train_all_idx]   # ← use the aggregated weights
+        w_train = w_full[train_all_idx]
         
         # Diagnostics
         y_hold_vec  = y_full[hold_idx]
