@@ -5590,19 +5590,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Make sure indices are positional (ints or boolean masks)
         # If your splitter returns numpy arrays of ints, you’re fine.
         # If it returns pandas Index, cast to numpy:
-        train_all_idx = np.asarray(train_all_idx)
-        hold_idx      = np.asarray(hold_idx)
+        #train_all_idx = np.asarray(train_all_idx)
+        #hold_idx      = np.asarray(hold_idx)
         
                # --- (8) TRAIN subsets (aligned) ---
-        X_train = X_full.iloc[train_all_idx]
+        X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
-        w_train = w_full[train_all_idx]
-        
-        # Diagnostics
+        # --- Filter CV folds to ensure both train and val have class 0 and 1 ---z
+        # ---- Quick diagnostics (optional but handy) ----
         y_hold_vec  = y_full[hold_idx]
         y_train_vec = y_full[train_all_idx]
+        #st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
+        #if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
+        #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
 
 
         bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
