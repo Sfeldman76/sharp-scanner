@@ -6598,7 +6598,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         _bake_feature_names_in_(model_logloss, feature_cols)
         _bake_feature_names_in_(model_auc, feature_cols)
        
-        
+        if cal_blend is not None:
+            iso_blend = _CalAdapter(cal_blend)
+        else:
+            # fallback identity calibrator adapter
+            iso_blend = _CalAdapter(("iso", _IdentityIsoCal(eps=eps)))
         # === Save ensemble (choose one or both)
         trained_models[market] = {
                 "model_logloss": model_logloss,
