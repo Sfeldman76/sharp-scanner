@@ -5824,8 +5824,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(final_estimators_cap)})
         
         # Slice ROWS correctly
-        X_tr_es = X_train.iloc[tr_es_rel]
-        X_va_es = X_train.iloc[va_es_rel]
+        X_tr_es = X_train[tr_es_rel]   # ✅ not .iloc
+        X_va_es = X_train[va_es_rel]
+
         y_tr_es = y_train[tr_es_rel]
         y_va_es = y_train[va_es_rel]
         w_tr_es = w_train[tr_es_rel]
