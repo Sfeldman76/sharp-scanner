@@ -2327,47 +2327,52 @@ def get_xgb_search_space(
         }
     else:
         
+        from scipy.stats import randint, uniform, loguniform
+
         params_ll = {
-            # deeper trees + more leaves → stronger interactions (pickup)
-            "max_depth":        randint(5, 9),            # 5–8
-            "max_leaves":       randint(32, 96),          # 32–95
-        
-            # a bit hotter lr than your current; still calibratable
-            "learning_rate":    loguniform(4.0e-2, 1.0e-1),  # 0.04–0.10 (log scale)
-        
-            # use most rows/features per tree (less bagging = more pickup)
-            "subsample":        uniform(0.80, 0.20),      # 0.80–1.00
-            "colsample_bytree": uniform(0.80, 0.20),      # 0.80–1.00
-        
-            # allow small, high‑variance splits
-            "min_child_weight": randint(1, 4),            # 1–3
-        
-            # allow weaker splits; small gamma
-            "gamma":            uniform(0.00, 0.40),      # 0.00–0.40
-        
-            # lighter regularization so weak signals survive
-            "reg_alpha":        loguniform(1e-4, 2.0e-1), # 0.0001–0.2
-            "reg_lambda":       loguniform(1.0, 6.0),     # ~1–6
-        }
-        
-        params_auc = {
-            # AUC search can be a hair more aggressive
-            "max_depth":        randint(6, 10),           # 6–9
+            # depth/leaves: enough structure, but not maxed out
+            "max_depth":        randint(4, 8),            # 4–7
             "max_leaves":       randint(48, 128),         # 48–127
         
-            "learning_rate":    loguniform(5.0e-2, 1.2e-1),  # 0.05–0.12
+            # cooler LR than AUC → better logloss; still allows range
+            "learning_rate":    loguniform(3.0e-2, 8.0e-2),   # 0.03–0.08
         
+            # mild bagging to reduce variance but not flatten probs
+            "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
+            "colsample_bytree": uniform(0.75, 0.20),      # 0.75–0.95
+            "colsample_bynode": uniform(0.70, 0.25),      # 0.70–0.95 (extra decorrelation)
+        
+            # allow smaller splits, but not ultra‑noisy
+            "min_child_weight": randint(2, 6),            # 2–5
+        
+            # weak gain requirement to keep some bite, yet smoother than AUC
+            "gamma":            uniform(0.00, 0.25),      # 0.00–0.25
+        
+            # regularization: a touch stronger than AUC for better logloss
+            "reg_alpha":        loguniform(1e-4, 3.0e-1), # 0.0001–0.3
+            "reg_lambda":       loguniform(2.0, 1.0e1),   # 2–10
+        }
+        params_auc = {
+            # a bit deeper and leafier → stronger interactions
+            "max_depth":        randint(6, 10),           # 6–9
+            "max_leaves":       randint(64, 160),         # 64–159
+        
+            # hotter LR band → more spread (you’ll calibrate later)
+            "learning_rate":    loguniform(5.0e-2, 1.2e-1),   # 0.05–0.12
+        
+            # minimal bagging for pickup
             "subsample":        uniform(0.85, 0.15),      # 0.85–1.00
             "colsample_bytree": uniform(0.85, 0.15),      # 0.85–1.00
+            "colsample_bynode": uniform(0.80, 0.20),      # 0.80–1.00
         
+            # very permissive splitting
             "min_child_weight": randint(1, 3),            # 1–2
+            "gamma":            uniform(0.00, 0.20),      # 0.00–0.20
         
-            "gamma":            uniform(0.00, 0.30),      # 0.00–0.30
-        
-            "reg_alpha":        loguniform(1e-4, 1.0e-1), # 0.0001–0.1
-            "reg_lambda":       loguniform(0.8, 4.0),     # ~0.8–4
+            # light regularization to keep weak signals alive
+            "reg_alpha":        loguniform(1e-4, 2.0e-1), # 0.0001–0.2
+            "reg_lambda":       loguniform(0.8, 6.0),     # ~0.8–6
         }
-
     # ---- scrub dangerous keys (defensive) ----
     danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric"}
     def _scrub(d: dict) -> dict: return {k: v for k, v in d.items() if k not in danger_keys}
@@ -2938,7 +2943,86 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
   
     return out
 
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+import numpy as np
 
+# (Optional) better iso for big leagues: fit on quantile means → avoids middle compression
+def fit_regularized_isotonic(p_oof, y_oof, q=80, eps=1e-4):
+    import pandas as pd
+    p = np.clip(np.asarray(p_oof, float), eps, 1-eps)
+    y = np.asarray(y_oof, int)
+    df = pd.DataFrame({"p": p, "y": y})
+    df["q"] = pd.qcut(df["p"], q=q, duplicates="drop")
+    by = df.groupby("q").agg(p_mean=("p","mean"), y_mean=("y","mean"))
+    iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    iso.fit(by["p_mean"].to_numpy(), by["y_mean"].to_numpy())
+    return iso
+
+def fit_iso_platt_beta(p_oof, y_oof, eps=1e-4, use_quantile_iso=False):
+    p = np.clip(np.asarray(p_oof, float), eps, 1-eps)
+    y = np.asarray(y_oof, int)
+
+    # Isotonic (regular or quantile-regularized)
+    if use_quantile_iso:
+        iso = fit_regularized_isotonic(p, y, q=80, eps=eps)
+    else:
+        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        iso.fit(p, y)
+
+    # Platt
+    platt = LogisticRegression(max_iter=2000)
+    platt.fit(p.reshape(-1,1), y)
+
+    # Beta (optional)
+    beta = None
+    try:
+        from betacal import BetaCalibration
+        beta = BetaCalibration(parameters="abm")
+        beta.fit(p.reshape(-1,1), y)
+    except Exception:
+        pass
+
+    return {"iso": iso, "platt": platt, "beta": beta}
+
+def _apply_cal(kind, cal, x):
+    if kind == "iso":
+        return cal.transform(x)
+    if kind == "platt":
+        return cal.predict_proba(x.reshape(-1,1))[:,1]
+    if kind == "beta":
+        return cal.predict(x.reshape(-1,1))
+    raise ValueError(kind)
+
+def select_blend(cals, p_oof, y_oof, eps=1e-4):
+    from sklearn.metrics import log_loss
+    x = np.clip(np.asarray(p_oof, float), eps, 1-eps)
+    y = np.asarray(y_oof,   int)
+
+    kinds = ["iso", "platt"] + (["beta"] if cals["beta"] is not None else [])
+    best = None
+    # Try convex blends: p = a*iso + (1-a)*base, a∈[0..1]
+    for base in kinds:
+        p_iso  = _apply_cal("iso",  cals["iso"],  x)
+        p_base = _apply_cal(base,   cals[base],   x)
+        for a in np.linspace(0.0, 1.0, 11):  # 0.0, 0.1, ..., 1.0
+            p_blend = np.clip(a*p_iso + (1-a)*p_base, eps, 1-eps)
+            score   = log_loss(y, p_blend, labels=[0,1])
+            if (best is None) or (score < best[0]):
+                best = (score, base, float(a))
+    _, base, alpha = best
+    return {"cals": cals, "base": base, "alpha": alpha}
+
+def apply_blend(sel, p, eps=1e-4, clip=(0.001, 0.999)):
+    x = np.clip(np.asarray(p, float), eps, 1-eps)
+    cals, base, a = sel["cals"], sel["base"], sel["alpha"]
+    p_iso  = _apply_cal("iso",  cals["iso"],  x)
+    p_base = _apply_cal(base,   cals[base],   x)
+    out    = a*p_iso + (1-a)*p_base
+    if clip:
+        lo, hi = clip
+        out = np.clip(out, lo, hi)
+    return out
 
 # extra_plumbing.py
 import os, numpy as np, pandas as pd
@@ -5842,11 +5926,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_oof_auc = np.clip(p_oof_auc, eps, 1 - eps)
         # ----- pick blend weight on OOF (logloss‑based) + fit isotonic; get flipped flag -----
         
+        # ... your OOF loop and blend weight selection stays the same ...
         best_w, _, p_oof_blend = pick_blend_weight_on_oof(
             y_oof=y_oof, p_oof_log=p_oof_log, p_oof_auc=p_oof_auc,
             metric="logloss", grid=None, eps=eps,
         )
-
+        
+        # Choose clip per league so we don't pinch the tails
+        CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
+        
+        # 1) Fit iso + platt (+ beta) on OOF
+        use_quantile_iso = (sport_key not in SMALL_LEAGUES)  # big leagues: regularize iso to avoid middle squeeze
+        cals = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        
+        # 2) Pick the best convex blend on OOF (often alpha<1 → widens)
+        sel  = select_blend(cals, p_oof_blend, y_oof, eps=eps)
+        print(f"Calibrator blend: base={sel['base']}, alpha_iso={sel['alpha']:.2f}")
+        
+       
         # ⛑️ NEW: fit robust calibrator on the OOF blend (iso → else beta/platt)
         cal_blend = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps, min_unique=200, prefer_beta=True)
         
@@ -5897,11 +5994,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_ho_log = pos_proba(model_logloss, X_full[hold_idx],      positive=1)
         p_ho_auc = pos_proba(model_auc,     X_full[hold_idx],      positive=1)
         
+        # ... later, when applying to train/holdout ...
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
-        p_cal     = apply_calibrator(cal_blend, p_train_blend_raw)
-        p_cal_val = apply_calibrator(cal_blend, p_hold_blend_raw)
+        # 3) Apply the blended calibrator with a looser tail clip
+        p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1-CLIP))
+        p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1-CLIP))
+
         
         # Guard against holdout having one class → AUC would be nan
         y_hold_vec = y_full[hold_idx].astype(int)
