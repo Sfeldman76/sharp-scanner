@@ -2810,25 +2810,30 @@ def compute_snapshot_micro_features_training(
     return out
 
 
-# === utils: hybrid timing derivatives (uses your persisted hybrid columns) ===
 def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame:
     """
     Builds timing magnitude/split/entropy features from your hybrid timing columns.
-    It auto-detects columns by prefix; adjust the patterns if your names differ.
+    Auto-detects columns by prefix.
     """
-    if df.empty: 
+    if df.empty:
         return df
-    out = df.copy()
 
-    # Detect column sets (adjust patterns to your naming if needed)
+    out = df.copy()
+    n = len(out)
+
+    # Detect column sets
     line_cols = [c for c in out.columns if c.startswith("SharpMove_Magnitude_")]
     odds_cols = [c for c in out.columns if c.startswith("OddsMove_Magnitude_")]
 
-    # Fallbacks if you use different names; append, don't overwrite
+    # Fallbacks (append, don’t overwrite)
     if not line_cols:
-        line_cols += [c for c in out.columns if ("line" in c.lower() or "value" in c.lower()) and "magnitude" in c.lower()]
+        line_cols += [c for c in out.columns
+                      if ("line" in c.lower() or "value" in c.lower())
+                      and "magnitude" in c.lower()]
     if not odds_cols:
-        odds_cols += [c for c in out.columns if ("odds" in c.lower() or "price" in c.lower() or "prob" in c.lower()) and "magnitude" in c.lower()]
+        odds_cols += [c for c in out.columns
+                      if ("odds" in c.lower() or "price" in c.lower() or "prob" in c.lower())
+                      and "magnitude" in c.lower()]
 
     def _pick(cols, pats):
         pats = tuple(p.lower() for p in pats)
@@ -2842,70 +2847,73 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
     mid_o   = _pick(odds_cols, ("midday","midrange"))
     late_o  = _pick(odds_cols, ("late","urgent"))
 
-    # Sums (vectorized) — float32 to save RAM
-    out["Hybrid_Line_TotalMag"] = (out[line_cols].sum(axis=1) if line_cols else 0.0).astype("float32")
-    out["Hybrid_Line_EarlyMag"] = (out[early_l].sum(axis=1)   if early_l   else 0.0).astype("float32")
-    out["Hybrid_Line_MidMag"]   = (out[mid_l].sum(axis=1)     if mid_l     else 0.0).astype("float32")
-    out["Hybrid_Line_LateMag"]  = (out[late_l].sum(axis=1)    if late_l    else 0.0).astype("float32")
+    def _zeros():
+        # vector of zeros aligned to DF rows, float32
+        return pd.Series(0.0, index=out.index, dtype="float32")
 
-    out["Hybrid_Odds_TotalMag"] = (out[odds_cols].sum(axis=1) if odds_cols else 0.0).astype("float32")
-    out["Hybrid_Odds_EarlyMag"] = (out[early_o].sum(axis=1)   if early_o   else 0.0).astype("float32")
-    out["Hybrid_Odds_MidMag"]   = (out[mid_o].sum(axis=1)     if mid_o     else 0.0).astype("float32")
-    out["Hybrid_Odds_LateMag"]  = (out[late_o].sum(axis=1)    if late_o    else 0.0).astype("float32")
+    # Sums (vectorized) — float32
+    out["Hybrid_Line_TotalMag"] = (out[line_cols].sum(axis=1).astype("float32") if line_cols else _zeros())
+    out["Hybrid_Line_EarlyMag"] = (out[early_l].sum(axis=1).astype("float32")   if early_l   else _zeros())
+    out["Hybrid_Line_MidMag"]   = (out[mid_l].sum(axis=1).astype("float32")     if mid_l     else _zeros())
+    out["Hybrid_Line_LateMag"]  = (out[late_l].sum(axis=1).astype("float32")    if late_l    else _zeros())
+
+    out["Hybrid_Odds_TotalMag"] = (out[odds_cols].sum(axis=1).astype("float32") if odds_cols else _zeros())
+    out["Hybrid_Odds_EarlyMag"] = (out[early_o].sum(axis=1).astype("float32")   if early_o   else _zeros())
+    out["Hybrid_Odds_MidMag"]   = (out[mid_o].sum(axis=1).astype("float32")     if mid_o     else _zeros())
+    out["Hybrid_Odds_LateMag"]  = (out[late_o].sum(axis=1).astype("float32")    if late_o    else _zeros())
 
     # Shares / ratios
-    eps = 1e-6
-    out["Hybrid_Line_LateShare"] = (out["Hybrid_Line_LateMag"] / (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
-    out["Hybrid_Line_EarlyShare"]= (out["Hybrid_Line_EarlyMag"]/ (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
-    out["Hybrid_Odds_LateShare"] = (out["Hybrid_Odds_LateMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
-    out["Hybrid_Odds_EarlyShare"]= (out["Hybrid_Odds_EarlyMag"]/ (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
+    eps = np.float32(1e-6)
+    out["Hybrid_Line_LateShare"]  = (out["Hybrid_Line_LateMag"]  / (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Line_EarlyShare"] = (out["Hybrid_Line_EarlyMag"] / (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Odds_LateShare"]  = (out["Hybrid_Odds_LateMag"]  / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Odds_EarlyShare"] = (out["Hybrid_Odds_EarlyMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
     out["Hybrid_Line_Odds_Mag_Ratio"] = (out["Hybrid_Line_TotalMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
 
-    # assume: eps = 1e-12 (or your chosen small constant)
-    
-    # Imbalance (guard denom) + cast
+    # Imbalance
     out["Hybrid_Line_Imbalance_LateVsEarly"] = (
         (out["Hybrid_Line_LateMag"] - out["Hybrid_Line_EarlyMag"]) /
-        (out["Hybrid_Line_TotalMag"].astype("float32") + eps)
+        (out["Hybrid_Line_TotalMag"] + eps)
     ).astype("float32")
-    
-    # Filter to columns that actually exist (in case lists contain extras)
+
+    # Entropy (only if cols exist)
     _line_cols = [c for c in (line_cols or []) if c in out.columns]
     _odds_cols = [c for c in (odds_cols or []) if c in out.columns]
-    
+
     if _line_cols:
         W = out[_line_cols].to_numpy(dtype="float32")
         out["Hybrid_Timing_Entropy_Line"] = safe_row_entropy(W).astype("float32")
     else:
         out["Hybrid_Timing_Entropy_Line"] = np.float32(0.0)
-    
+
     if _odds_cols:
         W2 = out[_odds_cols].to_numpy(dtype="float32")
         out["Hybrid_Timing_Entropy_Odds"] = safe_row_entropy(W2).astype("float32")
     else:
         out["Hybrid_Timing_Entropy_Odds"] = np.float32(0.0)
-    
+
     # Ensure absolute-from-open columns exist & are float32
     for c in ("Abs_Line_Move_From_Opening", "Abs_Odds_Move_From_Opening"):
         if c not in out.columns:
             out[c] = 0.0
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
-    
-    # Interactions with snapshot microstructure (float32)
+
+    # Interactions with snapshot microstructure
     if "Key_Corridor_Pressure" in out.columns:
         out["Corridor_x_LateShare_Line"] = (
-            out["Key_Corridor_Pressure"].astype("float32") * out["Hybrid_Line_LateShare"].astype("float32")
+            out["Key_Corridor_Pressure"].astype("float32") * out["Hybrid_Line_LateShare"]
         ).astype("float32")
     if "Dist_To_Next_Key" in out.columns:
         out["Dist_x_LateShare_Line"] = (
-            out["Dist_To_Next_Key"].astype("float32") * out["Hybrid_Line_LateShare"].astype("float32")
+            out["Dist_To_Next_Key"].astype("float32") * out["Hybrid_Line_LateShare"]
         ).astype("float32")
     if "Book_PctRank_Line" in out.columns:
         out["PctRank_x_LateShare_Line"] = (
-            out["Book_PctRank_Line"].astype("float32") * out["Hybrid_Line_LateShare"].astype("float32")
+            out["Book_PctRank_Line"].astype("float32") * out["Hybrid_Line_LateShare"]
         ).astype("float32")
-        # Ensure your “absolute from open” live in float32 (if present)
-  
+
+    return out  # ← REQUIRED
+
 
 
 # (Optional) better iso for big leagues: fit on quantile means → avoids middle compression
