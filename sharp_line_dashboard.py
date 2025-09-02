@@ -5377,7 +5377,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ============================================================================
                 # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
           # ---- Groups & times (snapshot-aware) ----
-        groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
+    
         
         snap_ts = pd.to_datetime(
             df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
@@ -5438,9 +5438,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Sport-aware embargo only when we truly have multiple snapshots
        
-        # Replace previous 'groups' and 'times'
-        groups = groups_all
-        times  = time_values_all
+      
+      
         
         # Guard: drop NaT times (rare but fatal for CV)
         if pd.isna(times).any():
