@@ -523,7 +523,6 @@ def tier_from_prob(p: float) -> str:
 
 
 def _normalize_cals(cals_tuple_or_dict):
-    """Accept (kind, model) or a dict; return dict with iso/platt/beta keys."""
     if isinstance(cals_tuple_or_dict, tuple) and len(cals_tuple_or_dict) == 2:
         kind, model = cals_tuple_or_dict
         return {
@@ -531,8 +530,20 @@ def _normalize_cals(cals_tuple_or_dict):
             "platt": model if kind == "platt" else None,
             "beta":  model if kind == "beta"  else None,
         }
-    return cals_tuple_or_dict  # already dict-like
+    return cals_tuple_or_dict
 
+class _IdentityCal:
+    def __init__(self, eps=1e-6):
+        self.eps = eps
+    # used when select_blend calls .transform for iso
+    def transform(self, p):
+        p = np.asarray(p, float).reshape(-1)
+        return np.clip(p, self.eps, 1.0 - self.eps)
+    # used if select_blend ever calls predict_proba for platt/beta
+    def predict_proba(self, X):
+        p = np.asarray(X, float).reshape(-1)
+        p = np.clip(p, self.eps, 1.0 - self.eps)
+        return np.c_[1.0 - p, p]
 
 
 
@@ -5926,108 +5937,73 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
         
         # 1) Fit iso + platt (+ beta) on OOF
-        use_quantile_iso = (sport_key not in SMALL_LEAGUES)  # big leagues: regularize iso
+        use_quantile_iso = (sport_key not in SMALL_LEAGUES)
         cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        cals = _normalize_cals(cals_raw)
         
-        cals = _normalize_cals(cals_raw)  # <-- ensure dict shape
-        sel  = select_blend(cals, p_oof_blend, y_oof, eps=eps)
+        # Backfill missing to avoid NoneType errors inside select_blend
+        if cals.get("iso") is None:
+            cals["iso"] = _IdentityCal(eps=eps)
+        if cals.get("platt") is None and cals.get("beta") is None:
+            cals["platt"] = _IdentityCal(eps=eps)
+        
+        sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
         print(f"Calibrator blend: base={sel['base']}, alpha_iso={sel['alpha']:.2f}")
         
-       
-        # ⛑️ NEW: fit robust calibrator on the OOF blend (iso → else beta/platt)
+        # (robust calibrator optional; safe to keep)
         cal_blend = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps, min_unique=200, prefer_beta=True)
-        
-        class _CalAdapter:
-            def __init__(self, cal_tuple, clip=(0.01, 0.99)):
-                self.kind, self.model = cal_tuple   # kind ∈ {"iso", "beta", "platt"}
-                self.clip = clip
-        
-            def predict(self, p):
-                p = np.asarray(p, float)
-                if self.kind == "iso":
-                    out = self.model.transform(p)
-                elif self.kind == "beta":
-                    out = self.model.predict(p.reshape(-1, 1))
-                else:  # "platt"
-                    out = self.model.predict_proba(p.reshape(-1, 1))[:, 1]
-                if self.clip:
-                    lo, hi = self.clip
-                    out = np.clip(out, lo, hi)
-                return out
-        
-        
         if cal_blend is not None:
-            iso_blend = _CalAdapter(cal_blend)
-            # Optional: log what we chose
-            kind = cal_blend[0]
-            print(f"Calibration chosen on OOF blend: {kind}")
-       
+            print(f"Calibration chosen on OOF blend: {cal_blend[0]}")
         
-        # (optional) inspect other weights without changing best_w
-        # _grid = np.linspace(0.20, 0.80, 13)
-        # rows = []
-        # for w in _grid:
-        #     p_tmp = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
-        #     rows.append({"w_log": w,
-        #                  "AUC": roc_auc_score(y_oof, p_tmp),
-        #                  "LogLoss": log_loss(y_oof, p_tmp, labels=[0,1])})
-        # st.dataframe(pd.DataFrame(rows))
-        
-        # ---------------------------------------------------------------------------
-        # Final blended + calibrated predictions for TRAIN + HOLDOUT
-        # ---------------------------------------------------------------------------
+        # ---------- Final blended + calibrated predictions for TRAIN + HOLDOUT ----------
         pos_ll_final  = pos_col_index(model_logloss, positive=1)
         pos_auc_final = pos_col_index(model_auc,     positive=1)
         
-        p_tr_log = pos_proba(model_logloss, X_full[train_all_idx], positive=1)
-        p_tr_auc = pos_proba(model_auc,     X_full[train_all_idx], positive=1)
-        p_ho_log = pos_proba(model_logloss, X_full[hold_idx],      positive=1)
-        p_ho_auc = pos_proba(model_auc,     X_full[hold_idx],      positive=1)
+        # ✅ Use .iloc for DataFrame row selection
+        p_tr_log = pos_proba(model_logloss, X_full.iloc[train_all_idx], positive=1)
+        p_tr_auc = pos_proba(model_auc,     X_full.iloc[train_all_idx], positive=1)
+        p_ho_log = pos_proba(model_logloss, X_full.iloc[hold_idx],      positive=1)
+        p_ho_auc = pos_proba(model_auc,     X_full.iloc[hold_idx],      positive=1)
         
-        # ... later, when applying to train/holdout ...
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
-        # 3) Apply the blended calibrator with a looser tail clip
+        # Apply the legacy blend calibrator
         p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1-CLIP))
         p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1-CLIP))
-
         
-        # Guard against holdout having one class → AUC would be nan
-        y_hold_vec = y_full[hold_idx].astype(int)
+        # ---------- Metrics (handle single-class holdout safely) ----------
+        y_hold_vec  = y_full[hold_idx].astype(int)
+        y_train_vec = y_full[train_all_idx].astype(int)
+        
+        auc_ho = np.nan  # ✅ initialize before branch
         if np.unique(y_hold_vec).size < 2:
-            auc_ho = float(auc_ho) if not np.isnan(auc_ho) else np.nan
+            # nothing to do; auc_ho stays NaN
+            pass
         else:
-            # final safety: flip if needed (should rarely trigger after OOF lock)
-            auc_raw, _ = _auc_safe(y_hold_vec, p_cal_val)
+            # final safety flip (rare)
+            auc_raw, _  = _auc_safe(y_hold_vec, p_cal_val)
             auc_flip, _ = _auc_safe(y_hold_vec, 1.0 - p_cal_val)
             if np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw):
                 p_cal_val = 1.0 - p_cal_val
                 p_cal     = 1.0 - p_cal
             auc_ho = roc_auc_score(y_hold_vec, p_cal_val)
         
-        
-        # targets aligned
-        y_train_vec = y_full[train_all_idx].astype(int)
-        y_hold_vec  = y_full[hold_idx].astype(int)
-        
-        # targets aligned
-       
         p_train_vec = np.asarray(p_cal, dtype=float)
         p_hold_vec  = np.asarray(p_cal_val, dtype=float)
-
-        # metrics
-        auc_train = roc_auc_score(y_train_vec, p_cal)
-        auc_val   = roc_auc_score(y_hold_vec,  p_cal_val)
+        
+        auc_train = roc_auc_score(y_train_vec, p_cal) if np.unique(y_train_vec).size > 1 else np.nan
+        auc_val   = auc_ho
         brier_tr  = brier_score_loss(y_train_vec, p_cal)
         brier_val = brier_score_loss(y_hold_vec,  p_cal_val)
         
         st.write(f"🔧 Ensemble weight (logloss vs auc): w={best_w:.2f}")
         st.write(f"📉 LogLoss: train={log_loss(y_train_vec, np.clip(p_cal,eps,1-eps), labels=[0,1]):.5f}, "
                  f"val={log_loss(y_hold_vec,  np.clip(p_cal_val,eps,1-eps), labels=[0,1]):.5f}")
-        st.write(f"📈 AUC:     train={auc_train:.4f}, val={auc_val:.4f}")
+        st.write(f"📈 AUC:     train={auc_train if not np.isnan(auc_train) else '—':>}, "
+                 f"val={auc_val if not np.isnan(auc_val) else '—':>}")
         st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
-               
+
 
         
          #--- quick calibration table (for sanity; full plot optional) ---
