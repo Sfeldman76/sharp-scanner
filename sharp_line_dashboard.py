@@ -521,9 +521,20 @@ def tier_from_prob(p: float) -> str:
     return "✅ Low"
 
 
-from sklearn.isotonic import IsotonicRegression
-from sklearn.metrics import roc_auc_score, log_loss
-import numpy as np
+
+def _normalize_cals(cals_tuple_or_dict):
+    """Accept (kind, model) or a dict; return dict with iso/platt/beta keys."""
+    if isinstance(cals_tuple_or_dict, tuple) and len(cals_tuple_or_dict) == 2:
+        kind, model = cals_tuple_or_dict
+        return {
+            "iso":   model if kind == "iso"   else None,
+            "platt": model if kind == "platt" else None,
+            "beta":  model if kind == "beta"  else None,
+        }
+    return cals_tuple_or_dict  # already dict-like
+
+
+
 
 def pos_col_index(est, positive=1):
     cls = getattr(est, "classes_", None)
@@ -5915,10 +5926,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
         
         # 1) Fit iso + platt (+ beta) on OOF
-        use_quantile_iso = (sport_key not in SMALL_LEAGUES)  # big leagues: regularize iso to avoid middle squeeze
-        cals = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        use_quantile_iso = (sport_key not in SMALL_LEAGUES)  # big leagues: regularize iso
+        cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
         
-        # 2) Pick the best convex blend on OOF (often alpha<1 → widens)
+        cals = _normalize_cals(cals_raw)  # <-- ensure dict shape
         sel  = select_blend(cals, p_oof_blend, y_oof, eps=eps)
         print(f"Calibrator blend: base={sel['base']}, alpha_iso={sel['alpha']:.2f}")
         
