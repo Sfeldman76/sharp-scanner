@@ -5806,7 +5806,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             features=features,
         )
                 
-        
+        sport_key = str(sport).upper()
+
+        if sport_key in SMALL_LEAGUES:
+            search_estimators = 300
+            eps = 5e-3
+        else:
+            search_estimators = 400
+            eps = 1e-4
         # ---------------------------------------------------------------------------
         #  CV with purge + embargo (snapshot-aware)
         # ---------------------------------------------------------------------------
