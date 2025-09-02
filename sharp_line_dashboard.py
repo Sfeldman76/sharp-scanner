@@ -5777,12 +5777,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_oof_auc = np.clip(p_oof_auc, eps, 1 - eps)
         # ----- pick blend weight on OOF (logloss‑based) + fit isotonic; get flipped flag -----
         
-        # ... your OOF loop and blend weight selection stays the same ...
-        best_w, _, p_oof_blend = pick_blend_weight_on_oof(
-            y_oof=y_oof, p_oof_log=p_oof_log, p_oof_auc=p_oof_auc,
-            metric="logloss", grid=None, eps=eps,
-        )
-        
+ 
         # Choose clip per league so we don't pinch the tails
       
         # --- Pick blend weights on OOF (unchanged) ---
@@ -5868,9 +5863,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
         # 3) Apply the blended calibrator with a looser tail clip
-        p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1-CLIP))
-        p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1-CLIP))
-
+        p_cal     = iso_blend.predict(p_train_blend_raw)
+        p_cal_val = iso_blend.predict(p_hold_blend_raw)
         
         # Guard against holdout having one class → AUC would be nan
         y_hold_vec = y_full[hold_idx].astype(int)
