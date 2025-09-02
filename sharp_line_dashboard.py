@@ -5378,10 +5378,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
           # ---- Groups & times (snapshot-aware) ----
 
- 
+        has_snapshots = (
+            df_market.groupby("Game_Key")["Snapshot_Timestamp"]
+            .nunique(dropna=True)
+            .fillna(0)
+            .max() > 1
+        )
         # --- (1) embargo must be defined earlier (and has_snapshots computed). ---
         sport_key  = str(sport).upper()
-        # has_snapshots = ...  # compute this before (as you did earlier)
+        #has_snapshots = ...  # compute this before (as you did earlier)
         embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
         
         # --- (2) aggregate to one sharp‑aware row per (Game, Market) ---
