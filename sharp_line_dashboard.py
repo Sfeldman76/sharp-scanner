@@ -6099,11 +6099,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         pos_auc_final = pos_col_index(model_auc,     positive=1)
         
         # ✅ Use .iloc for DataFrame row selection
-        p_tr_log = pos_proba(model_logloss, X_full.iloc[train_all_idx], positive=1)
-        p_tr_auc = pos_proba(model_auc,     X_full.iloc[train_all_idx], positive=1)
-        p_ho_log = pos_proba(model_logloss, X_full.iloc[hold_idx],      positive=1)
-        p_ho_auc = pos_proba(model_auc,     X_full.iloc[hold_idx],      positive=1)
-        
+        # ✅ Use regular indexing for NumPy arrays
+        p_tr_log = pos_proba(model_logloss, X_full[train_all_idx], positive=1)
+        p_tr_auc = pos_proba(model_auc,     X_full[train_all_idx], positive=1)
+        p_ho_log = pos_proba(model_logloss, X_full[hold_idx],      positive=1)
+        p_ho_auc = pos_proba(model_auc,     X_full[hold_idx],      positive=1)
         p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
