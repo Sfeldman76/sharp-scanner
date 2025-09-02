@@ -5520,7 +5520,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Keep a single source of truth for downstream code
         features = feature_cols
-          features = feature_cols
+
         # ============================================================================
         
        
@@ -5742,7 +5742,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-        from sklearn.base import is_classifier as sk_is_classifier
+
 
         def _assert_classifier(est, name: str):
             """
@@ -5806,30 +5806,48 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
+             
         # ---------------------------------------------------------------------------
-        #  Final early-stopped fits on last CV fold (with sample_weight)
+        # Final early-stopped fits on last CV fold (with sample_weight)
         # ---------------------------------------------------------------------------
-        tr_es_rel, va_es_rel = folds[-1]
+        tr_es_rel, va_es_rel = folds[-1]  # folds is your list of (train_idx, val_idx)
+        tr_es_rel = np.asarray(tr_es_rel)
+        va_es_rel = np.asarray(va_es_rel)
+        
         final_estimators_cap  = 3000
         early_stopping_rounds = 500
         
-        model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": final_estimators_cap})
-        model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": final_estimators_cap})
+        # Build fresh models with the searched params
+        model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(final_estimators_cap)})
+        model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(final_estimators_cap)})
         
+        # Slice ROWS correctly
+        X_tr_es = X_train.iloc[tr_es_rel]
+        X_va_es = X_train.iloc[va_es_rel]
+        y_tr_es = y_train[tr_es_rel]
+        y_va_es = y_train[va_es_rel]
+        w_tr_es = w_train[tr_es_rel]
+        w_va_es = w_train[va_es_rel]
+        
+        # Fit with early stopping (pass eval_set weights via fit params)
         model_logloss.fit(
-            X_train[tr_es_rel], y_train[tr_es_rel],
-            eval_set=[(X_train[va_es_rel], y_train[va_es_rel])],
-            sample_weight=w_train[tr_es_rel],
-            early_stopping_rounds=early_stopping_rounds,
+            X_tr_es, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
             verbose=False,
+            early_stopping_rounds=early_stopping_rounds,
         )
+        
         model_auc.fit(
-            X_train[tr_es_rel], y_train[tr_es_rel],
-            eval_set=[(X_train[va_es_rel], y_train[va_es_rel])],
-            sample_weight=w_train[tr_es_rel],
-            early_stopping_rounds=early_stopping_rounds,
+            X_tr_es, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
             verbose=False,
+            early_stopping_rounds=early_stopping_rounds,
         )
+
         
         def _best_rounds(clf):
             br = getattr(clf, "best_iteration", None)
