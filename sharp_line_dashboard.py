@@ -5791,85 +5791,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
       
         # After computing mask_oof / y_oof / p_oof_log / p_oof_auc ...
         if mask_oof.sum() < 50:
-            # ---- SMALL‑LEAGUE PLACEHOLDER FALLBACK ----
-            # Laplace-smoothed base rate (beats naive 0.50)
-            n = int(len(y_train))
-            n_pos = int(np.nansum(y_train == 1))
-            base_rate = (n_pos + 1) / (n + 2)  # Beta(1,1) prior
-        
-            # Blend weight is irrelevant; keep shape‑compatible arrays
-            best_w = 0.5
-            p_oof_blend = np.full(mask_oof.sum(), base_rate, dtype=float)
-        
-            # Build a constant calibrator adapter that just clips
-            class _IdentityCal:
-                def transform(self, p): 
-                    p = np.asarray(p, float).reshape(-1)
-                    return np.clip(p, eps, 1 - eps)
-        
-            class _CalAdapter:
-                def __init__(self, cal_tuple, clip=(0.01, 0.99)):
-                    self.kind, self.model = cal_tuple
-                    self.clip = clip
-                def predict(self, x):
-                    x = np.asarray(x, float).reshape(-1)
-                    if self.kind == "iso":
-                        out = self.model.transform(x)
-                    else:
-                        out = x
-                    if self.clip:
-                        lo, hi = self.clip
-                        out = np.clip(out, lo, hi)
-                    return out
-        
-            # Choose clip per league
-            CLIP = 0.005 if sport_key in SMALL_LEAGUES else 0.001
-            iso_blend = _CalAdapter(("iso", _IdentityCal()), clip=(CLIP, 1.0 - CLIP))
-            print("⚠️ Small-league fallback: using base-rate placeholder model")
-        
-            # TRAIN/HOLDOUT predictions become constant base_rate (still shaped correctly)
-            p_tr_log = np.full(len(train_all_idx), base_rate, dtype=float)
-            p_tr_auc = np.full(len(train_all_idx), base_rate, dtype=float)
-            p_ho_log = np.full(len(hold_idx),      base_rate, dtype=float)
-            p_ho_auc = np.full(len(hold_idx),      base_rate, dtype=float)
-        
-            # Keep the rest of your downstream code unchanged:
-            p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
-            p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
-        
-            # Apply the “calibrator” (identity + clip)
-            p_cal     = iso_blend.predict(p_train_blend_raw)
-            p_cal_val = iso_blend.predict(p_hold_blend_raw)
-        
-            # Targets
-            y_train_vec = y_full[train_all_idx].astype(int)
-            y_hold_vec  = y_full[hold_idx].astype(int)
-        
-            # Metrics (guard AUC if one class in holdout)
-            if np.unique(y_hold_vec).size < 2:
-                auc_train = np.nan
-                auc_val   = np.nan
-            else:
-                auc_train = roc_auc_score(y_train_vec, p_cal) if np.unique(y_train_vec).size > 1 else np.nan
-                auc_val   = roc_auc_score(y_hold_vec,  p_cal_val)
-        
-            brier_tr  = brier_score_loss(y_train_vec, p_cal)
-            brier_val = brier_score_loss(y_hold_vec,  p_cal_val)
-        
-            # (Optional) display
-            st.write(f"⚠️ Placeholder model used. Base rate={base_rate:.3f}  (n={n}, pos={n_pos})")
-            st.write(f"📉 LogLoss: train={log_loss(y_train_vec, np.clip(p_cal,eps,1-eps), labels=[0,1]):.5f}, "
-                     f"val={log_loss(y_hold_vec,  np.clip(p_cal_val,eps,1-eps), labels=[0,1]):.5f}")
-            st.write(f"📈 AUC:     train={auc_train if not np.isnan(auc_train) else '—'}, "
-                     f"val={auc_val if not np.isnan(auc_val) else '—'}")
-            st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
-        
-            # Then jump to your normal return / save path for this fold/model
-            # (e.g., set flags so you don't try to use real model objects later)
-            USE_PLACEHOLDER = True
-            # --------------------------------------------------------------------
-        else:
-         
+            raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
+
 
         y_oof     = y_train[mask_oof].astype(int)
         p_oof_log = oof_pred_logloss[mask_oof].astype(float)
