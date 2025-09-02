@@ -2516,7 +2516,7 @@ def get_xgb_search_space(
         grow_policy="lossguide",
         max_bin=384,
         max_delta_step=0.5,
-        sampling_method="gradient_based",
+        sampling_method="uniform",
         reg_lambda=3.0,
         min_child_weight=2,
         n_jobs=int(n_jobs),
