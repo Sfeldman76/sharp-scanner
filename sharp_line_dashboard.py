@@ -2485,11 +2485,11 @@ def totals_features_for_upcoming(df_scores: pd.DataFrame,
     return hist.merge(want, on=key_col, how="right")[[key_col] + cols]
 
 
-from scipy.stats import randint, uniform, loguniform
 
 SMALL_LEAGUES = {"WNBA", "CFL"}
 BIG_LEAGUES   = {"MLB", "NBA", "NFL", "NCAAF", "NCAAB"}  # extend as needed
-from scipy.stats import randint, uniform, loguniform  # ensure these are imported at top
+
+from scipy.stats import randint, uniform, loguniform
 
 def get_xgb_search_space(
     sport: str,
@@ -2498,38 +2498,36 @@ def get_xgb_search_space(
     n_jobs: int = 1,
     scale_pos_weight: float = 1.0,
     features: list[str] | None = None,
-    use_monotone: bool = False,   # ← make constraints opt‑in
+    use_monotone: bool = False,   # kept for compatibility; unused unless you wire constraints
 ) -> tuple[dict, dict, dict]:
     """
     Returns (base_kwargs, params_ll, params_auc) for XGBClassifier randomized searches.
-    Tuned to avoid flat models on low-variance feature sets.
+    Uses ONLY passed arguments (no access to y_train). Ranges chosen to avoid flat models.
     """
     s = str(sport).upper()
+    spw = float(scale_pos_weight)  # <-- use the passed-in value
 
-    # ---- base kwargs (lighter regularization; no colsample_bynode) ----
     # ---------------- Base kwargs (single, consistent block) ----------------
     base_kwargs = dict(
         objective="binary:logistic",
-        eval_metric=["logloss", "auc"],     # track both; logloss is primary
+        eval_metric=["logloss", "auc"],
         tree_method="hist",                 # "gpu_hist" if you have GPU
         predictor="cpu_predictor",
         grow_policy="lossguide",
-        max_bin=384,                        # bumped for finer splits
-        max_delta_step=0.5,                 # steadier probs with imbalance
-        sampling_method="gradient_based",   # better with subsample
-        # do NOT set colsample_bynode here; keep it only in search grids
-        # do NOT set max_leaves here if you search it
-        reg_lambda=3.0,                     # mild L2 default
-        min_child_weight=2,                 # gentle default; grid will override
+        max_bin=384,
+        max_delta_step=0.5,
+        sampling_method="gradient_based",
+        reg_lambda=3.0,
+        min_child_weight=2,
         n_jobs=int(n_jobs),
         random_state=42,
         importance_type="total_gain",
-        scale_pos_weight=float(scale_pos_weight),
+        scale_pos_weight=spw,               # <-- from caller
     )
-    
+
     # ---------------- Search spaces ----------------
     SMALL = (s in SMALL_LEAGUES)
-    
+
     if SMALL:
         # Small leagues — aggressive but variance-aware
         params_ll = {
@@ -2543,8 +2541,8 @@ def get_xgb_search_space(
             "gamma":            uniform(0.00, 0.40),        # 0.00–0.40
             "reg_lambda":       loguniform(1.0, 6.0),       # 1–6
             "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
-            "scale_pos_weight": uniform(max(0.6, 0.7*scale_pos_weight),
-                                        max(0.8, 1.3*scale_pos_weight)),
+            # optional: search around spw
+            "scale_pos_weight": uniform(max(0.6, 0.7*spw), max(0.8, 1.3*spw)),
         }
         params_auc = {
             "max_depth":        randint(3, 8),              # {3..7}
@@ -2557,11 +2555,8 @@ def get_xgb_search_space(
             "gamma":            uniform(0.00, 0.40),        # 0.00–0.40
             "reg_lambda":       loguniform(1.0, 6.0),       # 1–6
             "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
-            "scale_pos_weight": uniform(max(0.6, 0.7*scale_pos_weight),
-                                        max(0.8, 1.3*scale_pos_weight)),
+            "scale_pos_weight": uniform(max(0.6, 0.7*spw), max(0.8, 1.3*spw)),
         }
-        search_estimators = 450
-        CLIP = 0.005
     else:
         # Big leagues — more capacity & diversity
         params_ll = {
@@ -2575,8 +2570,7 @@ def get_xgb_search_space(
             "gamma":            uniform(0.00, 0.10),        # 0.00–0.10
             "reg_alpha":        loguniform(1e-4, 4e-1),     # 0.0001–0.4
             "reg_lambda":       loguniform(3.0, 15.0),      # 3–15
-            "scale_pos_weight": uniform(max(0.5, 0.6*scale_pos_weight),
-                                        max(0.6, 1.4*scale_pos_weight)),
+            "scale_pos_weight": uniform(max(0.5, 0.6*spw), max(0.6, 1.4*spw)),
         }
         params_auc = {
             "max_depth":        randint(6, 9),              # {6,7,8}
@@ -2589,23 +2583,16 @@ def get_xgb_search_space(
             "gamma":            uniform(0.00, 0.10),        # 0.00–0.10
             "reg_alpha":        loguniform(1e-5, 2e-1),     # 1e-5–0.2
             "reg_lambda":       loguniform(1.0, 8.0),       # 1–8
-            "scale_pos_weight": uniform(max(0.5, 0.6*scale_pos_weight),
-                                        max(0.6, 1.4*scale_pos_weight)),
+            "scale_pos_weight": uniform(max(0.5, 0.6*spw), max(0.6, 1.4*spw)),
         }
-        search_estimators = 600
-        CLIP = 0.0005
-    
+
     # -------------- scrub params (defensive) --------------
     danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric"}
-    def _scrub(d: dict) -> dict: return {k: v for k, v in d.items() if k not in danger_keys}
-    params_ll  = _scrub(params_ll)
-    params_auc = _scrub(params_auc)
-    
-    # Always compute scale_pos_weight from *train set* right before building spaces
-    spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
-    
+    params_ll  = {k: v for k, v in params_ll.items()  if k not in danger_keys}
+    params_auc = {k: v for k, v in params_auc.items() if k not in danger_keys}
 
     return base_kwargs, params_ll, params_auc
+
 
 
 def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, *, 
@@ -5810,14 +5797,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert len(w_train) == len(X_train), f"sample_weight misaligned: {len(w_train)} vs {len(X_train)}"
         
         # ---------------------------------------------------------------------------
+        spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],
             n_jobs=1,
-            scale_pos_weight=((y_train == 0).sum() / max(1, (y_train == 1).sum())),
+            scale_pos_weight=spw,
             features=features,
         )
-        
+                
         
         # ---------------------------------------------------------------------------
         #  CV with purge + embargo (snapshot-aware)
