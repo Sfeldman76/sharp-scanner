@@ -520,7 +520,46 @@ def tier_from_prob(p: float) -> str:
     if p >= 0.51: return "⭐ Lean"
     return "✅ Low"
 
+# --- helpers (put these near your other utils) ---
+class _IdentityIsoCal:
+    def __init__(self, eps=1e-6):
+        self.eps = eps
+    def transform(self, p):
+        p = np.asarray(p, float).reshape(-1)
+        return np.clip(p, self.eps, 1.0 - self.eps)
 
+class _IdentityProbCal:
+    def __init__(self, eps=1e-6):
+        self.eps = eps
+    def predict_proba(self, X):
+        p = np.asarray(X, float).reshape(-1)
+        p = np.clip(p, self.eps, 1.0 - self.eps)
+        return np.c_[1.0 - p, p]
+
+def _ensure_transform_for_iso(iso_obj):
+    if iso_obj is None:
+        return None
+    if hasattr(iso_obj, "transform"):
+        return iso_obj
+    if hasattr(iso_obj, "predict"):
+        class _IsoAsTransform:
+            def __init__(self, iso): self.iso = iso
+            def transform(self, p):  return self.iso.predict(p)
+        return _IsoAsTransform(iso_obj)
+    return iso_obj
+
+def _ensure_predict_proba_for_prob_cal(cal_obj, eps=1e-6):
+    if cal_obj is None or hasattr(cal_obj, "predict_proba"):
+        return cal_obj
+    class _AsPredictProba:
+        def __init__(self, base, eps=1e-6): self.base, self.eps = base, eps
+        def predict_proba(self, X):
+            p = np.asarray(X, float).reshape(-1)
+            if hasattr(self.base, "__call__"):
+                p = np.asarray(self.base(p), float).reshape(-1)
+            p = np.clip(p, self.eps, 1.0 - self.eps)
+            return np.c_[1.0 - p, p]
+    return _AsPredictProba(cal_obj, eps=eps)
 
 def _normalize_cals(cals_tuple_or_dict):
     if isinstance(cals_tuple_or_dict, tuple) and len(cals_tuple_or_dict) == 2:
@@ -5977,17 +6016,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
         # After you compute cals_raw:
         cals = _normalize_cals(cals_raw)
-        
-        # Ensure required interfaces exist:
+
+        # Ensure expected interfaces exist
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso"))
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=eps)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=eps)
         
-        # Backfill identities so select_blend never sees None
+        # Backfill so select_blend never sees None
         if cals["iso"] is None:
-            cals["iso"] = _IdentityCal(eps=eps)
+            cals["iso"] = _IdentityIsoCal(eps=eps)
         if cals["platt"] is None and cals["beta"] is None:
-            cals["platt"] = _IdentityCal(eps=eps)
+            cals["platt"] = _IdentityProbCal(eps=eps)
         
         sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
         print(f"Calibrator blend: base={sel['base']}, alpha_iso={sel['alpha']:.2f}")
