@@ -1889,41 +1889,31 @@ def enrich_power_for_training_lowmem(
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
-def fit_robust_calibrator(p_oof, y_oof, *, eps=1e-4, min_unique=200, prefer_beta=True):
-    """
-    Fit a calibrator on OOF predictions with a safe fallback:
-      - If enough unique preds → Isotonic
-      - Else → BetaCalibration (if available) or Platt (LogisticRegression)
-    Returns tuple: (kind, model)
-    """
-    p = np.asarray(p_oof, float)
+def fit_iso_platt_beta(p_oof, y_oof, eps=1e-4, use_quantile_iso=False):
+    p = np.clip(np.asarray(p_oof, float), eps, 1-eps)
     y = np.asarray(y_oof, int)
 
-    # clip to avoid 0/1 extremes
-    p = np.clip(p, eps, 1 - eps)
-
-    # uniqueness check (rounded to 4dp to avoid misleading float noise)
-    nuniq = np.unique(np.round(p, 4)).size
-
-    # Prefer BetaCalibration for thin data if installed
-    if nuniq < min_unique and prefer_beta:
-        try:
-            from betacal import BetaCalibration
-            beta = BetaCalibration(parameters="abm")  # a,b,m
-            beta.fit(p.reshape(-1, 1), y)
-            return ("beta", beta)
-        except Exception:
-            pass  # fall through to Platt
-
-    if nuniq >= min_unique:
+    # Isotonic (regular or quantile-regularized)
+    if use_quantile_iso:
+        iso = fit_regularized_isotonic(p, y, q=80, eps=eps)
+    else:
         iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
         iso.fit(p, y)
-        return ("iso", iso)
 
-    # Platt fallback (logistic regression on the score)
-    lr = LogisticRegression(max_iter=2000)
-    lr.fit(p.reshape(-1, 1), y)
-    return ("platt", lr)
+    # Platt
+    platt = LogisticRegression(max_iter=2000)
+    platt.fit(p.reshape(-1,1), y)
+
+    # Beta (optional)
+    beta = None
+    try:
+        from betacal import BetaCalibration
+        beta = BetaCalibration(parameters="abm")
+        beta.fit(p.reshape(-1,1), y)
+    except Exception:
+        pass
+
+    return {"iso": iso, "platt": platt, "beta": beta}
 
 def apply_calibrator(cal_tuple, p, *, clip=(0.01, 0.99)):
     kind, model = cal_tuple
@@ -1938,6 +1928,7 @@ def apply_calibrator(cal_tuple, p, *, clip=(0.01, 0.99)):
         lo, hi = clip
         out = np.clip(out, lo, hi)
     return out
+    
 # --- fast Normal CDF (SciPy-free), vectorized, low-temp ---
 def _phi(x):
     """
@@ -1967,7 +1958,39 @@ def _phi(x):
     # reflect for negative x
     return np.where(x >= 0, cdf_ax, 1.0 - cdf_ax).astype(np.float32)
 
+def select_blend(cals, p_oof, y_oof, eps=1e-4):
+    from sklearn.metrics import log_loss
+    x = np.clip(np.asarray(p_oof, float), eps, 1-eps)
+    y = np.asarray(y_oof,   int)
 
+    kinds = ["iso", "platt"] + (["beta"] if cals["beta"] is not None else [])
+    best = None
+    # Try convex blends: p = a*iso + (1-a)*base, a∈[0..1]
+    for base in kinds:
+        p_iso  = _apply_cal("iso",  cals["iso"],  x)
+        p_base = _apply_cal(base,   cals[base],   x)
+        for a in np.linspace(0.0, 1.0, 11):  # 0.0, 0.1, ..., 1.0
+            p_blend = np.clip(a*p_iso + (1-a)*p_base, eps, 1-eps)
+            score   = log_loss(y, p_blend, labels=[0,1])
+            if (best is None) or (score < best[0]):
+                best = (score, base, float(a))
+    _, base, alpha = best
+    return {"cals": cals, "base": base, "alpha": alpha}
+
+
+def apply_blend(sel, p, eps=1e-4, clip=(0.001, 0.999)):
+    x = np.clip(np.asarray(p, float), eps, 1-eps)
+    cals, base, a = sel["cals"], sel["base"], sel["alpha"]
+    p_iso  = _apply_cal("iso",  cals["iso"],  x)
+    p_base = _apply_cal(base,   cals[base],   x)
+    out    = a*p_iso + (1-a)*p_base
+    if clip:
+        lo, hi = clip
+        out = np.clip(out, lo, hi)
+    return out
+
+# extra_plumbing.py
+import os, numpy as np, pandas as pd
 
 SPORT_SPREAD_CFG = {
     "NFL":   dict(points_per_elo=np.float32(25.0), HFA=np.float32(1.6), sigma_pts=np.float32(13.2)),
@@ -3114,16 +3137,7 @@ def select_blend(cals, p_oof, y_oof, eps=1e-4):
     _, base, alpha = best
     return {"cals": cals, "base": base, "alpha": alpha}
 
-def apply_blend(sel, p, eps=1e-4, clip=(0.001, 0.999)):
-    x = np.clip(np.asarray(p, float), eps, 1-eps)
-    cals, base, a = sel["cals"], sel["base"], sel["alpha"]
-    p_iso  = _apply_cal("iso",  cals["iso"],  x)
-    p_base = _apply_cal(base,   cals[base],   x)
-    out    = a*p_iso + (1-a)*p_base
-    if clip:
-        lo, hi = clip
-        out = np.clip(out, lo, hi)
-    return out
+
 
 # extra_plumbing.py
 import os, numpy as np, pandas as pd
@@ -5506,68 +5520,60 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Keep a single source of truth for downstream code
         features = feature_cols
+          features = feature_cols
         # ============================================================================
-                # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
-          # ---- Groups & times (snapshot-aware) ----
-
-        # snapshot mode?
-        has_snapshots = (
-            df_market.groupby("Merge_Key_Short")["Snapshot_Timestamp"]
-            .nunique(dropna=True)
-            .fillna(0).max() > 1
+        
+       
+        # === Build X / y ===
+        X_full = _to_numeric_block(df_market, feature_cols).to_numpy(np.float32)
+        
+        y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
+        valid_mask = ~y_series.isna()
+        if not valid_mask.all():
+            X_full = X_full[valid_mask.to_numpy()]
+        y_full = y_series.loc[valid_mask].astype(int).to_numpy()
+        
+        # ---- Groups & times (snapshot-aware) ----
+        groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
+        
+        snap_ts = pd.to_datetime(
+            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
+        )
+        game_ts = pd.to_datetime(
+            df_market.loc[valid_mask, "Game_Start"], errors="coerce", utc=True
         )
         
-        sport_key  = str(sport).upper()
+        # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
+        by_game_snaps = (
+            df_market.loc[valid_mask]
+            .groupby("Game_Key")["Snapshot_Timestamp"]
+            .nunique(dropna=True)
+        )
+        has_snapshots = (by_game_snaps.fillna(0).max() > 1)
+        
+        time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
+        
+        # Sport-aware embargo only when we truly have multiple snapshots
+        sport_key = str(sport).upper()
         embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
         
-        # if you want to apply embargo before building: filter df_market first
-        if has_snapshots and embargo_td > pd.Timedelta(0):
-            ts = pd.to_datetime(df_market["Snapshot_Timestamp"], errors="coerce", utc=True)
-            gs = pd.to_datetime(df_market["Commence_Hour"],      errors="coerce", utc=True)
-            df_market_emb = df_market[ts.notna() & gs.notna() & (ts <= gs - embargo_td)].copy()
-        else:
-            df_market_emb = df_market
-
-        df_gm = build_game_market_sharpaware_schema(df_market_emb, feature_cols)
+        # Replace previous 'groups' and 'times'
+        groups = groups_all
+        times  = time_values_all
         
-        if df_gm is None or df_gm.empty:
-            st.warning("⛔ No training rows returned.")
-            return
-        
-        # Use the raw feature set (no aggregation)
-        missing_feats = [c for c in feature_cols if c not in df_gm.columns]
-        for c in missing_feats:
-            df_gm[c] = 0.0
-        
-        X_full = df_gm[feature_cols].astype(float)
-        y_full = df_gm["y"].astype(int).to_numpy()
-        w_full = df_gm["sample_weight"].astype(float).to_numpy()
-        
-        # --- (4) Build X / y / groups / times from df_gm ONLY (no valid_mask here) ---
-        
-        # Strictest leakage guard: keep all rows from the same game together
-        groups = df_gm["Merge_Key_Short"].astype(str).to_numpy()
-        
-        times = pd.to_datetime(df_gm["Game_Start"], utc=True).to_numpy()
-        
-        # (w_full already set)
-
-        
-        # --- (5) optional sample weights at aggregated level (simple & aligned) ---
-       
-        
-        # --- (6) drop NaT times if any (rare) ---
-        # --- (6) drop NaT times if any (rare) ---
+        # Guard: drop NaT times (rare but fatal for CV)
         if pd.isna(times).any():
             bad  = np.flatnonzero(pd.isna(times))
             keep = np.setdiff1d(np.arange(len(times)), bad)
+            X_full = X_full[keep]; y_full = y_full[keep]
+            groups = groups[keep]; times  = times[keep]
         
-            X_full = X_full.iloc[keep]         # ✅ use .iloc for DataFrame
-            y_full = y_full[keep]              # numpy → ok
-            groups = groups[keep]              # numpy → ok
-            times  = times[keep]               # numpy → ok
-            w_full = w_full[keep]              # numpy → ok
-
+        # ---- Holdout = last ~N groups (time-forward, group-safe) ----
+        meta  = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
+        gmeta = (meta.groupby("group", as_index=False)["time"]
+                   .agg(start="min", end="max")
+                   .sort_values("start")
+                   .reset_index(drop=True))
         
         # --- (7) time‑forward, group‑safe holdout as before ---
         train_all_idx, hold_idx = holdout_by_percent_groups(
@@ -5598,6 +5604,75 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_hold_vec  = y_full[hold_idx]
         y_train_vec = y_full[train_all_idx]
 
+
+        bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
+            "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
+        )
+        
+        train_df = df_market.loc[valid_mask].iloc[train_all_idx].copy()
+        def _fallback_book_lift(df: pd.DataFrame, book_col: str, label_col: str, prior: float = 100.0):
+            if (book_col is None) or (book_col not in df.columns) or (label_col not in df.columns):
+                return pd.Series(dtype=float)
+            dfv = df[[book_col, label_col]].dropna()
+            if dfv.empty:
+                return pd.Series(dtype=float)
+        
+            y = pd.to_numeric(dfv[label_col], errors="coerce")
+            m = float(np.nanmean(y))
+            grp = dfv.groupby(book_col)[label_col].agg(["sum", "count"]).rename(columns={"sum": "hits", "count": "n"})
+            a = m * prior; b = (1.0 - m) * prior
+            post_mean = (grp["hits"] + a) / (grp["n"] + a + b)
+            lift = (post_mean / max(1e-9, m)) - 1.0
+            return lift
+        
+        if bk_col is None:
+            w_train = np.ones(len(train_df), dtype=np.float32)
+        else:
+            if bk_col not in train_df.columns:
+                train_df[bk_col] = "UNK"
+        
+            B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
+            n_gb = train_df.groupby(["Game_Key", bk_col]).size()
+        
+            TAU = 0.6
+            def _w_gb(g, b, tau=1.0):
+                Bg  = max(1, int(B_g.get(g, 1)))
+                ngb = max(1, int(n_gb.get((g, b), 1)))
+                return 1.0 / (Bg * (ngb ** tau))
+        
+            w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])], dtype=np.float32)
+        
+           # --- Sharp-book tilt only (no reliability map) --------------------------------
+            # Requires: train_df, w_base, bk_col, SHARP_BOOKS
+            
+            if bk_col not in train_df.columns:
+                raise KeyError(f"bk_col '{bk_col}' not found in train_df columns")
+            
+            # sharp flag
+            if "Is_Sharp_Book" in train_df.columns:
+                is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).astype(np.float32).to_numpy()
+            else:
+                is_sharp = train_df[bk_col].isin(SHARP_BOOKS).astype(np.float32).to_numpy()
+            
+            ALPHA_SHARP = 0.80
+            
+            # base multiplier from sharp tilt
+            mult = 1.0 + ALPHA_SHARP * is_sharp
+            
+            # optional tiny boost for high-limit rows (remove this block if not desired)
+            if "High_Limit_Flag" in train_df.columns:
+                high_limit = train_df["High_Limit_Flag"].fillna(False).astype(bool).astype(np.float32).to_numpy()
+                mult = mult + 0.10 * high_limit  # adjust or delete
+            
+            # final weights
+            w_train = pd.Series(w_base, index=train_df.index).astype(np.float32).to_numpy() * mult.astype(np.float32)
+        
+            s = w_train.sum()
+            if s > 0:
+                w_train *= (len(w_train) / s)
+        
+        assert len(w_train) == len(X_train), f"sample_weight misaligned: {len(w_train)} vs {len(X_train)}"
+        
         # ---------------------------------------------------------------------------
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
@@ -5815,57 +5890,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             metric="logloss", grid=None, eps=eps,
         )
         
-        # --- Clean OOF arrays ONCE (use these everywhere below) ---
-        p = np.asarray(p_oof_blend, float).reshape(-1)
-        y = np.asarray(y_oof, float).reshape(-1)
-        p = np.clip(p, 0.0, 1.0)
-        mask = np.isfinite(p) & np.isfinite(y) & ((y == 0) | (y == 1))
-        p, y = p[mask], y[mask]
-        if p.size >= 2 and np.unique(p).size < 2:
-            p = np.clip(p + 1e-8 * np.random.default_rng(42).standard_normal(p.shape), 0.0, 1.0)
+        # Choose clip per league so we don't pinch the tails
+        CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
         
-        # --- Fit ONE robust calibrator on the CLEANED OOF arrays ---
-        cal_blend = fit_robust_calibrator(
-            p_oof=p, y_oof=y,  # pass cleaned arrays
-            eps=eps, min_unique=200, prefer_beta=True
-        )
+        # 1) Fit iso + platt (+ beta) on OOF
+        use_quantile_iso = (sport_key not in SMALL_LEAGUES)  # big leagues: regularize iso to avoid middle squeeze
+        cals = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
         
-        # --- Adapter with correct handling for iso/platt/beta + tail clipping ---
-        def _safe_logit(x, eps=1e-6):
-            x = np.clip(np.asarray(x, float).reshape(-1), eps, 1 - eps)
-            return np.log(x / (1 - x))
+        # 2) Pick the best convex blend on OOF (often alpha<1 → widens)
+        sel  = select_blend(cals, p_oof_blend, y_oof, eps=eps)
+        print(f"Calibrator blend: base={sel['base']}, alpha_iso={sel['alpha']:.2f}")
+        
+       
+        # ⛑️ NEW: fit robust calibrator on the OOF blend (iso → else beta/platt)
+        cal_blend = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps, min_unique=200, prefer_beta=True)
         
         class _CalAdapter:
             def __init__(self, cal_tuple, clip=(0.01, 0.99)):
-                # cal_tuple: (kind ∈ {"iso","platt","beta"} or "iso"|"identity", model)
-                self.kind, self.model = cal_tuple
+                self.kind, self.model = cal_tuple   # kind ∈ {"iso", "beta", "platt"}
                 self.clip = clip
         
-            def predict(self, x):
-                x = np.asarray(x, float).reshape(-1)
+            def predict(self, p):
+                p = np.asarray(p, float)
                 if self.kind == "iso":
-                    out = self.model.transform(x)
-                elif self.kind == "platt":
-                    out = self.model.predict_proba(x.reshape(-1, 1))[:, 1]
+                    out = self.model.transform(p)
                 elif self.kind == "beta":
-                    # Beta calibrator expects features on logit space (+ quadratic term)
-                    z = _safe_logit(x)
-                    X = np.c_[z, z * z]
-                    out = self.model.predict_proba(X)[:, 1]
-                else:  # identity / fallback
-                    out = np.clip(x, 0.0, 1.0)
+                    out = self.model.predict(p.reshape(-1, 1))
+                else:  # "platt"
+                    out = self.model.predict_proba(p.reshape(-1, 1))[:, 1]
                 if self.clip:
                     lo, hi = self.clip
                     out = np.clip(out, lo, hi)
                 return out
         
-        # Choose clip per league so we don't pinch the tails too much in small leagues
-        CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
-        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1.0 - CLIP))
         
-        # Optional: log what we chose
-        print(f"Calibration chosen on OOF blend: {cal_blend[0]}")
-
+        if cal_blend is not None:
+            iso_blend = _CalAdapter(cal_blend)
+            # Optional: log what we chose
+            kind = cal_blend[0]
+            print(f"Calibration chosen on OOF blend: {kind}")
+       
+        
         # (optional) inspect other weights without changing best_w
         # _grid = np.linspace(0.20, 0.80, 13)
         # rows = []
@@ -5892,8 +5957,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
         
         # 3) Apply the blended calibrator with a looser tail clip
-        p_cal     = iso_blend.predict(p_train_blend_raw)
-        p_cal_val = iso_blend.predict(p_hold_blend_raw)
+        p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1-CLIP))
+        p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1-CLIP))
+
         
         # Guard against holdout having one class → AUC would be nan
         y_hold_vec = y_full[hold_idx].astype(int)
