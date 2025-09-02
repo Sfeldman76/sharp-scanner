@@ -1241,7 +1241,7 @@ def holdout_by_percent_groups(
     """
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10, "NCAAF": 0.10, "NBA": 0.18, "WNBA": 0.10,
-        "NHL": 0.18, "MLB": 0.12, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
+        "NHL": 0.18, "MLB": 0.08, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
     }
     if pct_holdout is None:
         key = (sport or "DEFAULT").upper()
@@ -2330,28 +2330,28 @@ def get_xgb_search_space(
         
 
         params_ll = {
-            "max_depth":        randint(4, 7),
+            "max_depth":        randint(4, 6),
             "max_leaves":       randint(64, 128),
             "learning_rate":    loguniform(3e-2, 6e-2),     # 0.03–0.06
             "subsample":        uniform(0.75, 0.2),
-            "colsample_bytree": uniform(0.75, 0.2),
-            "colsample_bynode": uniform(0.7, 0.2),
-            "min_child_weight": randint(2, 6),              # ← key for spreads!
-            "gamma":            uniform(0.1, 0.3),
+            "colsample_bytree": uniform(0.70, 0.25),   # 0.70–0.95
+            "colsample_bynode": uniform(0.65, 0.25),  
+            "min_child_weight": randint(3, 6),              # ← key for spreads!
+            "gamma":            uniform(0, 0.1),
             "reg_alpha":        loguniform(1e-4, 0.4),
             "reg_lambda":       loguniform(3.0, 15.0),
         }
         params_auc = {
             "max_depth":        randint(6, 9),
             "max_leaves":       randint(96, 160),
-            "learning_rate":    loguniform(5e-2, 0.10),
+            "learning_rate":    loguniform(0.05, 0.15),
             "subsample":        uniform(0.85, 0.15),
-            "colsample_bytree": uniform(0.85, 0.15),
-            "colsample_bynode": uniform(0.75, 0.2),
+            "colsample_bytree": uniform(0.85, 0.15),   # 0.85–1.00
+            "colsample_bynode": uniform(0.80, 0.20),  
             "min_child_weight": randint(1, 3),
-            "gamma":            uniform(0.00, 0.2),
+            "gamma":            uniform(0, 0.1),
             "reg_alpha":        loguniform(1e-5, 0.2),
-            "reg_lambda":       loguniform(1.0, 10.0),
+            "reg_lambda":       loguniform(1.0, 8.0),
         }
     # ---- scrub dangerous keys (defensive) ----
     danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric"}
@@ -5722,7 +5722,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             search_estimators = 300
             eps = 5e-3
         else:
-            search_estimators = 600
+            search_estimators = 400
             eps = 1e-4
         
         # ---------------------------------------------------------------------------
