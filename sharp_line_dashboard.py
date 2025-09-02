@@ -2940,44 +2940,131 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
     return out  # ← REQUIRED
 
 
+# --- Drop-in safety for calibration ------------------------------------------------
+import numpy as np
+import pandas as pd
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
-# (Optional) better iso for big leagues: fit on quantile means → avoids middle compression
-def fit_regularized_isotonic(p_oof, y_oof, q=80, eps=1e-4):
-    import pandas as pd
-    p = np.clip(np.asarray(p_oof, float), eps, 1-eps)
-    y = np.asarray(y_oof, int)
-    df = pd.DataFrame({"p": p, "y": y})
-    df["q"] = pd.qcut(df["p"], q=q, duplicates="drop")
-    by = df.groupby("q").agg(p_mean=("p","mean"), y_mean=("y","mean"))
-    iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-    iso.fit(by["p_mean"].to_numpy(), by["y_mean"].to_numpy())
-    return iso
+def _safe_clean_pred_labels(p: np.ndarray, y: np.ndarray):
+    """Clean and validate predictions+labels for calibration."""
+    p = np.asarray(p, dtype=float).reshape(-1)
+    y = np.asarray(y, dtype=float).reshape(-1)
 
-def fit_iso_platt_beta(p_oof, y_oof, eps=1e-4, use_quantile_iso=False):
-    p = np.clip(np.asarray(p_oof, float), eps, 1-eps)
-    y = np.asarray(y_oof, int)
+    # Hard clamp to [0, 1] and remove non-finite
+    p = np.clip(p, 0.0, 1.0)
+    mask = np.isfinite(p) & np.isfinite(y)
+    p, y = p[mask], y[mask]
 
-    # Isotonic (regular or quantile-regularized)
-    if use_quantile_iso:
-        iso = fit_regularized_isotonic(p, y, q=80, eps=eps)
-    else:
-        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-        iso.fit(p, y)
+    # Coerce labels to {0,1}; drop anything else
+    # (handles cases where y has NaN or floats like 0.0/1.0)
+    y_bin_mask = (y == 0) | (y == 1)
+    p, y = p[y_bin_mask], y[y_bin_mask]
 
-    # Platt
-    platt = LogisticRegression(max_iter=2000)
-    platt.fit(p.reshape(-1,1), y)
+    return p, y
 
-    # Beta (optional)
-    beta = None
+def fit_regularized_isotonic(p, y, q=80, eps=1e-6):
+    """
+    Regularized isotonic: bin by quantiles, average, drop degenerate/NaN bins,
+    then fit monotone mapping. Falls back to Platt or identity if needed.
+    """
+    p, y = _safe_clean_pred_labels(p, y)
+
+    # Not enough data after cleaning → identity
+    if p.size < 10 or np.unique(p).size < 2:
+        return ("iso", _IdentityCal())  # keep API: (kind, model)
+
+    # Build bins by quantiles; protect against duplicate edges
     try:
-        from betacal import BetaCalibration
-        beta = BetaCalibration(parameters="abm")
-        beta.fit(p.reshape(-1,1), y)
+        q = int(q)
+        q = max(10, min(q, max(10, p.size // 5)))
+        qs = np.linspace(0, 1, q + 1)
+        edges = np.unique(np.quantile(p, qs, method="linear"))
     except Exception:
-        pass
+        # Fallback if quantile fails
+        edges = np.unique(np.linspace(p.min(), p.max(), 21))
 
-    return {"iso": iso, "platt": platt, "beta": beta}
+    # Assign bins; if edges collapse, bail to Platt or identity
+    if edges.size < 3:
+        # Try Platt (logistic on raw p)
+        try:
+            pl = LogisticRegression(max_iter=500)
+            pl.fit(p.reshape(-1, 1), y)
+            return ("platt", pl)
+        except Exception:
+            return ("iso", _IdentityCal())
+
+    # pd.cut can yield NaN bin for max; include_right=True-like behavior
+    # by nudging the last edge
+    edges[-1] = np.nextafter(edges[-1], np.float64(np.inf))
+    b = pd.cut(p, bins=edges, labels=False, include_lowest=True)
+
+    # Aggregate per bin
+    by = (
+        pd.DataFrame({"p": p, "y": y, "b": b})
+        .groupby("b", dropna=True)
+        .agg(p_mean=("p", "mean"), y_mean=("y", "mean"), n=("y", "size"))
+        .reset_index(drop=True)
+    )
+
+    # Drop bins that are NaN/inf or too small
+    good = (
+        np.isfinite(by["p_mean"]) &
+        np.isfinite(by["y_mean"]) &
+        (by["n"] >= 2)
+    )
+    by = by.loc[good].copy()
+
+    # Add tiny regularization to prevent flat ties causing issues
+    if not by.empty:
+        jitter = eps * np.arange(len(by), dtype=float)
+        by["p_mean"] = by["p_mean"].to_numpy(dtype=float) + jitter
+
+    # Need at least 2 ascending x points for isotonic
+    if by.shape[0] < 2 or np.unique(by["p_mean"]).size < 2:
+        # Try Platt; if even that fails, identity
+        try:
+            pl = LogisticRegression(max_iter=500)
+            pl.fit(p.reshape(-1, 1), y)
+            return ("platt", pl)
+        except Exception:
+            return ("iso", _IdentityCal())
+
+    # Fit isotonic on (p_mean -> y_mean)
+    iso = IsotonicRegression(y_min=eps, y_max=1 - eps, increasing=True, out_of_bounds="clip")
+    iso.fit(by["p_mean"].to_numpy(), by["y_mean"].to_numpy())
+    return ("iso", iso)
+
+class _IdentityCal:
+    """Identity calibrator with scikit-learn-like interface."""
+    def transform(self, p):
+        p = np.asarray(p, dtype=float).reshape(-1)
+        p = np.clip(p, 0.0, 1.0)
+        return p
+
+# --- Wrap your entry function to clean first --------------------------------------
+def fit_iso_platt_beta(p, y, eps=1e-6, use_quantile_iso=True):
+    """
+    Returns a tuple like ("iso"|... , model) chosen by your logic.
+    This wrapper now ensures inputs are clean to avoid NaN errors.
+    """
+    p, y = _safe_clean_pred_labels(p, y)
+
+    # Guard: no class variety → identity (or a fixed clip)
+    if p.size < 2 or np.unique(y).size < 2:
+        return ("iso", _IdentityCal())
+
+    # Your prior selection logic can remain; ensure each candidate uses cleaned (p,y)
+    if use_quantile_iso:
+        return fit_regularized_isotonic(p, y, q=80, eps=eps)
+
+    # Example: try Platt as alternative path
+    try:
+        pl = LogisticRegression(max_iter=500)
+        pl.fit(p.reshape(-1, 1), y)
+        return ("platt", pl)
+    except Exception:
+        return ("iso", _IdentityCal())
 
 def _apply_cal(kind, cal, x):
     if kind == "iso":
@@ -5697,46 +5784,64 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         # Choose clip per league so we don't pinch the tails
-        CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
+      
+        # --- Pick blend weights on OOF (unchanged) ---
+        best_w, _, p_oof_blend = pick_blend_weight_on_oof(
+            y_oof=y_oof, p_oof_log=p_oof_log, p_oof_auc=p_oof_auc,
+            metric="logloss", grid=None, eps=eps,
+        )
         
-        # 1) Fit iso + platt (+ beta) on OOF
-        use_quantile_iso = (sport_key not in SMALL_LEAGUES)  # big leagues: regularize iso to avoid middle squeeze
-        cals = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        # --- Clean OOF arrays ONCE (use these everywhere below) ---
+        p = np.asarray(p_oof_blend, float).reshape(-1)
+        y = np.asarray(y_oof, float).reshape(-1)
+        p = np.clip(p, 0.0, 1.0)
+        mask = np.isfinite(p) & np.isfinite(y) & ((y == 0) | (y == 1))
+        p, y = p[mask], y[mask]
+        if p.size >= 2 and np.unique(p).size < 2:
+            p = np.clip(p + 1e-8 * np.random.default_rng(42).standard_normal(p.shape), 0.0, 1.0)
         
-        # 2) Pick the best convex blend on OOF (often alpha<1 → widens)
-        sel  = select_blend(cals, p_oof_blend, y_oof, eps=eps)
-        print(f"Calibrator blend: base={sel['base']}, alpha_iso={sel['alpha']:.2f}")
+        # --- Fit ONE robust calibrator on the CLEANED OOF arrays ---
+        cal_blend = fit_robust_calibrator(
+            p_oof=p, y_oof=y,  # pass cleaned arrays
+            eps=eps, min_unique=200, prefer_beta=True
+        )
         
-       
-        # ⛑️ NEW: fit robust calibrator on the OOF blend (iso → else beta/platt)
-        cal_blend = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps, min_unique=200, prefer_beta=True)
+        # --- Adapter with correct handling for iso/platt/beta + tail clipping ---
+        def _safe_logit(x, eps=1e-6):
+            x = np.clip(np.asarray(x, float).reshape(-1), eps, 1 - eps)
+            return np.log(x / (1 - x))
         
         class _CalAdapter:
             def __init__(self, cal_tuple, clip=(0.01, 0.99)):
-                self.kind, self.model = cal_tuple   # kind ∈ {"iso", "beta", "platt"}
+                # cal_tuple: (kind ∈ {"iso","platt","beta"} or "iso"|"identity", model)
+                self.kind, self.model = cal_tuple
                 self.clip = clip
         
-            def predict(self, p):
-                p = np.asarray(p, float)
+            def predict(self, x):
+                x = np.asarray(x, float).reshape(-1)
                 if self.kind == "iso":
-                    out = self.model.transform(p)
+                    out = self.model.transform(x)
+                elif self.kind == "platt":
+                    out = self.model.predict_proba(x.reshape(-1, 1))[:, 1]
                 elif self.kind == "beta":
-                    out = self.model.predict(p.reshape(-1, 1))
-                else:  # "platt"
-                    out = self.model.predict_proba(p.reshape(-1, 1))[:, 1]
+                    # Beta calibrator expects features on logit space (+ quadratic term)
+                    z = _safe_logit(x)
+                    X = np.c_[z, z * z]
+                    out = self.model.predict_proba(X)[:, 1]
+                else:  # identity / fallback
+                    out = np.clip(x, 0.0, 1.0)
                 if self.clip:
                     lo, hi = self.clip
                     out = np.clip(out, lo, hi)
                 return out
         
+        # Choose clip per league so we don't pinch the tails too much in small leagues
+        CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
+        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1.0 - CLIP))
         
-        if cal_blend is not None:
-            iso_blend = _CalAdapter(cal_blend)
-            # Optional: log what we chose
-            kind = cal_blend[0]
-            print(f"Calibration chosen on OOF blend: {kind}")
-       
-        
+        # Optional: log what we chose
+        print(f"Calibration chosen on OOF blend: {cal_blend[0]}")
+
         # (optional) inspect other weights without changing best_w
         # _grid = np.linspace(0.20, 0.80, 13)
         # rows = []
