@@ -1215,7 +1215,7 @@ def holdout_by_percent_groups(
     """
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10, "NCAAF": 0.10, "NBA": 0.18, "WNBA": 0.10,
-        "NHL": 0.18, "MLB": 0.08, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
+        "NHL": 0.18, "MLB": 0.15, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
     }
     if pct_holdout is None:
         key = (sport or "DEFAULT").upper()
@@ -1299,87 +1299,108 @@ def sharp_row_weights(df, a_sharp=0.8, b_limit=0.15, c_liq=0.10, d_steam=0.10):
     return w.astype(np.float32)
 
 
-def build_game_market_sharpaware_schema(df, feature_cols):
-    import numpy as np, pandas as pd
-
-    if df is None or df.empty or not feature_cols:
+def build_game_market_sharpaware_schema(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    *,
+    key_col: str = "Merge_Key_Short",
+    book_col_candidates: tuple[str, ...] = ("Bookmaker","Bookmaker_Norm"),
+    outcome_col: str = "Outcome",
+    time_col: str = "Snapshot_Timestamp",
+    start_col: str = "Game_Start",
+    label_col: str = "SHARP_HIT_BOOL",
+    reliability_col: str = "Book_Reliability_x_Magnitude",
+    sharp_flag: str = "Is_Sharp_Book",
+    sharp_tilt: float = 0.5,
+    normalize_within_game: bool = True,
+    fill_missing_feature: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Returns one row per (Game × Bookmaker × Outcome) for training.
+    - Dedups to last snapshot per (game, book, outcome)
+    - Keeps both outcomes (no canonical filtering)
+    - Returns features + y + sample_weight
+    - Uses the same function name as before so downstream doesn’t break
+    """
+    if df is None or df.empty:
         return pd.DataFrame()
-
-    # column names per your schema
-    game_col   = "Merge_Key_Short"
-    market_col = "Market"
-    book_col   = "Bookmaker"
-    time_col   = "Snapshot_Timestamp"
-    start_col  = "Commence_Hour"
-    label_col  = "SHARP_HIT_BOOL"
 
     d = df.copy()
 
-    # robust parse
-    d[time_col]  = pd.to_datetime(d[time_col],  errors="coerce", utc=True)
-    d[start_col] = pd.to_datetime(d[start_col], errors="coerce", utc=True)
+    # Resolve book column
+    book_col = next((c for c in book_col_candidates if c in d.columns), None)
+    if book_col is None:
+        book_col = "_ONE_BOOK"
+        d[book_col] = "ONE"
 
-    # keep valid
-    d = d[d[game_col].notna() & d[start_col].notna()]
-    if d.empty: 
+    # Basic checks
+    for c in (key_col, outcome_col, start_col, label_col):
+        if c not in d.columns:
+            raise KeyError(f"Missing required column: {c}")
+    d = d[d[label_col].isin([0, 1])]
+    if d.empty:
         return pd.DataFrame()
 
-    # latest pre‑start per (game, market, book) — NO embargo here yet; you’ll apply embargo before calling this if you want
-    d1 = (d[d[time_col].notna() & (d[time_col] <= d[start_col])]
-            .sort_values([game_col, market_col, book_col, time_col])
-            .groupby([game_col, market_col, book_col], as_index=False)
-            .tail(1))
-    if d1.empty:
-        # fallback: latest with a timestamp at all
-        d1 = (d[d[time_col].notna()]
-                .sort_values([game_col, market_col, book_col, time_col])
-                .groupby([game_col, market_col, book_col], as_index=False)
-                .tail(1))
-        if d1.empty:
-            return pd.DataFrame()
+    # Fill defaults
+    if reliability_col not in d.columns:
+        d[reliability_col] = 1.0
+    if sharp_flag not in d.columns:
+        d[sharp_flag] = 0
 
-    # weights
-    w = sharp_row_weights(d1)
-    d1["_w"] = w
+    # Dedup: last row per (game, book, outcome)
+    sort_cols = [key_col, book_col, outcome_col]
+    if time_col in d.columns:
+        d = d.sort_values(sort_cols + [time_col])
+    elif "Inserted_Timestamp" in d.columns:
+        d = d.sort_values(sort_cols + ["Inserted_Timestamp"])
+    else:
+        d = d.sort_values(sort_cols)
+    d = d.groupby([key_col, book_col, outcome_col], as_index=False).tail(1)
 
-    # numeric features from your list
-    num = d1[feature_cols].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    # Sample weight = reliability × (1 + tilt × sharp_flag)
+    base_w = d[reliability_col].astype(float).clip(0, 1) * (1.0 + sharp_tilt * d[sharp_flag].astype(int))
+    d["_w_base"] = base_w.astype(float)
 
-    # normalize weights within (game, market)
-    gkeys = [game_col, market_col]
-    w_norm = d1["_w"] / (d1.groupby(gkeys)["_w"].transform("sum").replace(0, 1.0))
-    d1["_wn"] = w_norm.astype(np.float32)
+    if normalize_within_game:
+        def _norm(g):
+            s = g["_w_base"].sum()
+            return g["_w_base"] / s if s > 0 else np.full(len(g), 1.0 / max(len(g), 1))
+        d["_w"] = d.groupby(key_col, group_keys=False).apply(_norm).to_numpy()
+    else:
+        d["_w"] = d["_w_base"].to_numpy()
 
-    # safe grouping (list of Series)
-    keys = [d1[k] for k in gkeys]
+    # Feature matrix construction with padding
+    X = d.reindex(columns=feature_cols, copy=False)
+    for c in feature_cols:
+        if c not in X.columns:
+            X[c] = fill_missing_feature
+        else:
+            s = X[c]
+            if s.dtype == object:
+                X[c] = pd.to_numeric(
+                    s.replace({
+                        'True': 1, 'False': 0, True: 1, False: 0,
+                        '': np.nan, 'none': np.nan, 'None': np.nan,
+                        'NA': np.nan, 'NaN': np.nan, 'unknown': np.nan
+                    }),
+                    errors="coerce"
+                )
+            elif s.dtype == bool:
+                X[c] = s.astype(float)
+    X = X.fillna(fill_missing_feature).astype(np.float32, copy=False)
+    X = X[feature_cols]
 
-    # weighted means
-    wm = (num.mul(d1["_wn"].to_numpy().reshape(-1,1), axis=0)).groupby(keys).sum()
-    wm.columns = [f"{c}__wm" for c in wm.columns]
+    # Final output frame with label and weight
+    out = X.copy()
+    out["y"] = d[label_col].astype(int).to_numpy()
+    out["sample_weight"] = d["_w"].astype(float).to_numpy()
+    out["Merge_Key_Short"] = d[key_col].values
+    out["Bookmaker"] = d[book_col].values
+    out["Outcome"] = d[outcome_col].values
+    out["Game_Start"] = pd.to_datetime(d[start_col], errors="coerce", utc=True)
 
-    # disagreement (std across books)
-    std = num.groupby(keys).std(ddof=0).fillna(0.0)
-    std.columns = [f"{c}__std" for c in std.columns]
+    return out.reset_index(drop=True)
 
-    # counts
-    n_books = d1.groupby(gkeys)[book_col].nunique().to_frame("N_books")
-    n_rows  = d1.groupby(gkeys).size().to_frame("N_rows")
-
-    # label (assumed consistent within game×market)
-    y = (pd.to_numeric(d1[label_col], errors="coerce")
-           .groupby(keys).max().astype(int))
-    # time
-    t = (d1.groupby(keys)[start_col].max().pipe(pd.to_datetime, utc=True))
-
-    out = wm.join([std, n_books, n_rows], how="left")
-    out["y"] = y
-    out["Game_Start"] = t
-    out = out.reset_index()
-
-    # ensure unique rows per (game, market)
-    assert out[[game_col, market_col]].drop_duplicates().shape[0] == out.shape[0], \
-        "Duplicate (game, market) after aggregation."
-    return out
 
 
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
@@ -5767,9 +5788,89 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             oof_pred_auc[va_rel]     = pos_proba(m_auc, X_train[va_rel], positive=1)
         
         mask_oof = np.isfinite(oof_pred_logloss) & np.isfinite(oof_pred_auc)
+      
+        # After computing mask_oof / y_oof / p_oof_log / p_oof_auc ...
         if mask_oof.sum() < 50:
-            raise RuntimeError("Too few OOF predictions to fit isotonic calibration.")
+            # ---- SMALL‑LEAGUE PLACEHOLDER FALLBACK ----
+            # Laplace-smoothed base rate (beats naive 0.50)
+            n = int(len(y_train))
+            n_pos = int(np.nansum(y_train == 1))
+            base_rate = (n_pos + 1) / (n + 2)  # Beta(1,1) prior
         
+            # Blend weight is irrelevant; keep shape‑compatible arrays
+            best_w = 0.5
+            p_oof_blend = np.full(mask_oof.sum(), base_rate, dtype=float)
+        
+            # Build a constant calibrator adapter that just clips
+            class _IdentityCal:
+                def transform(self, p): 
+                    p = np.asarray(p, float).reshape(-1)
+                    return np.clip(p, eps, 1 - eps)
+        
+            class _CalAdapter:
+                def __init__(self, cal_tuple, clip=(0.01, 0.99)):
+                    self.kind, self.model = cal_tuple
+                    self.clip = clip
+                def predict(self, x):
+                    x = np.asarray(x, float).reshape(-1)
+                    if self.kind == "iso":
+                        out = self.model.transform(x)
+                    else:
+                        out = x
+                    if self.clip:
+                        lo, hi = self.clip
+                        out = np.clip(out, lo, hi)
+                    return out
+        
+            # Choose clip per league
+            CLIP = 0.005 if sport_key in SMALL_LEAGUES else 0.001
+            iso_blend = _CalAdapter(("iso", _IdentityCal()), clip=(CLIP, 1.0 - CLIP))
+            print("⚠️ Small-league fallback: using base-rate placeholder model")
+        
+            # TRAIN/HOLDOUT predictions become constant base_rate (still shaped correctly)
+            p_tr_log = np.full(len(train_all_idx), base_rate, dtype=float)
+            p_tr_auc = np.full(len(train_all_idx), base_rate, dtype=float)
+            p_ho_log = np.full(len(hold_idx),      base_rate, dtype=float)
+            p_ho_auc = np.full(len(hold_idx),      base_rate, dtype=float)
+        
+            # Keep the rest of your downstream code unchanged:
+            p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
+            p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
+        
+            # Apply the “calibrator” (identity + clip)
+            p_cal     = iso_blend.predict(p_train_blend_raw)
+            p_cal_val = iso_blend.predict(p_hold_blend_raw)
+        
+            # Targets
+            y_train_vec = y_full[train_all_idx].astype(int)
+            y_hold_vec  = y_full[hold_idx].astype(int)
+        
+            # Metrics (guard AUC if one class in holdout)
+            if np.unique(y_hold_vec).size < 2:
+                auc_train = np.nan
+                auc_val   = np.nan
+            else:
+                auc_train = roc_auc_score(y_train_vec, p_cal) if np.unique(y_train_vec).size > 1 else np.nan
+                auc_val   = roc_auc_score(y_hold_vec,  p_cal_val)
+        
+            brier_tr  = brier_score_loss(y_train_vec, p_cal)
+            brier_val = brier_score_loss(y_hold_vec,  p_cal_val)
+        
+            # (Optional) display
+            st.write(f"⚠️ Placeholder model used. Base rate={base_rate:.3f}  (n={n}, pos={n_pos})")
+            st.write(f"📉 LogLoss: train={log_loss(y_train_vec, np.clip(p_cal,eps,1-eps), labels=[0,1]):.5f}, "
+                     f"val={log_loss(y_hold_vec,  np.clip(p_cal_val,eps,1-eps), labels=[0,1]):.5f}")
+            st.write(f"📈 AUC:     train={auc_train if not np.isnan(auc_train) else '—'}, "
+                     f"val={auc_val if not np.isnan(auc_val) else '—'}")
+            st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
+        
+            # Then jump to your normal return / save path for this fold/model
+            # (e.g., set flags so you don't try to use real model objects later)
+            USE_PLACEHOLDER = True
+            # --------------------------------------------------------------------
+        else:
+         
+
         y_oof     = y_train[mask_oof].astype(int)
         p_oof_log = oof_pred_logloss[mask_oof].astype(float)
         p_oof_auc = oof_pred_auc[mask_oof].astype(float)
