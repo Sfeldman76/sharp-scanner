@@ -1361,13 +1361,12 @@ def build_game_market_sharpaware_schema(
     base_w = d[reliability_col].astype(float).clip(0, 1) * (1.0 + sharp_tilt * d[sharp_flag].astype(int))
     d["_w_base"] = base_w.astype(float)
 
-    if normalize_within_game:
-        def _norm(g):
-            s = g["_w_base"].sum()
-            return g["_w_base"] / s if s > 0 else np.full(len(g), 1.0 / max(len(g), 1))
-        d["_w"] = d.groupby(key_col, group_keys=False).apply(_norm).to_numpy()
-    else:
-        d["_w"] = d["_w_base"].to_numpy()
+    # Vectorized per-game normalization (no apply, no index issues)
+    sum_w = d.groupby(key_col)["_w_base"].transform("sum")
+    cnt_w = d.groupby(key_col)["_w_base"].transform("size").clip(lower=1)
+    
+    d["_w"] = np.where(sum_w > 0, d["_w_base"] / sum_w, 1.0 / cnt_w)
+    d["_w"] = d["_w"].astype(float)
 
     # Feature matrix construction with padding
     X = d.reindex(columns=feature_cols, copy=False)
