@@ -588,11 +588,6 @@ import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
-class _IdentityIsoCal:
-    def __init__(self, eps=1e-6): self.eps = eps
-    def transform(self, p):
-        p = np.asarray(p, float).reshape(-1)
-        return np.clip(p, self.eps, 1.0 - self.eps)
 
 class _BetaCalibrator:
     """Logistic on [logit(p), logit(p)^2]; exposes .predict(probs)->calibrated_probs."""
@@ -6623,11 +6618,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         _bake_feature_names_in_(model_logloss, feature_cols)
         _bake_feature_names_in_(model_auc, feature_cols)
        
-        if cal_blend is not None:
-            iso_blend = _CalAdapter(cal_blend)
-        else:
-            # fallback identity calibrator adapter
-            iso_blend = _CalAdapter(("iso", _IdentityIsoCal(eps=eps)))
+        if cal_blend is None:
+            cal_blend = ("iso", _IdentityIsoCal(eps=eps))
+        
+        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1-CLIP))
+        
         # === Save ensemble (choose one or both)
         trained_models[market] = {
                 "model_logloss": model_logloss,
