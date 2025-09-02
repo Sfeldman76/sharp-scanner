@@ -1325,26 +1325,37 @@ def build_game_market_sharpaware(
 
     # group keys: one row per (Game, Market)
     gkeys = [game_col, market_col]
-
+    
+    # if market_col might be missing, synthesize a single market value
+    if market_col not in d.columns:
+        d[market_col] = "GEN"
+    
     # normalize weights within each (Game, Market)
     w_norm = d["_w"] / (d.groupby(gkeys)["_w"].transform("sum").replace(0, 1.0))
     d["_wn"] = w_norm.astype(np.float32)
-
-    # weighted means
-    wm = (num.mul(d["_wn"].to_numpy().reshape(-1,1), axis=0)).groupby(d[gkeys]).sum()
+    
+    # use a list of Series for all groupbys (safe & consistent)
+    keys = [d[k] for k in gkeys]
+    
+    # numeric features (already built as `num`) → weighted means
+    wm = (num.mul(d["_wn"].to_numpy().reshape(-1, 1), axis=0)).groupby(keys).sum()
     wm.columns = [f"{c}__wm" for c in wm.columns]
-
+    
     # disagreement (unweighted std across books)
-    std = num.groupby(d[gkeys]).std(ddof=0).fillna(0.0)
+    std = num.groupby(keys).std(ddof=0).fillna(0.0)
     std.columns = [f"{c}__std" for c in std.columns]
-
+    
     # counts
     n_books = d.groupby(gkeys)[book_col].nunique().to_frame("N_books")
     n_rows  = d.groupby(gkeys).size().to_frame("N_rows")
+    
+    # label & time (keep same grouping style everywhere)
+    y = (pd.to_numeric(d[label_col], errors="coerce")
+           .groupby(keys).max().astype(int))
+    t = (d.groupby(keys)[start_col]
+           .max()
+           .pipe(pd.to_datetime, utc=True))
 
-    # label & time (assumed consistent per (Game, Market))
-    y = pd.to_numeric(d[label_col], errors="coerce").groupby(d[gkeys]).max().astype(int)
-    t = d.groupby(gkeys)[start_col].max().pipe(pd.to_datetime, utc=True)
 
     out = wm.join([std, n_books, n_rows], how="left")
     out["y"] = y
