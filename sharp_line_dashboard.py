@@ -2507,144 +2507,103 @@ def get_xgb_search_space(
     s = str(sport).upper()
 
     # ---- base kwargs (lighter regularization; no colsample_bynode) ----
+    # ---------------- Base kwargs (single, consistent block) ----------------
     base_kwargs = dict(
         objective="binary:logistic",
-        eval_metric="logloss",
-
-        tree_method="hist",
+        eval_metric=["logloss", "auc"],     # track both; logloss is primary
+        tree_method="hist",                 # "gpu_hist" if you have GPU
+        predictor="cpu_predictor",
         grow_policy="lossguide",
-        max_leaves=48,
-        max_bin=(128 if X_rows < 150_000 else 64),
-        sampling_method="uniform",
-
-        # ⚠️ was 0.8; this + bytree colsampling can starve splits
-        # Remove per-node col sampling; keep only bytree in the search
-        # colsample_bynode=0.8,  # ← drop
-
-        # gentler defaults (search can override)
-        reg_lambda=3.0,          # was 5.0
-        min_child_weight=2,      # was 5
-
+        max_bin=384,                        # bumped for finer splits
+        max_delta_step=0.5,                 # steadier probs with imbalance
+        sampling_method="gradient_based",   # better with subsample
+        # do NOT set colsample_bynode here; keep it only in search grids
+        # do NOT set max_leaves here if you search it
+        reg_lambda=3.0,                     # mild L2 default
+        min_child_weight=2,                 # gentle default; grid will override
         n_jobs=int(n_jobs),
         random_state=42,
         importance_type="total_gain",
-
         scale_pos_weight=float(scale_pos_weight),
     )
-
-    # ---- search spaces (wider & friendlier) ----
-    if s in SMALL_LEAGUES:
-        
-        # 🔥 Agresssive but small‑data aware — logloss search
+    
+    # ---------------- Search spaces ----------------
+    SMALL = (s in SMALL_LEAGUES)
+    
+    if SMALL:
+        # Small leagues — aggressive but variance-aware
         params_ll = {
-            # a bit shallower than big leagues; still allows interactions
-            "max_depth": randint(4, 7),      # 4–6
-            "max_leaves": randint(48, 96),         # 16–63  (use with grow_policy='lossguide' if you like)
-        
-            # slightly hotter than your original small-league band, but not too hot
-            "learning_rate": loguniform(3e-2, 0.10), # 0.008–0.06 (log scale)
-        
-            # moderate bagging to reduce variance with thin data
-            "subsample":        uniform(0.70, 0.25),      # 0.70–0.95
-            "colsample_bytree": uniform(0.70, 0.25),      # 0.70–0.95
-        
-            # allow easy splits but avoid the noisiest (don’t use 1-only everywhere)
-            "min_child_weight": randint(1, 5),           # {2..7}
-        
-            # require a bit of gain to split (stability with thin data)
-            "gamma": uniform(0.00, 0.40),      # 0.10–0.90
-        
-            # keep weak signals, but with guardrails
-            "reg_lambda": loguniform(1.0, 6.0),     # 1–6
-            "reg_alpha":  loguniform(1e-4, 0.5),    # 3–20
+            "max_depth":        randint(4, 7),              # {4,5,6}
+            "max_leaves":       randint(48, 96),            # {48..95}
+            "learning_rate":    loguniform(3e-2, 1.0e-1),   # 0.03–0.10
+            "subsample":        uniform(0.70, 0.25),        # 0.70–0.95
+            "colsample_bytree": uniform(0.70, 0.25),        # 0.70–0.95
+            "colsample_bynode": uniform(0.65, 0.20),        # 0.65–0.85
+            "min_child_weight": randint(1, 5),              # {1..4}
+            "gamma":            uniform(0.00, 0.40),        # 0.00–0.40
+            "reg_lambda":       loguniform(1.0, 6.0),       # 1–6
+            "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
+            "scale_pos_weight": uniform(max(0.6, 0.7*scale_pos_weight),
+                                        max(0.8, 1.3*scale_pos_weight)),
         }
-        
-        # 🔥 Aggressive AUC search (rank pickup) with small‑data stability
         params_auc = {
-            "max_depth": randint(3, 8),      # 4–6
-            "max_leaves": randint(48, 96),         # 20–79
-        
-            "learning_rate": loguniform(3e-2, 0.10), # 0.008–0.08
-        
-            "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
-            "colsample_bytree": uniform(0.75, 0.20),      # 0.75–0.95
-        
-            # a hair looser than ll for pickup, but still not ultra‑fragile
-            "min_child_weight": randint(1, 6),            # {1..5}
-        
-            # allow smaller gains than ll (pickup), but not zero
-            "gamma": uniform(0.00, 0.40),      # 0.05–0.60
-        
-            # light L1, moderate L2
-            "reg_lambda": loguniform(1.0, 6.0),     # 1–6
-            "reg_alpha":  loguniform(1e-4, 0.5),   # 2–15
+            "max_depth":        randint(3, 8),              # {3..7}
+            "max_leaves":       randint(48, 96),            # {48..95}
+            "learning_rate":    loguniform(3e-2, 1.0e-1),   # 0.03–0.10
+            "subsample":        uniform(0.75, 0.20),        # 0.75–0.95
+            "colsample_bytree": uniform(0.75, 0.20),        # 0.75–0.95
+            "colsample_bynode": uniform(0.60, 0.22),        # 0.60–0.82
+            "min_child_weight": randint(1, 6),              # {1..5}
+            "gamma":            uniform(0.00, 0.40),        # 0.00–0.40
+            "reg_lambda":       loguniform(1.0, 6.0),       # 1–6
+            "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
+            "scale_pos_weight": uniform(max(0.6, 0.7*scale_pos_weight),
+                                        max(0.8, 1.3*scale_pos_weight)),
         }
+        search_estimators = 450
+        CLIP = 0.005
     else:
-        
-        
-
+        # Big leagues — more capacity & diversity
         params_ll = {
-            "max_depth":        randint(4, 6),
-            "max_leaves":       randint(64, 128),
+            "max_depth":        randint(4, 7),              # {4,5,6}
+            "max_leaves":       randint(64, 128),           # {64..127}
             "learning_rate":    loguniform(3e-2, 6e-2),     # 0.03–0.06
-            "subsample":        uniform(0.75, 0.2),
-            "colsample_bytree": uniform(0.70, 0.25),   # 0.70–0.95
-            "colsample_bynode": uniform(0.65, 0.25),  
-            "min_child_weight": randint(3, 6),              # ← key for spreads!
-            "gamma":            uniform(0, 0.1),
-            "reg_alpha":        loguniform(1e-4, 0.4),
-            "reg_lambda":       loguniform(3.0, 15.0),
+            "subsample":        uniform(0.75, 0.20),        # 0.75–0.95
+            "colsample_bytree": uniform(0.70, 0.25),        # 0.70–0.95
+            "colsample_bynode": uniform(0.65, 0.25),        # 0.65–0.90
+            "min_child_weight": randint(3, 6),              # {3,4,5}
+            "gamma":            uniform(0.00, 0.10),        # 0.00–0.10
+            "reg_alpha":        loguniform(1e-4, 4e-1),     # 0.0001–0.4
+            "reg_lambda":       loguniform(3.0, 15.0),      # 3–15
+            "scale_pos_weight": uniform(max(0.5, 0.6*scale_pos_weight),
+                                        max(0.6, 1.4*scale_pos_weight)),
         }
         params_auc = {
-            "max_depth":        randint(6, 9),
-            "max_leaves":       randint(96, 160),
-            "learning_rate":    loguniform(0.05, 0.15),
-            "subsample":        uniform(0.85, 0.15),
-            "colsample_bytree": uniform(0.85, 0.15),   # 0.85–1.00
-            "colsample_bynode": uniform(0.80, 0.20),  
-            "min_child_weight": randint(1, 3),
-            "gamma":            uniform(0, 0.1),
-            "reg_alpha":        loguniform(1e-5, 0.2),
-            "reg_lambda":       loguniform(1.0, 8.0),
+            "max_depth":        randint(6, 9),              # {6,7,8}
+            "max_leaves":       randint(96, 160),           # {96..159}
+            "learning_rate":    loguniform(5e-2, 1.5e-1),   # 0.05–0.15
+            "subsample":        uniform(0.85, 0.15),        # 0.85–1.00
+            "colsample_bytree": uniform(0.85, 0.15),        # 0.85–1.00
+            "colsample_bynode": uniform(0.80, 0.20),        # 0.80–1.00
+            "min_child_weight": randint(1, 3),              # {1,2}
+            "gamma":            uniform(0.00, 0.10),        # 0.00–0.10
+            "reg_alpha":        loguniform(1e-5, 2e-1),     # 1e-5–0.2
+            "reg_lambda":       loguniform(1.0, 8.0),       # 1–8
+            "scale_pos_weight": uniform(max(0.5, 0.6*scale_pos_weight),
+                                        max(0.6, 1.4*scale_pos_weight)),
         }
-    # ---- scrub dangerous keys (defensive) ----
+        search_estimators = 600
+        CLIP = 0.0005
+    
+    # -------------- scrub params (defensive) --------------
     danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric"}
     def _scrub(d: dict) -> dict: return {k: v for k, v in d.items() if k not in danger_keys}
     params_ll  = _scrub(params_ll)
     params_auc = _scrub(params_auc)
-    base_kwargs.update({"objective": "binary:logistic", "eval_metric": "logloss"})
-    base_kwargs.update({
-        "grow_policy": "lossguide",
-        "max_bin": 384,
-        "max_delta_step": 0.5,
-    })
-    base_kwargs.update({
-        "tree_method": "hist",          # required for max_bin to matter
-        "predictor":   "cpu_predictor", # avoids GPU/cpu mismatch surprises
-    })
-    # ---- (optional) monotone constraints — only when explicitly enabled ----
-    if use_monotone and features:
-        mono = {c: 0 for c in features}
-        # Use only clearly numeric / directional fields
-        plus_1 = [
-            "Abs_Odds_Move_From_Opening", "Pct_Line_Move_From_Opening",
-            "Abs_Line_Move_Z", "Pct_Line_Move_Z",
-            "Line_Moved_Toward_Team", "Outcome_Cover_Prob",
-            "Book_Reliability_Lift", "Book_Reliability_x_Sharp", "Book_Reliability_x_PROB_SHIFT",
-        ]
-        minus_1 = [
-            "Value_Reversal_Flag", "Odds_Reversal_Flag",
-            "Potential_Overmove_Flag", "Potential_Odds_Overmove_Flag",
-            "Total_vs_Spread_Contradiction",
-        ]
-        for c in plus_1:
-            if c in mono: mono[c] = 1
-        for c in minus_1:
-            if c in mono: mono[c] = -1
-        base_kwargs["monotone_constraints"] = "(" + ",".join(str(mono.get(c, 0)) for c in features) + ")"
-    else:
-        # make sure we don't accidentally carry an old value
-        base_kwargs.pop("monotone_constraints", None)
+    
+    # Always compute scale_pos_weight from *train set* right before building spaces
+    spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
+    
 
     return base_kwargs, params_ll, params_auc
 
@@ -5859,12 +5818,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             features=features,
         )
         
-        if sport_key in SMALL_LEAGUES:
-            search_estimators = 300
-            eps = 5e-3
-        else:
-            search_estimators = 400
-            eps = 1e-4
         
         # ---------------------------------------------------------------------------
         #  CV with purge + embargo (snapshot-aware)
