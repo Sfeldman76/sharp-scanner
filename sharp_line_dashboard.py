@@ -5529,37 +5529,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_market_emb = df_market
 
         df_gm = build_game_market_sharpaware_schema(df_market_emb, feature_cols)
-
+        
         if df_gm is None or df_gm.empty:
-            st.warning("⛔ Aggregation produced no rows; skipping this slice.")
+            st.warning("⛔ No training rows returned.")
             return
         
-        # --- (3) choose aggregated features (weighted means + disagreement stds) ---
-
-        _non_feat = {"Merge_Key_Short","Game_Start","y","Market","N_books","N_rows"}
-        agg_cols = [c for c in df_gm.columns if (c not in _non_feat) and (c.endswith("__wm") or c.endswith("__std"))]
-        if not agg_cols:
-            raise RuntimeError("No aggregated features found (…__wm / …__std).")
-
+        # Use the raw feature set (no aggregation)
+        missing_feats = [c for c in feature_cols if c not in df_gm.columns]
+        for c in missing_feats:
+            df_gm[c] = 0.0
+        
+        X_full = df_gm[feature_cols].astype(float)
+        y_full = df_gm["y"].astype(int).to_numpy()
+        w_full = df_gm["sample_weight"].astype(float).to_numpy()
         
         # --- (4) Build X / y / groups / times from df_gm ONLY (no valid_mask here) ---
-
-        X_full = (df_gm[agg_cols].astype("float32")
-                  .replace([np.inf,-np.inf], np.nan).fillna(0.0).to_numpy())
-        y_full = df_gm["y"].astype(int).to_numpy()
-
-        # Strictest leakage guard: keep all markets of same game together
-        # (If you need markets split independently, use the "::" choice instead.)
-        # groups = df_gm["Game_Key"].astype(str).to_numpy()
-        groups = (df_gm["Merge_Key_Short"].astype(str) + "::" + df_gm["Market"].astype(str)).to_numpy()
-
         
-        times  = pd.to_datetime(df_gm["Game_Start"], utc=True).to_numpy()
+        # Strictest leakage guard: keep all rows from the same game together
+        groups = df_gm["Merge_Key_Short"].astype(str).to_numpy()
+        
+        times = pd.to_datetime(df_gm["Game_Start"], utc=True).to_numpy()
+        
+        # (w_full already set)
+
         
         # --- (5) optional sample weights at aggregated level (simple & aligned) ---
-        w_base = df_gm["N_books"].astype(np.float32).to_numpy()
-        wg     = pd.Series(w_base).groupby(df_gm["Merge_Key_Short"]).transform("sum").replace(0,1.0).to_numpy()
-        w_full = (w_base / wg).astype(np.float32)
+       
         
         # --- (6) drop NaT times if any (rare) ---
         if pd.isna(times).any():
