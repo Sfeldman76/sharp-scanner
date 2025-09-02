@@ -1110,6 +1110,50 @@ def get_trained_models(sport_key):
     
 sharp_moves_cache = {}
 
+
+# --- Identity calibrators (used as safe fallbacks) ---
+class _IdentityIsoCal:
+    def __init__(self, eps=1e-4): self.eps = float(eps)
+    def transform(self, p):
+        import numpy as np
+        p = np.asarray(p, float)
+        return np.clip(p, self.eps, 1 - self.eps)
+
+class _IdentityProbCal:
+    def __init__(self, eps=1e-4): self.eps = float(eps)
+    def predict_proba(self, p2d):
+        import numpy as np
+        p = np.asarray(p2d, float).reshape(-1)
+        p = np.clip(p, self.eps, 1 - self.eps)
+        return np.column_stack([1 - p, p])
+
+# --- Adapter you can save and later call .predict(p) on ---
+class _CalAdapter:
+    """
+    Wrap a calibrator tuple ('iso'|'beta'|'platt', model) so you can call .predict(p).
+    Also applies an output clip to avoid 0/1 extremes.
+    """
+    def __init__(self, cal_tuple, clip=(0.001, 0.999)):
+        if cal_tuple is None or len(cal_tuple) != 2:
+            raise ValueError("cal_tuple must be ('iso'|'beta'|'platt', model)")
+        self.kind, self.model = cal_tuple
+        self.clip = clip
+
+    def predict(self, p):
+        import numpy as np
+        p = np.asarray(p, float)
+        if self.kind == "iso":
+            out = self.model.transform(p)
+        elif self.kind == "beta":
+            out = self.model.predict(p.reshape(-1, 1))
+        else:  # 'platt'
+            out = self.model.predict_proba(p.reshape(-1, 1))[:, 1]
+        if self.clip:
+            lo, hi = self.clip
+            out = np.clip(out, lo, hi)
+        return out
+
+
 def read_recent_sharp_master_cached(hours=120):
     cache_key = f"sharp_master_{hours}h"
     
