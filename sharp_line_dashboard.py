@@ -2327,51 +2327,31 @@ def get_xgb_search_space(
         }
     else:
         
-        from scipy.stats import randint, uniform, loguniform
+        
 
         params_ll = {
-            # depth/leaves: enough structure, but not maxed out
-            "max_depth":        randint(4, 8),            # 4–7
-            "max_leaves":       randint(48, 128),         # 48–127
-        
-            # cooler LR than AUC → better logloss; still allows range
-            "learning_rate":    loguniform(3.0e-2, 8.0e-2),   # 0.03–0.08
-        
-            # mild bagging to reduce variance but not flatten probs
-            "subsample":        uniform(0.75, 0.20),      # 0.75–0.95
-            "colsample_bytree": uniform(0.75, 0.20),      # 0.75–0.95
-            "colsample_bynode": uniform(0.70, 0.25),      # 0.70–0.95 (extra decorrelation)
-        
-            # allow smaller splits, but not ultra‑noisy
-            "min_child_weight": randint(2, 6),            # 2–5
-        
-            # weak gain requirement to keep some bite, yet smoother than AUC
-            "gamma":            uniform(0.00, 0.25),      # 0.00–0.25
-        
-            # regularization: a touch stronger than AUC for better logloss
-            "reg_alpha":        loguniform(1e-4, 3.0e-1), # 0.0001–0.3
-            "reg_lambda":       loguniform(2.0, 1.0e1),   # 2–10
+            "max_depth":        randint(4, 7),
+            "max_leaves":       randint(64, 128),
+            "learning_rate":    loguniform(3e-2, 6e-2),     # 0.03–0.06
+            "subsample":        uniform(0.75, 0.2),
+            "colsample_bytree": uniform(0.75, 0.2),
+            "colsample_bynode": uniform(0.7, 0.2),
+            "min_child_weight": randint(2, 6),              # ← key for spreads!
+            "gamma":            uniform(0.1, 0.3),
+            "reg_alpha":        loguniform(1e-4, 0.4),
+            "reg_lambda":       loguniform(3.0, 15.0),
         }
         params_auc = {
-            # a bit deeper and leafier → stronger interactions
-            "max_depth":        randint(6, 10),           # 6–9
-            "max_leaves":       randint(64, 160),         # 64–159
-        
-            # hotter LR band → more spread (you’ll calibrate later)
-            "learning_rate":    loguniform(5.0e-2, 1.2e-1),   # 0.05–0.12
-        
-            # minimal bagging for pickup
-            "subsample":        uniform(0.85, 0.15),      # 0.85–1.00
-            "colsample_bytree": uniform(0.85, 0.15),      # 0.85–1.00
-            "colsample_bynode": uniform(0.80, 0.20),      # 0.80–1.00
-        
-            # very permissive splitting
-            "min_child_weight": randint(1, 3),            # 1–2
-            "gamma":            uniform(0.00, 0.20),      # 0.00–0.20
-        
-            # light regularization to keep weak signals alive
-            "reg_alpha":        loguniform(1e-4, 2.0e-1), # 0.0001–0.2
-            "reg_lambda":       loguniform(0.8, 6.0),     # ~0.8–6
+            "max_depth":        randint(6, 9),
+            "max_leaves":       randint(96, 160),
+            "learning_rate":    loguniform(5e-2, 0.10),
+            "subsample":        uniform(0.85, 0.15),
+            "colsample_bytree": uniform(0.85, 0.15),
+            "colsample_bynode": uniform(0.75, 0.2),
+            "min_child_weight": randint(1, 3),
+            "gamma":            uniform(0.00, 0.2),
+            "reg_alpha":        loguniform(1e-5, 0.2),
+            "reg_lambda":       loguniform(1.0, 10.0),
         }
     # ---- scrub dangerous keys (defensive) ----
     danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric"}
@@ -2379,7 +2359,15 @@ def get_xgb_search_space(
     params_ll  = _scrub(params_ll)
     params_auc = _scrub(params_auc)
     base_kwargs.update({"objective": "binary:logistic", "eval_metric": "logloss"})
-
+    base_kwargs.update({
+        "grow_policy": "lossguide",
+        "max_bin": 384,
+        "max_delta_step": 0.5,
+    })
+    base_kwargs.update({
+        "tree_method": "hist",          # required for max_bin to matter
+        "predictor":   "cpu_predictor", # avoids GPU/cpu mismatch surprises
+    })
     # ---- (optional) monotone constraints — only when explicitly enabled ----
     if use_monotone and features:
         mono = {c: 0 for c in features}
