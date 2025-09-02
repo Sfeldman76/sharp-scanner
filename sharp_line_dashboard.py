@@ -613,6 +613,42 @@ def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, grid=None, eps=1e-4,
 
     return best_w, iso, p_oof_blend, (a is not p_oof_log)  # flipped flag (bool)
 
+# --- Calibrator normalization & safety shims (put right before select_blend) ---
+def _ensure_transform_for_iso(iso_obj):
+    """Wrap sklearn IsotonicRegression (predict-only) to expose .transform."""
+    if iso_obj is None:
+        return None
+    if hasattr(iso_obj, "transform"):
+        return iso_obj
+    if hasattr(iso_obj, "predict"):
+        class _IsoAsTransform:
+            def __init__(self, iso): self.iso = iso
+            def transform(self, p): return self.iso.predict(p)
+        return _IsoAsTransform(iso_obj)
+    return iso_obj  # unknown type, best effort
+
+def _ensure_predict_proba_for_prob_cal(cal_obj, eps=1e-6):
+    """
+    Ensure platt/beta calibrators expose .predict_proba(*).
+    If cal_obj already has predict_proba → return as-is.
+    If it's a bare function/obj returning probs, wrap it.
+    """
+    if cal_obj is None:
+        return None
+    if hasattr(cal_obj, "predict_proba"):
+        return cal_obj
+    # Fallback: treat input as raw probabilities and build a 2-col proba
+    class _AsPredictProba:
+        def __init__(self, base, eps=1e-6):
+            self.base = base; self.eps = eps
+        def predict_proba(self, X):
+            p = np.asarray(X, float).reshape(-1)
+            if hasattr(self.base, "__call__"):
+                p = np.asarray(self.base(p), float).reshape(-1)
+            p = np.clip(p, self.eps, 1.0 - self.eps)
+            return np.c_[1.0 - p, p]
+    return _AsPredictProba(cal_obj, eps=eps)
+
 
 
 def normalize_team(t):
@@ -5939,12 +5975,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # 1) Fit iso + platt (+ beta) on OOF
         use_quantile_iso = (sport_key not in SMALL_LEAGUES)
         cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        # After you compute cals_raw:
         cals = _normalize_cals(cals_raw)
         
-        # Backfill missing to avoid NoneType errors inside select_blend
-        if cals.get("iso") is None:
+        # Ensure required interfaces exist:
+        cals["iso"]   = _ensure_transform_for_iso(cals.get("iso"))
+        cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=eps)
+        cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=eps)
+        
+        # Backfill identities so select_blend never sees None
+        if cals["iso"] is None:
             cals["iso"] = _IdentityCal(eps=eps)
-        if cals.get("platt") is None and cals.get("beta") is None:
+        if cals["platt"] is None and cals["beta"] is None:
             cals["platt"] = _IdentityCal(eps=eps)
         
         sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
