@@ -5377,188 +5377,88 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ============================================================================
                 # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
           # ---- Groups & times (snapshot-aware) ----
-    
-        
-        snap_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
-        )
-        game_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Game_Start"], errors="coerce", utc=True
-        )
-        by_game_snaps = (
-            df_market.loc[valid_mask]
-            .groupby("Game_Key")["Snapshot_Timestamp"]
-            .nunique(dropna=True)
-        )
-        has_snapshots = (by_game_snaps.fillna(0).max() > 1)
-        
-        sport_key = str(sport).upper()
+
+ 
+        # --- (1) embargo must be defined earlier (and has_snapshots computed). ---
+        sport_key  = str(sport).upper()
+        # has_snapshots = ...  # compute this before (as you did earlier)
         embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
+        
+        # --- (2) aggregate to one sharp‑aware row per (Game, Market) ---
         df_gm = build_game_market_sharpaware(
             df=df_market,
-            feature_cols=feature_cols,           # after your PR removal
+            feature_cols=feature_cols,      # after your PR removal
             label_col="SHARP_HIT_BOOL",
             embargo_td=embargo_td,
-            book_col=("Bookmaker" if "Bookmaker" in df_market.columns else
-                      "Bookmaker_Norm"),
+            book_col=("Bookmaker" if "Bookmaker" in df_market.columns else "Bookmaker_Norm"),
             time_col="Snapshot_Timestamp",
             start_col="Game_Start",
             game_col="Game_Key",
             market_col=("Market" if "Market" in df_market.columns else "Market_Type"),
         )
+        if df_gm is None or df_gm.empty:
+            st.warning("⛔ Aggregation produced no rows; skipping this slice.")
+            return
         
-        # Choose which aggregated features to model with
-        # (weighted means + disagreement stds are most useful)
+        # --- (3) choose aggregated features (weighted means + disagreement stds) ---
         _non_feat = {"Game_Key","Game_Start","y","Market","Market_Type","N_books","N_rows"}
         agg_cols = [c for c in df_gm.columns
                     if (c not in _non_feat) and (c.endswith("__wm") or c.endswith("__std"))]
+        if not agg_cols:
+            raise RuntimeError("No aggregated feature columns found (…__wm / …__std).")
         
-        # === Build X / y FROM THE AGGREGATED TABLE ===
-        X_full = df_gm[agg_cols].astype("float32").replace([np.inf,-np.inf], np.nan).fillna(0.0).to_numpy()
+        # --- (4) Build X / y / groups / times from df_gm ONLY (no valid_mask here) ---
+        X_full = (df_gm[agg_cols]
+                  .astype("float32")
+                  .replace([np.inf, -np.inf], np.nan)
+                  .fillna(0.0)
+                  .to_numpy())
         y_full = df_gm["y"].astype(int).to_numpy()
         
-        # ---- Groups & times (one row per game/market) ----
-        # Strictest leakage guard: group by game so *all markets* of a game stay together.
-        #groups = df_gm["Game_Key"].astype(str).to_numpy()
-        # If you prefer to split markets independently per game, use:
-        groups = (df_gm["Game_Key"].astype(str) + "::" + df_gm.get("Market", df_gm.get("Market_Type","")).astype(str)).to_numpy()
+        # Strictest leakage guard: keep all markets of same game together
+        # (If you need markets split independently, use the "::" choice instead.)
+        # groups = df_gm["Game_Key"].astype(str).to_numpy()
+        groups = (df_gm["Game_Key"].astype(str) + "::" +
+                  df_gm.get("Market", df_gm.get("Market_Type","")).astype(str)).to_numpy()
         
-        times = pd.to_datetime(df_gm["Game_Start"], utc=True).to_numpy()
-
-        # === Build X / y ===
-        X_full = _to_numeric_block(df_market, feature_cols).to_numpy(np.float32)
+        times  = pd.to_datetime(df_gm["Game_Start"], utc=True).to_numpy()
         
-        y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
-        valid_mask = ~y_series.isna()
-        if not valid_mask.all():
-            X_full = X_full[valid_mask.to_numpy()]
-        y_full = y_series.loc[valid_mask].astype(int).to_numpy()
+        # --- (5) optional sample weights at aggregated level (simple & aligned) ---
+        w_base = df_gm["N_books"].astype(np.float32).to_numpy()
+        wg     = pd.Series(w_base).groupby(df_gm["Game_Key"]).transform("sum").replace(0, 1.0).to_numpy()
+        w_full = (w_base / wg).astype(np.float32)
         
-        time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
-        
-        # Sport-aware embargo only when we truly have multiple snapshots
-       
-      
-      
-        
-        # Guard: drop NaT times (rare but fatal for CV)
+        # --- (6) drop NaT times if any (rare) ---
         if pd.isna(times).any():
             bad  = np.flatnonzero(pd.isna(times))
             keep = np.setdiff1d(np.arange(len(times)), bad)
             X_full = X_full[keep]; y_full = y_full[keep]
             groups = groups[keep]; times  = times[keep]
+            w_full = w_full[keep]
         
-        # ---- Holdout = last ~N groups (time-forward, group-safe) ----
-        meta  = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
-        gmeta = (meta.groupby("group", as_index=False)["time"]
-                   .agg(start="min", end="max")
-                   .sort_values("start")
-                   .reset_index(drop=True))
-        
-        # pick per-sport holdout 
-        # === Time-forward % split by groups (contiguous last block) ===
+        # --- (7) time‑forward, group‑safe holdout as before ---
         train_all_idx, hold_idx = holdout_by_percent_groups(
-            sport=sport,               # e.g., "NBA"
-            groups=groups,             # Game_Key per row
-            times=times,               # Snapshot_Timestamp if multi-snapshot else Game_Start
-            y=y_full,                  # labels aligned to rows
-            pct_holdout=None,          # use SPORT_HOLDOUT_PCT default; or override with a float
+            sport=sport,
+            groups=groups,
+            times=times,
+            y=y_full,
+            pct_holdout=None,
             min_train_games=25,
             min_hold_games=8,
             ensure_label_diversity=True
         )
         
-        # ---- TRAIN subset arrays (everything downstream uses only TRAIN rows) ----
+        # --- (8) TRAIN subsets (aligned) ---
         X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
         t_train = times[train_all_idx]
-        # --- Filter CV folds to ensure both train and val have class 0 and 1 ---z
-        # ---- Quick diagnostics (optional but handy) ----
+        w_train = w_full[train_all_idx]   # ← use the aggregated weights
+        
+        # Diagnostics
         y_hold_vec  = y_full[hold_idx]
         y_train_vec = y_full[train_all_idx]
-        #st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
-        #if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
-        #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
-        
-        # ---------------------------------------------------------------------------
-        #  Book-aware sample weights (equalize duplicates per game; tilt toward sharp)
-        # ---------------------------------------------------------------------------
-        bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
-            "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
-        )
-        
-        train_df = df_market.loc[valid_mask].iloc[train_all_idx].copy()
-        
-        def _fallback_book_lift(df: pd.DataFrame, book_col: str, label_col: str, prior: float = 100.0):
-            if (book_col is None) or (book_col not in df.columns) or (label_col not in df.columns):
-                return pd.Series(dtype=float)
-            dfv = df[[book_col, label_col]].dropna()
-            if dfv.empty:
-                return pd.Series(dtype=float)
-        
-            y = pd.to_numeric(dfv[label_col], errors="coerce")
-            m = float(np.nanmean(y))
-            grp = dfv.groupby(book_col)[label_col].agg(["sum", "count"]).rename(columns={"sum": "hits", "count": "n"})
-            a = m * prior; b = (1.0 - m) * prior
-            post_mean = (grp["hits"] + a) / (grp["n"] + a + b)
-            lift = (post_mean / max(1e-9, m)) - 1.0
-            return lift
-        
-        if bk_col is None:
-            w_train = np.ones(len(train_df), dtype=np.float32)
-        else:
-            if bk_col not in train_df.columns:
-                train_df[bk_col] = "UNK"
-        
-            B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
-            n_gb = train_df.groupby(["Game_Key", bk_col]).size()
-        
-            TAU = 0.6
-            def _w_gb(g, b, tau=1.0):
-                Bg  = max(1, int(B_g.get(g, 1)))
-                ngb = max(1, int(n_gb.get((g, b), 1)))
-                return 1.0 / (Bg * (ngb ** tau))
-        
-            w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])], dtype=np.float32)
-        
-           # --- Sharp-book tilt only (no reliability map) --------------------------------
-            # Requires: train_df, w_base, bk_col, SHARP_BOOKS
-            
-            if bk_col not in train_df.columns:
-                raise KeyError(f"bk_col '{bk_col}' not found in train_df columns")
-            
-            # sharp flag
-            if "Is_Sharp_Book" in train_df.columns:
-                is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).astype(np.float32).to_numpy()
-            else:
-                is_sharp = train_df[bk_col].isin(SHARP_BOOKS).astype(np.float32).to_numpy()
-            
-            ALPHA_SHARP = 0.80
-            
-            # base multiplier from sharp tilt
-            mult = 1.0 + ALPHA_SHARP * is_sharp
-            
-            # optional tiny boost for high-limit rows (remove this block if not desired)
-            if "High_Limit_Flag" in train_df.columns:
-                high_limit = train_df["High_Limit_Flag"].fillna(False).astype(bool).astype(np.float32).to_numpy()
-                mult = mult + 0.10 * high_limit  # adjust or delete
-            
-            # final weights
-            w_train = pd.Series(w_base, index=train_df.index).astype(np.float32).to_numpy() * mult.astype(np.float32)
-        
-            s = w_train.sum()
-            if s > 0:
-                w_train *= (len(w_train) / s)
-        
-        assert len(w_train) == len(X_train), f"sample_weight misaligned: {len(w_train)} vs {len(X_train)}"
-        
-        # ---------------------------------------------------------------------------
-        #  Hyperparam spaces & small-league overrides (use the fixed helper)
-        # ---------------------------------------------------------------------------
-       
-        # ---------------------------------------------------------------------------
-        #  Search space + sport-aware tweaks
+
         # ---------------------------------------------------------------------------
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
