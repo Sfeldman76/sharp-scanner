@@ -662,6 +662,31 @@ def _auc_safe(y, p):
     ok = (np.unique(y).size == 2) and np.isfinite(p).all() and (p.min() >= 0) and (p.max() <= 1)
     if not ok: return (np.nan, False)
     return (roc_auc_score(y, p), True)
+class _CalAdapter:
+    """
+    Wrap a calibrator tuple ('iso'|'beta'|'platt', model) so you can call .predict(p)
+    and get clipped probabilities. Compatible with your fit_robust_calibrator output.
+    """
+    def __init__(self, cal_tuple, clip=(0.001, 0.999)):
+        if cal_tuple is None or len(cal_tuple) != 2:
+            raise ValueError("cal_tuple must be ('iso'|'beta'|'platt', model)")
+        self.kind, self.model = cal_tuple
+        self.clip = clip
+
+    def predict(self, p):
+        import numpy as np
+        p = np.asarray(p, float)
+        if self.kind == "iso":
+            # your helpers already normalize iso to have .transform if needed
+            out = self.model.transform(p) if hasattr(self.model, "transform") else self.model.predict(p)
+        elif self.kind == "beta":
+            # your _BetaCalibrator exposes .predict(p)
+            out = self.model.predict(p)
+        else:  # 'platt'
+            out = self.model.predict_proba(p.reshape(-1, 1))[:, 1]
+        lo, hi = self.clip
+        return np.clip(out, lo, hi)
+
 
 def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, grid=None, eps=1e-4,
                              metric="logloss", hybrid_alpha=0.9):
