@@ -6104,7 +6104,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "random_state": 42,
             "scale_pos_weight": float(spw),
         })
+        base_kwargs.update({
+            "tree_method": "hist",
+            "grow_policy": "lossguide",
+            "max_bin": 128,
+            "predictor": "cpu_predictor",
+            "random_state": 42,
+            "scale_pos_weight": float(spw),
         
+            # 👉 encourage splitting & diversity
+            "min_child_weight": 1.0,
+            "gamma": 0.0,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "learning_rate": 0.05,
+            # If you use lossguide, consider bounding leaves:
+            "max_leaves": 64,   # (or try 128)
+        })
+
         # League-sized defaults
         sport_key = str(sport).upper()
         if sport_key in SMALL_LEAGUES:
@@ -6147,7 +6164,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         
         # pick your n_estimators
-      
+        # Example overrides (keep your distributions if they already cover these)
+        params_ll.update({
+            "min_child_weight": [0.5, 1, 2, 4],
+            "gamma": [0, 0.1, 0.2, 0.5],
+            "subsample": [0.7, 0.8, 0.9, 1.0],
+            "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
+            "max_leaves": [32, 64, 128],
+            "reg_lambda": [0.5, 1.0, 2.0, 5.0],
+            "reg_alpha": [0.0, 0.1, 0.5],
+        })
+        params_auc.update(params_ll)
+
         search_trials = 25 if sport_key in SMALL_LEAGUES else 25
         # build the two base estimators WITH their eval_metric
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
@@ -6183,7 +6211,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         rs_ll.fit(X_train, y_train, groups=g_train, **fit_params)
         rs_auc.fit(X_train, y_train, groups=g_train, **fit_params)
-                
+        st.write({
+            "n_trees_ll": n_trees_ll,
+            "n_trees_auc": n_trees_auc,
+            "train_pred_std_raw": float(np.std(pos_proba(model_logloss, X_train))),
+            "train_pred_range_raw": (float(np.min(pos_proba(model_logloss, X_train))),
+                                     float(np.max(pos_proba(model_logloss, X_train))))
+        })      
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
