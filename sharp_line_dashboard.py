@@ -6004,7 +6004,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # pick your n_estimators
         search_estimators = 300 if sport_key in SMALL_LEAGUES else 400
-        
+        search_trials = 25 if sport_key in SMALL_LEAGUES else 50
         # build the two base estimators WITH their eval_metric
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
