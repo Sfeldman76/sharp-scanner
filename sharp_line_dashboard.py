@@ -6203,8 +6203,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # (sanity) ensure eval weights aren’t zeroed
        
         # Build fresh models with the searched params
-        model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(final_estimators_cap)})
-        model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(final_estimators_cap)})
+        model_logloss = XGBClassifier(
+            **{**base_kwargs, **best_ll_params,
+               "n_estimators": int(final_estimators_cap),
+               "eval_metric": "logloss"}   # <-- ensure logloss is logged
+        )
+        model_auc = XGBClassifier(
+            **{**base_kwargs, **best_auc_params,
+               "n_estimators": int(final_estimators_cap),
+               "eval_metric": "auc"}       # <-- ensure auc is logged
+        )
+
         
         # Slice ROWS correctly
         X_tr_es = X_train[tr_es_rel]   # ✅ not .iloc
@@ -6283,13 +6292,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             bi = getattr(clf, "best_iteration", None)
             return int(bi + 1) if (bi is not None and bi >= 0) else int(getattr(clf, "n_estimators", 0))
         
+        def _safe_metric_tail(clf, prefer):
+            ev = getattr(clf, "evals_result_", {}) or {}
+            ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
+            if not ds:
+                return None, {"datasets": list(ev.keys())}
+            metrics = ev[ds]
+            key = prefer if prefer in metrics else next((k for k in metrics if prefer in k), None)
+            if not key:
+                return None, {"dataset": ds, "metrics_available": list(metrics.keys())}
+            arr = metrics[key]
+            return (arr[-10:] if len(arr) >= 10 else arr), {"dataset": ds, "metric_key": key, "len": len(arr)}
+        
+        val_logloss_last10, info_log = _safe_metric_tail(model_logloss, "logloss")
+        val_auc_last10,     info_auc = _safe_metric_tail(model_auc,     "auc")
+        
         st.write({
-            "ES_n_trees_ll": _num_trees(model_logloss),
-            "ES_n_trees_auc": _num_trees(model_auc),
-            "val_logloss_last10": model_logloss.evals_result_["validation_0"]["logloss"][-10:],
-            "val_auc_last10":     model_auc.evals_result_["validation_0"]["auc"][-10:],
+            "ES_n_trees_ll": getattr(model_logloss, "best_iteration", None),
+            "ES_n_trees_auc": getattr(model_auc, "best_iteration", None),
+            "val_logloss_last10": val_logloss_last10,
+            "val_auc_last10": val_auc_last10,
+            "log_info": info_log,
+            "auc_info": info_auc,
         })
-          
         
         
         # ---------------------------------------------------------------------------
