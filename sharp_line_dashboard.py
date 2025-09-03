@@ -2513,7 +2513,7 @@ def get_xgb_search_space(
         tree_method="hist",
         predictor="cpu_predictor",
         grow_policy="lossguide",
-        max_bin=192,
+        max_bin=128,
         max_delta_step=0.5,
         sampling_method="uniform",
         reg_lambda=3.0,
@@ -5903,7 +5903,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # stronger defaults for high‑dimensional feature sets
         base_kwargs.update({
             "sampling_method": "uniform",   # keep CPU-safe setting
-            "max_bin": 192,
+            "max_bin": 128,
             "grow_policy": "lossguide",
             "predictor": "cpu_predictor",
             "random_state": 42,
