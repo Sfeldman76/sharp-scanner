@@ -5759,8 +5759,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # (1) Drop near-constant columns
         
         
-       # ---- Cheap feature pruning before modeling ----
-        from sklearn.feature_selection import VarianceThreshold
+     
         
         # (1) Drop near-constant features
         vt = VarianceThreshold(threshold=1e-5)
