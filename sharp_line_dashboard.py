@@ -6212,13 +6212,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
         rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
-        st.write({
-            "n_trees_ll": n_trees_ll,
-            "n_trees_auc": n_trees_auc,
-            "train_pred_std_raw": float(np.std(pos_proba(model_logloss, X_train))),
-            "train_pred_range_raw": (float(np.min(pos_proba(model_logloss, X_train))),
-                                     float(np.max(pos_proba(model_logloss, X_train))))
-        })      
+       
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
@@ -6267,7 +6261,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=early_stopping_rounds,
         )
 
+        def _num_trees_trained(clf):
+            bi = getattr(clf, "best_iteration", None)
+            if bi is not None and bi >= 0:
+                return int(bi + 1)
+            try:
+                booster = clf.get_booster()
+                biter = getattr(booster, "best_iteration", None)
+                if biter is not None and biter >= 0:
+                    return int(biter + 1)
+                bntl = getattr(booster, "best_ntree_limit", None)
+                if bntl:
+                    return int(bntl)
+            except Exception:
+                pass
+            return int(getattr(clf, "n_estimators", 200))
         
+        n_trees_ll  = _num_trees_trained(model_logloss)
+        n_trees_auc = _num_trees_trained(model_auc)
+        
+        st.write({
+            "n_trees_ll": n_trees_ll,
+            "n_trees_auc": n_trees_auc,
+            "train_pred_std_raw": float(np.std(pos_proba(model_logloss, X_train, positive=1))),
+            "train_pred_range_raw": (
+                float(np.min(pos_proba(model_logloss, X_train, positive=1))),
+                float(np.max(pos_proba(model_logloss, X_train, positive=1))),
+            ),
+        })
         def _best_rounds(clf):
             br = getattr(clf, "best_iteration", None)
             if br is not None and br >= 0:
