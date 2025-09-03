@@ -151,6 +151,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score
 from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
 from sklearn.metrics import log_loss, make_scorer
 
+from sklearn.feature_selection import VarianceThreshold
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
@@ -2510,8 +2511,7 @@ def get_xgb_search_space(
     # ---------------- Base kwargs (single, consistent block) ----------------
     base_kwargs = dict(
         objective="binary:logistic",
-        eval_metric=["logloss", "auc"],
-        tree_method="hist",                 # "gpu_hist" if you have GPU
+        tree_method="hist",
         predictor="cpu_predictor",
         grow_policy="lossguide",
         max_bin=384,
@@ -2522,7 +2522,8 @@ def get_xgb_search_space(
         n_jobs=int(n_jobs),
         random_state=42,
         importance_type="total_gain",
-        scale_pos_weight=spw,               # <-- from caller
+        scale_pos_weight=spw,
+        # ← NO eval_metric here
     )
 
     # ---------------- Search spaces ----------------
@@ -5654,7 +5655,47 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if not valid_mask.all():
             X_full = X_full[valid_mask.to_numpy()]
         y_full = y_series.loc[valid_mask].astype(int).to_numpy()
+         # ---- Cheap feature pruning (before any split/CV) --
         
+        
+        st.markdown("### 🧹 Feature Pruning (pre-split)")
+        
+        # 1) Near-constant features
+        vt = VarianceThreshold(threshold=1e-5)
+        X_full_pruned = vt.fit_transform(X_full)
+        
+        if hasattr(vt, "get_support"):
+            mask_keep = vt.get_support()
+            removed_const = [c for c, keep in zip(feature_cols, mask_keep) if not keep]
+            feature_cols  = [c for c, keep in zip(feature_cols, mask_keep) if keep]
+        else:
+            # Fallback (very rare)
+            mask_keep = np.ones(X_full.shape[1], dtype=bool)
+            removed_const = []
+            feature_cols  = feature_cols[:X_full_pruned.shape[1]]
+        
+        st.write(f"• Removed near-constant features: {len(removed_const)}")
+        if removed_const:
+            st.caption(", ".join(removed_const[:20]) + (" ..." if len(removed_const) > 20 else ""))
+        
+        # 2) Exact duplicate columns (optional but cheap)
+        df_tmp = pd.DataFrame(X_full_pruned, columns=feature_cols)
+        # Transpose, get unique rows (i.e., unique columns pre-transpose)
+        _, uniq_idx = np.unique(df_tmp.T, axis=0, return_index=True)
+        uniq_idx = np.sort(uniq_idx)
+        
+        dup_count = df_tmp.shape[1] - len(uniq_idx)
+        if dup_count > 0:
+            removed_dups = [feature_cols[i] for i in range(len(feature_cols)) if i not in uniq_idx]
+            st.write(f"• Removed duplicate features: {dup_count}")
+            if removed_dups:
+                st.caption(", ".join(removed_dups[:20]) + (" ..." if len(removed_dups) > 20 else ""))
+            df_tmp = df_tmp.iloc[:, uniq_idx]
+            feature_cols = list(df_tmp.columns)
+        
+        # Finalize X_full after pruning
+        X_full = df_tmp.to_numpy(dtype=np.float32)
+        st.write(f"✅ Final feature count after pruning: {len(feature_cols)}")
         # ---- Groups & times (snapshot-aware) ----
         groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
         
@@ -5862,17 +5903,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         # stronger defaults for high‑dimensional feature sets
         base_kwargs.update({
-            "sampling_method":   "uniform",  # CPU hist
-            "subsample":         0.85,       # row bagging
-            "colsample_bytree":  0.65,       # column bagging per tree (key when many cols)
-            "colsample_bynode":  0.80,       # lighter per‑split bagging
-            "max_depth":         4,          # shallower trees
-            "max_leaves":        64,         # cap complexity with lossguide
-            "min_child_weight":  3,          # need more rows in a leaf
-            "gamma":             0.10,       # require some gain to split
-            "reg_alpha":         0.10,       # L1 → sparsity (drops weak splits)
-            "reg_lambda":        6.00,       # moderate L2
-        })       
+            "objective": "binary:logistic",
+            "tree_method": "hist",
+            "predictor": "cpu_predictor",
+            "grow_policy": "lossguide",
+            "max_bin": 384,
+            "max_delta_step": 0.5,
+            "sampling_method": "uniform",   # ✅ keep
+            "importance_type": "total_gain",
+            "scale_pos_weight": float(spw),
+            "random_state": 42,
+            "n_jobs": int(n_jobs),
+        })
         sport_key = str(sport).upper()
 
         if sport_key in SMALL_LEAGUES:
@@ -5968,42 +6010,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         fit_params = dict(
             sample_weight=w_train,
             eval_set=[(X_train, y_train)],
-            eval_metric="logloss",
             early_stopping_rounds=40,
             verbose=False,
         )
         
-        # --------
         rs_ll = RandomizedSearchCV(
-            estimator=search_base_ll,
+            estimator=est_ll,
             param_distributions=params_ll,
             scoring="neg_log_loss",
-            cv=cv_splits,                 # ← use filtered folds
-            n_iter=25,
-            n_jobs=1,
+            n_iter=search_trials,
+            cv=folds,
             random_state=42,
-            refit=True,
-            verbose=1,
-            error_score=np.nan,           # ← don’t crash on occasional bad candidates
+            n_jobs=1,
+            verbose=0,
         )
-       
         
-        rs_ll.fit(X_train, y_train, groups=g_train, **fit_params)
-
         rs_auc = RandomizedSearchCV(
-            estimator=search_base_auc,
+            estimator=est_auc,
             param_distributions=params_auc,
             scoring="roc_auc",
-            cv=cv_splits,                 # ← use filtered folds
-            n_iter=25,
+            n_iter=search_trials,
+            cv=folds,
+            random_state=137,
             n_jobs=1,
-            random_state=4242,
-            refit=True,
-            verbose=1,
-            error_score=np.nan,
+            verbose=0,
         )
-        rs_auc.fit(X_train, y_train, groups=g_train, **fit_params)
         
+        rs_ll.fit(X_train, y_train, groups=g_train, **fit_params)
+        rs_auc.fit(X_train, y_train, groups=g_train, **fit_params)
+                
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
