@@ -5902,18 +5902,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         # stronger defaults for high‑dimensional feature sets
         base_kwargs.update({
-            "objective": "binary:logistic",
-            "tree_method": "hist",
-            "predictor": "cpu_predictor",
-            "grow_policy": "lossguide",
+            "sampling_method": "uniform",   # keep CPU-safe setting
             "max_bin": 384,
-            "max_delta_step": 0.5,
-            "sampling_method": "uniform",   # ✅ keep
-            "importance_type": "total_gain",
-            "scale_pos_weight": float(spw),
+            "grow_policy": "lossguide",
+            "predictor": "cpu_predictor",
             "random_state": 42,
-            "n_jobs": int(n_jobs),
+            "scale_pos_weight": float(spw),
         })
+# 
         sport_key = str(sport).upper()
 
         if sport_key in SMALL_LEAGUES:
