@@ -88,6 +88,9 @@ from pytz import timezone as pytz_timezone
 from sklearn.feature_selection import VarianceThreshold
 import pyarrow as pa
 import pyarrow.parquet as pq
+import numpy as np
+import pandas as pd
+from sklearn.base import clone
 
 from scipy.stats import zscore, entropy, randint, loguniform, uniform
 from sklearn.experimental import enable_halving_search_cv 
@@ -1390,7 +1393,7 @@ def holdout_by_percent_groups(
     """
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10, "NCAAF": 0.10, "NBA": 0.18, "WNBA": 0.10,
-        "NHL": 0.18, "MLB": 0.08, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
+        "NHL": 0.18, "MLB": 0.15, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
     }
     if pct_holdout is None:
         key = (sport or "DEFAULT").upper()
@@ -1575,6 +1578,116 @@ def build_game_market_sharpaware_schema(
 
     return out.reset_index(drop=True)
 
+
+def shap_stability_select(
+    model_proto,
+    X: pd.DataFrame,
+    y: np.ndarray,
+    folds,                       # iterable of (train_idx, valid_idx, *rest)
+    *,
+    topk_per_fold: int = 60,     # K used to count "presence" within each fold
+    min_presence: float = 0.6,   # must appear in top-K in ≥60% of folds
+    max_keep: int | None = None, # hard cap after sorting by avg_abs_shap (optional)
+    sample_per_fold: int = 4000, # SHAP computed on a sample of train fold rows
+    random_state: int = 42,
+    must_keep: list[str] = None  # always-keep features (unioned at the end)
+):
+    """
+    Returns:
+      selected_features: list[str]
+      summary_df: pd.DataFrame with avg_rank, presence, avg_abs_shap
+    """
+    try:
+        import shap
+    except Exception as e:
+        raise RuntimeError("Install shap to use shap_stability_select") from e
+
+    feat = X.columns.tolist()
+    nF = len(feat)
+    if nF == 0:
+        return [], pd.DataFrame()
+
+    rng = np.random.RandomState(random_state)
+    counts_in_topk = pd.Series(0, index=feat, dtype=int)
+    shap_sum = pd.Series(0.0, index=feat, dtype=float)
+    fold_rank_frames = []
+
+    # iterate folds defensively (supports (tr,va) or (tr,va,*,*))
+    for fold in folds:
+        tr_idx, va_idx = fold[:2]
+        Xtr, ytr = X.iloc[tr_idx], y[tr_idx]
+
+        # fit a fresh clone on the fold’s train
+        mdl = clone(model_proto)
+        mdl.fit(Xtr, ytr)
+
+        # modest sample for speed/memory
+        if len(Xtr) > sample_per_fold:
+            sample = Xtr.iloc[rng.choice(len(Xtr), size=sample_per_fold, replace=False)]
+        else:
+            sample = Xtr
+
+        # fast tree explainer; stable for xgboost
+        explainer = shap.TreeExplainer(mdl, feature_perturbation="tree_path_dependent")
+        sval = explainer.shap_values(sample)
+
+        # binary case: ensure 2D array
+        if isinstance(sval, list):
+            # some versions return [class0, class1]; take positive class
+            sval = sval[1]
+        sval = np.asarray(sval)
+        shap_abs_mean = pd.Series(np.abs(sval).mean(axis=0), index=feat)
+
+        # accumulate
+        shap_sum = shap_sum.add(shap_abs_mean, fill_value=0.0)
+
+        # per-fold ranking (1 = most important)
+        r = shap_abs_mean.rank(ascending=False, method="average")
+        fold_rank_frames.append(r)
+
+        # count presence in top-K this fold
+        topk = shap_abs_mean.sort_values(ascending=False).head(min(topk_per_fold, nF)).index
+        counts_in_topk.loc[topk] += 1
+
+    # aggregate across folds
+    n_folds = len(fold_rank_frames)
+    avg_rank = pd.concat(fold_rank_frames, axis=1).mean(axis=1)          # lower is better
+    presence = counts_in_topk / max(n_folds, 1)
+    avg_abs_shap = (shap_sum / max(n_folds, 1))
+
+    # selection rule:
+    # 1) keep anything with presence ≥ min_presence
+    # 2) also keep the best-by-avg_abs_shap up to topk_per_fold (for safety)
+    keep_presence = presence.index[presence >= float(min_presence)].tolist()
+    keep_top_global = avg_abs_shap.sort_values(ascending=False).head(topk_per_fold).index.tolist()
+
+    # stable order: by descending avg_abs_shap
+    selected = list(dict.fromkeys(keep_top_global + keep_presence))
+    selected = sorted(selected, key=lambda c: (-avg_abs_shap[c], avg_rank[c]))
+
+    # union must-keep
+    if must_keep:
+        for c in must_keep:
+            if c in feat and c not in selected:
+                selected.append(c)
+
+    # optional cap
+    if max_keep is not None and len(selected) > max_keep:
+        # respect ordering by SHAP, but ensure must_keep are kept
+        base = [c for c in selected if (not must_keep or c not in must_keep)]
+        head = base[: max_keep - (len(must_keep or []))]
+        selected = head + [c for c in (must_keep or []) if c in feat and c not in head]
+
+    summary = (
+        pd.DataFrame({
+            "avg_rank": avg_rank,
+            "presence": presence,
+            "avg_abs_shap": avg_abs_shap
+        })
+        .loc[selected]
+        .sort_values(["avg_abs_shap","presence"], ascending=[False, False])
+    )
+    return selected, summary
 
 
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
@@ -5913,10 +6026,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         sport_key = str(sport).upper()
 
         if sport_key in SMALL_LEAGUES:
-            search_estimators = 300
+            search_estimators = 200
             eps = 5e-3
         else:
-            search_estimators = 400
+            search_estimators = 300
             eps = 1e-4
         # ---------------------------------------------------------------------------
         #  CV with purge + embargo (snapshot-aware)
@@ -5966,6 +6079,50 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 # For now, raise to make the situation explicit
                 raise RuntimeError("No class-balanced CV splits available; widen data or use placeholder model.")
         folds = cv_splits
+
+        # ================== << INSERT: SHAP stability selection >> ==================
+        # Use the *original* column-named DataFrame for SHAP, not the np arrays.
+        X_train_df = pd.DataFrame(X_train, columns=feature_cols)
+        
+        # Optional domain anchors; you can set to [] if you don’t want must-keeps.
+        must_keep = [
+            "Was_Line_Resistance_Broken","SharpMove_Resistance_Break",
+            "Minutes_To_Game_Tier","Late_Game_Steam_Flag",
+            "PR_Model_Agree_H2H_Flag","PR_Market_Agree_H2H_Flag",
+            "Spread_vs_H2H_Aligned","CrossMarket_Prob_Gap_Exists"
+        ]
+        
+        selected_feats, shap_summary = shap_stability_select(
+            model_proto=XGBClassifier(
+                objective="binary:logistic",
+                tree_method="hist",
+                grow_policy="lossguide",
+                max_bin=128,
+                max_delta_step=0.5,
+                n_jobs=1,
+                random_state=42
+            ),
+            X=X_train_df,
+            y=y_train,
+            folds=folds,
+            topk_per_fold=60,
+            min_presence=0.60,
+            max_keep=80,              # optional cap; tune per league size
+            sample_per_fold=4000,
+            random_state=42,
+            #must_keep=must_keep        # or [] to disable anchors
+        )
+        
+        # Reduce training matrices to the selected columns
+        feature_cols = selected_feats
+        X_train = X_train_df[feature_cols].to_numpy(np.float32)
+        
+        # Also reduce the *full* matrix so downstream holdout/OOF slices align:
+        # Rebuild X_full from df_market to keep column order consistent
+        X_full = _to_numeric_block(df_market.loc[valid_mask, feature_cols], feature_cols).to_numpy(np.float32)
+        
+        # Re-slice aligned subsets after feature reduction
+        X_va_es = X_train[folds[-1][1]]
         # ---------------------------------------------------------------------------
         #  Estimators & safety checks
         # ---------------------------------------------------------------------------
@@ -6005,7 +6162,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # pick your n_estimators
       
-        search_trials = 25 if sport_key in SMALL_LEAGUES else 40
+        search_trials = 25 if sport_key in SMALL_LEAGUES else 25
         # build the two base estimators WITH their eval_metric
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
@@ -6054,8 +6211,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         tr_es_rel = np.asarray(tr_es_rel)
         va_es_rel = np.asarray(va_es_rel)
         
-        final_estimators_cap  = 3000
-        early_stopping_rounds = 500
+        final_estimators_cap  = 1000
+        early_stopping_rounds = 200
         
         # Build fresh models with the searched params
         model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(final_estimators_cap)})
