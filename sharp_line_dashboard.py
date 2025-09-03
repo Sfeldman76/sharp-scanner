@@ -2507,7 +2507,7 @@ def get_xgb_search_space(
     """
     s = str(sport).upper()
     spw = float(scale_pos_weight)  # <-- use the passed-in value
-
+    n_jobs = 1
     # ---------------- Base kwargs (single, consistent block) ----------------
     base_kwargs = dict(
         objective="binary:logistic",
