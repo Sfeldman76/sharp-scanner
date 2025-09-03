@@ -6201,8 +6201,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         final_estimators_cap  = 6000
         early_stopping_rounds = 3000
         # (sanity) ensure eval weights aren’t zeroed
-        w_tr_es = np.maximum(w_tr_es, 1e-6)
-        w_va_es = np.maximum(w_va_es, 1e-6)
+       
         # Build fresh models with the searched params
         model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(final_estimators_cap)})
         model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(final_estimators_cap)})
@@ -6210,12 +6209,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Slice ROWS correctly
         X_tr_es = X_train[tr_es_rel]   # ✅ not .iloc
         X_va_es = X_train[va_es_rel]
-
+       
         y_tr_es = y_train[tr_es_rel]
         y_va_es = y_train[va_es_rel]
         w_tr_es = w_train[tr_es_rel]
         w_va_es = w_train[va_es_rel]
-        
+        w_tr_es = np.maximum(w_tr_es, 1e-6)
+        w_va_es = np.maximum(w_va_es, 1e-6)
         # Fit with early stopping (pass eval_set weights via fit params)
         model_logloss.fit(
             X_tr_es, y_tr_es,
