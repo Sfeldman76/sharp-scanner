@@ -5808,9 +5808,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Finalize X_full after pruning
         X_full = df_tmp.to_numpy(dtype=np.float32)
-    
-        features = list(feature_cols)
+        features_pruned = tuple(feature_cols)   # 🔒 freeze pruned column names
         st.write(f"✅ Final feature count after pruning: {len(feature_cols)}")
+     
         # ---- Groups & times (snapshot-aware) ----
         groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
         
@@ -5983,23 +5983,61 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---------------------------------------------------------------------------
         spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
+       
+
+        # ================== << INSERT: SHAP stability selection >> ==================
+        # Use the *original* column-named DataFrame for SHAP, not the np arrays.
+        X_train_df = pd.DataFrame(X_train, columns=list(features_pruned))
+
+        selected_feats, shap_summary = shap_stability_select(
+            model_proto=XGBClassifier(
+                objective="binary:logistic",
+                tree_method="hist",
+                grow_policy="lossguide",
+                max_bin=128,
+                max_delta_step=0.5,
+                n_jobs=1,
+                random_state=42
+            ),
+            X=X_train_df,
+            y=y_train,
+            folds=folds,
+            topk_per_fold=60,
+            min_presence=0.60,
+            max_keep=80,
+            sample_per_fold=4000,
+            random_state=42,
+        )
+        
+        # 🔒 Final feature list (post-SHAP)
+        FEATURE_COLS_FINAL = tuple(selected_feats)
+        
+        # Rebuild BOTH matrices by name to ensure identical columns & order (do this ONCE)
+        X_train = pd.DataFrame(X_train, columns=list(features_pruned)) \
+                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
+        X_full  = pd.DataFrame(X_full,  columns=list(features_pruned)) \
+                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
+        
+        # Use this everywhere below (search space, logs, etc.)
+        features = list(FEATURE_COLS_FINAL)
+        
+        # Now compute spw & search space (AFTER setting `features`)
+        spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],
             n_jobs=1,
             scale_pos_weight=spw,
-            features=features,
+            features=features,  # ✅ SHAP-final list
         )
-        # stronger defaults for high‑dimensional feature sets
         base_kwargs.update({
-            "sampling_method": "uniform",   # keep CPU-safe setting
+            "sampling_method": "uniform",
             "max_bin": 128,
             "grow_policy": "lossguide",
             "predictor": "cpu_predictor",
             "random_state": 42,
             "scale_pos_weight": float(spw),
         })
-# 
         sport_key = str(sport).upper()
 
         if sport_key in SMALL_LEAGUES:
@@ -6057,42 +6095,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 raise RuntimeError("No class-balanced CV splits available; widen data or use placeholder model.")
         folds = cv_splits
 
-        # ================== << INSERT: SHAP stability selection >> ==================
-        # Use the *original* column-named DataFrame for SHAP, not the np arrays.
-        X_train_df = pd.DataFrame(X_train, columns=feature_cols)
         
-        # Optional domain anchors; you can set to [] if you don’t want must-keeps.
-        must_keep = [
-            "Was_Line_Resistance_Broken","SharpMove_Resistance_Break",
-            "Minutes_To_Game_Tier","Late_Game_Steam_Flag",
-            "PR_Model_Agree_H2H_Flag","PR_Market_Agree_H2H_Flag",
-            "Spread_vs_H2H_Aligned","CrossMarket_Prob_Gap_Exists"
-        ]
+        # Rebuild BOTH matrices by name to ensure identical columns & order
+        X_train = pd.DataFrame(X_train, columns=list(features_pruned)) \
+                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
+        X_full  = pd.DataFrame(X_full,  columns=list(features_pruned)) \
+                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
         
-        selected_feats, shap_summary = shap_stability_select(
-            model_proto=XGBClassifier(
-                objective="binary:logistic",
-                tree_method="hist",
-                grow_policy="lossguide",
-                max_bin=128,
-                max_delta_step=0.5,
-                n_jobs=1,
-                random_state=42
-            ),
-            X=X_train_df,
-            y=y_train,
-            folds=folds,
-            topk_per_fold=60,
-            min_presence=0.60,
-            max_keep=80,              # optional cap; tune per league size
-            sample_per_fold=4000,
-            random_state=42,
-            #must_keep=must_keep        # or [] to disable anchors
-        )
-        
-        # Reduce training matrices to the selected columns
-        feature_cols = selected_feats
-        X_train = X_train_df[feature_cols].to_numpy(np.float32)
+        # Use this everywhere below (search space, logs, etc.)
+        features = list(FEATURE_COLS_FINAL)
+                
+    
+ 
         
         # Also reduce the *full* matrix so downstream holdout/OOF slices align:
         
