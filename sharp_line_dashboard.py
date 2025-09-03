@@ -6176,10 +6176,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
         params_auc.update(params_ll)
 
-        search_trials = 25 if sport_key in SMALL_LEAGUES else 25
+        search_trials = 25 if sport_key in SMALL_LEAGUES else 40
         # build the two base estimators WITH their eval_metric
-        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
-        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
+        #est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
+        #est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
         fit_params = dict(
             sample_weight=w_train,
             eval_set=[(X_train, y_train)],
@@ -6226,8 +6226,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         tr_es_rel = np.asarray(tr_es_rel)
         va_es_rel = np.asarray(va_es_rel)
         
-        final_estimators_cap  = 1000
-        early_stopping_rounds = 200
+        final_estimators_cap  = 3000
+        early_stopping_rounds = 1000
         
         # Build fresh models with the searched params
         model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(final_estimators_cap)})
