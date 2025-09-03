@@ -6117,7 +6117,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # League-sized defaults
     
         sport_key = str(sport).upper()
-        search_estimators = 300 if sport_key in SMALL_LEAGUES else 400
+        search_estimators = 350 if sport_key in SMALL_LEAGUES else 450
         eps = 5e-3 if sport_key in SMALL_LEAGUES else 1e-4
         
         # Base estimators for the search (NO early stopping here)
@@ -6142,17 +6142,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # pick your n_estimators
         # Example overrides (keep your distributions if they already cover these)
-        params_ll.update({
-            "min_child_weight": [0.5, 1, 2, 4],
-            "gamma": [0, 0.1, 0.2, 0.5],
-            "subsample": [0.7, 0.8, 0.9, 1.0],
-            "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
-            "max_leaves": [32, 64, 128, 256],
-            "reg_lambda": [0.5, 1.0, 2.0, 5.0],
-            "reg_alpha": [0.0, 0.1, 0.5],
+        base_kwargs.update({
+            "max_delta_step": 1.0,     # stabilizes gradients on imbalanced folds
         })
-        params_auc.update(params_ll)
-
+        
+        # Search space (works for both LL and AUC paths)
+        params_common = {
+            "min_child_weight": [0.0, 0.5, 1, 2, 4],    # let small leaves form
+            "gamma": [0, 0.1, 0.2],                     # keep splits cheap initially
+            "subsample": [0.8, 0.9, 1.0],
+            "colsample_bytree": [0.8, 0.9, 1.0],
+            "max_leaves": [128, 256, 512],              # more capacity than 32/64
+            "reg_lambda": [0.1, 0.5, 1.0, 2.0, 5.0],    # avoid over-penalizing
+            "reg_alpha": [0.0, 0.1, 0.5, 1.0],
+            "learning_rate": [0.03, 0.05, 0.1],         # give search a chance to move
+        }
+        
+        params_ll.update(params_common)
+        params_auc.update(params_common)
+        
+        # keep ES **off** during RandomizedSearchCV; set eval_metric on estimators only
+        search_estimators = 350  # ~300–500 is a good range for search
+        
         search_trials = 25 if sport_key in SMALL_LEAGUES else 40
         # build the two base estimators WITH their eval_metric
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
