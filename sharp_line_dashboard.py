@@ -6279,8 +6279,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         n_trees_ll  = _best_rounds(model_logloss)
         n_trees_auc = _best_rounds(model_auc)
-
-  
+        def _num_trees(clf):
+            bi = getattr(clf, "best_iteration", None)
+            return int(bi + 1) if (bi is not None and bi >= 0) else int(getattr(clf, "n_estimators", 0))
+        
+        st.write({
+            "ES_n_trees_ll": _num_trees(model_logloss),
+            "ES_n_trees_auc": _num_trees(model_auc),
+            "val_logloss_last10": model_logloss.evals_result_["validation_0"]["logloss"][-10:],
+            "val_auc_last10":     model_auc.evals_result_["validation_0"]["auc"][-10:],
+        })
+          
+        
         
         # ---------------------------------------------------------------------------
         #  OOF predictions (train-only) with per-fold refits + weights
