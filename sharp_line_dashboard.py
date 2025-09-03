@@ -6006,14 +6006,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             
             # base multiplier from sharp tilt
             mult = 1.0 + ALPHA_SHARP * is_sharp
-            
-            # optional tiny boost for high-limit rows (remove this block if not desired)
-            if "High_Limit_Flag" in train_df.columns:
-                high_limit = train_df["High_Limit_Flag"].fillna(False).astype(bool).astype(np.float32).to_numpy()
-                mult = mult + 0.10 * high_limit  # adjust or delete
-            
+          
             # final weights
-            w_train = pd.Series(w_base, index=train_df.index).astype(np.float32).to_numpy() * mult.astype(np.float32)
+            w_train = pd.Series(w_base, index=train_df.index).astype(np.float32).to_numpy()
         
             s = w_train.sum()
             if s > 0:
@@ -6126,16 +6121,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # sanity checks (fail fast if anything drifted)
         assert X_train.shape[1] == len(feature_cols), f"X_train={X_train.shape[1]} vs feature_cols={len(feature_cols)}"
         assert X_full.shape[1]  == len(feature_cols),  f"X_full={X_full.shape[1]}  vs feature_cols={len(feature_cols)}"
-
+        
         # Now compute spw & search space (AFTER setting `features`)
-        spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
+        
+        # build or update base_kwargs only 
+        pos_rate = float(np.mean(y_train))
+
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],
             n_jobs=1,
-            scale_pos_weight=spw,
-            features=features,  # ✅ SHAP-final list
+            scale_pos_weight=1.0,   # 👈 neutralize class weighting
+            features=features,
         )
+        
+        # make sure nothing reintroduces it
+        base_kwargs["scale_pos_weight"] = 1.0
+        params_ll.pop("scale_pos_weight", None)
+        params_auc.pop("scale_pos_weight", None)
+        
+        # set a better prior so trees move off 0.5 faster
+        base_kwargs["base_score"] = pos_rate
  
         base_kwargs = {
             **base_kwargs,
@@ -6182,58 +6188,51 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # pick your n_estimators
         # Example overrides (keep your distributions if they already cover these)
-        base_kwargs.update({
-            "max_delta_step": 1.0,     # stabilizes gradients on imbalanced folds
-        })
+        
+        # ---- IMPORTANT: neutralize class weight; you already use sample_weight ----
+        base_kwargs["scale_pos_weight"] = 1.0
+        params_ll.pop("scale_pos_weight", None)
+        params_auc.pop("scale_pos_weight", None)
+        
+        # ---- Encourage capacity/diversity + better prior ----
         base_kwargs.update({
             "tree_method": "hist",
             "grow_policy": "lossguide",
             "predictor": "cpu_predictor",
             "random_state": 42,
+            "sampling_method": "uniform",
         
-            # capacity / exploration
-            "max_bin": 256,
-            "min_child_weight": 0.5,    # was 1.0
-            "gamma": 0.0,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "learning_rate": 0.05,
-            "max_leaves": 512,          # was 64/128/256 — give it room
-            "reg_lambda": 0.5,          # soften L2
-            "reg_alpha": 0.0,           # keep L1 off initially
+            "base_score": pos_rate,   # ← move the start away from 0.5 if class prior ≠ 0.5
+        
+            # split capacity & diversity
+            "learning_rate": 0.03,    # smaller eta → more trees → more spread
+            "max_leaves": 512,        # more capacity (try 256–1024 if fast enough)
+            "max_depth": 12,          # depth cap so leaves aren’t tiny
+            "min_child_weight": 0.1,  # easier to split than 0.5/1.0
+            "gamma": 0.0,             # keep splits cheap initially
+            "subsample": 0.7,         # more tree diversity
+            "colsample_bytree": 0.7,
+            "colsample_bynode": 0.8,
+        
+            "max_bin": 256,           # 256 is a good default for CPU speed/quality
+            "max_delta_step": 0.0
         })
 
-        # Search space (works for both LL and AUC paths)
+
         params_common = {
-            "min_child_weight": [0.0, 0.5, 1, 2, 4],    # let small leaves form
-            "gamma": [0, 0.1, 0.2],                     # keep splits cheap initially
-            "subsample": [0.8, 0.9, 1.0],
-            "colsample_bytree": [0.8, 0.9, 1.0],
-            "max_leaves": [256, 512],              # more capacity than 32/64
-            "reg_lambda": [0.1, 0.5, 1.0, 2.0, 5.0],    # avoid over-penalizing
-            "reg_alpha": [0.0, 0.1, 0.5, 1.0],
-            "learning_rate": [0.03, 0.05, 0.1],         # give search a chance to move
+            "min_child_weight": [0.0, 0.1, 0.5, 1, 2],
+            "gamma": [0, 0.01, 0.05, 0.1],
+            "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
+            "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
+            "colsample_bynode": [0.8, 1.0],
+            "max_leaves": [256, 512, 1024],
+            "max_depth": [8, 10, 12],             # depthwise guard
+            "reg_lambda": [0.1, 0.5, 1.0, 2.0],   # lighter L2
+            "reg_alpha": [0.0, 0.1, 0.5],         # mild L1
+            "learning_rate": [0.03, 0.05, 0.08],
         }
-        
         params_ll.update(params_common)
         params_auc.update(params_common)
-        wider_grid = {
-            "min_child_weight": [0.1, 0.5, 1, 2],
-            "gamma": [0, 0.01, 0.05, 0.1],
-            "subsample": [0.6, 0.8, 1.0],
-            "colsample_bytree": [0.6, 0.8, 1.0],
-            "colsample_bylevel": [0.6, 0.8, 1.0],
-            "colsample_bynode": [0.6, 0.8, 1.0],
-            "max_leaves": [256, 512, 1024],
-            "max_bin": [128, 256],
-            "learning_rate": [0.03, 0.05, 0.08],
-            "reg_lambda": [0, 0.5, 1.0],
-            "reg_alpha": [0.0, 0.1],
-        }
-        params_auc.update(wider_grid)
-        # If you’re keeping the logloss stream:
-        params_ll.update(wider_grid)
-
         
         # keep ES **off** during RandomizedSearchCV; set eval_metric on estimators only
         search_estimators = 500  # ~300–500 is a good range for search
@@ -6468,9 +6467,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
 
         # Calibrate (keep your existing calibrator stack)
-        CLIP = 0.01 if sport_key not in SMALL_LEAGUES else 0.01
-        use_quantile_iso = (sport_key not in SMALL_LEAGUES)
+        CLIP = 0.005 if sport_key not in SMALL_LEAGUES else 0.01
+        use_quantile_iso = False
         cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        
         cals = _normalize_cals(cals_raw)
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso"))
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=eps)
