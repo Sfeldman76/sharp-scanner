@@ -6154,8 +6154,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "subsample": 0.9,
             "colsample_bytree": 0.9,
         }
-        # League-sized defaults
-        base_kwargs.update({
+       
            
         sport_key = str(sport).upper()
         search_estimators = 350 if sport_key in SMALL_LEAGUES else 450
