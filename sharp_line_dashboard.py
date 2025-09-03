@@ -6057,7 +6057,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # 🔒 Final feature list (post-SHAP)
         FEATURE_COLS_FINAL = tuple(selected_feats)
-        
+        feature_cols = list(FEATURE_COLS_FINAL)
+        features     = feature_cols  # if you use `features` later
+
+
+       
         # UI: how many SHAP removed
         n_before = len(features_pruned); n_after = len(FEATURE_COLS_FINAL); removed = n_before - n_after
         st.success(f"🧠 SHAP selection kept {n_after} / {n_before} features (−{removed} removed).")
@@ -6073,9 +6077,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                      .loc[:, list(FEATURE_COLS_FINAL)]
                      .to_numpy(np.float32))
         
-        # Use this everywhere below (search space, logs, etc.)
-        features = list(FEATURE_COLS_FINAL)
+   
         
+        # 👉 keep downstream code happy by syncing the legacy var
+        feature_cols = list(FEATURE_COLS_FINAL)
+        features     = feature_cols  # if you pass `features` elsewhere
+        
+        # sanity checks (fail fast if anything drifted)
+        assert X_train.shape[1] == len(feature_cols), f"X_train={X_train.shape[1]} vs feature_cols={len(feature_cols)}"
+        assert X_full.shape[1]  == len(feature_cols),  f"X_full={X_full.shape[1]}  vs feature_cols={len(feature_cols)}"
+
         # Now compute spw & search space (AFTER setting `features`)
         spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
@@ -6809,7 +6820,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # safety check (optional but nice)
        
-        assert X_full.shape[1] == len(feature_cols), "Feature width drifted"
+
         _bake_feature_names_in_(model_logloss, feature_cols)
         _bake_feature_names_in_(model_auc, feature_cols)
        
