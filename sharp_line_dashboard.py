@@ -86,7 +86,7 @@ from sklearn.calibration import CalibratedClassifierCV
 import requests
 import pytz
 from pytz import timezone as pytz_timezone
-
+from sklearn.feature_selection import VarianceThreshold
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -2559,31 +2559,32 @@ def get_xgb_search_space(
         }
     else:
         # Big leagues — more capacity & diversity
+        # LogLoss-oriented (probability quality)
         params_ll = {
-            "max_depth":        randint(4, 7),              # {4,5,6}
-            "max_leaves":       randint(64, 128),           # {64..127}
-            "learning_rate":    loguniform(3e-2, 6e-2),     # 0.03–0.06
-            "subsample":        uniform(0.75, 0.20),        # 0.75–0.95
-            "colsample_bytree": uniform(0.70, 0.25),        # 0.70–0.95
-            "colsample_bynode": uniform(0.65, 0.25),        # 0.65–0.90
-            "min_child_weight": randint(3, 6),              # {3,4,5}
-            "gamma":            uniform(0.00, 0.10),        # 0.00–0.10
-            "reg_alpha":        loguniform(1e-4, 4e-1),     # 0.0001–0.4
-            "reg_lambda":       loguniform(3.0, 15.0),      # 3–15
-            "scale_pos_weight": uniform(max(0.5, 0.6*spw), max(0.6, 1.4*spw)),
+            "max_depth":        randint(3, 5),
+            "max_leaves":       randint(48, 96),
+            "learning_rate":    loguniform(0.03, 0.07),
+            "subsample":        uniform(0.80, 0.15),     # 0.80–0.95
+            "colsample_bytree": uniform(0.55, 0.25),     # 0.55–0.80
+            "colsample_bynode": uniform(0.70, 0.20),     # 0.70–0.90
+            "min_child_weight": randint(3, 8),
+            "gamma":            uniform(0.05, 0.35),
+            "reg_alpha":        loguniform(1e-3, 0.5),
+            "reg_lambda":       loguniform(3.0, 12.0),
         }
+        
+        # AUC-oriented (rank pickup) but still tamed
         params_auc = {
-            "max_depth":        randint(6, 9),              # {6,7,8}
-            "max_leaves":       randint(96, 160),           # {96..159}
-            "learning_rate":    loguniform(5e-2, 1.5e-1),   # 0.05–0.15
-            "subsample":        uniform(0.85, 0.15),        # 0.85–1.00
-            "colsample_bytree": uniform(0.85, 0.15),        # 0.85–1.00
-            "colsample_bynode": uniform(0.80, 0.20),        # 0.80–1.00
-            "min_child_weight": randint(1, 3),              # {1,2}
-            "gamma":            uniform(0.00, 0.10),        # 0.00–0.10
-            "reg_alpha":        loguniform(1e-5, 2e-1),     # 1e-5–0.2
-            "reg_lambda":       loguniform(1.0, 8.0),       # 1–8
-            "scale_pos_weight": uniform(max(0.5, 0.6*spw), max(0.6, 1.4*spw)),
+            "max_depth":        randint(4, 6),
+            "max_leaves":       randint(64, 128),
+            "learning_rate":    loguniform(0.04, 0.10),
+            "subsample":        uniform(0.80, 0.18),     # 0.80–0.98
+            "colsample_bytree": uniform(0.60, 0.25),     # 0.60–0.85
+            "colsample_bynode": uniform(0.70, 0.20),
+            "min_child_weight": randint(2, 6),
+            "gamma":            uniform(0.03, 0.25),
+            "reg_alpha":        loguniform(1e-4, 0.3),
+            "reg_lambda":       loguniform(2.0, 8.0),
         }
 
     # -------------- scrub params (defensive) --------------
@@ -5713,8 +5714,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # If it returns pandas Index, cast to numpy:
         #train_all_idx = np.asarray(train_all_idx)
         #hold_idx      = np.asarray(hold_idx)
+        # ---- Cheap feature pruning before modeling ----
+        # (1) Drop near-constant columns
         
-               # --- (8) TRAIN subsets (aligned) ---
+        
+       # ---- Cheap feature pruning before modeling ----
+        from sklearn.feature_selection import VarianceThreshold
+        
+        # (1) Drop near-constant features
+        vt = VarianceThreshold(threshold=1e-5)
+        X_full = vt.fit_transform(X_full)
+        
+        # Rebuild feature list after pruning
+        if hasattr(vt, "get_support"):
+            feature_cols = [col for col, keep in zip(feature_cols, vt.get_support()) if keep]
+        else:
+            feature_cols = feature_cols[:X_full.shape[1]]
+        
+        st.write(f"🧹 Pruned to {len(feature_cols)} features after variance thresholding.")
+        
+        # (2) Drop exact duplicate features (very rare but good hygiene)
+       
+        
+        df_tmp = pd.DataFrame(X_full, columns=feature_cols)
+        _, unique_idx = np.unique(df_tmp.T, axis=0, return_index=True)
+        X_full = df_tmp.iloc[:, sorted(unique_idx)].to_numpy()
+        feature_cols = list(df_tmp.columns[sorted(unique_idx)])
+        
+        st.write(f"🧹 Removed duplicate features; final feature count: {len(feature_cols)}")
+                       # --- (8) TRAIN subsets (aligned) ---
         X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
@@ -5727,7 +5755,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
         #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
 
-
+        # ---- 5) Simple health checks (Streamlit friendly) ----
+        st.markdown("### 🩺 Data Health Checks")
+        
+        # 1. Class balance
+        pos_rate = float(np.mean(y_train))
+        st.write(f"✅ Class balance — Positives: `{pos_rate:.3f}` ({int(pos_rate * 100)}%)")
+        
+        # 2. Shape check
+        st.write(f"🔢 Train shape: {X_train.shape[0]} rows × {X_train.shape[1]} features")
+        
+        # 3. NaN check
+        has_nan = np.isnan(X_train).any()
+        if has_nan:
+            st.error("❌ NaNs found in X_train")
+        else:
+            st.success("✅ No NaNs in X_train")
+        
+        # 4. Constant columns (optional redundancy check)
+        n_const = (np.std(X_train, axis=0) < 1e-6).sum()
+        if n_const > 0:
+            st.warning(f"⚠️ {n_const} features are near-constant in X_train")
+        
+        # 5. Class diversity in holdout (if known)
+        if 'y_hold_vec' in locals():
+            n_pos = (y_hold_vec == 1).sum()
+            n_neg = (y_hold_vec == 0).sum()
+            st.write(f"📊 Holdout — Pos: {n_pos}, Neg: {n_neg}")
+            
         bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
             "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
         )
@@ -5805,7 +5860,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             scale_pos_weight=spw,
             features=features,
         )
-                
+        # stronger defaults for high‑dimensional feature sets
+        base_kwargs.update({
+            "sampling_method":   "uniform",  # CPU hist
+            "subsample":         0.85,       # row bagging
+            "colsample_bytree":  0.65,       # column bagging per tree (key when many cols)
+            "colsample_bynode":  0.80,       # lighter per‑split bagging
+            "max_depth":         4,          # shallower trees
+            "max_leaves":        64,         # cap complexity with lossguide
+            "min_child_weight":  3,          # need more rows in a leaf
+            "gamma":             0.10,       # require some gain to split
+            "reg_alpha":         0.10,       # L1 → sparsity (drops weak splits)
+            "reg_lambda":        6.00,       # moderate L2
+        })       
         sport_key = str(sport).upper()
 
         if sport_key in SMALL_LEAGUES:
@@ -5898,6 +5965,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  Randomized searches (use filtered cv_splits)
         # ---------------------------------------------------------------------------
+        fit_params = dict(
+            sample_weight=w_train,
+            eval_set=[(X_train, y_train)],
+            eval_metric="logloss",
+            early_stopping_rounds=40,
+            verbose=False,
+        )
+        
+        # --------
         rs_ll = RandomizedSearchCV(
             estimator=search_base_ll,
             param_distributions=params_ll,
@@ -5910,8 +5986,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             error_score=np.nan,           # ← don’t crash on occasional bad candidates
         )
-        rs_ll.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
+       
         
+        rs_ll.fit(X_train, y_train, groups=g_train, **fit_params)
+
         rs_auc = RandomizedSearchCV(
             estimator=search_base_auc,
             param_distributions=params_auc,
@@ -5924,7 +6002,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=1,
             error_score=np.nan,
         )
-        rs_auc.fit(X_train, y_train, groups=g_train, sample_weight=w_train)
+        rs_auc.fit(X_train, y_train, groups=g_train, **fit_params)
         
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
