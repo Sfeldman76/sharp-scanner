@@ -6096,32 +6096,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             scale_pos_weight=spw,
             features=features,  # ✅ SHAP-final list
         )
-        base_kwargs.update({
-            "sampling_method": "uniform",
-            "max_bin": 128,
-            "grow_policy": "lossguide",
-            "predictor": "cpu_predictor",
-            "random_state": 42,
-            "scale_pos_weight": float(spw),
-        })
-        base_kwargs.update({
+ 
+        base_kwargs = {
+            **base_kwargs,
             "tree_method": "hist",
             "grow_policy": "lossguide",
-            "max_bin": 128,
+            "max_bin": 256,
             "predictor": "cpu_predictor",
             "random_state": 42,
             "scale_pos_weight": float(spw),
+            "sampling_method": "uniform",
         
-            # 👉 encourage splitting & diversity
-            "min_child_weight": 1.0,
-            "gamma": 0.0,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            "learning_rate": 0.05,
-            # If you use lossguide, consider bounding leaves:
-            "max_leaves": 64,   # (or try 128)
-        })
-
+            # Encourage splitting & add capacity (works with lossguide)
+            "learning_rate": 0.03,     # smaller LR → more rounds before ES
+            "max_leaves": 256,         # more capacity (try 128–512 if needed)
+            "min_child_weight": 0.5,   # easier to split
+            "subsample": 0.9,
+            "colsample_bytree": 0.9,
+        }
         # League-sized defaults
     
         sport_key = str(sport).upper()
@@ -6206,9 +6198,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         tr_es_rel = np.asarray(tr_es_rel)
         va_es_rel = np.asarray(va_es_rel)
         
-        final_estimators_cap  = 3000
-        early_stopping_rounds = 1000
-        
+        final_estimators_cap  = 6000
+        early_stopping_rounds = 3000
+        # (sanity) ensure eval weights aren’t zeroed
+        w_tr_es = np.maximum(w_tr_es, 1e-6)
+        w_va_es = np.maximum(w_va_es, 1e-6)
         # Build fresh models with the searched params
         model_logloss = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(final_estimators_cap)})
         model_auc     = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(final_estimators_cap)})
