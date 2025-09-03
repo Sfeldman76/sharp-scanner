@@ -5982,72 +5982,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert len(w_train) == len(X_train), f"sample_weight misaligned: {len(w_train)} vs {len(X_train)}"
         
         # ---------------------------------------------------------------------------
-        spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
-       
-
-        # ================== << INSERT: SHAP stability selection >> ==================
-        # Use the *original* column-named DataFrame for SHAP, not the np arrays.
-        X_train_df = pd.DataFrame(X_train, columns=list(features_pruned))
-
-        selected_feats, shap_summary = shap_stability_select(
-            model_proto=XGBClassifier(
-                objective="binary:logistic",
-                tree_method="hist",
-                grow_policy="lossguide",
-                max_bin=128,
-                max_delta_step=0.5,
-                n_jobs=1,
-                random_state=42
-            ),
-            X=X_train_df,
-            y=y_train,
-            folds=folds,
-            topk_per_fold=60,
-            min_presence=0.60,
-            max_keep=80,
-            sample_per_fold=4000,
-            random_state=42,
-        )
-        
-        # 🔒 Final feature list (post-SHAP)
-        FEATURE_COLS_FINAL = tuple(selected_feats)
-        
-        # Rebuild BOTH matrices by name to ensure identical columns & order (do this ONCE)
-        X_train = pd.DataFrame(X_train, columns=list(features_pruned)) \
-                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
-        X_full  = pd.DataFrame(X_full,  columns=list(features_pruned)) \
-                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
-        
-        # Use this everywhere below (search space, logs, etc.)
-        features = list(FEATURE_COLS_FINAL)
-        
-        # Now compute spw & search space (AFTER setting `features`)
-        spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
-        base_kwargs, params_ll, params_auc = get_xgb_search_space(
-            sport=sport,
-            X_rows=X_train.shape[0],
-            n_jobs=1,
-            scale_pos_weight=spw,
-            features=features,  # ✅ SHAP-final list
-        )
-        base_kwargs.update({
-            "sampling_method": "uniform",
-            "max_bin": 128,
-            "grow_policy": "lossguide",
-            "predictor": "cpu_predictor",
-            "random_state": 42,
-            "scale_pos_weight": float(spw),
-        })
-        sport_key = str(sport).upper()
-
-        if sport_key in SMALL_LEAGUES:
-            search_estimators = 200
-            eps = 5e-3
-        else:
-            search_estimators = 300
-            eps = 1e-4
-        # ---------------------------------------------------------------------------
-        #  CV with purge + embargo (snapshot-aware)
+      
+          #  CV with purge + embargo (snapshot-aware)
         # ---------------------------------------------------------------------------
         rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
         target_games  = 8 if sport_key in SMALL_LEAGUES else 20
@@ -6095,40 +6031,88 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 raise RuntimeError("No class-balanced CV splits available; widen data or use placeholder model.")
         folds = cv_splits
 
+        # ================== << SHAP stability selection >> ==================
+        # Use the PRUNED names to build a columned DF for SHAP
+        X_train_df = pd.DataFrame(X_train, columns=list(features_pruned))
         
-        # Rebuild BOTH matrices by name to ensure identical columns & order
-        X_train = pd.DataFrame(X_train, columns=list(features_pruned)) \
-                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
-        X_full  = pd.DataFrame(X_full,  columns=list(features_pruned)) \
-                    .loc[:, list(FEATURE_COLS_FINAL)].to_numpy(np.float32)
+        selected_feats, shap_summary = shap_stability_select(
+            model_proto=XGBClassifier(
+                objective="binary:logistic",
+                tree_method="hist",
+                grow_policy="lossguide",
+                max_bin=128,
+                max_delta_step=0.5,
+                n_jobs=1,
+                random_state=42
+            ),
+            X=X_train_df,
+            y=y_train,
+            folds=folds,                # reuse the CV folds built earlier (rows unchanged)
+            topk_per_fold=60,
+            min_presence=0.60,
+            max_keep=80,
+            sample_per_fold=4000,
+            random_state=42,
+        )
+        
+        # 🔒 Final feature list (post-SHAP)
+        FEATURE_COLS_FINAL = tuple(selected_feats)
+        
+        # UI: how many SHAP removed
+        n_before = len(features_pruned); n_after = len(FEATURE_COLS_FINAL); removed = n_before - n_after
+        st.success(f"🧠 SHAP selection kept {n_after} / {n_before} features (−{removed} removed).")
+        if removed > 0:
+            dropped = [c for c in features_pruned if c not in FEATURE_COLS_FINAL]
+            st.caption("Dropped (sample): " + ", ".join(dropped[:20]) + (" ..." if removed > 20 else ""))
+        
+        # Rebuild BOTH matrices by name to ensure identical columns & order (do this ONCE)
+        X_train = (pd.DataFrame(X_train, columns=list(features_pruned))
+                     .loc[:, list(FEATURE_COLS_FINAL)]
+                     .to_numpy(np.float32))
+        X_full  = (pd.DataFrame(X_full,  columns=list(features_pruned))
+                     .loc[:, list(FEATURE_COLS_FINAL)]
+                     .to_numpy(np.float32))
         
         # Use this everywhere below (search space, logs, etc.)
         features = list(FEATURE_COLS_FINAL)
-                
-    
- 
         
-        # Also reduce the *full* matrix so downstream holdout/OOF slices align:
+        # Now compute spw & search space (AFTER setting `features`)
+        spw = (y_train == 0).sum() / max(1, (y_train == 1).sum())
+        base_kwargs, params_ll, params_auc = get_xgb_search_space(
+            sport=sport,
+            X_rows=X_train.shape[0],
+            n_jobs=1,
+            scale_pos_weight=spw,
+            features=features,  # ✅ SHAP-final list
+        )
+        base_kwargs.update({
+            "sampling_method": "uniform",
+            "max_bin": 128,
+            "grow_policy": "lossguide",
+            "predictor": "cpu_predictor",
+            "random_state": 42,
+            "scale_pos_weight": float(spw),
+        })
         
-        # Re-slice aligned subsets after feature reduction
-        X_va_es = X_train[folds[-1][1]]
-        # ---------------------------------------------------------------------------
+        # League-sized defaults
+        sport_key = str(sport).upper()
+        if sport_key in SMALL_LEAGUES:
+            search_estimators = 200
+            eps = 5e-3
+        else:
+            search_estimators = 300
+            eps = 1e-4
+        
+        # -------------------------------------------------------------------
         #  Estimators & safety checks
-        # ---------------------------------------------------------------------------
+        # -------------------------------------------------------------------
         search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
         search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
-
-
+        
         def _assert_classifier(est, name: str):
-            """
-            Be strict but robust: rely on the tag and the presence of predict_proba.
-            Avoid any shadowed is_classifier surprises.
-            """
-            est_type   = getattr(est, "_estimator_type", None)
-            has_proba  = callable(getattr(est, "predict_proba", None))
-            ok = (est_type == "classifier") and has_proba
-            if not ok:
-                # Avoid crashing on repr(); print minimal, safe debug info
+            est_type  = getattr(est, "_estimator_type", None)
+            has_proba = callable(getattr(est, "predict_proba", None))
+            if not ((est_type == "classifier") and has_proba):
                 cls = type(est)
                 try:
                     xgbp = est.get_xgb_params()
@@ -6139,11 +6123,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     f"type={cls}\n"
                     f"_estimator_type={est_type}\n"
                     f"has_predict_proba={has_proba}\n"
-                    f"sk_is_classifier={sk_is_classifier(est)}\n"
                     f"params={xgbp}"
                 )
+        
         _assert_classifier(search_base_ll,  "search_base_ll")
         _assert_classifier(search_base_auc, "search_base_auc")
+        # ================== << end SHAP block >> ==================
+
         
         # ---------------------------------------------------------------------------
         #  Randomized searches (use filtered cv_splits)
