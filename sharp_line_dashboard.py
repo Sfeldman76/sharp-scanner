@@ -2513,7 +2513,7 @@ def get_xgb_search_space(
         tree_method="hist",
         predictor="cpu_predictor",
         grow_policy="lossguide",
-        max_bin=384,
+        max_bin=192,
         max_delta_step=0.5,
         sampling_method="uniform",
         reg_lambda=3.0,
@@ -2564,8 +2564,8 @@ def get_xgb_search_space(
             "max_depth":        randint(3, 5),
             "max_leaves":       randint(48, 96),
             "learning_rate":    loguniform(0.03, 0.07),
-            "subsample":        uniform(0.80, 0.15),     # 0.80–0.95
-            "colsample_bytree": uniform(0.55, 0.25),     # 0.55–0.80
+            "subsample":        uniform(0.70, 0.20),     # 0.80–0.95
+            "colsample_bytree": uniform(0.65, 0.20),     # 0.55–0.80
             "colsample_bynode": uniform(0.70, 0.20),     # 0.70–0.90
             "min_child_weight": randint(3, 8),
             "gamma":            uniform(0.05, 0.35),
@@ -2578,8 +2578,8 @@ def get_xgb_search_space(
             "max_depth":        randint(4, 6),
             "max_leaves":       randint(64, 128),
             "learning_rate":    loguniform(0.04, 0.10),
-            "subsample":        uniform(0.80, 0.18),     # 0.80–0.98
-            "colsample_bytree": uniform(0.60, 0.25),     # 0.60–0.85
+            "subsample":        uniform(0.75, 0.20),     # 0.80–0.98
+            "colsample_bytree": uniform(0.70, 0.20),     # 0.60–0.85
             "colsample_bynode": uniform(0.70, 0.20),
             "min_child_weight": randint(2, 6),
             "gamma":            uniform(0.03, 0.25),
@@ -5902,7 +5902,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # stronger defaults for high‑dimensional feature sets
         base_kwargs.update({
             "sampling_method": "uniform",   # keep CPU-safe setting
-            "max_bin": 384,
+            "max_bin": 192,
             "grow_policy": "lossguide",
             "predictor": "cpu_predictor",
             "random_state": 42,
@@ -6003,8 +6003,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         
         # pick your n_estimators
-        search_estimators = 300 if sport_key in SMALL_LEAGUES else 400
-        search_trials = 25 if sport_key in SMALL_LEAGUES else 50
+      
+        search_trials = 25 if sport_key in SMALL_LEAGUES else 40
         # build the two base estimators WITH their eval_metric
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
