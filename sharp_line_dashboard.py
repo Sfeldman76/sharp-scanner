@@ -6123,39 +6123,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
 
         # League-sized defaults
+    
         sport_key = str(sport).upper()
-        if sport_key in SMALL_LEAGUES:
-            search_estimators = 200
-            eps = 5e-3
-        else:
-            search_estimators = 300
-            eps = 1e-4
+        search_estimators = 300 if sport_key in SMALL_LEAGUES else 400
+        eps = 5e-3 if sport_key in SMALL_LEAGUES else 1e-4
         
-        # -------------------------------------------------------------------
-        #  Estimators & safety checks
-        # -------------------------------------------------------------------
-        search_base_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 42})
-        search_base_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "random_state": 137})
+        # Base estimators for the search (NO early stopping here)
+        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
+        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
         
         def _assert_classifier(est, name: str):
             est_type  = getattr(est, "_estimator_type", None)
             has_proba = callable(getattr(est, "predict_proba", None))
             if not ((est_type == "classifier") and has_proba):
-                cls = type(est)
-                try:
-                    xgbp = est.get_xgb_params()
-                except Exception:
-                    xgbp = {}
-                raise AssertionError(
-                    f"{name} not classifier.\n"
-                    f"type={cls}\n"
-                    f"_estimator_type={est_type}\n"
-                    f"has_predict_proba={has_proba}\n"
-                    f"params={xgbp}"
-                )
+                raise AssertionError(f"{name} not classifier; _estimator_type={est_type}, has_predict_proba={has_proba}")
         
-        _assert_classifier(search_base_ll,  "search_base_ll")
-        _assert_classifier(search_base_auc, "search_base_auc")
+        _assert_classifier(est_ll,  "est_ll")
+        _assert_classifier(est_auc, "est_auc")
+
         # ================== << end SHAP block >> ==================
 
         
@@ -6170,7 +6155,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "gamma": [0, 0.1, 0.2, 0.5],
             "subsample": [0.7, 0.8, 0.9, 1.0],
             "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
-            "max_leaves": [32, 64, 128],
+            "max_leaves": [32, 64, 128, 256],
             "reg_lambda": [0.5, 1.0, 2.0, 5.0],
             "reg_alpha": [0.0, 0.1, 0.5],
         })
@@ -6178,15 +6163,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         search_trials = 25 if sport_key in SMALL_LEAGUES else 40
         # build the two base estimators WITH their eval_metric
-        #est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
-        #est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
-        fit_params = dict(
-            sample_weight=w_train,
-            eval_set=[(X_train, y_train)],
-            early_stopping_rounds=40,
-            verbose=False,
-        )
-        
+        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
+        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
+
+      
         rs_ll = RandomizedSearchCV(
             estimator=est_ll,
             param_distributions=params_ll,
@@ -6212,7 +6192,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
         rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
-       
+
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
