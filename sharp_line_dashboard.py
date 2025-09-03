@@ -1701,6 +1701,27 @@ def shap_stability_select(
     return selected, summary
 
 
+def _to_float_1d(x):
+    
+    if isinstance(x, (pd.Series, pd.DataFrame)):
+        x = x.values
+    x = np.asarray(x).astype(np.float64)
+    return x.ravel()
+
+def _clean_probs(y, *probs, eps=1e-6):
+    """Cast to float64, drop non-finite entries across all arrays, then clip."""
+   
+    arrs = [ _to_float_1d(y) ] + [ _to_float_1d(p) for p in probs ]
+    mask = np.isfinite(arrs[0])
+    for a in arrs[1:]:
+        mask &= np.isfinite(a)
+    cleaned = [ a[mask] for a in arrs ]
+    # clip probs (skip y at index 0)
+    for i in range(1, len(cleaned)):
+        cleaned[i] = np.clip(cleaned[i], eps, 1 - eps)
+    return cleaned, mask  # ([y, p1, p2, ...], keep_mask)
+
+
 # --- Active feature resolver (kept from your snippet; safe if already defined) ---
 def _resolve_active_features(bundle, model, df_like):
     cand = None
@@ -2720,44 +2741,52 @@ def get_xgb_search_space(
 
 
 
-def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, *, 
-                             metric="auc", grid=None, eps=1e-4):
-    """
-    Returns: best_w, iso_blend (fitted on best blended OOF), p_oof_blend (best)
-    metric ∈ {"auc","logloss","hybrid"}.
-      - "auc": maximize AUC
-      - "logloss": minimize logloss
-      - "hybrid": maximize (AUC - normalized logloss)
-    """
-    y_oof = np.asarray(y_oof).astype(int)
-    p_oof_log = np.clip(np.asarray(p_oof_log, float), eps, 1-eps)
-    p_oof_auc = np.clip(np.asarray(p_oof_auc, float), eps, 1-eps)
+def pick_blend_weight_on_oof(
+    y_oof, p_oof_auc, p_oof_log=None, grid=None, eps=1e-4,
+    metric="logloss", hybrid_alpha=0.9
+):
+    import numpy as np
+    from sklearn.metrics import log_loss
+
+    # --- AUC-only path ---
+    if p_oof_log is None:
+        (y, b), _ = _clean_probs(y_oof, p_oof_auc, eps=eps)
+        # polarity lock
+        auc_raw, ok = _auc_safe(y, b)
+        auc_flip, _ = _auc_safe(y, 1.0 - b)
+        flipped = ok and (np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw))
+        if flipped:
+            b = 1.0 - b
+        return 0.0, b, flipped
+
+    # --- Two-model path ---
+    (y, a, b), _ = _clean_probs(y_oof, p_oof_log, p_oof_auc, eps=eps)
+
+    # polarity lock on mean stream
+    mix = 0.5 * (a + b)
+    auc_raw, ok = _auc_safe(y, mix)
+    auc_flip, _ = _auc_safe(y, 1.0 - mix)
+    flipped = ok and (np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw))
+    if flipped:
+        a, b = 1.0 - a, 1.0 - b
+
     if grid is None:
-        grid = np.linspace(0.20, 0.80, 13)  # 0.20..0.80 step 0.05
+        grid = np.round(np.linspace(0.20, 0.80, 13), 2)
 
-    def score_vec(p):
-        if metric == "auc":
-            return roc_auc_score(y_oof, p)
-        elif metric == "logloss":
-            return -log_loss(y_oof, p, labels=[0,1])  # higher is better
-        elif metric == "hybrid":
-            # scale logloss into ~[0,1] band for stability
-            ll = log_loss(y_oof, p, labels=[0,1])
-            auc = roc_auc_score(y_oof, p)
-            return auc - ll  # simple tradeoff: tune if you like
-        else:
-            raise ValueError("metric must be 'auc', 'logloss', or 'hybrid'")
-
-    best_w, best_score, best_p = None, -1e9, None
+    best_w, best_score = None, +1e18
     for w in grid:
-        p = np.clip(w*p_oof_log + (1-w)*p_oof_auc, eps, 1-eps)
-        s = score_vec(p)
-        # tie-break toward mid weights for stability
-        if (s > best_score) or (np.isclose(s, best_score) and (best_w is None or abs(w-0.5) < abs(best_w-0.5))):
-            best_score, best_w, best_p = s, w, p
+        p = np.clip(w*a + (1-w)*b, eps, 1-eps)
+        if metric == "logloss":
+            score = log_loss(y, p, labels=[0, 1])
+        else:
+            auc, _ = _auc_safe(y, p)
+            score = hybrid_alpha*log_loss(y, p, labels=[0,1]) + (1-hybrid_alpha)*(1.0 - np.nan_to_num(auc))
+        if score < best_score:
+            best_score, best_w = score, float(w)
 
-    iso = IsotonicRegression(out_of_bounds="clip").fit(best_p, y_oof)
-    return float(best_w), iso, best_p
+    p_oof_blend = np.clip(best_w*a + (1-best_w)*b, eps, 1-eps)
+    return best_w, p_oof_blend, flipped
+
 
 def _bake_feature_names_in_(est, cols):
     """
@@ -6338,58 +6367,69 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "auc_info": info_auc,
         })
         
-        RUN_LOGLOSS = False
-        # ---------------------------------------------------------------------------
-        #  OOF predictions (train-only) with per-fold refits + weights
-        # ---------------------------------------------------------------------------
-        # --# ------------------- Build OOF preds (unchanged) -------------------
-        oof_pred_logloss = np.full(len(y_train), np.nan, float)
-        oof_pred_auc     = np.full(len(y_train), np.nan, float)
+        # -----------------------------------------
+        # OOF predictions (train-only) + blending
+        # -----------------------------------------
+        # Decide if we actually have a viable logloss stream
+        # Force whether to include logloss model in the blend
+        USE_LOGLOSS_STREAM = False  # 🔁 set to True if you want logloss+auc blend
+        RUN_LOGLOSS = USE_LOGLOSS_STREAM
+
+        
+        # Preallocate (float64 for safety)
+        oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
+        oof_pred_logloss = np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None
         
         for tr_rel, va_rel in folds:
-            m_ll  = XGBClassifier(**{**base_kwargs, **best_ll_params,  "n_estimators": int(n_trees_ll)})
+            # AUC stream
             m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc)})
-            m_ll.fit (X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
             m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
-            oof_pred_logloss[va_rel] = pos_proba(m_ll,  X_train[va_rel], positive=1)
-            oof_pred_auc[va_rel]     = pos_proba(m_auc, X_train[va_rel], positive=1)
+            oof_pred_auc[va_rel] = pos_proba(m_auc, X_train[va_rel], positive=1)
         
-        # ------------------- CLEAN OOF VECTORS (new) -------------------
-        RUN_LOGLOSS = ('best_ll_params' in locals()) and np.isfinite(oof_pred_logloss).sum() > 0
+            # Logloss stream (only if enabled)
+            if RUN_LOGLOSS:
+                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": int(n_trees_ll)})
+                m_ll.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
+                oof_pred_logloss[va_rel] = pos_proba(m_ll, X_train[va_rel], positive=1)
         
+        # ---- Clean & clip OOF vectors ----
         mask_auc = np.isfinite(oof_pred_auc)
         mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
         mask_oof = mask_auc & mask_log
-        
-        # guard: ensure we actually have data
         n_oof = int(mask_oof.sum())
         if n_oof < 50:
             raise RuntimeError(f"Too few finite OOF predictions after masking ({n_oof}). Check folds & models.")
         
-        y_oof      = y_train[mask_oof].astype(int)
-        p_oof_auc  = np.clip(oof_pred_auc[mask_oof].astype(float), eps, 1 - eps)
-        p_oof_log  = np.clip(oof_pred_logloss[mask_oof].astype(float), eps, 1 - eps) if RUN_LOGLOSS else None
+        y_oof = y_train[mask_oof].astype(int)
+        p_oof_auc = np.clip(oof_pred_auc[mask_oof].astype(np.float64), eps, 1 - eps)
+        p_oof_log = np.clip(oof_pred_logloss[mask_oof].astype(np.float64), eps, 1 - eps) if RUN_LOGLOSS else None
         
-        # final safety: no NaNs pass through
-        assert np.isfinite(y_oof).all(), "NaNs in y_oof"
-        assert np.isfinite(p_oof_auc).all(), "NaNs in p_oof_auc"
-        if RUN_LOGLOSS:
-            assert np.isfinite(p_oof_log).all(), "NaNs in p_oof_log"
-        
-        # ------------------- BLEND WEIGHT on OOF (updated calls) -------------------
-        # If your logloss model is weak, you can force AUC-only by setting RUN_LOGLOSS=False
+        # ---- Pick blend weight on OOF (AUC-only if RUN_LOGLOSS=False) ----
         if RUN_LOGLOSS:
             best_w, p_oof_blend, flipped = pick_blend_weight_on_oof(
                 y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=p_oof_log, eps=eps, metric="logloss"
             )
-            
         else:
             best_w, p_oof_blend, flipped = pick_blend_weight_on_oof(
                 y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=None, eps=eps, metric="logloss"
-            )
-            # best_w will be 0.0 in this path (pure AUC stream).
-
+            )  # best_w will be 0.0 here
         
+        # Final safety
+        p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
+        if not np.isfinite(p_oof_blend).all():
+            bad = np.flatnonzero(~np.isfinite(p_oof_blend))
+            st.error(f"Non-finite OOF blend at {bad[:10]} (showing up to 10). Dropping them.")
+            keep2 = np.isfinite(p_oof_blend)
+            y_oof, p_oof_blend = y_oof[keep2], p_oof_blend[keep2]
+        
+        st.write({
+            "RUN_LOGLOSS": bool(RUN_LOGLOSS),
+            "blend_w": float(best_w),
+            "flipped": bool(flipped),
+            "oof_len": int(len(p_oof_blend)),
+            "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max()))
+        })
+
         # sanity
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
 
