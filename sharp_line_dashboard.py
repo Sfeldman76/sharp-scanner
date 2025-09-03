@@ -6155,7 +6155,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "colsample_bytree": 0.9,
         }
         # League-sized defaults
-    
+        base_kwargs.update({
+           
         sport_key = str(sport).upper()
         search_estimators = 350 if sport_key in SMALL_LEAGUES else 450
         eps = 5e-3 if sport_key in SMALL_LEAGUES else 1e-4
@@ -6185,7 +6186,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         base_kwargs.update({
             "max_delta_step": 1.0,     # stabilizes gradients on imbalanced folds
         })
+        base_kwargs.update({
+            "tree_method": "hist",
+            "grow_policy": "lossguide",
+            "predictor": "cpu_predictor",
+            "random_state": 42,
         
+            # capacity / exploration
+            "max_bin": 256,
+            "min_child_weight": 0.5,    # was 1.0
+            "gamma": 0.0,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "learning_rate": 0.05,
+            "max_leaves": 512,          # was 64/128/256 — give it room
+            "reg_lambda": 0.5,          # soften L2
+            "reg_alpha": 0.0,           # keep L1 off initially
+        })
+
         # Search space (works for both LL and AUC paths)
         params_common = {
             "min_child_weight": [0.0, 0.5, 1, 2, 4],    # let small leaves form
@@ -6200,6 +6218,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         params_ll.update(params_common)
         params_auc.update(params_common)
+        wider_grid = {
+            "min_child_weight": [0.1, 0.5, 1, 2],
+            "gamma": [0, 0.01, 0.05, 0.1],
+            "subsample": [0.6, 0.8, 1.0],
+            "colsample_bytree": [0.6, 0.8, 1.0],
+            "colsample_bylevel": [0.6, 0.8, 1.0],
+            "colsample_bynode": [0.6, 0.8, 1.0],
+            "max_leaves": [256, 512, 1024],
+            "max_bin": [128, 256],
+            "learning_rate": [0.03, 0.05, 0.08],
+            "reg_lambda": [0, 0.5, 1.0],
+            "reg_alpha": [0.0, 0.1],
+        }
+        params_auc.update(wider_grid)
+        # If you’re keeping the logloss stream:
+        params_ll.update(wider_grid)
+
         
         # keep ES **off** during RandomizedSearchCV; set eval_metric on estimators only
         search_estimators = 500  # ~300–500 is a good range for search
@@ -6434,7 +6469,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
 
         # Calibrate (keep your existing calibrator stack)
-        CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
+        CLIP = 0.01 if sport_key not in SMALL_LEAGUES else 0.01
         use_quantile_iso = (sport_key not in SMALL_LEAGUES)
         cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
         cals = _normalize_cals(cals_raw)
