@@ -5808,6 +5808,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Finalize X_full after pruning
         X_full = df_tmp.to_numpy(dtype=np.float32)
+    
+        features = list(feature_cols)
         st.write(f"✅ Final feature count after pruning: {len(feature_cols)}")
         # ---- Groups & times (snapshot-aware) ----
         groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
@@ -6093,8 +6095,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         X_train = X_train_df[feature_cols].to_numpy(np.float32)
         
         # Also reduce the *full* matrix so downstream holdout/OOF slices align:
-        # Rebuild X_full from df_market to keep column order consistent
-        X_full = _to_numeric_block(df_market.loc[valid_mask, feature_cols], feature_cols).to_numpy(np.float32)
         
         # Re-slice aligned subsets after feature reduction
         X_va_es = X_train[folds[-1][1]]
