@@ -685,53 +685,70 @@ class _CalAdapter:
         lo, hi = self.clip
         return np.clip(out, lo, hi)
 
+def pick_blend_weight_on_oof(
+    y_oof,
+    p_oof_auc,
+    p_oof_log=None,
+    grid=None,
+    eps=1e-4,
+    metric="logloss",
+    hybrid_alpha=0.9,
+    allow_flip=True,
+):
+    """
+    Choose w for blended prob = w*log_model + (1-w)*auc_model on OOF.
+    If p_oof_log is None → AUC-only path (w = 0.0).
+    NOTE: This function NO LONGER fits isotonic. You calibrate later.
+    Returns: (best_w, p_oof_blend, flipped_flag)
+    """
+    import numpy as np
 
-def pick_blend_weight_on_oof(y_oof, p_oof_log, p_oof_auc, grid=None, eps=1e-4,
-                             metric="logloss", hybrid_alpha=0.9):
-    """
-    Choose w for blended prob = w*logloss_model + (1-w)*auc_model on OOF.
-    - metric="logloss" (recommended) or "hybrid": hybrid = alpha*logloss + (1-alpha)*(1-AUC).
-    Locks polarity using OOF before fitting isotonic.
-    """
     y = np.asarray(y_oof, int)
-    a = np.clip(np.asarray(p_oof_log, float), eps, 1-eps)
-    b = np.clip(np.asarray(p_oof_auc, float), eps, 1-eps)
+    b = np.clip(np.asarray(p_oof_auc, float), eps, 1 - eps)   # AUC stream
+
+    # AUC-only path
+    if p_oof_log is None:
+        flipped = False
+        if allow_flip:
+            auc_raw, ok = _auc_safe(y, b)
+            auc_flip, _ = _auc_safe(y, 1.0 - b)
+            if ok and np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw):
+                b = 1.0 - b
+                flipped = True
+        return 0.0, b, flipped
+
+    # Blend path (both streams provided)
+    a = np.clip(np.asarray(p_oof_log, float), eps, 1 - eps)   # logloss stream
+
+    # Polarity lock using mean stream
+    if allow_flip:
+        mix = 0.5 * (a + b)
+        auc_raw, ok = _auc_safe(y, mix)
+        auc_flip, _ = _auc_safe(y, 1.0 - mix)
+        if ok and np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw):
+            a, b = 1.0 - a, 1.0 - b
+            flipped = True
+        else:
+            flipped = False
+    else:
+        flipped = False
+
     if grid is None:
         grid = np.round(np.linspace(0.20, 0.80, 13), 2)
 
-    # polarity lock (AUC is symmetric; logloss is not)
-    auc_raw, ok = _auc_safe(y, 0.5*(a+b))
-    if ok:
-        auc_flip, _ = _auc_safe(y, 1.0 - 0.5*(a+b))
-        if np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw):
-            a, b = 1.0 - a, 1.0 - b  # flip both streams
-
-    best_w, best_score = None, +1e9
+    best_w, best_score = None, +1e18
     for w in grid:
-        p = np.clip(w*a + (1-w)*b, eps, 1-eps)
+        p = np.clip(w * a + (1 - w) * b, eps, 1 - eps)
         if metric == "logloss":
-            score = log_loss(y, p, labels=[0,1])
+            score = log_loss(y, p, labels=[0, 1])
         else:  # "hybrid"
             auc, _ = _auc_safe(y, p)
-            # lower is better
-            score = hybrid_alpha*log_loss(y, p, labels=[0,1]) + (1-hybrid_alpha)*(1.0 - np.nan_to_num(auc))
+            score = hybrid_alpha * log_loss(y, p, labels=[0, 1]) + (1 - hybrid_alpha) * (1.0 - np.nan_to_num(auc))
         if score < best_score:
             best_score, best_w = score, float(w)
 
-    # final blended OOF (post-polarity lock)
-    p_oof_blend = np.clip(best_w*a + (1-best_w)*b, eps, 1-eps)
-
-    
-
-    # isotonic on OOF (needs both classes; if not, return identity calibrator)
-    if np.unique(y).size == 2:
-        iso = IsotonicRegression(out_of_bounds="clip").fit(p_oof_blend, y)
-    else:
-        class _Identity:
-            def predict(self, x): return np.asarray(x, float)
-        iso = _Identity()
-
-    return best_w, iso, p_oof_blend, (a is not p_oof_log)  # flipped flag (bool)
+    p_oof_blend = np.clip(best_w * a + (1 - best_w) * b, eps, 1 - eps)
+    return best_w, p_oof_blend, flipped
 
 # --- Calibrator normalization & safety shims (put right before select_blend) ---
 def _ensure_transform_for_iso(iso_obj):
@@ -6359,28 +6376,50 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_oof_auc = np.clip(p_oof_auc, eps, 1 - eps)
         # ----- pick blend weight on OOF (logloss‑based) + fit isotonic; get flipped flag -----
         
- 
-        # Choose clip per league so we don't pinch the tails
-      
-        # --- Pick blend weights on OOF (unchanged) ---
-        best_w, _, p_oof_blend = pick_blend_weight_on_oof(
-            y_oof=y_oof, p_oof_log=p_oof_log, p_oof_auc=p_oof_auc,
-            metric="logloss", grid=None, eps=eps,
-        )
+        RUN_LOGLOSS = False  # set True only if your logloss model actually learns
+
+                # Choose clip per league so we don't pinch the tails
+              
+        # --- OOF blend weight (and optional polarity flip) ---
+        if RUN_LOGLOSS:
+            best_w, p_oof_blend, flipped = pick_blend_weight_on_oof(
+                y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=p_oof_log, metric="logloss", eps=eps
+            )
+        else:
+            best_w, p_oof_blend, flipped = pick_blend_weight_on_oof(
+                y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=None, metric="logloss", eps=eps
+            )
         
-        # Choose clip per league so we don't pinch the tails
+        # Calibrate (keep your existing calibrator stack)
         CLIP = 0.001 if sport_key not in SMALL_LEAGUES else 0.005
-        
-        # 1) Fit iso + platt (+ beta) on OOF
         use_quantile_iso = (sport_key not in SMALL_LEAGUES)
         cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
-        # After you compute cals_raw:
         cals = _normalize_cals(cals_raw)
-
-        # Ensure expected interfaces exist
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso"))
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=eps)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=eps)
+        if cals["iso"] is None: cals["iso"] = _IdentityIsoCal(eps=eps)
+        if cals["platt"] is None and cals["beta"] is None: cals["platt"] = _IdentityProbCal(eps=eps)
+        sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
+        
+        # --- Final blended raw preds (TRAIN/HOLDOUT) ---
+        p_tr_auc = pos_proba(model_auc, X_full[train_all_idx], positive=1)
+        p_ho_auc = pos_proba(model_auc, X_full[hold_idx],      positive=1)
+        
+        if RUN_LOGLOSS:
+            p_tr_log = pos_proba(model_logloss, X_full[train_all_idx], positive=1)
+            p_ho_log = pos_proba(model_logloss, X_full[hold_idx],      positive=1)
+            p_train_blend_raw = np.clip(best_w * p_tr_log + (1 - best_w) * p_tr_auc, eps, 1 - eps)
+            p_hold_blend_raw  = np.clip(best_w * p_ho_log + (1 - best_w) * p_ho_auc, eps, 1 - eps)
+        else:
+            best_w = 0.0  # make this explicit for logging
+            p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
+            p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
+        
+        # --- Apply your calibrator blend ---
+        p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1 - CLIP))
+        p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1 - CLIP))
+
         
         # Backfill so select_blend never sees None
         if cals["iso"] is None:
