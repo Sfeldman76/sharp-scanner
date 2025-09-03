@@ -5868,34 +5868,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # If it returns pandas Index, cast to numpy:
         #train_all_idx = np.asarray(train_all_idx)
         #hold_idx      = np.asarray(hold_idx)
-        # ---- Cheap feature pruning before modeling ----
-        # (1) Drop near-constant columns
-        
-        
+              
      
-        
-        # (1) Drop near-constant features
-        vt = VarianceThreshold(threshold=1e-5)
-        X_full = vt.fit_transform(X_full)
-        
-        # Rebuild feature list after pruning
-        if hasattr(vt, "get_support"):
-            feature_cols = [col for col, keep in zip(feature_cols, vt.get_support()) if keep]
-        else:
-            feature_cols = feature_cols[:X_full.shape[1]]
-        
-        st.write(f"🧹 Pruned to {len(feature_cols)} features after variance thresholding.")
-        
-        # (2) Drop exact duplicate features (very rare but good hygiene)
-       
-        
-        df_tmp = pd.DataFrame(X_full, columns=feature_cols)
-        _, unique_idx = np.unique(df_tmp.T, axis=0, return_index=True)
-        X_full = df_tmp.iloc[:, sorted(unique_idx)].to_numpy()
-        feature_cols = list(df_tmp.columns[sorted(unique_idx)])
-        
-        st.write(f"🧹 Removed duplicate features; final feature count: {len(feature_cols)}")
-                       # --- (8) TRAIN subsets (aligned) ---
+                            # --- (8) TRAIN subsets (aligned) ---
         X_train = X_full[train_all_idx]
         y_train = y_full[train_all_idx]
         g_train = groups[train_all_idx]
