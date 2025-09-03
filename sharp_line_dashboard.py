@@ -5128,7 +5128,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 🔹 Core sharp signals
             #'Sharp_Move_Signal',
             #'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
-            'Book_lift_x_Magnitude','Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
+            #'Book_lift_x_Magnitude',
+            'Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket','Market_Leader',#'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
@@ -5183,8 +5184,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
             #'TOT_Mispricing', 
             'ATS_EB_Rate',
-            'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
-            'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
+            #'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
+            #'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             'ATS_EB_Rate_Home',
             'ATS_EB_Rate_Away',
             'PR_Model_Agree_H2H_Flag','PR_Market_Agree_H2H_Flag'
@@ -5238,7 +5239,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         ])
         
         # add time-context flags
-        extend_unique(features, ['Is_Night_Game','Is_PrimeTime','DOW_Sin','DOW_Cos'])
+        extend_unique(features, ['Is_Night_Game','Is_PrimeTime','DOW_Sin'])
         
         extend_unique(features, [
             "Implied_Hold_Book",#"Two_Sided_Offered","Juice_Abs_Delta",
