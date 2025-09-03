@@ -23,7 +23,6 @@ div[data-testid="stDataFrame"] > div {
 """, unsafe_allow_html=True)
 
 
-
 st.markdown("""
 <style>
 .scrollable-table-container {
@@ -6002,6 +6001,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
         #  Randomized searches (use filtered cv_splits)
         # ---------------------------------------------------------------------------
+        
+        # pick your n_estimators
+        search_estimators = 300 if sport_key in SMALL_LEAGUES else 400
+        
+        # build the two base estimators WITH their eval_metric
+        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
+        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
         fit_params = dict(
             sample_weight=w_train,
             eval_set=[(X_train, y_train)],
