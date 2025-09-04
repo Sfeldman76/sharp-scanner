@@ -5345,7 +5345,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             #'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
             #'CrossMarket_Prob_Gap_Exists',
-            #'Line_Moved_Away_From_Team',
+            'Line_Moved_Away_From_Team',
             
             
             'Pct_Line_Move_From_Opening',#'Pct_Line_Move_Bin',
@@ -5405,8 +5405,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
             ]
         ]
-        #extend_unique(features, hybrid_timing_features)
-        #extend_unique(features, hybrid_odds_timing_features)
+        extend_unique(features, hybrid_timing_features)
+        extend_unique(features, hybrid_odds_timing_features)
         timing_cols = build_timing_aggregates_inplace(df_bt)
 
         # extend your feature list with timing_cols (and remove the 32 originals)
