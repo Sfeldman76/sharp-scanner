@@ -645,10 +645,7 @@ def perm_auc_importance(est, X, y, w, n_repeats=8, random_state=42):
     })
     return base, df
 
-# Use the *same* ES fold you already used for early stopping
-base_auc, perm_df = perm_auc_importance(model_auc, X_va_es, y_va_es, w_va_es, n_repeats=10)
-st.write({"perm_base_auc": float(base_auc)})
-st.dataframe(perm_df.head(25))
+
 
 
 class _BetaCalibrator:
@@ -6444,7 +6441,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- Create models (single, final instantiation) ---
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
-        DEBUG_INTERP = True
+        
         # --- Early-stopped fits ---
         model_logloss.fit(
             X_tr_es, y_tr_es,
@@ -6463,6 +6460,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=early_stopping_rounds,
         )
+        
+        DEBUG_INTERP = True
+
+        if DEBUG_INTERP:
+            import numpy as np
+            # Skip cleanly if ES fold is single-class (AUC undefined)
+            if np.unique(y_va_es).size < 2:
+                st.warning("Permutation importance skipped: ES validation fold has a single class.")
+            else:
+                base_auc, perm_df = perm_auc_importance(
+                    model_auc,
+                    X_va_es,
+                    y_va_es.astype(int),
+                    w_va_es,
+                    n_repeats=10,
+                    feature_names=feature_cols,
+                    random_state=42,
+                )
+                st.write({"perm_base_auc": float(base_auc)})
+                st.dataframe(perm_df.head(25))
+        
         if DEBUG_INTERP:
             
         
