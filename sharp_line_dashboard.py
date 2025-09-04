@@ -712,7 +712,7 @@ def best_round_plus_one(clf) -> int:
     return int(getattr(clf, "n_estimators", 0))
 
 def weight_report(w, y):
-    import pandas as pd
+    
     df = pd.DataFrame({"w": w, "y": y})
     return df.groupby("y")["w"].agg(["count","sum","mean","min","max"])
 
@@ -777,7 +777,7 @@ class _CalAdapter:
         self.clip = clip
 
     def predict(self, p):
-        import numpy as np
+        
         p = np.asarray(p, float)
         if self.kind == "iso":
             # your helpers already normalize iso to have .transform if needed
@@ -1010,7 +1010,7 @@ def get_bq_client() -> bigquery.Client:
     return bigquery.Client()  
 
 def norm_team(x):
-    import pandas as pd
+ 
     if isinstance(x, pd.Series):
         s = x
         ret_series = True
@@ -1563,7 +1563,7 @@ def holdout_by_percent_groups(
 
 
 def sharp_row_weights(df, a_sharp=0.8, b_limit=0.15, c_liq=0.10, d_steam=0.10):
-    import numpy as np, pandas as pd
+  
     w = np.ones(len(df), dtype=np.float32)
 
     # sharp‑ish signals available in your schema
@@ -2887,8 +2887,7 @@ def pick_blend_weight_on_oof(
     y_oof, p_oof_auc, p_oof_log=None, grid=None, eps=1e-4,
     metric="logloss", hybrid_alpha=0.9
 ):
-    import numpy as np
-    from sklearn.metrics import log_loss
+
 
     # --- AUC-only path ---
     if p_oof_log is None:
@@ -3401,8 +3400,8 @@ def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame
 
 
 # --- Drop-in safety for calibration ------------------------------------------------
-import numpy as np
-import pandas as pd
+
+
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 
@@ -6464,7 +6463,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         DEBUG_INTERP = True
 
         if DEBUG_INTERP:
-            import numpy as np
+           
             # Skip cleanly if ES fold is single-class (AUC undefined)
             if np.unique(y_va_es).size < 2:
                 st.warning("Permutation importance skipped: ES validation fold has a single class.")
@@ -6656,8 +6655,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # === Interpretation (only when enabled) ===
         if DEBUG_INTERP:
-            import pandas as pd  # ensure available in this scope
-        
+      
             def category_lift_table(model, X, y, names, base=None):
                 p, _ = pos_proba_safe(model, X, positive=1)
                 base = float(np.mean(y)) if base is None else float(base)
