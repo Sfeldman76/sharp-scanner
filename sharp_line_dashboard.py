@@ -6189,7 +6189,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # scale by sample size (light heuristic)
             if X_rows < 5_000:
                 base = max(150, base // 2)   # smaller data → fewer trials
-            elif X_rows > 5,000:
+            elif X_rows > 5_000:
                 base = min(500, base * 2)   # very large data → more trials
             return int(base)
 
