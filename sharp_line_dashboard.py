@@ -6279,26 +6279,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         final_estimators_cap  = 10000   # allow very deep/long growth
         early_stopping_rounds = 500
         
-        # (You can keep lossguide for both; if you *want* depthwise for AUC, retain your override.)
-        model_logloss = XGBClassifier(
-            **{**base_kwargs, **best_ll_params,
-               "n_estimators": final_estimators_cap,
-               "eval_metric": "logloss",
-               "max_bin": 256,            # restore full-quality bins
-               "n_jobs": VCPUS}
+            # --- Build final param dicts first (clean & safe) ---
+        params_ll_final = {**base_kwargs, **best_ll_params}
+        params_ll_final.pop("predictor", None)  # silence "not used" warning
+        params_ll_final.update(
+            n_estimators=int(final_estimators_cap),
+            eval_metric="logloss",
+            max_bin=256,
+            n_jobs=int(VCPUS),
+            # keep lossguide from base_kwargs
         )
         
-        model_auc = XGBClassifier(
-            **{
-                **base_kwargs,
-                **best_auc_params,
-                "n_estimators": final_estimators_cap,
-                "eval_metric": "auc",
-                "max_bin": 256,
-                "n_jobs": VCPUS,
-                "grow_policy": "depthwise",   # override here
-            }
+        params_auc_final = {**base_kwargs, **best_auc_params}
+        params_auc_final.pop("predictor", None)
+        # ensure our override wins even if base_kwargs had grow_policy already
+        params_auc_final.update(
+            n_estimators=int(final_estimators_cap),
+            eval_metric="auc",
+            max_bin=256,
+            n_jobs=int(VCPUS),
+            grow_policy="depthwise",
         )
+        
+        # --- Create models (single, final instantiation) ---
+        model_logloss = XGBClassifier(**params_ll_final)
+        model_auc     = XGBClassifier(**params_auc_final)
+        
+        # --- Early-stopped fits ---
         model_logloss.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6316,6 +6323,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=early_stopping_rounds,
         )
+
         
         # (Optional) consolidate helpers you already had:
         def _best_rounds(clf):
