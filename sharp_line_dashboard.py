@@ -6750,16 +6750,44 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------- Calibration ----------------
         CLIP = 0.005 if sport_key not in SMALL_LEAGUES else 0.01
         use_quantile_iso = False
-        cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
         
+        # Always init so it's in scope on all paths
+        cal_blend = None
+        
+        # Fit the standard trio (iso / platt / beta)
+        cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
         cals = _normalize_cals(cals_raw)
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso"))
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=eps)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=eps)
-        if cals["iso"] is None: cals["iso"] = _IdentityIsoCal(eps=eps)
-        if cals["platt"] is None and cals["beta"] is None: cals["platt"] = _IdentityProbCal(eps=eps)
+        if cals["iso"] is None:
+            cals["iso"] = _IdentityIsoCal(eps=eps)
+        if cals["platt"] is None and cals["beta"] is None:
+            cals["platt"] = _IdentityProbCal(eps=eps)
         
+        # Blend the trio (your existing selector)
         sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
+        
+        # Optional robust calibrator (may return e.g. ("beta", beta_cal) or None)
+        try:
+            _cb = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps,
+                                        min_unique=200, prefer_beta=True)
+            if _cb is not None:
+                cal_blend = _cb
+        except Exception as e:
+            st.info(f"Robust calibrator skipped: {e}")
+        
+        # Fallback and normalize shape for adapter
+        if cal_blend is None:
+            cal_blend = ("iso", _IdentityIsoCal(eps=eps))
+        if isinstance(cal_blend, tuple) and len(cal_blend) >= 2:
+            cal_name, cal_obj = cal_blend[0], cal_blend[1]
+        else:
+            cal_name, cal_obj = "custom", cal_blend
+        
+        # Build adapter (kept for downstream use / parity with your prior code)
+        iso_blend = _CalAdapter(cal_obj, clip=(CLIP, 1 - CLIP))
+        st.write({"calibrator_used": str(cal_name)})
         
         # --- Final blended raw preds (TRAIN/HOLDOUT) ---
         p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
@@ -6775,26 +6803,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
             p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
         
-        # --- Apply calibrator blend ---
+        # --- Apply your selector's blend (status quo) ---
         p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1 - CLIP))
         p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1 - CLIP))
-        p_train_vec = np.asarray(p_cal, dtype=float)
-        p_hold_vec  = np.asarray(p_cal_val, dtype=float)
+        
+        # (Optionally, you could compare with the robust adapter:
+        #  p_cal_rb     = iso_blend.predict_proba(p_train_blend_raw)
+        #  p_cal_val_rb = iso_blend.predict_proba(p_hold_blend_raw)
+        #  and choose between them; left out to preserve current behavior.)
+        
+        # Ensure downstream vectors always exist
+        p_train_vec = np.asarray(np.clip(p_cal,     eps, 1 - eps), dtype=float)
+        p_hold_vec  = np.asarray(np.clip(p_cal_val, eps, 1 - eps), dtype=float)
         if not RUN_LOGLOSS:
             p_tr_log = np.array([], dtype=float)
             p_ho_log = np.array([], dtype=float)
-        # (optional but safe)
-        p_train_vec = np.clip(p_train_vec, eps, 1 - eps)
-        p_hold_vec  = np.clip(p_hold_vec,  eps, 1 - eps)
         
         # sanity (helps catch indexing mismatches)
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
+        
         # ---------- Metrics (safe flips, single-class tolerant) ----------
         y_hold_vec  = y_full[hold_idx].astype(int)
         y_train_vec = y_full[train_all_idx].astype(int)
-        
-        from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
         
         def auc_safe_with_flip(y, p):
             if np.unique(y).size < 2:
@@ -6805,8 +6836,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 return a_flip, 1.0 - p
             return a, p
         
-        auc_train, p_cal = auc_safe_with_flip(y_train_vec, p_cal)
-        auc_val,  p_cal_val = auc_safe_with_flip(y_hold_vec,  p_cal_val)
+        auc_train, p_cal     = auc_safe_with_flip(y_train_vec, p_train_vec)
+        auc_val,   p_cal_val = auc_safe_with_flip(y_hold_vec,  p_hold_vec)
         
         brier_tr  = brier_score_loss(y_train_vec, p_cal)
         brier_val = brier_score_loss(y_hold_vec,  p_cal_val)
@@ -6818,10 +6849,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                  f"val={auc_val if not np.isnan(auc_val) else '—':>}")
         st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
         
-                
-         #--- quick calibration table (for sanity; full plot optional) ---
-        
-        bins = np.linspace(0,1,11)
+        # --- quick calibration table (for sanity; full plot optional) ---
+        bins = np.linspace(0, 1, 11)
         idx  = np.digitize(p_cal_val, bins) - 1
         y_hold_series = pd.Series(y_hold_vec, index=hold_idx)
         
@@ -6835,7 +6864,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                                 "avg_p": avg_p, "emp_rate": emp, "n": int(mask.sum())})
         st.dataframe(pd.DataFrame(cal_tbl))
 
-        
 
 
         # ---- headline holdout metrics ----------------------------------------------
