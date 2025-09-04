@@ -6178,8 +6178,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": 500, "eval_metric": "logloss"})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": 500, "eval_metric": "auc"})
 
+  
         
-      
+        # --- Helper: choose a reasonable #trials ---
+        def _resolve_search_trials(sport: str, X_rows: int) -> int:
+            s = (sport or "").upper()
+            SMALL_LEAGUES = {"WNBA", "CFL"}  # adjust if you want
+            # base by league size
+            base = 64 if s in SMALL_LEAGUES else 96
+            # scale by sample size (light heuristic)
+            if X_rows < 5_000:
+                base = max(150, base // 2)   # smaller data → fewer trials
+            elif X_rows > 5,000:
+                base = min(500, base * 2)   # very large data → more trials
+            return int(base)
+
+        try:
+            search_trials  # type: ignore
+        except NameError:
+            search_trials = _resolve_search_trials(sport, X_train.shape[0])
+        
+        # Coerce to int and guard the range
+        try:
+            search_trials = int(search_trials)
+        except Exception:
+            search_trials = _resolve_search_trials(sport, X_train.shape[0])
+        
+        if search_trials <= 0:
+            search_trials = _resolve_search_trials(sport, X_train.shape[0])
            
       
         rs_ll = RandomizedSearchCV(
