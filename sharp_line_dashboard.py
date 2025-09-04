@@ -6778,15 +6778,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             st.info(f"Robust calibrator skipped: {e}")
         
         # Fallback and normalize shape for adapter
+        # Fallback and normalize shape for adapter
         if cal_blend is None:
             cal_blend = ("iso", _IdentityIsoCal(eps=eps))
+        
+        # Coerce into (name, object) tuple no matter what came back
         if isinstance(cal_blend, tuple) and len(cal_blend) >= 2:
             cal_name, cal_obj = cal_blend[0], cal_blend[1]
         else:
             cal_name, cal_obj = "custom", cal_blend
         
-        # Build adapter (kept for downstream use / parity with your prior code)
-        iso_blend = _CalAdapter(cal_obj, clip=(CLIP, 1 - CLIP))
+        # ✅ Pass a (name, obj) tuple to _CalAdapter (NOT just the object)
+        iso_blend = _CalAdapter((cal_name, cal_obj), clip=(CLIP, 1 - CLIP))
+        
         st.write({"calibrator_used": str(cal_name)})
         
         # --- Final blended raw preds (TRAIN/HOLDOUT) ---
