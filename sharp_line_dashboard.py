@@ -6428,46 +6428,83 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
         # ================== END FAST SEARCH → DEEP REFIT ==================
 
-        
-        # -----------------------------------------
+            # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
-        # Decide if we actually have a viable logloss stream
-        # Force whether to include logloss model in the blend
-        USE_LOGLOSS_STREAM = False  # 🔁 set to True if you want logloss+auc blend
+        
+        # Small-league heuristics
+        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000)
+        MIN_OOF = 15 if SMALL else 50          # lower bar for small leagues
+        USE_LOGLOSS_STREAM = False if SMALL else False  # keep off by default; flip to True if you want blending
         RUN_LOGLOSS = USE_LOGLOSS_STREAM
-
         
         # Preallocate (float64 for safety)
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
         oof_pred_logloss = np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None
         
+        # Make OOFs; clip now so NaNs stand out only when truly missing
         for tr_rel, va_rel in folds:
             # AUC stream
-            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc)})
+            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc), "n_jobs": 1})
             m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
-            oof_pred_auc[va_rel] = pos_proba(m_auc, X_train[va_rel], positive=1)
+            pa = pos_proba(m_auc, X_train[va_rel], positive=1).astype(np.float64)
+            oof_pred_auc[va_rel] = np.clip(pa, eps, 1 - eps)
         
-            # Logloss stream (only if enabled)
             if RUN_LOGLOSS:
-                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": int(n_trees_ll)})
+                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": int(n_trees_ll), "n_jobs": 1})
                 m_ll.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
-                oof_pred_logloss[va_rel] = pos_proba(m_ll, X_train[va_rel], positive=1)
+                pl = pos_proba(m_ll, X_train[va_rel], positive=1).astype(np.float64)
+                oof_pred_logloss[va_rel] = np.clip(pl, eps, 1 - eps)
         
-        # ---- Clean & clip OOF vectors ----
+        # Primary mask
         mask_auc = np.isfinite(oof_pred_auc)
         mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
         mask_oof = mask_auc & mask_log
         n_oof = int(mask_oof.sum())
-        if n_oof < 50:
-            raise RuntimeError(f"Too few finite OOF predictions after masking ({n_oof}). Check folds & models.")
         
-        y_oof = y_train[mask_oof].astype(int)
-        p_oof_auc = np.clip(oof_pred_auc[mask_oof].astype(np.float64), eps, 1 - eps)
-        p_oof_log = np.clip(oof_pred_logloss[mask_oof].astype(np.float64), eps, 1 - eps) if RUN_LOGLOSS else None
+        # ---- Small-league gap fill: use last-fold ES models for rows never validated ----
+        if SMALL and n_oof < MIN_OOF:
+            tr_es_rel, va_es_rel = folds[-1]
+            miss = ~mask_auc
+            if miss.any():
+                pa_fill = pos_proba(model_auc, X_train[miss], positive=1).astype(np.float64)
+                oof_pred_auc[miss] = np.clip(pa_fill, eps, 1 - eps)
+                mask_auc = np.isfinite(oof_pred_auc)
+        
+            if RUN_LOGLOSS and oof_pred_logloss is not None:
+                miss_log = ~np.isfinite(oof_pred_logloss)
+                if miss_log.any():
+                    pl_fill = pos_proba(model_logloss, X_train[miss_log], positive=1).astype(np.float64)
+                    oof_pred_logloss[miss_log] = np.clip(pl_fill, eps, 1 - eps)
+        
+            mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
+            mask_oof = mask_auc & mask_log
+            n_oof = int(mask_oof.sum())
+        
+        # ---- Final fallback policies for small leagues ----
+        if n_oof < MIN_OOF:
+            if SMALL:
+                # Fallback to last fold’s proper validation (ES models) to pick blend weight
+                tr_es_rel, va_es_rel = folds[-1]
+                y_oof      = y_train[va_es_rel].astype(int)
+                p_oof_auc  = np.clip(pos_proba(model_auc,     X_train[va_es_rel], positive=1), eps, 1 - eps).astype(np.float64)
+                p_oof_log  = (np.clip(pos_proba(model_logloss, X_train[va_es_rel], positive=1), eps, 1 - eps).astype(np.float64)
+                              if RUN_LOGLOSS else None)
+                st.info(f"Small-league fallback: using last-fold validation only (n={len(va_es_rel)}) for blend weight.")
+            else:
+                # Non-small: degrade gracefully to AUC-only and continue
+                y_oof      = y_train[mask_auc].astype(int)
+                p_oof_auc  = np.clip(oof_pred_auc[mask_auc], eps, 1 - eps).astype(np.float64)
+                p_oof_log  = None
+                st.warning(f"OOF coverage low ({n_oof}); proceeding with AUC-only blend source.")
+        else:
+            # Standard path with full OOF
+            y_oof     = y_train[mask_oof].astype(int)
+            p_oof_auc = np.clip(oof_pred_auc[mask_oof], eps, 1 - eps).astype(np.float64)
+            p_oof_log = (np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64) if RUN_LOGLOSS else None)
         
         # ---- Pick blend weight on OOF (AUC-only if RUN_LOGLOSS=False) ----
-        if RUN_LOGLOSS:
+        if RUN_LOGLOSS and p_oof_log is not None and p_oof_log.shape[0] == p_oof_auc.shape[0]:
             best_w, p_oof_blend, flipped = pick_blend_weight_on_oof(
                 y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=p_oof_log, eps=eps, metric="logloss"
             )
@@ -6479,18 +6516,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Final safety
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
         if not np.isfinite(p_oof_blend).all():
-            bad = np.flatnonzero(~np.isfinite(p_oof_blend))
-            st.error(f"Non-finite OOF blend at {bad[:10]} (showing up to 10). Dropping them.")
             keep2 = np.isfinite(p_oof_blend)
             y_oof, p_oof_blend = y_oof[keep2], p_oof_blend[keep2]
         
         st.write({
+            "SMALL": bool(SMALL),
             "RUN_LOGLOSS": bool(RUN_LOGLOSS),
+            "n_oof": int(n_oof),
             "blend_w": float(best_w),
             "flipped": bool(flipped),
-            "oof_len": int(len(p_oof_blend)),
             "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max()))
         })
+
 
         # sanity
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
