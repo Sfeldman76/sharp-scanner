@@ -6621,7 +6621,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- Apply calibrator blend ---
         p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1 - CLIP))
         p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1 - CLIP))
+        p_train_vec = np.asarray(p_cal, dtype=float)
+        p_hold_vec  = np.asarray(p_cal_val, dtype=float)
+        if not RUN_LOGLOSS:
+            p_tr_log = np.array([], dtype=float)
+            p_ho_log = np.array([], dtype=float)
+        # (optional but safe)
+        p_train_vec = np.clip(p_train_vec, eps, 1 - eps)
+        p_hold_vec  = np.clip(p_hold_vec,  eps, 1 - eps)
         
+        # sanity (helps catch indexing mismatches)
+        assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
+        assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
         # ---------- Metrics (safe flips, single-class tolerant) ----------
         y_hold_vec  = y_full[hold_idx].astype(int)
         y_train_vec = y_full[train_all_idx].astype(int)
