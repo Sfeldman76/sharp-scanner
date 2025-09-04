@@ -6232,28 +6232,71 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             search_kwargs_ll  = dict(n_iter=search_trials)
             search_kwargs_auc = dict(n_iter=search_trials)
         
-        rs_ll = _SearchCV(
-            estimator=est_ll,
-            param_distributions=params_ll,
-            scoring="neg_log_loss",
-            cv=folds,                    # your precomputed purge+embargo splits
-            n_jobs=VCPUS,                # parallel across trials
-            random_state=42,
-            verbose=1 if st.session_state.get("debug", False) else 0,
-            **search_kwargs_ll
-        )
+   
         
-        rs_auc = _SearchCV(
-            estimator=est_auc,
-            param_distributions=params_auc,
-            scoring="roc_auc",
-            cv=folds,
-            n_jobs=VCPUS,
-            random_state=137,
-            verbose=1 if st.session_state.get("debug", False) else 0,
-            **search_kwargs_auc
-        )
+        try:
+
+            rs_ll = HalvingRandomSearchCV(
+                estimator=est_ll,
+                param_distributions=params_ll,
+                factor=3,
+                resource="n_estimators",
+                min_resources=64,
+                max_resources=SEARCH_N_EST,
+                aggressive_elimination=False,
+                scoring="neg_log_loss",
+                cv=folds,
+                n_jobs=VCPUS,
+                random_state=42,
+                verbose=1 if st.session_state.get("debug", False) else 0,
+            )
         
+            rs_auc = HalvingRandomSearchCV(
+                estimator=est_auc,
+                param_distributions=params_auc,
+                factor=3,
+                resource="n_estimators",
+                min_resources=64,
+                max_resources=SEARCH_N_EST,
+                aggressive_elimination=False,
+                scoring="roc_auc",
+                cv=folds,
+                n_jobs=VCPUS,
+                random_state=137,
+                verbose=1 if st.session_state.get("debug", False) else 0,
+            )
+        
+        except Exception:
+          
+        
+            try:
+                search_trials  # type: ignore
+            except NameError:
+                # simple default if you don't have your resolver in scope
+                search_trials = 96
+        
+            rs_ll = RandomizedSearchCV(
+                estimator=est_ll,
+                param_distributions=params_ll,
+                n_iter=int(search_trials),
+                scoring="neg_log_loss",
+                cv=folds,
+                n_jobs=VCPUS,
+                random_state=42,
+                verbose=1 if st.session_state.get("debug", False) else 0,
+            )
+        
+            rs_auc = RandomizedSearchCV(
+                estimator=est_auc,
+                param_distributions=params_auc,
+                n_iter=int(search_trials),
+                scoring="roc_auc",
+                cv=folds,
+                n_jobs=VCPUS,
+                random_state=137,
+                verbose=1 if st.session_state.get("debug", False) else 0,
+            )
+
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         
         # Optionally clamp threadpools inside the search fits too
