@@ -10,7 +10,7 @@ pandas==2.1.4
 pyarrow==14.0.2
 numpy==1.26.4
 altair==5.2.0
-
+matplotlib>=3.7
 
 # === Core Libraries ===
 numpy==1.26.4
@@ -51,6 +51,7 @@ pandas-gbq==0.19.2
 
 # === Misc ===
 cloudpickle==3.0.0
+
 
 
 
