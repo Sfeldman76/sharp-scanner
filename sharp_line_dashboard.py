@@ -6293,7 +6293,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                "n_estimators": final_estimators_cap,
                "eval_metric": "auc",
                "max_bin": 256,
-               "n_jobs": VCPUS}
+               "n_jobs": VCPUS},
                "grow_policy": "depthwise",
         )
         
