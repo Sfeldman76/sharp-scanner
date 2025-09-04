@@ -6522,17 +6522,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         n_oof = int(mask_oof.sum())
         
         # Small-league gap fill with ES models for rows never validated
-        if SMALL && n_oof < MIN_OOF:
+        # Small-league gap fill with ES models for rows never validated
+        if SMALL and n_oof < MIN_OOF:
             miss = ~mask_auc
             if miss.any():
                 pa_fill, _ = pos_proba_safe(model_auc, X_train[miss], positive=1)
                 oof_pred_auc[miss] = np.clip(pa_fill, eps, 1 - eps)
                 mask_auc = np.isfinite(oof_pred_auc)
-            if RUN_LOGLOSS and oof_pred_logloss is not None:
+        
+            if RUN_LOGLOSS and (oof_pred_logloss is not None):
                 miss_log = ~np.isfinite(oof_pred_logloss)
                 if miss_log.any():
                     pl_fill, _ = pos_proba_safe(model_logloss, X_train[miss_log], positive=1)
                     oof_pred_logloss[miss_log] = np.clip(pl_fill, eps, 1 - eps)
+        
             mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
             mask_oof = mask_auc & mask_log
             n_oof = int(mask_oof.sum())
