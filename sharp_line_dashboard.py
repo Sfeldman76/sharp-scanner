@@ -2635,105 +2635,106 @@ SMALL_LEAGUES = {"WNBA", "CFL"}
 BIG_LEAGUES   = {"MLB", "NBA", "NFL", "NCAAF", "NCAAB"}  # extend as needed
 
 from scipy.stats import randint, uniform, loguniform
-
 def get_xgb_search_space(
     sport: str,
     *,
     X_rows: int,
     n_jobs: int = 1,
-    scale_pos_weight: float = 1.0,
+    scale_pos_weight: float = 1.0,   # kept for API compatibility; ignored inside
     features: list[str] | None = None,
-    use_monotone: bool = False,   # kept for compatibility; unused unless you wire constraints
+    use_monotone: bool = False,      # kept for compatibility; unused unless you wire constraints
 ) -> tuple[dict, dict, dict]:
     """
     Returns (base_kwargs, params_ll, params_auc) for XGBClassifier randomized searches.
-    Uses ONLY passed arguments (no access to y_train). Ranges chosen to avoid flat models.
+
+    Notes:
+    - Intentionally does NOT set `scale_pos_weight` in base kwargs or grids.
+      If you truly need it, set it *outside* this function (we recommend 1.0
+      and instead tune via sampling/regularization).
+    - No eval_metric here; set it on the estimator you pass to CV or fit.
     """
     s = str(sport).upper()
-    spw = float(scale_pos_weight)  # <-- use the passed-in value
-    n_jobs = 1
+    # spw kept only for backward compatibility with callers; not used.
+    _ = float(scale_pos_weight)
+    n_jobs = int(n_jobs)
+
     # ---------------- Base kwargs (single, consistent block) ----------------
     base_kwargs = dict(
         objective="binary:logistic",
         tree_method="hist",
         predictor="cpu_predictor",
         grow_policy="lossguide",
-        max_bin=128,
-        max_delta_step=0.5,
+        max_bin=256,                # a bit more resolution than 128
         sampling_method="uniform",
-        reg_lambda=3.0,
-        min_child_weight=2,
-        n_jobs=int(n_jobs),
+        max_delta_step=0.0,         # let the search/ES handle stabilization
+        reg_lambda=2.0,             # moderate L2
+        min_child_weight=1.0,       # allow splits; you’ll search wider below
+        n_jobs=n_jobs,
         random_state=42,
         importance_type="total_gain",
-        scale_pos_weight=spw,
-        # ← NO eval_metric here
+        # NOTE: no eval_metric, no scale_pos_weight here by design
     )
 
     # ---------------- Search spaces ----------------
     SMALL = (s in SMALL_LEAGUES)
 
     if SMALL:
-        # Small leagues — aggressive but variance-aware
+        # Small leagues — allow more exploration but keep it sane
         params_ll = {
-            "max_depth":        randint(4, 7),              # {4,5,6}
-            "max_leaves":       randint(48, 96),            # {48..95}
+            "max_depth":        randint(3, 7),              # {3,4,5,6}
+            "max_leaves":       randint(64, 128),           # {64..127}
             "learning_rate":    loguniform(3e-2, 1.0e-1),   # 0.03–0.10
-            "subsample":        uniform(0.70, 0.25),        # 0.70–0.95
-            "colsample_bytree": uniform(0.70, 0.25),        # 0.70–0.95
-            "colsample_bynode": uniform(0.65, 0.20),        # 0.65–0.85
+            "subsample":        uniform(0.70, 0.30),        # 0.70–1.00
+            "colsample_bytree": uniform(0.70, 0.30),        # 0.70–1.00
+            "colsample_bynode": uniform(0.60, 0.30),        # 0.60–0.90
             "min_child_weight": randint(1, 5),              # {1..4}
-            "gamma":            uniform(0.00, 0.40),        # 0.00–0.40
-            "reg_lambda":       loguniform(1.0, 6.0),       # 1–6
+            "gamma":            uniform(0.00, 0.30),        # 0.00–0.30
+            "reg_lambda":       loguniform(0.5, 6.0),       # 0.5–6
             "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
-            # optional: search around spw
-            "scale_pos_weight": uniform(max(0.6, 0.7*spw), max(0.8, 1.3*spw)),
         }
         params_auc = {
             "max_depth":        randint(3, 8),              # {3..7}
-            "max_leaves":       randint(48, 96),            # {48..95}
+            "max_leaves":       randint(64, 128),           # {64..127}
             "learning_rate":    loguniform(3e-2, 1.0e-1),   # 0.03–0.10
-            "subsample":        uniform(0.75, 0.20),        # 0.75–0.95
-            "colsample_bytree": uniform(0.75, 0.20),        # 0.75–0.95
-            "colsample_bynode": uniform(0.60, 0.22),        # 0.60–0.82
+            "subsample":        uniform(0.75, 0.25),        # 0.75–1.00
+            "colsample_bytree": uniform(0.70, 0.30),        # 0.70–1.00
+            "colsample_bynode": uniform(0.60, 0.30),        # 0.60–0.90
             "min_child_weight": randint(1, 6),              # {1..5}
-            "gamma":            uniform(0.00, 0.40),        # 0.00–0.40
-            "reg_lambda":       loguniform(1.0, 6.0),       # 1–6
+            "gamma":            uniform(0.00, 0.30),        # 0.00–0.30
+            "reg_lambda":       loguniform(0.5, 6.0),       # 0.5–6
             "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
-            "scale_pos_weight": uniform(max(0.6, 0.7*spw), max(0.8, 1.3*spw)),
         }
     else:
         # Big leagues — more capacity & diversity
         # LogLoss-oriented (probability quality)
         params_ll = {
-            "max_depth":        randint(3, 5),
-            "max_leaves":       randint(48, 96),
-            "learning_rate":    loguniform(0.03, 0.07),
-            "subsample":        uniform(0.70, 0.20),     # 0.80–0.95
-            "colsample_bytree": uniform(0.65, 0.20),     # 0.55–0.80
-            "colsample_bynode": uniform(0.70, 0.20),     # 0.70–0.90
-            "min_child_weight": randint(3, 8),
-            "gamma":            uniform(0.05, 0.35),
-            "reg_alpha":        loguniform(1e-3, 0.5),
-            "reg_lambda":       loguniform(3.0, 12.0),
+            "max_depth":        randint(3, 6),              # {3,4,5}
+            "max_leaves":       randint(64, 128),           # {64..127}
+            "learning_rate":    loguniform(0.03, 0.08),     # 0.03–0.08
+            "subsample":        uniform(0.70, 0.25),        # 0.70–0.95
+            "colsample_bytree": uniform(0.65, 0.25),        # 0.65–0.90
+            "colsample_bynode": uniform(0.70, 0.25),        # 0.70–0.95
+            "min_child_weight": randint(2, 8),              # {2..7}
+            "gamma":            uniform(0.03, 0.30),        # 0.03–0.33
+            "reg_alpha":        loguniform(1e-3, 0.5),      # 0.001–0.5
+            "reg_lambda":       loguniform(1.5, 10.0),      # 1.5–10
         }
-        
-        # AUC-oriented (rank pickup) but still tamed
+        # AUC-oriented (rank pickup)
         params_auc = {
-            "max_depth":        randint(4, 6),
-            "max_leaves":       randint(64, 128),
-            "learning_rate":    loguniform(0.04, 0.10),
-            "subsample":        uniform(0.75, 0.20),     # 0.80–0.98
-            "colsample_bytree": uniform(0.70, 0.20),     # 0.60–0.85
-            "colsample_bynode": uniform(0.70, 0.20),
-            "min_child_weight": randint(2, 6),
-            "gamma":            uniform(0.03, 0.25),
-            "reg_alpha":        loguniform(1e-4, 0.3),
-            "reg_lambda":       loguniform(2.0, 8.0),
+            "max_depth":        randint(4, 7),              # {4,5,6}
+            "max_leaves":       randint(96, 160),           # {96..159}
+            "learning_rate":    loguniform(0.04, 0.10),     # 0.04–0.10
+            "subsample":        uniform(0.75, 0.25),        # 0.75–1.00
+            "colsample_bytree": uniform(0.70, 0.25),        # 0.70–0.95
+            "colsample_bynode": uniform(0.70, 0.25),        # 0.70–0.95
+            "min_child_weight": randint(1, 6),              # {1..5}
+            "gamma":            uniform(0.02, 0.25),        # 0.02–0.27
+            "reg_alpha":        loguniform(1e-4, 0.3),      # 0.0001–0.3
+            "reg_lambda":       loguniform(1.5, 8.0),       # 1.5–8
         }
 
     # -------------- scrub params (defensive) --------------
-    danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric"}
+    danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric", "scale_pos_weight"}
     params_ll  = {k: v for k, v in params_ll.items()  if k not in danger_keys}
     params_auc = {k: v for k, v in params_auc.items() if k not in danger_keys}
 
@@ -6143,6 +6144,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # set a better prior so trees move off 0.5 faster
         base_kwargs["base_score"] = pos_rate
  
+        # before this block (once)
+        pos_rate = float(np.mean(y_train))  # prior positive rate for base_score
+        
         base_kwargs = {
             **base_kwargs,
             "tree_method": "hist",
@@ -6150,17 +6154,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "max_bin": 256,
             "predictor": "cpu_predictor",
             "random_state": 42,
-            "scale_pos_weight": float(spw),
+        
+            # ✅ stop using spw entirely
+            "scale_pos_weight": 1.0,   # neutralize class weighting
+            "base_score": pos_rate,    # prior so probs can move off 0.5
+        
             "sampling_method": "uniform",
         
-            # Encourage splitting & add capacity (works with lossguide)
-            "learning_rate": 0.03,     # smaller LR → more rounds before ES
-            "max_leaves": 256,         # more capacity (try 128–512 if needed)
-            "min_child_weight": 0.5,   # easier to split
+            # Encourage splitting & add capacity
+            "learning_rate": 0.03,
+            "max_leaves": 256,
+            "min_child_weight": 0.5,
             "subsample": 0.9,
             "colsample_bytree": 0.9,
         }
-       
            
         sport_key = str(sport).upper()
         search_estimators = 350 if sport_key in SMALL_LEAGUES else 450
