@@ -114,14 +114,14 @@ from sklearn.ensemble import GradientBoostingClassifier
 
 import xgboost as xgb
 from xgboost import XGBClassifier
-
+import shap, numpy as np, pandas as pd
 from google.oauth2 import service_account
 from google.cloud import storage, bigquery, bigquery_storage_v1
 import pandas_gbq
 from pandas_gbq import to_gbq
 import google.api_core.exceptions
 from google.cloud import bigquery, bigquery_storage
-
+from sklearn.inspection import PartialDependenceDisplay
 from pandas.api.types import (
     is_bool_dtype, is_numeric_dtype, is_categorical_dtype, is_datetime64_any_dtype,
     is_period_dtype, is_interval_dtype, is_object_dtype
@@ -619,6 +619,36 @@ class _IdentityCal:
 import numpy as np
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+import numpy as np, pandas as pd
+
+def perm_auc_importance(est, X, y, w, n_repeats=8, random_state=42):
+    rng = np.random.RandomState(random_state)
+    # correct positive column + baseline
+    p0, _ = pos_proba_safe(est, X, positive=1)
+    base = roc_auc_score(y, p0, sample_weight=w)
+    imps = np.zeros((X.shape[1], n_repeats), dtype=float)
+    Xc = X.copy()
+    for j in range(X.shape[1]):
+        col = Xc[:, j].copy()
+        for r in range(n_repeats):
+            rng.shuffle(Xc[:, j])
+            p, _ = pos_proba_safe(est, Xc, positive=1)
+            imps[j, r] = base - roc_auc_score(y, p, sample_weight=w)
+            Xc[:, j] = col
+    means, stds = imps.mean(1), imps.std(1)
+    order = np.argsort(-means)
+    df = pd.DataFrame({
+        "feature": np.array(feature_cols)[order],
+        "perm_auc_drop_mean": means[order],
+        "perm_auc_drop_std": stds[order],
+    })
+    return base, df
+
+# Use the *same* ES fold you already used for early stopping
+base_auc, perm_df = perm_auc_importance(model_auc, X_va_es, y_va_es, w_va_es, n_repeats=10)
+st.write({"perm_base_auc": float(base_auc)})
+st.dataframe(perm_df.head(25))
 
 
 class _BetaCalibrator:
@@ -6414,7 +6444,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- Create models (single, final instantiation) ---
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
-        
+        DEBUG_INTERP = True
         # --- Early-stopped fits ---
         model_logloss.fit(
             X_tr_es, y_tr_es,
@@ -6433,8 +6463,36 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=early_stopping_rounds,
         )
-
+        if DEBUG_INTERP:
+            
         
+            # Use ES validation fold for a fixed, time-correct slice
+            ns = int(min(4000, X_va_es.shape[0]))
+            X_shap = X_va_es[:ns]
+            expl = shap.TreeExplainer(model_auc)
+            sv = expl.shap_values(X_shap)   # shape: (ns, n_features)
+        
+            shap_mean = np.abs(sv).mean(0)
+            shap_top = (pd.DataFrame({"feature": feature_cols, "mean|SHAP|": shap_mean})
+                          .sort_values("mean|SHAP|", ascending=False))
+            st.subheader("SHAP (AUC model, ES fold)")
+            st.dataframe(shap_top.head(25))
+        if DEBUG_INTERP:
+          
+        
+            top_feats = shap_top["feature"].head(6).tolist()  # or hand-pick
+            feat_idx = [feature_cols.index(f) for f in top_feats if f in feature_cols]
+        
+            if feat_idx:
+                st.subheader("PDP/ICE (AUC model, ES fold)")
+                # PDP on ES validation keeps time order; you can also use X_train
+                PartialDependenceDisplay.from_estimator(
+                    model_auc, X_va_es, features=feat_idx,
+                    kind="both", grid_resolution=20, response_method="predict_proba"
+                )
+                st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
+        
+                
         # (Optional) consolidate helpers you already had:
         def _best_rounds(clf):
             br = getattr(clf, "best_iteration", None)
@@ -6541,17 +6599,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_oof = int(mask_oof.sum())
         
         # Final fallback policies
+        # Final fallback policies
         if n_oof < MIN_OOF:
             if SMALL:
                 tr_es_rel, va_es_rel = folds[-1]
                 y_oof = y_train[va_es_rel].astype(int)
                 pa_es, _ = pos_proba_safe(model_auc, X_train[va_es_rel], positive=1)
                 auc_es, p_oof_auc, flipped_es = auc_with_flip(y_oof, pa_es, w_train[va_es_rel])
+                # NEW: clip to keep in (eps, 1-eps) like the OOF path
+                p_oof_auc = np.clip(p_oof_auc.astype(np.float64), eps, 1 - eps)
+        
                 if RUN_LOGLOSS:
                     pl_es, _ = pos_proba_safe(model_logloss, X_train[va_es_rel], positive=1)
                     p_oof_log = np.clip(pl_es, eps, 1 - eps).astype(np.float64)
                 else:
                     p_oof_log = None
+        
                 st.info(f"Small-league fallback: using last-fold validation only (n={len(va_es_rel)}) for blend weight.")
             else:
                 y_oof = y_train[mask_auc].astype(int)
@@ -6573,6 +6636,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=None, eps=eps, metric="logloss"
             )
         
+        # === Interpretation (only when enabled) ===
+        if DEBUG_INTERP:
+            import pandas as pd  # ensure available in this scope
+        
+            def category_lift_table(model, X, y, names, base=None):
+                p, _ = pos_proba_safe(model, X, positive=1)
+                base = float(np.mean(y)) if base is None else float(base)
+                out = []
+                for j, name in enumerate(names):
+                    col = X[:, j]
+                    u = np.unique(col)
+                    if u.size <= 2:
+                        mask = (col == 1) if u.size == 2 else (col == u.max())
+                        if mask.any():
+                            m = float(p[mask].mean())
+                            out.append({"feature": name, "group": "==1", "n": int(mask.sum()),
+                                        "mean_p": m, "lift_vs_base": m - base})
+                    else:
+                        vals, cnts = np.unique(col, return_counts=True)
+                        top = vals[np.argsort(-cnts)[:5]]
+                        for v in top:
+                            mask = (col == v)
+                            if mask.any():
+                                m = float(p[mask].mean())
+                                out.append({"feature": name, "group": f"=={v}", "n": int(mask.sum()),
+                                            "mean_p": m, "lift_vs_base": m - base})
+                return (pd.DataFrame(out)
+                          .sort_values(["feature","lift_vs_base"], ascending=[True, False]))
+        
+            st.subheader("Category lift (ES fold)")
+            st.dataframe(category_lift_table(model_auc, X_va_es, y_va_es, feature_cols).head(50))
+        
         # Final safety
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
         if not np.isfinite(p_oof_blend).all():
@@ -6589,6 +6684,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
         
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
+
         
         # ---------------- Calibration ----------------
         CLIP = 0.005 if sport_key not in SMALL_LEAGUES else 0.01
