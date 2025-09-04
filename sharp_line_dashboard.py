@@ -6456,8 +6456,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Weights must be finite and not all zero
         assert np.isfinite(w_va_es).all() and (w_va_es > 0).any(), "Validation weights are zero/NaN."
 
-        final_estimators_cap  = max(15000, int(final_estimators_cap))
-        early_stopping_rounds = max(5000,   int(early_stopping_rounds))
+        # --- Safe defaults (define before bumping) ---
+        DEFAULT_FINAL_N_EST     = 10000
+        DEFAULT_ES_ROUNDS       = 500
+        
+        # If these weren’t set earlier in this function, seed them now
+        final_estimators_cap    = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
+        early_stopping_rounds   = int(locals().get("early_stopping_rounds", DEFAULT_ES_ROUNDS))
+        
+        # --- Your bumps (now safe) ---
+        final_estimators_cap    = max(15000, final_estimators_cap)
+        early_stopping_rounds   = max(5000,   early_stopping_rounds)
         
             # --- Build final param dicts first (clean & safe) ---
         params_ll_final = {**base_kwargs, **best_ll_params}
