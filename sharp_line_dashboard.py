@@ -6144,8 +6144,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # set a better prior so trees move off 0.5 faster
         base_kwargs["base_score"] = pos_rate
  
-        # before this block (once)
-        pos_rate = float(np.mean(y_train))  # prior positive rate for base_score
+       
         
         base_kwargs = {
             **base_kwargs,
