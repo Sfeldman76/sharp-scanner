@@ -6474,7 +6474,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     y_va_es.astype(int),
                     w_va_es,
                     n_repeats=10,
-                    feature_names=feature_cols,
+                    features=feature_cols, 
                     random_state=42,
                 )
                 st.write({"perm_base_auc": float(base_auc)})
