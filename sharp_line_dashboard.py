@@ -2635,6 +2635,9 @@ SMALL_LEAGUES = {"WNBA", "CFL"}
 BIG_LEAGUES   = {"MLB", "NBA", "NFL", "NCAAF", "NCAAB"}  # extend as needed
 
 from scipy.stats import randint, uniform, loguniform
+# Requires:
+#   from scipy.stats import randint, uniform, loguniform
+
 def get_xgb_search_space(
     sport: str,
     *,
@@ -2647,16 +2650,26 @@ def get_xgb_search_space(
     """
     Returns (base_kwargs, params_ll, params_auc) for XGBClassifier randomized searches.
 
-    Notes:
-    - Intentionally does NOT set `scale_pos_weight` in base kwargs or grids.
-      If you truly need it, set it *outside* this function (we recommend 1.0
-      and instead tune via sampling/regularization).
-    - No eval_metric here; set it on the estimator you pass to CV or fit.
+    Design:
+    - No eval_metric and no scale_pos_weight here.
+    - Base kwargs are safe, CPU-friendly, and consistent.
+    - Two search spaces:
+        * params_ll  → logloss-oriented (probability quality)
+        * params_auc → AUC-oriented (ranking lift)
+    - "Small leagues" get a slightly hotter learning rate and lighter models.
+
+    Tips:
+    - If you want a better prior, set after this call:
+          base_kwargs["base_score"] = float(np.clip(np.mean(y_train), 1e-4, 1-1e-4))
+    - Set n_estimators on the estimator you pass to CV, not here.
     """
     s = str(sport).upper()
-    # spw kept only for backward compatibility with callers; not used.
-    _ = float(scale_pos_weight)
+    _ = float(scale_pos_weight)  # kept only for API compatibility
     n_jobs = int(n_jobs)
+
+    # You can tweak this set as you wish
+    SMALL_LEAGUES = {"WNBA", "CFL"}  # add/remove: {"NCAAB-W", ...}
+    SMALL = (s in SMALL_LEAGUES)
 
     # ---------------- Base kwargs (single, consistent block) ----------------
     base_kwargs = dict(
@@ -2664,22 +2677,27 @@ def get_xgb_search_space(
         tree_method="hist",
         predictor="cpu_predictor",
         grow_policy="lossguide",
-        max_bin=256,                # a bit more resolution than 128
+        max_bin=256,                # solid CPU default
         sampling_method="uniform",
-        max_delta_step=0.0,         # let the search/ES handle stabilization
+        max_delta_step=0.0,         # no update clamp
         reg_lambda=2.0,             # moderate L2
-        min_child_weight=1.0,       # allow splits; you’ll search wider below
+        min_child_weight=1.0,       # allow splits; grids will widen
         n_jobs=n_jobs,
         random_state=42,
         importance_type="total_gain",
-        # NOTE: no eval_metric, no scale_pos_weight here by design
+        # intentionally: no eval_metric, no scale_pos_weight
     )
 
-    # ---------------- Search spaces ----------------
-    SMALL = (s in SMALL_LEAGUES)
+    # If you ever want monotone constraints, wire them here.
+    # (Kept off by default; supplying a dummy/all-zeros map is usually pointless.)
+    if use_monotone and features:
+        # Example skeleton (disabled by default):
+        # base_kwargs["monotone_constraints"] = "(" + ",".join("0" for _ in features) + ")"
+        pass
 
+    # ---------------- Search spaces ----------------
     if SMALL:
-        # Small leagues — allow more exploration but keep it sane
+        # Small leagues — allow exploration but keep it sane
         params_ll = {
             "max_depth":        randint(3, 7),              # {3,4,5,6}
             "max_leaves":       randint(64, 128),           # {64..127}
@@ -2715,7 +2733,7 @@ def get_xgb_search_space(
             "colsample_bytree": uniform(0.65, 0.25),        # 0.65–0.90
             "colsample_bynode": uniform(0.70, 0.25),        # 0.70–0.95
             "min_child_weight": randint(2, 8),              # {2..7}
-            "gamma":            uniform(0.03, 0.30),        # 0.03–0.33
+            "gamma":            uniform(0.03, 0.30),        # 0.03–0.30
             "reg_alpha":        loguniform(1e-3, 0.5),      # 0.001–0.5
             "reg_lambda":       loguniform(1.5, 10.0),      # 1.5–10
         }
@@ -2728,13 +2746,31 @@ def get_xgb_search_space(
             "colsample_bytree": uniform(0.70, 0.25),        # 0.70–0.95
             "colsample_bynode": uniform(0.70, 0.25),        # 0.70–0.95
             "min_child_weight": randint(1, 6),              # {1..5}
-            "gamma":            uniform(0.02, 0.25),        # 0.02–0.27
+            "gamma":            uniform(0.02, 0.25),        # 0.02–0.25
             "reg_alpha":        loguniform(1e-4, 0.3),      # 0.0001–0.3
             "reg_lambda":       loguniform(1.5, 8.0),       # 1.5–8
         }
 
+    # -------- Optional common wideners (mix of discrete choices) --------
+    params_common = {
+        "min_child_weight": [0.0, 0.1, 0.25, 0.5, 1.0, 2.0],
+        "gamma":            [0.0, 0.02, 0.05, 0.10],
+        "subsample":        [0.6, 0.7, 0.8, 0.9, 1.0],
+        "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
+        "max_leaves":       [256, 512, 1024],  # allows bigger capacity if search hits it
+        "max_bin":          [128, 256],
+        "learning_rate":    [0.05, 0.07, 0.09],
+        "reg_lambda":       [0.0, 0.5, 1.0, 2.0],
+        "reg_alpha":        [0.0, 0.1, 0.3],
+    }
+    params_ll.update(params_common)
+    params_auc.update(params_common)
+
     # -------------- scrub params (defensive) --------------
-    danger_keys = {"objective", "_estimator_type", "response_method", "eval_metric", "scale_pos_weight"}
+    danger_keys = {
+        "objective", "_estimator_type", "response_method",
+        "eval_metric", "scale_pos_weight"
+    }
     params_ll  = {k: v for k, v in params_ll.items()  if k not in danger_keys}
     params_auc = {k: v for k, v in params_auc.items() if k not in danger_keys}
 
@@ -6131,137 +6167,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],
-            n_jobs=1,
-            scale_pos_weight=1.0,   # 👈 neutralize class weighting
+            n_jobs=n_jobs,
             features=features,
         )
         
-        # make sure nothing reintroduces it
-        base_kwargs["scale_pos_weight"] = 1.0
-        params_ll.pop("scale_pos_weight", None)
-        params_auc.pop("scale_pos_weight", None)
+        # Optionally set a better prior (recommended):
+        base_kwargs["base_score"] = float(np.clip(np.mean(y_train), 1e-4, 1-1e-4))
         
-                # set a better prior so trees move off 0.5 faster
-        base_rate = float(np.clip(np.mean(y_train), 1e-4, 1-1e-4))
-
-
-        # overwrite some “flattening” defaults
-        base_kwargs = {
-            **base_kwargs,
-            "tree_method": "hist",
-            "grow_policy": "lossguide",
-            "max_bin": 256,
-            "predictor": "cpu_predictor",
-            "random_state": 42,
-            "sampling_method": "uniform",
-        
-            # ⬇️ important for spread
-            "base_score": base_rate,   # center on empirical prevalence, not 0.5
-            "max_delta_step": 0.0,     # remove update clamp (lets logits move)
-            "learning_rate": 0.07,     # a bit larger → fewer rounds needed
-            "max_leaves": 512,         # more capacity
-            "min_child_weight": 0.1,   # allow small leaves (was 0.5–2; too conservative)
-            "gamma": 0.0,              # cheap splits early
-            "subsample": 0.7,
-            "colsample_bytree": 0.7,
-            # keep regularization modest
-            "reg_lambda": 1.0,
-            "reg_alpha": 0.0,
-        }
-        
-        # Expand search ranges to allow more “splity” configs
-        params_common = {
-            "min_child_weight": [0.0, 0.1, 0.25, 0.5, 1.0, 2.0],
-            "gamma": [0.0, 0.02, 0.05, 0.1],
-            "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
-            "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
-            "max_leaves": [256, 512, 1024],
-            "max_bin": [128, 256],
-            "learning_rate": [0.05, 0.07, 0.09],
-            "reg_lambda": [0.0, 0.5, 1.0, 2.0],
-            "reg_alpha": [0.0, 0.1, 0.3],
-        }
-        params_ll.update(params_common)
-        params_auc.update(params_common)
-        
-        # ----- build search estimators (no early stopping inside the search) -----
-        search_estimators = 500
-        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
-        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
-        
-
-        def _assert_classifier(est, name: str):
-            est_type  = getattr(est, "_estimator_type", None)
-            has_proba = callable(getattr(est, "predict_proba", None))
-            if not ((est_type == "classifier") and has_proba):
-                raise AssertionError(f"{name} not classifier; _estimator_type={est_type}, has_predict_proba={has_proba}")
-        
-        _assert_classifier(est_ll,  "est_ll")
-        _assert_classifier(est_auc, "est_auc")
-
-        # ================== << end SHAP block >> ==================
+        # Build your estimators with your chosen n_estimators & eval_metric:
+        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": 500, "eval_metric": "logloss"})
+        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": 500, "eval_metric": "auc"})
 
         
-        # ---------------------------------------------------------------------------
-        #  Randomized searches (use filtered cv_splits)
-        # ---------------------------------------------------------------------------
-        
-        # pick your n_estimators
-        # Example overrides (keep your distributions if they already cover these)
-        
-        # ---- IMPORTANT: neutralize class weight; you already use sample_weight ----
-        base_kwargs["scale_pos_weight"] = 1.0
-        params_ll.pop("scale_pos_weight", None)
-        params_auc.pop("scale_pos_weight", None)
-        
-        # ---- Encourage capacity/diversity + better prior ----
-        base_kwargs.update({
-            "tree_method": "hist",
-            "grow_policy": "lossguide",
-            "predictor": "cpu_predictor",
-            "random_state": 42,
-            "sampling_method": "uniform",
-        
-            "base_score": pos_rate,   # ← move the start away from 0.5 if class prior ≠ 0.5
-        
-            # split capacity & diversity
-            "learning_rate": 0.03,    # smaller eta → more trees → more spread
-            "max_leaves": 512,        # more capacity (try 256–1024 if fast enough)
-            "max_depth": 12,          # depth cap so leaves aren’t tiny
-            "min_child_weight": 0.1,  # easier to split than 0.5/1.0
-            "gamma": 0.0,             # keep splits cheap initially
-            "subsample": 0.7,         # more tree diversity
-            "colsample_bytree": 0.7,
-            "colsample_bynode": 0.8,
-        
-            "max_bin": 256,           # 256 is a good default for CPU speed/quality
-            "max_delta_step": 0.0
-        })
-
-
-        params_common = {
-            "min_child_weight": [0.0, 0.1, 0.5, 1, 2],
-            "gamma": [0, 0.01, 0.05, 0.1],
-            "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
-            "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
-            "colsample_bynode": [0.8, 1.0],
-            "max_leaves": [256, 512, 1024],
-            "max_depth": [8, 10, 12],             # depthwise guard
-            "reg_lambda": [0.1, 0.5, 1.0, 2.0],   # lighter L2
-            "reg_alpha": [0.0, 0.1, 0.5],         # mild L1
-            "learning_rate": [0.03, 0.05, 0.08],
-        }
-        params_ll.update(params_common)
-        params_auc.update(params_common)
-        
-        # keep ES **off** during RandomizedSearchCV; set eval_metric on estimators only
-        search_estimators = 500  # ~300–500 is a good range for search
-        
-        search_trials = 40 if sport_key in SMALL_LEAGUES else 40
-        # build the two base estimators WITH their eval_metric
-        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
-        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
-
+      
+           
       
         rs_ll = RandomizedSearchCV(
             estimator=est_ll,
@@ -6302,8 +6221,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         tr_es_rel = np.asarray(tr_es_rel)
         va_es_rel = np.asarray(va_es_rel)
         
-        final_estimators_cap  = 6000
-        early_stopping_rounds = 4000
+        final_estimators_cap  = 10000
+        early_stopping_rounds = 500
         # (sanity) ensure eval weights aren’t zeroed
        
         # Build fresh models with the searched params
