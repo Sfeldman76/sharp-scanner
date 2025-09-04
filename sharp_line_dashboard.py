@@ -6167,7 +6167,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
             n_gb = train_df.groupby(["Game_Key", bk_col]).size()
         
-            TAU = 0.6
+            TAU = 0.7
             def _w_gb(g, b, tau=1.0):
                 Bg  = max(1, int(B_g.get(g, 1)))
                 ngb = max(1, int(n_gb.get((g, b), 1)))
@@ -6260,7 +6260,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 objective="binary:logistic",
                 tree_method="hist",
                 grow_policy="lossguide",
-                max_bin=128,
+                max_bin=256,
                 max_delta_step=0.5,
                 n_jobs=1,
                 random_state=42
@@ -6268,8 +6268,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X=X_train_df,
             y=y_train,
             folds=folds,                # reuse the CV folds built earlier (rows unchanged)
-            topk_per_fold=55,
-            min_presence=0.95,
+            topk_per_fold=30,
+            min_presence=0.90,
             max_keep=80,
             sample_per_fold=4000,
             random_state=42,
@@ -6325,8 +6325,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        # ================== FAST SEARCH → DEEP REFIT ==================
         
         # 1) Build *cheap* search estimators (broad exploration)
-        SEARCH_N_EST   = 300          # small budget per config during search
-        SEARCH_MAX_BIN = 128          # cheaper histograms for speed
+        SEARCH_N_EST   = 500          # small budget per config during search
+        SEARCH_MAX_BIN = 256          # cheaper histograms for speed
         
         # Parallelize across trials (keep estimator n_jobs=1)
         VCPUS = get_vcpus()
@@ -6457,8 +6457,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert np.isfinite(w_va_es).all() and (w_va_es > 0).any(), "Validation weights are zero/NaN."
 
         # --- Safe defaults (define before bumping) ---
-        DEFAULT_FINAL_N_EST     = 10000
-        DEFAULT_ES_ROUNDS       = 500
+        DEFAULT_FINAL_N_EST     = 15000
+        DEFAULT_ES_ROUNDS       = 7000
         
         # If these weren’t set earlier in this function, seed them now
         final_estimators_cap    = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
@@ -6466,7 +6466,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # --- Your bumps (now safe) ---
         final_estimators_cap    = max(15000, final_estimators_cap)
-        early_stopping_rounds   = max(5000,   early_stopping_rounds)
+        early_stopping_rounds   = max(7000,   early_stopping_rounds)
         
             # --- Build final param dicts first (clean & safe) ---
         params_ll_final = {**base_kwargs, **best_ll_params}
@@ -6474,7 +6474,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         params_ll_final.update(
             n_estimators=int(final_estimators_cap),
             eval_metric="logloss",
-            max_bin=256,
+            max_bin=512,
             n_jobs=int(VCPUS),
             # keep lossguide from base_kwargs
         )
@@ -6485,7 +6485,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         params_auc_final.update(
             n_estimators=int(final_estimators_cap),
             eval_metric="auc",
-            max_bin=256,
+            max_bin=512,
             n_jobs=int(VCPUS),
             grow_policy="depthwise",
         )
@@ -6757,7 +6757,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # ---------------- Calibration ----------------
-        CLIP = 0.005 if sport_key not in SMALL_LEAGUES else 0.01
+        CLIP = 0.0005 if sport_key not in SMALL_LEAGUES else 0.01
         use_quantile_iso = False
         
         # Always init so it's in scope on all paths
