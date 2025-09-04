@@ -622,28 +622,72 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 import numpy as np, pandas as pd
 
-def perm_auc_importance(est, X, y, w, n_repeats=8, random_state=42):
-    rng = np.random.RandomState(random_state)
-    # correct positive column + baseline
+from sklearn.metrics import roc_auc_score
+import numpy as np, pandas as pd
+
+def perm_auc_importance(
+    est,
+    X,
+    y,
+    w=None,
+    *,
+    n_repeats: int = 8,
+    feature_names=None,        # <-- now accepted
+    random_state: int = 42,
+):
+    """
+    Weighted permutation importance measured as drop in AUC on (X,y[,w]).
+    Returns (base_auc, DataFrame[feature, perm_auc_drop_mean, perm_auc_drop_std]).
+    """
+    # coerce
+    X = np.asarray(X)
+    y = np.asarray(y).astype(int)
+    w = (None if w is None else np.asarray(w))
+    if np.unique(y).size < 2:
+        raise ValueError("ROC AUC undefined: validation fold has a single class.")
+    if w is not None:
+        if not np.isfinite(w).all():
+            raise ValueError("Weights contain NaN/Inf.")
+        if (w > 0).sum() == 0:
+            raise ValueError("All validation weights are zero.")
+
+    # feature names
+    if feature_names is None:
+        try:
+            # last-resort fallback if you keep a global list
+            from inspect import currentframe
+            names = np.array(currentframe().f_back.f_locals.get("feature_cols", [f"f{j}" for j in range(X.shape[1])]))
+        except Exception:
+            names = np.array([f"f{j}" for j in range(X.shape[1])])
+    else:
+        names = np.array(feature_names)
+    assert X.shape[1] == names.size, "feature_names length must match X columns"
+
+    # baseline AUC (safe positive column)
     p0, _ = pos_proba_safe(est, X, positive=1)
     base = roc_auc_score(y, p0, sample_weight=w)
-    imps = np.zeros((X.shape[1], n_repeats), dtype=float)
+
+    # permute
+    rng = np.random.RandomState(random_state)
+    nfeat = X.shape[1]
+    imps = np.zeros((nfeat, n_repeats), dtype=float)
     Xc = X.copy()
-    for j in range(X.shape[1]):
+    for j in range(nfeat):
         col = Xc[:, j].copy()
         for r in range(n_repeats):
             rng.shuffle(Xc[:, j])
-            p, _ = pos_proba_safe(est, Xc, positive=1)
-            imps[j, r] = base - roc_auc_score(y, p, sample_weight=w)
+            pr, _ = pos_proba_safe(est, Xc, positive=1)
+            imps[j, r] = base - roc_auc_score(y, pr, sample_weight=w)
             Xc[:, j] = col
+
     means, stds = imps.mean(1), imps.std(1)
     order = np.argsort(-means)
     df = pd.DataFrame({
-        "feature": np.array(feature_cols)[order],
+        "feature": names[order],
         "perm_auc_drop_mean": means[order],
-        "perm_auc_drop_std": stds[order],
+        "perm_auc_drop_std":  stds[order],
     })
-    return base, df
+    return float(base), df
 
 
 
@@ -6468,14 +6512,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if np.unique(y_va_es).size < 2:
                 st.warning("Permutation importance skipped: ES validation fold has a single class.")
             else:
+                assert X_va_es.shape[1] == len(feature_cols)
+
                 base_auc, perm_df = perm_auc_importance(
                     model_auc,
                     X_va_es,
-                    y_va_es.astype(int),
+                    y_va_es,
                     w_va_es,
                     n_repeats=10,
-                    feature_names=feature_cols,
-                    random_state=42,
+                    feature_names=feature_cols,   # <-- works now
                 )
                 st.write({"perm_base_auc": float(base_auc)})
                 st.dataframe(perm_df.head(25))
