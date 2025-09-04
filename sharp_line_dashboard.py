@@ -639,6 +639,55 @@ class _BetaCalibrator:
         z = self._logit(p, self.eps)
         X = np.c_[z, z*z]
         return self.model.predict_proba(X)[:, 1]
+import numpy as np
+import math
+from sklearn.metrics import roc_auc_score
+
+def pos_proba_safe(clf, X, positive=1):
+    """Return P(y==positive) using the correct column from predict_proba."""
+    proba = clf.predict_proba(X)
+    classes = np.asarray(getattr(clf, "classes_", []))
+    if classes.size == 0:
+        raise RuntimeError("Classifier has no classes_.")
+    where = np.where(classes == positive)[0]
+    if where.size == 0:
+        raise RuntimeError(f"Positive label {positive} not in classes_: {classes!r}")
+    return proba[:, int(where[0])].astype(np.float64), classes
+
+def auc_with_flip(y, p, w=None):
+    """Compute AUC and flip scores if AUC<0.5 (returns auc, possibly flipped p, flipped?)."""
+    a = roc_auc_score(y, p, sample_weight=w)
+    if a < 0.5:
+        return 1.0 - a, 1.0 - p, True
+    return a, p, False
+
+def best_round_plus_one(clf) -> int:
+    """Robust number-of-trees getter after early stopping."""
+    bi = getattr(clf, "best_iteration", None)
+    if isinstance(bi, (int, np.integer)) and bi >= 0: return int(bi + 1)
+    if isinstance(bi, float) and not math.isnan(bi) and bi >= 0: return int(bi + 1)
+    try:
+        bst = clf.get_booster()
+        bi2 = getattr(bst, "best_iteration", None)
+        if isinstance(bi2, (int, np.integer)) and bi2 >= 0: return int(bi2 + 1)
+        bntl = getattr(bst, "best_ntree_limit", None)
+        if isinstance(bntl, (int, np.integer)) and bntl > 0: return int(bntl)
+    except Exception:
+        pass
+    ev = getattr(clf, "evals_result_", {}) or {}
+    ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
+    if ds:
+        metrics = ev[ds]
+        if metrics:
+            arr = next(iter(metrics.values()))
+            if isinstance(arr, list) and len(arr) > 0:
+                return int(len(arr))
+    return int(getattr(clf, "n_estimators", 0))
+
+def weight_report(w, y):
+    import pandas as pd
+    df = pd.DataFrame({"w": w, "y": y})
+    return df.groupby("y")["w"].agg(["count","sum","mean","min","max"])
 
 def fit_robust_calibrator(p_oof, y_oof, *, eps=1e-6, min_unique=200, prefer_beta=True):
     """
@@ -6149,8 +6198,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X=X_train_df,
             y=y_train,
             folds=folds,                # reuse the CV folds built earlier (rows unchanged)
-            topk_per_fold=35,
-            min_presence=0.85,
+            topk_per_fold=55,
+            min_presence=0.95,
             max_keep=80,
             sample_per_fold=4000,
             random_state=42,
@@ -6327,7 +6376,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         X_va_es = X_train[va_es_rel];  y_va_es = y_train[va_es_rel]
         w_tr_es = np.maximum(w_train[tr_es_rel], 1e-6)
         w_va_es = np.maximum(w_train[va_es_rel], 1e-6)
+                
+        def _has_both_classes_idx(y, idx):
+            u = set(np.unique(y[idx])); return (0 in u) and (1 in u)
         
+        # Validation fold must have both classes
+        assert _has_both_classes_idx(y_train, va_es_rel), "ES fold is single-class; widen min_val_size or pick a different ES fold."
+        
+        # Weights must be finite and not all zero
+        assert np.isfinite(w_va_es).all() and (w_va_es > 0).any(), "Validation weights are zero/NaN."
+
         final_estimators_cap  = 10000   # allow very deep/long growth
         early_stopping_rounds = 500
         
@@ -6427,34 +6485,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "val_auc_last10": val_auc_last10,
         })
         # ================== END FAST SEARCH → DEEP REFIT ==================
-
-            # -----------------------------------------
+        
+           # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
         
-        # Small-league heuristics
         SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000)
-        MIN_OOF = 15 if SMALL else 50          # lower bar for small leagues
-        USE_LOGLOSS_STREAM = False if SMALL else False  # keep off by default; flip to True if you want blending
+        MIN_OOF = 15 if SMALL else 50
+        USE_LOGLOSS_STREAM = False if SMALL else False
         RUN_LOGLOSS = USE_LOGLOSS_STREAM
         
-        # Preallocate (float64 for safety)
+        # Preallocate
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
         oof_pred_logloss = np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None
         
-        # Make OOFs; clip now so NaNs stand out only when truly missing
+        # Make OOFs with safe proba + optional per-fold flip
         for tr_rel, va_rel in folds:
             # AUC stream
             m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc), "n_jobs": 1})
             m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
-            pa = pos_proba(m_auc, X_train[va_rel], positive=1).astype(np.float64)
-            oof_pred_auc[va_rel] = np.clip(pa, eps, 1 - eps)
+            pa, _ = pos_proba_safe(m_auc, X_train[va_rel], positive=1)
+            auc_tmp, pa_fixed, flipped_tmp = auc_with_flip(y_train[va_rel].astype(int), pa, w_train[va_rel])
+            oof_pred_auc[va_rel] = np.clip(pa_fixed, eps, 1 - eps)
         
+            # Logloss stream (no flipping needed for semantics, but keep same plumbing)
             if RUN_LOGLOSS:
                 m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": int(n_trees_ll), "n_jobs": 1})
                 m_ll.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
-                pl = pos_proba(m_ll, X_train[va_rel], positive=1).astype(np.float64)
-                oof_pred_logloss[va_rel] = np.clip(pl, eps, 1 - eps)
+                pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
+                oof_pred_logloss[va_rel] = np.clip(pl.astype(np.float64), eps, 1 - eps)
         
         # Primary mask
         mask_auc = np.isfinite(oof_pred_auc)
@@ -6462,56 +6521,54 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         mask_oof = mask_auc & mask_log
         n_oof = int(mask_oof.sum())
         
-        # ---- Small-league gap fill: use last-fold ES models for rows never validated ----
-        if SMALL and n_oof < MIN_OOF:
-            tr_es_rel, va_es_rel = folds[-1]
+        # Small-league gap fill with ES models for rows never validated
+        if SMALL && n_oof < MIN_OOF:
             miss = ~mask_auc
             if miss.any():
-                pa_fill = pos_proba(model_auc, X_train[miss], positive=1).astype(np.float64)
+                pa_fill, _ = pos_proba_safe(model_auc, X_train[miss], positive=1)
                 oof_pred_auc[miss] = np.clip(pa_fill, eps, 1 - eps)
                 mask_auc = np.isfinite(oof_pred_auc)
-        
             if RUN_LOGLOSS and oof_pred_logloss is not None:
                 miss_log = ~np.isfinite(oof_pred_logloss)
                 if miss_log.any():
-                    pl_fill = pos_proba(model_logloss, X_train[miss_log], positive=1).astype(np.float64)
+                    pl_fill, _ = pos_proba_safe(model_logloss, X_train[miss_log], positive=1)
                     oof_pred_logloss[miss_log] = np.clip(pl_fill, eps, 1 - eps)
-        
             mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
             mask_oof = mask_auc & mask_log
             n_oof = int(mask_oof.sum())
         
-        # ---- Final fallback policies for small leagues ----
+        # Final fallback policies
         if n_oof < MIN_OOF:
             if SMALL:
-                # Fallback to last fold’s proper validation (ES models) to pick blend weight
                 tr_es_rel, va_es_rel = folds[-1]
-                y_oof      = y_train[va_es_rel].astype(int)
-                p_oof_auc  = np.clip(pos_proba(model_auc,     X_train[va_es_rel], positive=1), eps, 1 - eps).astype(np.float64)
-                p_oof_log  = (np.clip(pos_proba(model_logloss, X_train[va_es_rel], positive=1), eps, 1 - eps).astype(np.float64)
-                              if RUN_LOGLOSS else None)
+                y_oof = y_train[va_es_rel].astype(int)
+                pa_es, _ = pos_proba_safe(model_auc, X_train[va_es_rel], positive=1)
+                auc_es, p_oof_auc, flipped_es = auc_with_flip(y_oof, pa_es, w_train[va_es_rel])
+                if RUN_LOGLOSS:
+                    pl_es, _ = pos_proba_safe(model_logloss, X_train[va_es_rel], positive=1)
+                    p_oof_log = np.clip(pl_es, eps, 1 - eps).astype(np.float64)
+                else:
+                    p_oof_log = None
                 st.info(f"Small-league fallback: using last-fold validation only (n={len(va_es_rel)}) for blend weight.")
             else:
-                # Non-small: degrade gracefully to AUC-only and continue
-                y_oof      = y_train[mask_auc].astype(int)
-                p_oof_auc  = np.clip(oof_pred_auc[mask_auc], eps, 1 - eps).astype(np.float64)
-                p_oof_log  = None
+                y_oof = y_train[mask_auc].astype(int)
+                p_oof_auc = np.clip(oof_pred_auc[mask_auc], eps, 1 - eps).astype(np.float64)
+                p_oof_log = None
                 st.warning(f"OOF coverage low ({n_oof}); proceeding with AUC-only blend source.")
         else:
-            # Standard path with full OOF
-            y_oof     = y_train[mask_oof].astype(int)
+            y_oof = y_train[mask_oof].astype(int)
             p_oof_auc = np.clip(oof_pred_auc[mask_oof], eps, 1 - eps).astype(np.float64)
             p_oof_log = (np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64) if RUN_LOGLOSS else None)
         
-        # ---- Pick blend weight on OOF (AUC-only if RUN_LOGLOSS=False) ----
-        if RUN_LOGLOSS and p_oof_log is not None and p_oof_log.shape[0] == p_oof_auc.shape[0]:
+        # Pick blend weight on OOF (AUC-only if RUN_LOGLOSS=False)
+        if RUN_LOGLOSS and (p_oof_log is not None) and (p_oof_log.shape[0] == p_oof_auc.shape[0]):
             best_w, p_oof_blend, flipped = pick_blend_weight_on_oof(
                 y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=p_oof_log, eps=eps, metric="logloss"
             )
         else:
             best_w, p_oof_blend, flipped = pick_blend_weight_on_oof(
                 y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=None, eps=eps, metric="logloss"
-            )  # best_w will be 0.0 here
+            )
         
         # Final safety
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
@@ -6527,12 +6584,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "flipped": bool(flipped),
             "oof_minmax": (float(p_oof_blend.min()), float(p_oof_blend.max()))
         })
-
-
-        # sanity
+        
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
-
-        # Calibrate (keep your existing calibrator stack)
+        
+        # ---------------- Calibration ----------------
         CLIP = 0.005 if sport_key not in SMALL_LEAGUES else 0.01
         use_quantile_iso = False
         cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
@@ -6543,80 +6598,45 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=eps)
         if cals["iso"] is None: cals["iso"] = _IdentityIsoCal(eps=eps)
         if cals["platt"] is None and cals["beta"] is None: cals["platt"] = _IdentityProbCal(eps=eps)
+        
         sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
         
         # --- Final blended raw preds (TRAIN/HOLDOUT) ---
-        p_tr_auc = pos_proba(model_auc, X_full[train_all_idx], positive=1)
-        p_ho_auc = pos_proba(model_auc, X_full[hold_idx],      positive=1)
+        p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
+        p_ho_auc, _ = pos_proba_safe(model_auc, X_full[hold_idx],      positive=1)
         
         if RUN_LOGLOSS:
-            p_tr_log = pos_proba(model_logloss, X_full[train_all_idx], positive=1)
-            p_ho_log = pos_proba(model_logloss, X_full[hold_idx],      positive=1)
+            p_tr_log, _ = pos_proba_safe(model_logloss, X_full[train_all_idx], positive=1)
+            p_ho_log, _ = pos_proba_safe(model_logloss, X_full[hold_idx],      positive=1)
             p_train_blend_raw = np.clip(best_w * p_tr_log + (1 - best_w) * p_tr_auc, eps, 1 - eps)
             p_hold_blend_raw  = np.clip(best_w * p_ho_log + (1 - best_w) * p_ho_auc, eps, 1 - eps)
         else:
-            best_w = 0.0  # make this explicit for logging
+            best_w = 0.0
             p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
             p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
         
-        # --- Apply your calibrator blend ---
+        # --- Apply calibrator blend ---
         p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1 - CLIP))
         p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1 - CLIP))
-
         
-        # Backfill so select_blend never sees None
-        if cals["iso"] is None:
-            cals["iso"] = _IdentityIsoCal(eps=eps)
-        if cals["platt"] is None and cals["beta"] is None:
-            cals["platt"] = _IdentityProbCal(eps=eps)
-        
-        sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
-        print(f"Calibrator blend: base={sel['base']}, alpha_iso={sel['alpha']:.2f}")
-        
-        # (robust calibrator optional; safe to keep)
-        cal_blend = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps, min_unique=200, prefer_beta=True)
-        if cal_blend is not None:
-            print(f"Calibration chosen on OOF blend: {cal_blend[0]}")
-        
-        # ---------- Final blended + calibrated predictions for TRAIN + HOLDOUT ----------
-        pos_ll_final  = pos_col_index(model_logloss, positive=1)
-        pos_auc_final = pos_col_index(model_auc,     positive=1)
-        
-        # ✅ Use .iloc for DataFrame row selection
-        # ✅ Use regular indexing for NumPy arrays
-        p_tr_log = pos_proba(model_logloss, X_full[train_all_idx], positive=1)
-        p_tr_auc = pos_proba(model_auc,     X_full[train_all_idx], positive=1)
-        p_ho_log = pos_proba(model_logloss, X_full[hold_idx],      positive=1)
-        p_ho_auc = pos_proba(model_auc,     X_full[hold_idx],      positive=1)
-        p_train_blend_raw = np.clip(best_w*p_tr_log + (1-best_w)*p_tr_auc, eps, 1-eps)
-        p_hold_blend_raw  = np.clip(best_w*p_ho_log + (1-best_w)*p_ho_auc, eps, 1-eps)
-        
-        # Apply the legacy blend calibrator
-        p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1-CLIP))
-        p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1-CLIP))
-        
-        # ---------- Metrics (handle single-class holdout safely) ----------
+        # ---------- Metrics (safe flips, single-class tolerant) ----------
         y_hold_vec  = y_full[hold_idx].astype(int)
         y_train_vec = y_full[train_all_idx].astype(int)
         
-        auc_ho = np.nan  # ✅ initialize before branch
-        if np.unique(y_hold_vec).size < 2:
-            # nothing to do; auc_ho stays NaN
-            pass
-        else:
-            # final safety flip (rare)
-            auc_raw, _  = _auc_safe(y_hold_vec, p_cal_val)
-            auc_flip, _ = _auc_safe(y_hold_vec, 1.0 - p_cal_val)
-            if np.nan_to_num(auc_flip) > np.nan_to_num(auc_raw):
-                p_cal_val = 1.0 - p_cal_val
-                p_cal     = 1.0 - p_cal
-            auc_ho = roc_auc_score(y_hold_vec, p_cal_val)
+        from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
         
-        p_train_vec = np.asarray(p_cal, dtype=float)
-        p_hold_vec  = np.asarray(p_cal_val, dtype=float)
+        def auc_safe_with_flip(y, p):
+            if np.unique(y).size < 2:
+                return np.nan, p
+            a = roc_auc_score(y, p)
+            a_flip = roc_auc_score(y, 1.0 - p)
+            if np.nan_to_num(a_flip) > np.nan_to_num(a):
+                return a_flip, 1.0 - p
+            return a, p
         
-        auc_train = roc_auc_score(y_train_vec, p_cal) if np.unique(y_train_vec).size > 1 else np.nan
-        auc_val   = auc_ho
+        auc_train, p_cal = auc_safe_with_flip(y_train_vec, p_cal)
+        auc_val,  p_cal_val = auc_safe_with_flip(y_hold_vec,  p_cal_val)
+        
         brier_tr  = brier_score_loss(y_train_vec, p_cal)
         brier_val = brier_score_loss(y_hold_vec,  p_cal_val)
         
@@ -6626,9 +6646,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.write(f"📈 AUC:     train={auc_train if not np.isnan(auc_train) else '—':>}, "
                  f"val={auc_val if not np.isnan(auc_val) else '—':>}")
         st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
-
-
         
+                
          #--- quick calibration table (for sanity; full plot optional) ---
         
         bins = np.linspace(0,1,11)
