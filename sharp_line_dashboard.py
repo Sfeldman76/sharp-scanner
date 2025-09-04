@@ -6141,11 +6141,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         params_ll.pop("scale_pos_weight", None)
         params_auc.pop("scale_pos_weight", None)
         
-        # set a better prior so trees move off 0.5 faster
-        base_kwargs["base_score"] = pos_rate
- 
-       
-        
+                # set a better prior so trees move off 0.5 faster
+        base_rate = float(np.clip(np.mean(y_train), 1e-4, 1-1e-4))
+
+
+        # overwrite some “flattening” defaults
         base_kwargs = {
             **base_kwargs,
             "tree_method": "hist",
@@ -6153,29 +6153,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "max_bin": 256,
             "predictor": "cpu_predictor",
             "random_state": 42,
-        
-            # ✅ stop using spw entirely
-            "scale_pos_weight": 1.0,   # neutralize class weighting
-            "base_score": pos_rate,    # prior so probs can move off 0.5
-        
             "sampling_method": "uniform",
         
-            # Encourage splitting & add capacity
-            "learning_rate": 0.03,
-            "max_leaves": 256,
-            "min_child_weight": 0.5,
-            "subsample": 0.9,
-            "colsample_bytree": 0.9,
+            # ⬇️ important for spread
+            "base_score": base_rate,   # center on empirical prevalence, not 0.5
+            "max_delta_step": 0.0,     # remove update clamp (lets logits move)
+            "learning_rate": 0.07,     # a bit larger → fewer rounds needed
+            "max_leaves": 512,         # more capacity
+            "min_child_weight": 0.1,   # allow small leaves (was 0.5–2; too conservative)
+            "gamma": 0.0,              # cheap splits early
+            "subsample": 0.7,
+            "colsample_bytree": 0.7,
+            # keep regularization modest
+            "reg_lambda": 1.0,
+            "reg_alpha": 0.0,
         }
-           
-        sport_key = str(sport).upper()
-        search_estimators = 350 if sport_key in SMALL_LEAGUES else 450
-        eps = 5e-3 if sport_key in SMALL_LEAGUES else 1e-4
         
-        # Base estimators for the search (NO early stopping here)
+        # Expand search ranges to allow more “splity” configs
+        params_common = {
+            "min_child_weight": [0.0, 0.1, 0.25, 0.5, 1.0, 2.0],
+            "gamma": [0.0, 0.02, 0.05, 0.1],
+            "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
+            "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
+            "max_leaves": [256, 512, 1024],
+            "max_bin": [128, 256],
+            "learning_rate": [0.05, 0.07, 0.09],
+            "reg_lambda": [0.0, 0.5, 1.0, 2.0],
+            "reg_alpha": [0.0, 0.1, 0.3],
+        }
+        params_ll.update(params_common)
+        params_auc.update(params_common)
+        
+        # ----- build search estimators (no early stopping inside the search) -----
+        search_estimators = 500
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "logloss"})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": search_estimators, "eval_metric": "auc"})
         
+
         def _assert_classifier(est, name: str):
             est_type  = getattr(est, "_estimator_type", None)
             has_proba = callable(getattr(est, "predict_proba", None))
@@ -6298,11 +6312,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                "n_estimators": int(final_estimators_cap),
                "eval_metric": "logloss"}   # <-- ensure logloss is logged
         )
-        model_auc = XGBClassifier(
-            **{**base_kwargs, **best_auc_params,
-               "n_estimators": int(final_estimators_cap),
-               "eval_metric": "auc"}       # <-- ensure auc is logged
-        )
+        model_auc = XGBClassifier(**{**base_kwargs, **best_auc_params,
+                             "grow_policy": "depthwise",
+                             "n_estimators": final_estimators_cap,
+                             "eval_metric": "auc"})
 
         
         # Slice ROWS correctly
@@ -6335,20 +6348,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
 
         def _num_trees_trained(clf):
-            bi = getattr(clf, "best_iteration", None)
-            if bi is not None and bi >= 0:
-                return int(bi + 1)
             try:
-                booster = clf.get_booster()
-                biter = getattr(booster, "best_iteration", None)
-                if biter is not None and biter >= 0:
-                    return int(biter + 1)
-                bntl = getattr(booster, "best_ntree_limit", None)
-                if bntl:
+                bst = clf.get_booster()
+                bi  = getattr(clf, "best_iteration", None)
+                if bi is not None and bi >= 0:
+                    return int(bi + 1)
+                # fallbacks
+                bntl = getattr(bst, "best_ntree_limit", None)
+                if bntl is not None and bntl > 0:
                     return int(bntl)
+                # last resort: number of boosting rounds actually logged
+                ev = getattr(clf, "evals_result_", {}) or {}
+                ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
+                if ds:
+                    # pick the first metric present
+                    mkey = next(iter(ev[ds].keys()))
+                    return int(len(ev[ds][mkey]))
             except Exception:
                 pass
-            return int(getattr(clf, "n_estimators", 200))
+            return int(getattr(clf, "n_estimators", 0))
         
         n_trees_ll  = _num_trees_trained(model_logloss)
         n_trees_auc = _num_trees_trained(model_auc)
