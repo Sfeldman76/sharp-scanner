@@ -6456,8 +6456,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Weights must be finite and not all zero
         assert np.isfinite(w_va_es).all() and (w_va_es > 0).any(), "Validation weights are zero/NaN."
 
-        final_estimators_cap  = 10000   # allow very deep/long growth
-        early_stopping_rounds = 500
+        final_estimators_cap  = max(15000, int(final_estimators_cap))
+        early_stopping_rounds = max(5000,   int(early_stopping_rounds))
         
             # --- Build final param dicts first (clean & safe) ---
         params_ll_final = {**base_kwargs, **best_ll_params}
@@ -6612,7 +6612,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000)
         MIN_OOF = 15 if SMALL else 50
-        USE_LOGLOSS_STREAM = False if SMALL else False
+        USE_LOGLOSS_STREAM = True if SMALL else True
         RUN_LOGLOSS = USE_LOGLOSS_STREAM
         
         # Preallocate
