@@ -6163,7 +6163,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # build or update base_kwargs only 
         pos_rate = float(np.mean(y_train))
-
+        n_jobs = 1
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
             sport=sport,
             X_rows=X_train.shape[0],
