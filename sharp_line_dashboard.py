@@ -249,6 +249,21 @@ def _alias_lookup(s: str) -> str:
         if s in alts or s == canon:
             return canon
     return s
+
+import os
+
+def get_vcpus(env_var: str = "XGB_SEARCH_NJOBS") -> int:
+    """Prefer ENV override; else fall back to container vCPU count."""
+    val = os.getenv(env_var, "")
+    try:
+        n = int(val) if val != "" else (os.cpu_count() or 1)
+    except Exception:
+        n = os.cpu_count() or 1
+    return max(1, n)
+
+VCPUS = get_vcpus()  # e.g., 8 if XGB_SEARCH_NJOBS=8, else os.cpu_count()
+
+
 def normalize_book_name(bookmaker: str, book: str) -> str:
     book = book.lower().strip() if isinstance(book, str) else ""
     bookmaker = bookmaker.lower().strip() if isinstance(bookmaker, str) else ""
@@ -6186,7 +6201,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         SEARCH_MAX_BIN = 128          # cheaper histograms for speed
         
         # Parallelize across trials (keep estimator n_jobs=1)
-        VCPUS = max(1, n_jobs) or: int(os.getenv("XGB_SEARCH_NJOBS", os.cpu_count() or 1))
+        VCPUS = get_vcpus()
         
         est_ll  = XGBClassifier(**{**base_kwargs,
                                    "n_estimators": SEARCH_N_EST,
