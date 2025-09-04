@@ -91,6 +91,11 @@ import pyarrow.parquet as pq
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
+import os
+os.environ.setdefault("OMP_NUM_THREADS",  "1")
+os.environ.setdefault("MKL_NUM_THREADS",  "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS",  "1")
 
 from scipy.stats import zscore, entropy, randint, loguniform, uniform
 from sklearn.experimental import enable_halving_search_cv 
@@ -98,7 +103,7 @@ from sklearn.model_selection import (
     train_test_split, GridSearchCV, RandomizedSearchCV, 
     TimeSeriesSplit, HalvingRandomSearchCV, BaseCrossValidator
 )
-
+from sklearn.model_selection import RandomizedSearchCV as _SearchCV
 from sklearn.metrics import (
     roc_auc_score, log_loss, brier_score_loss, accuracy_score,
     precision_score, recall_score, f1_score, roc_curve, make_scorer
@@ -6174,106 +6179,109 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Optionally set a better prior (recommended):
         base_kwargs["base_score"] = float(np.clip(np.mean(y_train), 1e-4, 1-1e-4))
         
-        # Build your estimators with your chosen n_estimators & eval_metric:
-        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": 500, "eval_metric": "logloss"})
-        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": 500, "eval_metric": "auc"})
-
-  
+       # ================== FAST SEARCH → DEEP REFIT ==================
         
-        # --- Helper: choose a reasonable #trials ---
-        def _resolve_search_trials(sport: str, X_rows: int) -> int:
-            s = (sport or "").upper()
-            SMALL_LEAGUES = {"WNBA", "CFL"}  # adjust if you want
-            # base by league size
-            base = 64 if s in SMALL_LEAGUES else 96
-            # scale by sample size (light heuristic)
-            if X_rows < 5_000:
-                base = max(150, base // 2)   # smaller data → fewer trials
-            elif X_rows > 5_000:
-                base = min(500, base * 2)   # very large data → more trials
-            return int(base)
-
-        try:
-            search_trials  # type: ignore
-        except NameError:
-            search_trials = _resolve_search_trials(sport, X_train.shape[0])
+        # 1) Build *cheap* search estimators (broad exploration)
+        SEARCH_N_EST   = 300          # small budget per config during search
+        SEARCH_MAX_BIN = 128          # cheaper histograms for speed
         
-        # Coerce to int and guard the range
+        # Parallelize across trials (keep estimator n_jobs=1)
+        VCPUS = max(1, n_jobs) or: int(os.getenv("XGB_SEARCH_NJOBS", os.cpu_count() or 1))
+        
+        est_ll  = XGBClassifier(**{**base_kwargs,
+                                   "n_estimators": SEARCH_N_EST,
+                                   "eval_metric": "logloss",
+                                   "max_bin": SEARCH_MAX_BIN,
+                                   "n_jobs": 1})
+        est_auc = XGBClassifier(**{**base_kwargs,
+                                   "n_estimators": SEARCH_N_EST,
+                                   "eval_metric": "auc",
+                                   "max_bin": SEARCH_MAX_BIN,
+                                   "n_jobs": 1})
+        
+        # 2) Prefer Successive Halving; fallback to RandomizedSearch
         try:
-            search_trials = int(search_trials)
+            
+            search_kwargs_ll  = dict(factor=3, resource="n_estimators",
+                                     min_resources=64, max_resources=SEARCH_N_EST)
+            search_kwargs_auc = dict(factor=3, resource="n_estimators",
+                                     min_resources=64, max_resources=SEARCH_N_EST)
         except Exception:
-            search_trials = _resolve_search_trials(sport, X_train.shape[0])
+            
+            # keep your trial heuristic
+            try:
+                search_trials  # type: ignore
+            except NameError:
+                search_trials = _resolve_search_trials(sport, X_train.shape[0])
+            search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
+            search_kwargs_ll  = dict(n_iter=search_trials)
+            search_kwargs_auc = dict(n_iter=search_trials)
         
-        if search_trials <= 0:
-            search_trials = _resolve_search_trials(sport, X_train.shape[0])
-           
-      
-        rs_ll = RandomizedSearchCV(
+        rs_ll = _SearchCV(
             estimator=est_ll,
             param_distributions=params_ll,
             scoring="neg_log_loss",
-            n_iter=search_trials,
-            cv=folds,
+            cv=folds,                    # your precomputed purge+embargo splits
+            n_jobs=VCPUS,                # parallel across trials
             random_state=42,
-            n_jobs=1,
-            verbose=0,
+            verbose=1 if st.session_state.get("debug", False) else 0,
+            **search_kwargs_ll
         )
         
-        rs_auc = RandomizedSearchCV(
+        rs_auc = _SearchCV(
             estimator=est_auc,
             param_distributions=params_auc,
             scoring="roc_auc",
-            n_iter=search_trials,
             cv=folds,
+            n_jobs=VCPUS,
             random_state=137,
-            n_jobs=1,
-            verbose=0,
+            verbose=1 if st.session_state.get("debug", False) else 0,
+            **search_kwargs_auc
         )
+        
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         
-        rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
-        rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
-
+        # Optionally clamp threadpools inside the search fits too
+        with threadpool_limits(limits=1):
+            rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
+            rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
+        
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
             best_ll_params.pop(k, None)
             best_auc_params.pop(k, None)
-             
-        # ---------------------------------------------------------------------------
-        # Final early-stopped fits on last CV fold (with sample_weight)
-        # ---------------------------------------------------------------------------
-        tr_es_rel, va_es_rel = folds[-1]  # folds is your list of (train_idx, val_idx)
-        tr_es_rel = np.asarray(tr_es_rel)
-        va_es_rel = np.asarray(va_es_rel)
         
-        final_estimators_cap  = 10000
+        # 3) Deep refit with early stopping on the last fold
+        tr_es_rel, va_es_rel = folds[-1]
+        tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
+        
+        X_tr_es = X_train[tr_es_rel];  y_tr_es = y_train[tr_es_rel]
+        X_va_es = X_train[va_es_rel];  y_va_es = y_train[va_es_rel]
+        w_tr_es = np.maximum(w_train[tr_es_rel], 1e-6)
+        w_va_es = np.maximum(w_train[va_es_rel], 1e-6)
+        
+        final_estimators_cap  = 10000   # allow very deep/long growth
         early_stopping_rounds = 500
-        # (sanity) ensure eval weights aren’t zeroed
-       
-        # Build fresh models with the searched params
+        
+        # (You can keep lossguide for both; if you *want* depthwise for AUC, retain your override.)
         model_logloss = XGBClassifier(
             **{**base_kwargs, **best_ll_params,
-               "n_estimators": int(final_estimators_cap),
-               "eval_metric": "logloss"}   # <-- ensure logloss is logged
+               "n_estimators": final_estimators_cap,
+               "eval_metric": "logloss",
+               "max_bin": 256,            # restore full-quality bins
+               "n_jobs": VCPUS}
         )
-        model_auc = XGBClassifier(**{**base_kwargs, **best_auc_params,
-                             "grow_policy": "depthwise",
-                             "n_estimators": final_estimators_cap,
-                             "eval_metric": "auc"})
-
         
-        # Slice ROWS correctly
-        X_tr_es = X_train[tr_es_rel]   # ✅ not .iloc
-        X_va_es = X_train[va_es_rel]
-       
-        y_tr_es = y_train[tr_es_rel]
-        y_va_es = y_train[va_es_rel]
-        w_tr_es = w_train[tr_es_rel]
-        w_va_es = w_train[va_es_rel]
-        w_tr_es = np.maximum(w_tr_es, 1e-6)
-        w_va_es = np.maximum(w_va_es, 1e-6)
-        # Fit with early stopping (pass eval_set weights via fit params)
+        model_auc = XGBClassifier(
+            **{**base_kwargs, **best_auc_params,
+               "n_estimators": final_estimators_cap,
+               "eval_metric": "auc",
+               "max_bin": 256,
+               "n_jobs": VCPUS}
+               "grow_policy": "depthwise",
+        )
+        
         model_logloss.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6291,40 +6299,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=early_stopping_rounds,
         )
-
-        def _num_trees_trained(clf):
-            try:
-                bst = clf.get_booster()
-                bi  = getattr(clf, "best_iteration", None)
-                if bi is not None and bi >= 0:
-                    return int(bi + 1)
-                # fallbacks
-                bntl = getattr(bst, "best_ntree_limit", None)
-                if bntl is not None and bntl > 0:
-                    return int(bntl)
-                # last resort: number of boosting rounds actually logged
-                ev = getattr(clf, "evals_result_", {}) or {}
-                ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
-                if ds:
-                    # pick the first metric present
-                    mkey = next(iter(ev[ds].keys()))
-                    return int(len(ev[ds][mkey]))
-            except Exception:
-                pass
-            return int(getattr(clf, "n_estimators", 0))
         
-        n_trees_ll  = _num_trees_trained(model_logloss)
-        n_trees_auc = _num_trees_trained(model_auc)
-        
-        st.write({
-            "n_trees_ll": n_trees_ll,
-            "n_trees_auc": n_trees_auc,
-            "train_pred_std_raw": float(np.std(pos_proba(model_logloss, X_train, positive=1))),
-            "train_pred_range_raw": (
-                float(np.min(pos_proba(model_logloss, X_train, positive=1))),
-                float(np.max(pos_proba(model_logloss, X_train, positive=1))),
-            ),
-        })
+        # (Optional) consolidate helpers you already had:
         def _best_rounds(clf):
             br = getattr(clf, "best_iteration", None)
             if br is not None and br >= 0:
@@ -6341,10 +6317,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         n_trees_ll  = _best_rounds(model_logloss)
         n_trees_auc = _best_rounds(model_auc)
-        def _num_trees(clf):
-            bi = getattr(clf, "best_iteration", None)
-            return int(bi + 1) if (bi is not None and bi >= 0) else int(getattr(clf, "n_estimators", 0))
         
+        # Optional: refit on ALL training rows at the discovered best_rounds
+        if n_trees_ll > 0:
+            model_logloss.set_params(n_estimators=n_trees_ll)
+            model_logloss.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        
+        if n_trees_auc > 0:
+            model_auc.set_params(n_estimators=n_trees_auc)
+            model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+        
+        # (Keep your existing metric tail logging if you like)
         def _safe_metric_tail(clf, prefer):
             ev = getattr(clf, "evals_result_", {}) or {}
             ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
@@ -6365,9 +6348,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "ES_n_trees_auc": getattr(model_auc, "best_iteration", None),
             "val_logloss_last10": val_logloss_last10,
             "val_auc_last10": val_auc_last10,
-            "log_info": info_log,
-            "auc_info": info_auc,
         })
+        # ================== END FAST SEARCH → DEEP REFIT ==================
+
         
         # -----------------------------------------
         # OOF predictions (train-only) + blending
