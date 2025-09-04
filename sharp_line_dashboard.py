@@ -263,6 +263,15 @@ def get_vcpus(env_var: str = "XGB_SEARCH_NJOBS") -> int:
 
 VCPUS = get_vcpus()  # e.g., 8 if XGB_SEARCH_NJOBS=8, else os.cpu_count()
 
+# put this with your imports
+try:
+    from threadpoolctl import threadpool_limits
+except Exception:
+    # fallback: no-op context manager so your code still runs
+    from contextlib import contextmanager
+    @contextmanager
+    def threadpool_limits(**kwargs):
+        yield
 
 def normalize_book_name(bookmaker: str, book: str) -> str:
     book = book.lower().strip() if isinstance(book, str) else ""
