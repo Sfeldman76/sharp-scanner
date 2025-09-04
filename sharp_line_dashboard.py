@@ -6697,8 +6697,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- model disagreement (diversity) ----------------------------------------
         st.markdown("### 🔀 Model Disagreement")
-        corr_train  = float(np.corrcoef(p_tr_log, p_tr_auc)[0,1]) if len(p_tr_log)>1 else np.nan
-        corr_hold   = float(np.corrcoef(p_ho_log, p_ho_auc)[0,1]) if len(p_ho_log)>1 else np.nan
+        if RUN_LOGLOSS:
+            p_tr_log = np.asarray(p_tr_log, dtype=float)
+            p_ho_log = np.asarray(p_ho_log, dtype=float)
+            p_tr_auc = np.asarray(p_tr_auc, dtype=float)
+            p_ho_auc = np.asarray(p_ho_auc, dtype=float)
+        
+            corr_train = float(np.corrcoef(p_tr_log, p_tr_auc)[0, 1]) if p_tr_log.size > 1 else np.nan
+            corr_hold  = float(np.corrcoef(p_ho_log, p_ho_auc)[0, 1]) if p_ho_log.size > 1 else np.nan
+        else:
+            corr_train = np.nan
+            corr_hold  = np.nan
         st.write(f"- Corr(train) LogLoss vs AUC: `{corr_train:.3f}`")
         st.write(f"- Corr(holdout) LogLoss vs AUC: `{corr_hold:.3f}`")
 
