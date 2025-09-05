@@ -2864,14 +2864,16 @@ def fetch_latest_current_ratings_cached(
     # Keep only what we need, with tight dtypes
     return df[["Team_Norm", "Power_Rating"]]
 
-
 SPORT_SPREAD_CFG = {
-    "NFL":   dict(points_per_elo=25.0, HFA=1.6, sigma_pts=13.2),
-    "NCAAF": dict(points_per_elo=28.0, HFA=2.4, sigma_pts=16.0),
-    "NBA":   dict(points_per_elo=28.0, HFA=2.2, sigma_pts=11.5),
-    "WNBA":  dict(points_per_elo=28.0, HFA=2.0, sigma_pts=10.5),
-    "CFL":   dict(points_per_elo=26.0, HFA=1.8, sigma_pts=14.0),
+    "NFL":   dict(scale=np.float32(1.0),  HFA=np.float32(2.1),  sigma_pts=np.float32(13.0)),
+    "NCAAF": dict(scale=np.float32(1.0),  HFA=np.float32(2.6),  sigma_pts=np.float32(14.0)),
+    "NBA":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(12.0)),
+    "WNBA":  dict(scale=np.float32(1.0),  HFA=np.float32(2.0),  sigma_pts=np.float32(11.5)),
+    "CFL":   dict(scale=np.float32(1.0),  HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
+    # MLB ratings are 1500 + 400*(atk+dfn) → not run units; scale≈89–90 maps diff → runs
+    "MLB":   dict(scale=np.float32(89.0), HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
 }
+
 
 
 def enrich_power_from_current_inplace(
@@ -2965,42 +2967,45 @@ def _phi(z: np.ndarray) -> np.ndarray:
 def _get_cfg_vec(sport_series: pd.Series):
     s = sport_series.astype(str).str.upper().values
     n = len(s)
-    ppe = np.full(n, 27.0, dtype=np.float32)
-    hfa = np.zeros(n, dtype=np.float32)
-    sig = np.full(n, 12.0, dtype=np.float32)
-    for name, cfg in SPORT_SPREAD_CFG.items():
-        m = (s == name)
-        if m.any():
-            ppe[m] = np.float32(cfg["points_per_elo"])
-            hfa[m] = np.float32(cfg["HFA"])
-            sig[m] = np.float32(cfg["sigma_pts"])
-    return ppe, hfa, sig
+    scale = np.full(n, np.float32(1.0), dtype=np.float32)
+    hfa   = np.zeros(n, dtype=np.float32)
+    sig   = np.full(n, np.float32(12.0), dtype=np.float32)
+
+    for sport, cfg in SPORT_SPREAD_CFG.items():
+        m = (s == sport)
+        if not m.any():
+            continue
+        # backward-compat: accept points_per_elo if still present
+        sc = cfg.get("scale", cfg.get("points_per_elo", 1.0))
+        scale[m] = np.float32(sc)
+        hfa[m]   = np.float32(cfg["HFA"])
+        sig[m]   = np.float32(cfg["sigma_pts"])
+
+    return scale.astype("float32"), hfa.astype("float32"), sig.astype("float32")
 
 # ---- 1) Build consensus market spread per game (no BQ) ----
 
 def favorite_centric_from_powerdiff_lowmem(g_full: pd.DataFrame) -> pd.DataFrame:
     out = g_full.copy()
-    # normalize for safety
     out["Sport"] = out["Sport"].astype(str).str.upper().str.strip()
     for c in ["Home_Team_Norm","Away_Team_Norm"]:
         out[c] = out[c].astype(str).str.lower().str.strip()
 
     pr_diff = pd.to_numeric(out.get("Power_Rating_Diff"), errors="coerce").fillna(0).astype("float32")
-    ppe, hfa, sig = _get_cfg_vec(out["Sport"])
 
-    # model margin (home - away) in points with HFA
-    mu = (pr_diff + hfa) / ppe
+    # ⬇⬇ changed: pull `scale` (not ppe), and compute mu = pr_diff/scale + HFA
+    scale, hfa, sig = _get_cfg_vec(out["Sport"])
+    mu = (pr_diff / scale) + hfa
     mu = mu.astype("float32")
+
     out["Model_Expected_Margin"] = mu
     out["Model_Expected_Margin_Abs"] = np.abs(mu, dtype=np.float32)
     out["Sigma_Pts"] = sig
 
-    # model favorite/underdog teams
     fav_is_home = (mu >= 0)
     out["Model_Favorite_Team"] = np.where(fav_is_home, out["Home_Team_Norm"], out["Away_Team_Norm"])
     out["Model_Underdog_Team"] = np.where(fav_is_home, out["Away_Team_Norm"], out["Home_Team_Norm"])
 
-    # model spreads: fav negative, dog positive
     out["Model_Fav_Spread"] = (-np.abs(mu)).astype("float32")
     out["Model_Dog_Spread"] = (+np.abs(mu)).astype("float32")
 
@@ -3008,17 +3013,13 @@ def favorite_centric_from_powerdiff_lowmem(g_full: pd.DataFrame) -> pd.DataFrame
     dog_mkt = pd.to_numeric(out.get("Underdog_Market_Spread"), errors="coerce").astype("float32")
     k = np.where(np.isnan(fav_mkt), np.abs(dog_mkt), np.abs(fav_mkt)).astype("float32")
 
-    # Edges
-    out["Fav_Edge_Pts"] = (fav_mkt - out["Model_Fav_Spread"]).astype("float32")   # = mu_abs - k (sign-consistent)
-    out["Dog_Edge_Pts"] = (dog_mkt - out["Model_Dog_Spread"]).astype("float32")   # = k - mu_abs
+    out["Fav_Edge_Pts"] = (fav_mkt - out["Model_Fav_Spread"]).astype("float32")
+    out["Dog_Edge_Pts"] = (dog_mkt - out["Model_Dog_Spread"]).astype("float32")
 
-    # Cover probabilities with Normal(mu, sigma)
     eps = np.finfo("float32").eps
-    z_fav = (np.abs(mu) - k) / np.where(sig == 0, eps, sig)  # P(margin > k) for favorite
-    z_dog = (k - np.abs(mu)) / np.where(sig == 0, eps, sig)  # P(margin < k) for dog
-    out["Fav_Cover_Prob"] = (1.0 - _phi(-z_fav)).astype("float32")  # = 1 - Φ((k-μ_abs)/σ)
+    z_fav = (np.abs(mu) - k) / np.where(sig == 0, eps, sig)
+    out["Fav_Cover_Prob"] = (1.0 - _phi(-z_fav)).astype("float32")  # Φ(z_fav)
     out["Dog_Cover_Prob"] = (1.0 - out["Fav_Cover_Prob"]).astype("float32")
-
     return out
 
 def prep_consensus_market_spread_lowmem(
