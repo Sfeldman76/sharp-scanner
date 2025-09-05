@@ -4340,7 +4340,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    # === Existing "as-of" history features (unchanged) ===
     # === Columns we expect from the view ===
     history_cols = [
-        "After_Win_Flag","Revenge_Flag",
+        "After_Win_Flag",#"Revenge_Flag",
         "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
         "H2H_Win_Pct_Prior",  # "Opp_WinPct_Prior",
         # "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
@@ -6452,7 +6452,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # AUC (spread market) — push capacity & loosen regularization
         # AUC (spread market) — force splits
         best_auc_params.update({
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.01)), 0.01)),
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.001)), 0.001)),
             "gamma":            0.0,
           
             "max_leaves":        int(max(1024, int(best_auc_params.get("max_leaves", 0)) or 0)),
@@ -6469,7 +6469,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # LogLoss — looser too, but slightly more conservative
         best_ll_params.update({
-            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.05)), 0.05)),
+            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.005)), 0.005)),
             "gamma":            0.0,
             "max_leaves":        int(max(768,  int(best_ll_params.get("max_leaves", 0)) or 0)),
             "max_depth":         int(max(18,   int(best_ll_params.get("max_depth", 0))  or 0)),
