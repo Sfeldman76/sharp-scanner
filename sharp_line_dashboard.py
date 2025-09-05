@@ -6349,13 +6349,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ================== FAST SEARCH → DEEP REFIT (deeper, wider) ==================
         
         # 0) Capacity knobs
-        SEARCH_N_EST    = 1600        # larger budget per trial during search
-        SEARCH_MAX_BIN  = 384         # finer histograms for search
-        DEEP_N_EST      = 4000        # big refit budget
-        DEEP_MAX_BIN    = 512         # even finer bins on refit
-        EARLY_STOP      = 200         # patience
-        HALVING_FACTOR  = 3
-        MIN_RESOURCES   = 128         # ↑ less tiny early rounds
+        SEARCH_N_EST    = 800         # was 1600
+        SEARCH_MAX_BIN  = 256         # was 384
+        DEEP_N_EST      = 1800        # was 4000
+        DEEP_MAX_BIN    = 320         # was 512
+        EARLY_STOP      = 100         # was 200
+        HALVING_FACTOR  = 4           # more aggressive elimination
+        MIN_RESOURCES   = 64
         VCPUS           = get_vcpus()
         
         # 1) Base estimators for the search stage
@@ -6538,8 +6538,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             deep_auc.set_params(n_estimators=deep_auc.best_iteration + 1)
 
         # --- Safe defaults (define before bumping) ---
-        DEFAULT_FINAL_N_EST     = 20000
-        DEFAULT_ES_ROUNDS       = 10000
+        DEFAULT_FINAL_N_EST     = 10000
+        DEFAULT_ES_ROUNDS       = 8000
         
         # If these weren’t set earlier in this function, seed them now
         final_estimators_cap    = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
@@ -6547,7 +6547,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # --- Your bumps (now safe) ---
         final_estimators_cap    = max(20000, final_estimators_cap)
-        early_stopping_rounds   = max(10000,   early_stopping_rounds)
+        early_stopping_rounds   = max(8000,   early_stopping_rounds)
         
             # --- Build final param dicts first (clean & safe) ---
         params_ll_final = {**base_kwargs, **best_ll_params}
