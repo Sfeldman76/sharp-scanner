@@ -5983,24 +5983,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = feature_cols
 
         # ============================================================================
+
+
+        # === Build y and mask FIRST ===
+        y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
+        valid_mask = y_series.notna()
         
-        # Always work off the masked frame with positional indexing
+        # Work from a masked, reindexed dataframe so .iloc matches X/y
         df_valid = df_market.loc[valid_mask].reset_index(drop=True)
         
-        # Build X from df_valid, not df_market
+        # Final y
+        y_full = y_series.loc[valid_mask].astype(int).to_numpy()
+        
+        # Build X from the masked frame (no extra masking later)
         X_full = _to_numeric_block(df_valid, feature_cols).to_numpy(np.float32)
-        
-        
+        # Always work off the masked frame with positional indexing
+   
         # When you need train/hold subsets of the *dataframe*, use iloc
         train_df = df_valid.iloc[train_all_idx].copy()
         # === Build X / y ===
         
         
-        y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
-        valid_mask = ~y_series.isna()
-        if not valid_mask.all():
-            X_full = X_full[valid_mask.to_numpy()]
-        y_full = y_series.loc[valid_mask].astype(int).to_numpy()
          # ---- Cheap feature pruning (before any split/CV) --
         
         
