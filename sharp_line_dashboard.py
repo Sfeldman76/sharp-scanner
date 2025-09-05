@@ -97,6 +97,7 @@ os.environ.setdefault("MKL_NUM_THREADS",  "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS",  "1")
 
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from scipy.stats import zscore, entropy, randint, loguniform, uniform
 from sklearn.experimental import enable_halving_search_cv 
 from sklearn.model_selection import (
@@ -6241,8 +6242,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return safe
         
         
-        import numpy as np, pandas as pd
-        from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+        
         
         GLOBAL_SEED = 1337
         
