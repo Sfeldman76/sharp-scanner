@@ -6304,13 +6304,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p = float(np.mean(y[idx] == 1))
             return -abs(p - 0.5)  # higher is better
         folds.sort(key=lambda tv: _balance_score(tv[1], y_train), reverse=True)
+        
+        # After X_train, y_train (and optional g_train) are ready:
         folds, tr_es_rel, va_es_rel = build_deterministic_folds(
-        X_train, y_train,
-        cv=cv,                  # or None to force StratifiedKFold
-        groups=g_train,         # if your cv uses groups; else None
-        n_splits=getattr(cv, "n_splits", 5),
-        min_pos=5, min_neg=5,
-       
+            X_train, y_train,
+            cv=cv,                  # or None to force StratifiedKFold
+            groups=g_train,         # if your cv uses groups; else None
+            n_splits=getattr(cv, "n_splits", 5),
+            min_pos=5, min_neg=5,
+            seed=1337,
+        )
+
         # ================== << SHAP stability selection >> ==================
         # Use the PRUNED names to build a columned DF for SHAP
         X_train_df = pd.DataFrame(X_train, columns=list(features_pruned))
