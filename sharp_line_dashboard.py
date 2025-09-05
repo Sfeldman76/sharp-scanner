@@ -6462,8 +6462,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "colsample_bynode":  float(max(0.99, float(best_auc_params.get("colsample_bynode", 0.99)))),
             "reg_alpha":         0.0,
             "reg_lambda":        float(min(0.50, float(best_auc_params.get("reg_lambda", 0.50)))),
-            "max_bin":           int(max(448,  int(best_auc_params.get("max_bin", 448))))
-            "learning_rate":    float(max(0.00003, float(best_auc_params.get("learning_rate", 0.00003)))),
+            "max_bin":           int(max(448,  int(best_auc_params.get("max_bin", 448)))),
+            "learning_rate":     float(max(0.00003, float(best_auc_params.get("learning_rate", 0.00003)))),
             "grow_policy":      "lossguide",
         })
         
