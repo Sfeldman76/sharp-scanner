@@ -151,6 +151,7 @@ from xgboost import XGBClassifier
 from sklearn.base import is_classifier as sk_is_classifier
 import sys, inspect, xgboost, sklearn
 
+from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
 from sklearn.calibration import CalibratedClassifierCV, calibration_curve
@@ -163,7 +164,11 @@ pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
 
 bq_client = bigquery.Client(project=GCP_PROJECT_ID)  # uses env var
 gcs_client = storage.Client(project=GCP_PROJECT_ID)
-
+import os, random
+GLOBAL_SEED = 1337
+os.environ["PYTHONHASHSEED"] = "0"
+random.seed(GLOBAL_SEED)
+np.random.seed(GLOBAL_SEED)
 
 
 # === Constants and Config ===
@@ -6217,37 +6222,52 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             min_val_size=min_val_size,
         )
         
-        # --- Ensure binary labels and filter folds so both train & val have {0,1} ----
-        def _has_both_classes(idx, y):
-            u = set(np.unique(y[idx]))
-            return (0 in u) and (1 in u)
+       
         
-        def filter_cv_splits(cv_obj, X, y, groups=None):
+        # Require BOTH classes with a minimum count (train & val)
+        def _has_both_classes(idx, y, *, min_pos=5, min_neg=5):
+            yy = y[idx]
+            pos = int(np.sum(yy == 1))
+            neg = int(np.sum(yy == 0))
+            return (pos >= min_pos) and (neg >= min_neg)
+        
+        def filter_cv_splits(cv_obj, X, y, groups=None, *, min_pos=5, min_neg=5):
+            """Return only splits whose train AND val have both classes with minimum counts."""
             safe = []
             for tr, va in cv_obj.split(X, y, groups):
-                if _has_both_classes(tr, y) and _has_both_classes(va, y):
+                if _has_both_classes(tr, y, min_pos=min_pos, min_neg=min_neg) and \
+                   _has_both_classes(va, y, min_pos=min_pos, min_neg=min_neg):
                     safe.append((tr, va))
             return safe
         
+        def stratified_fallback(y, *, test_size=0.2, seed=1337, min_pos=5, min_neg=5):
+            """Single stratified split with retries at 20%/30%/40% val until both sides have counts."""
+            for ts in (test_size, 0.3, 0.4):
+                sss = StratifiedShuffleSplit(n_splits=1, test_size=ts, random_state=seed)
+                for tr, va in sss.split(np.zeros_like(y), y):
+                    if _has_both_classes(tr, y, min_pos=min_pos, min_neg=min_neg) and \
+                       _has_both_classes(va, y, min_pos=min_pos, min_neg=min_neg):
+                        return [(tr, va)]
+            raise RuntimeError("No class-balanced CV split available; widen data or use placeholder model.")
+        
+        # ---- usage ----
+        # make y clean & binary
         y_train = pd.Series(y_train).astype(int).clip(0, 1).to_numpy()
         
-        cv_splits = filter_cv_splits(cv, X_train, y_train, groups=g_train)
-        # Optional: inspect how many survived
-        # print(f"kept {len(cv_splits)} balanced CV folds")
+        # Make your cv object deterministic upstream (e.g., StratifiedKFold(..., shuffle=True, random_state=1337))
+        cv_splits = filter_cv_splits(cv, X_train, y_train, groups=g_train, min_pos=5, min_neg=5)
         
-        # Fallback if none survive: single 80/20 split, only if both sides are dual-class
         if not cv_splits:
-            n = len(y_train)
-            cut = max(1, int(0.8 * n))
-            tr = np.arange(cut)
-            va = np.arange(cut, n)
-            if _has_both_classes(tr, y_train) and _has_both_classes(va, y_train):
-                cv_splits = [(tr, va)]
-            else:
-                # Still single-class → consider your 0.50 placeholder path here
-                # For now, raise to make the situation explicit
-                raise RuntimeError("No class-balanced CV splits available; widen data or use placeholder model.")
+            cv_splits = stratified_fallback(y_train, seed=1337, min_pos=5, min_neg=5)
+        
         folds = cv_splits
+        
+        # Optionally: pick ES fold deterministically with best balance
+        # (closest to 50/50 in validation)
+        def _balance_score(idx, y):
+            p = float(np.mean(y[idx] == 1))
+            return -abs(p - 0.5)  # higher is better
+        folds.sort(key=lambda tv: _balance_score(tv[1], y_train), reverse=True)
 
         # ================== << SHAP stability selection >> ==================
         # Use the PRUNED names to build a columned DF for SHAP
@@ -6452,7 +6472,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # AUC (spread market) — push capacity & loosen regularization
         # AUC (spread market) — force splits
         best_auc_params.update({
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.001)), 0.001)),
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.01)), 0.01)),
             "gamma":            0.0,
           
             "max_leaves":        int(max(1024, int(best_auc_params.get("max_leaves", 0)) or 0)),
@@ -6469,7 +6489,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # LogLoss — looser too, but slightly more conservative
         best_ll_params.update({
-            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.005)), 0.005)),
+            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.05)), 0.05)),
             "gamma":            0.0,
             "max_leaves":        int(max(768,  int(best_ll_params.get("max_leaves", 0)) or 0)),
             "max_depth":         int(max(18,   int(best_ll_params.get("max_depth", 0))  or 0)),
