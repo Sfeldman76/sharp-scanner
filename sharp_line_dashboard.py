@@ -6452,7 +6452,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # AUC (spread market) — push capacity & loosen regularization
         # AUC (spread market) — force splits
         best_auc_params.update({
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.00001)), 0.00001)),
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.01)), 0.01)),
             "gamma":            0.0,
           
             "max_leaves":        int(max(1024, int(best_auc_params.get("max_leaves", 0)) or 0)),
@@ -6463,13 +6463,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "reg_alpha":         0.0,
             "reg_lambda":        float(min(0.50, float(best_auc_params.get("reg_lambda", 0.50)))),
             "max_bin":           int(max(448,  int(best_auc_params.get("max_bin", 448)))),
-            "learning_rate":     float(max(0.00003, float(best_auc_params.get("learning_rate", 0.00003)))),
+            "learning_rate":     float(max(0.03, float(best_auc_params.get("learning_rate", 0.03)))),
             "grow_policy":      "lossguide",
         })
         
         # LogLoss — looser too, but slightly more conservative
         best_ll_params.update({
-            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.00005)), 0.00005)),
+            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.05)), 0.05)),
             "gamma":            0.0,
             "max_leaves":        int(max(768,  int(best_ll_params.get("max_leaves", 0)) or 0)),
             "max_depth":         int(max(18,   int(best_ll_params.get("max_depth", 0))  or 0)),
@@ -6479,7 +6479,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "reg_alpha":         0.0,
             "reg_lambda":        float(min(0.80, float(best_ll_params.get("reg_lambda", 0.80)))),
             "max_bin":           int(max(384,  int(best_ll_params.get("max_bin", 384)))),
-            "learning_rate":    float(max(0.00008, float(best_ll_params.get("learning_rate", 0.00008)))),
+            "learning_rate":    float(max(0.08, float(best_ll_params.get("learning_rate", 0.08)))),
             "grow_policy":      "lossguide",
         })
 
