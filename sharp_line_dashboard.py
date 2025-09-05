@@ -7054,7 +7054,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # ---- overfitting check (train vs holdout) stays the same ----
-        auc_ho = auc_va
+        auc_ho = auc_val
         # ---- overfitting check (train vs holdout) ----------------------------------
         auc_tr = roc_auc_score(y_train_vec, p_cal)
         ll_tr  = log_loss(y_train_vec, np.clip(p_cal, eps, 1-eps), labels=[0,1])
