@@ -6467,17 +6467,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Gentle "looseners" (still conservative)
         # AUC (spread market) – looser child weight (≤ 0.10); keep leaves in 320–384
+        # AUC (spread market) — push capacity & loosen regularization
         best_auc_params.update({
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.10)), 0.10)),
-            "gamma":            0.0,
-            "max_leaves":       int(max(320, min(int(best_auc_params.get("max_leaves", 320)), 384))),
+            # allow tiny child nodes so trees actually split
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.05)), 0.05)),
+            "gamma":            0.0,                                   # no split penalty
+            "max_leaves":       int(max(448, int(best_auc_params.get("max_leaves", 0)) or 0)),
+            "max_depth":        int(max(7,   int(best_auc_params.get("max_depth", 0))  or 0)),
+            "subsample":        float(max(0.92, float(best_auc_params.get("subsample",        0.92)))),
+            "colsample_bytree": float(max(0.92, float(best_auc_params.get("colsample_bytree", 0.92)))),
+            "colsample_bynode": float(max(0.92, float(best_auc_params.get("colsample_bynode", 0.92)))),
+            "reg_alpha":        float(min(0.02, float(best_auc_params.get("reg_alpha",  0.02)))),
+            "reg_lambda":       float(min(1.20, float(best_auc_params.get("reg_lambda", 1.20)))),
+            "max_bin":          int(max(304, int(best_auc_params.get("max_bin", 304)))),
+            "learning_rate":    float(max(0.030, float(best_auc_params.get("learning_rate", 0.030)))),
+            "grow_policy":      "lossguide",
         })
         
-        # LogLoss – looser than before (≤ 0.20); same leaf bounds
+        # LogLoss — still looser than before, but a bit more conservative than AUC
         best_ll_params.update({
-            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.20)), 0.20)),
+            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.10)), 0.10)),
             "gamma":            0.0,
-            "max_leaves":       int(max(320, min(int(best_ll_params.get("max_leaves", 320)), 384))),
+            "max_leaves":       int(max(384, int(best_ll_params.get("max_leaves", 0)) or 0)),
+            "max_depth":        int(max(6,   int(best_ll_params.get("max_depth", 0))  or 0)),
+            "subsample":        float(max(0.88, float(best_ll_params.get("subsample",        0.88)))),
+            "colsample_bytree": float(max(0.88, float(best_ll_params.get("colsample_bytree", 0.88)))),
+            "colsample_bynode": float(max(0.88, float(best_ll_params.get("colsample_bynode", 0.88)))),
+            "reg_alpha":        float(min(0.05, float(best_ll_params.get("reg_alpha",  0.05)))),
+            "reg_lambda":       float(min(1.50, float(best_ll_params.get("reg_lambda", 1.50)))),
+            "max_bin":          int(max(288, int(best_ll_params.get("max_bin", 288)))),
+            "learning_rate":    float(max(0.028, float(best_ll_params.get("learning_rate", 0.030)))),
+            "grow_policy":      "lossguide",
         })
 
         # Remove unsafe/unused keys
