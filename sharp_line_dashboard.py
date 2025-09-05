@@ -2427,6 +2427,7 @@ def _phi(x):
     # reflect for negative x
     return np.where(x >= 0, cdf_ax, 1.0 - cdf_ax).astype(np.float32)
 
+PHI = _phi
 def select_blend(cals, p_oof, y_oof, eps=1e-4):
     from sklearn.metrics import log_loss
     x = np.clip(np.asarray(p_oof, float), eps, 1-eps)
@@ -2633,14 +2634,7 @@ def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFra
     denom = sigma.copy()
     denom[denom == 0] = np.nan
     z_cov = (k - mu_abs) / denom
-    if '_phi' not in globals():
-        # standard normal CDF
-        def _phi(z):
-            from math import erf, sqrt
-            z = np.asarray(z, dtype='float64')
-            return 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
-        globals()['_phi'] = _phi
-
+  
     fav_cover = (1.0 - _phi(z_cov)).astype('float32')
     dog_cover = (1.0 - fav_cover).astype('float32')
 
