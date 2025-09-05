@@ -6538,16 +6538,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             deep_auc.set_params(n_estimators=deep_auc.best_iteration + 1)
 
         # --- Safe defaults (define before bumping) ---
-        DEFAULT_FINAL_N_EST     = 50000
-        DEFAULT_ES_ROUNDS       = 15000
+        DEFAULT_FINAL_N_EST     = 20000
+        DEFAULT_ES_ROUNDS       = 10000
         
         # If these weren’t set earlier in this function, seed them now
         final_estimators_cap    = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
         early_stopping_rounds   = int(locals().get("early_stopping_rounds", DEFAULT_ES_ROUNDS))
         
         # --- Your bumps (now safe) ---
-        final_estimators_cap    = max(50000, final_estimators_cap)
-        early_stopping_rounds   = max(15000,   early_stopping_rounds)
+        final_estimators_cap    = max(20000, final_estimators_cap)
+        early_stopping_rounds   = max(10000,   early_stopping_rounds)
         
             # --- Build final param dicts first (clean & safe) ---
         params_ll_final = {**base_kwargs, **best_ll_params}
