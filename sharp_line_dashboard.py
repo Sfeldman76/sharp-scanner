@@ -6899,16 +6899,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
 
-        
         # ---------------- Calibration ----------------
         CLIP = 0.0005 if sport_key not in SMALL_LEAGUES else 0.01
         use_quantile_iso = False
         
-        # Always init so it's in scope on all paths
-        cal_blend = None
+        # --- 0) Decide flip ONCE using OOF (pre‑calibration) -------------------------
+        def _decide_flip_on_oof(y, p):
+            y = np.asarray(y, int)
+            p = np.asarray(p, float)
+            if np.unique(y).size < 2:
+                return False  # can't judge
+            auc = roc_auc_score(y, p)
+            auc_flip = roc_auc_score(y, 1.0 - p)
+            return (auc_flip > auc)
         
-        # Fit the standard trio (iso / platt / beta)
-        cals_raw = fit_iso_platt_beta(p_oof_blend, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        # p_oof_blend = your OOF blended *raw* probs (before any calibration)
+        flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
+        
+        def _maybe_flip(p, flip):
+            p = np.asarray(p, float)
+            return (1.0 - p) if flip else p
+        
+        # Apply the decision consistently to ALL raw preds BEFORE calibration
+        p_oof_for_cal = _maybe_flip(p_oof_blend, flip_flag)
+        
+        # --- 1) Fit the standard trio (iso / platt / beta) ON FLIPPED/NOT-FLIPPED OOF
+        cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
         cals = _normalize_cals(cals_raw)
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso"))
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=eps)
@@ -6918,35 +6934,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if cals["platt"] is None and cals["beta"] is None:
             cals["platt"] = _IdentityProbCal(eps=eps)
         
-        # Blend the trio (your existing selector)
-        sel = select_blend(cals, p_oof_blend, y_oof, eps=eps)
+        # Blend selector evaluated on the same OOF stream
+        sel = select_blend(cals, p_oof_for_cal, y_oof, eps=eps)
         
-        # Optional robust calibrator (may return e.g. ("beta", beta_cal) or None)
+        # Optional robust calibrator
+        cal_blend = None
         try:
-            _cb = fit_robust_calibrator(p_oof=p_oof_blend, y_oof=y_oof, eps=eps,
+            _cb = fit_robust_calibrator(p_oof=p_oof_for_cal, y_oof=y_oof, eps=eps,
                                         min_unique=200, prefer_beta=True)
             if _cb is not None:
                 cal_blend = _cb
         except Exception as e:
             st.info(f"Robust calibrator skipped: {e}")
         
-        # Fallback and normalize shape for adapter
-        # Fallback and normalize shape for adapter
         if cal_blend is None:
             cal_blend = ("iso", _IdentityIsoCal(eps=eps))
         
-        # Coerce into (name, object) tuple no matter what came back
+        # Adapter (not used below, but you can swap it in if you want to override `sel`)
         if isinstance(cal_blend, tuple) and len(cal_blend) >= 2:
             cal_name, cal_obj = cal_blend[0], cal_blend[1]
         else:
             cal_name, cal_obj = "custom", cal_blend
-        
-        # ✅ Pass a (name, obj) tuple to _CalAdapter (NOT just the object)
         iso_blend = _CalAdapter((cal_name, cal_obj), clip=(CLIP, 1 - CLIP))
+        st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag)})
         
-        st.write({"calibrator_used": str(cal_name)})
-        
-        # --- Final blended raw preds (TRAIN/HOLDOUT) ---
+        # --- 2) Raw model preds (AUC + optional LogLoss model)
         p_tr_auc, _ = pos_proba_safe(model_auc, X_full[train_all_idx], positive=1)
         p_ho_auc, _ = pos_proba_safe(model_auc, X_full[hold_idx],      positive=1)
         
@@ -6960,126 +6972,64 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
             p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
         
-        # --- Apply your selector's blend (status quo) ---
+        # --- 3) Apply the SAME flip to train/hold BEFORE calibration
+        p_train_blend_raw = _maybe_flip(p_train_blend_raw, flip_flag)
+        p_hold_blend_raw  = _maybe_flip(p_hold_blend_raw,  flip_flag)
+        
+        # --- 4) Calibrate (no more flipping anywhere downstream)
         p_cal     = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1 - CLIP))
         p_cal_val = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1 - CLIP))
-        
-        # (Optionally, you could compare with the robust adapter:
-        #  p_cal_rb     = iso_blend.predict_proba(p_train_blend_raw)
-        #  p_cal_val_rb = iso_blend.predict_proba(p_hold_blend_raw)
-        #  and choose between them; left out to preserve current behavior.)
         
         # Ensure downstream vectors always exist
         p_train_vec = np.asarray(np.clip(p_cal,     eps, 1 - eps), dtype=float)
         p_hold_vec  = np.asarray(np.clip(p_cal_val, eps, 1 - eps), dtype=float)
         if not RUN_LOGLOSS:
-            p_tr_log = np.array([], dtype=float)
-            p_ho_log = np.array([], dtype=float)
+            p_tr_log = np.array([], dtype=float); p_ho_log = np.array([], dtype=float)
         
-        # sanity (helps catch indexing mismatches)
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
         
-        # ---------- Metrics (safe flips, single-class tolerant) ----------
+        # ---------- Metrics (no flips here) ----------
         y_hold_vec  = y_full[hold_idx].astype(int)
         y_train_vec = y_full[train_all_idx].astype(int)
         
-        def auc_safe_with_flip(y, p):
-            if np.unique(y).size < 2:
-                return np.nan, p
-            a = roc_auc_score(y, p)
-            a_flip = roc_auc_score(y, 1.0 - p)
-            if np.nan_to_num(a_flip) > np.nan_to_num(a):
-                return a_flip, 1.0 - p
-            return a, p
+        def auc_safe(y, p):
+            return np.nan if np.unique(y).size < 2 else roc_auc_score(y, p)
         
-        auc_train, p_cal     = auc_safe_with_flip(y_train_vec, p_train_vec)
-        auc_val,   p_cal_val = auc_safe_with_flip(y_hold_vec,  p_hold_vec)
-        
-        brier_tr  = brier_score_loss(y_train_vec, p_cal)
-        brier_val = brier_score_loss(y_hold_vec,  p_cal_val)
+        auc_train = auc_safe(y_train_vec, p_train_vec)
+        auc_val   = auc_safe(y_hold_vec,  p_hold_vec)
+        brier_tr  = brier_score_loss(y_train_vec, p_train_vec)
+        brier_val = brier_score_loss(y_hold_vec,  p_hold_vec)
         
         st.write(f"🔧 Ensemble weight (logloss vs auc): w={best_w:.2f}")
-        st.write(f"📉 LogLoss: train={log_loss(y_train_vec, np.clip(p_cal,eps,1-eps), labels=[0,1]):.5f}, "
-                 f"val={log_loss(y_hold_vec,  np.clip(p_cal_val,eps,1-eps), labels=[0,1]):.5f}")
+        st.write(f"📉 LogLoss: train={log_loss(y_train_vec, np.clip(p_train_vec,eps,1-eps), labels=[0,1]):.5f}, "
+                 f"val={log_loss(y_hold_vec,  np.clip(p_hold_vec, eps,1-eps), labels=[0,1]):.5f}")
         st.write(f"📈 AUC:     train={auc_train if not np.isnan(auc_train) else '—':>}, "
                  f"val={auc_val if not np.isnan(auc_val) else '—':>}")
         st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
-        
-        # --- quick calibration table (for sanity; full plot optional) ---
-        bins = np.linspace(0, 1, 11)
-        idx  = np.digitize(p_cal_val, bins) - 1
-        y_hold_series = pd.Series(y_hold_vec, index=hold_idx)
-        
-        cal_tbl = []
-        for b in range(10):
-            mask = (idx == b)
-            if np.any(mask):
-                avg_p = float(p_cal_val[mask].mean())
-                emp   = float(y_hold_vec[mask].mean())
-                cal_tbl.append({"bin": f"{bins[b]:.1f}-{bins[b+1]:.1f}",
-                                "avg_p": avg_p, "emp_rate": emp, "n": int(mask.sum())})
-        st.dataframe(pd.DataFrame(cal_tbl))
 
-
-
-        # ---- headline holdout metrics ----------------------------------------------
-        auc_ho = roc_auc_score(y_hold_vec, p_cal_val)
-        ll_ho  = log_loss(y_hold_vec, np.clip(p_cal_val, eps, 1-eps), labels=[0,1])
-        br_ho  = brier_score_loss(y_hold_vec, p_cal_val)
-        
-        st.markdown(f"### 🧪 Holdout Validation — `{market.upper()}` (purged-CV tuned, time-forward holdout)")
-        st.write(f"- **Optimal Blend Weight (LogLoss model)**: `{best_w:.2f}`  (AUC weight `{1-best_w:.2f}`)")
-        st.write(f"- **Blended + Calibrated AUC**: `{auc_ho:.4f}`")
-        st.write(f"- **Holdout LogLoss**: `{ll_ho:.4f}`")
-        st.write(f"- **Holdout Brier**: `{br_ho:.4f}`")
-
-        
-        # ---- sanity sentinels (flatness/entropy) -----------------------------------
-        std_ens = float(np.std(p_cal))
-        rng_ens = float(np.max(p_cal) - np.min(p_cal))
-        entropy = -np.mean(p_cal*np.log(p_cal+1e-10) + (1-p_cal)*np.log(1-p_cal+1e-10))
-
-        
-        st.markdown(f"### 🔍 Prediction Confidence Analysis – `{market.upper()}`")
-        st.write(f"- Std Dev of Predictions: `{std_ens:.4f}`")
-        st.write(f"- Probability Range: `{rng_ens:.4f}`")
-        st.write(f"- Avg Prediction Entropy: `{entropy:.4f}`")
-        if std_ens < 0.02 or rng_ens < 0.05:
-            st.error("⚠️ Predictions look too flat. Loosen min_child_weight/gamma, review constraints & feature variance.")
-        
-        # ---- model disagreement (diversity) ----------------------------------------
-        st.markdown("### 🔀 Model Disagreement")
-        if RUN_LOGLOSS:
-            p_tr_log = np.asarray(p_tr_log, dtype=float)
-            p_ho_log = np.asarray(p_ho_log, dtype=float)
-            p_tr_auc = np.asarray(p_tr_auc, dtype=float)
-            p_ho_auc = np.asarray(p_ho_auc, dtype=float)
-        
-            corr_train = float(np.corrcoef(p_tr_log, p_tr_auc)[0, 1]) if p_tr_log.size > 1 else np.nan
-            corr_hold  = float(np.corrcoef(p_ho_log, p_ho_auc)[0, 1]) if p_ho_log.size > 1 else np.nan
-        else:
-            corr_train = np.nan
-            corr_hold  = np.nan
-        st.write(f"- Corr(train) LogLoss vs AUC: `{corr_train:.3f}`")
-        st.write(f"- Corr(holdout) LogLoss vs AUC: `{corr_hold:.3f}`")
-
-        
       
         # ---- calibration bins (holdout) + ROI per bin ------------------------------
+        # ==== HOLDOUT: Calibration bins (quantile) + ROI per bin ======================
         st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
-        bins   = np.linspace(0, 1, 11)
-        labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
         assert p_hold_vec.shape[0] == y_hold_vec.shape[0] == len(hold_idx)
-        eval_idx = np.asarray(hold_idx)  # positional
+        eval_idx = np.asarray(hold_idx)
+        # HOLDOUT bins (quantile)
         df_eval = pd.DataFrame({
-            "p":    p_hold_vec,
+            "p":    np.clip(p_hold_vec, eps, 1-eps),
             "y":    y_hold_vec.astype(int),
-            "odds": pd.to_numeric(df_valid.iloc[eval_idx]["Odds_Price"], errors="coerce"),
+            "odds": pd.to_numeric(df_valid.iloc[np.asarray(hold_idx)]["Odds_Price"], errors="coerce"),
         }).dropna(subset=["p","y"])
-
         
-        cuts = pd.cut(df_eval["p"], bins=bins, include_lowest=True, labels=labels)
+        uniq_hold = np.unique(np.round(df_eval["p"].to_numpy(), 6)).size
+        if uniq_hold < 5:
+            st.warning(f"⚠️ Holdout predictions are nearly discrete (unique≈{uniq_hold}). "
+                       "If this persists, check upstream constraints/regularization and calibrator inputs.")
+        
+        try:
+            cuts = pd.qcut(df_eval["p"], q=10, duplicates="drop")
+        except Exception:
+            cuts = pd.cut(df_eval["p"], bins=np.linspace(0,1,11), include_lowest=True)
         
         def _roi_mean_inline(sub: pd.DataFrame) -> float:
             if not sub["odds"].notna().any(): return float("nan")
@@ -7092,26 +7042,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             roi = win * profit_on_win - (1 - win) * 1.0
             return float(roi.mean())
         
-        rows=[]
-        for lb in labels:
-            sub = df_eval[cuts == lb]
-            n   = int(len(sub))
-            if n == 0:
-                rows.append((lb, 0, np.nan, np.nan, np.nan)); continue
-            hit   = float(sub["y"].mean())
-            roi   = _roi_mean_inline(sub)
-            avg_p = float(sub["p"].mean())
-            rows.append((lb, n, hit, roi, avg_p))
-        
-        df_bins = pd.DataFrame(rows, columns=["Prob Bin","N","Hit Rate","Avg ROI (unit)","Avg Pred P"])
-        df_bins["N"] = df_bins["N"].astype(int)
+        gb = df_eval.groupby(cuts, observed=True, sort=False)
+        df_bins = pd.DataFrame({
+            "Prob Bin": gb["p"].apply(lambda s: f"{s.min():.2f}-{s.max():.2f}").values,
+            "N": gb.size().astype(int).values,
+            "Hit Rate": gb["y"].mean().values.astype(float),
+            "Avg ROI (unit)": gb.apply(_roi_mean_inline).values.astype(float),
+            "Avg Pred P": gb["p"].mean().values.astype(float),
+        }).sort_values("Avg Pred P").reset_index(drop=True)
         st.dataframe(df_bins)
 
-        # quick extremes snapshot
-        hi, lo = df_bins.iloc[-1], df_bins.iloc[0]
-        st.write(f"**High bin ({hi['Prob Bin']}):** " + (f"N={hi['N']}, Hit={hi['Hit Rate']:.3f}, ROI={hi['Avg ROI (unit)']:.3f}" if hi["N"]>0 else "N=0"))
-        st.write(f"**Low bin  ({lo['Prob Bin']}):** " + (f"N={lo['N']}, Hit={lo['Hit Rate']:.3f}, ROI={lo['Avg ROI (unit)']:.3f}" if lo["N"]>0 else "N=0"))
         
+        # ---- overfitting check (train vs holdout) stays the same ----
+
         # ---- overfitting check (train vs holdout) ----------------------------------
         auc_tr = roc_auc_score(y_train_vec, p_cal)
         ll_tr  = log_loss(y_train_vec, np.clip(p_cal, eps, 1-eps), labels=[0,1])
@@ -7300,35 +7243,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         except Exception as e:
             st.error("Feature‑importance block failed safely.")
             st.exception(e)   
-        # ---- calibration curve table (train) ---------------------------------------
+            # ==== TRAIN: Calibration curve table (quantile bins, robust) ==================
         from sklearn.calibration import calibration_curve
         
-        # Use the final (possibly flipped) train probs
-        p_train_plot = np.asarray(p_cal, dtype=float)       # p_cal is after auc_safe_with_flip
-        y_train_plot = y_train_vec.astype(int)
+        # Prefer the same "final" train probs you use elsewhere; clip for safety
+        p_train_final = np.clip(np.asarray(p_cal, float), eps, 1 - eps)
+        y_train_plot  = y_train_vec.astype(int)
         
-        # Alignment / sanity
-        assert len(p_train_plot) == len(y_train_plot) == len(train_all_idx)
-        assert np.isfinite(p_train_plot).all()
+        assert len(p_train_final) == len(y_train_plot) == len(train_all_idx)
+        if not np.isfinite(p_train_final).all():
+            st.error("❌ Non-finite values in train probabilities after clipping."); 
+            p_train_final = np.nan_to_num(p_train_final, nan=0.5, posinf=0.999, neginf=0.001)
         
-        n_bins = 10
-        prob_true, prob_pred = calibration_curve(
-            y_train_plot, p_train_plot, n_bins=n_bins, strategy="uniform"
-        )
+        uniq_train = np.unique(np.round(p_train_final, 6)).size
+        if uniq_train < 5:
+            st.warning(f"⚠️ Train predictions are nearly discrete (unique≈{uniq_train}). "
+                       "If you see two big plateaus in bins, check that you're calibrating on PROBABILITIES "
+                       "(not logits or class labels) and that any AUC-based flip happens *before* calibration.")
         
-        # Bin counts that match "uniform" bins
-        bins = np.linspace(0.0, 1.0, n_bins + 1)
-        idx = np.clip(np.digitize(p_train_plot, bins) - 1, 0, n_bins - 1)
-        counts = np.bincount(idx, minlength=n_bins)
-        # keep only non-empty bins to align with calibration_curve output
-        nonempty = counts > 0
-        counts_kept = counts[nonempty][:len(prob_true)].astype(int)
+        # Build quantile-binned calibration table (keeps counts aligned with bins)
+        cal_df_src = pd.DataFrame({"p": p_train_final, "y": y_train_plot})
+        try:
+            qb = pd.qcut(cal_df_src["p"], q=10, duplicates="drop")
+        except Exception:
+            qb = pd.cut(cal_df_src["p"], bins=np.linspace(0, 1, 11), include_lowest=True)
         
+        g = cal_df_src.groupby(qb, observed=True, sort=False)
         calib_df = pd.DataFrame({
-            "Predicted Bin Center": prob_pred,
-            "Actual Hit Rate": prob_true,
-            "N": counts_kept,
-        })
+            "Predicted Bin Center": g["p"].mean().values,
+            "Actual Hit Rate": g["y"].mean().values,
+            "N": g.size().astype(int).values,
+        }).sort_values("Predicted Bin Center").reset_index(drop=True)
+        
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()} (Train)")
         st.dataframe(calib_df)
 
