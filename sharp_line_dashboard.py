@@ -5531,7 +5531,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
             #'Outcome_Model_Spread','Outcome_Market_Spread',
-            'Outcome_Spread_Edge',
+            #'Outcome_Spread_Edge',
             'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
             #'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
@@ -6586,15 +6586,44 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "eval_metric": "auc",
             "scale_pos_weight": spw,
         })
+                
+        # ===================== SPREAD AUC REFIT (clean) =====================
+        GLOBAL_SEED = 1337
         
-        deep_ll.fit(
-            X_tr_es, y_tr_es,
-            sample_weight=w_tr_es,
-            eval_set=[(X_va_es, y_va_es)],
-            sample_weight_eval_set=[w_va_es],
-            verbose=False,
-            early_stopping_rounds=EARLY_STOP,
+        # 0) sanitize ES fold
+        X_tr_es = np.nan_to_num(X_tr_es, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        X_va_es = np.nan_to_num(X_va_es, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        w_tr_es = np.nan_to_num(w_tr_es, copy=False, nan=1.0, posinf=1.0, neginf=1.0)
+        w_va_es = np.nan_to_num(w_va_es, copy=False, nan=1.0, posinf=1.0, neginf=1.0)
+        w_tr_es = np.maximum(w_tr_es, 1e-6)
+        w_va_es = np.maximum(w_va_es, 1e-6)
+        
+        # 1) imbalance handling
+        pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
+        pos_va = float((y_va_es == 1).sum()); neg_va = float((y_va_es == 0).sum())
+        assert pos_tr >= 5 and neg_tr >= 5, "ES train fold under-populated"
+        assert pos_va >= 5 and neg_va >= 5, "ES val fold under-populated"
+        scale_pos_weight = max(1.0, neg_tr / max(pos_tr, 1.0))
+        
+        # 2) force stable, high-capacity refit settings for spread
+        deep_auc.set_params(
+            random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
+            eval_metric="auc",
+            subsample=1.0, colsample_bytree=1.0, colsample_bynode=1.0,
+            learning_rate=0.03,
+            min_child_weight=0.05, gamma=0.0,
+            grow_policy="lossguide",
+            max_leaves=max(512, int(deep_auc.get_xgb_params().get("max_leaves", 0)) or 512),
+            max_depth=max(8,   int(deep_auc.get_xgb_params().get("max_depth",  0)) or 8),
+            max_bin=max(320,   int(deep_auc.get_xgb_params().get("max_bin",    0)) or 320),
+            reg_alpha=0.0, reg_lambda=1.5,
+            n_estimators=1500,
+            scale_pos_weight=scale_pos_weight,
+            # if supported: deterministic_histogram=True,
+            # n_jobs=refit_threads,
         )
+        
+        EARLY_STOP = 120
         deep_auc.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6604,7 +6633,69 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=EARLY_STOP,
         )
         
-      
+        # diagnostics BEFORE clamping
+        planned_cap  = int(deep_auc.get_xgb_params().get("n_estimators", 1500))
+        p_val        = deep_auc.predict_proba(X_va_es)[:, 1]
+        spread_std   = float(np.std(p_val))
+        extreme_frac = float(((p_val < 0.35) | (p_val > 0.65)).mean())
+        best_iter    = getattr(deep_auc, "best_iteration", None)
+        cap_hit      = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
+        
+        needs_more_spread = (spread_std < 0.05 and extreme_frac < 0.20 and (best_iter or 0) < 30 and not cap_hit)
+        
+        # 3) optional one-time fallback if still stalled
+        if needs_more_spread:
+            deep_auc.set_params(
+                learning_rate=0.03, min_child_weight=0.03, gamma=0.0,
+                grow_policy="lossguide",
+                max_leaves=640, max_depth=9, max_bin=352,
+                subsample=1.0, colsample_bytree=1.0, colsample_bynode=1.0,
+                n_estimators=1800, eval_metric="auc",
+                random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
+                scale_pos_weight=scale_pos_weight,
+            )
+            deep_auc.fit(
+                X_tr_es, y_tr_es,
+                sample_weight=w_tr_es,
+                eval_set=[(X_va_es, y_va_es)],
+                sample_weight_eval_set=[w_va_es],
+                verbose=False,
+                early_stopping_rounds=140,
+            )
+            # refresh diagnostics
+            planned_cap  = int(deep_auc.get_xgb_params().get("n_estimators", 1800))
+            p_val        = deep_auc.predict_proba(X_va_es)[:, 1]
+            spread_std   = float(np.std(p_val))
+            extreme_frac = float(((p_val < 0.35) | (p_val > 0.65)).mean())
+            best_iter    = getattr(deep_auc, "best_iteration", None)
+            cap_hit      = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
+        
+        # 4) clamp only if it actually trained long enough
+        if best_iter is not None and best_iter >= 50:
+            deep_auc.set_params(n_estimators=best_iter + 1)
+        # =================== END SPREAD AUC REFIT (clean) ===================
+        
+        # ---- now fit the LogLoss model as usual on the same ES fold ----
+        deep_ll.fit(
+            X_tr_es, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
+            verbose=False,
+            early_stopping_rounds=EARLY_STOP,
+        )
+        
+        
+        diag = {
+            "best_iter": getattr(deep_auc, "best_iteration", None),
+            "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
+            "spread_std": float(spread_std),
+            "extreme_frac": float(extreme_frac),
+            "cap_hit": bool(cap_hit),
+            "needs_more_spread": bool(needs_more_spread),
+        }
+        st.subheader("Spread AUC diagnostics")
+        st.json(diag)
         
         # (optional) clamp to best_iteration_
         if getattr(deep_ll, "best_iteration", None) is not None:
