@@ -7059,7 +7059,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         auc_tr = roc_auc_score(y_train_vec, p_cal)
         ll_tr  = log_loss(y_train_vec, np.clip(p_cal, eps, 1-eps), labels=[0,1])
         br_tr  = brier_score_loss(y_train_vec, p_cal)
-        
+        auc_tr  = auc_train
+        auc_ho  = auc_val
+        ll_tr   = log_loss(y_train_vec, p_train_vec, labels=[0, 1])
+        ll_ho   = log_loss(y_hold_vec,  p_hold_vec,  labels=[0, 1])
+        br_tr   = brier_score_loss(y_train_vec, p_train_vec)
+        br_ho   = brier_score_loss(y_hold_vec,  p_hold_vec)
         st.markdown("### 📉 Overfitting Check – Gap Analysis")
         st.write(f"- AUC Gap (Train - Holdout): `{(auc_tr - auc_ho):.4f}`")
         st.write(f"- LogLoss Gap (Train - Holdout): `{(ll_tr  - ll_ho):.4f}`")
