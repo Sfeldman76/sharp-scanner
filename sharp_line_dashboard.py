@@ -5522,7 +5522,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Book_Reliability_x_PROB_SHIFT',
         
             # Power ratings / edges
-            'PR_Team_Rating','PR_Opp_Rating',
+            #'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
             #'Outcome_Model_Spread','Outcome_Market_Spread',
             'Outcome_Spread_Edge',
@@ -5530,11 +5530,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
             #'TOT_Mispricing', 
-            'ATS_EB_Rate',
+            #'ATS_EB_Rate',
             #'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
             #'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             'ATS_EB_Rate_Home',
-            'ATS_EB_Rate_Away',
+            #'ATS_EB_Rate_Away',
             'PR_Model_Agree_H2H_Flag','PR_Market_Agree_H2H_Flag'
             
         ]
@@ -6344,112 +6344,115 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Optionally set a better prior (recommended):
         base_kwargs["base_score"] = float(np.clip(np.mean(y_train), 1e-4, 1-1e-4))
         
-       # ================== FAST SEARCH → DEEP REFIT ==================
+        # ================== FAST SEARCH → DEEP REFIT (deeper, wider, slower) ==================
         
-        # 1) Build *cheap* search estimators (broad exploration)
-        SEARCH_N_EST   = 500          # small budget per config during search
-        SEARCH_MAX_BIN = 256          # cheaper histograms for speed
+        # ================== FAST SEARCH → DEEP REFIT (deeper, wider) ==================
         
-        # Parallelize across trials (keep estimator n_jobs=1)
-        VCPUS = get_vcpus()
+        # 0) Capacity knobs
+        SEARCH_N_EST    = 1600        # larger budget per trial during search
+        SEARCH_MAX_BIN  = 384         # finer histograms for search
+        DEEP_N_EST      = 4000        # big refit budget
+        DEEP_MAX_BIN    = 512         # even finer bins on refit
+        EARLY_STOP      = 200         # patience
+        HALVING_FACTOR  = 3
+        MIN_RESOURCES   = 128         # ↑ less tiny early rounds
+        VCPUS           = get_vcpus()
         
-        est_ll  = XGBClassifier(**{**base_kwargs,
-                                   "n_estimators": SEARCH_N_EST,
-                                   "eval_metric": "logloss",
-                                   "max_bin": SEARCH_MAX_BIN,
-                                   "n_jobs": 1})
-        est_auc = XGBClassifier(**{**base_kwargs,
-                                   "n_estimators": SEARCH_N_EST,
-                                   "eval_metric": "auc",
-                                   "max_bin": SEARCH_MAX_BIN,
-                                   "n_jobs": 1})
+        # 1) Base estimators for the search stage
+        est_ll  = XGBClassifier(**{
+            **base_kwargs,
+            "n_estimators": SEARCH_N_EST,
+            "eval_metric": "logloss",
+            "max_bin": SEARCH_MAX_BIN,
+            "n_jobs": max(1, min(VCPUS, 8)),
+        })
+        est_auc = XGBClassifier(**{
+            **base_kwargs,
+            "n_estimators": SEARCH_N_EST,
+            "eval_metric": "auc",
+            "max_bin": SEARCH_MAX_BIN,
+            "n_jobs": max(1, min(VCPUS, 8)),
+        })
         
-        # 2) Prefer Successive Halving; fallback to RandomizedSearch
+        # 2) Deeper/wider search space (lossguide → max_leaves governs size)
+        param_space_common = {
+            "max_depth":        randint(4, 10),
+            "max_leaves":       randint(96, 512),
+            "learning_rate":    loguniform(0.012, 0.07),
+            "subsample":        uniform(0.70, 0.30),   # 0.70–1.00
+            "colsample_bytree": uniform(0.55, 0.45),   # 0.55–1.00
+            "colsample_bynode": uniform(0.55, 0.45),
+            "min_child_weight": loguniform(1.0, 64.0),
+            "gamma":            uniform(0.0, 8.0),
+            "reg_alpha":        loguniform(1e-4, 5.0),
+            "reg_lambda":       loguniform(0.5, 20.0),
+            "max_bin":          randint(256, 513),
+        }
+        params_ll  = dict(param_space_common)
+        params_auc = dict(param_space_common)
+        
+        # 3) Prefer Halving; fallback to RandomizedSearch
         try:
-            
-            search_kwargs_ll  = dict(factor=3, resource="n_estimators",
-                                     min_resources=64, max_resources=SEARCH_N_EST)
-            search_kwargs_auc = dict(factor=3, resource="n_estimators",
-                                     min_resources=64, max_resources=SEARCH_N_EST)
+            rs_ll = HalvingRandomSearchCV(
+                estimator=est_ll,
+                param_distributions=params_ll,
+                factor=HALVING_FACTOR,
+                resource="n_estimators",
+                min_resources=MIN_RESOURCES,
+                max_resources=SEARCH_N_EST,
+                aggressive_elimination=False,
+                scoring="neg_log_loss",
+                cv=folds,
+                n_jobs=VCPUS,
+                random_state=42,
+                verbose=1 if st.session_state.get("debug", False) else 0,
+            )
+            rs_auc = HalvingRandomSearchCV(
+                estimator=est_auc,
+                param_distributions=params_auc,
+                factor=HALVING_FACTOR,
+                resource="n_estimators",
+                min_resources=MIN_RESOURCES,
+                max_resources=SEARCH_N_EST,
+                aggressive_elimination=False,
+                scoring="roc_auc",
+                cv=folds,
+                n_jobs=VCPUS,
+                random_state=137,
+                verbose=1 if st.session_state.get("debug", False) else 0,
+            )
         except Exception:
-            
-            # keep your trial heuristic
             try:
                 search_trials  # type: ignore
             except NameError:
                 search_trials = _resolve_search_trials(sport, X_train.shape[0])
             search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
-            search_kwargs_ll  = dict(n_iter=search_trials)
-            search_kwargs_auc = dict(n_iter=search_trials)
-        
-   
-        
-        try:
-
-            rs_ll = HalvingRandomSearchCV(
-                estimator=est_ll,
-                param_distributions=params_ll,
-                factor=3,
-                resource="n_estimators",
-                min_resources=64,
-                max_resources=SEARCH_N_EST,
-                aggressive_elimination=False,
-                scoring="neg_log_loss",
-                cv=folds,
-                n_jobs=VCPUS,
-                random_state=42,
-                verbose=1 if st.session_state.get("debug", False) else 0,
-            )
-        
-            rs_auc = HalvingRandomSearchCV(
-                estimator=est_auc,
-                param_distributions=params_auc,
-                factor=3,
-                resource="n_estimators",
-                min_resources=64,
-                max_resources=SEARCH_N_EST,
-                aggressive_elimination=False,
-                scoring="roc_auc",
-                cv=folds,
-                n_jobs=VCPUS,
-                random_state=137,
-                verbose=1 if st.session_state.get("debug", False) else 0,
-            )
-        
-        except Exception:
-          
-        
-            try:
-                search_trials  # type: ignore
-            except NameError:
-                # simple default if you don't have your resolver in scope
-                search_trials = 96
+            search_trials = max(80, int(search_trials * 1.5))  # burn more CPU
         
             rs_ll = RandomizedSearchCV(
                 estimator=est_ll,
                 param_distributions=params_ll,
-                n_iter=int(search_trials),
+                n_iter=search_trials,
                 scoring="neg_log_loss",
                 cv=folds,
                 n_jobs=VCPUS,
                 random_state=42,
                 verbose=1 if st.session_state.get("debug", False) else 0,
             )
-        
             rs_auc = RandomizedSearchCV(
                 estimator=est_auc,
                 param_distributions=params_auc,
-                n_iter=int(search_trials),
+                n_iter=search_trials,
                 scoring="roc_auc",
                 cv=folds,
                 n_jobs=VCPUS,
                 random_state=137,
                 verbose=1 if st.session_state.get("debug", False) else 0,
             )
-
+        
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         
-        # Optionally clamp threadpools inside the search fits too
+        # Clamp BLAS threadpools inside fits
         with threadpool_limits(limits=1):
             rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
             rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
@@ -6457,7 +6460,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         
-        # Loosen AUC model to increase spread
+        # Looseners (AUC stream → extra spread)
         best_auc_params.update({
             "min_child_weight":  float(min(0.1,  best_auc_params.get("min_child_weight", 0.5))),
             "gamma":             0.0,
@@ -6466,21 +6469,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "colsample_bytree":  float(np.clip(  best_auc_params.get("colsample_bytree", 0.8),  0.7, 1.0)),
             "colsample_bynode":  float(np.clip(  best_auc_params.get("colsample_bynode", 0.8),  0.7, 1.0)),
         })
-        
-        # (Optional) mild looseners for the logloss stream
+        # Mild looseners for logloss stream
         best_ll_params.update({
             "min_child_weight":  float(min(0.25, best_ll_params.get("min_child_weight", 0.5))),
             "gamma":             0.0,
             "max_leaves":        int(max(512,    best_ll_params.get("max_leaves", 256))),
         })
         
-        # Remove unsafe/unused keys from both dicts
-        for k in ("monotone_constraints", "interaction_constraints",
-                  "predictor", "objective", "eval_metric", "_estimator_type", "response_method"):
+        # Remove unsafe/unused keys before deep refit
+        for k in ("monotone_constraints","interaction_constraints",
+                  "predictor","objective","eval_metric","_estimator_type","response_method"):
             best_auc_params.pop(k, None)
             best_ll_params.pop(k, None)
         
-        # 3) Deep refit with early stopping on the last fold
+        # 4) Deep refit with early stopping on the last fold
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
         
@@ -6488,27 +6490,64 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         X_va_es = X_train[va_es_rel];  y_va_es = y_train[va_es_rel]
         w_tr_es = np.maximum(w_train[tr_es_rel], 1e-6)
         w_va_es = np.maximum(w_train[va_es_rel], 1e-6)
-                
+        
         def _has_both_classes_idx(y, idx):
-            u = set(np.unique(y[idx])); return (0 in u) and (1 in u)
-        
-        # Validation fold must have both classes
+            u = set(np.unique(y[idx]))
+            return (0 in u) and (1 in u)
         assert _has_both_classes_idx(y_train, va_es_rel), "ES fold is single-class; widen min_val_size or pick a different ES fold."
-        
-        # Weights must be finite and not all zero
         assert np.isfinite(w_va_es).all() and (w_va_es > 0).any(), "Validation weights are zero/NaN."
+        
+        deep_ll = XGBClassifier(**{
+            **base_kwargs,
+            **best_ll_params,
+            "n_estimators": DEEP_N_EST,
+            "max_bin": DEEP_MAX_BIN,
+            "n_jobs": VCPUS,
+            "eval_metric": "logloss",
+        })
+        deep_auc = XGBClassifier(**{
+            **base_kwargs,
+            **best_auc_params,
+            "n_estimators": DEEP_N_EST,
+            "max_bin": DEEP_MAX_BIN,
+            "n_jobs": VCPUS,
+            "eval_metric": "auc",
+        })
+        
+        deep_ll.fit(
+            X_tr_es, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
+            verbose=False,
+            early_stopping_rounds=EARLY_STOP,
+        )
+        deep_auc.fit(
+            X_tr_es, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
+            verbose=False,
+            early_stopping_rounds=EARLY_STOP,
+        )
+        
+        # Clamp to best_iteration_ (freeze final size)
+        if getattr(deep_ll, "best_iteration", None) is not None:
+            deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
+        if getattr(deep_auc, "best_iteration", None) is not None:
+            deep_auc.set_params(n_estimators=deep_auc.best_iteration + 1)
 
         # --- Safe defaults (define before bumping) ---
-        DEFAULT_FINAL_N_EST     = 15000
-        DEFAULT_ES_ROUNDS       = 7000
+        DEFAULT_FINAL_N_EST     = 50000
+        DEFAULT_ES_ROUNDS       = 15000
         
         # If these weren’t set earlier in this function, seed them now
         final_estimators_cap    = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
         early_stopping_rounds   = int(locals().get("early_stopping_rounds", DEFAULT_ES_ROUNDS))
         
         # --- Your bumps (now safe) ---
-        final_estimators_cap    = max(15000, final_estimators_cap)
-        early_stopping_rounds   = max(7000,   early_stopping_rounds)
+        final_estimators_cap    = max(50000, final_estimators_cap)
+        early_stopping_rounds   = max(15000,   early_stopping_rounds)
         
             # --- Build final param dicts first (clean & safe) ---
         params_ll_final = {**base_kwargs, **best_ll_params}
