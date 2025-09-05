@@ -6316,7 +6316,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             min_pos=5, min_neg=5,
             seed=1337,
                 )
-         def _balance_score(idx, y):
+        def _balance_score(idx, y):
                     p = float(np.mean(y[idx] == 1))
                     return -abs(p - 0.5)  # higher is better
                 folds.sort(key=lambda tv: _balance_score(tv[1], y_train), reverse=True)
