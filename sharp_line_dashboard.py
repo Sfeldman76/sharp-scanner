@@ -5589,7 +5589,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         extend_unique(features, ['Is_Night_Game','Is_PrimeTime','DOW_Sin'])
         
         extend_unique(features, [
-            "Implied_Hold_Book",#"Two_Sided_Offered","Juice_Abs_Delta",
+            #"Implied_Hold_Book",#"Two_Sided_Offered","Juice_Abs_Delta",
             "Dist_To_Next_Key","Key_Corridor_Pressure",
             #"Book_PctRank_Line",
             "Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
@@ -6284,7 +6284,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X=X_train_df,
             y=y_train,
             folds=folds,                # reuse the CV folds built earlier (rows unchanged)
-            topk_per_fold=30,
+            topk_per_fold=20,
             min_presence=0.90,
             max_keep=80,
             sample_per_fold=4000,
@@ -6470,7 +6470,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # AUC (spread market) — push capacity & loosen regularization
         # AUC (spread market) — force splits
         best_auc_params.update({
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.01)), 0.01)),
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.001)), 0.001)),
             "gamma":            0.0,
             "max_leaves":       int(max(448, int(best_auc_params.get("max_leaves", 0)) or 0)),
             "max_depth":        int(max(8,   int(best_auc_params.get("max_depth", 0))  or 0)),
@@ -6480,13 +6480,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "reg_alpha":        float(min(0.01, float(best_auc_params.get("reg_alpha",  0.01)))),
             "reg_lambda":       float(min(1.0,  float(best_auc_params.get("reg_lambda", 1.0 )))),
             "max_bin":          int(max(304, int(best_auc_params.get("max_bin", 304)))),
-            "learning_rate":    float(max(0.03, float(best_auc_params.get("learning_rate", 0.03)))),
+            "learning_rate":    float(max(0.003, float(best_auc_params.get("learning_rate", 0.003)))),
             "grow_policy":      "lossguide",
         })
         
         # LogLoss — looser too, but slightly more conservative
         best_ll_params.update({
-            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.10)), 0.10)),
+            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.005)), 0.005)),
             "gamma":            0.0,
             "max_leaves":       int(max(384, int(best_ll_params.get("max_leaves", 0)) or 0)),
             "max_depth":        int(max(7,   int(best_ll_params.get("max_depth", 0))  or 0)),
@@ -6496,7 +6496,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "reg_alpha":        float(min(0.03, float(best_ll_params.get("reg_alpha",  0.03)))),
             "reg_lambda":       float(min(1.25, float(best_ll_params.get("reg_lambda", 1.25)))),
             "max_bin":          int(max(288, int(best_ll_params.get("max_bin", 288)))),
-            "learning_rate":    float(max(0.028, float(best_ll_params.get("learning_rate", 0.028)))),
+            "learning_rate":    float(max(0.008, float(best_ll_params.get("learning_rate", 0.008)))),
             "grow_policy":      "lossguide",
         })
 
