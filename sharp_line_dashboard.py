@@ -6240,27 +6240,63 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     safe.append((tr, va))
             return safe
         
-        def stratified_fallback(y, *, test_size=0.2, seed=1337, min_pos=5, min_neg=5):
-            """Single stratified split with retries at 20%/30%/40% val until both sides have counts."""
-            for ts in (test_size, 0.3, 0.4):
-                sss = StratifiedShuffleSplit(n_splits=1, test_size=ts, random_state=seed)
-                for tr, va in sss.split(np.zeros_like(y), y):
-                    if _has_both_classes(tr, y, min_pos=min_pos, min_neg=min_neg) and \
-                       _has_both_classes(va, y, min_pos=min_pos, min_neg=min_neg):
-                        return [(tr, va)]
-            raise RuntimeError("No class-balanced CV split available; widen data or use placeholder model.")
+       
+       
         
-        # ---- usage ----
-        # make y clean & binary
-        y_train = pd.Series(y_train).astype(int).clip(0, 1).to_numpy()
+        GLOBAL_SEED = 1337
         
-        # Make your cv object deterministic upstream (e.g., StratifiedKFold(..., shuffle=True, random_state=1337))
-        cv_splits = filter_cv_splits(cv, X_train, y_train, groups=g_train, min_pos=5, min_neg=5)
+        def _has_min_counts(idx, y, *, min_pos=5, min_neg=5):
+            yy = y[idx]
+            return (yy == 1).sum() >= min_pos and (yy == 0).sum() >= min_neg
         
-        if not cv_splits:
-            cv_splits = stratified_fallback(y_train, seed=1337, min_pos=5, min_neg=5)
+        def _balance_score(idx, y):
+            # higher is better: validation mix closest to 50/50
+            p = float((y[idx] == 1).mean())
+            return -abs(p - 0.5)
         
-        folds = cv_splits
+        def build_deterministic_folds(
+            X, y, *,
+            cv=None,               # optional: existing CV object (e.g., GroupKFold, TimeSeriesSplit)
+            groups=None,           # optional groups for cv.split(...)
+            n_splits=5,
+            min_pos=5, min_neg=5,
+            seed=GLOBAL_SEED
+        ):
+            """Return (folds, tr_es_rel, va_es_rel) with deterministic, class-viable splits."""
+            yb = pd.Series(y).astype(int).clip(0, 1).to_numpy()
+        
+            # 1) Make candidate splits
+            if cv is not None:
+                raw = [(tr, va) for tr, va in cv.split(X, yb, groups)]
+                if not raw and hasattr(cv, "n_splits"):
+                    n_splits = int(cv.n_splits)
+            else:
+                skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+                raw = [(tr, va) for tr, va in skf.split(X, yb)]
+        
+            # 2) Filter to splits with min counts per class (train & val)
+            folds = [(tr, va) for tr, va in raw
+                     if _has_min_counts(tr, yb, min_pos=min_pos, min_neg=min_neg)
+                     and _has_min_counts(va, yb, min_pos=min_pos, min_neg=min_neg)]
+        
+            # 3) Fallback: single stratified split (retry 20/30/40% val)
+            if not folds:
+                for ts in (0.20, 0.30, 0.40):
+                    sss = StratifiedShuffleSplit(n_splits=1, test_size=ts, random_state=seed)
+                    for tr, va in sss.split(np.zeros_like(yb), yb):
+                        if _has_min_counts(tr, yb, min_pos=min_pos, min_neg=min_neg) and \
+                           _has_min_counts(va, yb, min_pos=min_pos, min_neg=min_neg):
+                            folds = [(tr, va)]
+                            break
+                    if folds:
+                        break
+                if not folds:
+                    raise RuntimeError("No class-balanced CV split available; widen data or use a placeholder model.")
+        
+            # 4) Pick ES fold: validation closest to 50/50
+            folds.sort(key=lambda tv: _balance_score(tv[1], yb), reverse=True)
+            tr_es_rel, va_es_rel = folds[0]
+            return folds, tr_es_rel, va_es_rel
         
         # Optionally: pick ES fold deterministically with best balance
         # (closest to 50/50 in validation)
@@ -6268,7 +6304,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p = float(np.mean(y[idx] == 1))
             return -abs(p - 0.5)  # higher is better
         folds.sort(key=lambda tv: _balance_score(tv[1], y_train), reverse=True)
-
+        folds, tr_es_rel, va_es_rel = build_deterministic_folds(
+        X_train, y_train,
+        cv=cv,                  # or None to force StratifiedKFold
+        groups=g_train,         # if your cv uses groups; else None
+        n_splits=getattr(cv, "n_splits", 5),
+        min_pos=5, min_neg=5,
+       
         # ================== << SHAP stability selection >> ==================
         # Use the PRUNED names to build a columned DF for SHAP
         X_train_df = pd.DataFrame(X_train, columns=list(features_pruned))
@@ -6297,7 +6339,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         FEATURE_COLS_FINAL = tuple(selected_feats)
         feature_cols = list(FEATURE_COLS_FINAL)
         features     = feature_cols  # if you use `features` later
-
+        
 
        
         # UI: how many SHAP removed
@@ -6396,7 +6438,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         }
         params_ll  = dict(param_space_common)
         params_auc = dict(param_space_common)
-        
+       
+        # ===== end deterministic ES selection =====
         # 3) Prefer Halving; fallback to RandomizedSearch (fewer trials)
         try:
             rs_ll = HalvingRandomSearchCV(
