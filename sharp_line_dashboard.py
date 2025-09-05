@@ -4247,7 +4247,7 @@ def c_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
 
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
-    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 60, "CFL": 45, "WNBA": 45, "MLB": 45, "NCAAF": 45, "NCAAB": 60}
+    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 60, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 45, "NCAAB": 60}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
     st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
@@ -4341,12 +4341,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # === Columns we expect from the view ===
     history_cols = [
         "After_Win_Flag",#"Revenge_Flag",
-        "Current_Win_Streak_Prior","Current_Loss_Streak_Prior",
+        "Current_Win_Streak_Prior",#"Current_Loss_Streak_Prior",
         "H2H_Win_Pct_Prior",  # "Opp_WinPct_Prior",
         # "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
         # "Wins_Last5_Prior",
         "Margin_Last5_Prior",
-        "Days_Since_Last_Game",
+        #"Days_Since_Last_Game",
         # "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
         # "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
     ]
@@ -4354,8 +4354,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # === New team ATS cover / margin stats (prior-only, last-5) ===
     team_cover_cols = [
         # overall cover signal (intentionally off for now)
-        # "Cover_Rate_Last5",
-        # "Cover_Rate_After_Win_Last5",
+        "Cover_Rate_Last5",
+        "Cover_Rate_After_Win_Last5",
         # "Cover_Rate_After_Loss_Last5",
         # situational cover rates (intentionally off for now)
         # "Cover_Rate_Home_After_Home_Win_Last5",
@@ -4367,7 +4367,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # "Cover_Rate_Away_After_Away_Win_Last5",
         # "Cover_Rate_Away_After_Away_Loss_Last5",
         # margin distribution
-        "ATS_Cover_Margin_Last5_Prior_Mean",
+        #"ATS_Cover_Margin_Last5_Prior_Mean",
         #"ATS_Cover_Margin_Last5_Prior_Std",
         "Market_Bucket",
         "Market_OddsProb_Bucket"
@@ -5473,7 +5473,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # --- start with your manual core list ---
         features = [
             # 🔹 Core sharp signals
-            #'Sharp_Move_Signal',
+            'Sharp_Move_Signal',
             #'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
             #'Book_lift_x_Magnitude',
             'Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
@@ -5530,12 +5530,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
             #'TOT_Mispricing', 
-            #'ATS_EB_Rate',
+            'ATS_EB_Rate',
             #'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
             #'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
-            'ATS_EB_Rate_Home',
+            #'ATS_EB_Rate_Home',
             #'ATS_EB_Rate_Away',
-            'PR_Model_Agree_H2H_Flag','PR_Market_Agree_H2H_Flag'
+            'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag'
             
         ]
         
