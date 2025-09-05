@@ -5984,9 +5984,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         # ============================================================================
         
-       
+        # Always work off the masked frame with positional indexing
+        df_valid = df_market.loc[valid_mask].reset_index(drop=True)
+        
+        # Build X from df_valid, not df_market
+        X_full = _to_numeric_block(df_valid, feature_cols).to_numpy(np.float32)
+        
+        
+        # When you need train/hold subsets of the *dataframe*, use iloc
+        train_df = df_valid.iloc[train_all_idx].copy()
         # === Build X / y ===
-        X_full = _to_numeric_block(df_market, feature_cols).to_numpy(np.float32)
+        
         
         y_series   = pd.to_numeric(df_market["SHARP_HIT_BOOL"], errors="coerce")
         valid_mask = ~y_series.isna()
@@ -6035,16 +6043,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         X_full = df_tmp.to_numpy(dtype=np.float32)
         features_pruned = tuple(feature_cols)   # 🔒 freeze pruned column names
         st.write(f"✅ Final feature count after pruning: {len(feature_cols)}")
-     
-        # ---- Groups & times (snapshot-aware) ----
-        groups_all = df_market.loc[valid_mask, "Game_Key"].astype(str).to_numpy()
         
-        snap_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Snapshot_Timestamp"], errors="coerce", utc=True
-        )
-        game_ts = pd.to_datetime(
-            df_market.loc[valid_mask, "Game_Start"], errors="coerce", utc=True
-        )
+        # Recompute these from df_valid so everything is aligned
+        groups_all = df_valid["Game_Key"].astype(str).to_numpy()
+        snap_ts    = pd.to_datetime(df_valid["Snapshot_Timestamp"], errors="coerce", utc=True)
+        game_ts    = pd.to_datetime(df_valid["Game_Start"],           errors="coerce", utc=True)
+        # ---- Groups & times (snapshot-aware) ----
         
         # If any game has >1 snapshot we’re in snapshot regime (embargo matters)
         by_game_snaps = (
@@ -6306,7 +6310,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # sanity checks (fail fast if anything drifted)
         assert X_train.shape[1] == len(feature_cols), f"X_train={X_train.shape[1]} vs feature_cols={len(feature_cols)}"
         assert X_full.shape[1]  == len(feature_cols),  f"X_full={X_full.shape[1]}  vs feature_cols={len(feature_cols)}"
+        # After train/hold split:
+        assert X_train.shape[0] == y_train.shape[0] == len(train_all_idx)
+        assert np.isfinite(X_train).all()
+        assert set(np.unique(y_train)) <= {0,1}
         
+        # Before ROI bins:
+       
         # Now compute spw & search space (AFTER setting `features`)
         
         # build or update base_kwargs only 
@@ -6434,9 +6444,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
-        for k in ("objective", "eval_metric", "_estimator_type", "response_method"):
-            best_ll_params.pop(k, None)
+        
+        # Loosen AUC model to increase spread
+        best_auc_params.update({
+            "min_child_weight":  float(min(0.1,  best_auc_params.get("min_child_weight", 0.5))),
+            "gamma":             0.0,
+            "max_leaves":        int(max(512,    best_auc_params.get("max_leaves", 256))),
+            "subsample":         float(np.clip(  best_auc_params.get("subsample", 0.8),         0.7, 0.95)),
+            "colsample_bytree":  float(np.clip(  best_auc_params.get("colsample_bytree", 0.8),  0.7, 1.0)),
+            "colsample_bynode":  float(np.clip(  best_auc_params.get("colsample_bynode", 0.8),  0.7, 1.0)),
+        })
+        
+        # (Optional) mild looseners for the logloss stream
+        best_ll_params.update({
+            "min_child_weight":  float(min(0.25, best_ll_params.get("min_child_weight", 0.5))),
+            "gamma":             0.0,
+            "max_leaves":        int(max(512,    best_ll_params.get("max_leaves", 256))),
+        })
+        
+        # Remove unsafe/unused keys from both dicts
+        for k in ("monotone_constraints", "interaction_constraints",
+                  "predictor", "objective", "eval_metric", "_estimator_type", "response_method"):
             best_auc_params.pop(k, None)
+            best_ll_params.pop(k, None)
         
         # 3) Deep refit with early stopping on the last fold
         tr_es_rel, va_es_rel = folds[-1]
@@ -6926,12 +6956,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
         bins   = np.linspace(0, 1, 11)
         labels = [f"{bins[i]:.2f}-{bins[i+1]:.2f}" for i in range(len(bins)-1)]
-        
-        eval_idx = pd.Index(hold_idx)
+        assert p_hold_vec.shape[0] == y_hold_vec.shape[0] == len(hold_idx)
+        eval_idx = np.asarray(hold_idx)  # positional
         df_eval = pd.DataFrame({
-            "p":    pd.Series(p_hold_vec, index=eval_idx),
-            "y":    pd.Series(y_hold_vec, index=eval_idx),
-            "odds": pd.to_numeric(df_market.loc[eval_idx, "Odds_Price"], errors="coerce"),
+            "p":    p_hold_vec,
+            "y":    y_hold_vec.astype(int),
+            "odds": pd.to_numeric(df_valid.iloc[eval_idx]["Odds_Price"], errors="coerce"),
         }).dropna(subset=["p","y"])
 
         
@@ -7158,8 +7188,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             st.exception(e)   
         # ---- calibration curve table (train) ---------------------------------------
         from sklearn.calibration import calibration_curve
-        prob_true, prob_pred = calibration_curve(y_train_vec, p_cal, n_bins=10)
-        calib_df = pd.DataFrame({"Predicted Bin Center": prob_pred, "Actual Hit Rate": prob_true})
+        
+        # Use the final (possibly flipped) train probs
+        p_train_plot = np.asarray(p_cal, dtype=float)       # p_cal is after auc_safe_with_flip
+        y_train_plot = y_train_vec.astype(int)
+        
+        # Alignment / sanity
+        assert len(p_train_plot) == len(y_train_plot) == len(train_all_idx)
+        assert np.isfinite(p_train_plot).all()
+        
+        n_bins = 10
+        prob_true, prob_pred = calibration_curve(
+            y_train_plot, p_train_plot, n_bins=n_bins, strategy="uniform"
+        )
+        
+        # Bin counts that match "uniform" bins
+        bins = np.linspace(0.0, 1.0, n_bins + 1)
+        idx = np.clip(np.digitize(p_train_plot, bins) - 1, 0, n_bins - 1)
+        counts = np.bincount(idx, minlength=n_bins)
+        # keep only non-empty bins to align with calibration_curve output
+        nonempty = counts > 0
+        counts_kept = counts[nonempty][:len(prob_true)].astype(int)
+        
+        calib_df = pd.DataFrame({
+            "Predicted Bin Center": prob_pred,
+            "Actual Hit Rate": prob_true,
+            "N": counts_kept,
+        })
         st.markdown(f"#### 🎯 Calibration Bins – {market.upper()} (Train)")
         st.dataframe(calib_df)
 
