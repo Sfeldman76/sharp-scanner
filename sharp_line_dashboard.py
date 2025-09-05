@@ -6535,11 +6535,51 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=EARLY_STOP,
         )
         
+      
+        
+        # (optional) clamp to best_iteration_
         if getattr(deep_ll, "best_iteration", None) is not None:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
         if getattr(deep_auc, "best_iteration", None) is not None:
             deep_auc.set_params(n_estimators=deep_auc.best_iteration + 1)
         
+        # === Place your diagnostics HERE (right after deep_auc training) ===
+        p_val = deep_auc.predict_proba(X_va_es)[:, 1]
+        spread_std   = float(np.std(p_val))
+        extreme_frac = float(((p_val < 0.35) | (p_val > 0.65)).mean())
+        
+        cap_hit = getattr(deep_auc, "best_iteration", None)
+        cap_hit = bool(cap_hit is not None and
+                       cap_hit >= 0.9 * deep_auc.get_xgb_params().get("n_estimators",
+                                                                      deep_auc.get_params().get("n_estimators", 0)))
+        
+        needs_more_spread = bool(spread_std < 0.07 and extreme_frac < 0.25)
+        
+        # Streamlit UI (preferred)
+        import streamlit as st
+        st.subheader("AUC model spread diagnostics")
+        st.json({
+            "best_iter": getattr(deep_auc, "best_iteration", None),
+            "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators",
+                              deep_auc.get_params().get("n_estimators", 0)) or 0),
+            "spread_std": spread_std,
+            "extreme_frac": extreme_frac,
+            "cap_hit": cap_hit,
+            "needs_more_spread": needs_more_spread,
+        })
+        
+        # If you specifically want stdout logs instead of UI:
+        print({
+            "best_iter": getattr(deep_auc, "best_iteration", None),
+            "n_estimators": deep_auc.get_xgb_params().get("n_estimators",
+                             deep_auc.get_params().get("n_estimators", 0)),
+            "spread_std": spread_std,
+            "extreme_frac": extreme_frac,
+            "cap_hit": cap_hit,
+            "needs_more_spread": needs_more_spread,
+        })
+        # === end diagnostics ===
+
         
                 # --- Safe defaults for a 6-vCPU machine ---
         DEFAULT_FINAL_N_EST   = 1800   # align with your DEEP_N_EST
