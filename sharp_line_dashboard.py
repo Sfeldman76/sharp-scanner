@@ -6116,7 +6116,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
         #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
         # ✅ This line must come AFTER the split:
-        train_df = df_valid.iloc[train_all_idx].copy(
+        train_df = df_valid.iloc[train_all_idx].copy()
         # ---- 5) Simple health checks (Streamlit friendly) ----
         st.markdown("### 🩺 Data Health Checks")
         
