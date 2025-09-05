@@ -5495,7 +5495,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Value_Reversal_Flag','Odds_Reversal_Flag',
         
             # 🔥 Timing flags
-            'Late_Game_Steam_Flag',
+            #'Late_Game_Steam_Flag',
         
             #'Abs_Line_Move_From_Opening',
             #'Abs_Odds_Move_From_Opening',
@@ -5970,25 +5970,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Normalize your working feature list name
         feature_cols = list(features) if "features" in locals() else list(feature_cols)
         
-        if market_label.startswith("spread") or market_label == "spreads":
-            # Explicit PR features you've seen + any columns with PR_ prefix
-            PR_EXPLICIT = {
-                "PR_Team_Rating",
-                "PR_Opp_Rating",
-                "PR_Abs_Rating_Diff",
-                "PR_Rating_Diff",
-            }
-            def _is_pr(col: str) -> bool:
-                c = str(col)
-                return c.startswith("PR_") or (c in PR_EXPLICIT)
-        
-            before = len(feature_cols)
-            feature_cols = [c for c in feature_cols if not _is_pr(c)]
-            removed = before - len(feature_cols)
-            if removed:
-                print(f"🧹 Removed {removed} PR features for SPREADS.")
-        
-        # Keep a single source of truth for downstream code
+  
         features = feature_cols
 
         # ============================================================================
@@ -6470,33 +6452,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # AUC (spread market) — push capacity & loosen regularization
         # AUC (spread market) — force splits
         best_auc_params.update({
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.0001)), 0.0001)),
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.00001)), 0.00001)),
             "gamma":            0.0,
-            "max_leaves":        int(max(768, int(best_auc_params.get("max_leaves", 0)) or 0)),
-            "max_depth":         int(max(12,  int(best_auc_params.get("max_depth", 0))  or 0)),
-            "subsample":         float(max(0.96, float(best_auc_params.get("subsample",        0.96)))),
-            "colsample_bytree":  float(max(0.96, float(best_auc_params.get("colsample_bytree", 0.96)))),
-            "colsample_bynode":  float(max(0.96, float(best_auc_params.get("colsample_bynode", 0.96)))),
-            "reg_alpha":         float(min(0.005, float(best_auc_params.get("reg_alpha",  0.005)))),
-            "reg_lambda":        float(min(0.80,  float(best_auc_params.get("reg_lambda", 0.80 )))),
-            "max_bin":           int(max(384, int(best_auc_params.get("max_bin", 384)))),
-            "learning_rate":    float(max(0.0003, float(best_auc_params.get("learning_rate", 0.0003)))),
+          
+            "max_leaves":        int(max(1024, int(best_auc_params.get("max_leaves", 0)) or 0)),
+            "max_depth":         int(max(20,   int(best_auc_params.get("max_depth", 0))  or 0)),
+            "subsample":         float(max(0.99, float(best_auc_params.get("subsample",        0.99)))),
+            "colsample_bytree":  float(max(0.99, float(best_auc_params.get("colsample_bytree", 0.99)))),
+            "colsample_bynode":  float(max(0.99, float(best_auc_params.get("colsample_bynode", 0.99)))),
+            "reg_alpha":         0.0,
+            "reg_lambda":        float(min(0.50, float(best_auc_params.get("reg_lambda", 0.50)))),
+            "max_bin":           int(max(448,  int(best_auc_params.get("max_bin", 448))))
+            "learning_rate":    float(max(0.00003, float(best_auc_params.get("learning_rate", 0.00003)))),
             "grow_policy":      "lossguide",
         })
         
         # LogLoss — looser too, but slightly more conservative
         best_ll_params.update({
-            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.005)), 0.0005)),
+            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.00005)), 0.00005)),
             "gamma":            0.0,
-            "max_leaves":        int(max(640, int(best_ll_params.get("max_leaves", 0)) or 0)),
-            "max_depth":         int(max(10,  int(best_ll_params.get("max_depth", 0))  or 0)),
-            "subsample":         float(max(0.94, float(best_ll_params.get("subsample",        0.94)))),
-            "colsample_bytree":  float(max(0.94, float(best_ll_params.get("colsample_bytree", 0.94)))),
-            "colsample_bynode":  float(max(0.94, float(best_ll_params.get("colsample_bynode", 0.94)))),
-            "reg_alpha":         float(min(0.010, float(best_ll_params.get("reg_alpha",  0.010)))),
-            "reg_lambda":        float(min(1.00,  float(best_ll_params.get("reg_lambda", 1.00 )))),
-            "max_bin":           int(max(352, int(best_ll_params.get("max_bin", 352)))),
-            "learning_rate":    float(max(0.0008, float(best_ll_params.get("learning_rate", 0.0008)))),
+            "max_leaves":        int(max(768,  int(best_ll_params.get("max_leaves", 0)) or 0)),
+            "max_depth":         int(max(18,   int(best_ll_params.get("max_depth", 0))  or 0)),
+            "subsample":         float(max(0.96, float(best_ll_params.get("subsample",        0.96)))),
+            "colsample_bytree":  float(max(0.96, float(best_ll_params.get("colsample_bytree", 0.96)))),
+            "colsample_bynode":  float(max(0.96, float(best_ll_params.get("colsample_bynode", 0.96)))),
+            "reg_alpha":         0.0,
+            "reg_lambda":        float(min(0.80, float(best_ll_params.get("reg_lambda", 0.80)))),
+            "max_bin":           int(max(384,  int(best_ll_params.get("max_bin", 384)))),
+            "learning_rate":    float(max(0.00008, float(best_ll_params.get("learning_rate", 0.00008)))),
             "grow_policy":      "lossguide",
         })
 
