@@ -1553,7 +1553,7 @@ def holdout_by_percent_groups(
     """
     SPORT_HOLDOUT_PCT = {
         "NFL": 0.10, "NCAAF": 0.10, "NBA": 0.18, "WNBA": 0.10,
-        "NHL": 0.18, "MLB": 0.15, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
+        "NHL": 0.18, "MLB": 0.20, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
     }
     if pct_holdout is None:
         key = (sport or "DEFAULT").upper()
