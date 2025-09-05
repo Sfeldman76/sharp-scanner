@@ -6468,35 +6468,35 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Gentle "looseners" (still conservative)
         # AUC (spread market) – looser child weight (≤ 0.10); keep leaves in 320–384
         # AUC (spread market) — push capacity & loosen regularization
+        # AUC (spread market) — force splits
         best_auc_params.update({
-            # allow tiny child nodes so trees actually split
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.05)), 0.05)),
-            "gamma":            0.0,                                   # no split penalty
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.01)), 0.01)),
+            "gamma":            0.0,
             "max_leaves":       int(max(448, int(best_auc_params.get("max_leaves", 0)) or 0)),
-            "max_depth":        int(max(7,   int(best_auc_params.get("max_depth", 0))  or 0)),
+            "max_depth":        int(max(8,   int(best_auc_params.get("max_depth", 0))  or 0)),
             "subsample":        float(max(0.92, float(best_auc_params.get("subsample",        0.92)))),
             "colsample_bytree": float(max(0.92, float(best_auc_params.get("colsample_bytree", 0.92)))),
             "colsample_bynode": float(max(0.92, float(best_auc_params.get("colsample_bynode", 0.92)))),
-            "reg_alpha":        float(min(0.02, float(best_auc_params.get("reg_alpha",  0.02)))),
-            "reg_lambda":       float(min(1.20, float(best_auc_params.get("reg_lambda", 1.20)))),
+            "reg_alpha":        float(min(0.01, float(best_auc_params.get("reg_alpha",  0.01)))),
+            "reg_lambda":       float(min(1.0,  float(best_auc_params.get("reg_lambda", 1.0 )))),
             "max_bin":          int(max(304, int(best_auc_params.get("max_bin", 304)))),
-            "learning_rate":    float(max(0.030, float(best_auc_params.get("learning_rate", 0.030)))),
+            "learning_rate":    float(max(0.03, float(best_auc_params.get("learning_rate", 0.03)))),
             "grow_policy":      "lossguide",
         })
         
-        # LogLoss — still looser than before, but a bit more conservative than AUC
+        # LogLoss — looser too, but slightly more conservative
         best_ll_params.update({
             "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.10)), 0.10)),
             "gamma":            0.0,
             "max_leaves":       int(max(384, int(best_ll_params.get("max_leaves", 0)) or 0)),
-            "max_depth":        int(max(6,   int(best_ll_params.get("max_depth", 0))  or 0)),
-            "subsample":        float(max(0.88, float(best_ll_params.get("subsample",        0.88)))),
-            "colsample_bytree": float(max(0.88, float(best_ll_params.get("colsample_bytree", 0.88)))),
-            "colsample_bynode": float(max(0.88, float(best_ll_params.get("colsample_bynode", 0.88)))),
-            "reg_alpha":        float(min(0.05, float(best_ll_params.get("reg_alpha",  0.05)))),
-            "reg_lambda":       float(min(1.50, float(best_ll_params.get("reg_lambda", 1.50)))),
+            "max_depth":        int(max(7,   int(best_ll_params.get("max_depth", 0))  or 0)),
+            "subsample":        float(max(0.90, float(best_ll_params.get("subsample",        0.90)))),
+            "colsample_bytree": float(max(0.90, float(best_ll_params.get("colsample_bytree", 0.90)))),
+            "colsample_bynode": float(max(0.90, float(best_ll_params.get("colsample_bynode", 0.90)))),
+            "reg_alpha":        float(min(0.03, float(best_ll_params.get("reg_alpha",  0.03)))),
+            "reg_lambda":       float(min(1.25, float(best_ll_params.get("reg_lambda", 1.25)))),
             "max_bin":          int(max(288, int(best_ll_params.get("max_bin", 288)))),
-            "learning_rate":    float(max(0.028, float(best_ll_params.get("learning_rate", 0.030)))),
+            "learning_rate":    float(max(0.028, float(best_ll_params.get("learning_rate", 0.028)))),
             "grow_policy":      "lossguide",
         })
 
@@ -6532,6 +6532,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "n_jobs": refit_threads,
             "eval_metric": "logloss",
         })
+        pos = float(np.sum(y_tr_es == 1))
+        neg = float(np.sum(y_tr_es == 0))
+        spw = max(1.0, neg / max(pos, 1.0))
+        
         deep_auc = XGBClassifier(**{
             **base_kwargs,
             **best_auc_params,
@@ -6539,6 +6543,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "max_bin": DEEP_MAX_BIN,
             "n_jobs": refit_threads,
             "eval_metric": "auc",
+            "scale_pos_weight": spw,
         })
         
         deep_ll.fit(
