@@ -5999,8 +5999,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         X_full = _to_numeric_block(df_valid, feature_cols).to_numpy(np.float32)
         # Always work off the masked frame with positional indexing
    
-        # When you need train/hold subsets of the *dataframe*, use iloc
-        train_df = df_valid.iloc[train_all_idx].copy()
+       
         # === Build X / y ===
         
         
@@ -6116,7 +6115,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #st.write(f"✅ Holdout split → Train: {len(y_train_vec)} | Holdout: {len(y_hold_vec)}")
         #if len(y_train_vec): st.write("Train class counts:", np.bincount(y_train_vec))
         #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
-
+        # ✅ This line must come AFTER the split:
+        train_df = df_valid.iloc[train_all_idx].copy(
         # ---- 5) Simple health checks (Streamlit friendly) ----
         st.markdown("### 🩺 Data Health Checks")
         
@@ -6149,7 +6149,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
         )
         
-        train_df = df_market.loc[valid_mask].iloc[train_all_idx].copy()
+       
         def _fallback_book_lift(df: pd.DataFrame, book_col: str, label_col: str, prior: float = 100.0):
             if (book_col is None) or (book_col not in df.columns) or (label_col not in df.columns):
                 return pd.Series(dtype=float)
