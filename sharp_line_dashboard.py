@@ -6348,7 +6348,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ================== FAST SEARCH → DEEP REFIT (deeper, wider) ==================
         
-        # 0) Capacity knobs
+        # # ================== FAST SEARCH → MODERATE REFIT (6 vCPU friendly) ==================
+      
+        
+        # 0) Capacity knobs (right-sized for ~6 vCPUs)
         SEARCH_N_EST    = 800         # was 1600
         SEARCH_MAX_BIN  = 256         # was 384
         DEEP_N_EST      = 1800        # was 4000
@@ -6359,39 +6362,40 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         VCPUS           = get_vcpus()
         
         # 1) Base estimators for the search stage
+        #    IMPORTANT: keep estimator n_jobs=1 so CV/trials can parallelize.
         est_ll  = XGBClassifier(**{
             **base_kwargs,
             "n_estimators": SEARCH_N_EST,
             "eval_metric": "logloss",
             "max_bin": SEARCH_MAX_BIN,
-            "n_jobs": max(1, min(VCPUS, 8)),
+            "n_jobs": 1,
         })
         est_auc = XGBClassifier(**{
             **base_kwargs,
             "n_estimators": SEARCH_N_EST,
             "eval_metric": "auc",
             "max_bin": SEARCH_MAX_BIN,
-            "n_jobs": max(1, min(VCPUS, 8)),
+            "n_jobs": 1,
         })
         
-        # 2) Deeper/wider search space (lossguide → max_leaves governs size)
+        # 2) Leaner search space (reduces RAM/time blowups)
         param_space_common = {
-            "max_depth":        randint(4, 10),
-            "max_leaves":       randint(96, 512),
-            "learning_rate":    loguniform(0.012, 0.07),
-            "subsample":        uniform(0.70, 0.30),   # 0.70–1.00
-            "colsample_bytree": uniform(0.55, 0.45),   # 0.55–1.00
-            "colsample_bynode": uniform(0.55, 0.45),
-            "min_child_weight": loguniform(1.0, 64.0),
-            "gamma":            uniform(0.0, 8.0),
-            "reg_alpha":        loguniform(1e-4, 5.0),
-            "reg_lambda":       loguniform(0.5, 20.0),
-            "max_bin":          randint(256, 513),
+            "max_depth":        randint(3, 8),
+            "max_leaves":       randint(64, 320),          # tighter than 512
+            "learning_rate":    loguniform(0.018, 0.08),   # a tad faster LR => fewer trees needed
+            "subsample":        uniform(0.70, 0.25),       # 0.70–0.95
+            "colsample_bytree": uniform(0.55, 0.35),       # 0.55–0.90
+            "colsample_bynode": uniform(0.55, 0.35),
+            "min_child_weight": loguniform(1.0, 32.0),     # was up to 64
+            "gamma":            uniform(0.0, 6.0),         # was 8.0
+            "reg_alpha":        loguniform(1e-4, 2.0),
+            "reg_lambda":       loguniform(0.5, 10.0),
+            "max_bin":          randint(192, 321),         # 192–320
         }
         params_ll  = dict(param_space_common)
         params_auc = dict(param_space_common)
         
-        # 3) Prefer Halving; fallback to RandomizedSearch
+        # 3) Prefer Halving; fallback to RandomizedSearch (fewer trials)
         try:
             rs_ll = HalvingRandomSearchCV(
                 estimator=est_ll,
@@ -6400,10 +6404,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 resource="n_estimators",
                 min_resources=MIN_RESOURCES,
                 max_resources=SEARCH_N_EST,
-                aggressive_elimination=False,
+                aggressive_elimination=True,                 # ← more aggressive
                 scoring="neg_log_loss",
                 cv=folds,
-                n_jobs=VCPUS,
+                n_jobs=max(1, min(VCPUS, 6)),                # parallel across folds/trials
                 random_state=42,
                 verbose=1 if st.session_state.get("debug", False) else 0,
             )
@@ -6414,20 +6418,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 resource="n_estimators",
                 min_resources=MIN_RESOURCES,
                 max_resources=SEARCH_N_EST,
-                aggressive_elimination=False,
+                aggressive_elimination=True,
                 scoring="roc_auc",
                 cv=folds,
-                n_jobs=VCPUS,
+                n_jobs=max(1, min(VCPUS, 6)),
                 random_state=137,
                 verbose=1 if st.session_state.get("debug", False) else 0,
             )
         except Exception:
+            # Smaller fallback randomized search
             try:
                 search_trials  # type: ignore
             except NameError:
                 search_trials = _resolve_search_trials(sport, X_train.shape[0])
             search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
-            search_trials = max(80, int(search_trials * 1.5))  # burn more CPU
+            search_trials = max(50, int(search_trials * 1.2))      # lighter than before
         
             rs_ll = RandomizedSearchCV(
                 estimator=est_ll,
@@ -6435,7 +6440,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 n_iter=search_trials,
                 scoring="neg_log_loss",
                 cv=folds,
-                n_jobs=VCPUS,
+                n_jobs=max(1, min(VCPUS, 6)),
                 random_state=42,
                 verbose=1 if st.session_state.get("debug", False) else 0,
             )
@@ -6445,14 +6450,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 n_iter=search_trials,
                 scoring="roc_auc",
                 cv=folds,
-                n_jobs=VCPUS,
+                n_jobs=max(1, min(VCPUS, 6)),
                 random_state=137,
                 verbose=1 if st.session_state.get("debug", False) else 0,
             )
         
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         
-        # Clamp BLAS threadpools inside fits
+        # Keep BLAS threadpools at 1 inside fits to avoid oversubscription
         with threadpool_limits(limits=1):
             rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
             rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
@@ -6460,29 +6465,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         
-        # Looseners (AUC stream → extra spread)
+        # Gentle "looseners" (still conservative)
         best_auc_params.update({
-            "min_child_weight":  float(min(0.1,  best_auc_params.get("min_child_weight", 0.5))),
+            "min_child_weight":  float(min(0.2,  best_auc_params.get("min_child_weight", 0.5))),
             "gamma":             0.0,
-            "max_leaves":        int(max(512,    best_auc_params.get("max_leaves", 256))),
-            "subsample":         float(np.clip(  best_auc_params.get("subsample", 0.8),         0.7, 0.95)),
-            "colsample_bytree":  float(np.clip(  best_auc_params.get("colsample_bytree", 0.8),  0.7, 1.0)),
-            "colsample_bynode":  float(np.clip(  best_auc_params.get("colsample_bynode", 0.8),  0.7, 1.0)),
+            "max_leaves":        int(max(320,    best_auc_params.get("max_leaves", 160))),
         })
-        # Mild looseners for logloss stream
         best_ll_params.update({
-            "min_child_weight":  float(min(0.25, best_ll_params.get("min_child_weight", 0.5))),
+            "min_child_weight":  float(min(0.35, best_ll_params.get("min_child_weight", 0.5))),
             "gamma":             0.0,
-            "max_leaves":        int(max(512,    best_ll_params.get("max_leaves", 256))),
+            "max_leaves":        int(max(320,    best_ll_params.get("max_leaves", 160))),
         })
         
-        # Remove unsafe/unused keys before deep refit
+        # Remove unsafe/unused keys
         for k in ("monotone_constraints","interaction_constraints",
                   "predictor","objective","eval_metric","_estimator_type","response_method"):
             best_auc_params.pop(k, None)
             best_ll_params.pop(k, None)
         
-        # 4) Deep refit with early stopping on the last fold
+        # 4) Moderate deep refit w/ early stopping on the last fold
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
         
@@ -6497,12 +6498,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert _has_both_classes_idx(y_train, va_es_rel), "ES fold is single-class; widen min_val_size or pick a different ES fold."
         assert np.isfinite(w_va_es).all() and (w_va_es > 0).any(), "Validation weights are zero/NaN."
         
+        # For refit, you CAN use multiple threads safely
+        refit_threads = max(1, min(VCPUS, 6))
+        
         deep_ll = XGBClassifier(**{
             **base_kwargs,
             **best_ll_params,
             "n_estimators": DEEP_N_EST,
             "max_bin": DEEP_MAX_BIN,
-            "n_jobs": VCPUS,
+            "n_jobs": refit_threads,
             "eval_metric": "logloss",
         })
         deep_auc = XGBClassifier(**{
@@ -6510,7 +6514,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             **best_auc_params,
             "n_estimators": DEEP_N_EST,
             "max_bin": DEEP_MAX_BIN,
-            "n_jobs": VCPUS,
+            "n_jobs": refit_threads,
             "eval_metric": "auc",
         })
         
@@ -6531,23 +6535,32 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=EARLY_STOP,
         )
         
-        # Clamp to best_iteration_ (freeze final size)
         if getattr(deep_ll, "best_iteration", None) is not None:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
         if getattr(deep_auc, "best_iteration", None) is not None:
             deep_auc.set_params(n_estimators=deep_auc.best_iteration + 1)
+        
+        
+                # --- Safe defaults for a 6-vCPU machine ---
+        DEFAULT_FINAL_N_EST   = 1800   # align with your DEEP_N_EST
+        DEFAULT_ES_ROUNDS     = 100    # align with your EARLY_STOP
+        
+        # Seed from locals if already set, else use defaults
+        final_estimators_cap  = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
+        early_stopping_rounds = int(locals().get("early_stopping_rounds", DEFAULT_ES_ROUNDS))
+        
+        # Clamp overall capacity to a reasonable window
+        # (keeps time/memory in check but still lets ES find the optimum)
+        final_estimators_cap  = int(np.clip(final_estimators_cap, 1200, 2400))
+        
+        # Tie ES to capacity and LR (smaller LR → larger patience)
+        lr = float(locals().get("learning_rate", base_kwargs.get("learning_rate", 0.03)))
+        es_suggest = 0.08 * final_estimators_cap * (0.03 / max(lr, 1e-6))**0.5  # scale with sqrt of LR ratio
+        early_stopping_rounds = int(np.clip(es_suggest, 60, 220))
+        
+        # Optional: guarantee ES can actually trigger before hitting the cap
+        early_stopping_rounds = min(early_stopping_rounds, max(50, final_estimators_cap // 3))
 
-        # --- Safe defaults (define before bumping) ---
-        DEFAULT_FINAL_N_EST     = 10000
-        DEFAULT_ES_ROUNDS       = 8000
-        
-        # If these weren’t set earlier in this function, seed them now
-        final_estimators_cap    = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
-        early_stopping_rounds   = int(locals().get("early_stopping_rounds", DEFAULT_ES_ROUNDS))
-        
-        # --- Your bumps (now safe) ---
-        final_estimators_cap    = max(20000, final_estimators_cap)
-        early_stopping_rounds   = max(8000,   early_stopping_rounds)
         
             # --- Build final param dicts first (clean & safe) ---
         params_ll_final = {**base_kwargs, **best_ll_params}
