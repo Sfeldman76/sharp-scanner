@@ -6555,8 +6555,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         needs_more_spread = bool(spread_std < 0.07 and extreme_frac < 0.25)
         
-        # Streamlit UI (preferred)
-        import streamlit as st
+   
         st.subheader("AUC model spread diagnostics")
         st.json({
             "best_iter": getattr(deep_auc, "best_iteration", None),
