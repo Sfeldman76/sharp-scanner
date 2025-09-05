@@ -2461,13 +2461,17 @@ def apply_blend(sel, p, eps=1e-4, clip=(0.001, 0.999)):
 # extra_plumbing.py
 import os, numpy as np, pandas as pd
 
+# === 1) Config table (add MLB; switch to `scale`) ===
 SPORT_SPREAD_CFG = {
-    "NFL":   dict(points_per_elo=np.float32(25.0), HFA=np.float32(1.6), sigma_pts=np.float32(13.2)),
-    "NCAAF": dict(points_per_elo=np.float32(28.0), HFA=np.float32(2.4), sigma_pts=np.float32(16.0)),
-    "NBA":   dict(points_per_elo=np.float32(28.0), HFA=np.float32(2.2), sigma_pts=np.float32(11.5)),
-    "WNBA":  dict(points_per_elo=np.float32(28.0), HFA=np.float32(2.0), sigma_pts=np.float32(10.5)),
-    "CFL":   dict(points_per_elo=np.float32(26.0), HFA=np.float32(1.8), sigma_pts=np.float32(14.0)),
+    "NFL":   dict(scale=np.float32(1.0),  HFA=np.float32(2.1),  sigma_pts=np.float32(13.0)),
+    "NCAAF": dict(scale=np.float32(1.0),  HFA=np.float32(2.6),  sigma_pts=np.float32(14.0)),
+    "NBA":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(12.0)),
+    "WNBA":  dict(scale=np.float32(1.0),  HFA=np.float32(2.0),  sigma_pts=np.float32(11.5)),
+    "CFL":   dict(scale=np.float32(1.0),  HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
+    # MLB ratings are not in run units (1500 + 400*(atk+dfn)), so scale ≈ 89–90.
+    "MLB":   dict(scale=np.float32(89.0), HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
 }
+
 
 def prep_consensus_market_spread_lowmem(
     df_spreads: pd.DataFrame,
@@ -2591,41 +2595,52 @@ def enrich_and_grade_for_training(
 
     return out
 def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFrame:
-   
     g = df_games.copy()
     g['Sport'] = g['Sport'].astype(str).str.upper()
 
-    # pull sport params row-wise
     n = len(g)
-    ppe   = np.full(n, np.float32(27.0), dtype=np.float32)  # default
-    hfa   = np.zeros(n, dtype=np.float32)
-    sigma = np.full(n, np.float32(12.0), dtype=np.float32)
+    scale = np.full(n, np.float32(1.0), dtype=np.float32)  # rating-units → points (or runs for MLB)
+    hfa   = np.zeros(n, dtype=np.float32)                  # home-field in points/runs
+    sigma = np.full(n, np.float32(12.0), dtype=np.float32) # margin SD
 
     sp = g['Sport'].values
     for s, cfg in SPORT_SPREAD_CFG.items():
         mask = (sp == s)
         if mask.any():
-            ppe[mask]   = cfg['points_per_elo']
-            hfa[mask]   = cfg['HFA']
-            sigma[mask] = cfg['sigma_pts']
+            scale[mask] = np.float32(cfg.get('scale', 1.0))
+            hfa[mask]   = np.float32(cfg['HFA'])
+            sigma[mask] = np.float32(cfg['sigma_pts'])
 
+    # Power_Rating_Diff must be (Home_Rating - Away_Rating); ratings are stored as 1500 + *units*.
     pr_diff = pd.to_numeric(g['Power_Rating_Diff'], errors='coerce').fillna(0).astype('float32').values
-    # expected home - away margin in points
-    mu = (pr_diff + hfa) / ppe
+
+    # Expected home-away margin in sport units:
+    #   • point-based sports: scale=1.0 → mu = pr_diff + HFA_pts
+    #   • MLB:               scale≈89   → mu = pr_diff/scale + HFA_runs
+    mu = (pr_diff / scale) + hfa
     mu = mu.astype(np.float32)
     mu_abs = np.abs(mu, dtype=np.float32)
 
-    # k (market absolute spread) must be present from consensus merge
+    # k = market absolute spread (median abs from consensus step)
     k = pd.to_numeric(g.get('k', np.nan), errors='coerce').astype('float32').values
 
-    # edges at game level (favorite vs dog)
+    # Edges at game level (favorite vs dog)
     fav_edge = (mu_abs - k).astype('float32')
     dog_edge = (k - mu_abs).astype('float32')
 
-    # cover probs for favorite side: P(margin > k)
+    # Cover probs for favorite side under Normal(margin; mu_abs, sigma):
+    # P(margin > k) = 1 - Φ((k - mu_abs)/σ)
     denom = sigma.copy()
     denom[denom == 0] = np.nan
     z_cov = (k - mu_abs) / denom
+    if '_phi' not in globals():
+        # standard normal CDF
+        def _phi(z):
+            from math import erf, sqrt
+            z = np.asarray(z, dtype='float64')
+            return 0.5 * (1.0 + erf(z / np.sqrt(2.0)))
+        globals()['_phi'] = _phi
+
     fav_cover = (1.0 - _phi(z_cov)).astype('float32')
     dog_cover = (1.0 - fav_cover).astype('float32')
 
@@ -2641,13 +2656,13 @@ def favorite_centric_from_powerdiff_lowmem(df_games: pd.DataFrame) -> pd.DataFra
         'Model_Favorite_Team': np.where(mu >= 0, g['Home_Team_Norm'].values, g['Away_Team_Norm'].values),
         'Model_Underdog_Team': np.where(mu >= 0, g['Away_Team_Norm'].values, g['Home_Team_Norm'].values),
 
-        # market bits (already merged prior step)
-        'Market_Favorite_Team': g['Market_Favorite_Team'].values.astype(str),
-        'Market_Underdog_Team': g['Market_Underdog_Team'].values.astype(str),
+        # market bits (merged upstream)
+        'Market_Favorite_Team': g['Market_Favorite_Team'].astype(str).values,
+        'Market_Underdog_Team': g['Market_Underdog_Team'].astype(str).values,
         'Favorite_Market_Spread': g['Favorite_Market_Spread'].astype('float32').values,
         'Underdog_Market_Spread': g['Underdog_Market_Spread'].astype('float32').values,
 
-        # NEW: edges + cover probs at game level
+        # edges + cover probs at game level
         'Fav_Edge_Pts': fav_edge,
         'Dog_Edge_Pts': dog_edge,
         'Fav_Cover_Prob': fav_cover,
