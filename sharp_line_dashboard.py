@@ -6466,17 +6466,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_auc_params = rs_auc.best_params_.copy()
         
         # Gentle "looseners" (still conservative)
+        # AUC (spread market) – looser child weight (≤ 0.10); keep leaves in 320–384
         best_auc_params.update({
-            "min_child_weight":  float(min(0.2,  best_auc_params.get("min_child_weight", 0.5))),
-            "gamma":             0.0,
-            "max_leaves":        int(max(320,    best_auc_params.get("max_leaves", 160))),
-        })
-        best_ll_params.update({
-            "min_child_weight":  float(min(0.35, best_ll_params.get("min_child_weight", 0.5))),
-            "gamma":             0.0,
-            "max_leaves":        int(max(320,    best_ll_params.get("max_leaves", 160))),
+            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.10)), 0.10)),
+            "gamma":            0.0,
+            "max_leaves":       int(max(320, min(int(best_auc_params.get("max_leaves", 320)), 384))),
         })
         
+        # LogLoss – looser than before (≤ 0.20); same leaf bounds
+        best_ll_params.update({
+            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.20)), 0.20)),
+            "gamma":            0.0,
+            "max_leaves":       int(max(320, min(int(best_ll_params.get("max_leaves", 320)), 384))),
+        })
+
         # Remove unsafe/unused keys
         for k in ("monotone_constraints","interaction_constraints",
                   "predictor","objective","eval_metric","_estimator_type","response_method"):
