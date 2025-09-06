@@ -1876,69 +1876,26 @@ def _clean_probs(y, *probs, eps=1e-6):
         cleaned[i] = np.clip(cleaned[i], eps, 1 - eps)
     return cleaned, mask  # ([y, p1, p2, ...], keep_mask)
 
+# ---------------------------
+# WHY: all-features + metadata (V3, corrected)
+# ---------------------------
+from collections import defaultdict
+import numpy as np
+import pandas as pd
 
-# --- Active feature resolver (kept from your snippet; safe if already defined) ---
-def _resolve_active_features(bundle, model, df_like):
-    cand = None
-    if isinstance(bundle, dict):
-        for k in ("feature_names", "features", "training_features"):
-            if k in bundle and bundle[k]:
-                cand = list(dict.fromkeys([str(c) for c in bundle[k] if c is not None]))
-                break
-    if cand is None and hasattr(model, "get_booster"):
-        try:
-            booster = model.get_booster()
-            if booster is not None and getattr(booster, "feature_names", None):
-                cand = list(dict.fromkeys([str(c) for c in booster.feature_names]))
-        except Exception:
-            pass
-    if cand is None:
-        try:
-            cols = _resolve_feature_cols_like_training(bundle, model, df_like)  # your helper if available
-            cand = list(dict.fromkeys([str(c) for c in cols if c is not None]))
-        except Exception:
-            pass
-    if cand is None:
-        cand = [c for c in df_like.columns if c not in ("y","label","target")]
-    return cand
-
-# --- Numeric coercion (kept from your snippet; safe if already defined) ---
-def _coerce_numeric_inplace(df, cols, fill=0.0):
-    UI_NUM_COLS = {
-        'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge','Outcome_Cover_Prob',
-        'PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff','edge_x_k','mu_x_k'
-    }
-    for c in cols:
-        # create the column if missing
-        if c not in df.columns:
-            df[c] = (np.nan if c in UI_NUM_COLS else fill)
-            continue
-
-        s = df[c]
-        # avoid categorical assignment issues
-        if pd.api.types.is_categorical_dtype(s.dtype):
-            s = s.astype(object)
-
-        vals = pd.to_numeric(s, errors="coerce")
-        # UI columns should preserve NaN (so the UI can show blanks)
-        if c in UI_NUM_COLS:
-            df[c] = vals
-        else:
-            df[c] = vals.fillna(fill)
-# --- Helper to read first available value across aliases safely ---
+# --- robust value getter ---
 def _rv(row, *names, default=0.0):
     for n in names:
-        if n in row:
+        if n in row and pd.notna(row[n]):
             try:
                 return float(row[n])
             except Exception:
                 return default
     return default
 
-# --- Thresholds (tune lightly per sport if you want) ---
-# --- Thresholds (tune per sport if needed) ---
+# --- thresholds (as you had) ---
 THR = dict(
-    line_mag_big=0.30,
+    line_mag_big=0.01,
     late_share_high=0.50,
     urgent_share_high=0.20,
     entropy_concentrated=1.20,
@@ -1947,83 +1904,165 @@ THR = dict(
     pct_from_open_big=0.10,
     pr_diff_meaningful=4.0,
     cover_prob_conf=0.51,
-    # 🆕 ATS thresholds
-    ats_rate_strong=0.55,          # e.g., Elo/EB-style ATS rate >= 58% is notable
-    ats_margin_meaningful=2,     # avg cover margin (pts) viewed as meaningful
-    ats_roll_decay_hot=0.4,        # rolling/decay-weighted margin showing momentum
+    ats_rate_strong=0.55,
+    ats_margin_meaningful=2,
+    ats_roll_decay_hot=0.4,
 )
 
-WHY_RULES_V2 = [
-    # 🔹 Core sharp/book pressure
+# --- discover ALL usable features (numeric/bool or numeric-coercible) ---
+_EXCLUDE_KEYS = {"y","label","target"}
+def _is_usable_feature(s: pd.Series) -> bool:
+    dt = s.dtype
+    if pd.api.types.is_bool_dtype(dt) or pd.api.types.is_integer_dtype(dt) or pd.api.types.is_float_dtype(dt):
+        return True
+    if dt == object:
+        try:
+            return pd.to_numeric(s, errors="coerce").notna().any()
+        except Exception:
+            return False
+    return False
+
+def _resolve_active_features_union(bundle, model, df_like: pd.DataFrame, why_rules) -> list[str]:
+    """Bundle + booster + helper + why_rules refs + ALL usable df_like columns (order-preserving)."""
+    def _norm(xs):
+        return [str(c) for c in xs if c is not None]
+
+    out = []
+    # 1) bundle-declared
+    if isinstance(bundle, dict):
+        for k in ("feature_names", "features", "training_features"):
+            if k in bundle and bundle[k]:
+                out += _norm(bundle[k])
+                break
+    # 2) model booster feature_names
+    if hasattr(model, "get_booster"):
+        try:
+            booster = model.get_booster()
+            if booster is not None and getattr(booster, "feature_names", None):
+                out += _norm(booster.feature_names)
+        except Exception:
+            pass
+    # 3) optional helper
+    try:
+        cols = _resolve_feature_cols_like_training(bundle, model, df_like)  # if defined elsewhere
+        if cols:
+            out += _norm(cols)
+    except Exception:
+        pass
+    # 4) all rule-referenced columns (from the provided rules set)
+    rule_cols = []
+    for rule in why_rules:
+        rule_cols += rule.get("requires", [])
+        rule_cols += rule.get("requires_any", [])
+    out += _norm(rule_cols)
+    # 5) ALL usable df_like columns
+    all_usable = [c for c in df_like.columns if c not in _EXCLUDE_KEYS and _is_usable_feature(df_like[c])]
+    out += _norm(all_usable)
+
+    # dedupe preserve order
+    seen, ordered = set(), []
+    for c in out:
+        if c not in seen:
+            seen.add(c); ordered.append(c)
+    return ordered
+
+# --- numeric coercion for rule inputs (single, non-duplicated version) ---
+def _coerce_numeric_inplace(df: pd.DataFrame, cols, fill=0.0, ui_cols=frozenset()):
+    for c in cols:
+        if c not in df.columns:
+            df[c] = (np.nan if c in ui_cols else fill)
+            continue
+        s = df[c]
+        if pd.api.types.is_categorical_dtype(s.dtype):
+            s = s.astype(object)
+        vals = pd.to_numeric(s, errors="coerce")
+        df[c] = vals if c in ui_cols else vals.fillna(fill)
+
+# ---------- WHY_RULES_V3 ----------
+def build_hybrid_bin_rules():
+    phases = ["Overnight", "Early", "Midday", "Late"]
+    urg = ["VeryEarly", "MidRange", "LateGame", "Urgent"]
+    rules = []
+    for p in phases:
+        for u in urg:
+            col1 = f"SharpMove_Magnitude_{p}_{u}"
+            col2 = f"OddsMove_Magnitude_{p}_{u}"
+            rules.append(dict(requires_any=[col1], check=lambda r, c=col1: _rv(r, c) > 0.0,
+                              msg=f"💥 Sharp Timing Spike ({p}/{u})"))
+            rules.append(dict(requires_any=[col2], check=lambda r, c=col2: _rv(r, c) > 0.0,
+                              msg=f"💥 Odds Timing Spike ({p}/{u})"))
+    return rules
+
+WHY_RULES_V3 = [
+    # Sharp / book pressure
+    dict(requires_any=["Book_Reliability_Lift"],
+         check=lambda r: _rv(r,"Book_Reliability_Lift") > 0.0,
+         msg="✅ Reliable Book Confirms"),
+    dict(requires_any=["Is_Sharp_Book","Sharp_Move_Signal"],
+         check=lambda r: (_rv(r,"Is_Sharp_Book") > 0.0) and (_rv(r,"Sharp_Move_Signal") > 0.0),
+         msg="🎯 Sharp Book Triggered Move"),
+    dict(requires_any=["Sharp_Limit_Total"],
+         check=lambda r: _rv(r,"Sharp_Limit_Total") >= 5000,
+         msg="💼 High Sharp Limits"),
     dict(requires_any=["Book_lift_x_Magnitude"],
          check=lambda r: _rv(r,"Book_lift_x_Magnitude") > 0.0,
          msg="🏦 Book Lift Supports Move"),
     dict(requires_any=["Book_lift_x_PROB_SHIFT"],
          check=lambda r: _rv(r,"Book_lift_x_PROB_SHIFT") > 0.0,
          msg="📈 Book Lift Aligned with Prob Shift"),
-    dict(requires_any=["Sharp_Limit_Total"],
-         check=lambda r: _rv(r,"Sharp_Limit_Total") >= 10000,
-         msg="💼 High Sharp Limits"),
     dict(requires_any=["Is_Reinforced_MultiMarket"],
          check=lambda r: _rv(r,"Is_Reinforced_MultiMarket") > 0.0,
-         msg="📊 Multi-Market Reinforcement"),
+         msg="📊 Multi‑Market Reinforcement"),
     dict(requires_any=["Market_Leader"],
          check=lambda r: _rv(r,"Market_Leader") > 0.0,
          msg="🏆 Market Leader Led the Move"),
+    dict(requires_any=["High_Limit_Flag"],
+         check=lambda r: _rv(r,"High_Limit_Flag") > 0.0,
+         msg="🧱 High Limit Context"),
 
-    # 🔹 Market response / mispricing
+    # Market response / mispricing
     dict(requires_any=["Line_Moved_Toward_Team"],
          check=lambda r: _rv(r,"Line_Moved_Toward_Team") > 0.0,
-         msg="🧲 Line Moved Toward This Team"),
-    dict(requires_any=["Market_Mispricing"],
-         check=lambda r: _rv(r,"Market_Mispricing") > 0.0,
+         msg="🧲 Line Moved Toward This Side"),
+    dict(requires_any=["Market_Mispricing","Abs_Market_Mispricing"],
+         check=lambda r: max(_rv(r,"Market_Mispricing"), _rv(r,"Abs_Market_Mispricing")) > 0.05,
          msg="💸 Market Mispricing Detected"),
     dict(requires_any=["Pct_Line_Move_From_Opening"],
          check=lambda r: _rv(r,"Pct_Line_Move_From_Opening") >= THR["pct_from_open_big"],
          msg="📈 Significant Move From Open"),
 
-    # 🔁 Reversal / overmove
+    # Reversal / overmove
     dict(requires_any=["Value_Reversal_Flag"],
          check=lambda r: _rv(r,"Value_Reversal_Flag") > 0.0,
          msg="🔄 Value Reversal"),
     dict(requires_any=["Odds_Reversal_Flag"],
          check=lambda r: _rv(r,"Odds_Reversal_Flag") > 0.0,
          msg="📉 Odds Reversal"),
-    dict(requires_any=["Potential_Overmove_Flag"],
-         check=lambda r: _rv(r,"Potential_Overmove_Flag") > 0.0,
+    dict(requires_any=["Potential_Overmove_Flag","Abs_Line_Move_Z"],
+         check=lambda r: (_rv(r,"Potential_Overmove_Flag") > 0.0) or (_rv(r,"Abs_Line_Move_Z") >= 2.0),
          msg="📊 Possible Line Overmove"),
-    dict(requires_any=["Potential_Odds_Overmove_Flag"],
-         check=lambda r: _rv(r,"Potential_Odds_Overmove_Flag") > 0.0,
+    dict(requires_any=["Potential_Odds_Overmove_Flag","Implied_Prob_Shift_Z"],
+         check=lambda r: (_rv(r,"Potential_Odds_Overmove_Flag") > 0.0) or (_rv(r,"Implied_Prob_Shift_Z") >= 2.0),
          msg="🎯 Possible Odds Overmove"),
 
-    # 🚧 Resistance/levels
+    # Resistance / levels
     dict(requires_any=["Line_Resistance_Crossed_Count"],
          check=lambda r: _rv(r,"Line_Resistance_Crossed_Count") >= 1,
          msg="🪵 Crossed Key Resistance Levels"),
-    dict(requires_any=["SharpMove_Resistance_Break"],
-         check=lambda r: _rv(r,"SharpMove_Resistance_Break") > 0.0,
+    dict(requires_any=["SharpMove_Resistance_Break","Was_Line_Resistance_Broken"],
+         check=lambda r: (_rv(r,"SharpMove_Resistance_Break") > 0.0) or (_rv(r,"Was_Line_Resistance_Broken") > 0.0),
          msg="🪓 Resistance Broken by Sharp Move"),
 
-    # 🧠 Book reliability / liquidity microstructure
-    dict(requires_any=["Book_Reliability_Lift"],
-         check=lambda r: _rv(r,"Book_Reliability_Lift") > 0.0,
-         msg="✅ Reliable Book Confirms"),
-    dict(requires_any=["SmallBook_Heavy_Liquidity_Flag","SmallBook_Limit_Skew_Flag","SmallBook_Limit_Skew"],
-         check=lambda r: _rv(r,"SmallBook_Heavy_Liquidity_Flag")
-                         + _rv(r,"SmallBook_Limit_Skew_Flag")
-                         + max(0.0, _rv(r,"SmallBook_Limit_Skew")) > 0.0,
-         msg="💧 Liquidity/Limit Skew Signals Pressure"),
-
-    # ⏱️ Timing aggregates
-    dict(requires_any=["Line_TotalMag","Sharp_Line_Magnitude"],
-         check=lambda r: max(_rv(r,"Line_TotalMag"), _rv(r,"Sharp_Line_Magnitude")) >= THR["line_mag_big"],
+    # Timing aggregates (hybrid)
+    dict(requires_any=["Line_TotalMag","Sharp_Line_Magnitude","Hybrid_Line_LateMag"],
+         check=lambda r: max(_rv(r,"Line_TotalMag"), _rv(r,"Sharp_Line_Magnitude"), _rv(r,"Hybrid_Line_LateMag")) >= THR["line_mag_big"],
          msg="📏 Strong Timing Magnitude"),
-    dict(requires_any=["Line_LateShare"],
-         check=lambda r: _rv(r,"Line_LateShare") >= THR["late_share_high"],
-         msg="🌙 Late-Phase Dominant"),
-    dict(requires_any=["Line_UrgentShare"],
-         check=lambda r: _rv(r,"Line_UrgentShare") >= THR["urgent_share_high"],
-         msg="⏱️ Urgent Push Detected"),
+    dict(requires_any=["Hybrid_Line_LateShare","Line_LateShare"],
+         check=lambda r: max(_rv(r,"Hybrid_Line_LateShare"), _rv(r,"Line_LateShare")) >= THR["late_share_high"],
+         msg="🌙 Late‑Phase Dominant"),
+    dict(requires_any=["Hybrid_Line_EarlyShare","Hybrid_Line_Imbalance_LateVsEarly","Line_UrgentShare"],
+         check=lambda r: (_rv(r,"Line_UrgentShare") >= THR["urgent_share_high"]) or (_rv(r,"Hybrid_Line_Imbalance_LateVsEarly") > 0.0),
+         msg="⏱️ Urgent Push / Late Imbalance"),
     dict(requires_any=["Line_MaxBinMag"],
          check=lambda r: _rv(r,"Line_MaxBinMag") > 0.0,
          msg="💥 Sharp Timing Spike"),
@@ -2033,46 +2072,65 @@ WHY_RULES_V2 = [
     dict(requires_any=["Timing_Corr_Line_Odds"],
          check=lambda r: _rv(r,"Timing_Corr_Line_Odds") >= THR["corr_confirm"],
          msg="🔗 Odds Confirm Line Timing"),
-    dict(requires_any=["LineOddsMag_Ratio"],
-         check=lambda r: _rv(r,"LineOddsMag_Ratio") >= THR["odds_overmove_ratio"],
+    dict(requires_any=["LineOddsMag_Ratio","Hybrid_Line_Odds_Mag_Ratio"],
+         check=lambda r: max(_rv(r,"LineOddsMag_Ratio"), _rv(r,"Hybrid_Line_Odds_Mag_Ratio")) >= THR["odds_overmove_ratio"],
          msg="⚖️ Line > Odds Magnitude"),
     dict(requires_any=["Late_Game_Steam_Flag"],
          check=lambda r: _rv(r,"Late_Game_Steam_Flag") > 0.0,
          msg="🌙 Late Game Steam"),
-        # 🧠 Power Rating Agreement (H2H)
-    dict(requires_any=["PR_Model_Agree_H2H_Flag"],
-         check=lambda r: _rv(r,"PR_Model_Agree_H2H_Flag") > 0.0,
-         msg="🧠 Power Ratings Agree with Model"),
-    
-    dict(requires_any=["PR_Market_Agree_H2H_Flag"],
-         check=lambda r: _rv(r,"PR_Market_Agree_H2H_Flag") > 0.0,
-         msg="📊 Power Ratings Agree with Market"),
 
-    # 📐 Model & pricing agreement
+    # Cross‑market alignment / gaps
+    dict(requires_any=["CrossMarket_Prob_Gap_Exists","Spread_vs_H2H_ProbGap","Total_vs_Spread_ProbGap"],
+         check=lambda r: (_rv(r,"CrossMarket_Prob_Gap_Exists") > 0.0) or
+                         (abs(_rv(r,"Spread_vs_H2H_ProbGap")) > 0.05) or
+                         (abs(_rv(r,"Total_vs_Spread_ProbGap")) > 0.05),
+         msg="🧮 Cross‑Market Probability Dislocation"),
+    dict(requires_any=["Total_vs_Spread_Contradiction"],
+         check=lambda r: _rv(r,"Total_vs_Spread_Contradiction") > 0.0,
+         msg="⚠️ Totals vs Spread Contradiction"),
+
+    # PR / model / market agreement
     dict(requires_any=["model_fav_vs_market_fav_agree"],
          check=lambda r: _rv(r,"model_fav_vs_market_fav_agree") > 0.0,
          msg="🧭 Model & Market Agree"),
     dict(requires_any=["Outcome_Cover_Prob"],
          check=lambda r: _rv(r,"Outcome_Cover_Prob") >= THR["cover_prob_conf"],
          msg="🔮 Strong Cover Probability"),
-
-    # 📊 Power ratings / totals context
     dict(requires_any=["PR_Rating_Diff","PR_Abs_Rating_Diff"],
          check=lambda r: max(abs(_rv(r,"PR_Rating_Diff")), _rv(r,"PR_Abs_Rating_Diff")) >= THR["pr_diff_meaningful"],
-         msg="📈 Meaningful Power-Rating Edge"),
+         msg="📈 Meaningful Power‑Rating Edge"),
+    dict(requires_any=["PR_Model_Agree_H2H_Flag"],
+         check=lambda r: _rv(r,"PR_Model_Agree_H2H_Flag") > 0.0,
+         msg="🧠 Power Ratings Agree with Model"),
+    dict(requires_any=["PR_Market_Agree_H2H_Flag"],
+         check=lambda r: _rv(r,"PR_Market_Agree_H2H_Flag") > 0.0,
+         msg="📊 Power Ratings Agree with Market"),
+
+    # Totals context
     dict(requires_any=["TOT_Mispricing","TOT_Proj_Total_Baseline"],
          check=lambda r: _rv(r,"TOT_Mispricing") > 0.0,
          msg="🧮 Totals Mispricing"),
 
-    # 🔧 Trained cross-terms
+    # Microstructure / network / consistency
+    dict(requires_any=["SmallBook_Heavy_Liquidity_Flag","SmallBook_Limit_Skew_Flag","SmallBook_Limit_Skew"],
+         check=lambda r: _rv(r,"SmallBook_Heavy_Liquidity_Flag")
+                         + _rv(r,"SmallBook_Limit_Skew_Flag")
+                         + max(0.0, _rv(r,"SmallBook_Limit_Skew")) > 0.0,
+         msg="💧 Liquidity / Limit Skew Pressure"),
     dict(requires_any=["Book_Reliability_x_Magnitude"],
          check=lambda r: _rv(r,"Book_Reliability_x_Magnitude") > 0.0,
          msg="✅ Reliable Books Driving Magnitude"),
     dict(requires_any=["Book_Reliability_x_PROB_SHIFT"],
          check=lambda r: _rv(r,"Book_Reliability_x_PROB_SHIFT") > 0.0,
          msg="✅ Reliable Books Driving Prob Shift"),
+    dict(requires_any=["Sharp_Consensus_Weight"],
+         check=lambda r: _rv(r,"Sharp_Consensus_Weight") > 0.0,
+         msg="🕸️ Sharp Book Consensus"),
+    dict(requires_any=["Spread_ML_Inconsistency","Total_vs_Side_ImpliedDelta"],
+         check=lambda r: (_rv(r,"Spread_ML_Inconsistency") > 0.0) or (_rv(r,"Total_vs_Side_ImpliedDelta") > 0.0),
+         msg="🧩 Internal Pricing Inconsistency"),
 
-    # 🆕 ATS trend signals
+    # ATS trends / priors
     dict(requires_any=["ATS_EB_Rate"],
          check=lambda r: _rv(r,"ATS_EB_Rate") >= THR["ats_rate_strong"],
          msg="🏟️ Strong ATS Trend"),
@@ -2088,62 +2146,81 @@ WHY_RULES_V2 = [
     dict(requires_any=["ATS_Roll_Margin_Decay"],
          check=lambda r: _rv(r,"ATS_Roll_Margin_Decay") >= THR["ats_roll_decay_hot"],
          msg="🔥 Recent ATS Momentum"),
+
+    # Safety gate: surface rationale when you’ve disabled line-move features
+    dict(requires_any=["Disable_Line_Move_Features"],
+         check=lambda r: _rv(r,"Disable_Line_Move_Features") == 1.0,
+         msg="🧯 Line-move features disabled in this market (e.g., MLB spreads / H2H)"),
 ]
-def attach_why_model_likes_it(df_in: pd.DataFrame, bundle, model) -> pd.DataFrame:
-    """
-    Builds a human-readable 'Why Model Likes It' column using the UPDATED feature set
-    (timing aggregates, microstructure/resistance, mispricing, etc.). Only fires rules
-    when their required columns are present AND used by the model.
-    """
+
+# add dynamic hybrid bin rules
+WHY_RULES_V3.extend(build_hybrid_bin_rules())
+
+# --- feature → labels mapping ---
+def build_feature_label_index(why_rules) -> dict[str, list[str]]:
+    feat2labels = defaultdict(list)
+    for rule in why_rules:
+        msg = rule.get("msg", "")
+        feats = (rule.get("requires", []) or []) + (rule.get("requires_any", []) or [])
+        for f in feats:
+            if msg and msg not in feat2labels[f]:
+                feat2labels[f].append(msg)
+    return {f: sorted(v) for f, v in feat2labels.items()}
+
+# --- main attachment (all-features + metadata) ---
+def attach_why_all_features(df_in: pd.DataFrame, bundle, model, why_rules=WHY_RULES_V3,
+                            ui_numeric_cols=frozenset((
+                                'Outcome_Model_Spread','Outcome_Market_Spread','Outcome_Spread_Edge',
+                                'Outcome_Cover_Prob','PR_Team_Rating','PR_Opp_Rating','PR_Rating_Diff',
+                                'edge_x_k','mu_x_k'
+                            ))):
     df = df_in.copy()
 
-    # 1) Resolve which features the model actually used
-    active = _resolve_active_features(bundle, model, df)
-    active_set = set(map(str, active))
+    # 1) full active set
+    active = _resolve_active_features_union(bundle, model, df, why_rules=why_rules)
+    active_set = set(active)
 
-    # 2) Decide which rule columns are available (either active or simply present in df)
+    # 2) coerce the columns rules need
     needed = set()
-    for rule in WHY_RULES_V2:
+    for rule in why_rules:
         for req in rule.get("requires", []):
-            if (req in active_set) or (req in df.columns):
+            if (req in df.columns) or (req in active_set):
                 needed.add(req)
         for req in rule.get("requires_any", []):
-            if (req in active_set) or (req in df.columns):
+            if (req in df.columns) or (req in active_set):
                 needed.add(req)
+    _coerce_numeric_inplace(df, list(needed), fill=0.0, ui_cols=ui_numeric_cols)
 
-    # 3) Coerce only the needed columns to numeric (prevents categorical setitem errors)
-    _coerce_numeric_inplace(df, list(needed), fill=0.0)
-
-    # 4) Evaluate rules row-wise
+    # 3) evaluate rules
     msgs = []
+    rule_hits = np.zeros(len(why_rules), dtype=np.int64)
     for _, row in df.iterrows():
-        reasons = []
-        for rule in WHY_RULES_V2:
-            req_all  = rule.get("requires", [])
-            req_any  = rule.get("requires_any", [])
-            # Must have all reqs (if any)
-            if req_all and not all(((r in active_set) or (r in df.columns)) for r in req_all):
+        local = []
+        for i, rule in enumerate(why_rules):
+            req_all = rule.get("requires", [])
+            req_any = rule.get("requires_any", [])
+            # gate by presence
+            if req_all and not all((r in df.columns) for r in req_all):
                 continue
-            # Must have at least one of req_any (if any)
-            if req_any and not any(((r in active_set) or (r in df.columns)) for r in req_any):
+            if req_any and not any((r in df.columns) for r in req_any):
                 continue
-            # Try the check
             try:
                 if rule["check"](row):
-                    reasons.append(rule["msg"])
+                    local.append(rule["msg"])
+                    rule_hits[i] += 1
             except Exception:
-                # swallow row-level issues
                 continue
-        msgs.append(" · ".join(reasons) if reasons else "—")
+        msgs.append(" · ".join(local) if local else "—")
 
     df["Why Model Likes It"] = msgs
     df["Why_Feature_Count"] = df["Why Model Likes It"].apply(lambda s: 0 if s == "—" else (s.count("·") + 1))
-    df.attrs["active_features_used"] = active  # expose for downstream gating
+
+    # 4) metadata
+    df.attrs["why_feature_labels"] = build_feature_label_index(why_rules)  # {feature: [labels]}
+    df.attrs["active_features_used"] = active                                # ordered superset
+    df.attrs["why_rule_hits_counts"] = dict(zip([r.get("msg","") for r in why_rules],
+                                                map(int, rule_hits)))
     return df
-
-
-# --- TRAINING ENRICHMENT (LEAK-SAFE) ---
-
 
 def enrich_power_for_training_lowmem(
     df: pd.DataFrame,
@@ -9285,9 +9362,11 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     'Confidence Spark':'first'
                 })
             )
-    
-            #st.markdown("### 🧪 Summary Grouped Debug View")
             
+            #st.markdown("### 🧪 Summary Grouped Debug View")
+            # Round Rec Line and Sharp Line to 1 decimal
+            summary_grouped['Rec Line'] = summary_grouped['Rec Line'].round(1)
+            summary_grouped['Sharp Line'] = summary_grouped['Sharp Line'].round(1)
             # Print column list
             #st.code(f"🧩 Columns in summary_grouped:\n{summary_grouped.columns.tolist()}")
     
