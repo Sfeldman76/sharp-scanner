@@ -6698,6 +6698,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---- clamp only if it actually trained long enough ----
         if best_iter is not None and best_iter >= 50:
             deep_auc.set_params(n_estimators=best_iter + 1)
+
         
         # ---- fit the LogLoss model on the same ES fold ----
         deep_ll.fit(
