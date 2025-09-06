@@ -6191,7 +6191,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             else:
                 is_sharp = train_df[bk_col].isin(SHARP_BOOKS).astype(np.float32).to_numpy()
             
-            ALPHA_SHARP = 0.80
+            ALPHA_SHARP = 0.60
             
             # base multiplier from sharp tilt
             mult = 1.0 + ALPHA_SHARP * is_sharp
@@ -6323,8 +6323,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X=X_train_df,
             y=y_train,
             folds=folds,                # reuse the CV folds built earlier (rows unchanged)
-            topk_per_fold=15,
-            min_presence=0.80,
+            topk_per_fold=45,
+            min_presence=0.90,
             max_keep=80,
             sample_per_fold=5000,
             random_state=42,
@@ -6624,6 +6624,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         EARLY_STOP = 120
+
+        # ---- fit spread AUC once ----
         deep_auc.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6633,17 +6635,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             early_stopping_rounds=EARLY_STOP,
         )
         
-        # diagnostics BEFORE clamping
+        # ---- raw diagnostics (before any calibration) ----
         planned_cap  = int(deep_auc.get_xgb_params().get("n_estimators", 1500))
-        p_val        = deep_auc.predict_proba(X_va_es)[:, 1]
-        spread_std   = float(np.std(p_val))
-        extreme_frac = float(((p_val < 0.35) | (p_val > 0.65)).mean())
+        p_va_raw     = deep_auc.predict_proba(X_va_es)[:, 1]
+        spread_std_raw   = float(np.std(p_va_raw))
+        extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
         best_iter    = getattr(deep_auc, "best_iteration", None)
         cap_hit      = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
         
-        needs_more_spread = (spread_std < 0.05 and extreme_frac < 0.20 and (best_iter or 0) < 30 and not cap_hit)
+        # gate fallback on genuine underfitting (use raw metrics + tiny best_iter)
+        needs_more_spread = (spread_std_raw < 0.05 and extreme_frac_raw < 0.20 and (best_iter or 0) < 30 and not cap_hit)
         
-        # 3) optional one-time fallback if still stalled
+        # ---- optional one-time fallback refit ----
         if needs_more_spread:
             deep_auc.set_params(
                 learning_rate=0.03, min_child_weight=0.03, gamma=0.0,
@@ -6662,20 +6665,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 verbose=False,
                 early_stopping_rounds=140,
             )
-            # refresh diagnostics
+            # refresh raw diagnostics
             planned_cap  = int(deep_auc.get_xgb_params().get("n_estimators", 1800))
-            p_val        = deep_auc.predict_proba(X_va_es)[:, 1]
-            spread_std   = float(np.std(p_val))
-            extreme_frac = float(((p_val < 0.35) | (p_val > 0.65)).mean())
+            p_va_raw     = deep_auc.predict_proba(X_va_es)[:, 1]
+            spread_std_raw   = float(np.std(p_va_raw))
+            extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
             best_iter    = getattr(deep_auc, "best_iteration", None)
             cap_hit      = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
         
-        # 4) clamp only if it actually trained long enough
+        # ---- per-market logit calibration (favorites-only or overs-only) ----
+        def _logit(p):
+            p = np.clip(p, 1e-6, 1 - 1e-6); return np.log(p / (1.0 - p))
+        def _invlogit(z):
+            return 1.0 / (1.0 + np.exp(-z))
+        
+        y_bar = float(np.mean(y_va_es == 1))     # empirical base rate on ES val
+        p_bar = float(np.mean(p_va_raw))         # model mean prob on ES val
+        calib_offset = 0.0
+        if 0.0 < y_bar < 1.0 and 0.0 < p_bar < 1.0:
+            calib_offset = _logit(y_bar) - _logit(p_bar)
+            p_va_cal = _invlogit(_logit(p_va_raw) + calib_offset)
+        else:
+            p_va_cal = p_va_raw
+        
+        spread_std_cal   = float(np.std(p_va_cal))
+        extreme_frac_cal = float(((p_va_cal < 0.35) | (p_va_cal > 0.65)).mean())
+        
+        # persist offset for inference (favorites-only spread model)
+        st.session_state.setdefault("calibration", {})
+        st.session_state["calibration"]["spread_favorite_offset"] = float(calib_offset)
+        
+        # ---- clamp only if it actually trained long enough ----
         if best_iter is not None and best_iter >= 50:
             deep_auc.set_params(n_estimators=best_iter + 1)
-        # =================== END SPREAD AUC REFIT (clean) ===================
         
-        # ---- now fit the LogLoss model as usual on the same ES fold ----
+        # ---- fit the LogLoss model on the same ES fold ----
         deep_ll.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6684,62 +6708,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
-        
-        
-        diag = {
-            "best_iter": getattr(deep_auc, "best_iteration", None),
-            "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
-            "spread_std": float(spread_std),
-            "extreme_frac": float(extreme_frac),
-            "cap_hit": bool(cap_hit),
-            "needs_more_spread": bool(needs_more_spread),
-        }
-        st.subheader("Spread AUC diagnostics")
-        st.json(diag)
-        
-        # (optional) clamp to best_iteration_
-        if getattr(deep_ll, "best_iteration", None) is not None:
+        if getattr(deep_ll, "best_iteration", None) is not None and deep_ll.best_iteration >= 50:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
-        if getattr(deep_auc, "best_iteration", None) is not None:
-            deep_auc.set_params(n_estimators=deep_auc.best_iteration + 1)
         
-        # === Place your diagnostics HERE (right after deep_auc training) ===
-        p_val = deep_auc.predict_proba(X_va_es)[:, 1]
-        spread_std   = float(np.std(p_val))
-        extreme_frac = float(((p_val < 0.35) | (p_val > 0.65)).mean())
-        
-        cap_hit = getattr(deep_auc, "best_iteration", None)
-        cap_hit = bool(cap_hit is not None and
-                       cap_hit >= 0.9 * deep_auc.get_xgb_params().get("n_estimators",
-                                                                      deep_auc.get_params().get("n_estimators", 0)))
-        
-        needs_more_spread = bool(spread_std < 0.07 and extreme_frac < 0.25)
-        
-   
-        st.subheader("AUC model spread diagnostics")
+        # ---- Streamlit diagnostics (raw + calibrated) ----
+        st.subheader("Spread AUC diagnostics")
         st.json({
             "best_iter": getattr(deep_auc, "best_iteration", None),
-            "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators",
-                              deep_auc.get_params().get("n_estimators", 0)) or 0),
-            "spread_std": spread_std,
-            "extreme_frac": extreme_frac,
-            "cap_hit": cap_hit,
-            "needs_more_spread": needs_more_spread,
+            "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
+            "cap_hit": bool(cap_hit),
+            "needs_more_spread": bool(needs_more_spread),
+            "raw": {
+                "spread_std": spread_std_raw,
+                "extreme_frac": extreme_frac_raw,
+                "y_bar": y_bar,
+                "p_bar": p_bar,
+            },
+            "calibrated": {
+                "offset": float(calib_offset),
+                "spread_std": spread_std_cal,
+                "extreme_frac": extreme_frac_cal,
+            },
         })
-        
-        # If you specifically want stdout logs instead of UI:
-        print({
-            "best_iter": getattr(deep_auc, "best_iteration", None),
-            "n_estimators": deep_auc.get_xgb_params().get("n_estimators",
-                             deep_auc.get_params().get("n_estimators", 0)),
-            "spread_std": spread_std,
-            "extreme_frac": extreme_frac,
-            "cap_hit": cap_hit,
-            "needs_more_spread": needs_more_spread,
-        })
-        # === end diagnostics ===
-
-        
+                
                 # --- Safe defaults for a 6-vCPU machine ---
         DEFAULT_FINAL_N_EST   = 1800   # align with your DEEP_N_EST
         DEFAULT_ES_ROUNDS     = 100    # align with your EARLY_STOP
