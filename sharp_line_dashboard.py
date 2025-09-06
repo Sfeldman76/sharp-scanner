@@ -1388,7 +1388,7 @@ def _iso(ts) -> str:
 
 @st.cache_data(show_spinner=False)
 # ===========================
-# WHY MODEL LIKES IT (v2)
+
 # ===========================
 def _resolve_feature_cols_like_training(bundle, model=None, df_like=None, market: str | None = None) -> list[str]:
     """
@@ -8142,24 +8142,37 @@ def compute_diagnostics_vectorized(
         ["🟢 Aligned ↑","🔻 Aligned ↓","🔴 Model ↑ / Line ↓","🔴 Model ↓ / Line ↑"],
         default="⚪ Mixed"
     )
-
     # --- 6) Attach explainer aligned to model-active features ---
+    PROB_COL_CANDIDATES = ("Model Prob", "Model_Sharp_Win_Prob", "Pred_Prob", "Model_Prob")
+    prob_col = next((c for c in PROB_COL_CANDIDATES if c in df.columns), None)
+    has_prob_context = prob_col is not None and pd.to_numeric(df[prob_col], errors="coerce").notna().any()
+    
     active_feats = []
     try:
-        if (bundle is not None) and (model is not None) and ('attach_why_model_likes_it' in globals()):
-            df = attach_why_model_likes_it(df, bundle, model)
-            active_feats = list(getattr(df, "attrs", {}).get("active_features_used", []))
-        else:
-            df["Why Model Likes It"] = "⚠️ No model context"
-            df["Why_Feature_Count"] = 0
-            df.attrs["active_features_used"] = []
+        # Prefer the all-features explainer so attrs are populated even if bundle/model are thin
+        df = attach_why_all_features(df, bundle=bundle, model=model, why_rules=WHY_RULES_V3)
+        active_feats = list(getattr(df, "attrs", {}).get("active_features_used", []))
     except Exception as e:
-        df["Why Model Likes It"] = f"⚠️ Explainer failed: {e}"
-        df["Why_Feature_Count"] = 0
-        df.attrs["active_features_used"] = []
+        # Only show "no context" if we truly have neither a model nor a prob column
+        if not has_prob_context:
+            df["Why Model Likes It"] = f"⚠️ Explainer failed: {e}"
+            df["Why_Feature_Count"] = 0
+        active_feats = []
+    
+    # Robust fallback if the resolver returned nothing but we do have a prob
+    if not active_feats and has_prob_context:
+        # try exact training cols
+        try:
+            active_feats = _resolve_feature_cols_like_training(bundle, model, df) or []
+        except Exception:
+            active_feats = []
+        # seed at least the probability (and a few canonical context features) for the UI
+        seed = [prob_col] if prob_col else []
+        canon = [c for c in ("Outcome_Model_Spread","Outcome_Market_Spread","Outcome_Spread_Edge",
+                             "Outcome_Cover_Prob","PR_Rating_Diff") if c in df.columns]
+        # Make unique, preserve order
+        seen=set(); active_feats = [x for x in (active_feats + seed + canon) if not (x in seen or seen.add(x))]
 
-    # --- 7) Model-vs-Market seasoning (only if those cols were active in the model) ---
-    ACTIVE_FEATS = set(active_feats)
 
    
     def _is_active(col: str) -> bool:
