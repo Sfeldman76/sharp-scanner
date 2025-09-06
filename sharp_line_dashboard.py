@@ -8359,9 +8359,13 @@ def compute_diagnostics_vectorized(
         'Timing_Opportunity_Score','Timing_Stage',   
     ]
     active_cols_present = [c for c in active_feats if c in df.columns]
-    keep_cols = [c for c in base_cols if c in df.columns] + active_cols_present
-
+    # build keep_cols then de-dupe while preserving order
+    seen = set()
+    keep_cols = [c for c in ([c for c in base_cols if c in df.columns] + active_cols_present)
+                 if not (c in seen or seen.add(c))]
+    
     diagnostics_df = df[keep_cols].rename(columns={'Tier_Change':'Tier Δ'})
+    diagnostics_df = diagnostics_df.loc[:, ~pd.Index(diagnostics_df.columns).duplicated()]  # belt & suspenders
     return diagnostics_df
 
 
@@ -9249,7 +9253,8 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                         hybrid_odds_timing_features=hybrid_odds_timing_features if 'hybrid_odds_timing_features' in globals() else None,
                     )
                     diagnostics_chunks.append(chunk)
-            
+                diagnostics_chunks = [c.loc[:, ~pd.Index(c.columns).duplicated()] for c in diagnostics_chunks]
+    
                 diagnostics_df = (
                     pd.concat(diagnostics_chunks, ignore_index=True)
                     if diagnostics_chunks else pd.DataFrame(columns=[
