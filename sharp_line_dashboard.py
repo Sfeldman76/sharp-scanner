@@ -9458,30 +9458,22 @@ def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.Dat
 def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_client=None, show_edges: bool = False):
     """
     Streamlit tab to display per-team power ratings with recent trend deltas and (optional) model-vs-market edges.
-
-    Assumptions:
-      - ratings_current table has columns: Sport, Team_Norm, Rating, Snapshot_Timestamp (or Last_Update)
-      - ratings_history table has columns: Sport, Team_Norm, Rating, Snapshot_Timestamp
-      - sport_label matches Sport values in BQ (e.g., "NFL", "NBA", ...)
-
-    Args:
-      tab: a Streamlit container (from st.tabs([...]))
-      sport_label: league label, e.g. "NFL"
-      sport_key_api: your api sports key (unused here but kept for symmetry)
-      bq_client: google.cloud.bigquery.Client
-      show_edges: if True, tries to compute spread edges using attach_ratings_and_edges_for_diagnostics
     """
-
+    # ✅ Required imports (kept inside for safety in Streamlit reruns)
+    from google.cloud import bigquery
+    import pandas as pd
+    import numpy as np
+    import streamlit as st
+    from datetime import date, timedelta
 
     if bq_client is None:
-      
         bq_client = bigquery.Client(project="sharplogger", location="us")
 
     with tab:
         st.subheader(f"🏆 Power Ratings — {sport_label}")
 
         # — Controls —
-        col_left, col_right = st.columns([2,1])
+        col_left, col_right = st.columns([2, 1])
         with col_left:
             days_back = st.slider("History Window (days)", min_value=14, max_value=365, value=90, step=7)
         with col_right:
@@ -9491,14 +9483,13 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
         end_d = date.today()
         start_d = end_d - timedelta(days=days_back)
 
-        # --- Fetch current snapshot ---
-        # Use COALESCE so either Snapshot_Timestamp or Last_Update works
-        sql_current = f"""
+        # --- Fetch current snapshot (schema-tolerant) ---
+        sql_current = """
         SELECT
           UPPER(Sport) AS Sport,
-          LOWER(Team_Norm) AS Team_Norm,
+          LOWER(COALESCE(Team_Norm, Team)) AS Team_Norm,
           CAST(Rating AS FLOAT64) AS Rating,
-          COALESCE(Snapshot_Timestamp, Last_Update) AS Snapshot_Timestamp
+          COALESCE(Snapshot_Timestamp, Last_Update, Updated_At) AS Snapshot_Timestamp
         FROM `sharplogger.sharp_data.ratings_current`
         WHERE UPPER(Sport) = @sport
         """
@@ -9509,16 +9500,16 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             ),
         ).to_dataframe()
 
-        # --- Fetch history window ---
-        sql_hist = f"""
+        # --- Fetch history window (schema-tolerant) ---
+        sql_hist = """
         SELECT
           UPPER(Sport) AS Sport,
-          LOWER(Team_Norm) AS Team_Norm,
+          LOWER(COALESCE(Team_Norm, Team)) AS Team_Norm,
           CAST(Rating AS FLOAT64) AS Rating,
-          COALESCE(Snapshot_Timestamp, Last_Update) AS Snapshot_Timestamp
+          COALESCE(Snapshot_Timestamp, Last_Update, Updated_At) AS Snapshot_Timestamp
         FROM `sharplogger.sharp_data.ratings_history`
         WHERE UPPER(Sport) = @sport
-          AND DATE(COALESCE(Snapshot_Timestamp, Last_Update)) BETWEEN @start_d AND @end_d
+          AND DATE(COALESCE(Snapshot_Timestamp, Last_Update, Updated_At)) BETWEEN @start_d AND @end_d
         """
         hist_df = bq_client.query(
             sql_hist,
@@ -9541,18 +9532,22 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             return
 
         # --- Build latest-by-team & trend deltas ---
-        # Use history + current (dedupe latest)
         base_df = pd.concat([hist_df, cur_df], ignore_index=True)
+        # drop bad/aggregate rows (e.g., “american league”, “national league”)
+        base_df["Team_Norm"] = base_df["Team_Norm"].astype(str)
+        base_df = base_df[~base_df["Team_Norm"].str.contains(r"\bleague\b", case=False, na=False)]
         base_df = base_df.dropna(subset=["Team_Norm", "Rating"]).copy()
+        if base_df.empty:
+            st.warning("No team-level ratings after filtering.")
+            return
+
         base_df.sort_values(["Team_Norm", "Snapshot_Timestamp"], inplace=True)
 
         # Helper: pick rating at or before (now - window)
         def _value_asof(group: pd.DataFrame, cutoff_days: int):
             ts = group["Snapshot_Timestamp"].values
             vals = group["Rating"].values
-            # As-of cutoff
             cutoff = pd.Timestamp.utcnow().tz_localize("UTC") - pd.Timedelta(days=cutoff_days)
-            # Find last idx where ts <= cutoff
             idx = np.searchsorted(ts, cutoff.to_datetime64(), side="right") - 1
             if idx >= 0:
                 return float(vals[idx])
@@ -9579,20 +9574,25 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             .reset_index(drop=True)
         )
         summary["Rank"] = (np.arange(len(summary)) + 1).astype(int)
+
         # Pretty columns
         pretty = summary[["Rank", "Team_Norm", "Rating_Today", "Δ7d", "Δ14d", "Δ30d"]].copy()
         pretty.rename(columns={"Team_Norm": "Team", "Rating_Today": "Rating"}, inplace=True)
 
         # Display table
         st.markdown("### Current Ratings & Trend")
-        st.dataframe(
-            pretty.style.format({"Rating": "{:.1f}", "Δ7d": "{:+.2f}", "Δ14d": "{:+.2f}", "Δ30d": "{:+.2f}"})
-        )
+        st.dataframe(pretty.style.format({
+            "Rating": "{:.1f}",
+            "Δ7d": "{:+.2f}",
+            "Δ14d": "{:+.2f}",
+            "Δ30d": "{:+.2f}",
+        }))
 
         # — Team history explorer —
         with st.expander("📈 Team Rating History"):
             team_sel = st.selectbox("Team", options=list(summary["Team_Norm"]), index=0)
             g = base_df[base_df["Team_Norm"] == team_sel].sort_values("Snapshot_Timestamp").copy()
+            # timestamps are UTC-aware already
             g["Date"] = g["Snapshot_Timestamp"].dt.tz_convert("America/New_York").dt.date
             st.line_chart(g.set_index("Date")["Rating"])
 
@@ -9601,9 +9601,8 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             st.markdown("---")
             st.markdown("### Model vs Market Edges (Spreads)")
             st.caption("Powered by attach_ratings_and_edges_for_diagnostics(...) using current ratings.")
-            # Pull a lightweight set of recent scores_with_features rows to show upcoming edges
             try:
-                sq = f"""
+                sq = """
                 SELECT
                   Sport, Market, Home_Team_Norm, Away_Team_Norm, Outcome, Outcome_Norm,
                   Value, Bookmaker, Snapshot_Timestamp, Game_Start
@@ -9624,7 +9623,6 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                     ),
                 ).to_dataframe()
 
-                # Safely call your function
                 edges = attach_ratings_and_edges_for_diagnostics(
                     df_scores,
                     sport_aliases=SPORT_ALIASES,  # assumes you have this global
@@ -9634,7 +9632,6 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                     allow_forward_hours=0.0,
                     bq=bq_client,
                 )
-                # Keep the essentials for UI
                 keep_cols = [
                     "Sport","Home_Team_Norm","Away_Team_Norm","Outcome_Norm","Value","Game_Start",
                     "PR_Team_Rating","PR_Opp_Rating","PR_Rating_Diff",
@@ -9642,22 +9639,19 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                     "Outcome_Cover_Prob","model_fav_vs_market_fav_agree","edge_x_k","mu_x_k"
                 ]
                 show = edges[[c for c in keep_cols if c in edges.columns]].copy()
-                # Sort by biggest model edge
                 if "Outcome_Spread_Edge" in show.columns:
                     show = show.sort_values("Outcome_Spread_Edge", ascending=True)  # negative = model favorite by X pts
-                st.dataframe(
-                    show.style.format({
-                        "PR_Team_Rating": "{:.1f}",
-                        "PR_Opp_Rating": "{:.1f}",
-                        "PR_Rating_Diff": "{:+.1f}",
-                        "Outcome_Model_Spread": "{:+.1f}",
-                        "Outcome_Market_Spread": "{:+.1f}",
-                        "Outcome_Spread_Edge": "{:+.1f}",
-                        "Outcome_Cover_Prob": "{:.1%}",
-                        "edge_x_k": "{:+.2f}",
-                        "mu_x_k": "{:.2f}",
-                    })
-                )
+                st.dataframe(show.style.format({
+                    "PR_Team_Rating": "{:.1f}",
+                    "PR_Opp_Rating": "{:.1f}",
+                    "PR_Rating_Diff": "{:+.1f}",
+                    "Outcome_Model_Spread": "{:+.1f}",
+                    "Outcome_Market_Spread": "{:+.1f}",
+                    "Outcome_Spread_Edge": "{:+.1f}",
+                    "Outcome_Cover_Prob": "{:.1%}",
+                    "edge_x_k": "{:+.2f}",
+                    "mu_x_k": "{:.2f}",
+                }))
             except Exception as e:
                 st.warning(f"Could not render edges: {e}")
 
