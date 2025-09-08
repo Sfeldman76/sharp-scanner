@@ -9447,9 +9447,8 @@ def fetch_scores_and_backtest(*args, **kwargs):
 def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_client=None, show_edges: bool = False):
     """
     Streamlit tab to display per-team power ratings with recent trend deltas and (optional) model-vs-market edges.
-    Uses the `Team` column exclusively (no Team_Norm anywhere).
+    Uses the Team column (falls back to Team_Norm ONLY if Team is absent in that table).
     """
-    # safe imports on rerun
     from google.cloud import bigquery
     import pandas as pd
     import numpy as np
@@ -9459,69 +9458,106 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
     if bq_client is None:
         bq_client = bigquery.Client(project="sharplogger", location="us")
 
+    # ---------- helpers ----------
+    def pick_team(colnames: set[str]) -> str | None:
+        return "Team" if "Team" in colnames else ("Team_Norm" if "Team_Norm" in colnames else None)
+
+    def pick_rating(colnames: set[str]) -> str | None:
+        for c in ("Rating", "Power_Rating", "Elo", "PR", "PowerIndex"):
+            if c in colnames:
+                return c
+        return None
+
+    def pick_ts(colnames: set[str]) -> str | None:
+        for c in ("Updated_At", "Last_Update", "Snapshot_Timestamp"):
+            if c in colnames:
+                return c
+        return None
+    # -----------------------------
+
     with tab:
         st.subheader(f"🏆 Power Ratings — {sport_label}")
 
-        # — Controls —
         col_left, col_right = st.columns([2, 1])
         with col_left:
             days_back = st.slider("History Window (days)", min_value=14, max_value=365, value=90, step=7)
         with col_right:
-            _ = st.select_slider("Trend Window", options=[7, 14, 30], value=14)  # kept for future use
+            _ = st.select_slider("Trend Window", options=[7, 14, 30], value=14)
 
         end_d = date.today()
         start_d = end_d - timedelta(days=days_back)
 
-        # --- Fetch current snapshot (Team only) ---
-        sql_current = """
-        SELECT
-          UPPER(Sport) AS Sport,
-          LOWER(Team) AS Team,
-          CAST(Rating AS FLOAT64) AS Rating,
-          COALESCE(Snapshot_Timestamp, Last_Update, Updated_At) AS Snapshot_Timestamp
-        FROM `sharplogger.sharp_data.ratings_current`
-        WHERE UPPER(Sport) = @sport
-          AND Team IS NOT NULL
-        """
-        try:
-            cur_df = bq_client.query(
-                sql_current,
-                job_config=bigquery.QueryJobConfig(
-                    query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper())]
-                ),
-            ).to_dataframe()
-        except Exception as e:
-            st.error(f"Failed to load current ratings (Team): {e}")
+        # ---- Inspect schemas & build safe SELECTs ----
+        cur_fq = "sharplogger.sharp_data.ratings_current"
+        his_fq = "sharplogger.sharp_data.ratings_history"
+
+        cur_cols = {f.name for f in bq_client.get_table(cur_fq).schema}
+        his_cols = {f.name for f in bq_client.get_table(his_fq).schema}
+
+        team_cur = pick_team(cur_cols)
+        team_his = pick_team(his_cols)
+        if team_cur is None:
+            st.error(f"`{cur_fq}` has neither Team nor Team_Norm.")
+            return
+        if team_his is None:
+            st.error(f"`{his_fq}` has neither Team nor Team_Norm.")
             return
 
-        # --- Fetch history window (Team only) ---
-        sql_hist = """
-        SELECT
-          UPPER(Sport) AS Sport,
-          LOWER(Team) AS Team,
-          CAST(Rating AS FLOAT64) AS Rating,
-          COALESCE(Snapshot_Timestamp, Last_Update, Updated_At) AS Snapshot_Timestamp
-        FROM `sharplogger.sharp_data.ratings_history`
-        WHERE UPPER(Sport) = @sport
-          AND Team IS NOT NULL
-          AND DATE(COALESCE(Snapshot_Timestamp, Last_Update, Updated_At)) BETWEEN @start_d AND @end_d
-        """
-        try:
-            hist_df = bq_client.query(
-                sql_hist,
-                job_config=bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()),
-                        bigquery.ScalarQueryParameter("start_d", "DATE", start_d),
-                        bigquery.ScalarQueryParameter("end_d", "DATE", end_d),
-                    ]
-                ),
-            ).to_dataframe()
-        except Exception as e:
-            st.error(f"Failed to load ratings history (Team): {e}")
+        rating_cur = pick_rating(cur_cols)
+        rating_his = pick_rating(his_cols)
+        if rating_cur is None:
+            st.error(f"`{cur_fq}` has no rating column (tried Rating/Power_Rating/Elo/PR/PowerIndex).")
+            return
+        if rating_his is None:
+            st.error(f"`{his_fq}` has no rating column (tried Rating/Power_Rating/Elo/PR/PowerIndex).")
             return
 
-        # Types / early exit
+        ts_cur = pick_ts(cur_cols)  # may be None
+        ts_his = pick_ts(his_cols)  # may be None
+
+        team_cur_expr = f"LOWER({team_cur})"
+        team_his_expr = f"LOWER({team_his})"
+        rating_cur_expr = f"CAST({rating_cur} AS FLOAT64)"
+        rating_his_expr = f"CAST({rating_his} AS FLOAT64)"
+        ts_cur_expr = ts_cur if ts_cur else "CAST(NULL AS TIMESTAMP)"
+        ts_his_expr = ts_his if ts_his else "CAST(NULL AS TIMESTAMP)"
+        hist_date_clause = f"AND DATE({ts_his}) BETWEEN @start_d AND @end_d" if ts_his else ""
+
+        # --- Current snapshot (schema-safe) ---
+        sql_current = f"""
+        SELECT
+          UPPER(Sport) AS Sport,
+          {team_cur_expr} AS Team,
+          {rating_cur_expr} AS Rating,
+          {ts_cur_expr} AS Snapshot_Timestamp
+        FROM `{cur_fq}`
+        WHERE UPPER(Sport) = @sport
+          AND {team_cur} IS NOT NULL
+        """
+        cur_params = [bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper())]
+        cur_df = bq_client.query(sql_current, job_config=bigquery.QueryJobConfig(query_parameters=cur_params)).to_dataframe()
+
+        # --- History window (only filter by date if ts exists) ---
+        sql_hist = f"""
+        SELECT
+          UPPER(Sport) AS Sport,
+          {team_his_expr} AS Team,
+          {rating_his_expr} AS Rating,
+          {ts_his_expr} AS Snapshot_Timestamp
+        FROM `{his_fq}`
+        WHERE UPPER(Sport) = @sport
+          AND {team_his} IS NOT NULL
+          {(' ' + hist_date_clause) if hist_date_clause else ''}
+        """
+        hist_params = [bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper())]
+        if ts_his:
+            hist_params += [
+                bigquery.ScalarQueryParameter("start_d", "DATE", start_d),
+                bigquery.ScalarQueryParameter("end_d", "DATE", end_d),
+            ]
+        hist_df = bq_client.query(sql_hist, job_config=bigquery.QueryJobConfig(query_parameters=hist_params)).to_dataframe()
+
+        # ---------- types / early exit ----------
         for d in (cur_df, hist_df):
             if not d.empty:
                 d["Snapshot_Timestamp"] = pd.to_datetime(d["Snapshot_Timestamp"], utc=True, errors="coerce")
@@ -9529,19 +9565,16 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
             st.warning("No ratings found for this sport in the selected window.")
             return
 
-        # --- Latest + deltas (ASCII-only column names) ---
+        # ---------- latest + deltas ----------
         base_df = pd.concat([hist_df, cur_df], ignore_index=True)
         base_df["Team"] = base_df["Team"].astype(str)
-        # drop league aggregate rows if present
         base_df = base_df[~base_df["Team"].str.contains(r"\bleague\b", case=False, na=False)]
         base_df = base_df.dropna(subset=["Team", "Rating"]).copy()
         if base_df.empty:
             st.warning("No team-level ratings after filtering.")
             return
-
         base_df.sort_values(["Team", "Snapshot_Timestamp"], inplace=True)
 
-        # tz-safe helper (no tz_localize on aware timestamps)
         def _value_asof(group: pd.DataFrame, cutoff_days: int):
             g = group.dropna(subset=["Snapshot_Timestamp"])
             if g.empty:
@@ -9559,10 +9592,12 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
         for team, g in base_df.groupby("Team"):
             g = g.sort_values("Snapshot_Timestamp")
             r_today = float(g["Rating"].iloc[-1])
-            d7  = r_today - _value_asof(g, 7)
-            d14 = r_today - _value_asof(g, 14)
-            d30 = r_today - _value_asof(g, 30)
-            deltas.append((team, d7, d14, d30))
+            deltas.append((
+                team,
+                r_today - _value_asof(g, 7),
+                r_today - _value_asof(g, 14),
+                r_today - _value_asof(g, 30),
+            ))
         deltas_df = pd.DataFrame(deltas, columns=["Team", "Delta_7d", "Delta_14d", "Delta_30d"])
 
         summary = (
@@ -9576,8 +9611,6 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
         pretty = summary[["Rank", "Team", "Rating_Today", "Delta_7d", "Delta_14d", "Delta_30d"]].copy()
         pretty.rename(columns={"Rating_Today": "Rating",
                                "Delta_7d": "Delta 7d", "Delta_14d": "Delta 14d", "Delta_30d": "Delta 30d"}, inplace=True)
-
-        # light rounding (no Styler)
         for c in ["Rating", "Delta 7d", "Delta 14d", "Delta 30d"]:
             if c in pretty.columns:
                 pretty[c] = pd.to_numeric(pretty[c], errors="coerce").round(2)
@@ -9586,23 +9619,17 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
         st.markdown("### Current Ratings & Trend")
         st.dataframe(pretty, use_container_width=True)
 
-        # — Team history explorer —
+        # ---------- history chart ----------
         with st.expander("📈 Team Rating History"):
             team_sel = st.selectbox("Team", options=list(summary["Team"]), index=0)
             g = base_df[base_df["Team"] == team_sel].sort_values("Snapshot_Timestamp").copy()
-            # safely convert to NY time whether tz-naive or tz-aware
             try:
                 g["Date"] = g["Snapshot_Timestamp"].dt.tz_convert("America/New_York").dt.date
             except TypeError:
-                g["Date"] = (
-                    g["Snapshot_Timestamp"]
-                    .dt.tz_localize("UTC")
-                    .dt.tz_convert("America/New_York")
-                    .dt.date
-                )
+                g["Date"] = g["Snapshot_Timestamp"].dt.tz_localize("UTC").dt.tz_convert("America/New_York").dt.date
             st.line_chart(g.set_index("Date")["Rating"])
 
-        # — Optional edges —
+        # ---------- optional edges (unchanged) ----------
         if show_edges:
             st.markdown("---")
             st.markdown("### Model vs Market Edges (Spreads)")
@@ -9621,17 +9648,15 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                 now_utc = pd.Timestamp.now(tz="UTC").to_pydatetime()
                 df_scores = bq_client.query(
                     sq,
-                    job_config=bigquery.QueryJobConfig(
-                        query_parameters=[
-                            bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()),
-                            bigquery.ScalarQueryParameter("now_utc", "DATETIME", now_utc),
-                        ]
-                    ),
+                    job_config=bigquery.QueryJobConfig(query_parameters=[
+                        bigquery.ScalarQueryParameter("sport", "STRING", sport_label.upper()),
+                        bigquery.ScalarQueryParameter("now_utc", "DATETIME", now_utc),
+                    ]),
                 ).to_dataframe()
 
                 edges = attach_ratings_and_edges_for_diagnostics(
                     df_scores,
-                    sport_aliases=SPORT_ALIASES,  # assumes you have this global
+                    sport_aliases=SPORT_ALIASES,
                     table_history="sharplogger.sharp_data.ratings_current",
                     project="sharplogger",
                     pad_days=30,
@@ -9648,7 +9673,6 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                 st.dataframe(show, use_container_width=True)
             except Exception as e:
                 st.warning(f"Could not render edges: {e}")
-
 
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date=None, end_date=None):
