@@ -96,7 +96,7 @@ os.environ.setdefault("OMP_NUM_THREADS",  "1")
 os.environ.setdefault("MKL_NUM_THREADS",  "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS",  "1")
-
+from sklearn.calibration import calibration_curve  # (kept import local to avoid global clutter)
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from scipy.stats import zscore, entropy, randint, loguniform, uniform
 from sklearn.experimental import enable_halving_search_cv 
@@ -7287,7 +7287,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             st.exception(e)
         
         # ==== TRAIN: Calibration curve table (quantile bins, robust) ==================
-        from sklearn.calibration import calibration_curve  # (kept import local to avoid global clutter)
+        
         
         p_train_final = np.clip(np.asarray(p_cal_tr, float), eps, 1 - eps)
         y_train_plot  = y_train_vec.astype(int)
@@ -7401,8 +7401,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
         # --- aliases from the blended/calibrated step ---
-        ensemble_prob     = p_cal        # train/OOF blended + calibrated
-        ensemble_prob_val = p_cal_val    # holdout/val blended + calibrated
+       
+
+        ensemble_prob = p_train_vec
         
         if ('X_val' in locals() and isinstance(X_val, pd.DataFrame)) \
            and ('y_val' in locals() and isinstance(y_val, (pd.Series, pd.DataFrame))):
