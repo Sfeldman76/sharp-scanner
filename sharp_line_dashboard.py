@@ -141,7 +141,11 @@ RATINGS_HISTORY_TABLE = "sharplogger.sharp_data.ratings_history"  # <- fully qua
 GCS_BUCKET = "sharp-models"
 import os, json
 import gc
-  
+from google.cloud import bigquery
+import pandas as pd
+import numpy as np
+import streamlit as st
+from datetime import date, timedelta 
 from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
 import numpy as np
 import pandas as pd
@@ -2322,7 +2326,7 @@ def enrich_power_for_training_lowmem(
         method = None if is_current else PREFERRED_METHOD.get(sport.upper())
 
         # Teams are already normalized; bind params
-        from google.cloud import bigquery
+      
         sql = f"""
         SELECT
           UPPER(CAST(Sport AS STRING))        AS Sport,
@@ -9470,7 +9474,7 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
 
 
     if bq_client is None:
-        from google.cloud import bigquery
+      
         bq_client = bigquery.Client(project="sharplogger", location="us")
 
     with tab:
@@ -9658,7 +9662,7 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
                 st.warning(f"Could not render edges: {e}")
 
 def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date=None, end_date=None):
-    from google.cloud import bigquery
+
     client = bigquery.Client(project="sharplogger", location="us")
 
     with tab:
