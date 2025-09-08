@@ -7239,9 +7239,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                                 "Impact": impact,
                             })
                             .sort_values("Importance", ascending=False)
-                            .reset_index(drop_u=True)
+                            .reset_index(drop=True)  # ← fix: was drop_u=True
                         )
-        
+
                         active = importance_df[importance_df["Importance"] > 0].copy().reset_index(drop=True)
         
                         def _to_streamlit_scalar(x):
@@ -7425,7 +7425,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         p_train_vec = np.asarray(p_cal, dtype=float)       # same length as y_train_vec
         p_hold_vec  = np.asarray(p_cal_val, dtype=float)   # same length as y_hold_vec
-        
+        p_cal      = p_train_vec      # legacy: "calibrated train probs"
+        p_cal_val  = p_hold_vec       # legacy: "calibrated holdout probs"
         # sanity checks
         assert len(y_train_vec) == len(p_train_vec), f"train len mismatch: y={len(y_train_vec)} p={len(p_train_vec)}"
         assert len(y_hold_vec)  == len(p_hold_vec),  f"holdout len mismatch: y={len(y_hold_vec)} p={len(p_hold_vec)}"
