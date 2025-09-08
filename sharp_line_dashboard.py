@@ -9459,11 +9459,6 @@ def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_clien
     Streamlit tab to display per-team power ratings with recent trend deltas and (optional) model-vs-market edges.
     """
     # ✅ safe imports on rerun
-    from google.cloud import bigquery
-    import pandas as pd
-    import numpy as np
-    import streamlit as st
-    from datetime import date, timedelta
 
     if bq_client is None:
         bq_client = bigquery.Client(project="sharplogger", location="us")
