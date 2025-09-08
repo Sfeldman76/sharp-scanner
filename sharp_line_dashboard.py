@@ -9332,7 +9332,28 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             }
             </style>
             """, unsafe_allow_html=True)
+            if label.upper() == "NCAAF":
+                with st.expander("🔍 Raw NCAAF summary (no formatting)"):
+                    st.caption("Unfixed, original Unicode; no Styler, so this won't crash.")
+                    # 1) plain preview
+                    st.table(table_df.head(50))  # or st.dataframe(table_df, use_container_width=True)
             
+                    # 2) quick detectors
+                    def _non_ascii_cols(df):
+                        return [c for c in df.columns if any(ord(ch) > 127 for ch in str(c))]
+                    def _non_ascii_rows(df):
+                        return df.applymap(lambda x: isinstance(x, str) and any(ord(ch) > 127 for ch in x)).any(axis=1)
+            
+                    st.write("Non-ASCII columns:", _non_ascii_cols(table_df))
+                    bad_rows = _non_ascii_rows(table_df)
+                    if bad_rows.any():
+                        st.write(f"Rows containing non-ASCII characters: {int(bad_rows.sum())}")
+                        st.dataframe(table_df.loc[bad_rows].head(25), use_container_width=True)
+            
+                    # 3) peek at the generated HTML safely (escape=True so cell contents can't break tags)
+                    html_safe = table_df.to_html(index=False, escape=True)
+                    st.code(html_safe[:2000], language="html")
+            # 👆 End debug insert
     
             table_df = summary_grouped[view_cols].copy()
             table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
@@ -9428,32 +9449,6 @@ def fetch_scores_and_backtest(*args, **kwargs):
     return pd.DataFrame()
 
     
-def load_backtested_predictions(sport_label: str, days_back: int = 30) -> pd.DataFrame:
-    client = bigquery.Client(location="us")
-    query = f"""
-        SELECT 
-            Game_Key, Bookmaker, Market, Outcome,
-            Value,
-            Sharp_Move_Signal, Sharp_Limit_Jump, Sharp_Prob_Shift,
-            Sharp_Time_Score, Sharp_Limit_Total,
-            Is_Reinforced_MultiMarket, Market_Leader, LimitUp_NoMove_Flag,
-            SharpBetScore, Enhanced_Sharp_Confidence_Score, True_Sharp_Confidence_Score,
-            SHARP_HIT_BOOL, SHARP_COVER_RESULT, Scored, Snapshot_Timestamp, Sport,
-            First_Line_Value, First_Sharp_Prob, Line_Delta, Model_Prob_Diff, Direction_Aligned
-
-        FROM `sharplogger.sharp_data.scores_with_features`
-        WHERE 
-            Snapshot_Timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days_back} DAY)
-            AND SHARP_HIT_BOOL IS NOT NULL
-            AND Sport = '{sport_label}'
-    """
-    try:
-        df = client.query(query).to_dataframe()
-        return df
-    except Exception as e:
-        st.error(f"❌ Failed to load predictions: {e}")
-        return pd.DataFrame()
-
 def render_power_ranking_tab(tab, sport_label: str, sport_key_api: str, bq_client=None, show_edges: bool = False):
     """
     Streamlit tab to display per-team power ratings with recent trend deltas and (optional) model-vs-market edges.
