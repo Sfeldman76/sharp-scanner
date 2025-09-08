@@ -6428,10 +6428,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X=X_train_df,
             y=y_train,
             folds=folds,                # same row indices
-            topk_per_fold=45,
+            topk_per_fold=10,
             min_presence=0.90,
             max_keep=80,
-            sample_per_fold=5000,
+            sample_per_fold=8000,
             random_state=42,
         )
         
