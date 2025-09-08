@@ -9254,10 +9254,10 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             
             
             # === Final Output
+            # === Final Output
             st.subheader(f"📊 Sharp vs Rec Book Summary Table – {label}")
             st.info(f"✅ Summary table shape: {summary_grouped.shape}")
             
-    
             # === CSS Styling for All Tables (keep this once)
             st.markdown("""
             <style>
@@ -9268,14 +9268,12 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 margin-bottom: 1rem;
                 position: relative;
             }
-            
             .custom-table {
                 border-collapse: collapse;
                 width: max-content;
                 table-layout: fixed;
                 font-size: 14px;
             }
-            
             .custom-table th, .custom-table td {
                 border: 1px solid #444;
                 padding: 8px;
@@ -9284,8 +9282,6 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 word-break: break-word;
                 max-width: 300px; /* Adjust this to prevent overflow */
             }
-    
-            
             .custom-table th {
                 background-color: #1f2937;
                 color: white;
@@ -9293,7 +9289,6 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 top: 0;
                 z-index: 2;
             }
-            
             /* Freeze first 4 columns */
             .custom-table th:nth-child(1),
             .custom-table td:nth-child(1) {
@@ -9323,22 +9318,25 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 background-color: #2d3748;
                 z-index: 3;
             }
-            
-            .custom-table tr:nth-child(even) {
-                background-color: #2d3748;
-            }
-            .custom-table tr:hover {
-                background-color: #4b5563;
-            }
+            .custom-table tr:nth-child(even) { background-color: #2d3748; }
+            .custom-table tr:hover { background-color: #4b5563; }
             </style>
             """, unsafe_allow_html=True)
+            
+            # 1) Build table_df FIRST (tolerate missing columns)
+            cols = [c for c in view_cols if c in summary_grouped.columns]
+            missing = sorted(set(view_cols) - set(cols))
+            if missing:
+                st.warning(f"Missing columns ignored: {missing}")
+            
+            table_df = summary_grouped[cols].copy()
+            
+            # 2) DEBUG: raw view for NCAAF (AFTER table_df exists)
             if label.upper() == "NCAAF":
                 with st.expander("🔍 Raw NCAAF summary (no formatting)"):
                     st.caption("Unfixed, original Unicode; no Styler, so this won't crash.")
-                    # 1) plain preview
-                    st.table(table_df.head(50))  # or st.dataframe(table_df, use_container_width=True)
+                    st.table(table_df.head(50))  # or: st.dataframe(table_df, use_container_width=True)
             
-                    # 2) quick detectors
                     def _non_ascii_cols(df):
                         return [c for c in df.columns if any(ord(ch) > 127 for ch in str(c))]
                     def _non_ascii_rows(df):
@@ -9350,16 +9348,13 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                         st.write(f"Rows containing non-ASCII characters: {int(bad_rows.sum())}")
                         st.dataframe(table_df.loc[bad_rows].head(25), use_container_width=True)
             
-                    # 3) peek at the generated HTML safely (escape=True so cell contents can't break tags)
+                    # Safe HTML peek (escaped so content can't break tags)
                     html_safe = table_df.to_html(index=False, escape=True)
                     st.code(html_safe[:2000], language="html")
-            # 👆 End debug insert
-    
-            table_df = summary_grouped[view_cols].copy()
-            table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
             
-            # ✅ Safe id; visible emoji stays only in text, not in ids/classes
-            safe_id = f"tbl-{_title_key}"
+            # 3) Your existing HTML render (once)
+            table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
+            safe_id = f"tbl-{_title_key}"  # assumes _title_key is defined above
             st.markdown(
                 f"<div id='{safe_id}' class='scrollable-table-container'>{table_html}</div>",
                 unsafe_allow_html=True
@@ -9367,7 +9362,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             
             st.success("✅ Finished rendering sharp picks table.")
             st.caption(f"Showing {len(table_df)} rows")
-            # === Render Sharp Picks Table (HTML Version)
+
             pass
     # === 2. Render Live Odds Snapshot Table
     with st.container():  # or a dedicated tab/expander if you want
