@@ -4838,8 +4838,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['ResistBreak_x_Mag']     = df_market.get('Was_Line_Resistance_Broken',0) * df_market.get('Abs_Line_Move_From_Opening',0).fillna(0)
         df_market['LateSteam_x_KeyCount']  = df_market.get('Potential_Overmove_Flag',0)   * df_market.get('Line_Resistance_Crossed_Count',0).fillna(0)
         df_market['Aligned_x_HighLimit']   = df_market.get('Line_Moved_Toward_Team',0)    * (df_market.get('Sharp_Limit_Total',0) >= 7000).astype(int)
-        df_market['Rev_x_BookLift']        = ((df_market.get('Value_Reversal_Flag',0)==1) | (df_market.get('Odds_Reversal_Flag',0)==1)).astype(int) \
-                                             * df_market.get('Book_Reliability_x_PROB_SHIFT',0).fillna(0)
+        # helpers to keep things aligned & NA-safe
+        def _series_or_default(df, col, default=0.0, dtype="float32"):
+            if col in df.columns:
+                return pd.to_numeric(df[col], errors="coerce")
+            # return an aligned Series, not a scalar
+            return pd.Series(default, index=df.index, dtype=dtype)
+        
+        val_rev  = _series_or_default(df_market, "Value_Reversal_Flag")
+        odds_rev = _series_or_default(df_market, "Odds_Reversal_Flag")
+        
+        rev_flag_bool = (val_rev.fillna(0).eq(1) | odds_rev.fillna(0).eq(1))
+        df_market["Rev_x_BookLift"] = rev_flag_bool.astype("int8") * _series_or_default(df_market, "Book_Reliability_Lift").fillna(0)
+
         df_market['GapExists_x_RecSkew']   = df_market.get('CrossMarket_Prob_Gap_Exists',0) * df_market.get('SmallBook_Limit_Skew_Flag',0)
         df_market['Misalign_x_MoveAway']   = (df_market.get('model_fav_vs_market_fav_agree',1)==0).astype(int) * df_market.get('Line_Moved_Away_From_Team',0)
 
