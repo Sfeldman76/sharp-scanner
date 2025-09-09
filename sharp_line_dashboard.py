@@ -1460,34 +1460,86 @@ def _rho_xy(x_bool: pd.Series, y_bool: pd.Series) -> float:
         return np.nan
     return float(np.corrcoef(x, y)[0,1])
 
-def build_corr_lookup_ST_SM_TM(hist: pd.DataFrame, sport: str="NFL") -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+def build_corr_lookup_ST_SM_TM(hist: pd.DataFrame, sport: str = "NFL"):
     """
-    hist columns: Sport, close_spread (signed), close_total, p_ml_fav (de-vig),
-                  fav_won (bool), fav_covered (bool), went_over (bool)
+    hist columns expected: Sport, close_spread (signed), close_total, p_ml_fav (de-vig),
+                           fav_won (bool), fav_covered (bool), went_over (bool)
+    Returns: (ST_lookup, SM_lookup, TM_lookup) DataFrames.
     """
-    H = hist.loc[hist["Sport"].eq(sport)].copy()
-    H["spread_bin"] = H["close_spread"].apply(_bin_spread)
-    H["total_bin"]  = H["close_total"].apply(_bin_total)
-    H["ml_bin"]     = H["p_ml_fav"].apply(_bin_ml)
+    H = hist.loc[hist["Sport"].astype(str).str.upper().eq(str(sport).upper())].copy()
 
-    # Spread↔Total: fav_covered vs went_over by (spread_bin,total_bin)
-    ST = (H.groupby(["spread_bin","total_bin"])
-            .apply(lambda g: pd.Series(dict(
-                rho_ST=_rho_xy(g["fav_covered"], g["went_over"]), n=len(g))))
-            .reset_index())
+    # --- bin helpers (idempotent; reuse existing cols if present) ---
+    def _bin_spread(x):
+        if pd.isna(x): return np.nan
+        x = abs(float(x))
+        return "≥10" if x >= 10 else ("7–9.5" if x >= 7 else ("3–6.5" if x >= 3 else "<3"))
 
-    # Spread↔ML: fav_covered vs fav_won by (spread_bin,ml_bin)
-    SM = (H.groupby(["spread_bin","ml_bin"])
-            .apply(lambda g: pd.Series(dict(
-                rho_SM=_rho_xy(g["fav_covered"], g["fav_won"]), n=len(g))))
-            .reset_index())
+    def _bin_total(x):
+        if pd.isna(x): return np.nan
+        x = float(x)
+        return "high" if x >= 52 else ("mid" if x >= 46 else "low")
 
-    # Total↔ML: went_over vs fav_won by (total_bin,ml_bin)
-    TM = (H.groupby(["total_bin","ml_bin"])
-            .apply(lambda g: pd.Series(dict(
-                rho_TM=_rho_xy(g["went_over"], g["fav_won"]), n=len(g))))
-            .reset_index())
-    return ST, SM, TM
+    def _bin_ml(p):
+        if pd.isna(p): return np.nan
+        p = float(p)
+        if p >= 0.80: return "≥0.80"
+        if p >= 0.70: return "0.70–0.79"
+        if p >= 0.60: return "0.60–0.69"
+        return "0.50–0.59"
+
+    if "spread_bin" not in H.columns:
+        H["spread_bin"] = H["close_spread"].apply(_bin_spread)
+    if "total_bin" not in H.columns:
+        H["total_bin"]  = H["close_total"].apply(_bin_total)
+    if "ml_bin" not in H.columns:
+        H["ml_bin"]     = H["p_ml_fav"].apply(_bin_ml)
+
+    def _rho_xy(x_bool: pd.Series, y_bool: pd.Series) -> float:
+        x = x_bool.astype(float).to_numpy()
+        y = y_bool.astype(float).to_numpy()
+        # stability guards
+        if len(x) < 150 or np.nanstd(x) == 0 or np.nanstd(y) == 0:
+            return np.nan
+        return float(np.corrcoef(x, y)[0, 1])
+
+    # --- Spread↔Total (fav_covered vs went_over) ---
+    ST_rows = []
+    for (sb, tb), g in H.groupby(["spread_bin", "total_bin"], dropna=True):
+        ST_rows.append({
+            "spread_bin": sb,
+            "total_bin": tb,
+            "rho_ST": _rho_xy(g["fav_covered"], g["went_over"]),
+            "n": len(g),
+        })
+    ST_lookup = pd.DataFrame(ST_rows)
+
+    # --- Spread↔ML (fav_covered vs fav_won) ---
+    SM_rows = []
+    for (sb, mb), g in H.groupby(["spread_bin", "ml_bin"], dropna=True):
+        SM_rows.append({
+            "spread_bin": sb,
+            "ml_bin": mb,
+            "rho_SM": _rho_xy(g["fav_covered"], g["fav_won"]),
+            "n": len(g),
+        })
+    SM_lookup = pd.DataFrame(SM_rows)
+
+    # --- Total↔ML (went_over vs fav_won) ---
+    TM_rows = []
+    for (tb, mb), g in H.groupby(["total_bin", "ml_bin"], dropna=True):
+        TM_rows.append({
+            "total_bin": tb,
+            "ml_bin": mb,
+            "rho_TM": _rho_xy(g["went_over"], g["fav_won"]),
+            "n": len(g),
+        })
+    TM_lookup = pd.DataFrame(TM_rows)
+
+    return ST_lookup, SM_lookup, TM_lookup
+
+
+
+
 def attach_pairwise_correlation_features(
     df: pd.DataFrame,
     cross_pivots: pd.DataFrame,
@@ -4842,6 +4894,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     hist_df["Sport"]     = hist_df["Sport"].astype(str).str.upper()
     
     # ρ lookups (Spread↔Total, Spread↔ML, Total↔ML) — do this ONCE
+    
     ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist_df, sport=sport_label)
     # df_spreads is your historical spread rows (per outcome/book/snapshot)
     # must include: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
