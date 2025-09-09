@@ -6429,7 +6429,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             y=y_train,
             folds=folds,                # same row indices
             topk_per_fold=10,
-            min_presence=0.6,
+            min_presence=0.5,
             max_keep=80,
             sample_per_fold=10000,
             random_state=42,
@@ -6597,7 +6597,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         best_ll_params.update({
             **STABLE,
-            "min_child_weight": max(4.0, float(best_ll_params.get("min_child_weight", 4.0))),
+            "min_child_weight": max(2.0, float(best_ll_params.get("min_child_weight", 2.0))),
             "gamma": max(2.0, float(best_ll_params.get("gamma", 2.0))),
             "max_leaves": min(256, int(best_ll_params.get("max_leaves", 192) or 192)),
             "max_depth": min(8,   int(best_ll_params.get("max_depth", 6)   or 6)),
@@ -6659,7 +6659,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             colsample_bytree=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bytree", 0.80))),
             colsample_bynode=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bynode", 0.80))),
             learning_rate=min(0.03, float(deep_auc.get_xgb_params().get("learning_rate", 0.03))),
-            min_child_weight=max(2.0, float(deep_auc.get_xgb_params().get("min_child_weight", 2.0))),
+            min_child_weight=max(1.0, float(deep_auc.get_xgb_params().get("min_child_weight", 1.0))),
             gamma=max(1.0, float(deep_auc.get_xgb_params().get("gamma", 1.0))),
             grow_policy="lossguide",
             max_leaves=min(384, int(deep_auc.get_xgb_params().get("max_leaves", 256) or 256)),
@@ -6727,8 +6727,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
 
         # --- Final capacity / ES suggestions (compact & consistent) -------------------------
-        DEFAULT_FINAL_N_EST   = 1800
-        DEFAULT_ES_ROUNDS     = 100
+        DEFAULT_FINAL_N_EST   = 4000
+        DEFAULT_ES_ROUNDS     = 400
         final_estimators_cap  = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
         early_stopping_rounds = int(locals().get("early_stopping_rounds", DEFAULT_ES_ROUNDS))
         final_estimators_cap  = int(np.clip(final_estimators_cap, 1200, 2400))
