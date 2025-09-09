@@ -4852,7 +4852,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market["Rev_x_BookLift"] = rev_flag_bool.astype("int8") * _series_or_default(df_market, "Book_Reliability_Lift").fillna(0)
 
         df_market['GapExists_x_RecSkew']   = df_market.get('CrossMarket_Prob_Gap_Exists',0) * df_market.get('SmallBook_Limit_Skew_Flag',0)
-        df_market['Misalign_x_MoveAway']   = (df_market.get('model_fav_vs_market_fav_agree',1)==0).astype(int) * df_market.get('Line_Moved_Away_From_Team',0)
+        # helper that returns an aligned Series (not a scalar) when the col is missing
+        def _series_or_default(df, col, default, dtype=None):
+            if col in df.columns:
+                s = df[col]
+            else:
+                s = pd.Series(default, index=df.index)
+            if dtype is not None:
+                # only after alignment
+                try:
+                    s = s.astype(dtype)
+                except Exception:
+                    pass
+            return s
+        
+        # 1) model/market (dis)agreement → 1 if misaligned else 0
+        # default=1 preserves your previous intent: treat missing as "agree"
+        agree = pd.to_numeric(_series_or_default(df_market, 'model_fav_vs_market_fav_agree', 1),
+                              errors='coerce').fillna(1)
+        misalign_flag = (agree == 0).astype('int8')
+        
+        # 2) move-away flag as aligned numeric
+        move_away = pd.to_numeric(_series_or_default(df_market, 'Line_Moved_Away_From_Team', 0),
+                                  errors='coerce').fillna(0).astype('int8')
+        
+        # 3) interaction
+        df_market['Misalign_x_MoveAway'] = (misalign_flag * move_away).astype('int8')
+
 
         # If you don’t want line-based metrics on H2H, zero them now
         if market == "h2h":
