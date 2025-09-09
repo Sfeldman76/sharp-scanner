@@ -151,6 +151,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import RandomizedSearchCV
 
+from math import erf, sqrt
 from xgboost import XGBClassifier
 # put near your imports (only once)
 from sklearn.base import is_classifier as sk_is_classifier
@@ -1380,6 +1381,182 @@ def build_book_reliability_map(df: pd.DataFrame, prior_strength: float = 200.0) 
     return mapping
 
 
+
+def _amer_to_prob_one(odds) -> float:
+    if pd.isna(odds): return np.nan
+    o = float(odds)
+    return 100.0/(o+100.0) if o>=0 else (-o)/((-o)+100.0)
+
+def _devig_pair(p_a: float, p_b: float) -> float:
+    if np.isnan(p_a) or np.isnan(p_b): return np.nan
+    s = p_a + p_b
+    return np.nan if s <= 0 else p_a / s  # returns prob for the "A" leg
+
+def _norm_cdf(x): return 0.5*(1.0 + erf(x / sqrt(2.0)))
+
+def _spread_to_winprob(spread_abs: np.ndarray, sport: np.ndarray) -> np.ndarray:
+    out = np.full_like(spread_abs, np.nan, dtype="float64")
+    for i, (s, sp) in enumerate(zip(spread_abs, sport)):
+        sigma = float(SPORT_SPREAD_CFG.get(str(sp).upper(), {"sigma_pts": 13.5})["sigma_pts"])
+        out[i] = _norm_cdf(float(s) / sigma)
+    return out
+def build_cross_market_pivots_for_training(df: pd.DataFrame) -> pd.DataFrame:
+    need = [c for c in ["Game_Key","Bookmaker","Market","Outcome","Value","Odds_Price","Snapshot_Timestamp"] if c in df.columns]
+    g = (df.loc[:, need]
+           .sort_values("Snapshot_Timestamp")
+           .groupby(["Game_Key","Bookmaker","Market","Outcome"], as_index=False)
+           .tail(1))
+
+    # Spread magnitude
+    spread = g[g.Market.str.lower().eq("spreads")].copy()
+    spread["Spread_Value"] = pd.to_numeric(spread["Value"], errors="coerce").abs()
+    spread = spread.groupby(["Game_Key","Bookmaker"], as_index=False).agg(Spread_Value=("Spread_Value","max"))
+
+    # Totals p(Over) de-vig
+    tots = g[g.Market.str.lower().eq("totals")].copy()
+    tots["Outcome_l"] = tots["Outcome"].astype(str).str.lower()
+    tots["Total_Value"] = pd.to_numeric(tots["Value"], errors="coerce")
+    tots["p_raw"] = tots["Odds_Price"].map(_amer_to_prob_one)
+    over  = tots[tots["Outcome_l"].eq("over") ][["Game_Key","Bookmaker","Total_Value","p_raw"]].rename(columns={"p_raw":"p_over_raw"})
+    under = tots[tots["Outcome_l"].eq("under")][["Game_Key","Bookmaker","p_raw"]].rename(columns={"p_raw":"p_under_raw"})
+    tot_p = over.merge(under, on=["Game_Key","Bookmaker"], how="left")
+    tot_p["p_over"] = tot_p.apply(lambda r: _devig_pair(r["p_over_raw"], r["p_under_raw"]), axis=1)
+
+    # ML favorite prob de-vig
+    h2h = g[g.Market.str.lower().eq("h2h")].copy()
+    h2h["p_raw"] = h2h["Odds_Price"].map(_amer_to_prob_one)
+    favdog = (h2h.sort_values(["Game_Key","Bookmaker","p_raw"], ascending=[True,True,False])
+                .groupby(["Game_Key","Bookmaker"], as_index=False)
+                .agg(p_fav_raw=("p_raw","first"), p_dog_raw=("p_raw","last")))
+    favdog["p_ml_fav"] = favdog.apply(lambda r: _devig_pair(r["p_fav_raw"], r["p_dog_raw"]), axis=1)
+
+    return (spread
+            .merge(tot_p[["Game_Key","Bookmaker","Total_Value","p_over"]], on=["Game_Key","Bookmaker"], how="outer")
+            .merge(favdog[["Game_Key","Bookmaker","p_ml_fav"]],             on=["Game_Key","Bookmaker"], how="outer"))
+
+
+def _bin_spread(x):
+    if pd.isna(x): return np.nan
+    x = abs(float(x))
+    return "≥10" if x>=10 else ("7–9.5" if x>=7 else ("3–6.5" if x>=3 else "<3"))
+
+def _bin_total(x):
+    if pd.isna(x): return np.nan
+    x = float(x)
+    return "high" if x>=52 else ("mid" if x>=46 else "low")
+
+def _bin_ml(p):
+    if pd.isna(p): return np.nan
+    p = float(p)
+    if p>=0.80: return "≥0.80"
+    if p>=0.70: return "0.70–0.79"
+    if p>=0.60: return "0.60–0.69"
+    return "0.50–0.59"
+
+def _rho_xy(x_bool: pd.Series, y_bool: pd.Series) -> float:
+    x = x_bool.astype(float).to_numpy()
+    y = y_bool.astype(float).to_numpy()
+    if len(x) < 150 or x.std()==0 or y.std()==0:  # stability guard
+        return np.nan
+    return float(np.corrcoef(x, y)[0,1])
+
+def build_corr_lookup_ST_SM_TM(hist: pd.DataFrame, sport: str="NFL") -> tuple[pd.DataFrame,pd.DataFrame,pd.DataFrame]:
+    """
+    hist columns: Sport, close_spread (signed), close_total, p_ml_fav (de-vig),
+                  fav_won (bool), fav_covered (bool), went_over (bool)
+    """
+    H = hist.loc[hist["Sport"].eq(sport)].copy()
+    H["spread_bin"] = H["close_spread"].apply(_bin_spread)
+    H["total_bin"]  = H["close_total"].apply(_bin_total)
+    H["ml_bin"]     = H["p_ml_fav"].apply(_bin_ml)
+
+    # Spread↔Total: fav_covered vs went_over by (spread_bin,total_bin)
+    ST = (H.groupby(["spread_bin","total_bin"])
+            .apply(lambda g: pd.Series(dict(
+                rho_ST=_rho_xy(g["fav_covered"], g["went_over"]), n=len(g))))
+            .reset_index())
+
+    # Spread↔ML: fav_covered vs fav_won by (spread_bin,ml_bin)
+    SM = (H.groupby(["spread_bin","ml_bin"])
+            .apply(lambda g: pd.Series(dict(
+                rho_SM=_rho_xy(g["fav_covered"], g["fav_won"]), n=len(g))))
+            .reset_index())
+
+    # Total↔ML: went_over vs fav_won by (total_bin,ml_bin)
+    TM = (H.groupby(["total_bin","ml_bin"])
+            .apply(lambda g: pd.Series(dict(
+                rho_TM=_rho_xy(g["went_over"], g["fav_won"]), n=len(g))))
+            .reset_index())
+    return ST, SM, TM
+def attach_pairwise_correlation_features(
+    df: pd.DataFrame,
+    cross_pivots: pd.DataFrame,
+    ST_lookup: pd.DataFrame,
+    SM_lookup: pd.DataFrame,
+    TM_lookup: pd.DataFrame,
+    sport_default: str="NFL",
+) -> pd.DataFrame:
+    if df.empty: return df
+    out = df.merge(cross_pivots, on=["Game_Key","Bookmaker"], how="left", validate="m:1")
+
+    # Core probs
+    sport = out.get("Sport", sport_default).astype(str).str.upper().to_numpy()
+    spread_abs = pd.to_numeric(out["Spread_Value"], errors="coerce").to_numpy(dtype="float64")
+    p_spread_fav = _spread_to_winprob(spread_abs, sport)
+    p_ml_fav     = pd.to_numeric(out["p_ml_fav"], errors="coerce").to_numpy(dtype="float64")
+    p_over       = pd.to_numeric(out["p_over"],    errors="coerce").to_numpy(dtype="float64")
+
+    # Side-awareness (if you train on canonical only you can skip the side flip)
+    if "Is_Favorite_Bet" in out.columns:
+        is_fav = out["Is_Favorite_Bet"].astype("float32").to_numpy() == 1.0
+    else:
+        v = pd.to_numeric(out.get("Value"), errors="coerce").to_numpy(dtype="float64")
+        is_fav = np.where(np.isnan(v), False, v < 0)
+
+    p_side = np.where(is_fav, p_spread_fav, 1.0 - p_spread_fav)  # for ST pair
+
+    # Bins for lookups
+    out["spread_bin"] = pd.Series(out.get("Spread_Value")).apply(_bin_spread)
+    out["total_bin"]  = pd.Series(out.get("Total_Value")).apply(_bin_total)
+    out["ml_bin"]     = pd.Series(out.get("p_ml_fav")).apply(_bin_ml)
+
+    # Join rhos
+    out = out.merge(ST_lookup[["spread_bin","total_bin","rho_ST"]], on=["spread_bin","total_bin"], how="left")
+    out = out.merge(SM_lookup[["spread_bin","ml_bin","rho_SM"]],     on=["spread_bin","ml_bin"],    how="left")
+    out = out.merge(TM_lookup[["total_bin","ml_bin","rho_TM"]],     on=["total_bin","ml_bin"],     how="left")
+
+    # Synergy = rho * sqrt(p(1-p) q(1-q))  (NaN-safe)
+    def _synergy(p, q, rho):
+        mult = np.sqrt(np.clip(p*(1-p),0,1) * np.clip(q*(1-q),0,1))
+        return rho * mult
+
+    # Spread↔Total (p_side vs p_over)
+    ST_syn = _synergy(p_side, p_over, pd.to_numeric(out["rho_ST"], errors="coerce").to_numpy(float))
+    out["SpreadTotal_Rho"]     = pd.to_numeric(out["rho_ST"]).astype("float32")
+    out["SpreadTotal_Synergy"] = pd.Series(ST_syn).astype("float32")
+    out["SpreadTotal_Sign"]    = ((p_side - 0.5)*(p_over - 0.5)).astype("float32")
+
+    # Spread↔ML (p_spread_fav vs p_ml_fav)
+    SM_syn = _synergy(p_spread_fav, p_ml_fav, pd.to_numeric(out["rho_SM"], errors="coerce").to_numpy(float))
+    out["SpreadML_Rho"]        = pd.to_numeric(out["rho_SM"]).astype("float32")
+    out["SpreadML_Synergy"]    = pd.Series(SM_syn).astype("float32")
+    out["SpreadML_Sign"]       = ((p_spread_fav - 0.5)*(p_ml_fav - 0.5)).astype("float32")
+
+    # Total↔ML (p_over vs p_ml_fav)
+    TM_syn = _synergy(p_over, p_ml_fav, pd.to_numeric(out["rho_TM"], errors="coerce").to_numpy(float))
+    out["TotalML_Rho"]         = pd.to_numeric(out["rho_TM"]).astype("float32")
+    out["TotalML_Synergy"]     = pd.Series(TM_syn).astype("float32")
+    out["TotalML_Sign"]        = ((p_over - 0.5)*(p_ml_fav - 0.5)).astype("float32")
+
+    # (Optional) keep your existing consistency gap too
+    if "Spread_ML_ProbGap" not in out.columns:
+        gap = np.abs(p_spread_fav - p_ml_fav)
+        out["Spread_ML_ProbGap"] = pd.Series(gap).astype("float32")
+
+    return out
+
+
+
 # --- CACHED CLIENT (resource-level) ---
 @st.cache_resource
 def get_bq() -> bigquery.Client:
@@ -2551,10 +2728,10 @@ import os, numpy as np, pandas as pd
 
 # === 1) Config table (add MLB; switch to `scale`) ===
 SPORT_SPREAD_CFG = {
-    "NFL":   dict(scale=np.float32(1.0),  HFA=np.float32(2.1),  sigma_pts=np.float32(13.0)),
-    "NCAAF": dict(scale=np.float32(1.0),  HFA=np.float32(2.6),  sigma_pts=np.float32(14.0)),
-    "NBA":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(12.0)),
-    "WNBA":  dict(scale=np.float32(1.0),  HFA=np.float32(2.0),  sigma_pts=np.float32(11.5)),
+    "NFL":   dict(scale=np.float32(1.0),  HFA=np.float32(2.1),  sigma_pts=np.float32(13.2)),
+    "NCAAF": dict(scale=np.float32(1.0),  HFA=np.float32(2.6),  sigma_pts=np.float32(16.0)),
+    "NBA":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(11.5)),
+    "WNBA":  dict(scale=np.float32(1.0),  HFA=np.float32(2.0),  sigma_pts=np.float32(10.5)),
     "CFL":   dict(scale=np.float32(1.0),  HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
     # MLB ratings are not in run units (1500 + 400*(atk+dfn)), so scale ≈ 89–90.
     "MLB":   dict(scale=np.float32(89.0), HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
@@ -5597,10 +5774,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         df_market['PR_Model_Agree_H2H_Flag']  = (df_market['PR_Model_Agree_H2H']  == True).astype('Int8')
         df_market['PR_Market_Agree_H2H_Flag'] = (df_market['PR_Market_Agree_H2H'] == True).astype('Int8')
 
+
+
+        
         def extend_unique(base, items):
             for c in items:
                 if c not in base:
                     base.append(c)
+        # after you finish cleaning/deduping df_market (your canonical training rows)
+        cross_pivots = build_cross_market_pivots_for_training(df_market)
+
+        
+        # hist_df: pre-cutoff labeled games with closers & outcomes (one row per Game_Key)
+        # columns needed: Sport, close_spread, close_total, p_ml_fav, fav_won, fav_covered, went_over
+        ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist_df, sport=label)
+        df_market = attach_pairwise_correlation_features(
+            df_market,           # <— was df_valid
+            cross_pivots,
+            ST_lookup, SM_lookup, TM_lookup,
+            sport_default=label,
+        )
+
+
         
         # --- start with your manual core list ---
         features = [
@@ -5667,7 +5862,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
             #'ATS_EB_Rate_Home',
             #'ATS_EB_Rate_Away',
-            'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag'
+            'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag',
+            "SpreadTotal_Rho","SpreadTotal_Synergy","SpreadTotal_Sign",
+            "SpreadML_Rho","SpreadML_Synergy","SpreadML_Sign","Spread_ML_ProbGap",
+            "TotalML_Rho","TotalML_Synergy","TotalML_Sign",
             
         ]
         
