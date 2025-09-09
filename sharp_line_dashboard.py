@@ -6254,6 +6254,87 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ✅ This line must come AFTER the split:
         train_df = df_valid.iloc[train_all_idx].copy()
        
+        # --- Sample weights: build from train_df ONLY (must match X_train/y_train 1:1) ---
+        def _build_sample_weights(train_df: pd.DataFrame) -> np.ndarray:
+            # Book column present?
+            bk_col = "Bookmaker" if "Bookmaker" in train_df.columns else (
+                "Bookmaker_Norm" if "Bookmaker_Norm" in train_df.columns else None
+            )
+        
+            # Base group/book weights (no dropping of rows)
+            if bk_col is None:
+                w_base = np.ones(len(train_df), dtype=np.float32)
+            else:
+                B_g  = train_df.groupby("Game_Key")[bk_col].nunique()
+                n_gb = train_df.groupby(["Game_Key", bk_col]).size()
+        
+                TAU = 0.7
+                def _w_gb(g, b, tau=1.0):
+                    Bg  = max(1, int(B_g.get(g, 1)))
+                    ngb = max(1, int(n_gb.get((g, b), 1)))
+                    return 1.0 / (Bg * (ngb ** tau))
+        
+                w_base = np.array([_w_gb(g, b, TAU)
+                                   for g, b in zip(train_df["Game_Key"], train_df[bk_col])],
+                                  dtype=np.float32)
+        
+                # Sharp-book tilt
+                if "Is_Sharp_Book" in train_df.columns:
+                    is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).to_numpy(dtype=np.float32)
+                else:
+                    is_sharp = train_df[bk_col].isin(SHARP_BOOKS).to_numpy(dtype=np.float32)
+        
+                w_base *= (1.0 + 0.60 * is_sharp)
+        
+            # Market/context multiplier (no row drops)
+            def _ctx(m: pd.DataFrame) -> np.ndarray:
+                w_book = m.get("Book_Reliability_Score", pd.Series(1.0, index=m.index)).clip(0.6, 1.4)
+        
+                w_mag  = pd.to_numeric(m.get("Abs_Line_Move_From_Opening", 0), errors="coerce") \
+                           .fillna(0).clip(0, 2.0) ** 0.7
+        
+                tier = m.get("Minutes_To_Game_Tier", pd.Series("", index=m.index)).astype(str)
+                is_overnight = (tier == "Overnight_VeryEarly").astype(int)
+        
+                is_too_late  = pd.to_numeric(m.get("Potential_Overmove_Flag", 0), errors="coerce").fillna(0).astype(int)
+                w_time = (1.0 - 0.15*is_too_late) * (1.0 - 0.15*is_overnight)
+        
+                p0 = pd.to_numeric(m.get("Spread_Implied_Prob", np.nan), errors="coerce") \
+                        .fillna(pd.to_numeric(m.get("H2H_Implied_Prob", np.nan), errors="coerce")) \
+                        .fillna(0.5).clip(0.01, 0.99)
+                w_mid = np.where((p0 > 0.45) & (p0 < 0.55), 1.4, 1.0)
+        
+                rev = ((pd.to_numeric(m.get("Value_Reversal_Flag", 0), errors="coerce").fillna(0) == 1) |
+                       (pd.to_numeric(m.get("Odds_Reversal_Flag", 0),  errors="coerce").fillna(0) == 1)).astype(int)
+                w_rev = 1.0 - 0.15*rev
+        
+                out = (w_book.to_numpy("float32")
+                       * w_mag.to_numpy("float32")
+                       * w_time.astype("float32")
+                       * w_mid.astype("float32")
+                       * w_rev.astype("float32"))
+                return np.asarray(out, dtype=np.float32)
+        
+            w = (w_base * _ctx(train_df)).astype(np.float32)
+            w[~np.isfinite(w)] = 0.0
+        
+            # Renormalize to mean 1.0
+            s = float(w.sum())
+            if s > 0:
+                w *= (len(w) / s)
+            else:
+                w[:] = 1.0
+            return w
+        
+        # Build weights aligned to X_train/y_train
+        w_train = _build_sample_weights(train_df)
+        
+        # Hard alignment checks (will raise immediately if anything is off)
+        assert len(train_df) == X_train.shape[0] == len(y_train), \
+            ("train_df/X_train/y_train length mismatch",
+             len(train_df), X_train.shape[0], len(y_train))
+        assert len(w_train) == len(y_train) == X_train.shape[0], \
+            ("sample_weight misaligned", len(w_train), len(y_train), X_train.shape[0])
 
            # ---- 5) Simple health checks (Streamlit friendly) ----
         st.markdown("### 🩺 Data Health Checks")
