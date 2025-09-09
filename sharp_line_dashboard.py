@@ -6196,7 +6196,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Use snapshot time if multiple snapshots exist, else game start time
         time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
-        
+        sport_key  = str(sport).upper()
+        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
+
         # Final arrays used downstream
         groups = groups_all
         times  = time_values_all
