@@ -6429,9 +6429,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             y=y_train,
             folds=folds,                # same row indices
             topk_per_fold=10,
-            min_presence=0.70,
+            min_presence=0.6,
             max_keep=80,
-            sample_per_fold=8000,
+            sample_per_fold=10000,
             random_state=42,
         )
         
@@ -6476,9 +6476,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Capacity knobs (right-sized for ~6 vCPUs)
         SEARCH_N_EST    = 800
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 2000
+        DEEP_N_EST      = 4000
         DEEP_MAX_BIN    = 512
-        EARLY_STOP      = 100
+        EARLY_STOP      = 500
         HALVING_FACTOR  = 4
         MIN_RESOURCES   = 64
         VCPUS           = get_vcpus()
@@ -6571,37 +6571,45 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         
-        # Gentle “looseners” (robust defaults; keep consistent with your domain tweaks)
+        # Common stabilizers
+        STABLE = dict(
+            objective="binary:logistic",
+            tree_method="hist",
+            grow_policy="lossguide",
+            max_delta_step=0.5,
+            eval_metric=["logloss","auc"],
+        )
+        
         best_auc_params.update({
-            "min_child_weight": float(min(float(best_auc_params.get("min_child_weight", 0.001)), 0.001)),
-            "gamma": 0.0,
-            "max_leaves":       int(max(1024, int(best_auc_params.get("max_leaves", 0)) or 0)),
-            "max_depth":        int(max(20,   int(best_auc_params.get("max_depth", 0))  or 0)),
-            "subsample":        float(max(0.99, float(best_auc_params.get("subsample",        0.99)))),
-            "colsample_bytree": float(max(0.99, float(best_auc_params.get("colsample_bytree", 0.99)))),
-            "colsample_bynode": float(max(0.99, float(best_auc_params.get("colsample_bynode", 0.99)))),
-            "reg_alpha": 0.0,
-            "reg_lambda": float(min(0.50, float(best_auc_params.get("reg_lambda", 0.50)))),
-            "max_bin":    int(max(448,  int(best_auc_params.get("max_bin", 448)))),
-            "learning_rate": float(max(0.05, float(best_auc_params.get("learning_rate", 0.05)))),
-            "grow_policy": "lossguide",
+            **STABLE,
+            "min_child_weight": max(2.0, float(best_auc_params.get("min_child_weight", 2.0))),
+            "gamma": max(1.0, float(best_auc_params.get("gamma", 1.0))),
+            "max_leaves": min(384, int(best_auc_params.get("max_leaves", 256) or 256)),
+            "max_depth": min(10,  int(best_auc_params.get("max_depth", 8)   or 8)),
+            "subsample": min(0.90, float(best_auc_params.get("subsample", 0.85))),
+            "colsample_bytree": min(0.85, float(best_auc_params.get("colsample_bytree", 0.80))),
+            "colsample_bynode": min(0.85, float(best_auc_params.get("colsample_bynode", 0.80))),
+            "reg_alpha": max(1e-3, float(best_auc_params.get("reg_alpha", 0.005))),
+            "reg_lambda": max(2.0, float(best_auc_params.get("reg_lambda", 3.0))),
+            "max_bin": min(384, int(best_auc_params.get("max_bin", 320))),
+            "learning_rate": min(0.03, float(best_auc_params.get("learning_rate", 0.03))),
         })
         
         best_ll_params.update({
-            "min_child_weight": float(min(float(best_ll_params.get("min_child_weight", 0.005)), 0.005)),
-            "gamma": 0.0,
-            "max_leaves":       int(max(768,  int(best_ll_params.get("max_leaves", 0)) or 0)),
-            "max_depth":        int(max(18,   int(best_ll_params.get("max_depth", 0))  or 0)),
-            "subsample":        float(max(0.96, float(best_ll_params.get("subsample",        0.96)))),
-            "colsample_bytree": float(max(0.96, float(best_ll_params.get("colsample_bytree", 0.96)))),
-            "colsample_bynode": float(max(0.96, float(best_ll_params.get("colsample_bynode", 0.96)))),
-            "reg_alpha": 0.0,
-            "reg_lambda": float(min(0.80, float(best_ll_params.get("reg_lambda", 0.80)))),
-            "max_bin":    int(max(384,  int(best_ll_params.get("max_bin", 384)))),
-            "learning_rate": float(max(0.05, float(best_ll_params.get("learning_rate", 0.05)))),
-            "grow_policy": "lossguide",
+            **STABLE,
+            "min_child_weight": max(4.0, float(best_ll_params.get("min_child_weight", 4.0))),
+            "gamma": max(2.0, float(best_ll_params.get("gamma", 2.0))),
+            "max_leaves": min(256, int(best_ll_params.get("max_leaves", 192) or 192)),
+            "max_depth": min(8,   int(best_ll_params.get("max_depth", 6)   or 6)),
+            "subsample": min(0.85, float(best_ll_params.get("subsample", 0.80))),
+            "colsample_bytree": min(0.80, float(best_ll_params.get("colsample_bytree", 0.75))),
+            "colsample_bynode": min(0.80, float(best_ll_params.get("colsample_bynode", 0.75))),
+            "reg_alpha": max(5e-3, float(best_ll_params.get("reg_alpha", 0.01))),
+            "reg_lambda": max(3.0, float(best_ll_params.get("reg_lambda", 5.0))),
+            "max_bin": min(320, int(best_ll_params.get("max_bin", 256))),
+            "learning_rate": min(0.025, float(best_ll_params.get("learning_rate", 0.025))),
         })
-        
+
         # Remove unsafe/unused keys
         for k in ("monotone_constraints","interaction_constraints","predictor","objective",
                   "eval_metric","_estimator_type","response_method"):
@@ -6644,19 +6652,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
         
         # Spread AUC refit (stable/high‑capacity defaults)
+        # ✅ Stable AUC refit (keep the “tamed” profile)
         deep_auc.set_params(
             random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
-            subsample=1.0, colsample_bytree=1.0, colsample_bynode=1.0,
-            learning_rate=0.03, min_child_weight=0.05, gamma=0.0,
+            subsample=min(0.90, float(deep_auc.get_xgb_params().get("subsample", 0.85))),
+            colsample_bytree=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bytree", 0.80))),
+            colsample_bynode=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bynode", 0.80))),
+            learning_rate=min(0.03, float(deep_auc.get_xgb_params().get("learning_rate", 0.03))),
+            min_child_weight=max(2.0, float(deep_auc.get_xgb_params().get("min_child_weight", 2.0))),
+            gamma=max(1.0, float(deep_auc.get_xgb_params().get("gamma", 1.0))),
             grow_policy="lossguide",
-            max_leaves=max(512, int(deep_auc.get_xgb_params().get("max_leaves", 0)) or 512),
-            max_depth=max(8,   int(deep_auc.get_xgb_params().get("max_depth",  0)) or 8),
-            max_bin=max(320,   int(deep_auc.get_xgb_params().get("max_bin",    0)) or 320),
-            reg_alpha=0.0, reg_lambda=1.5,
+            max_leaves=min(384, int(deep_auc.get_xgb_params().get("max_leaves", 256) or 256)),
+            max_depth=min(10,  int(deep_auc.get_xgb_params().get("max_depth", 8)   or 8)),
+            max_bin=min(384,   int(deep_auc.get_xgb_params().get("max_bin", 320))),
+            reg_alpha=max(1e-3, float(deep_auc.get_xgb_params().get("reg_alpha", 0.005))),
+            reg_lambda=max(2.0, float(deep_auc.get_xgb_params().get("reg_lambda", 3.0))),
             n_estimators=1500,
+            eval_metric=["logloss","auc"],   # monitor both
         )
-        EARLY_STOP = 120
+        EARLY_STOP = 120  # keep
+
         
+        # === Final deep AUC fit (stabilized) ===
         deep_auc.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6674,56 +6691,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_iter   = getattr(deep_auc, "best_iteration", None)
         cap_hit     = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
         
-        needs_more_spread = (spread_std_raw < 0.05 and extreme_frac_raw < 0.20 and (best_iter or 0) < 30 and not cap_hit)
-        
-        if needs_more_spread:
-            deep_auc.set_params(
-                learning_rate=0.03, min_child_weight=0.03, gamma=0.0,
-                grow_policy="lossguide",
-                max_leaves=640, max_depth=9, max_bin=352,
-                subsample=1.0, colsample_bytree=1.0, colsample_bynode=1.0,
-                n_estimators=1800, eval_metric="auc",
-                random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
-                scale_pos_weight=scale_pos_weight,
-            )
-            deep_auc.fit(
-                X_tr_es, y_tr_es,
-                sample_weight=w_tr_es,
-                eval_set=[(X_va_es, y_va_es)],
-                sample_weight_eval_set=[w_va_es],
-                verbose=False,
-                early_stopping_rounds=140,
-            )
-            planned_cap  = int(deep_auc.get_xgb_params().get("n_estimators", 1800))
-            p_va_raw     = deep_auc.predict_proba(X_va_es)[:, 1]
-            spread_std_raw   = float(np.std(p_va_raw))
-            extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-            best_iter    = getattr(deep_auc, "best_iteration", None)
-            cap_hit      = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
-        
-        # simple per‑market logit calibration (favorites/overs only)
-        def _logit(p):    p = np.clip(p, 1e-6, 1 - 1e-6); return np.log(p / (1.0 - p))
-        def _invlogit(z): return 1.0 / (1.0 + np.exp(-z))
-        
-        y_bar = float(np.mean(y_va_es == 1))
-        p_bar = float(np.mean(p_va_raw))
-        if 0.0 < y_bar < 1.0 and 0.0 < p_bar < 1.0:
-            calib_offset = _logit(y_bar) - _logit(p_bar)
-            p_va_cal = _invlogit(_logit(p_va_raw) + calib_offset)
-        else:
-            calib_offset = 0.0
-            p_va_cal = p_va_raw
-        
-        spread_std_cal   = float(np.std(p_va_cal))
-        extreme_frac_cal = float(((p_va_cal < 0.35) | (p_va_cal > 0.65)).mean())
-        
-        st.session_state.setdefault("calibration", {})
-        st.session_state["calibration"]["spread_favorite_offset"] = float(calib_offset)
-        
         if best_iter is not None and best_iter >= 50:
             deep_auc.set_params(n_estimators=best_iter + 1)
         
-        # LogLoss ES refit
+        # === Final deep LogLoss fit ===
         deep_ll.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6732,8 +6703,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
+        
         if getattr(deep_ll, "best_iteration", None) is not None and deep_ll.best_iteration >= 50:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
+
         
         st.subheader("Spread AUC diagnostics")
         st.json({
@@ -6773,7 +6746,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             eval_metric="auc",
             max_bin=512,
             n_jobs=int(VCPUS),
-            grow_policy="depthwise",  # explicit override
+            #grow_policy="depthwise",  # explicit override
         )
         
         model_logloss = XGBClassifier(**params_ll_final)
@@ -7483,11 +7456,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             cal_blend = ("iso", _IdentityIsoCal(eps=eps))
         
         iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1-CLIP))
-        
+
+
+        # --- Helper to get final calibrated probs (blend → optional flip → calibrate+clip) ---
+        def predict_calibrated(models: dict, X):
+            # required keys: model_auc, model_logloss, best_w, iso_blend
+            pa = models["model_auc"].predict_proba(X)[:, 1]
+            pl = models["model_logloss"].predict_proba(X)[:, 1]
+            p_blend = float(models.get("best_w", 0.5)) * pl + (1.0 - float(models.get("best_w", 0.5))) * pa
+            if models.get("flip_flag", False):
+                p_blend = 1.0 - p_blend
+            # iso_blend is your _CalAdapter, already clipping (e.g., (CLIP, 1-CLIP))
+            return models["iso_blend"].predict(p_blend)
+
         # === Save ensemble (choose one or both)
         trained_models[market] = {
                 "model_logloss": model_logloss,
                 "model_auc":     model_auc,
+                "flip_flag":     bool(flip_flag),
                 "iso_blend":     iso_blend,
                 "best_w":        float(best_w),
                 "team_feature_map": team_feature_map,
