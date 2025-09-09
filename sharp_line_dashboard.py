@@ -6190,23 +6190,27 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         has_snapshots = (by_game_snaps.fillna(0).max() > 1)
         
+                groups_all = df_valid["Game_Key"].astype(str).to_numpy()
+        snap_ts    = pd.to_datetime(df_valid["Snapshot_Timestamp"], errors="coerce", utc=True)
+        game_ts    = pd.to_datetime(df_valid["Game_Start"],           errors="coerce", utc=True)
+        
+        # Use snapshot time if multiple snapshots exist, else game start time
         time_values_all = snap_ts.to_numpy() if has_snapshots else game_ts.to_numpy()
         
-        # Sport-aware embargo only when we truly have multiple snapshots
-        sport_key = str(sport).upper()
-        embargo_td = SPORT_EMBARGO.get(sport_key, SPORT_EMBARGO["default"]) if has_snapshots else pd.Timedelta(0)
-        
-        # Replace previous 'groups' and 'times'
+        # Final arrays used downstream
         groups = groups_all
         times  = time_values_all
         
-        # Guard: drop NaT times (rare but fatal for CV)
+        # ✅ Guard: drop NaT times (rare but fatal for CV) — PLACE THIS BLOCK RIGHT HERE
         if pd.isna(times).any():
             bad  = np.flatnonzero(pd.isna(times))
             keep = np.setdiff1d(np.arange(len(times)), bad)
-            X_full = X_full[keep]; y_full = y_full[keep]
-            groups = groups[keep]; times  = times[keep]
-        
+            X_full  = X_full[keep]
+            y_full  = y_full[keep]
+            groups  = groups[keep]
+            times   = times[keep]
+            df_valid = df_valid.iloc[keep].reset_index(drop=True)
+            
         # ---- Holdout = last ~N groups (time-forward, group-safe) ----
         meta  = pd.DataFrame({"group": groups, "time": pd.to_datetime(times, utc=True)})
         gmeta = (meta.groupby("group", as_index=False)["time"]
@@ -6313,7 +6317,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if bk_col:
             lift = _fallback_book_lift(train_df, bk_col, "SHARP_HIT_BOOL", prior=200.0)
             if not lift.empty:
-                top = lift.sort_values(ascending=False).head(8).round(3)
+                top = lift.sort_values(ascending=False).head(20).round(3)
                 st.write("🏷️ Book reliability (empirical, smoothed):")
                 st.json(top.to_dict())
 
