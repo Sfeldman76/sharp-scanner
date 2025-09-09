@@ -6713,7 +6713,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "best_iter": getattr(deep_auc, "best_iteration", None),
             "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
             "cap_hit": bool(cap_hit),
-            "needs_more_spread": bool(needs_more_spread),
+            
             "raw": {"spread_std": spread_std_raw, "extreme_frac": extreme_frac_raw, "y_bar": y_bar, "p_bar": p_bar},
             "calibrated": {"offset": float(calib_offset), "spread_std": spread_std_cal, "extreme_frac": extreme_frac_cal},
         })
