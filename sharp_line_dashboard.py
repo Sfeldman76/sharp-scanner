@@ -4725,6 +4725,124 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             st.exception(e)
             st.stop()
 
+
+    # === Build hist_df (closers + finals) once, then ρ lookups once ===
+    sport_label = sport.upper()
+    
+    # Ensure df_latest has teams
+    if not {"Home_Team_Norm","Away_Team_Norm"}.issubset(df_latest.columns):
+        df_latest = df_latest.merge(
+            df_bt[["Game_Key","Home_Team_Norm","Away_Team_Norm"]].drop_duplicates("Game_Key"),
+            on="Game_Key", how="left"
+        )
+    
+    # Closers from latest snapshot (per (Game, Market, Outcome, Book))
+    closers = df_latest[[
+        "Game_Key","Bookmaker","Market","Outcome","Value","Odds_Price",
+        "Home_Team_Norm","Away_Team_Norm"
+    ]].copy()
+    for c in ("Market","Outcome","Home_Team_Norm","Away_Team_Norm"):
+        closers[c] = closers[c].astype(str).str.lower().str.strip()
+    
+    is_spread = closers["Market"].eq("spreads")
+    is_total  = closers["Market"].eq("totals")
+    is_ml     = closers["Market"].eq("h2h")
+    
+    # spreads: home/away signed
+    sp_home = (closers[is_spread & (closers["Outcome"] == closers["Home_Team_Norm"])]
+               .assign(home_spread=pd.to_numeric(
+                   closers.loc[is_spread & (closers["Outcome"] == closers["Home_Team_Norm"]), "Value"], errors="coerce"))
+               [["Game_Key","Bookmaker","home_spread"]])
+    sp_away = (closers[is_spread & (closers["Outcome"] == closers["Away_Team_Norm"])]
+               .assign(away_spread=pd.to_numeric(
+                   closers.loc[is_spread & (closers["Outcome"] == closers["Away_Team_Norm"]), "Value"], errors="coerce"))
+               [["Game_Key","Bookmaker","away_spread"]])
+    
+    # totals: Over row
+    tot_over = (closers[is_total & closers["Outcome"].eq("over")]
+                .assign(close_total=pd.to_numeric(
+                    closers.loc[is_total & closers["Outcome"].eq("over"), "Value"], errors="coerce"))
+                [["Game_Key","Bookmaker","close_total"]])
+    
+    # ML: both sides → de-vigged fav prob per book
+    def _amer_to_prob_vec(x):
+        x = pd.to_numeric(x, errors="coerce")
+        return np.where(x >= 0, 100.0/(x+100.0), (-x)/((-x)+100.0))
+    
+    ml_home = closers[is_ml & (closers["Outcome"] == closers["Home_Team_Norm"])][["Game_Key","Bookmaker","Odds_Price"]].rename(columns={"Odds_Price":"ml_home"})
+    ml_away = closers[is_ml & (closers["Outcome"] == closers["Away_Team_Norm"])][["Game_Key","Bookmaker","Odds_Price"]].rename(columns={"Odds_Price":"ml_away"})
+    ml = ml_home.merge(ml_away, on=["Game_Key","Bookmaker"], how="outer")
+    ml["p_home_raw"]     = _amer_to_prob_vec(ml["ml_home"])
+    ml["p_away_raw"]     = _amer_to_prob_vec(ml["ml_away"])
+    ml["p_ml_fav_book"]  = np.where(
+        (ml["p_home_raw"] + ml["p_away_raw"]) > 0,
+        np.maximum(ml["p_home_raw"], ml["p_away_raw"]) / (ml["p_home_raw"] + ml["p_away_raw"]),
+        np.nan
+    )
+    
+    per_book = (sp_home.merge(sp_away, on=["Game_Key","Bookmaker"], how="outer")
+                      .merge(tot_over, on=["Game_Key","Bookmaker"],  how="outer")
+                      .merge(ml[["Game_Key","Bookmaker","p_ml_fav_book","p_home_raw","p_away_raw"]],
+                             on=["Game_Key","Bookmaker"], how="outer"))
+    
+    def _collapse_game(g):
+        # signed close_spread: favorite negative
+        hs = g["home_spread"].dropna()
+        as_ = g["away_spread"].dropna()
+        if not hs.empty or not as_.empty:
+            cand = []
+            if not hs.empty: cand.append(hs.min())           # home favorite => negative
+            if not as_.empty: cand.append(-abs(as_.min()))   # away favorite => negative
+            close_spread = np.nanmin(cand) if cand else np.nan
+        else:
+            close_spread = np.nan
+        return pd.Series(dict(
+            close_spread=close_spread,
+            close_total = g["close_total"].median(skipna=True),
+            p_ml_fav    = g["p_ml_fav_book"].median(skipna=True),
+            p_home_raw  = g["p_home_raw"].median(skipna=True),
+            p_away_raw  = g["p_away_raw"].median(skipna=True),
+        ))
+    
+    closers_game = per_book.groupby("Game_Key", as_index=False).apply(_collapse_game).reset_index(drop=True)
+    
+    # finals already loaded as df_results (you did this earlier)
+    key_map = (df_bt[["Game_Key","Merge_Key_Short"]].dropna().drop_duplicates("Game_Key"))
+    finals_slim = df_results.rename(columns={
+        "Score_Home_Score":"Home_Score",
+        "Score_Away_Score":"Away_Score"
+    })[["Merge_Key_Short","Game_Start","Home_Score","Away_Score","Sport","Home_Team","Away_Team"]]
+    
+    hist_df = (closers_game
+               .merge(key_map, on="Game_Key",  how="left")
+               .merge(finals_slim, on="Merge_Key_Short", how="left"))
+    
+    # Label outcomes
+    margin    = pd.to_numeric(hist_df["Home_Score"], errors="coerce") - pd.to_numeric(hist_df["Away_Score"], errors="coerce")
+    total_pts = pd.to_numeric(hist_df["Home_Score"], errors="coerce") + pd.to_numeric(hist_df["Away_Score"], errors="coerce")
+    home_spread_med = per_book.groupby("Game_Key")["home_spread"].median()
+    away_spread_med = per_book.groupby("Game_Key")["away_spread"].median()
+    hist_df = hist_df.merge(home_spread_med.rename("home_spread_med"), on="Game_Key", how="left") \
+                     .merge(away_spread_med.rename("away_spread_med"), on="Game_Key", how="left")
+    
+    home_fav = np.where(
+        pd.to_numeric(hist_df["home_spread_med"], errors="coerce") < 0, True,
+        np.where(pd.to_numeric(hist_df["away_spread_med"], errors="coerce") < 0, False, np.nan)
+    )
+    
+    hist_df["fav_covered"] = np.where(
+        np.isnan(home_fav), np.nan,
+        np.where(home_fav,
+                 margin > -pd.to_numeric(hist_df["home_spread_med"], errors="coerce"),
+                 (-margin) > -pd.to_numeric(hist_df["away_spread_med"], errors="coerce"))
+    )
+    hist_df["fav_won"]   = np.where(hist_df[["p_home_raw","p_away_raw"]].isna().any(axis=1), np.nan,
+                                    np.where(hist_df["p_home_raw"] >= hist_df["p_away_raw"], margin > 0, margin < 0))
+    hist_df["went_over"] = total_pts > pd.to_numeric(hist_df["close_total"], errors="coerce")
+    hist_df["Sport"]     = hist_df["Sport"].astype(str).str.upper()
+    
+    # ρ lookups (Spread↔Total, Spread↔ML, Total↔ML) — do this ONCE
+    ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist_df, sport=sport_label)
     # df_spreads is your historical spread rows (per outcome/book/snapshot)
     # must include: ['Sport','Game_Start','Home_Team_Norm','Away_Team_Norm','Outcome_Norm','Value']
     # Build the spread-rows input from your working frame
@@ -5783,18 +5901,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     base.append(c)
         # after you finish cleaning/deduping df_market (your canonical training rows)
         cross_pivots = build_cross_market_pivots_for_training(df_market)
-
         
-        # hist_df: pre-cutoff labeled games with closers & outcomes (one row per Game_Key)
-        # columns needed: Sport, close_spread, close_total, p_ml_fav, fav_won, fav_covered, went_over
-        ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist_df, sport=label)
         df_market = attach_pairwise_correlation_features(
-            df_market,           # <— was df_valid
+            df_market,
             cross_pivots,
             ST_lookup, SM_lookup, TM_lookup,
-            sport_default=label,
+            sport_default=sport_label,   # not 'label'
         )
 
+     
+        
 
         
         # --- start with your manual core list ---
