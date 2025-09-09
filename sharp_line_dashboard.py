@@ -6634,22 +6634,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         refit_threads = max(1, min(VCPUS, 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
         scale_pos_weight = max(1.0, neg_tr / max(pos_tr, 1.0))
-        
-        deep_ll = XGBClassifier(**{
-            **base_kwargs, **best_ll_params,
-            "n_estimators": DEEP_N_EST,
-            "max_bin": DEEP_MAX_BIN,
-            "n_jobs": refit_threads,
-            "eval_metric": "logloss",
-        })
-        deep_auc = XGBClassifier(
-            **{**base_kwargs, **best_auc_params},
+        for k in ("n_estimators", "eval_metric", "n_jobs", "max_bin", "scale_pos_weight"):
+            best_auc_params.pop(k, None)
+            best_ll_params.pop(k, None)
+                    
+        # AUC stream (early-stop on logloss; compute AUC after)
+        deep_auc = XGBClassifier(**{**base_kwargs, **best_auc_params})
+        deep_auc.set_params(
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
-            eval_metric="logloss",           # ← keep ONLY logloss here
-            scale_pos_weight=scale_pos_weight,
+            eval_metric="logloss",          # avoid auc.cc issue
+            scale_pos_weight=scale_pos_weight,  # set once here
         )
+        
+        # Logloss stream
+        deep_ll = XGBClassifier(**{**base_kwargs, **best_ll_params})
+        deep_ll.set_params(
+            n_estimators=DEEP_N_EST,
+            max_bin=DEEP_MAX_BIN,
+            n_jobs=refit_threads,
+            eval_metric="logloss",
+        )
+
         
         # Spread AUC refit (stable/high‑capacity defaults)
         # ✅ Stable AUC refit (keep the “tamed” profile)
