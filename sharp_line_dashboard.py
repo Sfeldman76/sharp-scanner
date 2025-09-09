@@ -6190,7 +6190,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         has_snapshots = (by_game_snaps.fillna(0).max() > 1)
         
-                groups_all = df_valid["Game_Key"].astype(str).to_numpy()
+        groups_all = df_valid["Game_Key"].astype(str).to_numpy()
         snap_ts    = pd.to_datetime(df_valid["Snapshot_Timestamp"], errors="coerce", utc=True)
         game_ts    = pd.to_datetime(df_valid["Game_Start"],           errors="coerce", utc=True)
         
