@@ -6472,7 +6472,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
         
-        # ================== FAST SEARCH → MODERATE/DEEP REFIT ===============================
+   # ================== FAST SEARCH → MODERATE/DEEP REFIT ===============================
+       
+        
         # Capacity knobs (right-sized for ~6 vCPUs)
         SEARCH_N_EST    = 800
         SEARCH_MAX_BIN  = 256
@@ -6571,13 +6573,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         
-        # Common stabilizers
+        # Common stabilizers (no callables in eval_metric)
         STABLE = dict(
             objective="binary:logistic",
             tree_method="hist",
             grow_policy="lossguide",
             max_delta_step=0.5,
-            eval_metric=["logloss","auc"],
         )
         
         best_auc_params.update({
@@ -6609,10 +6610,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "max_bin": min(320, int(best_ll_params.get("max_bin", 256))),
             "learning_rate": min(0.025, float(best_ll_params.get("learning_rate", 0.025))),
         })
-
-        # Remove unsafe/unused keys
+        
+        # Remove keys we'll set explicitly (and any metrics)
         for k in ("monotone_constraints","interaction_constraints","predictor","objective",
-                  "eval_metric","_estimator_type","response_method"):
+                  "eval_metric","_estimator_type","response_method",
+                  "n_estimators","n_jobs","max_bin","scale_pos_weight"):
             best_auc_params.pop(k, None)
             best_ll_params.pop(k, None)
         
@@ -6628,16 +6630,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # class presence
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
-        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single‑class; widen min_val_size or choose different fold."
+        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
         
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
         scale_pos_weight = max(1.0, neg_tr / max(pos_tr, 1.0))
-        for k in ("n_estimators", "eval_metric", "n_jobs", "max_bin", "scale_pos_weight"):
-            best_auc_params.pop(k, None)
-            best_ll_params.pop(k, None)
-                    
+        
         # AUC stream (early-stop on logloss; compute AUC after)
         deep_auc = XGBClassifier(**{**base_kwargs, **best_auc_params})
         deep_auc.set_params(
@@ -6645,57 +6644,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
             eval_metric="logloss",          # avoid auc.cc issue
-            scale_pos_weight=scale_pos_weight,  # set once here
+            scale_pos_weight=scale_pos_weight,
+            random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
+            subsample=min(0.90, float(deep_auc.get_xgb_params().get("subsample", 0.85))),
+            colsample_bytree=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bytree", 0.80))),
+            colsample_bynode=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bynode", 0.80))),
+            learning_rate=min(0.03, float(deep_auc.get_xgb_params().get("learning_rate", 0.03))),
+            min_child_weight=max(2.0, float(deep_auc.get_xgb_params().get("min_child_weight", 2.0))),
+            gamma=max(1.0, float(deep_auc.get_xgb_params().get("gamma", 1.0))),
+            grow_policy="lossguide",
+            max_leaves=min(384, int(deep_auc.get_xgb_params().get("max_leaves", 256) or 256)),
+            max_depth=min(10,  int(deep_auc.get_xgb_params().get("max_depth", 8)   or 8)),
+            reg_alpha=max(1e-3, float(deep_auc.get_xgb_params().get("reg_alpha", 0.005))),
+            reg_lambda=max(2.0, float(deep_auc.get_xgb_params().get("reg_lambda", 3.0))),
         )
         
-        # Logloss stream
         deep_ll = XGBClassifier(**{**base_kwargs, **best_ll_params})
         deep_ll.set_params(
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
             eval_metric="logloss",
-        )
-
-        
-        # Spread AUC refit (stable/high‑capacity defaults)
-        # ✅ Stable AUC refit (keep the “tamed” profile)
-        deep_auc.set_params(
             random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
-            subsample=min(0.90, float(deep_auc.get_xgb_params().get("subsample", 0.85))),
-            colsample_bytree=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bytree", 0.80))),
-            colsample_bynode=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bynode", 0.80))),
-            learning_rate=min(0.03, float(deep_auc.get_xgb_params().get("learning_rate", 0.03))),
-            min_child_weight=max(1.0, float(deep_auc.get_xgb_params().get("min_child_weight", 1.0))),
-            gamma=max(1.0, float(deep_auc.get_xgb_params().get("gamma", 1.0))),
-            grow_policy="lossguide",
-            max_leaves=min(384, int(deep_auc.get_xgb_params().get("max_leaves", 256) or 256)),
-            max_depth=min(10,  int(deep_auc.get_xgb_params().get("max_depth", 8)   or 8)),
-            max_bin=min(384,   int(deep_auc.get_xgb_params().get("max_bin", 320))),
-            reg_alpha=max(1e-3, float(deep_auc.get_xgb_params().get("reg_alpha", 0.005))),
-            reg_lambda=max(2.0, float(deep_auc.get_xgb_params().get("reg_lambda", 3.0))),
-            n_estimators=1500,
-            eval_metric=["logloss","auc"],   # monitor both
         )
-        EARLY_STOP = 240  # keep
-
         
-        def auc_safe_metric(preds, dtrain):
-            y = dtrain.get_label().astype(int)
-            w = dtrain.get_weight()
-            if w is not None and len(w):
-                w = np.asarray(w, dtype=np.float64)
-                w = np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
-                w[w < 0] = 0.0
-            # numeric safety
-            preds = np.asarray(preds, dtype=np.float64)
-            preds = np.clip(preds, 1e-12, 1 - 1e-12)
-            val = roc_auc_score(y, preds, sample_weight=w if (w is not None and len(w)) else None)
-            val = float(min(0.999999999, max(0.0, val)))  # clamp to [0, 1)
-            return "auc_safe", val, True  # higher is better
-
         # === Final deep AUC fit (stabilized) ===
-        deep_auc.set_params(eval_metric=["logloss", auc_safe_metric])  # ES on logloss, report AUC safely
         deep_auc.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6704,21 +6677,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
+        
         # diagnostics
         planned_cap = int(deep_auc.get_xgb_params().get("n_estimators", 1500))
-
-        
-        p_va_raw = deep_auc.predict_proba(X_va_es)[:, 1]
-        # numeric safety for AUC
-        p_va_raw = np.clip(p_va_raw, 1e-12, 1 - 1e-12)
-        auc_va   = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
-
-       
+        p_va_raw    = np.clip(deep_auc.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
+        auc_va      = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
         spread_std_raw   = float(np.std(p_va_raw))
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-        best_iter        = getattr(deep_auc, "best_iteration", None)
-        cap_hit          = bool(best_iter is not None and best_iter >= 0.8 * int(deep_auc.get_xgb_params().get("n_estimators", 1500)))
-
+        best_iter   = getattr(deep_auc, "best_iteration", None)
+        cap_hit     = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
+        
         if best_iter is not None and best_iter >= 50:
             deep_auc.set_params(n_estimators=best_iter + 1)
         
@@ -6731,19 +6699,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
-        
         if getattr(deep_ll, "best_iteration", None) is not None and deep_ll.best_iteration >= 50:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
-
         
         st.session_state.setdefault("calibration", {})
-        st.session_state["calibration"]["spread_favorite_offset"] = float(0.0)  # no longer used but kept for compatibility
+        st.session_state["calibration"]["spread_favorite_offset"] = float(0.0)  # kept for compatibility
         
         st.subheader("Spread AUC diagnostics")
         y_bar = float(np.mean(y_va_es == 1))
         p_bar = float(np.mean(p_va_raw))
-        
-
         st.json({
             "best_iter": best_iter,
             "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
@@ -6751,8 +6715,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "raw": {"spread_std": spread_std_raw, "extreme_frac": extreme_frac_raw, "y_bar": y_bar, "p_bar": p_bar},
             "auc_va_es": auc_va,
         })
-
-
+        
         # --- Final capacity / ES suggestions (compact & consistent) -------------------------
         DEFAULT_FINAL_N_EST   = 4000
         DEFAULT_ES_ROUNDS     = 400
@@ -6770,7 +6733,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         params_ll_final.pop("predictor", None)
         params_ll_final.update(
             n_estimators=int(final_estimators_cap),
-            eval_metric="logloss",
+            eval_metric="logloss",   # keep logloss to avoid auc.cc
             max_bin=512,
             n_jobs=int(VCPUS),
         )
@@ -6778,16 +6741,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         params_auc_final.pop("predictor", None)
         params_auc_final.update(
             n_estimators=int(final_estimators_cap),
-            eval_metric="auc",
+            eval_metric="logloss",   # also logloss; compute AUC separately if needed
             max_bin=512,
             n_jobs=int(VCPUS),
-            #grow_policy="depthwise",  # explicit override
         )
         
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
         
-        # Early‑stopped fits on ES fold
+        # Early-stopped fits on ES fold
         model_logloss.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6818,7 +6780,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             model_auc.set_params(n_estimators=n_trees_auc)
             model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
         
-        # Metric tails (compact)
+        # Metric tails (compact) — auc may be None since we trained with logloss only
         def _safe_metric_tail(clf, prefer):
             ev = getattr(clf, "evals_result_", {}) or {}
             ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
@@ -6832,7 +6794,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return (arr[-10:] if len(arr) >= 10 else arr), {"dataset": ds, "metric_key": key, "len": len(arr)}
         
         val_logloss_last10, info_log = _safe_metric_tail(model_logloss, "logloss")
-        val_auc_last10,     info_auc = _safe_metric_tail(model_auc,     "auc")
+        val_auc_last10,     info_auc = _safe_metric_tail(model_auc,     "auc")  # may be None
         
         st.write({
             "ES_n_trees_ll": getattr(model_logloss, "best_iteration", None),
@@ -6840,7 +6802,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "val_logloss_last10": val_logloss_last10,
             "val_auc_last10": val_auc_last10,
         })
-        
+
         # ================== Lightweight interpretation (optional, guarded) ==================
         DEBUG_INTERP = True
         if DEBUG_INTERP:
