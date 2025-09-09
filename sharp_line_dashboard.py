@@ -6642,14 +6642,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "n_jobs": refit_threads,
             "eval_metric": "logloss",
         })
-        deep_auc = XGBClassifier(**{
-            **base_kwargs, **best_auc_params,
-            "n_estimators": DEEP_N_EST,
-            "max_bin": DEEP_MAX_BIN,
-            "n_jobs": refit_threads,
-            "eval_metric": "auc",
-            "scale_pos_weight": scale_pos_weight,
-        })
+        deep_auc = XGBClassifier(
+            **{**base_kwargs, **best_auc_params},
+            n_estimators=DEEP_N_EST,
+            max_bin=DEEP_MAX_BIN,
+            n_jobs=refit_threads,
+            eval_metric="logloss",           # ← keep ONLY logloss here
+            scale_pos_weight=scale_pos_weight,
+        )
         
         # Spread AUC refit (stable/high‑capacity defaults)
         # ✅ Stable AUC refit (keep the “tamed” profile)
@@ -6697,15 +6697,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
-        
         # diagnostics
         planned_cap = int(deep_auc.get_xgb_params().get("n_estimators", 1500))
-        p_va_raw    = deep_auc.predict_proba(X_va_es)[:, 1]
+
+        
+        p_va_raw = deep_auc.predict_proba(X_va_es)[:, 1]
+        # numeric safety for AUC
+        p_va_raw = np.clip(p_va_raw, 1e-12, 1 - 1e-12)
+        auc_va   = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
+
+       
         spread_std_raw   = float(np.std(p_va_raw))
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-        best_iter   = getattr(deep_auc, "best_iteration", None)
-        cap_hit     = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
-        
+        best_iter        = getattr(deep_auc, "best_iteration", None)
+        cap_hit          = bool(best_iter is not None and best_iter >= 0.8 * int(deep_auc.get_xgb_params().get("n_estimators", 1500)))
+
         if best_iter is not None and best_iter >= 50:
             deep_auc.set_params(n_estimators=best_iter + 1)
         
@@ -6722,24 +6728,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if getattr(deep_ll, "best_iteration", None) is not None and deep_ll.best_iteration >= 50:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
 
-        y_bar = float(np.mean(y_va_es == 1))
-        p_bar = float(np.mean(p_va_raw))
         
         st.session_state.setdefault("calibration", {})
         st.session_state["calibration"]["spread_favorite_offset"] = float(0.0)  # no longer used but kept for compatibility
         
         st.subheader("Spread AUC diagnostics")
+        y_bar = float(np.mean(y_va_es == 1))
+        p_bar = float(np.mean(p_va_raw))
+        
+
         st.json({
-            "best_iter": getattr(deep_auc, "best_iteration", None),
+            "best_iter": best_iter,
             "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
             "cap_hit": bool(cap_hit),
-            "raw": {
-                "spread_std": spread_std_raw,
-                "extreme_frac": extreme_frac_raw,
-                "y_bar": y_bar,
-                "p_bar": p_bar
-            }
+            "raw": {"spread_std": spread_std_raw, "extreme_frac": extreme_frac_raw, "y_bar": y_bar, "p_bar": p_bar},
+            "auc_va_es": auc_va,
         })
+
 
         # --- Final capacity / ES suggestions (compact & consistent) -------------------------
         DEFAULT_FINAL_N_EST   = 4000
