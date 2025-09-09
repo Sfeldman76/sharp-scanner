@@ -6210,70 +6210,83 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
         # ✅ This line must come AFTER the split:
         train_df = df_valid.iloc[train_all_idx].copy()
-        def market_context_weights(m):
-            w_book = m.get('Book_Reliability_Score', pd.Series(1.0, index=m.index)).clip(0.6, 1.4)
-            w_mag  = m.get('Abs_Line_Move_From_Opening', 0).fillna(0).clip(0, 2.0) ** 0.7
-            is_too_late  = m.get('Potential_Overmove_Flag', 0).astype(int)
-            is_overnight = (m.get('Minutes_To_Game_Tier','') == 'Overnight_VeryEarly').astype(int) if 'Minutes_To_Game_Tier' in m else 0
-            w_time = (1.0 - 0.15*is_too_late) * (1.0 - 0.15*is_overnight)
-            p0 = m.get('Spread_Implied_Prob', m.get('H2H_Implied_Prob', 0.5)).astype(float).clip(0.01,0.99)
-            w_mid = np.where((p0>0.45)&(p0<0.55), 1.4, 1.0)
-            rev = ((m.get('Value_Reversal_Flag',0)==1)|(m.get('Odds_Reversal_Flag',0)==1)).astype(int)
-            w_rev = 1.0 - 0.15*rev
-            return (w_book.to_numpy('float32') * w_mag.to_numpy('float32') * w_time * w_mid * w_rev).astype('float32')
-        
-        w_ctx = market_context_weights(train_df)
-        w_train = (w_train * w_ctx)
-        w_train *= (len(w_train) / max(1.0, w_train.sum()))  # renormalize
+       
 
-
-        # ---- 5) Simple health checks (Streamlit friendly) ----
+           # ---- 5) Simple health checks (Streamlit friendly) ----
         st.markdown("### 🩺 Data Health Checks")
         
-        # 1. Class balance
+        # 0) Basic shape & groups
+        n_rows, n_feats = X_train.shape
+        n_games = len(pd.unique(g_train))
+        st.write(f"🔢 Train shape: {n_rows} rows × {n_feats} features | 🎮 Unique games: {n_games}")
+        
+        # 1) Class balance
         pos_rate = float(np.mean(y_train))
         st.write(f"✅ Class balance — Positives: `{pos_rate:.3f}` ({int(pos_rate * 100)}%)")
+        st.write(f"Counts — 1s: {int((y_train==1).sum())}, 0s: {int((y_train==0).sum())}")
         
-        # 2. Shape check
-        st.write(f"🔢 Train shape: {X_train.shape[0]} rows × {X_train.shape[1]} features")
-        
-        # 3. NaN check
+        # 2) NaN / Inf checks
         has_nan = np.isnan(X_train).any()
-        if has_nan:
-            st.error("❌ NaNs found in X_train")
+        has_inf = np.isinf(X_train).any()
+        if has_nan or has_inf:
+            st.error(f"❌ Bad values in X_train — NaN: {bool(has_nan)}, Inf: {bool(has_inf)}")
         else:
-            st.success("✅ No NaNs in X_train")
+            st.success("✅ No NaNs/Inf in X_train")
         
-        # 4. Constant columns (optional redundancy check)
-        n_const = (np.std(X_train, axis=0) < 1e-6).sum()
+        # 3) Constant/near-constant features (use float64 for stability)
+        n_const = (np.std(X_train.astype("float64"), axis=0) < 1e-6).sum()
         if n_const > 0:
-            st.warning(f"⚠️ {n_const} features are near-constant in X_train")
+            st.warning(f"⚠️ {int(n_const)} features are near-constant in X_train")
+        else:
+            st.success("✅ No near-constant features")
         
-        # 5. Class diversity in holdout (if known)
+        # 4) Holdout class diversity (if available)
         if 'y_hold_vec' in locals():
-            n_pos = (y_hold_vec == 1).sum()
-            n_neg = (y_hold_vec == 0).sum()
+            n_pos = int((y_hold_vec == 1).sum())
+            n_neg = int((y_hold_vec == 0).sum())
             st.write(f"📊 Holdout — Pos: {n_pos}, Neg: {n_neg}")
-            
-        bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
-            "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
-        )
         
-       
+        # 5) If you’re using sample weights, sanity check alignment
+        if 'w_train' in locals():
+            assert len(w_train) == len(y_train) == len(X_train), \
+                f"sample_weight misaligned: {len(w_train)} vs {len(y_train)} vs {len(X_train)}"
+            bad_w = np.sum(~np.isfinite(w_train))
+            if bad_w:
+                st.warning(f"⚠️ {int(bad_w)} non‑finite weights; they will be zeroed/renormed.")
+            st.write(f"🧮 Weight summary — mean: {float(np.mean(w_train)):.3f}, "
+                     f"min: {float(np.min(w_train)):.3f}, max: {float(np.max(w_train)):.3f}")
+        
+        # Optional: quick book‑level diagnostic (only if you want to use the helper)
         def _fallback_book_lift(df: pd.DataFrame, book_col: str, label_col: str, prior: float = 100.0):
             if (book_col is None) or (book_col not in df.columns) or (label_col not in df.columns):
                 return pd.Series(dtype=float)
             dfv = df[[book_col, label_col]].dropna()
             if dfv.empty:
                 return pd.Series(dtype=float)
-        
             y = pd.to_numeric(dfv[label_col], errors="coerce")
             m = float(np.nanmean(y))
-            grp = dfv.groupby(book_col)[label_col].agg(["sum", "count"]).rename(columns={"sum": "hits", "count": "n"})
+            grp = dfv.groupby(book_col)[label_col].agg(["sum","count"]).rename(columns={"sum":"hits","count":"n"})
             a = m * prior; b = (1.0 - m) * prior
             post_mean = (grp["hits"] + a) / (grp["n"] + a + b)
             lift = (post_mean / max(1e-9, m)) - 1.0
             return lift
+        
+        # Example usage (diagnostic only):
+        bk_col = "Bookmaker" if "Bookmaker" in train_df.columns else ("Bookmaker_Norm" if "Bookmaker_Norm" in train_df.columns else None)
+        if bk_col:
+            lift = _fallback_book_lift(train_df, bk_col, "SHARP_HIT_BOOL", prior=200.0)
+            if not lift.empty:
+                top = lift.sort_values(ascending=False).head(8).round(3)
+                st.write("🏷️ Book reliability (empirical, smoothed):")
+                st.json(top.to_dict())
+
+  
+       
+                
+        # --- Base weights from book/group structure ------------------------------------
+        bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
+            "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
+        )
         
         if bk_col is None:
             w_train = np.ones(len(train_df), dtype=np.float32)
@@ -6290,34 +6303,67 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 ngb = max(1, int(n_gb.get((g, b), 1)))
                 return 1.0 / (Bg * (ngb ** tau))
         
-            w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])], dtype=np.float32)
+            w_base = np.array([_w_gb(g, b, TAU) for g, b in zip(train_df["Game_Key"], train_df[bk_col])],
+                              dtype=np.float32)
         
-           # --- Sharp-book tilt only (no reliability map) --------------------------------
-            # Requires: train_df, w_base, bk_col, SHARP_BOOKS
-            
-            if bk_col not in train_df.columns:
-                raise KeyError(f"bk_col '{bk_col}' not found in train_df columns")
-            
-            # sharp flag
+            # Sharp-book tilt (no reliability map here)
             if "Is_Sharp_Book" in train_df.columns:
-                is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).astype(np.float32).to_numpy()
+                is_sharp = train_df["Is_Sharp_Book"].fillna(False).astype(bool).to_numpy(dtype=np.float32)
             else:
-                is_sharp = train_df[bk_col].isin(SHARP_BOOKS).astype(np.float32).to_numpy()
-            
-            ALPHA_SHARP = 0.60
-            
-            # base multiplier from sharp tilt
-            mult = 1.0 + ALPHA_SHARP * is_sharp
-          
-            # final weights
-            w_train = pd.Series(w_base, index=train_df.index).astype(np.float32).to_numpy()
+                is_sharp = train_df[bk_col].isin(SHARP_BOOKS).to_numpy(dtype=np.float32)
         
-            s = w_train.sum()
-            if s > 0:
-                w_train *= (len(w_train) / s)
+            ALPHA_SHARP = 0.60
+            mult = 1.0 + ALPHA_SHARP * is_sharp
+        
+            w_train = (w_base * mult).astype(np.float32)
+        
+        # --- Market/context multiplier (APPLY AFTER base weights) -----------------------
+        def market_context_weights(m: pd.DataFrame) -> np.ndarray:
+            w_book = m.get("Book_Reliability_Score", pd.Series(1.0, index=m.index)).clip(0.6, 1.4)
+            w_mag  = pd.to_numeric(m.get("Abs_Line_Move_From_Opening", 0), errors="coerce") \
+                       .fillna(0).clip(0, 2.0) ** 0.7
+        
+            # time flags (be robust to dtype)
+            if "Minutes_To_Game_Tier" in m.columns:
+                tier = m["Minutes_To_Game_Tier"].astype(str)
+                is_overnight = (tier == "Overnight_VeryEarly").astype(int)
+            else:
+                is_overnight = 0
+        
+            is_too_late = pd.to_numeric(m.get("Potential_Overmove_Flag", 0), errors="coerce").fillna(0).astype(int)
+            w_time = (1.0 - 0.15 * is_too_late) * (1.0 - 0.15 * is_overnight)
+        
+            # mid‑probability emphasis
+            p0_spread = pd.to_numeric(m.get("Spread_Implied_Prob", np.nan), errors="coerce")
+            p0 = p0_spread.fillna(pd.to_numeric(m.get("H2H_Implied_Prob", np.nan), errors="coerce")) \
+                         .fillna(0.5).clip(0.01, 0.99)
+            w_mid = np.where((p0 > 0.45) & (p0 < 0.55), 1.4, 1.0)
+        
+            # reversal deprioritization
+            rev = ((pd.to_numeric(m.get("Value_Reversal_Flag", 0), errors="coerce").fillna(0) == 1) |
+                   (pd.to_numeric(m.get("Odds_Reversal_Flag", 0),  errors="coerce").fillna(0) == 1)).astype(int)
+            w_rev = 1.0 - 0.15 * rev
+        
+            out = (w_book.to_numpy(dtype="float32")
+                   * w_mag.to_numpy(dtype="float32")
+                   * w_time.astype("float32")
+                   * w_mid.astype("float32")
+                   * w_rev.astype("float32"))
+            return np.asarray(out, dtype=np.float32)
+        
+        w_ctx = market_context_weights(train_df)
+        w_train = (w_train * w_ctx).astype(np.float32)
+        
+        # sanitize + renormalize
+        w_train[~np.isfinite(w_train)] = 0.0
+        s = float(w_train.sum())
+        if s > 0:
+            w_train *= (len(w_train) / s)
+        else:
+            w_train[:] = 1.0  # degenerate fallback
         
         assert len(w_train) == len(X_train), f"sample_weight misaligned: {len(w_train)} vs {len(X_train)}"
-        
+
         # ---------------------------------------------------------------------------
       
           #  CV with purge + embargo (snapshot-aware)
