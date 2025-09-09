@@ -6670,10 +6670,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_estimators=1500,
             eval_metric=["logloss","auc"],   # monitor both
         )
-        EARLY_STOP = 120  # keep
+        EARLY_STOP = 240  # keep
 
         
+        def auc_safe_metric(preds, dtrain):
+            y = dtrain.get_label().astype(int)
+            w = dtrain.get_weight()
+            if w is not None and len(w):
+                w = np.asarray(w, dtype=np.float64)
+                w = np.nan_to_num(w, nan=0.0, posinf=0.0, neginf=0.0)
+                w[w < 0] = 0.0
+            # numeric safety
+            preds = np.asarray(preds, dtype=np.float64)
+            preds = np.clip(preds, 1e-12, 1 - 1e-12)
+            val = roc_auc_score(y, preds, sample_weight=w if (w is not None and len(w)) else None)
+            val = float(min(0.999999999, max(0.0, val)))  # clamp to [0, 1)
+            return "auc_safe", val, True  # higher is better
+
         # === Final deep AUC fit (stabilized) ===
+        deep_auc.set_params(eval_metric=["logloss", auc_safe_metric])  # ES on logloss, report AUC safely
         deep_auc.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
