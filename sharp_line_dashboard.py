@@ -6707,17 +6707,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if getattr(deep_ll, "best_iteration", None) is not None and deep_ll.best_iteration >= 50:
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
 
+        y_bar = float(np.mean(y_va_es == 1))
+        p_bar = float(np.mean(p_va_raw))
+        
+        st.session_state.setdefault("calibration", {})
+        st.session_state["calibration"]["spread_favorite_offset"] = float(0.0)  # no longer used but kept for compatibility
         
         st.subheader("Spread AUC diagnostics")
         st.json({
             "best_iter": getattr(deep_auc, "best_iteration", None),
             "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
             "cap_hit": bool(cap_hit),
-            
-            "raw": {"spread_std": spread_std_raw, "extreme_frac": extreme_frac_raw, "y_bar": y_bar, "p_bar": p_bar},
-            "calibrated": {"offset": float(calib_offset), "spread_std": spread_std_cal, "extreme_frac": extreme_frac_cal},
+            "raw": {
+                "spread_std": spread_std_raw,
+                "extreme_frac": extreme_frac_raw,
+                "y_bar": y_bar,
+                "p_bar": p_bar
+            }
         })
-        
+
         # --- Final capacity / ES suggestions (compact & consistent) -------------------------
         DEFAULT_FINAL_N_EST   = 1800
         DEFAULT_ES_ROUNDS     = 100
