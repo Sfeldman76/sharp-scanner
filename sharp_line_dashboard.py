@@ -4503,17 +4503,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
    
     
     # === Get latest snapshot per Game_Key + Market + Outcome (avoid multi-snapshot double counting) ===
-    dedup_cols = [
-        'Game_Key','Market','Outcome','Bookmaker','Value',
-        'Sharp_Move_Signal','Sharp_Limit_Jump','Sharp_Time_Score','Sharp_Limit_Total',
-        'Is_Reinforced_MultiMarket','Market_Leader','LimitUp_NoMove_Flag'
-    ]
+    # === Get latest snapshot per Game_Key + Market + Outcome + Book (immutable) ===
+    DEDUP_KEY = ['Game_Key','Market','Outcome','Bookmaker']
     df_bt = (
         df_bt.sort_values('Snapshot_Timestamp')
-             .drop_duplicates(subset=dedup_cols, keep='last')
+             .drop_duplicates(subset=DEDUP_KEY, keep='last')
     )
 
-   
    
     with tmr("reliability features"):
         df_bt = add_book_reliability_features(df_bt, label_col="SHARP_HIT_BOOL", prior_strength=200.0)
@@ -4774,6 +4770,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         status.write(f"🚧 Training model for `{market.upper()}`...")
     
         df_market = df_bt[df_bt['Market'].astype(str).str.lower() == market].copy()
+        # --- Canonical side filter (EARLY to reduce noise/compute) ---
+        if market == "totals":
+            df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"]
+        else:  # spreads + h2h
+            df_market["Value"] = pd.to_numeric(df_market["Value"], errors="coerce")
+            df_market = df_market[df_market["Value"] < 0]
+        if df_market.empty:
+            pb.progress(min(100, max(0, pct)));  continue
+        df_market = (df_market.sort_values('Snapshot_Timestamp')
+                       .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last'))
 
        
         if df_market.empty:
@@ -4781,13 +4787,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             pb.progress(min(100, max(0, pct)))
             continue
         
-        # Totals: keep latest-per-outcome snapshot
-        if market == "totals":
-            df_market = (
-                df_market.sort_values(['Snapshot_Timestamp'])
-                         .drop_duplicates(subset=['Game_Key','Bookmaker','Market','Outcome'], keep='last')
-                         .reset_index(drop=True)
-            )
+ 
         
         # Defuse categoricals that can raise setitem errors
         for col in ("Sport","Market","Bookmaker"):
@@ -4823,7 +4823,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_market,
             emit_levels_str=False,  # keep memory tiny for training
         )
-
+        
        # === NEW: final-snapshot microstructure + hybrid timing (before normalization/canonical filter) ===
         df_market = compute_snapshot_micro_features_training(
             df_market,
@@ -4834,7 +4834,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             prob_col="Implied_Prob" if "Implied_Prob" in df_market.columns else None,
             price_col="Odds_Price" if "Odds_Price" in df_market.columns else None,
         )
-        
+        # === Compact domain interactions ===
+        df_market['ResistBreak_x_Mag']     = df_market.get('Was_Line_Resistance_Broken',0) * df_market.get('Abs_Line_Move_From_Opening',0).fillna(0)
+        df_market['LateSteam_x_KeyCount']  = df_market.get('Potential_Overmove_Flag',0)   * df_market.get('Line_Resistance_Crossed_Count',0).fillna(0)
+        df_market['Aligned_x_HighLimit']   = df_market.get('Line_Moved_Toward_Team',0)    * (df_market.get('Sharp_Limit_Total',0) >= 7000).astype(int)
+        df_market['Rev_x_BookLift']        = ((df_market.get('Value_Reversal_Flag',0)==1) | (df_market.get('Odds_Reversal_Flag',0)==1)).astype(int) \
+                                             * df_market.get('Book_Reliability_x_PROB_SHIFT',0).fillna(0)
+        df_market['GapExists_x_RecSkew']   = df_market.get('CrossMarket_Prob_Gap_Exists',0) * df_market.get('SmallBook_Limit_Skew_Flag',0)
+        df_market['Misalign_x_MoveAway']   = (df_market.get('model_fav_vs_market_fav_agree',1)==0).astype(int) * df_market.get('Line_Moved_Away_From_Team',0)
+
         # If you don’t want line-based metrics on H2H, zero them now
         if market == "h2h":
             for c in ["Dist_To_Next_Key","Key_Corridor_Pressure","Book_PctRank_Line",
@@ -5649,8 +5657,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
             ]
         ]
-        extend_unique(features, hybrid_timing_features)
-        extend_unique(features, hybrid_odds_timing_features)
+        #extend_unique(features, hybrid_timing_features)
+        #extend_unique(features, hybrid_odds_timing_features)
         timing_cols = build_timing_aggregates_inplace(df_bt)
 
         # extend your feature list with timing_cols (and remove the 32 originals)
@@ -5658,7 +5666,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         # add historical/streak features you computed earlier (schema-safe list)
         extend_unique(features, [c for c in history_present if c not in features])
-        
+        extend_unique(features, [
+            'ResistBreak_x_Mag','LateSteam_x_KeyCount','Aligned_x_HighLimit',
+            'Rev_x_BookLift','GapExists_x_RecSkew','Misalign_x_MoveAway'
+        ])
+
         # add recent team model performance stats
         extend_unique(features, [
             #'Team_Past_Avg_Model_Prob',
@@ -5729,10 +5741,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # 🔧 C FEATURES SAFELY (inplace mutation)
         features = c_features_inplace(df_market, features)
-       
+        
         # Final dataset for modeling
         feature_cols = [str(c) for c in features]
-        
+        if str(market).lower() == "spreads":
+            drop_like = ('Pct_Line_Move_From_Opening','Pct_Line_Move_Bin','Pct_Line_Move_Z')
+            feature_cols = [c for c in feature_cols if not any(x in c for x in drop_like)]
+
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
         X = (df_market[feature_cols]
              .apply(pd.to_numeric, errors='coerce')
@@ -5896,15 +5911,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # --- sport → embargo (top of file, once) ---
         SPORT_EMBARGO = {
-            "MLB":   pd.Timedelta("1 hours"),
-            "NBA":   pd.Timedelta("1 hours"),
+            "MLB":   pd.Timedelta("2 hours"),
+            "NBA":   pd.Timedelta("12 hours"),
             "NHL":   pd.Timedelta("1 hours"),
             "NCAAB": pd.Timedelta("11 hours"),
             "NFL":   pd.Timedelta("1 days"),
             "NCAAF": pd.Timedelta("1 days"),
-            "WNBA":  pd.Timedelta("1 hours"),
-            "MLS":   pd.Timedelta("1 hours"),
-            "default": pd.Timedelta("1 hours"),
+            "WNBA":  pd.Timedelta("8 hours"),
+            "MLS":   pd.Timedelta("12 hours"),
+            "default": pd.Timedelta("12 hours"),
         }
         def get_embargo_for_sport(sport: str) -> pd.Timedelta:
             return SPORT_EMBARGO.get(str(sport).upper(), SPORT_EMBARGO["default"])
@@ -6195,6 +6210,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         #if len(y_hold_vec):  st.write("Holdout class counts:", np.bincount(y_hold_vec))
         # ✅ This line must come AFTER the split:
         train_df = df_valid.iloc[train_all_idx].copy()
+        def market_context_weights(m):
+            w_book = m.get('Book_Reliability_Score', pd.Series(1.0, index=m.index)).clip(0.6, 1.4)
+            w_mag  = m.get('Abs_Line_Move_From_Opening', 0).fillna(0).clip(0, 2.0) ** 0.7
+            is_too_late  = m.get('Potential_Overmove_Flag', 0).astype(int)
+            is_overnight = (m.get('Minutes_To_Game_Tier','') == 'Overnight_VeryEarly').astype(int) if 'Minutes_To_Game_Tier' in m else 0
+            w_time = (1.0 - 0.15*is_too_late) * (1.0 - 0.15*is_overnight)
+            p0 = m.get('Spread_Implied_Prob', m.get('H2H_Implied_Prob', 0.5)).astype(float).clip(0.01,0.99)
+            w_mid = np.where((p0>0.45)&(p0<0.55), 1.4, 1.0)
+            rev = ((m.get('Value_Reversal_Flag',0)==1)|(m.get('Odds_Reversal_Flag',0)==1)).astype(int)
+            w_rev = 1.0 - 0.15*rev
+            return (w_book.to_numpy('float32') * w_mag.to_numpy('float32') * w_time * w_mid * w_rev).astype('float32')
+        
+        w_ctx = market_context_weights(train_df)
+        w_train = (w_train * w_ctx)
+        w_train *= (len(w_train) / max(1.0, w_train.sum()))  # renormalize
+
+
         # ---- 5) Simple health checks (Streamlit friendly) ----
         st.markdown("### 🩺 Data Health Checks")
         
@@ -6434,8 +6466,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             sample_per_fold=10000,
             random_state=42,
         )
-        
+        # Make selection pickier
+        # (if you keep shap_stability_select editable, use min_presence=0.6, max_keep=60).
+        if 'sign_flip_rate' in shap_summary.columns:
+            keep = shap_summary.loc[shap_summary['sign_flip_rate'] <= 0.30, 'feature'].tolist()
+            selected_feats = [f for f in selected_feats if f in keep]
         FEATURE_COLS_FINAL = tuple(selected_feats)
+
+        
         feature_cols = list(FEATURE_COLS_FINAL)
         features     = feature_cols
         
@@ -6716,7 +6754,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "auc_va_es": auc_va,
         })
         
-        # --- Final capacity / ES suggestions (compact & consistent) -------------------------
+        # --- Final capacity / ES suggestions ------------------------------------------------
         DEFAULT_FINAL_N_EST   = 4000
         DEFAULT_ES_ROUNDS     = 400
         final_estimators_cap  = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
@@ -6728,7 +6766,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         early_stopping_rounds = int(np.clip(es_suggest, 60, 220))
         early_stopping_rounds = min(early_stopping_rounds, max(50, final_estimators_cap // 3))
         
-        # --- Final params and models (single instantiation) ---------------------------------
+        # --- Final params and models (single instantiation) --------------------------------
         params_ll_final = {**base_kwargs, **best_ll_params}
         params_ll_final.pop("predictor", None)
         params_ll_final.update(
@@ -6737,6 +6775,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             max_bin=512,
             n_jobs=int(VCPUS),
         )
+        
         params_auc_final = {**base_kwargs, **best_auc_params}
         params_auc_final.pop("predictor", None)
         params_auc_final.update(
@@ -6746,10 +6785,26 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_jobs=int(VCPUS),
         )
         
+        # --- Monotone constraints (SET AFTER the updates above) ----------------------------
+        MONO = {
+            'Abs_Line_Move_From_Opening':           +1,
+            'Implied_Prob_Shift':                   +1,
+            'Was_Line_Resistance_Broken':           +1,
+            'Line_Resistance_Crossed_Count':        +1,
+            'Potential_Overmove_Flag':              +1,
+            'Value_Reversal_Flag':                  -1,
+            'Odds_Reversal_Flag':                   -1,
+        }
+        # IMPORTANT: feature_cols should be your final selected columns (after SHAP/whitelist)
+        mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
+        mono_str = f"({','.join(map(str, mono_vec))})"
+        params_ll_final['monotone_constraints']  = mono_str
+        params_auc_final['monotone_constraints'] = mono_str
+        
+        # --- Instantiate & fit -------------------------------------------------------------
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
         
-        # Early-stopped fits on ES fold
         model_logloss.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -6766,6 +6821,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=early_stopping_rounds,
         )
+
         
         # Best rounds
         n_trees_ll  = _best_rounds(model_logloss)
@@ -6779,7 +6835,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if n_trees_auc > 0:
             model_auc.set_params(n_estimators=n_trees_auc)
             model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
+
         
+
         # Metric tails (compact) — auc may be None since we trained with logloss only
         def _safe_metric_tail(clf, prefer):
             ev = getattr(clf, "evals_result_", {}) or {}
