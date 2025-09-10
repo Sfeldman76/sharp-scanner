@@ -1393,34 +1393,6 @@ def _devig_pair(p_a: float, p_b: float) -> float:
 
 
 
-
-
-def _norm_cdf(x):
-    """
-    Standard normal CDF that accepts scalars or numpy arrays.
-    Uses math.erf but vectorized safely.
-    """
-    x = np.asarray(x, dtype="float64")
-    return 0.5 * (1.0 + np.vectorize(erf)(x / np.sqrt(2.0)))  # NOTE: np.sqrt, not math.sqrt
-
-def _spread_to_winprob(spread_abs, sport):
-    """
-    Vectorized P(favorite wins) from spread magnitude using sport-specific sigma.
-    spread_abs: array-like of |spread|
-    sport: array-like of sport strings
-    """
-    spread_abs = np.asarray(spread_abs, dtype="float64")
-    sport = np.asarray(sport)
-
-    sigmas = np.array([
-        float(SPORT_SPREAD_CFG.get(str(sp).upper(), {"sigma_pts": 13.5})["sigma_pts"])
-        for sp in sport
-    ], dtype="float64")
-
-    z = np.divide(spread_abs, sigmas, out=np.full_like(spread_abs, np.nan), where=(sigmas > 0))
-    return _norm_cdf(z)
-
-
 def build_cross_market_pivots_for_training(df: pd.DataFrame) -> pd.DataFrame:
     need = [c for c in ["Game_Key","Bookmaker","Market","Outcome","Value","Odds_Price","Snapshot_Timestamp"] if c in df.columns]
     g = (df.loc[:, need]
@@ -3964,14 +3936,42 @@ def _prob_to_amer(p):
 
 # Heuristic scoring-volatility by sport (used for spread↔ML conversions; tune over time)
 SIGMA_ML = { "NFL": 10.5, "NCAAF": 12.0, "NBA": 12.0, "WNBA": 10.0, "CFL": 11.5, "MLB": 3.8 }
+# keep your imports:
+
+
+def _norm_cdf(x):
+    """Standard normal CDF; accepts scalar or ndarray."""
+    x = np.asarray(x, dtype="float64")
+    # vectorize math.erf so arrays are OK
+    return 0.5 * (1.0 + np.vectorize(erf)(x / np.sqrt(2.0)))  # NOTE: np.sqrt, not math.sqrt
+
+def _sigma_lookup(sp):
+    """Get sigma (points) for a sport from whichever mapping you have."""
+    sp_u = str(sp).upper()
+    if "SPORT_SPREAD_CFG" in globals() and sp_u in SPORT_SPREAD_CFG:
+        return float(SPORT_SPREAD_CFG[sp_u]["sigma_pts"])
+    if "SIGMA_ML" in globals() and sp_u in SIGMA_ML:
+        return float(SIGMA_ML[sp_u])
+    return 13.5  # sensible default
+
 def _spread_to_winprob(spread_pts, sport="NFL"):
-    """Rough favorite win prob from spread using normal CDF with sport-specific sigma.
-       Negative spread => favorite. P(win) = Φ(-spread/σ_ml)."""
-    from math import erf, sqrt
-    s = SIGMA_ML.get(str(sport).upper(), 11.0)
-    z = -pd.to_numeric(spread_pts, errors="coerce") / max(s, 1e-6)
-    # Φ(z) via erf
-    return 0.5 * (1.0 + erf(z / sqrt(2.0)))
+    """
+    P(favorite wins) from spread magnitude using Φ(|spread| / σ).
+    - spread_pts: scalar/array-like; can be signed or absolute
+    - sport: single string or array-like matching spread length
+    Returns ndarray.
+    """
+    spread = np.asarray(pd.to_numeric(spread_pts, errors="coerce"), dtype="float64")
+    # sport can be a single string or a vector (same length as spread)
+    if np.ndim(sport) == 0:
+        sigma = float(_sigma_lookup(sport))
+    else:
+        sport_arr = np.asarray(sport)
+        sigma = np.array([_sigma_lookup(sp) for sp in sport_arr], dtype="float64")
+
+    # use magnitude; negative spread just means "favorite"
+    z = np.divide(np.abs(spread), sigma, out=np.full_like(spread, np.nan), where=(np.asarray(sigma) > 0))
+    return _norm_cdf(z)
 
 # -------------------------
 # 1) Limit Dynamics (uses your existing limit columns)
