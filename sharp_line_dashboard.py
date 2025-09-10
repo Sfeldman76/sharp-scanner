@@ -1946,109 +1946,173 @@ def shap_stability_select(
     y: np.ndarray,
     folds,                       # iterable of (train_idx, valid_idx, *rest)
     *,
-    topk_per_fold: int = 60,     # K used to count "presence" within each fold
-    min_presence: float = 0.6,   # must appear in top-K in ≥60% of folds
-    max_keep: int | None = None, # hard cap after sorting by avg_abs_shap (optional)
-    sample_per_fold: int = 4000, # SHAP computed on a sample of train fold rows
+    topk_per_fold: int = 60,
+    min_presence: float = 0.6,
+    max_keep: int | None = None,
+    sample_per_fold: int = 4000,
     random_state: int = 42,
-    must_keep: list[str] = None  # always-keep features (unioned at the end)
+    must_keep: list[str] = None
 ):
     """
     Returns:
       selected_features: list[str]
-      summary_df: pd.DataFrame with avg_rank, presence, avg_abs_shap
+      summary_df: DataFrame indexed by feature with:
+        - avg_rank (lower better)
+        - presence (fraction of folds where feature is in per-fold top-K)
+        - avg_abs_shap (mean |SHAP| across folds)
+        - sign_flip_rate (fraction of folds disagreeing with the modal SHAP sign)
+        - shap_cv (std/mean of |SHAP| across folds; stability of magnitude)
     """
     try:
         import shap
     except Exception as e:
         raise RuntimeError("Install shap to use shap_stability_select") from e
 
-    feat = X.columns.tolist()
+    feat = list(X.columns)
     nF = len(feat)
     if nF == 0:
         return [], pd.DataFrame()
 
     rng = np.random.RandomState(random_state)
-    counts_in_topk = pd.Series(0, index=feat, dtype=int)
-    shap_sum = pd.Series(0.0, index=feat, dtype=float)
+    counts_in_topk   = pd.Series(0, index=feat, dtype=int)
+    shap_sum_abs     = pd.Series(0.0, index=feat, dtype=float)
+    per_fold_abs     = []  # list[pd.Series] of per-fold mean |SHAP|
+    per_fold_sign    = []  # list[pd.Series] of per-fold mean SHAP sign
     fold_rank_frames = []
 
-    # iterate folds defensively (supports (tr,va) or (tr,va,*,*))
     for fold in folds:
-        tr_idx, va_idx = fold[:2]
+        tr_idx, _ = fold[:2]
         Xtr, ytr = X.iloc[tr_idx], y[tr_idx]
 
-        # fit a fresh clone on the fold’s train
         mdl = clone(model_proto)
         mdl.fit(Xtr, ytr)
 
         # modest sample for speed/memory
         if len(Xtr) > sample_per_fold:
-            sample = Xtr.iloc[rng.choice(len(Xtr), size=sample_per_fold, replace=False)]
+            Xs = Xtr.iloc[rng.choice(len(Xtr), size=sample_per_fold, replace=False)]
         else:
-            sample = Xtr
+            Xs = Xtr
 
-        # fast tree explainer; stable for xgboost
+        # Use TreeExplainer for XGBoost/Tree models
         explainer = shap.TreeExplainer(mdl, feature_perturbation="tree_path_dependent")
-        sval = explainer.shap_values(sample)
+        sval = explainer.shap_values(Xs)
 
-        # binary case: ensure 2D array
-        if isinstance(sval, list):
-            # some versions return [class0, class1]; take positive class
+        # binary case compatibility
+        if isinstance(sval, list):  # some versions return [class0, class1]
             sval = sval[1]
         sval = np.asarray(sval)
-        shap_abs_mean = pd.Series(np.abs(sval).mean(axis=0), index=feat)
 
-        # accumulate
-        shap_sum = shap_sum.add(shap_abs_mean, fill_value=0.0)
+        # mean |SHAP| and mean signed SHAP per feature on this fold
+        abs_mean  = pd.Series(np.abs(sval).mean(axis=0), index=feat)
+        sign_mean = pd.Series(np.sign(sval).mean(axis=0), index=feat)  # in [-1,+1]
 
-        # per-fold ranking (1 = most important)
-        r = shap_abs_mean.rank(ascending=False, method="average")
+        shap_sum_abs = shap_sum_abs.add(abs_mean, fill_value=0.0)
+        per_fold_abs.append(abs_mean)
+        per_fold_sign.append(sign_mean)
+
+        r = abs_mean.rank(ascending=False, method="average")
         fold_rank_frames.append(r)
 
-        # count presence in top-K this fold
-        topk = shap_abs_mean.sort_values(ascending=False).head(min(topk_per_fold, nF)).index
+        topk = abs_mean.sort_values(ascending=False).head(min(topk_per_fold, nF)).index
         counts_in_topk.loc[topk] += 1
 
-    # aggregate across folds
-    n_folds = len(fold_rank_frames)
-    avg_rank = pd.concat(fold_rank_frames, axis=1).mean(axis=1)          # lower is better
-    presence = counts_in_topk / max(n_folds, 1)
-    avg_abs_shap = (shap_sum / max(n_folds, 1))
+    n_folds  = max(len(fold_rank_frames), 1)
+    avg_rank = pd.concat(fold_rank_frames, axis=1).mean(axis=1)
+    presence = counts_in_topk / n_folds
+    avg_abs  = shap_sum_abs / n_folds
 
-    # selection rule:
-    # 1) keep anything with presence ≥ min_presence
-    # 2) also keep the best-by-avg_abs_shap up to topk_per_fold (for safety)
-    keep_presence = presence.index[presence >= float(min_presence)].tolist()
-    keep_top_global = avg_abs_shap.sort_values(ascending=False).head(topk_per_fold).index.tolist()
+    # Sign flip rate: compare each fold's sign to modal sign across folds
+    S = pd.concat(per_fold_sign, axis=1) if per_fold_sign else pd.DataFrame(index=feat)
+    if not S.empty:
+        modal_sign = np.sign(S.mean(axis=1)).replace(0, 1)  # treat 0 ~ weak; bias to +1
+        disagree   = (np.sign(S).replace(0, 1).ne(modal_sign, axis=0)).sum(axis=1)
+        sign_flip_rate = disagree / n_folds
+    else:
+        sign_flip_rate = pd.Series(0.0, index=feat)
 
-    # stable order: by descending avg_abs_shap
+    # SHAP coefficient of variation for magnitude across folds
+    A = pd.concat(per_fold_abs, axis=1) if per_fold_abs else pd.DataFrame(index=feat)
+    if not A.empty:
+        shap_cv = (A.std(axis=1) / (A.mean(axis=1).replace(0, np.nan))).fillna(0.0)
+    else:
+        shap_cv = pd.Series(0.0, index=feat)
+
+    # Base selection: top-K globally + presence threshold
+    keep_presence   = presence.index[presence >= float(min_presence)].tolist()
+    keep_top_global = avg_abs.sort_values(ascending=False).head(topk_per_fold).index.tolist()
+
     selected = list(dict.fromkeys(keep_top_global + keep_presence))
-    selected = sorted(selected, key=lambda c: (-avg_abs_shap[c], avg_rank[c]))
+    # Stable order: primary avg_abs desc, tie-break by avg_rank asc, then lower sign_flip and cv
+    selected = sorted(
+        selected,
+        key=lambda c: (-float(avg_abs[c]), float(avg_rank[c]), float(sign_flip_rate[c]), float(shap_cv[c]))
+    )
 
-    # union must-keep
+    # Union must_keep
     if must_keep:
         for c in must_keep:
             if c in feat and c not in selected:
                 selected.append(c)
 
-    # optional cap
+    # Optional global cap
     if max_keep is not None and len(selected) > max_keep:
-        # respect ordering by SHAP, but ensure must_keep are kept
         base = [c for c in selected if (not must_keep or c not in must_keep)]
         head = base[: max_keep - (len(must_keep or []))]
         selected = head + [c for c in (must_keep or []) if c in feat and c not in head]
 
     summary = (
         pd.DataFrame({
-            "avg_rank": avg_rank,
-            "presence": presence,
-            "avg_abs_shap": avg_abs_shap
+            "feature":       feat,
+            "avg_rank":      avg_rank,
+            "presence":      presence,
+            "avg_abs_shap":  avg_abs,
+            "sign_flip_rate":sign_flip_rate,
+            "shap_cv":       shap_cv,
         })
+        .set_index("feature")
         .loc[selected]
         .sort_values(["avg_abs_shap","presence"], ascending=[False, False])
     )
     return selected, summary
+
+def greedy_corr_prune(
+    X: pd.DataFrame,
+    candidates: list[str],
+    *,
+    rank_df: pd.DataFrame,    # the summary returned above (index=feature)
+    corr_thresh: float = 0.92,
+    must_keep: list[str] = None
+) -> list[str]:
+    must_keep = [c for c in (must_keep or []) if c in candidates]
+    # Sort by desirability: high SHAP, high presence, low flip/cv
+    order = (
+        rank_df.loc[candidates]
+        .assign(_key = lambda d: list(zip(-d["avg_abs_shap"], -d["presence"], d["sign_flip_rate"], d["shap_cv"])))
+        .sort_values("_key").index.tolist()
+    )
+    kept = []
+    banned = set()
+
+    # Precompute corr on candidate slice only (faster + memory-safe)
+    M = X.loc[:, [c for c in candidates if c in X.columns]]
+    C = M.corr().abs()
+
+    # Seed with must_keep first
+    for c in must_keep:
+        kept.append(c)
+        banned.update(C.index[C[c] > corr_thresh].tolist())
+
+    for c in order:
+        if c in banned or c in kept:
+            continue
+        kept.append(c)
+        banned.update(C.index[C[c] > corr_thresh].tolist())
+
+    # Ensure must_keep in final
+    for c in must_keep:
+        if c not in kept:
+            kept.insert(0, c)
+    return kept
 
 
 def _to_float_1d(x):
@@ -6974,6 +7038,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         # ================== SHAP stability selection (on pruned set) ==================
+        # 1) SHAP stability on a pruned base set
         X_train_df = pd.DataFrame(X_train, columns=list(features_pruned))
         
         selected_feats, shap_summary = shap_stability_select(
@@ -6988,19 +7053,61 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             ),
             X=X_train_df,
             y=y_train,
-            folds=folds,                # same row indices
+            folds=folds,                # (train_idx, valid_idx)
             topk_per_fold=10,
-            min_presence=0.5,
-            max_keep=80,
+            min_presence=0.6,           # a bit stricter is fine
+            max_keep=120,               # loose pre-cap; prune correlations next
             sample_per_fold=10000,
             random_state=42,
+
         )
-        # Make selection pickier
-        # (if you keep shap_stability_select editable, use min_presence=0.6, max_keep=60).
-        if 'sign_flip_rate' in shap_summary.columns:
-            keep = shap_summary.loc[shap_summary['sign_flip_rate'] <= 0.30, 'feature'].tolist()
-            selected_feats = [f for f in selected_feats if f in keep]
-        FEATURE_COLS_FINAL = tuple(selected_feats)
+        
+        # Optional: enforce extra stability filters BEFORE corr pruning
+        stable_mask = (
+            (shap_summary["sign_flip_rate"] <= 0.30) &
+            (shap_summary["shap_cv"] <= 1.00)        # cv <= 1 is a reasonable soft guard
+        )
+        selected_feats = [f for f in selected_feats if f in shap_summary.index[stable_mask]]
+        
+        # 2) Greedy correlation prune → tidy, diverse set
+        FEATURE_COLS_FINAL = tuple(
+            greedy_corr_prune(
+                X=X_train_df,
+                candidates=selected_feats,
+                rank_df=shap_summary,
+                corr_thresh=0.92,        # tighten to 0.90 if still redundant
+                must_keep=["Is_Home_Team_Bet","Is_Favorite_Bet"]  # keep your invariants
+            )
+        )
+        SOFT_KEEP_BONUS = {
+            "Minutes_To_Game_Tier": 0.05,
+            "Abs_Line_Move_From_Opening": 0.03,
+            "Abs_Odds_Move_From_Opening": 0.03,
+            "Is_Sharp_Book": 0.02,
+            "Spread_vs_H2H_Aligned": 0.02,
+        }
+        ss = shap_summary.copy()
+        ss["_score"] = (
+            ss["avg_abs_shap"].rank(pct=True, ascending=False)
+            + 0.5*ss["presence"]
+            - 0.2*ss["sign_flip_rate"]
+            - 0.1*ss["shap_cv"]
+            + ss.index.to_series().map(SOFT_KEEP_BONUS).fillna(0.0)
+        )
+        ranked = ss.loc[selected_feats].sort_values("_score", ascending=False).index.tolist()
+        FEATURE_COLS_FINAL = tuple(
+            greedy_corr_prune(X_train_df, ranked, rank_df=shap_summary, corr_thresh=0.92, must_keep=None)
+        )
+
+        # (Optional) Hard cap after pruning
+        MAX_FEATS = 60
+        if len(FEATURE_COLS_FINAL) > MAX_FEATS:
+            # keep best by SHAP among the pruned set
+            keep_order = shap_summary.loc[list(FEATURE_COLS_FINAL)].sort_values(
+                ["avg_abs_shap","presence"], ascending=[False, False]
+            ).index.tolist()
+            FEATURE_COLS_FINAL = tuple(keep_order[:MAX_FEATS])
+
 
         
         feature_cols = list(FEATURE_COLS_FINAL)
