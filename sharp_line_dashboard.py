@@ -10488,6 +10488,6 @@ else:
             render_power_ranking_tab(tab=power_tab, sport_label=label, sport_key_api=sport_key, bq_client=client, show_edges=False)
         
         with situation_tab:
-            render_situation_db_tab()
+            render_situation_db_tab(selected_sport=sport)   # 
 
 
