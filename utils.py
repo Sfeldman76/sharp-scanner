@@ -4514,7 +4514,7 @@ def build_cross_market_pivots_for_training(df):
 
 # --- Corr lookup builder (expects hist with required cols) --------------------
 def build_corr_lookup_ST_SM_TM(hist, sport: str = "NFL"):
-    import pandas as pd, numpy as np
+   
     if hist is None or hist.empty:
         # Return empty frames with stable schemas
         return (pd.DataFrame(columns=["spread_bin","total_bin","rho_ST","n"]),
@@ -4560,8 +4560,7 @@ def attach_cross_market_bins_and_corr(
     - Optionally merges rho_ST / rho_SM / rho_TM from historical lookup (if available)
     - Leaves NaNs when data is missing (no defaults).
     """
-    import pandas as pd
-
+    
     if df is None or df.empty:
         return df
 
