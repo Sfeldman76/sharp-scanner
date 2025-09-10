@@ -10422,7 +10422,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
                 .style.format({'Win_Rate': '{:.1%}'})
             )
 
-
+from streamlit_situations_tab import render_situation_db_tab
 # --- Sidebar navigation
 sport = st.sidebar.radio("Select a League", ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"])
 
@@ -10470,8 +10470,9 @@ else:
     if conflicting:
         st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
     elif run_scanner:
-        scan_tab, analysis_tab, power_tab = st.tabs(["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings"])
-
+        scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
+            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
+        )
         
         with scan_tab:
             render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
@@ -10485,6 +10486,8 @@ else:
             client = bigquery.Client(project="sharplogger", location="us")
             # Set show_edges=True if you want the bottom section that calls attach_ratings_and_edges_for_diagnostics(...)
             render_power_ranking_tab(tab=power_tab, sport_label=label, sport_key_api=sport_key, bq_client=client, show_edges=False)
-
+        
+        with situation_tab:
+            render_situation_db_tab()
 
 
