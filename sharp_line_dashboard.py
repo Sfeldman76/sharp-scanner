@@ -156,7 +156,7 @@ from xgboost import XGBClassifier
 # put near your imports (only once)
 from sklearn.base import is_classifier as sk_is_classifier
 import sys, inspect, xgboost, sklearn
-
+from numpy import erf as _erf
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
@@ -164,6 +164,13 @@ from sklearn.calibration import CalibratedClassifierCV, calibration_curve
 from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
 from sklearn.model_selection import StratifiedKFold, RandomizedSearchCV
 from sklearn.metrics import log_loss, make_scorer
+import numpy as np
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+import numpy as np, pandas as pd
+from math import erf as _erf
+
 
 from sklearn.feature_selection import VarianceThreshold
 pandas_gbq.context.project = GCP_PROJECT_ID  # credentials will be inferred
@@ -627,14 +634,6 @@ class _IdentityCal:
         p = np.clip(p, self.eps, 1.0 - self.eps)
         return np.c_[1.0 - p, p]
 
-import numpy as np
-from sklearn.isotonic import IsotonicRegression
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
-import numpy as np, pandas as pd
-
-from sklearn.metrics import roc_auc_score
-import numpy as np, pandas as pd
 
 def perm_auc_importance(
     est,
@@ -1392,14 +1391,43 @@ def _devig_pair(p_a: float, p_b: float) -> float:
     s = p_a + p_b
     return np.nan if s <= 0 else p_a / s  # returns prob for the "A" leg
 
-def _norm_cdf(x): return 0.5*(1.0 + erf(x / sqrt(2.0)))
+
+
+# Try vectorized erf from NumPy; fall back to math.erf with vectorize if needed
+try:
+      # present in modern NumPy
+    _HAS_VECTOR_ERF = True
+except Exception:
+    
+    _HAS_VECTOR_ERF = False
+
+def _norm_cdf(x):
+    """Φ(x) that accepts scalar or ndarray, returns ndarray."""
+    x = np.asarray(x, dtype="float64")
+    if _HAS_VECTOR_ERF:
+        return 0.5 * (1.0 + _erf(x / np.sqrt(2.0)))
+    # fallback: apply scalar erf elementwise
+    x2 = x / np.sqrt(2.0)
+    return np.vectorize(lambda t: 0.5 * (1.0 + _erf(float(t))))(x2)
 
 def _spread_to_winprob(spread_abs: np.ndarray, sport: np.ndarray) -> np.ndarray:
-    out = np.full_like(spread_abs, np.nan, dtype="float64")
-    for i, (s, sp) in enumerate(zip(spread_abs, sport)):
-        sigma = float(SPORT_SPREAD_CFG.get(str(sp).upper(), {"sigma_pts": 13.5})["sigma_pts"])
-        out[i] = _norm_cdf(float(s) / sigma)
-    return out
+    """
+    Vectorized P(favorite wins) from spread magnitude using sport-specific sigma.
+    spread_abs: array of |spread|
+    sport: array of sport strings
+    """
+    spread_abs = np.asarray(spread_abs, dtype="float64")
+    sport = np.asarray(sport)
+    # build sigma per row
+    sigmas = np.array([
+        float(SPORT_SPREAD_CFG.get(str(sp).upper(), {"sigma_pts": 13.5})["sigma_pts"])
+        for sp in sport
+    ], dtype="float64")
+    # avoid divide-by-zero; keep NaN where sigma is invalid
+    z = np.divide(spread_abs, sigmas, out=np.full_like(spread_abs, np.nan), where=(sigmas > 0))
+    return _norm_cdf(z)
+
+
 def build_cross_market_pivots_for_training(df: pd.DataFrame) -> pd.DataFrame:
     need = [c for c in ["Game_Key","Bookmaker","Market","Outcome","Value","Odds_Price","Snapshot_Timestamp"] if c in df.columns]
     g = (df.loc[:, need]
