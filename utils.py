@@ -5064,16 +5064,16 @@ def apply_blended_sharp_score(
     df,
     trained_models,
     df_all_snapshots=None,
-    sport: str | None = None, 
-    weights=None,
+    weights=None,                 # ← keep as 4th positional (back-compat)
     *,
-    mem_profile: bool = True,          # ← turn on/off
-    mem_interval_s: float = 5.0,       # ← how often to log
-    mem_topn: int = 8,                 # ← how many heavy locals to list
-    mem_gc_threshold_mb: float | None = None,  # ← e.g., 3500 for 3.5 GB auto-GC
-    mem_log_df_columns: bool = False,  # ← one-off df column breakdown
+    sport: str | None = None,     # ← keyword-only now
+    mem_profile: bool = True,
+    mem_interval_s: float = 5.0,
+    mem_topn: int = 8,
+    mem_gc_threshold_mb: float | None = None,
+    mem_log_df_columns: bool = False,
 ):
-    logger.info("🛠️ Running `apply_blended_sharp_score()`")
+
 
 
         # --- init sampler ---
