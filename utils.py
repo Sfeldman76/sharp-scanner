@@ -4418,6 +4418,202 @@ def _enrich_snapshot_micro_and_resistance(df_in: pd.DataFrame) -> pd.DataFrame:
 
     return df_tmp
 
+# --- Prob/De-vig helpers ------------------------------------------------------
+def _amer_to_prob_one(odds) -> float:
+    import numpy as np, pandas as pd
+    if pd.isna(odds): return np.nan
+    o = float(odds)
+    return 100.0/(o+100.0) if o >= 0 else (-o)/((-o)+100.0)
+
+def _devig_pair(p_a: float, p_b: float) -> float:
+    import numpy as np
+    if np.isnan(p_a) or np.isnan(p_b): return np.nan
+    s = p_a + p_b
+    return np.nan if s <= 0 else p_a / s  # prob for "A" leg after de-vig
+
+# --- Binning helpers (NFL defaults; tweak per sport if needed) ----------------
+def _bin_spread(x):
+    import numpy as np, pandas as pd
+    if pd.isna(x): return np.nan
+    x = abs(float(x))
+    return "≥10" if x >= 10 else ("7–9.5" if x >= 7 else ("3–6.5" if x >= 3 else "<3"))
+
+def _bin_total(x):
+    import numpy as np, pandas as pd
+    if pd.isna(x): return np.nan
+    x = float(x)
+    return "high" if x >= 52 else ("mid" if x >= 46 else "low")
+
+def _bin_ml(p):
+    import numpy as np, pandas as pd
+    if pd.isna(p): return np.nan
+    p = float(p)
+    if   p >= 0.80: return "≥0.80"
+    elif p >= 0.70: return "0.70–0.79"
+    elif p >= 0.60: return "0.60–0.69"
+    else:           return "0.50–0.59"
+
+def _rho_xy(x_bool, y_bool) -> float:
+    import numpy as np, pandas as pd
+    x = pd.Series(x_bool).astype(float).to_numpy()
+    y = pd.Series(y_bool).astype(float).to_numpy()
+    if len(x) < 150 or np.nanstd(x) == 0 or np.nanstd(y) == 0:  # stability guard
+        return np.nan
+    return float(np.corrcoef(x, y)[0, 1])
+
+# --- Build cross-market pivots from (latest) snapshots ------------------------
+def build_cross_market_pivots_for_training(df):
+    import pandas as pd, numpy as np
+    need = [c for c in ["Game_Key","Bookmaker","Market","Outcome","Value","Odds_Price","Snapshot_Timestamp"] if c in df.columns]
+    if not need:
+        return pd.DataFrame(columns=["Game_Key","Bookmaker","Spread_Value","Total_Value","p_over","p_ml_fav"])
+
+    g = (df.loc[:, need]
+           .sort_values("Snapshot_Timestamp")
+           .groupby(["Game_Key","Bookmaker","Market","Outcome"], as_index=False)
+           .tail(1))
+
+    # Spread magnitude (abs points)
+    spread = g[g["Market"].str.lower().eq("spreads")].copy()
+    if not spread.empty:
+        spread["Spread_Value"] = pd.to_numeric(spread["Value"], errors="coerce").abs()
+        spread = spread.groupby(["Game_Key","Bookmaker"], as_index=False)\
+                       .agg(Spread_Value=("Spread_Value","max"))
+    else:
+        spread = pd.DataFrame(columns=["Game_Key","Bookmaker","Spread_Value"])
+
+    # Totals p(Over), de-vig
+    tots = g[g["Market"].str.lower().eq("totals")].copy()
+    if not tots.empty:
+        tots["Outcome_l"]  = tots["Outcome"].astype(str).str.lower()
+        tots["Total_Value"] = pd.to_numeric(tots["Value"], errors="coerce")
+        tots["p_raw"]       = tots["Odds_Price"].map(_amer_to_prob_one)
+        over  = tots[tots["Outcome_l"].eq("over") ][["Game_Key","Bookmaker","Total_Value","p_raw"]].rename(columns={"p_raw":"p_over_raw"})
+        under = tots[tots["Outcome_l"].eq("under")][["Game_Key","Bookmaker","p_raw"]].rename(columns={"p_raw":"p_under_raw"})
+        tot_p = over.merge(under, on=["Game_Key","Bookmaker"], how="left", validate="m:1")
+        tot_p["p_over"] = tot_p.apply(lambda r: _devig_pair(r["p_over_raw"], r["p_under_raw"]), axis=1)
+        tot_p = tot_p[["Game_Key","Bookmaker","Total_Value","p_over"]]
+    else:
+        tot_p = pd.DataFrame(columns=["Game_Key","Bookmaker","Total_Value","p_over"])
+
+    # H2H favorite prob, de-vig
+    h2h = g[g["Market"].str.lower().eq("h2h")].copy()
+    if not h2h.empty:
+        h2h["p_raw"] = h2h["Odds_Price"].map(_amer_to_prob_one)
+        favdog = (h2h.sort_values(["Game_Key","Bookmaker","p_raw"], ascending=[True, True, False])
+                    .groupby(["Game_Key","Bookmaker"], as_index=False)
+                    .agg(p_fav_raw=("p_raw","first"), p_dog_raw=("p_raw","last")))
+        favdog["p_ml_fav"] = favdog.apply(lambda r: _devig_pair(r["p_fav_raw"], r["p_dog_raw"]), axis=1)
+        favdog = favdog[["Game_Key","Bookmaker","p_ml_fav"]]
+    else:
+        favdog = pd.DataFrame(columns=["Game_Key","Bookmaker","p_ml_fav"])
+
+    out = (spread.merge(tot_p, on=["Game_Key","Bookmaker"], how="outer")
+                 .merge(favdog, on=["Game_Key","Bookmaker"], how="outer"))
+    return out
+
+# --- Corr lookup builder (expects hist with required cols) --------------------
+def build_corr_lookup_ST_SM_TM(hist, sport: str = "NFL"):
+    import pandas as pd, numpy as np
+    if hist is None or hist.empty:
+        # Return empty frames with stable schemas
+        return (pd.DataFrame(columns=["spread_bin","total_bin","rho_ST","n"]),
+                pd.DataFrame(columns=["spread_bin","ml_bin","rho_SM","n"]),
+                pd.DataFrame(columns=["total_bin","ml_bin","rho_TM","n"]))
+    H = hist.loc[hist["Sport"].astype(str).str.upper().eq(str(sport).upper())].copy()
+    # bins (create if missing)
+    if "spread_bin" not in H.columns and "close_spread" in H.columns:
+        H["spread_bin"] = H["close_spread"].apply(_bin_spread)
+    if "total_bin" not in H.columns and "close_total" in H.columns:
+        H["total_bin"]  = H["close_total"].apply(_bin_total)
+    if "ml_bin" not in H.columns and "p_ml_fav" in H.columns:
+        H["ml_bin"]     = H["p_ml_fav"].apply(_bin_ml)
+
+    # guard for label columns
+    if not set(["fav_covered","went_over","fav_won"]).issubset(H.columns):
+        return (pd.DataFrame(columns=["spread_bin","total_bin","rho_ST","n"]),
+                pd.DataFrame(columns=["spread_bin","ml_bin","rho_SM","n"]),
+                pd.DataFrame(columns=["total_bin","ml_bin","rho_TM","n"]))
+
+    ST_rows = [{'spread_bin':sb,'total_bin':tb,'rho_ST':_rho_xy(g['fav_covered'],g['went_over']),'n':len(g)}
+               for (sb,tb), g in H.groupby(['spread_bin','total_bin'], dropna=True)]
+    SM_rows = [{'spread_bin':sb,'ml_bin':mb,'rho_SM':_rho_xy(g['fav_covered'],g['fav_won']),'n':len(g)}
+               for (sb,mb), g in H.groupby(['spread_bin','ml_bin'], dropna=True)]
+    TM_rows = [{'total_bin':tb,'ml_bin':mb,'rho_TM':_rho_xy(g['went_over'],g['fav_won']),'n':len(g)}
+               for (tb,mb), g in H.groupby(['total_bin','ml_bin'], dropna=True)]
+
+    ST_lookup = pd.DataFrame(ST_rows, columns=["spread_bin","total_bin","rho_ST","n"])
+    SM_lookup = pd.DataFrame(SM_rows, columns=["spread_bin","ml_bin","rho_SM","n"])
+    TM_lookup = pd.DataFrame(TM_rows, columns=["total_bin","ml_bin","rho_TM","n"])
+    return ST_lookup, SM_lookup, TM_lookup
+
+def attach_cross_market_bins_and_corr(
+    df: "pd.DataFrame",
+    df_all_snapshots: "pd.DataFrame",
+    sport: str,
+    bq=None,
+    hist_table_fq: str | None = None,
+):
+    """
+    - Builds Spread_Value / Total_Value / p_over / p_ml_fav from latest snapshots
+    - Adds spread_bin / total_bin / ml_bin
+    - Optionally merges rho_ST / rho_SM / rho_TM from historical lookup (if available)
+    - Leaves NaNs when data is missing (no defaults).
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return df
+
+    # 1) Cross-market pivots from snapshots (no defaults)
+    piv = pd.DataFrame(columns=["Game_Key","Bookmaker","Spread_Value","Total_Value","p_over","p_ml_fav"])
+    if df_all_snapshots is not None and not df_all_snapshots.empty:
+        piv = build_cross_market_pivots_for_training(df_all_snapshots)
+
+    out = df.merge(piv, on=["Game_Key","Bookmaker"], how="left", validate="m:1")
+
+    # 2) Bins (only when source values exist)
+    if "Spread_Value" in out.columns:
+        out["spread_bin"] = out["Spread_Value"].apply(_bin_spread)
+    if "Total_Value" in out.columns:
+        out["total_bin"]  = out["Total_Value"].apply(_bin_total)
+    if "p_ml_fav" in out.columns:
+        out["ml_bin"]     = out["p_ml_fav"].apply(_bin_ml)
+
+    # 3) Optional: historical correlation lookups (BigQuery)
+    ST_lookup = SM_lookup = TM_lookup = None
+    if bq is not None and hist_table_fq:
+        try:
+            sql = f"""
+            SELECT Sport, close_spread, close_total, p_ml_fav,
+                   fav_covered, went_over, fav_won
+            FROM `{hist_table_fq}`
+            WHERE Sport = '{sport}'
+            """
+            hist = bq.query(sql).to_dataframe(create_bqstorage_client=False)
+            ST_lookup, SM_lookup, TM_lookup = build_corr_lookup_ST_SM_TM(hist, sport=sport)
+        except Exception:
+            # Silent skip if table/cols unavailable
+            ST_lookup = SM_lookup = TM_lookup = None
+
+    # 4) Merge rho_* only if lookups are present and bins exist (no fills)
+    if ST_lookup is not None and not ST_lookup.empty \
+       and {"spread_bin","total_bin"}.issubset(out.columns):
+        out = out.merge(ST_lookup[["spread_bin","total_bin","rho_ST"]],
+                        on=["spread_bin","total_bin"], how="left", validate="m:1")
+
+    if SM_lookup is not None and not SM_lookup.empty \
+       and {"spread_bin","ml_bin"}.issubset(out.columns):
+        out = out.merge(SM_lookup[["spread_bin","ml_bin","rho_SM"]],
+                        on=["spread_bin","ml_bin"], how="left", validate="m:1")
+
+    if TM_lookup is not None and not TM_lookup.empty \
+       and {"total_bin","ml_bin"}.issubset(out.columns):
+        out = out.merge(TM_lookup[["total_bin","ml_bin","rho_TM"]],
+                        on=["total_bin","ml_bin"], how="left", validate="m:1")
+
+    return out
+
 # utils.py  — drop-in feature helpers (no Streamlit; no circular imports)
 
 
@@ -4796,6 +4992,9 @@ def add_clv_proxy_features(
             pass
 
     return out
+
+
+
 
 def wire_ats_features_inplace(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -5299,6 +5498,14 @@ def apply_blended_sharp_score(
             logger.warning(f"⚠️ detect_market_leaders merge skipped: {e}")
     if 'Market_Leader' not in df.columns:
         df['Market_Leader'] = 0
+    # Example names; adjust to your variables if different
+    df = attach_cross_market_bins_and_corr(
+            df=df,
+            df_all_snapshots=df_all_snapshots,
+            sport=sport,                              # e.g., "NFL"
+            bq=bq_client,                             # your bigquery.Client or None
+            hist_table_fq="sharplogger.sharp_data.scores_with_features"  # or None to skip rho_*
+    )
 
     # === Flag Pinnacle no-move behavior
     df['Is_Pinnacle'] = (df['Book'].astype(str).str.lower().str.strip() == 'pinnacle')
