@@ -5064,6 +5064,7 @@ def apply_blended_sharp_score(
     df,
     trained_models,
     df_all_snapshots=None,
+    sport: str | None = None, 
     weights=None,
     *,
     mem_profile: bool = True,          # ← turn on/off
@@ -7067,7 +7068,15 @@ def detect_sharp_moves(
         skip_df_first = True
         history_hours = 0
 
-  
+      # detect_utils.py
+    canon_sport = (_sport_key or _sport_label or None)
+    if canon_sport and 'SPORT_ALIASES' in globals():
+        s = str(canon_sport).strip().lower()
+        for k, alist in SPORT_ALIASES.items():
+            if s == k or s in [str(a).strip().lower() for a in (alist or [])]:
+                canon_sport = k
+                break
+
 
     # ---------- 1) Build 'previous' lookup only if provided ----------
     # ---------- 1) Build 'previous' lookup only if provided ----------
@@ -7420,7 +7429,7 @@ def detect_sharp_moves(
     
     # If apply_blended_sharp_score mutates, let it copy internally; otherwise pass df directly.
     
-    df_scored = apply_blended_sharp_score(df, trained_models, df_all_snapshots, weights)
+    df_scored = apply_blended_sharp_score(df, trained_models, df_all_snapshots, sport=canon_sport, weights)
 
     
     if not df_scored.empty:
