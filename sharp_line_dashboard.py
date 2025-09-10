@@ -150,7 +150,7 @@ from pandas.api.types import is_bool_dtype, is_object_dtype, is_string_dtype
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import RandomizedSearchCV
-
+from scipy.special import ndtr
 from math import erf, sqrt
 from xgboost import XGBClassifier
 # put near your imports (only once)
@@ -1393,22 +1393,9 @@ def _devig_pair(p_a: float, p_b: float) -> float:
 
 
 
-# Try vectorized erf from NumPy; fall back to math.erf with vectorize if needed
-try:
-      # present in modern NumPy
-    _HAS_VECTOR_ERF = True
-except Exception:
-    
-    _HAS_VECTOR_ERF = False
 
-def _norm_cdf(x):
-    """Φ(x) that accepts scalar or ndarray, returns ndarray."""
-    x = np.asarray(x, dtype="float64")
-    if _HAS_VECTOR_ERF:
-        return 0.5 * (1.0 + _erf(x / np.sqrt(2.0)))
-    # fallback: apply scalar erf elementwise
-    x2 = x / np.sqrt(2.0)
-    return np.vectorize(lambda t: 0.5 * (1.0 + _erf(float(t))))(x2)
+def _norm_cdf(x): return ndtr(x)
+
 
 def _spread_to_winprob(spread_abs: np.ndarray, sport: np.ndarray) -> np.ndarray:
     """
