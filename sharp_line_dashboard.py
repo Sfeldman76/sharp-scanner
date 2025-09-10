@@ -27,7 +27,7 @@ st.markdown("""
 <style>
 .scrollable-table-container {
     max-height: 600px;
-    overflow-y: auto;
+    ovlow-y: auto;
     border: 1px solid #444;
     margin-bottom: 1rem;
 }
@@ -156,7 +156,7 @@ from xgboost import XGBClassifier
 # put near your imports (only once)
 from sklearn.base import is_classifier as sk_is_classifier
 import sys, inspect, xgboost, sklearn
-from numpy import erf as _erf
+
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
@@ -1394,23 +1394,29 @@ def _devig_pair(p_a: float, p_b: float) -> float:
 
 
 
-def _norm_cdf(x): return ndtr(x)
 
+def _norm_cdf(x):
+    """
+    Standard normal CDF that accepts scalars or numpy arrays.
+    Uses math.erf but vectorized safely.
+    """
+    x = np.asarray(x, dtype="float64")
+    return 0.5 * (1.0 + np.vectorize(erf)(x / np.sqrt(2.0)))  # NOTE: np.sqrt, not math.sqrt
 
-def _spread_to_winprob(spread_abs: np.ndarray, sport: np.ndarray) -> np.ndarray:
+def _spread_to_winprob(spread_abs, sport):
     """
     Vectorized P(favorite wins) from spread magnitude using sport-specific sigma.
-    spread_abs: array of |spread|
-    sport: array of sport strings
+    spread_abs: array-like of |spread|
+    sport: array-like of sport strings
     """
     spread_abs = np.asarray(spread_abs, dtype="float64")
     sport = np.asarray(sport)
-    # build sigma per row
+
     sigmas = np.array([
         float(SPORT_SPREAD_CFG.get(str(sp).upper(), {"sigma_pts": 13.5})["sigma_pts"])
         for sp in sport
     ], dtype="float64")
-    # avoid divide-by-zero; keep NaN where sigma is invalid
+
     z = np.divide(spread_abs, sigmas, out=np.full_like(spread_abs, np.nan), where=(sigmas > 0))
     return _norm_cdf(z)
 
