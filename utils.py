@@ -7429,7 +7429,11 @@ def detect_sharp_moves(
     
     # If apply_blended_sharp_score mutates, let it copy internally; otherwise pass df directly.
     
-    df_scored = apply_blended_sharp_score(df, trained_models, df_all_snapshots, sport=canon_sport, weights)
+    df_scored = apply_blended_sharp_score(
+        df, trained_models, df_all_snapshots, weights,  # ← positional
+        sport=canon_sport                               # ← keyword-only (after the *)
+    )
+
 
     
     if not df_scored.empty:
