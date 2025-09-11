@@ -66,111 +66,46 @@ def _spread_bucket(v: float | None) -> str:
 
 def get_team_context(game_id: str, team: str) -> dict:
     """
-    Unified context fetcher:
-      - Prefer current/future context from moves_with_features_merged
-      - Fallback to historical context from scores_with_features
-    Returns:
-      {
-        "is_home": True/False/None,
-        "is_favorite": True/False/None,
-        "spread_bucket": str,
-        "cutoff": TIMESTAMP or None,
-        "source": "moves" | "scores" | "none"
-      }
+    Pull context from moves_with_features_merged:
+    - Is_Home → bool
+    - Value   → float (closing spread)
     """
-    # 1) Try moves (current/future)
-    sql_moves = """
+    sql = """
     SELECT
-      ANY_VALUE(Closing_Spread_For_Team) AS closing_spread,
-      ANY_VALUE(feat_Game_Start)         AS game_start,
-      CASE
-        WHEN GREATEST(
-               IFNULL(Home_After_Home_Win_Flag,   -1),
-               IFNULL(Home_After_Home_Loss_Flag,  -1),
-               IFNULL(Home_After_Away_Win_Flag,   -1),
-               IFNULL(Home_After_Away_Loss_Flag,  -1)
-             ) >= 0
-         AND GREATEST(
-               IFNULL(Away_After_Home_Win_Flag,   -1),
-               IFNULL(Away_After_Home_Loss_Flag,  -1),
-               IFNULL(Away_After_Away_Win_Flag,   -1),
-               IFNULL(Away_After_Away_Loss_Flag,  -1)
-             ) < 0 THEN TRUE
-        WHEN GREATEST(
-               IFNULL(Away_After_Home_Win_Flag,   -1),
-               IFNULL(Away_After_Home_Loss_Flag,  -1),
-               IFNULL(Away_After_Away_Win_Flag,   -1),
-               IFNULL(Away_After_Away_Loss_Flag,  -1)
-             ) >= 0
-         AND GREATEST(
-               IFNULL(Home_After_Home_Win_Flag,   -1),
-               IFNULL(Home_After_Home_Loss_Flag,  -1),
-               IFNULL(Home_After_Away_Win_Flag,   -1),
-               IFNULL(Home_After_Away_Loss_Flag,  -1)
-             ) < 0 THEN FALSE
-        ELSE NULL
-      END AS is_home
+      ANY_VALUE(Is_Home)         AS is_home,
+      ANY_VALUE(Value)           AS closing_spread,
+      ANY_VALUE(feat_Game_Start) AS game_start
     FROM `sharplogger.sharp_data.moves_with_features_merged`
-    WHERE feat_Game_Key = @gid AND feat_Team = @team
+    WHERE feat_Game_Key = @gid
+      AND feat_Team     = @team
     """
-    job = CLIENT.query(sql_moves, job_config=bigquery.QueryJobConfig(
+    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("gid","STRING", game_id),
-            bigquery.ScalarQueryParameter("team","STRING", team),
-        ]))
+            bigquery.ScalarQueryParameter("gid", "STRING", game_id),
+            bigquery.ScalarQueryParameter("team", "STRING", team),
+        ]
+    ))
     df = job.result().to_dataframe()
 
-    if not df.empty:
-        r  = df.iloc[0]
-        sp = r.get("closing_spread")
-        is_favorite = (sp is not None) and (float(sp) < 0)
+    if df.empty:
         return {
-            "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
-            "is_favorite": is_favorite if sp is not None else None,
-            "spread_bucket": _spread_bucket(sp),
-            "cutoff": r.get("game_start"),
-            "source": "moves",
+            "is_home": None,
+            "is_favorite": None,
+            "spread_bucket": "",
+            "cutoff": None,
+            "source": "none"
         }
 
-    # 2) Fallback to scores (historical)
-    sql_scores = f"""
-    SELECT
-      ANY_VALUE(Home_After_Home_Win_Flag)  AS H_H_W,
-      ANY_VALUE(Home_After_Home_Loss_Flag) AS H_H_L,
-      ANY_VALUE(Home_After_Away_Win_Flag)  AS H_A_W,
-      ANY_VALUE(Home_After_Away_Loss_Flag) AS H_A_L,
-      ANY_VALUE(Away_After_Home_Win_Flag)  AS A_H_W,
-      ANY_VALUE(Away_After_Home_Loss_Flag) AS A_H_L,
-      ANY_VALUE(Away_After_Away_Win_Flag)  AS A_A_W,
-      ANY_VALUE(Away_After_Away_Loss_Flag) AS A_A_L,
-      ANY_VALUE(Closing_Spread_For_Team)   AS closing_spread,
-      ANY_VALUE(feat_Game_Start)           AS cutoff
-    FROM {VIEW_FEAT}
-    WHERE feat_Game_Key = @gid AND feat_Team = @team
-    """
-    job2 = CLIENT.query(sql_scores, job_config=bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("gid","STRING", game_id),
-            bigquery.ScalarQueryParameter("team","STRING", team),
-        ]))
-    df2 = job2.result().to_dataframe()
-
-    if df2.empty:
-        return {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"}
-
-    r2 = df2.iloc[0]
-    has_home = any(pd.notnull(r2[x]) for x in ["H_H_W","H_H_L","H_A_W","H_A_L"])
-    has_away = any(pd.notnull(r2[x]) for x in ["A_H_W","A_H_L","A_A_W","A_A_L"])
-    site = True if has_home else (False if has_away else None)
-    sp2 = r2.get("closing_spread")
-    is_favorite2 = (sp2 is not None) and (float(sp2) < 0)
+    row = df.iloc[0]
+    spread = row.get("closing_spread")
+    is_favorite = (spread is not None) and (float(spread) < 0)
 
     return {
-        "is_home": site,
-        "is_favorite": is_favorite2 if sp2 is not None else None,
-        "spread_bucket": _spread_bucket(sp2),
-        "cutoff": r2.get("cutoff"),
-        "source": "scores",
+        "is_home": row.get("is_home"),
+        "is_favorite": is_favorite,
+        "spread_bucket": _spread_bucket(spread),
+        "cutoff": row.get("game_start"),
+        "source": "moves"
     }
 
 
