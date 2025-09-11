@@ -2,8 +2,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from google.cloud import bigquery
 import datetime as dt
+from datetime import datetime, timezone
+from google.cloud import bigquery
 
 # --- constants / config ----------------------------------------------------
 PROJECT = "sharplogger"
@@ -22,26 +23,34 @@ CACHE_TTL_SEC = 90
 
 # --- small utils -----------------------------------------------------------
 
-def _coerce_timestamp(x):
-    """Return a Python datetime or None; handles pandas/NaT/strings."""
-    if x is None or (isinstance(x, float) and pd.isna(x)):
+def _coerce_timestamp(x) -> dt.datetime | None:
+    """Return timezone-aware UTC datetime or None."""
+    if x is None:
         return None
     if isinstance(x, pd.Timestamp):
-        return None if pd.isna(x) else x.to_pydatetime()
+        if pd.isna(x):
+            return None
+        return x.to_pydatetime()
     if isinstance(x, dt.datetime):
-        return x
+        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
     try:
         return pd.to_datetime(x, utc=True).to_pydatetime()
     except Exception:
         return None
 
 def _round_cutoff(ts: dt.datetime | None) -> dt.datetime | None:
-    """Round to hour to improve cache hits without changing results meaningfully."""
     if ts is None:
         return None
-    if isinstance(ts, pd.Timestamp):
-        ts = ts.to_pydatetime()
     return ts.replace(minute=0, second=0, microsecond=0)
+
+def _fallback_now_utc() -> dt.datetime:
+    return datetime.now(timezone.utc)
+
+def _safe_cutoff(primary: dt.datetime | None, fallback: dt.datetime | None) -> dt.datetime | None:
+    """Pick a valid cutoff; prefer primary, else fallback, else None."""
+    a = _coerce_timestamp(primary)
+    b = _coerce_timestamp(fallback)
+    return a or b
 
 def _coerce_teams_list(x):
     """Normalize Teams to a list[str]. Accepts list, array, 'A, B' string, etc."""
@@ -147,21 +156,21 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
     joined AS (
       SELECT
         t.team AS feat_Team,
-        m.is_home   AS m_is_home,
-        m.closing_spread AS m_spread,
-        m.game_start     AS m_cutoff,
-        s.is_home   AS s_is_home,
-        s.closing_spread AS s_spread,
-        s.cutoff         AS s_cutoff
+        m.is_home         AS m_is_home,
+        m.closing_spread  AS m_spread,
+        m.game_start      AS m_cutoff,
+        s.is_home         AS s_is_home,
+        s.closing_spread  AS s_spread,
+        s.cutoff          AS s_cutoff
       FROM teams_param t
       LEFT JOIN moves_pre  m ON m.feat_Team = t.team
       LEFT JOIN scores_pre s ON s.feat_Team = t.team
     )
     SELECT
       feat_Team,
-      COALESCE(m_is_home, s_is_home)                 AS is_home,
-      COALESCE(m_spread, s_spread)                   AS closing_spread,
-      COALESCE(m_cutoff, s_cutoff)                   AS cutoff,
+      COALESCE(m_is_home, s_is_home)  AS is_home,
+      COALESCE(m_spread,  s_spread)   AS closing_spread,
+      COALESCE(m_cutoff,  s_cutoff)   AS cutoff,
       CASE WHEN m_cutoff IS NOT NULL THEN 'moves' ELSE 'scores' END AS source
     FROM joined
     """
@@ -191,11 +200,16 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
         }
     return out
 
-
+def get_team_context(game_id: str, team: str) -> dict:
+    """Single-team wrapper reusing the cached batch function."""
+    ctxs = get_contexts_for_game(game_id, (team,))
+    return ctxs.get(team, {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"})
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def situation_stats_cached(sport: str, team: str, cutoff: dt.datetime, market: str, min_n: int) -> pd.DataFrame:
-    cutoff = _round_cutoff(cutoff)
+    cutoff = _round_cutoff(_coerce_timestamp(cutoff))
+    if cutoff is None:
+        return pd.DataFrame()
     sql = f"""
       SELECT * FROM `{PROJECT}.{DATASET}.situation_stats_from_scores`
         (@sport, @team, @cutoff, @market, @min_n)
@@ -218,7 +232,9 @@ def situation_stats_cached(sport: str, team: str, cutoff: dt.datetime, market: s
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str,
                                     is_home: bool | None, spread_bucket: str | None, min_n: int):
-    cutoff = _round_cutoff(cutoff)
+    cutoff = _round_cutoff(_coerce_timestamp(cutoff))
+    if cutoff is None:
+        return None
     sql = """
       SELECT * FROM `sharplogger.sharp_data.league_situation_stats_from_scores`
         (@sport, @cutoff, @market, @is_home, @spread_bucket, @min_n)
@@ -245,7 +261,9 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
                             is_home: bool | None, spread_bucket: str | None,
                             is_favorite: bool | None, min_n: int = 30) -> pd.DataFrame:
     """Leaderboard of historical performance for this exact role (uses scores_role_view)."""
-    cutoff = _round_cutoff(cutoff)
+    cutoff = _round_cutoff(_coerce_timestamp(cutoff))
+    if cutoff is None:
+        return pd.DataFrame()
     sql = f"""
     WITH src AS (
       SELECT
@@ -287,8 +305,8 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
     filtered AS (
       SELECT *
       FROM e
-      WHERE (@is_home     IS NULL OR Is_Home = @is_home)
-        AND (@spread_bucket = ''  OR Spread_Bucket = @spread_bucket)
+      WHERE (@is_home IS NULL OR Is_Home = @is_home)
+        AND (@spread_bucket = '' OR Spread_Bucket = @spread_bucket)
         AND (@is_favorite IS NULL OR (Closing_Spread IS NOT NULL AND (Closing_Spread < 0) = @is_favorite))
     ),
     by_team AS (
@@ -343,7 +361,6 @@ def bullet(team: str, market: str, r: pd.Series) -> str:
     roi_val = r.get("ROI_Pct")
     roi_txt = f", ROI {float(roi_val):+,.1f}%" if pd.notnull(roi_val) else ""
     push_txt = f"-{P}P" if P else ""
-    # r.Situation is produced by your table function; if missing, fall back to label
     situation = r.get("Situation", "Situation")
     return (f"**{team} — {market.capitalize()}** · {situation}: "
             f"{W}-{L}{push_txt} ({winpct:.1f}%) over {N}{roi_txt}.")
@@ -360,13 +377,13 @@ def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bu
     """Ordered list of situation names to display for the *current* role."""
     out = []
     # Specific combos first
-    if is_home is True and is_favorite is True:   out.append("Home Favorite")
-    if is_home is True and is_favorite is False:  out.append("Home Underdog")
-    if is_home is False and is_favorite is True:  out.append("Road Favorite")
-    if is_home is False and is_favorite is False: out.append("Road Underdog")
+    if is_home is True  and is_favorite is True:   out.append("Home Favorite")
+    if is_home is True  and is_favorite is False:  out.append("Home Underdog")
+    if is_home is False and is_favorite is True:   out.append("Road Favorite")
+    if is_home is False and is_favorite is False:  out.append("Road Underdog")
     # Individual facets
-    if is_home is True:  out.append("Home")
-    if is_home is False: out.append("Road")
+    if is_home is True:      out.append("Home")
+    if is_home is False:     out.append("Road")
     if is_favorite is True:  out.append("Favorite")
     if is_favorite is False: out.append("Underdog")
     # Bucket
@@ -414,8 +431,8 @@ def render_situation_db_tab(selected_sport: str | None = None):
     df_games = df_games.copy()
     df_games["TeamsList"] = df_games["Teams"].apply(lambda x: tuple(_coerce_teams_list(x)))
     df_games["label"] = df_games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}" if r["TeamsList"]
-                  else f"{r['Game_Start']} — (teams TBD)",
+        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}"
+                  if r["TeamsList"] else f"{r['Game_Start']} — (teams TBD)",
         axis=1
     )
 
@@ -424,17 +441,13 @@ def render_situation_db_tab(selected_sport: str | None = None):
         st.stop()
 
     game_id    = row["Game_Id"]
-    game_start = _coerce_timestamp(row["Game_Start"])
+    game_start = _coerce_timestamp(row["Game_Start"])  # may be None; we’ll handle
     teams      = row["TeamsList"]
-
-    if not teams:
-        st.info("Teams not yet available for this game.")
-        return
 
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
     baseline_min_n = st.number_input("League baseline min N", 50, 1000, 150, step=10)
 
-    # Prefetch contexts for both teams in a single query
+    # Prefetch contexts for both teams
     contexts = get_contexts_for_game(game_id, teams[:2])
 
     cols = st.columns(2)
@@ -442,24 +455,21 @@ def render_situation_db_tab(selected_sport: str | None = None):
         with cols[i]:
             st.subheader(team)
 
-            ctx = contexts.get(team, {})
+            ctx = contexts.get(team) or get_team_context(game_id, team)
             role_bits = []
             role_bits.append("🏠 Home" if ctx.get("is_home") is True else ("🚗 Road" if ctx.get("is_home") is False else ""))
             role_bits.append("⭐ Favorite" if ctx.get("is_favorite") is True else ("🐶 Underdog" if ctx.get("is_favorite") is False else ""))
             if ctx.get("spread_bucket"): role_bits.append(ctx["spread_bucket"])
             st.caption(" / ".join([b for b in role_bits if b]) or "Role: Unknown")
 
-            sport_str     = selected_sport  # functions expect a sport string
+            sport_str     = selected_sport
             is_home       = ctx.get("is_home")
             spread_bucket = ctx.get("spread_bucket")
-            cutoff_ctx    = _coerce_timestamp(ctx.get("cutoff"))
-            cutoff        = cutoff_ctx or game_start
 
-            if cutoff is None:
-                st.caption("_No valid cutoff timestamp yet for this team/game._")
-                continue
+            # ✅ SAFE CUTOFF: prefer context cutoff; else game_start; else now (never None)
+            cutoff = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
 
-            # Spreads – show situations matching current role
+            # Spreads (current role)
             st.markdown("**Spreads — current role**")
             s_ats = situation_stats_cached(sport_str, team, cutoff, "spreads", min_n)
             if s_ats.empty:
@@ -469,7 +479,7 @@ def render_situation_db_tab(selected_sport: str | None = None):
                 wanted = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "spreads", s_ats, wanted, base)
 
-            # Moneyline – show situations matching current role
+            # Moneyline (current role)
             st.markdown("**Moneyline — current role**")
             s_ml = situation_stats_cached(sport_str, team, cutoff, "moneyline", min_n)
             if s_ml.empty:
