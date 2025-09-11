@@ -174,6 +174,36 @@ def get_team_context(game_id: str, team: str) -> dict:
     }
 
 
+
+def _coerce_teams_list(x):
+    # None / NaN → []
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return []
+    # Already list/tuple
+    if isinstance(x, (list, tuple)):
+        return list(x)
+    # NumPy array
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    # Pandas Series (rare if exploded upstream)
+    if isinstance(x, pd.Series):
+        return x.astype(str).tolist()
+    # Single string
+    if isinstance(x, str):
+        return [x]
+    # Anything with .tolist()
+    if hasattr(x, "tolist"):
+        try:
+            out = x.tolist()
+            return list(out) if isinstance(out, (list, tuple, np.ndarray, pd.Series)) else [str(out)]
+        except Exception:
+            pass
+    # Fallback
+    try:
+        return list(x)
+    except Exception:
+        return [str(x)]
+
 # --- table-function wrappers ----------------------------------------------
 
 def situation_stats(sport: str, team: str, cutoff, market: str, min_n: int) -> pd.DataFrame:
@@ -350,14 +380,12 @@ def render_situation_db_tab(selected_sport: str | None = None):
         st.warning("Please pick a sport in the sidebar.")
         st.stop()
     
-    df_games = list_games(selected_sport)
-    if df_games.empty:
-        st.info("No upcoming games found for this sport.")
-        return
-
+    df_games["TeamsList"] = df_games["Teams"].apply(_coerce_teams_list)
     df_games["label"] = df_games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(list(r['Teams'] or []))}", axis=1
+        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}",
+        axis=1
     )
+
     row = st.selectbox(
         "Select game",
         df_games.to_dict("records"),
