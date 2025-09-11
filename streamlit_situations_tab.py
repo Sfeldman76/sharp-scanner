@@ -164,9 +164,13 @@ def bullet_with_baseline(team, market, r, base):
 def render_situation_db_tab(selected_sport: str|None = None):
     st.header("Situation Database — Best % by Team (from scores_with_features)")
 
-    df_games = list_games()
+    if not selected_sport:
+        st.warning("Please pick a sport in the sidebar.")
+        st.stop()
+    
+    df_games = list_games(selected_sport)   # << sport-specific + future-only
     if df_games.empty:
-        st.info("No games found in window.")
+        st.info("No upcoming games found for this sport.")
         return
 
     df_games["label"] = df_games.apply(
