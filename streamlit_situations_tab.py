@@ -23,20 +23,47 @@ CACHE_TTL_SEC = 90
 
 # --- small utils -----------------------------------------------------------
 
+# --- small utils -----------------------------------------------------------
+import datetime as dt
+import pandas as pd
+
 def _coerce_timestamp(x) -> dt.datetime | None:
-    """Return timezone-aware UTC datetime or None."""
+    """
+    Return a timezone-aware UTC datetime or None.
+    - Returns None for None/NaT/empty.
+    - Accepts datetime, pandas.Timestamp, or date (assumed 00:00 local).
+    - Localizes naive inputs to UTC.
+    """
     if x is None:
         return None
+
+    # Pandas Timestamp
     if isinstance(x, pd.Timestamp):
-        if pd.isna(x):
+        if pd.isna(x):                 # catches NaT
             return None
-        return x.to_pydatetime()
-    if isinstance(x, dt.datetime):
-        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
-    try:
-        return pd.to_datetime(x, utc=True).to_pydatetime()
-    except Exception:
-        return None
+        ts = x
+    # Python datetime
+    elif isinstance(x, dt.datetime):
+        ts = pd.Timestamp(x)
+    # Python date (no time) → assume midnight
+    elif isinstance(x, dt.date):
+        ts = pd.Timestamp(dt.datetime.combine(x, dt.time(0, 0, 0)))
+    else:
+        # Try to parse anything else with pandas, then re-run checks
+        try:
+            ts = pd.to_datetime(x)
+            if pd.isna(ts):
+                return None
+        except Exception:
+            return None
+
+    # Ensure tz-aware UTC
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+
+    return ts.to_pydatetime()
 
 def _round_cutoff(ts: dt.datetime | None) -> dt.datetime | None:
     if ts is None:
@@ -206,28 +233,51 @@ def get_team_context(game_id: str, team: str) -> dict:
     return ctxs.get(team, {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"})
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
-def situation_stats_cached(sport: str, team: str, cutoff: dt.datetime, market: str, min_n: int) -> pd.DataFrame:
-    cutoff = _round_cutoff(_coerce_timestamp(cutoff))
-    if cutoff is None:
-        return pd.DataFrame()
+from google.cloud import bigquery
+
+@st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
+def situation_stats_cached(sport_str: str, team: str, cutoff, market: str, min_n: int):
+    # normalize cutoff
+    cutoff_ts = _coerce_timestamp(cutoff)  # -> datetime|None
+
+    # base SQL with optional cutoff filter injected
+    cutoff_filter = "AND Event_Timestamp < @cutoff_ts" if cutoff_ts is not None else ""
+
     sql = f"""
-      SELECT * FROM `{PROJECT}.{DATASET}.situation_stats_from_scores`
-        (@sport, @team, @cutoff, @market, @min_n)
+    -- situation stats
+    WITH base AS (
+      SELECT *
+      FROM {SCORES_ROLE_VIEW}
+      WHERE Sport = @sport
+        AND Team  = @team
+        AND Market = @market
+        {cutoff_filter}
+    )
+    SELECT
+      Team,
+      COUNT(*) AS N,
+      AVG(CAST(Win_Flag AS INT64)) AS WinRate,
+      SAFE_DIVIDE(SUM(Profit_USD), NULLIF(COUNT(*), 0)) AS AvgProfit
+    FROM base
+    GROUP BY Team
+    HAVING N >= @min_n
     """
+
+    params = [
+        bigquery.ScalarQueryParameter("sport",  "STRING", sport_str),
+        bigquery.ScalarQueryParameter("team",   "STRING", team),
+        bigquery.ScalarQueryParameter("market", "STRING", market),
+        bigquery.ScalarQueryParameter("min_n",  "INT64",  int(min_n)),
+    ]
+    if cutoff_ts is not None:
+        params.append(bigquery.ScalarQueryParameter("cutoff_ts", "TIMESTAMP", cutoff_ts))
+
     job = CLIENT.query(
         sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport","STRING", sport),
-                bigquery.ScalarQueryParameter("team","STRING", team),
-                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
-                bigquery.ScalarQueryParameter("market","STRING", market),
-                bigquery.ScalarQueryParameter("min_n","INT64", min_n),
-            ],
-            use_query_cache=True,
-        ),
+        job_config=bigquery.QueryJobConfig(query_parameters=params),
     )
     return job.result().to_dataframe()
+
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str,
@@ -467,11 +517,12 @@ def render_situation_db_tab(selected_sport: str | None = None):
             spread_bucket = ctx.get("spread_bucket")
 
             # ✅ SAFE CUTOFF: prefer context cutoff; else game_start; else now (never None)
-            cutoff = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
+            cutoff_input = st.date_input("Cutoff (optional)", value=None)
+            #cutoff = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
 
             # Spreads (current role)
             st.markdown("**Spreads — current role**")
-            s_ats = situation_stats_cached(sport_str, team, cutoff, "spreads", min_n)
+            s_ats = situation_stats_cached(sport_str, team, cutoff_input, "spreads", min_n)
             if s_ats.empty:
                 st.write("_No ATS situations meeting N threshold._")
             else:
