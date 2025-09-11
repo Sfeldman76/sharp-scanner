@@ -10422,18 +10422,103 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
                 .style.format({'Win_Rate': '{:.1%}'})
             )
 
+
+
+# --- MUST RUN BEFORE ANY WIDGETS ---
+def _sanitize_session_state():
+    """
+    Replace array-like / pandas objects in st.session_state with plain Python types
+    to avoid 'truth value of an array is ambiguous' during Streamlit's widget diff.
+    """
+    to_fix = []
+    for k in list(st.session_state.keys()):
+        v = st.session_state[k]
+        try:
+            if isinstance(v, (np.bool_, np.integer, np.floating)):
+                st.session_state[k] = v.item()
+            elif isinstance(v, np.ndarray):
+                # For widgets, arrays should almost never be stored — keep as list
+                st.session_state[k] = v.tolist()
+            elif isinstance(v, (pd.Series, pd.Index)):
+                st.session_state[k] = v.astype(object).tolist()
+            elif isinstance(v, pd.DataFrame):
+                # Store a lightweight dict to avoid DF comparisons
+                st.session_state[k] = v.to_dict(orient="list")
+        except Exception:
+            # If anything is weird/unserializable, delete it so Streamlit reinitializes
+            to_fix.append(k)
+    for k in to_fix:
+        del st.session_state[k]
+
+# Optionally, harden known boolean keys (from prior runs) that might have bad types
+def _coerce_bool_key(key, default=False):
+    v = st.session_state.get(key, default)
+    if isinstance(v, (np.bool_, bool)):
+        st.session_state[key] = bool(v)
+    elif isinstance(v, (np.ndarray, pd.Series, list)):
+        # Treat non-empty as True if you want, or just force default:
+        st.session_state[key] = bool(default)
+    else:
+        st.session_state[key] = bool(v)
+
+# Call once at top
+_sanitize_session_state()
+
+# If you used these keys previously without namespacing, coerce them explicitly:
+for legacy_key in [
+    "pause_refresh",
+    "run_nfl_scanner", "run_ncaaf_scanner", "run_nba_scanner",
+    "run_mlb_scanner", "run_cfl_scanner", "run_wnba_scanner",
+]:
+    if legacy_key in st.session_state:
+        _coerce_bool_key(legacy_key, default=False)
+# --- Put these near your sanitizer (top of file), BEFORE any widgets ---
+def ensure_bool_widget_state(key: str, default: bool = False) -> bool:
+    """Return a safe bool for a widget's initial value; if corrupted, reset to default."""
+    import numpy as np, pandas as pd
+    v = st.session_state.get(key, default)
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    # If it's list/Series/ndarray/DataFrame/etc, nuke and return default
+    if isinstance(v, (list, tuple, set, dict, np.ndarray, pd.Series, pd.Index, pd.DataFrame)):
+        st.session_state.pop(key, None)
+        return default
+    # Fallback: cast scalars safely
+    try:
+        return bool(v)
+    except Exception:
+        st.session_state.pop(key, None)
+        return default
+
+
+def purge_non_scalar_widget_keys(prefix: str = "ui_") -> None:
+    """Remove any ui_* keys that accidentally hold arrays/Series/DFs from prior runs."""
+    import numpy as np, pandas as pd
+    bad_types = (list, tuple, set, dict, np.ndarray, pd.Series, pd.Index, pd.DataFrame)
+    for k in list(st.session_state.keys()):
+        if k.startswith(prefix) and isinstance(st.session_state[k], bad_types):
+            st.session_state.pop(k, None)
+
 from streamlit_situations_tab import render_situation_db_tab
 
+purge_non_scalar_widget_keys()
+
 # --- Sidebar navigation
-sport = st.sidebar.radio("Select a League", ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"], key="ui_sport_radio")
+sport = st.sidebar.radio(
+    "Select a League",
+    ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"],
+    key="ui_sport_radio",
+)
 
 st.sidebar.markdown("### ⚙️ Controls")
 
-# Use a namespaced key so nothing else writes arrays into it
 PAUSE_KEY = "ui_pause_refresh"
-pause_refresh = st.sidebar.checkbox("⏸️ Pause Auto Refresh",
-                                    key=PAUSE_KEY,
-                                    value=bool(st.session_state.get(PAUSE_KEY, False)))
+pause_refresh = st.sidebar.checkbox(
+    "⏸️ Pause Auto Refresh",
+    key=PAUSE_KEY,
+    value=ensure_bool_widget_state(PAUSE_KEY, default=False),
+)
+
 
 force_reload = st.sidebar.button("🔁 Force Reload", key="ui_force_reload_btn")
 
@@ -10479,6 +10564,33 @@ else:
 
     if conflicting:
         st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
+    # === LEAGUE PAGES ===
+else:
+    st.title(f"🏟️ {sport} Sharp Scanner")
+
+    scanner_key = scanner_widget_keys[sport]
+
+    run_scanner = st.checkbox(
+        f"Run {sport} Scanner",
+        key=scanner_key,
+        value=ensure_bool_widget_state(scanner_key, default=True),  # ✅ fixed!
+    )
+
+    label = sport  # e.g. "WNBA"
+    sport_key = SPORTS[sport]  # e.g. "basketball_wnba"
+
+    if st.button(f"📈 Train {sport} Sharp Model", key=f"ui_train_{sport}_btn"):
+        train_timing_opportunity_model(sport=label)
+        train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
+
+    # Prevent multiple scanners from running — treat only literal True as on
+    conflicting = [
+        k for k, v in scanner_widget_keys.items()
+        if k != sport and bool(st.session_state.get(v, False)) is True
+    ]
+
+    if conflicting:
+        st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
     elif run_scanner:
         scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
             ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
@@ -10492,8 +10604,13 @@ else:
 
         with power_tab:
             client = bigquery.Client(project="sharplogger", location="us")
-            # Set show_edges=True if you want the bottom section that calls attach_ratings_and_edges_for_diagnostics(...)
-            render_power_ranking_tab(tab=power_tab, sport_label=label, sport_key_api=sport_key, bq_client=client, show_edges=False)
+            render_power_ranking_tab(
+                tab=power_tab,
+                sport_label=label,
+                sport_key_api=sport_key,
+                bq_client=client,
+                show_edges=False,
+            )
 
         with situation_tab:
             render_situation_db_tab(selected_sport=sport)
