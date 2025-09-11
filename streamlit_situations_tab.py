@@ -379,13 +379,21 @@ def render_situation_db_tab(selected_sport: str | None = None):
     if not selected_sport:
         st.warning("Please pick a sport in the sidebar.")
         st.stop()
-    
+
+    # ✅ Create df_games first
+    df_games = list_games(selected_sport)
+    if df_games.empty:
+        st.info("No upcoming games found for this sport.")
+        return
+
+    # ✅ Safely normalize Teams column, then build labels
     df_games["TeamsList"] = df_games["Teams"].apply(_coerce_teams_list)
     df_games["label"] = df_games.apply(
         lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}",
         axis=1
     )
 
+    # ✅ Let the user pick a game
     row = st.selectbox(
         "Select game",
         df_games.to_dict("records"),
@@ -394,13 +402,14 @@ def render_situation_db_tab(selected_sport: str | None = None):
     if not row:
         st.stop()
 
-    game_id, game_start, teams = row["Game_Id"], row["Game_Start"], row["Teams"]
+    # ✅ Use TeamsList from the normalized column
+    game_id, game_start, teams = row["Game_Id"], row["Game_Start"], row["TeamsList"]
 
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
     baseline_min_n = st.number_input("League baseline min N", 50, 1000, 150, step=10)
 
     cols = st.columns(2)
-    for i, team in enumerate(teams[:2]):
+    for i, team in enumerate(teams[:2]):  # guard if Teams has >2
         with cols[i]:
             st.subheader(team)
 
@@ -414,11 +423,11 @@ def render_situation_db_tab(selected_sport: str | None = None):
             if ctx["spread_bucket"]: role_bits.append(ctx["spread_bucket"])
             st.caption(" / ".join(role_bits) or "Role: Unknown")
 
-            # Set sport/cutoff/role inputs for table function
+            # Inputs for table functions
             sport_str = selected_sport or ctx.get("sport") or ""
             is_home = ctx["is_home"]
             spread_bucket = ctx["spread_bucket"]
-            cutoff = ctx["cutoff"] or game_start  # fallback to game start
+            cutoff = ctx["cutoff"] or game_start  # fallback
 
             # 🧾 Spreads
             st.markdown("**Spreads — top 3**")
@@ -453,9 +462,12 @@ def render_situation_db_tab(selected_sport: str | None = None):
                 )
                 for _, r in s_ml.head(3).iterrows():
                     st.markdown(bullet_with_baseline(team, "moneyline", r, base_ml))
-            
-            rb = role_leaderboard(sport_str, cutoff, "spreads", ctx["is_home"], ctx["spread_bucket"], baseline_min_n)
 
+            # 🏆 League leaderboard for this exact role (spreads)
+            rb = role_leaderboard(
+                sport_str, cutoff, "spreads",
+                ctx["is_home"], ctx["spread_bucket"], baseline_min_n
+            )
             st.markdown("**League — this exact role**")
             if rb.empty:
                 st.write("_No teams meet N threshold in this role._")
