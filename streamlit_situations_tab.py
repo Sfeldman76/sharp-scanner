@@ -14,6 +14,22 @@ SCORES_ROLE_VIEW = "`sharplogger.sharp_data.scores_role_view`"
 MOVES_TABLE      = "`sharplogger.sharp_data.moves_with_features_merged`"
 
 # --- helpers ---------------------------------------------------------------
+# add near your imports
+from datetime import datetime
+
+
+def _coerce_timestamp(x):
+    """Return a timezone-aware python datetime or None."""
+    if x is None:
+        return None
+    try:
+        ts = pd.to_datetime(x, utc=True, errors="coerce")
+        if pd.isna(ts):
+            return None
+        # BigQuery client handles tz-aware datetimes fine (RFC3339)
+        return ts.to_pydatetime()
+    except Exception:
+        return None
 
 def list_games(sport_label: str) -> pd.DataFrame:
     # Map sidebar label to DB value if needed
@@ -307,8 +323,7 @@ def render_situation_db_tab(selected_sport: str | None = None):
         st.warning("Please pick a sport in the sidebar.")
         st.stop()
 
-
-    # ✅ Create df_games first
+    # Load games
     df_games = list_games(selected_sport)
     if df_games.empty:
         st.info("No upcoming games found for this sport.")
@@ -317,22 +332,25 @@ def render_situation_db_tab(selected_sport: str | None = None):
     df_games = df_games.copy()
     df_games["TeamsList"] = df_games["Teams"].apply(_coerce_teams_list)
     df_games["label"] = df_games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}" if r["TeamsList"] else f"{r['Game_Start']} — (teams TBD)",
+        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}" if r["TeamsList"]
+                  else f"{r['Game_Start']} — (teams TBD)",
         axis=1
     )
 
-    # ✅ Let the user pick a game
-    row = st.selectbox(
-        "Select game",
-        df_games.to_dict("records"),
-        format_func=lambda r: r["label"]
-    )
+    # Pick a game
+    row = st.selectbox("Select game", df_games.to_dict("records"), format_func=lambda r: r["label"])
     if not row:
         st.stop()
 
-    # ✅ Use TeamsList from the normalized column
-    game_id, game_start, teams = row["Game_Id"], row["Game_Start"], row["TeamsList"]
+    # Resolve game fields once
+    game_id = row["Game_Id"]
+    game_start = _coerce_timestamp(row["Game_Start"])   # <-- coerced once
+    teams = row["TeamsList"]
+    if not teams:
+        st.info("This game has no parsed teams yet.")
+        return
 
+    # Controls
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
     baseline_min_n = st.number_input("League baseline min N", 50, 1000, 150, step=10)
 
@@ -341,8 +359,9 @@ def render_situation_db_tab(selected_sport: str | None = None):
         with cols[i]:
             st.subheader(team)
 
-            # 🧠 Get context from moves/scores
+            # Context (moves preferred, scores fallback)
             ctx = get_team_context(game_id, team)
+
             role_bits = []
             if ctx["is_home"] is True: role_bits.append("🏠 Home")
             elif ctx["is_home"] is False: role_bits.append("🚗 Road")
@@ -351,51 +370,46 @@ def render_situation_db_tab(selected_sport: str | None = None):
             if ctx["spread_bucket"]: role_bits.append(ctx["spread_bucket"])
             st.caption(" / ".join(role_bits) or "Role: Unknown")
 
-            # Inputs for table functions
+            # Inputs for queries
             sport_str = selected_sport or ctx.get("sport") or ""
-            is_home = ctx["is_home"]
-            spread_bucket = ctx["spread_bucket"]
-            cutoff = ctx["cutoff"] or game_start  # fallback
+            is_home = ctx.get("is_home")
+            spread_bucket = ctx.get("spread_bucket")
 
-            # 🧾 Spreads
+            # Safe cutoff: prefer context, else game start
+            cutoff_ctx = _coerce_timestamp(ctx.get("cutoff"))
+            cutoff = cutoff_ctx or game_start
+            if cutoff is None:
+                st.warning("No valid cutoff time for this game/team yet.")
+                continue  # skip this team safely
+
+            # Spreads
             st.markdown("**Spreads — top 3**")
             s_ats = situation_stats(sport_str, team, cutoff, "spreads", min_n)
             if s_ats.empty:
                 st.write("_No ATS situations meeting N threshold._")
             else:
                 base = league_baseline_filtered(
-                    sport=sport_str,
-                    cutoff=cutoff,
-                    market="spreads",
-                    is_home=is_home,
-                    spread_bucket=spread_bucket,
-                    min_n=baseline_min_n
+                    sport=sport_str, cutoff=cutoff, market="spreads",
+                    is_home=is_home, spread_bucket=spread_bucket, min_n=baseline_min_n
                 )
                 for _, r in s_ats.head(3).iterrows():
                     st.markdown(bullet_with_baseline(team, "spreads", r, base))
 
-            # 💰 Moneyline
+            # Moneyline
             st.markdown("**Moneyline — top 3**")
             s_ml = situation_stats(sport_str, team, cutoff, "moneyline", min_n)
             if s_ml.empty:
                 st.write("_No ML situations meeting N threshold._")
             else:
                 base_ml = league_baseline_filtered(
-                    sport=sport_str,
-                    cutoff=cutoff,
-                    market="moneyline",
-                    is_home=is_home,
-                    spread_bucket=spread_bucket,
-                    min_n=baseline_min_n
+                    sport=sport_str, cutoff=cutoff, market="moneyline",
+                    is_home=is_home, spread_bucket=spread_bucket, min_n=baseline_min_n
                 )
                 for _, r in s_ml.head(3).iterrows():
                     st.markdown(bullet_with_baseline(team, "moneyline", r, base_ml))
 
-            # 🏆 League leaderboard for this exact role (spreads)
-            rb = role_leaderboard(
-                sport_str, cutoff, "spreads",
-                ctx["is_home"], ctx["spread_bucket"], baseline_min_n
-            )
+            # League leaderboard for this exact role (spreads)
+            rb = role_leaderboard(sport_str, cutoff, "spreads", is_home, spread_bucket, baseline_min_n)
             st.markdown("**League — this exact role**")
             if rb.empty:
                 st.write("_No teams meet N threshold in this role._")
