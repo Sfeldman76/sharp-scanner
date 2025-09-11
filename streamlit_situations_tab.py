@@ -117,20 +117,29 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
     """Return {team: {is_home, is_favorite, spread_bucket, cutoff, source}} for up to 2 teams."""
     if not teams:
         return {}
+
     sql = f"""
-    WITH moves AS (
+    WITH teams_param AS (
+      SELECT team FROM UNNEST(@teams) AS team
+    ),
+    moves AS (
       SELECT
         feat_Team,
         ANY_VALUE({HOME_COL})      AS is_home,
         ANY_VALUE({SPREAD_COL})    AS closing_spread,
         ANY_VALUE(feat_Game_Start) AS game_start
       FROM {MOVES_TABLE}
-      WHERE feat_Game_Key = @gid AND feat_Team IN UNNEST(@teams)
+      WHERE feat_Game_Key = @gid
+        AND feat_Team IN (SELECT team FROM teams_param)
       GROUP BY feat_Team
     ),
+    -- teams that did NOT appear in moves
     missing AS (
-      SELECT team FROM UNNEST(@teams) AS team
-      EXCEPT DISTINCT SELECT feat_Team FROM moves
+      SELECT t.team
+      FROM teams_param t
+      LEFT JOIN moves m
+        ON m.feat_Team = t.team
+      WHERE m.feat_Team IS NULL
     ),
     scores AS (
       SELECT
@@ -139,7 +148,8 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
         ANY_VALUE({SPREAD_COL})    AS closing_spread,
         ANY_VALUE(feat_Game_Start) AS cutoff
       FROM {SCORES_ROLE_VIEW}
-      WHERE feat_Game_Key = @gid AND feat_Team IN (SELECT team FROM missing)
+      WHERE feat_Game_Key = @gid
+        AND feat_Team IN (SELECT team FROM missing)
       GROUP BY feat_Team
     ),
     unioned AS (
@@ -156,17 +166,19 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
     )
     WHERE rn = 1
     """
+
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("gid","STRING", game_id),
-                bigquery.ArrayQueryParameter("teams","STRING", list(teams)),
+                bigquery.ScalarQueryParameter("gid", "STRING", game_id),
+                bigquery.ArrayQueryParameter("teams", "STRING", list(teams)),
             ],
             use_query_cache=True,
         ),
     )
     df = job.result().to_dataframe()
+
     out = {}
     for _, r in df.iterrows():
         sp = r.get("closing_spread")
