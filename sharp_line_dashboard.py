@@ -10425,6 +10425,13 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
 
 # --- MUST RUN BEFORE ANY WIDGETS ---
+import numpy as np
+import pandas as pd
+import streamlit as st
+from google.cloud import bigquery
+from streamlit_situations_tab import render_situation_db_tab
+
+
 def _sanitize_session_state():
     """
     Replace array-like / pandas objects in st.session_state with plain Python types
@@ -10437,34 +10444,27 @@ def _sanitize_session_state():
             if isinstance(v, (np.bool_, np.integer, np.floating)):
                 st.session_state[k] = v.item()
             elif isinstance(v, np.ndarray):
-                # For widgets, arrays should almost never be stored — keep as list
                 st.session_state[k] = v.tolist()
             elif isinstance(v, (pd.Series, pd.Index)):
                 st.session_state[k] = v.astype(object).tolist()
             elif isinstance(v, pd.DataFrame):
-                # Store a lightweight dict to avoid DF comparisons
                 st.session_state[k] = v.to_dict(orient="list")
         except Exception:
-            # If anything is weird/unserializable, delete it so Streamlit reinitializes
             to_fix.append(k)
     for k in to_fix:
         del st.session_state[k]
 
-# Optionally, harden known boolean keys (from prior runs) that might have bad types
 def _coerce_bool_key(key, default=False):
     v = st.session_state.get(key, default)
     if isinstance(v, (np.bool_, bool)):
         st.session_state[key] = bool(v)
     elif isinstance(v, (np.ndarray, pd.Series, list)):
-        # Treat non-empty as True if you want, or just force default:
         st.session_state[key] = bool(default)
     else:
         st.session_state[key] = bool(v)
 
-# Call once at top
 _sanitize_session_state()
 
-# If you used these keys previously without namespacing, coerce them explicitly:
 for legacy_key in [
     "pause_refresh",
     "run_nfl_scanner", "run_ncaaf_scanner", "run_nba_scanner",
@@ -10472,35 +10472,57 @@ for legacy_key in [
 ]:
     if legacy_key in st.session_state:
         _coerce_bool_key(legacy_key, default=False)
-# --- Put these near your sanitizer (top of file), BEFORE any widgets ---
+
+# --- Safe widget helpers (BEFORE any widgets) ---
 def ensure_bool_widget_state(key: str, default: bool = False) -> bool:
     """Return a safe bool for a widget's initial value; if corrupted, reset to default."""
-    import numpy as np, pandas as pd
     v = st.session_state.get(key, default)
     if isinstance(v, (bool, np.bool_)):
         return bool(v)
-    # If it's list/Series/ndarray/DataFrame/etc, nuke and return default
     if isinstance(v, (list, tuple, set, dict, np.ndarray, pd.Series, pd.Index, pd.DataFrame)):
         st.session_state.pop(key, None)
         return default
-    # Fallback: cast scalars safely
     try:
         return bool(v)
     except Exception:
         st.session_state.pop(key, None)
         return default
 
-
 def purge_non_scalar_widget_keys(prefix: str = "ui_") -> None:
     """Remove any ui_* keys that accidentally hold arrays/Series/DFs from prior runs."""
-    import numpy as np, pandas as pd
     bad_types = (list, tuple, set, dict, np.ndarray, pd.Series, pd.Index, pd.DataFrame)
     for k in list(st.session_state.keys()):
         if k.startswith(prefix) and isinstance(st.session_state[k], bad_types):
             st.session_state.pop(k, None)
 
-from streamlit_situations_tab import render_situation_db_tab
+def sanitize_widget_value(value, default=None):
+    """Coerce array-like/pandas objects into plain Python-safe types for widget state."""
+    if isinstance(value, (bool, int, float, str)) or value is None:
+        return value
+    if isinstance(value, (np.bool_, np.integer, np.floating)):
+        return value.item()
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_widget_value(v) for v in value]
+    if isinstance(value, (np.ndarray, pd.Series, pd.Index)):
+        return [sanitize_widget_value(v) for v in value.tolist()]
+    if isinstance(value, pd.DataFrame):
+        return value.to_dict(orient="records")
+    if isinstance(value, dict):
+        return {k: sanitize_widget_value(v) for k, v in value.items()}
+    return default
 
+def sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_")):
+    """Convert any array/Series/DF stored under widget key prefixes into safe Python types."""
+    for k in list(st.session_state.keys()):
+        if any(k.startswith(p) for p in prefixes):
+            v = st.session_state[k]
+            safe_v = sanitize_widget_value(v, default=None)
+            if safe_v is None and v is not None:
+                st.session_state.pop(k, None)
+            else:
+                st.session_state[k] = safe_v
+
+# Clean up any lingering bad ui_* values before creating widgets
 purge_non_scalar_widget_keys()
 
 # --- Sidebar navigation
@@ -10518,7 +10540,6 @@ pause_refresh = st.sidebar.checkbox(
     key=PAUSE_KEY,
     value=ensure_bool_widget_state(PAUSE_KEY, default=False),
 )
-
 
 force_reload = st.sidebar.button("🔁 Force Reload", key="ui_force_reload_btn")
 
@@ -10545,11 +10566,10 @@ else:
     st.title(f"🏟️ {sport} Sharp Scanner")
 
     scanner_key = scanner_widget_keys[sport]
-
     run_scanner = st.checkbox(
         f"Run {sport} Scanner",
         key=scanner_key,
-        value=ensure_bool_widget_state(scanner_key, default=True),  # ✅ fixed!
+        value=ensure_bool_widget_state(scanner_key, default=True),
     )
 
     label = sport  # e.g. "WNBA"
@@ -10576,7 +10596,9 @@ else:
             render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
 
         with analysis_tab:
-            render_sharp_signal_analysis_tab(tab=analysis_tab, sport_label=label, sport_key_api=sport_key)
+            render_sharp_signal_analysis_tab(
+                tab=analysis_tab, sport_label=label, sport_key_api=sport_key
+            )
 
         with power_tab:
             client = bigquery.Client(project="sharplogger", location="us")
@@ -10589,7 +10611,11 @@ else:
             )
 
         with situation_tab:
+            # IMPORTANT: If your function assigns to session_state with widget keys,
+            # namespace them like "situation_ui_*" and only store scalars/lists.
             render_situation_db_tab(selected_sport=sport)
 
+        # === CRITICAL: sanitize AFTER Situation tab renders so the next rerun is safe ===
+        sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_"))
 
 
