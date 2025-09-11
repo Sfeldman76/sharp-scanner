@@ -122,7 +122,7 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
     WITH teams_param AS (
       SELECT team FROM UNNEST(@teams) AS team
     ),
-    moves AS (
+    moves_pre AS (
       SELECT
         feat_Team,
         ANY_VALUE({HOME_COL})      AS is_home,
@@ -133,15 +133,7 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
         AND feat_Team IN (SELECT team FROM teams_param)
       GROUP BY feat_Team
     ),
-    -- teams that did NOT appear in moves
-    missing AS (
-      SELECT t.team
-      FROM teams_param t
-      LEFT JOIN moves m
-        ON m.feat_Team = t.team
-      WHERE m.feat_Team IS NULL
-    ),
-    scores AS (
+    scores_pre AS (
       SELECT
         feat_Team,
         ANY_VALUE({HOME_COL})      AS is_home,
@@ -149,22 +141,29 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
         ANY_VALUE(feat_Game_Start) AS cutoff
       FROM {SCORES_ROLE_VIEW}
       WHERE feat_Game_Key = @gid
-        AND feat_Team IN (SELECT team FROM missing)
+        AND feat_Team IN (SELECT team FROM teams_param)
       GROUP BY feat_Team
     ),
-    unioned AS (
-      SELECT feat_Team, is_home, closing_spread, game_start AS cutoff, 'moves'  AS source FROM moves
-      UNION ALL
-      SELECT feat_Team, is_home, closing_spread, cutoff     AS cutoff, 'scores' AS source FROM scores
-    )
-    SELECT feat_Team, is_home, closing_spread, cutoff, source
-    FROM (
+    joined AS (
       SELECT
-        u.*,
-        ROW_NUMBER() OVER (PARTITION BY feat_Team ORDER BY (source = 'moves') DESC) AS rn
-      FROM unioned u
+        t.team AS feat_Team,
+        m.is_home   AS m_is_home,
+        m.closing_spread AS m_spread,
+        m.game_start     AS m_cutoff,
+        s.is_home   AS s_is_home,
+        s.closing_spread AS s_spread,
+        s.cutoff         AS s_cutoff
+      FROM teams_param t
+      LEFT JOIN moves_pre  m ON m.feat_Team = t.team
+      LEFT JOIN scores_pre s ON s.feat_Team = t.team
     )
-    WHERE rn = 1
+    SELECT
+      feat_Team,
+      COALESCE(m_is_home, s_is_home)                 AS is_home,
+      COALESCE(m_spread, s_spread)                   AS closing_spread,
+      COALESCE(m_cutoff, s_cutoff)                   AS cutoff,
+      CASE WHEN m_cutoff IS NOT NULL THEN 'moves' ELSE 'scores' END AS source
+    FROM joined
     """
 
     job = CLIENT.query(
@@ -191,6 +190,7 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
             "source": r.get("source"),
         }
     return out
+
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
