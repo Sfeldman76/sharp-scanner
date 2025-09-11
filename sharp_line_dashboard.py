@@ -10545,30 +10545,6 @@ else:
     st.title(f"🏟️ {sport} Sharp Scanner")
 
     scanner_key = scanner_widget_keys[sport]
-    run_scanner = st.checkbox(f"Run {sport} Scanner",
-                              value=bool(st.session_state.get(scanner_key, True)),
-                              key=scanner_key)
-
-    label = sport  # e.g. "WNBA"
-    sport_key = SPORTS[sport]  # e.g. "basketball_wnba"
-
-    if st.button(f"📈 Train {sport} Sharp Model", key=f"ui_train_{sport}_btn"):
-        train_timing_opportunity_model(sport=label)
-        train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
-
-    # Prevent multiple scanners from running — treat only literal True as on
-    conflicting = [
-        k for k, v in scanner_widget_keys.items()
-        if k != sport and (st.session_state.get(v) is True)
-    ]
-
-    if conflicting:
-        st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
-    # === LEAGUE PAGES ===
-else:
-    st.title(f"🏟️ {sport} Sharp Scanner")
-
-    scanner_key = scanner_widget_keys[sport]
 
     run_scanner = st.checkbox(
         f"Run {sport} Scanner",
