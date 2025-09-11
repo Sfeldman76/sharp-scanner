@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 from google.cloud import bigquery
-
+import numpy as np
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 VIEW_GAMES = f"`{PROJECT}.{DATASET}.scores_games_list`"
