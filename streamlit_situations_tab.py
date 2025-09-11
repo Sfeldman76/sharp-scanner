@@ -330,7 +330,8 @@ def render_situation_db_tab(selected_sport: str | None = None):
         return
 
     df_games = df_games.copy()
-    df_games["TeamsList"] = df_games["Teams"].apply(_coerce_teams_list)
+    df_games["TeamsList"] = df_games["Teams"].apply(lambda x: tuple(_coerce_teams_list(x)))
+
     df_games["label"] = df_games.apply(
         lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}" if r["TeamsList"]
                   else f"{r['Game_Start']} — (teams TBD)",
