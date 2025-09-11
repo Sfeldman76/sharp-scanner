@@ -9,8 +9,6 @@ VIEW_GAMES = f"`{PROJECT}.{DATASET}.scores_games_list`"
 VIEW_FEAT  = f"`{PROJECT}.{DATASET}.scores_with_features`"
 CLIENT = bigquery.Client(project=PROJECT)
 
-
-
 # --- helpers ---------------------------------------------------------------
 
 def list_games(sport_label: str) -> pd.DataFrame:
@@ -36,8 +34,6 @@ def list_games(sport_label: str) -> pd.DataFrame:
     )
     return job.result().to_dataframe()
 
-
-
 def team_rows(game_id: str) -> pd.DataFrame:
     sql = f"""
     SELECT feat_Team AS Team, ANY_VALUE(feat_Game_Start) AS Cutoff
@@ -50,7 +46,7 @@ def team_rows(game_id: str) -> pd.DataFrame:
     ))
     return job.result().to_dataframe()
 
-def _spread_bucket(v: float|None) -> str:
+def _spread_bucket(v: float | None) -> str:
     if v is None:
         return ""
     try:
@@ -68,15 +64,76 @@ def _spread_bucket(v: float|None) -> str:
     if v <=  10.5: return "Dog +7 to +10.5"
     return "Dog ≥ +11"
 
-def game_team_context(game_id: str, team: str) -> dict:
+def get_team_context(game_id: str, team: str) -> dict:
     """
-    Pull one row for this (game, team) and derive:
-      - is_home (bool via Home_/Away_ flags)
-      - spread_bucket (string via Closing_Spread_For_Team)
-      - cutoff (game start ts for this team row)
-      - sport (None unless you add it to scores_with_features)
+    Unified context fetcher:
+      - Prefer current/future context from moves_with_features_merged
+      - Fallback to historical context from scores_with_features
+    Returns:
+      {
+        "is_home": True/False/None,
+        "is_favorite": True/False/None,
+        "spread_bucket": str,
+        "cutoff": TIMESTAMP or None,
+        "source": "moves" | "scores" | "none"
+      }
     """
-    sql = f"""
+    # 1) Try moves (current/future)
+    sql_moves = """
+    SELECT
+      ANY_VALUE(Closing_Spread_For_Team) AS closing_spread,
+      ANY_VALUE(feat_Game_Start)         AS game_start,
+      CASE
+        WHEN GREATEST(
+               IFNULL(Home_After_Home_Win_Flag,   -1),
+               IFNULL(Home_After_Home_Loss_Flag,  -1),
+               IFNULL(Home_After_Away_Win_Flag,   -1),
+               IFNULL(Home_After_Away_Loss_Flag,  -1)
+             ) >= 0
+         AND GREATEST(
+               IFNULL(Away_After_Home_Win_Flag,   -1),
+               IFNULL(Away_After_Home_Loss_Flag,  -1),
+               IFNULL(Away_After_Away_Win_Flag,   -1),
+               IFNULL(Away_After_Away_Loss_Flag,  -1)
+             ) < 0 THEN TRUE
+        WHEN GREATEST(
+               IFNULL(Away_After_Home_Win_Flag,   -1),
+               IFNULL(Away_After_Home_Loss_Flag,  -1),
+               IFNULL(Away_After_Away_Win_Flag,   -1),
+               IFNULL(Away_After_Away_Loss_Flag,  -1)
+             ) >= 0
+         AND GREATEST(
+               IFNULL(Home_After_Home_Win_Flag,   -1),
+               IFNULL(Home_After_Home_Loss_Flag,  -1),
+               IFNULL(Home_After_Away_Win_Flag,   -1),
+               IFNULL(Home_After_Away_Loss_Flag,  -1)
+             ) < 0 THEN FALSE
+        ELSE NULL
+      END AS is_home
+    FROM `sharplogger.sharp_data.moves_with_features_merged`
+    WHERE feat_Game_Key = @gid AND feat_Team = @team
+    """
+    job = CLIENT.query(sql_moves, job_config=bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("gid","STRING", game_id),
+            bigquery.ScalarQueryParameter("team","STRING", team),
+        ]))
+    df = job.result().to_dataframe()
+
+    if not df.empty:
+        r  = df.iloc[0]
+        sp = r.get("closing_spread")
+        is_favorite = (sp is not None) and (float(sp) < 0)
+        return {
+            "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
+            "is_favorite": is_favorite if sp is not None else None,
+            "spread_bucket": _spread_bucket(sp),
+            "cutoff": r.get("game_start"),
+            "source": "moves",
+        }
+
+    # 2) Fallback to scores (historical)
+    sql_scores = f"""
     SELECT
       ANY_VALUE(Home_After_Home_Win_Flag)  AS H_H_W,
       ANY_VALUE(Home_After_Home_Loss_Flag) AS H_H_L,
@@ -88,33 +145,34 @@ def game_team_context(game_id: str, team: str) -> dict:
       ANY_VALUE(Away_After_Away_Loss_Flag) AS A_A_L,
       ANY_VALUE(Closing_Spread_For_Team)   AS closing_spread,
       ANY_VALUE(feat_Game_Start)           AS cutoff
-      -- If your view has Sport: , ANY_VALUE(Sport) AS Sport
     FROM {VIEW_FEAT}
     WHERE feat_Game_Key = @gid AND feat_Team = @team
     """
-    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(
+    job2 = CLIENT.query(sql_scores, job_config=bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ScalarQueryParameter("gid","STRING",game_id),
-            bigquery.ScalarQueryParameter("team","STRING",team),
-        ]
-    ))
-    df = job.result().to_dataframe()
-    if df.empty:
-        return {"is_home": None, "spread_bucket": "", "sport": None, "cutoff": None}
+            bigquery.ScalarQueryParameter("gid","STRING", game_id),
+            bigquery.ScalarQueryParameter("team","STRING", team),
+        ]))
+    df2 = job2.result().to_dataframe()
 
-    r = df.iloc[0]
-    # infer home/away from presence of the home/away flags
-    is_home = any(pd.notnull(r[x]) for x in ["H_H_W","H_H_L","H_A_W","H_A_L"])
-    away_markers = any(pd.notnull(r[x]) for x in ["A_H_W","A_H_L","A_A_W","A_A_L"])
-    site = True if is_home else (False if away_markers else None)
+    if df2.empty:
+        return {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"}
 
-    bucket = _spread_bucket(r.get("closing_spread"))
+    r2 = df2.iloc[0]
+    has_home = any(pd.notnull(r2[x]) for x in ["H_H_W","H_H_L","H_A_W","H_A_L"])
+    has_away = any(pd.notnull(r2[x]) for x in ["A_H_W","A_H_L","A_A_W","A_A_L"])
+    site = True if has_home else (False if has_away else None)
+    sp2 = r2.get("closing_spread")
+    is_favorite2 = (sp2 is not None) and (float(sp2) < 0)
+
     return {
         "is_home": site,
-        "spread_bucket": bucket,
-        "sport": None,  # fill if you add Sport to scores_with_features
-        "cutoff": r.get("cutoff"),
+        "is_favorite": is_favorite2 if sp2 is not None else None,
+        "spread_bucket": _spread_bucket(sp2),
+        "cutoff": r2.get("cutoff"),
+        "source": "scores",
     }
+
 
 # --- table-function wrappers ----------------------------------------------
 
@@ -135,8 +193,10 @@ def situation_stats(sport: str, team: str, cutoff, market: str, min_n: int) -> p
     ))
     return job.result().to_dataframe()
 
-def league_baseline(sport: str, cutoff, market: str, is_home, spread_bucket: str|None, min_n: int = 100):
-    # matches: (p_sport, p_cutoff, p_market, p_is_home, p_spread_bucket, p_min_n)
+def league_baseline_filtered(sport: str, cutoff, market: str,
+                             is_home: bool | None,
+                             spread_bucket: str | None,
+                             min_n: int = 100):
     sql = """
     SELECT * FROM `sharplogger.sharp_data.league_situation_stats_from_scores`
       (@sport, @cutoff, @market, @is_home, @spread_bucket, @min_n)
@@ -152,37 +212,151 @@ def league_baseline(sport: str, cutoff, market: str, is_home, spread_bucket: str
     df = job.result().to_dataframe()
     return None if df.empty else df.iloc[0]
 
+def role_leaderboard(sport: str, cutoff, market: str,
+                     is_home: bool | None,
+                     spread_bucket: str | None,
+                     min_n: int = 30) -> pd.DataFrame:
+    sql = f"""
+    WITH src AS (
+      SELECT s.*
+      FROM {VIEW_FEAT} AS s
+      WHERE s.Sport = @sport
+        AND s.feat_Game_Start < @cutoff
+        AND s.feat_Game_Start >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL 10 YEAR))
+    ),
+    e AS (
+      SELECT
+        s.feat_Team AS Team,
+        CASE
+          WHEN GREATEST(
+                 IFNULL(Home_After_Home_Win_Flag,   -1),
+                 IFNULL(Home_After_Home_Loss_Flag,  -1),
+                 IFNULL(Home_After_Away_Win_Flag,   -1),
+                 IFNULL(Home_After_Away_Loss_Flag,  -1)
+               ) >= 0
+           AND GREATEST(
+                 IFNULL(Away_After_Home_Win_Flag,   -1),
+                 IFNULL(Away_After_Home_Loss_Flag,  -1),
+                 IFNULL(Away_After_Away_Win_Flag,   -1),
+                 IFNULL(Away_After_Away_Loss_Flag,  -1)
+               ) < 0 THEN TRUE
+          WHEN GREATEST(
+                 IFNULL(Away_After_Home_Win_Flag,   -1),
+                 IFNULL(Away_After_Home_Loss_Flag,  -1),
+                 IFNULL(Away_After_Away_Win_Flag,   -1),
+                 IFNULL(Away_After_Away_Loss_Flag,  -1)
+               ) >= 0
+           AND GREATEST(
+                 IFNULL(Home_After_Home_Win_Flag,   -1),
+                 IFNULL(Home_After_Home_Loss_Flag,  -1),
+                 IFNULL(Home_After_Away_Win_Flag,   -1),
+                 IFNULL(Home_After_Away_Loss_Flag,  -1)
+               ) < 0 THEN FALSE
+          ELSE NULL
+        END AS Is_Home,
+        CASE
+          WHEN Closing_Spread_For_Team IS NULL THEN ''
+          WHEN Closing_Spread_For_Team <= -10.5 THEN 'Fav ≤ -10.5'
+          WHEN Closing_Spread_For_Team <=  -7.5 THEN 'Fav -8 to -10.5'
+          WHEN Closing_Spread_For_Team <=  -6.5 THEN 'Fav -7 to -6.5'
+          WHEN Closing_Spread_For_Team <=  -3.5 THEN 'Fav -4 to -6.5'
+          WHEN Closing_Spread_For_Team <=  -0.5 THEN 'Fav -0.5 to -3.5'
+          WHEN Closing_Spread_For_Team =    0.0 THEN 'Pick (0)'
+          WHEN Closing_Spread_For_Team <=   3.5 THEN 'Dog +0.5 to +3.5'
+          WHEN Closing_Spread_For_Team <=   6.5 THEN 'Dog +4 to +6.5'
+          WHEN Closing_Spread_For_Team <=  10.5 THEN 'Dog +7 to +10.5'
+          ELSE 'Dog ≥ +11'
+        END AS Spread_Bucket,
+        CASE WHEN Spread_Cover_Flag = 1 THEN 'W'
+             WHEN Spread_Cover_Flag = 0 THEN 'L'
+             WHEN ATS_Cover_Margin  = 0 THEN 'P'
+             ELSE NULL END AS ATS_Result,
+        CASE WHEN Team_Score > Opp_Score THEN 'W' ELSE 'L' END AS SU_Result,
+        CASE WHEN @market='spreads'   THEN (Spread_Cover_Flag IN (0,1) OR ATS_Cover_Margin = 0)
+             WHEN @market='moneyline' THEN TRUE
+             ELSE FALSE END AS is_graded
+      FROM src s
+    ),
+    filtered AS (
+      SELECT *
+      FROM e
+      WHERE is_graded
+        AND (@is_home IS NULL OR Is_Home = @is_home)
+        AND (@spread_bucket = '' OR Spread_Bucket = @spread_bucket)
+    ),
+    by_team AS (
+      SELECT
+        Team,
+        COUNT(*) AS N,
+        COUNTIF( (@market='spreads' AND ATS_Result='W') OR
+                 (@market='moneyline' AND SU_Result='W') ) AS W,
+        COUNTIF( (@market='spreads' AND ATS_Result='L') OR
+                 (@market='moneyline' AND SU_Result='L') ) AS L,
+        COUNTIF( @market='spreads' AND ATS_Result='P' ) AS P
+      FROM filtered
+      GROUP BY Team
+      HAVING N >= @min_n
+    )
+    SELECT
+      Team, N, W, L, P,
+      SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
+      CASE
+        WHEN @market = 'spreads' AND (W + L) > 0
+          THEN ((W * (100.0/110.0) + L * (-1.0)) / (W + L)) * 100.0
+        ELSE NULL
+      END AS ROI_Pct
+    FROM by_team
+    ORDER BY IFNULL(ROI_Pct, 0.0) DESC, WinPct DESC, N DESC
+    """
+    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("sport","STRING", sport),
+        bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
+        bigquery.ScalarQueryParameter("market","STRING", market),
+        bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
+        bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
+        bigquery.ScalarQueryParameter("min_n","INT64", min_n),
+    ]))
+    return job.result().to_dataframe()
+
 # --- formatting ------------------------------------------------------------
 
 def bullet(team: str, market: str, r: pd.Series) -> str:
-    roi = (f", ROI {r.ROI_Pct:+.1f}%" if pd.notnull(r.ROI_Pct) else "")
+    W = int(r.W) if pd.notnull(r.W) else 0
+    L = int(r.L) if pd.notnull(r.L) else 0
+    P = int(r.P) if ('P' in r.index and pd.notnull(r.P)) else 0
+    N = int(r.N) if pd.notnull(r.N) else 0
+    winpct = float(r.WinPct) if pd.notnull(r.WinPct) else 0.0
+    roi_val = r.get('ROI_Pct')
+    roi_txt = f", ROI {float(roi_val):+,.1f}%" if pd.notnull(roi_val) else ""
+    push_txt = f"-{P}P" if P else ""
     return (f"**{team} — {market.capitalize()}** · {r.Situation}: "
-            f"{int(r.W)}-{int(r.L)}{('-'+str(int(r.P))+'P' if getattr(r,'P',0) else '')} "
-            f"({float(r.WinPct):.1f}%) over {int(r.N)}{roi}.")
+            f"{W}-{L}{push_txt} ({winpct:.1f}%) over {N}{roi_txt}.")
+
 
 def bullet_with_baseline(team, market, r, base):
-    team_line = f"**{team} — {market.capitalize()}** · {r.Situation}: {int(r.W)}-{int(r.L)}{('-'+str(int(r.P))+'P' if getattr(r,'P',0) else '')} ({float(r.WinPct):.1f}%) over {int(r.N)}"
+    line = bullet(team, market, r)
     if base is None:
-        return "• " + team_line
-    base_line = f" — League baseline: {float(base.WinPct):.1f}% (N={int(base.N)})"
-    return "• " + team_line + base_line
+        return "• " + line
+    base_WP = float(base.WinPct) if pd.notnull(base.WinPct) else 0.0
+    base_N  = int(base.N) if pd.notnull(base.N) else 0
+    return "• " + line + f" — League baseline: {base_WP:.1f}% (N={base_N})"
 
 # --- UI --------------------------------------------------------------------
 
-def render_situation_db_tab(selected_sport: str|None = None):
-    st.header("Situation Database — Best % by Team (from scores_with_features)")
+def render_situation_db_tab(selected_sport: str | None = None):
+    st.header("📊 Situation Database — Best % by Team (from scores_with_features)")
 
     if not selected_sport:
         st.warning("Please pick a sport in the sidebar.")
         st.stop()
     
-    df_games = list_games(selected_sport) # << sport-specific + future-only
+    df_games = list_games(selected_sport)
     if df_games.empty:
         st.info("No upcoming games found for this sport.")
         return
 
     df_games["label"] = df_games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}", axis=1
+        lambda r: f"{r['Game_Start']} — {', '.join(list(r['Teams'] or []))}", axis=1
     )
     row = st.selectbox(
         "Select game",
@@ -198,33 +372,65 @@ def render_situation_db_tab(selected_sport: str|None = None):
     baseline_min_n = st.number_input("League baseline min N", 50, 1000, 150, step=10)
 
     cols = st.columns(2)
-    for i, team in enumerate(teams[:2]):  # guard in case Teams has >2
+    for i, team in enumerate(teams[:2]):
         with cols[i]:
             st.subheader(team)
 
-            # pull current context for the baseline
-            ctx = game_team_context(game_id, team)
-            sport_str = selected_sport or ctx.get("sport") or ""  # must be non-null for the function
+            # 🧠 Get context from moves/scores
+            ctx = get_team_context(game_id, team)
+            role_bits = []
+            if ctx["is_home"] is True: role_bits.append("🏠 Home")
+            elif ctx["is_home"] is False: role_bits.append("🚗 Road")
+            if ctx["is_favorite"] is True: role_bits.append("⭐ Favorite")
+            elif ctx["is_favorite"] is False: role_bits.append("🐶 Underdog")
+            if ctx["spread_bucket"]: role_bits.append(ctx["spread_bucket"])
+            st.caption(" / ".join(role_bits) or "Role: Unknown")
+
+            # Set sport/cutoff/role inputs for table function
+            sport_str = selected_sport or ctx.get("sport") or ""
             is_home = ctx["is_home"]
             spread_bucket = ctx["spread_bucket"]
+            cutoff = ctx["cutoff"] or game_start  # fallback to game start
 
-            # Spreads
-            s_ats = situation_stats(sport_str, team, game_start, "spreads", min_n)
+            # 🧾 Spreads
             st.markdown("**Spreads — top 3**")
+            s_ats = situation_stats(sport_str, team, cutoff, "spreads", min_n)
             if s_ats.empty:
                 st.write("_No ATS situations meeting N threshold._")
             else:
-                base = league_baseline(sport_str, game_start, "spreads", is_home, spread_bucket, baseline_min_n)
+                base = league_baseline_filtered(
+                    sport=sport_str,
+                    cutoff=cutoff,
+                    market="spreads",
+                    is_home=is_home,
+                    spread_bucket=spread_bucket,
+                    min_n=baseline_min_n
+                )
                 for _, r in s_ats.head(3).iterrows():
                     st.markdown(bullet_with_baseline(team, "spreads", r, base))
 
-            # Moneyline
-            s_ml = situation_stats(sport_str, team, game_start, "moneyline", min_n)
+            # 💰 Moneyline
             st.markdown("**Moneyline — top 3**")
+            s_ml = situation_stats(sport_str, team, cutoff, "moneyline", min_n)
             if s_ml.empty:
                 st.write("_No ML situations meeting N threshold._")
             else:
-                base_ml = league_baseline(sport_str, game_start, "moneyline", is_home, spread_bucket, baseline_min_n)
+                base_ml = league_baseline_filtered(
+                    sport=sport_str,
+                    cutoff=cutoff,
+                    market="moneyline",
+                    is_home=is_home,
+                    spread_bucket=spread_bucket,
+                    min_n=baseline_min_n
+                )
                 for _, r in s_ml.head(3).iterrows():
                     st.markdown(bullet_with_baseline(team, "moneyline", r, base_ml))
+            
+            rb = role_leaderboard(sport_str, cutoff, "spreads", ctx["is_home"], ctx["spread_bucket"], baseline_min_n)
+
+            st.markdown("**League — this exact role**")
+            if rb.empty:
+                st.write("_No teams meet N threshold in this role._")
+            else:
+                st.dataframe(rb.head(20))
 
