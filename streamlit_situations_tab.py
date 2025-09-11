@@ -232,8 +232,6 @@ def get_team_context(game_id: str, team: str) -> dict:
     ctxs = get_contexts_for_game(game_id, (team,))
     return ctxs.get(team, {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"})
 
-@st.cache_data(ttl=CACHE_TTL_SEC)
-from google.cloud import bigquery
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def situation_stats_cached(sport_str: str, team: str, cutoff, market: str, min_n: int):
