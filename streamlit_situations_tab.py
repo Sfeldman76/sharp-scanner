@@ -14,83 +14,27 @@ CLIENT = bigquery.Client(project=PROJECT)
 # --- helpers ---------------------------------------------------------------
 
 def list_games(sport_label: str) -> pd.DataFrame:
-    """
-    Return upcoming games (> now) for the selected sport.
-    Tries scores_games_list (expects Sport). If not present, falls back to sharp_moves_master.
-    """
-    # Map UI label -> DB sport value. Adjust to your schema.
+    # Map sidebar label to DB value if needed
     SPORT_MAP = {
-        "NFL": "NFL",
-        "NCAAF": "NCAAF",
-        "NBA": "NBA",
-        "NCAAB": "NCAAB",
-        "MLB": "MLB",
-        "WNBA": "WNBA",
-        "CFL": "CFL",
+        "NFL": "NFL", "NCAAF": "NCAAF", "NBA": "NBA",
+        "NCAAB": "NCAAB", "MLB": "MLB", "WNBA": "WNBA", "CFL": "CFL",
     }
     db_sport = SPORT_MAP.get(sport_label, sport_label)
 
-    # 1) Try the view with Sport filter
-    try:
-        sql_view = f"""
-        SELECT Game_Id, Game_Start, Teams
-        FROM {VIEW_GAMES}
-        WHERE Sport = @sport
-          AND Game_Start > CURRENT_TIMESTAMP()
-        ORDER BY Game_Start ASC
-        """
-        job = CLIENT.query(
-            sql_view,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ScalarQueryParameter("sport","STRING", db_sport)]
-            ),
-        )
-        df = job.result().to_dataframe()
-        if not df.empty:
-            return df
-    except Exception:
-        pass  # fall back below
-
-    # 2) Fallback: build from sharp_moves_master directly
-    fallback_sql = """
-    WITH base AS (
-      SELECT
-        COALESCE(CAST(Game_Id AS STRING),
-                 TO_HEX(MD5(CONCAT(
-                   IFNULL(Sport, ''), '|',
-                   FORMAT_TIMESTAMP('%F %T', Game_Start), '|',
-                   IFNULL(Home_Team_Norm, ''), '|',
-                   IFNULL(Away_Team_Norm, '')
-                 )))) AS Game_Id,
-        Game_Start,
-        ARRAY[
-          LOWER(Away_Team_Norm),
-          LOWER(Home_Team_Norm)
-        ] AS Teams
-      FROM `sharplogger.sharp_data.sharp_moves_master`
-      WHERE Sport = @sport
-        AND Game_Start > CURRENT_TIMESTAMP()
-        AND Game_Start IS NOT NULL
-    ),
-    dedup AS (
-      SELECT * EXCEPT(rn)
-      FROM (
-        SELECT b.*, ROW_NUMBER() OVER (PARTITION BY Game_Id ORDER BY Game_Start DESC) rn
-        FROM base b
-      )
-      WHERE rn = 1
-    )
+    sql = f"""
     SELECT Game_Id, Game_Start, Teams
-    FROM dedup
+    FROM {VIEW_GAMES}
+    WHERE Sport = @sport
+      AND Game_Start > CURRENT_TIMESTAMP()
     ORDER BY Game_Start ASC
     """
-    job2 = CLIENT.query(
-        fallback_sql,
+    job = CLIENT.query(
+        sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[bigquery.ScalarQueryParameter("sport","STRING", db_sport)]
         ),
     )
-    return job2.result().to_dataframe()
+    return job.result().to_dataframe()
 
 
 
