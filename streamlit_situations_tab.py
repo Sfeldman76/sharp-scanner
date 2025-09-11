@@ -114,10 +114,7 @@ def list_games_cached(sport_label: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
-    """
-    Return {team: {is_home, is_favorite, spread_bucket, cutoff, source}} for the given teams.
-    Prefers MOVES; falls back to SCORES_ROLE_VIEW.
-    """
+    """Return {team: {is_home, is_favorite, spread_bucket, cutoff, source}} for up to 2 teams."""
     if not teams:
         return {}
     sql = f"""
@@ -144,22 +141,20 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
       FROM {SCORES_ROLE_VIEW}
       WHERE feat_Game_Key = @gid AND feat_Team IN (SELECT team FROM missing)
       GROUP BY feat_Team
+    ),
+    unioned AS (
+      SELECT feat_Team, is_home, closing_spread, game_start AS cutoff, 'moves'  AS source FROM moves
+      UNION ALL
+      SELECT feat_Team, is_home, closing_spread, cutoff     AS cutoff, 'scores' AS source FROM scores
     )
-    SELECT
-      feat_Team,
-      is_home,
-      closing_spread,
-      COALESCE(game_start, cutoff) AS cutoff,
-      CASE WHEN game_start IS NOT NULL THEN 'moves' ELSE 'scores' END AS source
-    FROM moves
-    UNION ALL
-    SELECT
-      feat_Team,
-      is_home,
-      closing_spread,
-      cutoff,
-      'scores' AS source
-    FROM scores
+    SELECT feat_Team, is_home, closing_spread, cutoff, source
+    FROM (
+      SELECT
+        u.*,
+        ROW_NUMBER() OVER (PARTITION BY feat_Team ORDER BY (source = 'moves') DESC) AS rn
+      FROM unioned u
+    )
+    WHERE rn = 1
     """
     job = CLIENT.query(
         sql,
@@ -174,7 +169,7 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
     df = job.result().to_dataframe()
     out = {}
     for _, r in df.iterrows():
-        sp  = r.get("closing_spread")
+        sp = r.get("closing_spread")
         spf = float(sp) if pd.notnull(sp) else None
         out[r["feat_Team"]] = {
             "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
@@ -184,6 +179,7 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
             "source": r.get("source"),
         }
     return out
+
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def situation_stats_cached(sport: str, team: str, cutoff: dt.datetime, market: str, min_n: int) -> pd.DataFrame:
