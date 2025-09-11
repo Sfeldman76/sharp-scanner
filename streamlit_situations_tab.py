@@ -9,17 +9,26 @@ VIEW_GAMES = f"`{PROJECT}.{DATASET}.scores_games_list`"
 VIEW_FEAT  = f"`{PROJECT}.{DATASET}.scores_with_features`"
 CLIENT = bigquery.Client(project=PROJECT)
 
+
+
 # --- helpers ---------------------------------------------------------------
 
-def list_games() -> pd.DataFrame:
+def list_games(sport: str) -> pd.DataFrame:
     sql = f"""
     SELECT Game_Id, Game_Start, Teams
     FROM {VIEW_GAMES}
-    WHERE Game_Start BETWEEN TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 365 DAY)
-                        AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-    ORDER BY Game_Start DESC
+    WHERE Sport = @sport
+      AND Game_Start > CURRENT_TIMESTAMP()
+    ORDER BY Game_Start ASC
     """
-    return CLIENT.query(sql).result().to_dataframe()
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("sport", "STRING", sport)]
+        )
+    )
+    return job.result().to_dataframe()
+
 
 def team_rows(game_id: str) -> pd.DataFrame:
     sql = f"""
