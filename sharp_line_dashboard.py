@@ -10423,14 +10423,21 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
             )
 
 from streamlit_situations_tab import render_situation_db_tab
+
 # --- Sidebar navigation
-sport = st.sidebar.radio("Select a League", ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"])
+sport = st.sidebar.radio("Select a League", ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"], key="ui_sport_radio")
 
 st.sidebar.markdown("### ⚙️ Controls")
-st.sidebar.checkbox("⏸️ Pause Auto Refresh", key="pause_refresh")
-force_reload = st.sidebar.button("🔁 Force Reload")
 
-# --- Optional: Track scanner checkboxes by sport
+# Use a namespaced key so nothing else writes arrays into it
+PAUSE_KEY = "ui_pause_refresh"
+pause_refresh = st.sidebar.checkbox("⏸️ Pause Auto Refresh",
+                                    key=PAUSE_KEY,
+                                    value=bool(st.session_state.get(PAUSE_KEY, False)))
+
+force_reload = st.sidebar.button("🔁 Force Reload", key="ui_force_reload_btn")
+
+# --- Optional: Track scanner checkboxes by sport (logical names)
 scanner_flags = {
     "NFL": "run_nfl_scanner",
     "NCAAF": "run_ncaaf_scanner",
@@ -10440,31 +10447,34 @@ scanner_flags = {
     "WNBA": "run_wnba_scanner",
 }
 
+# Map to **widget** keys that are safely namespaced
+scanner_widget_keys = {k: f"ui_{v}" for k, v in scanner_flags.items()}
+
 # === GENERAL PAGE ===
 if sport == "General":
     st.title("🎯 Sharp Scanner Dashboard")
     st.write("Use the sidebar to select a league and begin scanning or training models.")
 
 # === LEAGUE PAGES ===
-# === LEAGUE PAGES ===
 else:
     st.title(f"🏟️ {sport} Sharp Scanner")
 
-    scanner_key = scanner_flags.get(sport)
-    run_scanner = st.checkbox(f"Run {sport} Scanner", value=True, key=scanner_key)
+    scanner_key = scanner_widget_keys[sport]
+    run_scanner = st.checkbox(f"Run {sport} Scanner",
+                              value=bool(st.session_state.get(scanner_key, True)),
+                              key=scanner_key)
 
     label = sport  # e.g. "WNBA"
     sport_key = SPORTS[sport]  # e.g. "basketball_wnba"
 
-    if st.button(f"📈 Train {sport} Sharp Model"):
+    if st.button(f"📈 Train {sport} Sharp Model", key=f"ui_train_{sport}_btn"):
         train_timing_opportunity_model(sport=label)
         train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
-        
-    # Prevent multiple scanners from running
-   
+
+    # Prevent multiple scanners from running — treat only literal True as on
     conflicting = [
-        k for k, v in scanner_flags.items()
-        if k != sport and st.session_state.get(v, False)
+        k for k, v in scanner_widget_keys.items()
+        if k != sport and (st.session_state.get(v) is True)
     ]
 
     if conflicting:
@@ -10473,21 +10483,20 @@ else:
         scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
             ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
         )
-        
+
         with scan_tab:
             render_scanner_tab(label=label, sport_key=sport_key, container=scan_tab)
 
         with analysis_tab:
             render_sharp_signal_analysis_tab(tab=analysis_tab, sport_label=label, sport_key_api=sport_key)
-        
+
         with power_tab:
-           
-            
             client = bigquery.Client(project="sharplogger", location="us")
             # Set show_edges=True if you want the bottom section that calls attach_ratings_and_edges_for_diagnostics(...)
             render_power_ranking_tab(tab=power_tab, sport_label=label, sport_key_api=sport_key, bq_client=client, show_edges=False)
-        
+
         with situation_tab:
-            render_situation_db_tab(selected_sport=sport)   # 
+            render_situation_db_tab(selected_sport=sport)
+
 
 
