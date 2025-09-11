@@ -1,75 +1,73 @@
 # streamlit_situations_tab.py
 import streamlit as st
 import pandas as pd
-from google.cloud import bigquery
 import numpy as np
-PROJECT = "sharplogger"
-DATASET = "sharp_data"
-VIEW_GAMES = f"`{PROJECT}.{DATASET}.scores_games_list`"
-VIEW_FEAT  = f"`{PROJECT}.{DATASET}.scores_with_features`"
-CLIENT = bigquery.Client(project=PROJECT)
-HOME_COL   = "Is_Home"
-SPREAD_COL = "Value"  # used by moves and scores_role_view
-SCORES_ROLE_VIEW = "`sharplogger.sharp_data.scores_role_view`"
-MOVES_TABLE      = "`sharplogger.sharp_data.moves_with_features_merged`"
-
-# --- helpers ---------------------------------------------------------------
-# add near your imports
-from datetime import datetime
-from functools import lru_cache
+from google.cloud import bigquery
 import datetime as dt
 
+# --- constants / config ----------------------------------------------------
+PROJECT = "sharplogger"
+DATASET = "sharp_data"
+
+VIEW_GAMES       = f"`{PROJECT}.{DATASET}.scores_games_list`"
+SCORES_ROLE_VIEW = f"`{PROJECT}.{DATASET}.scores_role_view`"
+MOVES_TABLE      = f"`{PROJECT}.{DATASET}.moves_with_features_merged`"
+
+# Schema-aligned columns
+HOME_COL   = "Is_Home"   # BOOL in moves/scores_role_view
+SPREAD_COL = "Value"     # closing spread for the team (fav < 0)
+
+CLIENT = bigquery.Client(project=PROJECT)
+CACHE_TTL_SEC = 90
+
+# --- small utils -----------------------------------------------------------
 
 def _coerce_timestamp(x):
-    """Return a Python datetime (UTC) or None; handles pandas/NaT/strings."""
+    """Return a Python datetime or None; handles pandas/NaT/strings."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     if isinstance(x, pd.Timestamp):
-        if pd.isna(x):
-            return None
-        return x.to_pydatetime()
+        return None if pd.isna(x) else x.to_pydatetime()
     if isinstance(x, dt.datetime):
         return x
-    # try string
     try:
         return pd.to_datetime(x, utc=True).to_pydatetime()
     except Exception:
         return None
 
-def list_games(sport_label: str) -> pd.DataFrame:
-    # Map sidebar label to DB value if needed
-    SPORT_MAP = {
-        "NFL": "NFL", "NCAAF": "NCAAF", "NBA": "NBA",
-        "NCAAB": "NCAAB", "MLB": "MLB", "WNBA": "WNBA", "CFL": "CFL",
-    }
-    db_sport = SPORT_MAP.get(sport_label, sport_label)
+def _round_cutoff(ts: dt.datetime | None) -> dt.datetime | None:
+    """Round to hour to improve cache hits without changing results meaningfully."""
+    if ts is None:
+        return None
+    if isinstance(ts, pd.Timestamp):
+        ts = ts.to_pydatetime()
+    return ts.replace(minute=0, second=0, microsecond=0)
 
-    sql = f"""
-    SELECT Game_Id, Game_Start, Teams
-    FROM {VIEW_GAMES}
-    WHERE Sport = @sport
-      AND Game_Start > CURRENT_TIMESTAMP()
-    ORDER BY Game_Start ASC
-    """
-    job = CLIENT.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("sport","STRING", db_sport)]
-        ),
-    )
-    return job.result().to_dataframe()
-
-def team_rows(game_id: str) -> pd.DataFrame:
-    sql = f"""
-    SELECT feat_Team AS Team, ANY_VALUE(feat_Game_Start) AS Cutoff
-    FROM {VIEW_FEAT}
-    WHERE feat_Game_Key = @gid
-    GROUP BY feat_Team
-    """
-    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("gid","STRING",game_id)]
-    ))
-    return job.result().to_dataframe()
+def _coerce_teams_list(x):
+    """Normalize Teams to a list[str]. Accepts list, array, 'A, B' string, etc."""
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return []
+    if isinstance(x, (list, tuple)):
+        return [str(v).strip() for v in x if str(v).strip()]
+    if isinstance(x, np.ndarray):
+        return [str(v).strip() for v in x.tolist() if str(v).strip()]
+    if isinstance(x, pd.Series):
+        return [str(v).strip() for v in x.astype(str).tolist() if str(v).strip()]
+    if isinstance(x, str):
+        parts = [p.strip() for p in x.split(",")] if "," in x else [x.strip()]
+        return [p for p in parts if p]
+    if hasattr(x, "tolist"):
+        try:
+            out = x.tolist()
+            if isinstance(out, (list, tuple, np.ndarray, pd.Series)):
+                return [str(v).strip() for v in list(out) if str(v).strip()]
+            return [str(out).strip()]
+        except Exception:
+            pass
+    try:
+        return [str(v).strip() for v in list(x) if str(v).strip()]
+    except Exception:
+        return [str(x).strip()]
 
 def _spread_bucket(v: float | None) -> str:
     if v is None:
@@ -89,204 +87,37 @@ def _spread_bucket(v: float | None) -> str:
     if v <=  10.5: return "Dog +7 to +10.5"
     return "Dog ≥ +11"
 
-def get_team_context(game_id: str, team: str) -> dict:
-    # 1) moves (preferred)
-    sql_moves = f"""
-    SELECT
-      ANY_VALUE({HOME_COL})         AS is_home,
-      ANY_VALUE({SPREAD_COL})       AS closing_spread,
-      ANY_VALUE(feat_Game_Start)    AS game_start
-    FROM {MOVES_TABLE}
-    WHERE feat_Game_Key = @gid AND feat_Team = @team
-    """
-    job = CLIENT.query(sql_moves, job_config=bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("gid","STRING", game_id),
-            bigquery.ScalarQueryParameter("team","STRING", team),
-        ]))
-    df = job.result().to_dataframe()
-    if not df.empty:
-        r = df.iloc[0]
-        sp = r.get("closing_spread")
-        spf = float(sp) if pd.notnull(sp) else None
-        return {
-            "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
-            "is_favorite": (spf is not None and spf < 0),
-            "spread_bucket": _spread_bucket(spf),
-            "cutoff": r.get("game_start"),
-            "source": "moves",
-        }
+# --- DB helpers (cached) ---------------------------------------------------
 
-    # 2) fallback: scores_role_view
-    sql_scores = f"""
-    SELECT
-      ANY_VALUE({HOME_COL})         AS is_home,
-      ANY_VALUE({SPREAD_COL})       AS closing_spread,
-      ANY_VALUE(feat_Game_Start)    AS cutoff
-    FROM {SCORES_ROLE_VIEW}
-    WHERE feat_Game_Key = @gid AND feat_Team = @team
-    """
-    job2 = CLIENT.query(sql_scores, job_config=bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("gid","STRING", game_id),
-            bigquery.ScalarQueryParameter("team","STRING", team),
-        ]))
-    df2 = job2.result().to_dataframe()
-    if df2.empty:
-        return {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"}
-
-    r2 = df2.iloc[0]
-    sp2 = r2.get("closing_spread")
-    sp2f = float(sp2) if pd.notnull(sp2) else None
-    return {
-        "is_home": bool(r2["is_home"]) if pd.notnull(r2["is_home"]) else None,
-        "is_favorite": (sp2f is not None and sp2f < 0),
-        "spread_bucket": _spread_bucket(sp2f),
-        "cutoff": r2.get("cutoff"),
-        "source": "scores",
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def list_games_cached(sport_label: str) -> pd.DataFrame:
+    SPORT_MAP = {
+        "NFL": "NFL", "NCAAF": "NCAAF", "NBA": "NBA",
+        "NCAAB": "NCAAB", "MLB": "MLB", "WNBA": "WNBA", "CFL": "CFL",
     }
-
-
-
-def _coerce_teams_list(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return []
-    if isinstance(x, (list, tuple)):
-        return list(x)
-    if isinstance(x, np.ndarray):
-        return x.tolist()
-    if isinstance(x, pd.Series):
-        return x.astype(str).tolist()
-    if isinstance(x, str):
-        # split on comma if present; otherwise treat as one team
-        parts = [p.strip() for p in x.split(",")] if "," in x else [x.strip()]
-        # filter out accidental empties
-        return [p for p in parts if p]
-    if hasattr(x, "tolist"):
-        try:
-            out = x.tolist()
-            if isinstance(out, (list, tuple, np.ndarray, pd.Series)):
-                return [str(v) for v in list(out)]
-            return [str(out)]
-        except Exception:
-            pass
-    try:
-        return [str(v) for v in list(x)]
-    except Exception:
-        return [str(x)]
-def _wanted_situations(is_home, is_fav, bucket):
-    wanted = []
-    # Pure role
-    if is_fav is True:
-        wanted.append("Favorite")
-    elif is_fav is False:
-        wanted.append("Underdog")
-    # Site
-    if is_home is True:
-        wanted.append("Home")
-    elif is_home is False:
-        wanted.append("Road")
-    # Combo
-    if is_home is not None and is_fav is not None:
-        combo = ("Home " if is_home else "Road ") + ("Favorite" if is_fav else "Underdog")
-        wanted.append(combo)
-    # Exact bucket
-    if bucket:
-        wanted.append(bucket)
-    # De‑dupe while preserving order
-    seen = set()
-    out = []
-    for s in wanted:
-        if s not in seen:
-            out.append(s)
-            seen.add(s)
-    return out
-
-
-def _print_matching_situations(team, market, df_team, wanted, base_row):
+    db_sport = SPORT_MAP.get(sport_label, sport_label)
+    sql = f"""
+      SELECT Game_Id, Game_Start, Teams
+      FROM {VIEW_GAMES}
+      WHERE Sport = @sport
+        AND Game_Start > CURRENT_TIMESTAMP()
+      ORDER BY Game_Start ASC
     """
-    df_team: situation_stats(...) result for that market
-    wanted:  list of situation labels we want to show, in order
-    """
-    shown = 0
-    for label in wanted:
-        m = df_team[df_team["Situation"] == label]
-        if not m.empty:
-            r = m.iloc[0]
-            st.markdown(bullet_with_baseline(team, market, r, base_row))
-            shown += 1
-    if shown == 0:
-        # Fall back: show top 2 so the card isn’t empty
-        for _, r in df_team.head(2).iterrows():
-            st.markdown(bullet_with_baseline(team, market, r, base_row))
-
-# at top
-from functools import lru_cache
-import datetime as dt
-
-CACHE_TTL_SEC = 90
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("sport","STRING", db_sport)],
+            use_query_cache=True,
+        ),
+    )
+    return job.result().to_dataframe()
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
-def list_games_cached(selected_sport: str):
-    return list_games(selected_sport)
-
-def _round_cutoff(ts):
-    if ts is None:
-        return None
-    # round to nearest hour to improve cache hits while staying accurate
-    if isinstance(ts, pd.Timestamp):
-        ts = ts.to_pydatetime()
-    return ts.replace(minute=0, second=0, microsecond=0)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def get_team_context_cached(game_id: str, team: str):
-    return get_team_context(game_id, team)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def situation_stats_cached(sport, team, cutoff, market, min_n):
-    cutoff = _round_cutoff(cutoff)
-    return situation_stats(sport, team, cutoff, market, min_n)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def league_baseline_filtered_cached(sport, cutoff, market, is_home, spread_bucket, min_n):
-    cutoff = _round_cutoff(cutoff)
-    return league_baseline_filtered(sport, cutoff, market, is_home, spread_bucket, min_n)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def role_leaderboard_cached(sport, cutoff, market, is_home, spread_bucket, is_favorite, min_n):
-    cutoff = _round_cutoff(cutoff)
-    return role_leaderboard(sport, cutoff, market, is_home, spread_bucket, is_favorite, min_n)
-CACHE_TTL_SEC = 90
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def list_games_cached(selected_sport: str) -> pd.DataFrame:
-    return list_games(selected_sport)
-
-def _round_cutoff(ts: dt.datetime|None) -> dt.datetime|None:
-    if ts is None:
-        return None
-    return ts.replace(minute=0, second=0, microsecond=0)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def get_team_context_cached(game_id: str, team: str) -> dict:
-    return get_team_context(game_id, team)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def situation_stats_cached(sport, team, cutoff, market, min_n):
-    return situation_stats(sport, team, _round_cutoff(cutoff), market, min_n)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def league_baseline_filtered_cached(sport, cutoff, market, is_home, spread_bucket, min_n):
-    return league_baseline_filtered(sport, _round_cutoff(cutoff), market, is_home, spread_bucket, min_n)
-
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def role_leaderboard_cached(sport, cutoff, market, is_home, spread_bucket, is_favorite, min_n):
-    # We pass is_favorite to make cache key distinct, even if SQL doesn’t use it yet
-    return role_leaderboard(sport, _round_cutoff(cutoff), market, is_home, spread_bucket, min_n)
-
-# --- table-function wrappers ----------------------------------------------
 def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
-    """Return {team: {is_home, is_favorite, spread_bucket, cutoff, source}} for up to 2 teams."""
+    """
+    Return {team: {is_home, is_favorite, spread_bucket, cutoff, source}} for the given teams.
+    Prefers MOVES; falls back to SCORES_ROLE_VIEW.
+    """
     if not teams:
         return {}
     sql = f"""
@@ -343,7 +174,7 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
     df = job.result().to_dataframe()
     out = {}
     for _, r in df.iterrows():
-        sp = r.get("closing_spread")
+        sp  = r.get("closing_spread")
         spf = float(sp) if pd.notnull(sp) else None
         out[r["feat_Team"]] = {
             "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
@@ -354,93 +185,59 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
         }
     return out
 
-
-def situation_stats(sport: str, team: str, cutoff, market: str, min_n: int) -> pd.DataFrame:
-    # matches: (p_sport, p_team, p_cutoff, p_market, p_min_n)
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def situation_stats_cached(sport: str, team: str, cutoff: dt.datetime, market: str, min_n: int) -> pd.DataFrame:
+    cutoff = _round_cutoff(cutoff)
     sql = f"""
-    SELECT * FROM `{PROJECT}.{DATASET}.situation_stats_from_scores`
-      (@sport, @team, @cutoff, @market, @min_n)
+      SELECT * FROM `{PROJECT}.{DATASET}.situation_stats_from_scores`
+        (@sport, @team, @cutoff, @market, @min_n)
     """
-    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("sport","STRING",sport),
-            bigquery.ScalarQueryParameter("team","STRING",team),
-            bigquery.ScalarQueryParameter("cutoff","TIMESTAMP",cutoff),
-            bigquery.ScalarQueryParameter("market","STRING",market),
-            bigquery.ScalarQueryParameter("min_n","INT64",min_n),
-        ]
-    ))
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport","STRING", sport),
+                bigquery.ScalarQueryParameter("team","STRING", team),
+                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
+                bigquery.ScalarQueryParameter("market","STRING", market),
+                bigquery.ScalarQueryParameter("min_n","INT64", min_n),
+            ],
+            use_query_cache=True,
+        ),
+    )
     return job.result().to_dataframe()
-def _wanted_situations(is_home: bool|None, is_favorite: bool|None, spread_bucket: str|None):
-    """Return the ordered list of Situation names we want to display for current role."""
-    out = []
-    # Primary role (non-overlapping combos first)
-    if is_home is True and is_favorite is True:   out.append("Home Favorite")
-    if is_home is True and is_favorite is False:  out.append("Home Underdog")
-    if is_home is False and is_favorite is True:  out.append("Road Favorite")
-    if is_home is False and is_favorite is False: out.append("Road Underdog")
-    # Simple site & fav/dog buckets
-    if is_home is True:  out.append("Home")
-    if is_home is False: out.append("Road")
-    if is_favorite is True:  out.append("Favorite")
-    if is_favorite is False: out.append("Underdog")
-    # Spread bucket if present
-    if spread_bucket: out.append(spread_bucket)
-    # Always include 'Pick (0)' if it’s exactly that bucket
-    if spread_bucket == "Pick (0)" and "Pick (0)" not in out:
-        out.append("Pick (0)")
-    # De-dupe while preserving order
-    seen, keep = set(), []
-    for s in out:
-        if s and s not in seen:
-            keep.append(s); seen.add(s)
-    return keep
 
-def _print_matching_situations(team, market, df, wanted_order, baseline_row):
-    """Print only the situations we care about (in wanted_order) with baseline line."""
-    if df.empty:
-        st.write("_No situations meeting N threshold._")
-        return
-    # index by situation for quick lookups
-    idx = {row.Situation: row for _, row in df.iterrows()}
-    printed = 0
-    for name in wanted_order:
-        row = idx.get(name)
-        if row is None:
-            continue
-        st.markdown(bullet_with_baseline(team, market, row, baseline_row))
-        printed += 1
-        if printed >= 3:  # keep it tight
-            break
-    if printed == 0:
-        # fallback: top 3 overall if none of the wanted keys exist
-        for _, r in df.head(3).iterrows():
-            st.markdown(bullet_with_baseline(team, market, r, baseline_row))
-
-def league_baseline_filtered(sport: str, cutoff, market: str,
-                             is_home: bool | None,
-                             spread_bucket: str | None,
-                             min_n: int = 100):
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str,
+                                    is_home: bool | None, spread_bucket: str | None, min_n: int):
+    cutoff = _round_cutoff(cutoff)
     sql = """
-    SELECT * FROM `sharplogger.sharp_data.league_situation_stats_from_scores`
-      (@sport, @cutoff, @market, @is_home, @spread_bucket, @min_n)
+      SELECT * FROM `sharplogger.sharp_data.league_situation_stats_from_scores`
+        (@sport, @cutoff, @market, @is_home, @spread_bucket, @min_n)
     """
-    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("sport","STRING", sport),
-        bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
-        bigquery.ScalarQueryParameter("market","STRING", market),
-        bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
-        bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
-        bigquery.ScalarQueryParameter("min_n","INT64", min_n),
-    ]))
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport","STRING", sport),
+                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
+                bigquery.ScalarQueryParameter("market","STRING", market),
+                bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
+                bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
+                bigquery.ScalarQueryParameter("min_n","INT64", min_n),
+            ],
+            use_query_cache=True,
+        ),
+    )
     df = job.result().to_dataframe()
     return None if df.empty else df.iloc[0]
 
-def role_leaderboard(sport: str, cutoff, market: str,
-                     is_home: bool | None,
-                     spread_bucket: str | None,
-                     is_favorite: bool | None = None,
-                     min_n: int = 30) -> pd.DataFrame:
+@st.cache_data(ttl=CACHE_TTL_SEC)
+def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
+                            is_home: bool | None, spread_bucket: str | None,
+                            is_favorite: bool | None, min_n: int = 30) -> pd.DataFrame:
+    """Leaderboard of historical performance for this exact role (uses scores_role_view)."""
+    cutoff = _round_cutoff(cutoff)
     sql = f"""
     WITH src AS (
       SELECT
@@ -448,7 +245,7 @@ def role_leaderboard(sport: str, cutoff, market: str,
         {HOME_COL}   AS Is_Home,
         {SPREAD_COL} AS Closing_Spread,
         Spread_Cover_Flag, ATS_Cover_Margin,
-        Team_Score, Opp_Score, feat_Game_Start
+        Team_Score, Opp_Score, feat_Game_Start, Sport
       FROM {SCORES_ROLE_VIEW}
       WHERE Sport = @sport
         AND feat_Game_Start < @cutoff
@@ -482,8 +279,8 @@ def role_leaderboard(sport: str, cutoff, market: str,
     filtered AS (
       SELECT *
       FROM e
-      WHERE (@is_home IS NULL OR Is_Home = @is_home)
-        AND (@spread_bucket = '' OR Spread_Bucket = @spread_bucket)
+      WHERE (@is_home     IS NULL OR Is_Home = @is_home)
+        AND (@spread_bucket = ''  OR Spread_Bucket = @spread_bucket)
         AND (@is_favorite IS NULL OR (Closing_Spread IS NOT NULL AND (Closing_Spread < 0) = @is_favorite))
     ),
     by_team AS (
@@ -510,20 +307,24 @@ def role_leaderboard(sport: str, cutoff, market: str,
     FROM by_team
     ORDER BY IFNULL(ROI_Pct, 0.0) DESC, WinPct DESC, N DESC
     """
-    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=[
-        bigquery.ScalarQueryParameter("sport","STRING", sport),
-        bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
-        bigquery.ScalarQueryParameter("market","STRING", market),
-        bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
-        bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
-        bigquery.ScalarQueryParameter("is_favorite","BOOL", is_favorite),
-        bigquery.ScalarQueryParameter("min_n","INT64", min_n),
-    ]))
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport","STRING", sport),
+                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
+                bigquery.ScalarQueryParameter("market","STRING", market),
+                bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
+                bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
+                bigquery.ScalarQueryParameter("is_favorite","BOOL", is_favorite),
+                bigquery.ScalarQueryParameter("min_n","INT64", min_n),
+            ],
+            use_query_cache=True,
+        ),
+    )
     return job.result().to_dataframe()
 
-
-
-# --- formatting ------------------------------------------------------------
+# --- display helpers -------------------------------------------------------
 
 def bullet(team: str, market: str, r: pd.Series) -> str:
     W = int(r.W) if pd.notnull(r.W) else 0
@@ -531,12 +332,13 @@ def bullet(team: str, market: str, r: pd.Series) -> str:
     P = int(r.P) if ('P' in r.index and pd.notnull(r.P)) else 0
     N = int(r.N) if pd.notnull(r.N) else 0
     winpct = float(r.WinPct) if pd.notnull(r.WinPct) else 0.0
-    roi_val = r.get('ROI_Pct')
+    roi_val = r.get("ROI_Pct")
     roi_txt = f", ROI {float(roi_val):+,.1f}%" if pd.notnull(roi_val) else ""
     push_txt = f"-{P}P" if P else ""
-    return (f"**{team} — {market.capitalize()}** · {r.Situation}: "
+    # r.Situation is produced by your table function; if missing, fall back to label
+    situation = r.get("Situation", "Situation")
+    return (f"**{team} — {market.capitalize()}** · {situation}: "
             f"{W}-{L}{push_txt} ({winpct:.1f}%) over {N}{roi_txt}.")
-
 
 def bullet_with_baseline(team, market, r, base):
     line = bullet(team, market, r)
@@ -546,7 +348,48 @@ def bullet_with_baseline(team, market, r, base):
     base_N  = int(base.N) if pd.notnull(base.N) else 0
     return "• " + line + f" — League baseline: {base_WP:.1f}% (N={base_N})"
 
-# --- UI --------------------------------------------------------------------
+def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bucket: str | None):
+    """Ordered list of situation names to display for the *current* role."""
+    out = []
+    # Specific combos first
+    if is_home is True and is_favorite is True:   out.append("Home Favorite")
+    if is_home is True and is_favorite is False:  out.append("Home Underdog")
+    if is_home is False and is_favorite is True:  out.append("Road Favorite")
+    if is_home is False and is_favorite is False: out.append("Road Underdog")
+    # Individual facets
+    if is_home is True:  out.append("Home")
+    if is_home is False: out.append("Road")
+    if is_favorite is True:  out.append("Favorite")
+    if is_favorite is False: out.append("Underdog")
+    # Bucket
+    if spread_bucket: out.append(spread_bucket)
+    # De-dupe preserve order
+    seen, keep = set(), []
+    for s in out:
+        if s and s not in seen:
+            keep.append(s); seen.add(s)
+    return keep
+
+def _print_matching_situations(team, market, df, wanted_order, baseline_row):
+    """Print only the situations we care about; fallback to top 3 if none match."""
+    if df.empty:
+        st.write("_No situations meeting N threshold._")
+        return
+    by_name = {row.Situation: row for _, row in df.iterrows() if "Situation" in row.index}
+    printed = 0
+    for name in wanted_order:
+        r = by_name.get(name)
+        if r is None:
+            continue
+        st.markdown(bullet_with_baseline(team, market, r, baseline_row))
+        printed += 1
+        if printed >= 3:
+            break
+    if printed == 0:
+        for _, r in df.head(3).iterrows():
+            st.markdown(bullet_with_baseline(team, market, r, baseline_row))
+
+# --- main UI ---------------------------------------------------------------
 
 def render_situation_db_tab(selected_sport: str | None = None):
     st.header("📊 Situation Database — Best % by Team")
@@ -563,7 +406,8 @@ def render_situation_db_tab(selected_sport: str | None = None):
     df_games = df_games.copy()
     df_games["TeamsList"] = df_games["Teams"].apply(lambda x: tuple(_coerce_teams_list(x)))
     df_games["label"] = df_games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}" if r["TeamsList"] else f"{r['Game_Start']} — (teams TBD)",
+        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}" if r["TeamsList"]
+                  else f"{r['Game_Start']} — (teams TBD)",
         axis=1
     )
 
@@ -571,14 +415,18 @@ def render_situation_db_tab(selected_sport: str | None = None):
     if not row:
         st.stop()
 
-    game_id     = row["Game_Id"]
-    game_start  = _coerce_timestamp(row["Game_Start"])
-    teams       = row["TeamsList"]
+    game_id    = row["Game_Id"]
+    game_start = _coerce_timestamp(row["Game_Start"])
+    teams      = row["TeamsList"]
+
+    if not teams:
+        st.info("Teams not yet available for this game.")
+        return
 
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
     baseline_min_n = st.number_input("League baseline min N", 50, 1000, 150, step=10)
 
-    # one prefetch for both teams
+    # Prefetch contexts for both teams in a single query
     contexts = get_contexts_for_game(game_id, teams[:2])
 
     cols = st.columns(2)
@@ -586,38 +434,46 @@ def render_situation_db_tab(selected_sport: str | None = None):
         with cols[i]:
             st.subheader(team)
 
-            ctx = contexts.get(team) or get_team_context_cached(game_id, team)
+            ctx = contexts.get(team, {})
             role_bits = []
-            role_bits.append("🏠 Home" if ctx["is_home"] is True else ("🚗 Road" if ctx["is_home"] is False else ""))
-            role_bits.append("⭐ Favorite" if ctx["is_favorite"] is True else ("🐶 Underdog" if ctx["is_favorite"] is False else ""))
-            if ctx["spread_bucket"]: role_bits.append(ctx["spread_bucket"])
+            role_bits.append("🏠 Home" if ctx.get("is_home") is True else ("🚗 Road" if ctx.get("is_home") is False else ""))
+            role_bits.append("⭐ Favorite" if ctx.get("is_favorite") is True else ("🐶 Underdog" if ctx.get("is_favorite") is False else ""))
+            if ctx.get("spread_bucket"): role_bits.append(ctx["spread_bucket"])
             st.caption(" / ".join([b for b in role_bits if b]) or "Role: Unknown")
 
-            sport_str     = selected_sport
-            is_home       = ctx["is_home"]
-            spread_bucket = ctx["spread_bucket"]
-            cutoff        = ctx["cutoff"] or game_start
+            sport_str     = selected_sport  # functions expect a sport string
+            is_home       = ctx.get("is_home")
+            spread_bucket = ctx.get("spread_bucket")
+            cutoff_ctx    = _coerce_timestamp(ctx.get("cutoff"))
+            cutoff        = cutoff_ctx or game_start
 
+            if cutoff is None:
+                st.caption("_No valid cutoff timestamp yet for this team/game._")
+                continue
+
+            # Spreads – show situations matching current role
             st.markdown("**Spreads — current role**")
             s_ats = situation_stats_cached(sport_str, team, cutoff, "spreads", min_n)
             if s_ats.empty:
                 st.write("_No ATS situations meeting N threshold._")
             else:
                 base = league_baseline_filtered_cached(sport_str, cutoff, "spreads", is_home, spread_bucket, baseline_min_n)
-                wanted = _wanted_situations(is_home, ctx["is_favorite"], spread_bucket)
+                wanted = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "spreads", s_ats, wanted, base)
 
+            # Moneyline – show situations matching current role
             st.markdown("**Moneyline — current role**")
             s_ml = situation_stats_cached(sport_str, team, cutoff, "moneyline", min_n)
             if s_ml.empty:
                 st.write("_No ML situations meeting N threshold._")
             else:
                 base_ml = league_baseline_filtered_cached(sport_str, cutoff, "moneyline", is_home, spread_bucket, baseline_min_n)
-                wanted_ml = _wanted_situations(is_home, ctx["is_favorite"], spread_bucket)
+                wanted_ml = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "moneyline", s_ml, wanted_ml, base_ml)
 
+            # League leaderboard for this exact role (spreads)
             st.markdown("**League — this exact role**")
-            rb = role_leaderboard_cached(sport_str, cutoff, "spreads", is_home, spread_bucket, ctx["is_favorite"], baseline_min_n)
+            rb = role_leaderboard_cached(sport_str, cutoff, "spreads", is_home, spread_bucket, ctx.get("is_favorite"), baseline_min_n)
             if rb.empty:
                 st.write("_No teams meet N threshold in this role._")
             else:
