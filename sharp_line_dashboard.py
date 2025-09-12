@@ -10425,7 +10425,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
 
 # --- SIMPLE RENDER FLOW (no UI sanitization/purge) ---
-from streamlit_situations_tab import render_situations_from_moves
+from streamlit_situations_tab import render_current_situations_tab
 # ============================ SIDEBAR + TABS UI ================================
 sport = st.sidebar.radio(
     "Select a League",
@@ -10509,7 +10509,7 @@ else:
             )
         with situation_tab:
             try:
-                render_situations_from_moves(selected_sport=sport)
+                render_current_situations_tab(selected_sport=sport)
             except Exception as e:
                 st.error(f"Situations tab error: {e}")
 
