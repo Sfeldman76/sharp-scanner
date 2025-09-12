@@ -50,6 +50,22 @@ def _coerce_timestamp(x) -> dt.datetime | None:
     else:
         ts = ts.tz_convert("UTC")
     return ts.to_pydatetime()
+# ---- add this helper near your other utils ----
+def _to_utc_datetime(x) -> dt.datetime:
+    """
+    Always return a tz-aware (UTC) Python datetime.
+    Robust to None, pd.NaT, numpy NaT, numpy.datetime64, strings, etc.
+    """
+    if isinstance(x, dt.datetime):
+        return x.astimezone(timezone.utc) if x.tzinfo else x.replace(tzinfo=timezone.utc)
+    try:
+        ts = pd.to_datetime(x, utc=True, errors="coerce")
+        if pd.isna(ts):
+            return _fallback_now_utc()
+        # ts is a pandas Timestamp tz-aware; convert to python datetime
+        return ts.to_pydatetime()
+    except Exception:
+        return _fallback_now_utc()
 
 def _round_cutoff(ts: dt.datetime | None) -> dt.datetime | None:
     if ts is None:
@@ -380,9 +396,7 @@ def situation_stats_cached(sport_str: str, team: str, cutoff_date: date | None,
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str,
                                     is_home: bool | None, spread_bucket: str | None, min_n: int):
-    cutoff = _round_cutoff(_coerce_timestamp(cutoff))
-    if cutoff is None:
-        return None
+    cutoff_dt = _round_cutoff(_to_utc_datetime(cutoff)) or _fallback_now_utc()
     sql = """
       SELECT * FROM `sharplogger.sharp_data.league_situation_stats_from_scores`
         (@sport, @cutoff, @market, @is_home, @spread_bucket, @min_n)
@@ -392,7 +406,7 @@ def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("sport","STRING", sport),
-                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
+                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff_dt),
                 bigquery.ScalarQueryParameter("market","STRING", market),
                 bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
                 bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
@@ -404,16 +418,12 @@ def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str
     df = job.result().to_dataframe()
     return None if df.empty else df.iloc[0]
 
+
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
                             is_home: bool | None, spread_bucket: str | None,
                             is_favorite: bool | None, min_n: int = 30) -> pd.DataFrame:
-    cutoff = _coerce_timestamp(cutoff)
-    if cutoff is None or (isinstance(cutoff, pd.Timestamp) and pd.isna(cutoff)):
-        cutoff = _fallback_now_utc()
-    cutoff = _round_cutoff(cutoff) or _fallback_now_utc()
-    if isinstance(cutoff, pd.Timestamp):
-        cutoff = cutoff.to_pydatetime()
+    cutoff_dt = _round_cutoff(_to_utc_datetime(cutoff)) or _fallback_now_utc()
 
     sql = f"""
     WITH src AS (
@@ -489,7 +499,7 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("sport","STRING", sport),
-                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff),
+                bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff_dt),
                 bigquery.ScalarQueryParameter("market","STRING", market),
                 bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
                 bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
@@ -500,6 +510,7 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
         ),
     )
     return job.result().to_dataframe()
+
 
 # --- display helpers -------------------------------------------------------
 def bullet(team: str, market: str, r: pd.Series) -> str:
@@ -616,11 +627,9 @@ def render_situation_db_tab(selected_sport: str | None = None):
             cutoff_date_for_stats = cutoff_input or date.today()
 
             cutoff_ts_context = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
-            cutoff_ts = _round_cutoff(cutoff_ts_context) or _fallback_now_utc()
-            if isinstance(cutoff_ts, pd.Timestamp):
-                cutoff_ts = cutoff_ts.to_pydatetime()
-
-            # Spreads (current role) — DATE cutoff
+            cutoff_ts = _round_cutoff(_to_utc_datetime(cutoff_ts_context)) or _fallback_now_utc()
+            
+            # Spreads — current role
             st.markdown("**Spreads — current role**")
             s_ats_all = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "spreads", min_n)
             s_ats = s_ats_all[s_ats_all["Team"] == team] if not s_ats_all.empty else s_ats_all
@@ -630,8 +639,8 @@ def render_situation_db_tab(selected_sport: str | None = None):
                 base = league_baseline_filtered_cached(sport_str, cutoff_ts, "spreads", is_home, spread_bucket, baseline_min_n)
                 wanted = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "spreads", s_ats, wanted, base)
-
-            # Moneyline (current role) — DATE cutoff
+            
+            # Moneyline — current role
             st.markdown("**Moneyline — current role**")
             s_ml_all = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "moneyline", min_n)
             s_ml = s_ml_all[s_ml_all["Team"] == team] if not s_ml_all.empty else s_ml_all
@@ -641,12 +650,8 @@ def render_situation_db_tab(selected_sport: str | None = None):
                 base_ml = league_baseline_filtered_cached(sport_str, cutoff_ts, "moneyline", is_home, spread_bucket, baseline_min_n)
                 wanted_ml = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "moneyline", s_ml, wanted_ml, base_ml)
-
-            # League leaderboard for this exact role (spreads) — TIMESTAMP cutoff
+            
+            # League — this exact role
             st.markdown("**League — this exact role**")
             rb = role_leaderboard_cached(sport_str, cutoff_ts, "spreads", is_home, spread_bucket, ctx.get("is_favorite"), baseline_min_n)
-            if rb.empty:
-                st.write("_No teams meet N threshold in this role._")
-            else:
-                st.dataframe(rb.head(20))
 
