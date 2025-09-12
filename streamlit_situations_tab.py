@@ -27,15 +27,8 @@ CACHE_TTL_SEC = 90
 
 # --- small utils -----------------------------------------------------------
 def _coerce_timestamp(x) -> dt.datetime | None:
-    """
-    Return a timezone-aware UTC datetime or None.
-    - Returns None for None/NaT/empty.
-    - Accepts datetime, pandas.Timestamp, or date (assumed 00:00 local).
-    - Localizes naive inputs to UTC.
-    """
     if x is None:
         return None
-
     if isinstance(x, pd.Timestamp):
         if pd.isna(x):
             return None
@@ -56,7 +49,6 @@ def _coerce_timestamp(x) -> dt.datetime | None:
         ts = ts.tz_localize("UTC")
     else:
         ts = ts.tz_convert("UTC")
-
     return ts.to_pydatetime()
 
 def _round_cutoff(ts: dt.datetime | None) -> dt.datetime | None:
@@ -68,13 +60,11 @@ def _fallback_now_utc() -> dt.datetime:
     return datetime.now(timezone.utc)
 
 def _safe_cutoff(primary: dt.datetime | None, fallback: dt.datetime | None) -> dt.datetime | None:
-    """Pick a valid cutoff; prefer primary, else fallback, else None."""
     a = _coerce_timestamp(primary)
     b = _coerce_timestamp(fallback)
     return a or b
 
 def _coerce_teams_list(x) -> list[str]:
-    """Normalize Teams to a list[str]. Accepts list, array, 'A, B' string, etc."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return []
     if isinstance(x, (list, tuple)):
@@ -119,64 +109,8 @@ def _spread_bucket(v: float | None) -> str:
 
 # --- DB helpers (cached) ---------------------------------------------------
 def _get_view_columns_via_api(bq: bigquery.Client, fq_table: str) -> set[str]:
-    """Return column names using the BigQuery Table API (no data scan / no SQL)."""
     tbl = bq.get_table(fq_table)
     return {field.name for field in tbl.schema}
-
-def _resolve_team_expr(bq: bigquery.Client) -> str:
-    try:
-        cols = _get_view_columns_via_api(bq, SCORES_ROLE_VIEW_FQ)
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch schema for scores_role_view: {e}")
-        return "feat_Team"  # safer default for your schema
-
-    # ✅ Prefer feat_Team (present in your schema)
-    if "feat_Team" in cols:
-        return "feat_Team"
-
-    # Then common fallbacks
-    if "Team" in cols:
-        return "Team"
-    if "Team_Norm" in cols:
-        return "Team_Norm"
-    if {"Is_Home", "Home_Team", "Away_Team"}.issubset(cols):
-        return "CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END"
-    if {"Is_Home", "Home_Team_Norm", "Away_Team_Norm"}.issubset(cols):
-        return "CASE WHEN Is_Home THEN Home_Team_Norm ELSE Away_Team_Norm END"
-    if {"Is_Home", "Team_Home", "Team_Away"}.issubset(cols):
-        return "CASE WHEN Is_Home THEN Team_Home ELSE Team_Away END"
-
-    st.warning(f"⚠️ Could not resolve a team expression; available columns: {sorted(cols)}. Falling back to 'feat_Team'.")
-    return "feat_Team"
-
-
-def _resolve_spread_expr(bq: bigquery.Client) -> str:
-    """
-    Resolve the per-team spread value column used by 'current role'.
-    Priority:
-      1) Value (unified)
-      2) Closing_Spread_For_Team
-      3) Spread_For_Team
-      4) CASE WHEN Is_Home THEN Home_Spread ELSE -Away_Spread END
-    Fallback to 'Value' with a warning.
-    """
-    try:
-        cols = _get_view_columns_via_api(bq, SCORES_ROLE_VIEW_FQ)
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch schema for scores_role_view: {e}")
-        return "Value"
-
-    if "Value" in cols:
-        return "Value"
-    if "Closing_Spread_For_Team" in cols:
-        return "Closing_Spread_For_Team"
-    if "Spread_For_Team" in cols:
-        return "Spread_For_Team"
-    if {"Is_Home", "Home_Spread", "Away_Spread"}.issubset(cols):
-        return "CASE WHEN Is_Home THEN Home_Spread ELSE -Away_Spread END"
-
-    st.warning(f"⚠️ Could not resolve a spread column; available columns: {sorted(cols)}. Falling back to 'Value'.")
-    return "Value"
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def list_games_cached(sport_label: str) -> pd.DataFrame:
@@ -203,11 +137,9 @@ def list_games_cached(sport_label: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def get_contexts_for_game(game_id: str, teams: tuple[str, ...] | list[str]) -> dict:
-    """Return {team: {is_home, is_favorite, spread_bucket, cutoff, source}} for up to 2 teams."""
     teams = list(teams or [])
     if not teams:
         return {}
-
     sql = f"""
     WITH teams_param AS (
       SELECT team FROM UNNEST(@teams) AS team
@@ -255,7 +187,6 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...] | list[str]) -> d
       CASE WHEN m_cutoff IS NOT NULL THEN 'moves' ELSE 'scores' END AS source
     FROM joined
     """
-
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
@@ -282,23 +213,19 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...] | list[str]) -> d
     return out
 
 def get_team_context(game_id: str, team: str) -> dict:
-    """Single-team wrapper reusing the cached batch function."""
     ctxs = get_contexts_for_game(game_id, (team,))
     return ctxs.get(team, {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"})
 
+# ---------- Situations queries that match your schema ----------
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def situation_stats_cached(sport_str: str, team: str, cutoff_date: date | None,
                            market: str, min_n: int) -> pd.DataFrame:
     """
-    Per-team situation stats (DATE-based cutoff).
-    Falls back to today's date if cutoff_date is None.
+    Per-team situation stats (DATE-based cutoff), grouped by (Team, Situation).
+    - Spreads: uses Spread_Cover_Flag, excludes pushes from denom
+    - Moneyline: uses (Team_Score > Opp_Score)
     """
-    bq = bigquery.Client(project=PROJECT)
-    team_expr = _resolve_team_expr(bq)
-    spread_expr = _resolve_spread_expr(bq) if market.lower() == "spreads" else None
-
     cutoff_d = cutoff_date or date.today()
-    where = "Sport = @sport AND DATE(feat_Game_Start) <= @cutoff"
     params = [
         bigquery.ScalarQueryParameter("sport", "STRING", (sport_str or "").upper()),
         bigquery.ScalarQueryParameter("cutoff", "DATE", cutoff_d),
@@ -307,36 +234,147 @@ def situation_stats_cached(sport_str: str, team: str, cutoff_date: date | None,
 
     if market.lower() == "spreads":
         sql = f"""
+        WITH base AS (
+          SELECT
+            feat_Team AS Team,
+            Is_Home,
+            Value     AS Closing_Spread,
+            Spread_Cover_Flag,
+            ATS_Cover_Margin,
+            feat_Game_Start
+          FROM {SCORES_ROLE_VIEW}
+          WHERE Sport = @sport
+            AND DATE(feat_Game_Start) <= @cutoff
+        ),
+        enriched AS (
+          SELECT
+            *,
+            CASE
+              WHEN Closing_Spread IS NULL THEN ''
+              WHEN Closing_Spread <= -10.5 THEN 'Fav ≤ -10.5'
+              WHEN Closing_Spread <=  -7.5 THEN 'Fav -8 to -10.5'
+              WHEN Closing_Spread <=  -6.5 THEN 'Fav -7 to -6.5'
+              WHEN Closing_Spread <=  -3.5 THEN 'Fav -4 to -6.5'
+              WHEN Closing_Spread <=  -0.5 THEN 'Fav -0.5 to -3.5'
+              WHEN Closing_Spread =    0.0 THEN 'Pick (0)'
+              WHEN Closing_Spread <=   3.5 THEN 'Dog +0.5 to +3.5'
+              WHEN Closing_Spread <=   6.5 THEN 'Dog +4 to +6.5'
+              WHEN Closing_Spread <=  10.5 THEN 'Dog +7 to +10.5'
+              ELSE 'Dog ≥ +11'
+            END AS Spread_Bucket
+          FROM base
+        ),
+        situations AS (
+          SELECT
+            Team,
+            s AS Situation,
+            Spread_Cover_Flag,
+            ATS_Cover_Margin,
+            Closing_Spread
+          FROM enriched,
+          UNNEST(ARRAY(
+            SELECT x FROM UNNEST([
+              CASE WHEN Is_Home AND Closing_Spread < 0 THEN 'Home Favorite' END,
+              CASE WHEN Is_Home AND (Closing_Spread >= 0 OR Closing_Spread IS NULL) THEN 'Home Underdog' END,
+              CASE WHEN NOT Is_Home AND Closing_Spread < 0 THEN 'Road Favorite' END,
+              CASE WHEN NOT Is_Home AND (Closing_Spread >= 0 OR Closing_Spread IS NULL) THEN 'Road Underdog' END,
+              CASE WHEN Is_Home THEN 'Home' END,
+              CASE WHEN NOT Is_Home THEN 'Road' END,
+              CASE WHEN Closing_Spread < 0 THEN 'Favorite' END,
+              CASE WHEN Closing_Spread >= 0 THEN 'Underdog' END,
+              Spread_Bucket
+            ]) AS x
+            WHERE x IS NOT NULL AND x != ''
+          )) AS s
+        )
         SELECT
-          {team_expr} AS Team,
+          Team,
+          Situation,
           COUNT(*) AS N,
-          AVG(CAST(Win_Flag AS INT64)) AS Win_Rate,
-          AVG({spread_expr}) AS Avg_Spread
-        FROM {SCORES_ROLE_VIEW}
-        WHERE {where}
-        GROUP BY Team
+          COUNTIF(Spread_Cover_Flag IN (0,1)) AS Decisions,
+          COUNTIF(Spread_Cover_Flag = 1) AS W,
+          COUNTIF(Spread_Cover_Flag = 0) AS L,
+          COUNTIF(ATS_Cover_Margin = 0) AS P,
+          SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag = 1),
+                      NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)), 0)) AS Win_Rate,
+          AVG(Closing_Spread) AS Avg_Spread
+        FROM situations
+        GROUP BY Team, Situation
         HAVING N >= @min_n
-        ORDER BY N DESC
+        ORDER BY N DESC, Win_Rate DESC
         """
     else:
         sql = f"""
+        WITH base AS (
+          SELECT
+            feat_Team AS Team,
+            Is_Home,
+            Value     AS Closing_Spread,
+            Team_Score,
+            Opp_Score,
+            feat_Game_Start
+          FROM {SCORES_ROLE_VIEW}
+          WHERE Sport = @sport
+            AND DATE(feat_Game_Start) <= @cutoff
+        ),
+        enriched AS (
+          SELECT
+            *,
+            CASE
+              WHEN Closing_Spread IS NULL THEN ''
+              WHEN Closing_Spread <= -10.5 THEN 'Fav ≤ -10.5'
+              WHEN Closing_Spread <=  -7.5 THEN 'Fav -8 to -10.5'
+              WHEN Closing_Spread <=  -6.5 THEN 'Fav -7 to -6.5'
+              WHEN Closing_Spread <=  -3.5 THEN 'Fav -4 to -6.5'
+              WHEN Closing_Spread <=  -0.5 THEN 'Fav -0.5 to -3.5'
+              WHEN Closing_Spread =    0.0 THEN 'Pick (0)'
+              WHEN Closing_Spread <=   3.5 THEN 'Dog +0.5 to +3.5'
+              WHEN Closing_Spread <=   6.5 THEN 'Dog +4 to +6.5'
+              WHEN Closing_Spread <=  10.5 THEN 'Dog +7 to +10.5'
+              ELSE 'Dog ≥ +11'
+            END AS Spread_Bucket,
+            CAST(Team_Score > Opp_Score AS INT64) AS ML_Win
+          FROM base
+        ),
+        situations AS (
+          SELECT
+            Team,
+            s AS Situation,
+            ML_Win
+          FROM enriched,
+          UNNEST(ARRAY(
+            SELECT x FROM UNNEST([
+              CASE WHEN Is_Home AND Closing_Spread < 0 THEN 'Home Favorite' END,
+              CASE WHEN Is_Home AND (Closing_Spread >= 0 OR Closing_Spread IS NULL) THEN 'Home Underdog' END,
+              CASE WHEN NOT Is_Home AND Closing_Spread < 0 THEN 'Road Favorite' END,
+              CASE WHEN NOT Is_Home AND (Closing_Spread >= 0 OR Closing_Spread IS NULL) THEN 'Road Underdog' END,
+              CASE WHEN Is_Home THEN 'Home' END,
+              CASE WHEN NOT Is_Home THEN 'Road' END,
+              CASE WHEN Closing_Spread < 0 THEN 'Favorite' END,
+              CASE WHEN Closing_Spread >= 0 THEN 'Underdog' END,
+              Spread_Bucket
+            ]) AS x
+            WHERE x IS NOT NULL AND x != ''
+          )) AS s
+        )
         SELECT
-          {team_expr} AS Team,
+          Team,
+          Situation,
           COUNT(*) AS N,
-          AVG(CAST(Win_Flag AS INT64)) AS Win_Rate
-        FROM {SCORES_ROLE_VIEW}
-        WHERE {where}
-        GROUP BY Team
+          AVG(ML_Win) AS Win_Rate
+        FROM situations
+        GROUP BY Team, Situation
         HAVING N >= @min_n
-        ORDER BY N DESC
+        ORDER BY N DESC, Win_Rate DESC
         """
-
     try:
         job_config = bigquery.QueryJobConfig(query_parameters=params)
-        return bq.query(sql, job_config=job_config).to_dataframe()
+        return CLIENT.query(sql, job_config=job_config).to_dataframe()
     except Exception as e:
         st.error(f"❌ situation_stats_cached failed: {e}")
-        cols = ["Team", "N", "Win_Rate"] + (["Avg_Spread"] if market.lower() == "spreads" else [])
+        cols = ["Team", "Situation", "N", "Win_Rate"]
+        if market.lower() == "spreads":
+            cols += ["Decisions", "W", "L", "P", "Avg_Spread"]
         return pd.DataFrame(columns=cols)
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
@@ -370,12 +408,13 @@ def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str
 def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
                             is_home: bool | None, spread_bucket: str | None,
                             is_favorite: bool | None, min_n: int = 30) -> pd.DataFrame:
-    """Leaderboard of historical performance for this exact role (uses scores_role_view)."""
     cutoff = _coerce_timestamp(cutoff)
-    if cutoff is None:
-        st.info("No valid cutoff available for leaderboard; skipping.")
-        return pd.DataFrame()
+    if cutoff is None or (isinstance(cutoff, pd.Timestamp) and pd.isna(cutoff)):
+        cutoff = _fallback_now_utc()
     cutoff = _round_cutoff(cutoff) or _fallback_now_utc()
+    if isinstance(cutoff, pd.Timestamp):
+        cutoff = cutoff.to_pydatetime()
+
     sql = f"""
     WITH src AS (
       SELECT
@@ -445,7 +484,6 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
     FROM by_team
     ORDER BY IFNULL(ROI_Pct, 0.0) DESC, WinPct DESC, N DESC
     """
-
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
@@ -465,17 +503,17 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
 
 # --- display helpers -------------------------------------------------------
 def bullet(team: str, market: str, r: pd.Series) -> str:
-    W = int(r.W) if pd.notnull(r.W) else 0
-    L = int(r.L) if pd.notnull(r.L) else 0
-    P = int(r.P) if ('P' in r.index and pd.notnull(r.P)) else 0
-    N = int(r.N) if pd.notnull(r.N) else 0
-    winpct = float(r.WinPct) if pd.notnull(r.WinPct) else 0.0
+    W = int(r.W) if 'W' in r.index and pd.notnull(r.W) else 0
+    L = int(r.L) if 'L' in r.index and pd.notnull(r.L) else 0
+    P = int(r.P) if 'P' in r.index and pd.notnull(r.P) else 0
+    N = int(r.N) if 'N' in r.index and pd.notnull(r.N) else 0
+    winpct = float(r.Win_Rate if 'Win_Rate' in r.index else r.WinPct) if pd.notnull(r.get('Win_Rate', r.get('WinPct', np.nan))) else 0.0
     roi_val = r.get("ROI_Pct")
     roi_txt = f", ROI {float(roi_val):+,.1f}%" if pd.notnull(roi_val) else ""
     push_txt = f"-{P}P" if P else ""
     situation = r.get("Situation", "Situation")
     return (f"**{team} — {market.capitalize()}** · {situation}: "
-            f"{W}-{L}{push_txt} ({winpct:.1f}%) over {N}{roi_txt}.")
+            f"{W}-{L}{push_txt} ({winpct*100:.1f}%) over {N}{roi_txt}.")
 
 def bullet_with_baseline(team, market, r, base):
     line = bullet(team, market, r)
@@ -486,7 +524,6 @@ def bullet_with_baseline(team, market, r, base):
     return "• " + line + f" — League baseline: {base_WP:.1f}% (N={base_N})"
 
 def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bucket: str | None):
-    """Ordered list of situation names to display for the *current* role."""
     out = []
     if is_home is True  and is_favorite is True:   out.append("Home Favorite")
     if is_home is True  and is_favorite is False:  out.append("Home Underdog")
@@ -504,10 +541,10 @@ def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bu
     return keep
 
 def _print_matching_situations(team, market, df, wanted_order, baseline_row):
-    """Print only the situations we care about; fallback to top 3 if none match."""
     if df.empty:
         st.write("_No situations meeting N threshold._")
         return
+    # df here is ALREADY filtered to the selected team
     by_name = {row.Situation: row for _, row in df.iterrows() if "Situation" in row.index}
     printed = 0
     for name in wanted_order:
@@ -575,14 +612,18 @@ def render_situation_db_tab(selected_sport: str | None = None):
             spread_bucket = ctx.get("spread_bucket")
 
             # Cutoffs: DATE for per-team stats; TIMESTAMP for league/leaderboard
-            cutoff_input: date = st.date_input("Cutoff (DATE for stats)", value=date.today())
+            cutoff_input: date = st.date_input("Cutoff (DATE for stats)", value=date.today(), key=f"cutoff_{team}")
             cutoff_date_for_stats = cutoff_input or date.today()
+
             cutoff_ts_context = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
             cutoff_ts = _round_cutoff(cutoff_ts_context) or _fallback_now_utc()
+            if isinstance(cutoff_ts, pd.Timestamp):
+                cutoff_ts = cutoff_ts.to_pydatetime()
 
             # Spreads (current role) — DATE cutoff
             st.markdown("**Spreads — current role**")
-            s_ats = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "spreads", min_n)
+            s_ats_all = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "spreads", min_n)
+            s_ats = s_ats_all[s_ats_all["Team"] == team] if not s_ats_all.empty else s_ats_all
             if s_ats.empty:
                 st.write("_No ATS situations meeting N threshold._")
             else:
@@ -592,21 +633,15 @@ def render_situation_db_tab(selected_sport: str | None = None):
 
             # Moneyline (current role) — DATE cutoff
             st.markdown("**Moneyline — current role**")
-            s_ml = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "moneyline", min_n)
+            s_ml_all = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "moneyline", min_n)
+            s_ml = s_ml_all[s_ml_all["Team"] == team] if not s_ml_all.empty else s_ml_all
             if s_ml.empty:
                 st.write("_No ML situations meeting N threshold._")
             else:
                 base_ml = league_baseline_filtered_cached(sport_str, cutoff_ts, "moneyline", is_home, spread_bucket, baseline_min_n)
                 wanted_ml = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "moneyline", s_ml, wanted_ml, base_ml)
-            cutoff_ts_context = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
-            cutoff_ts = _round_cutoff(cutoff_ts_context) or _fallback_now_utc()
-            
-            # Ensure pure Python datetime (not pandas.Timestamp / NaT)
-            if isinstance(cutoff_ts, pd.Timestamp):
-                cutoff_ts = cutoff_ts.to_pydatetime()
-            if cutoff_ts is None or (isinstance(cutoff_ts, float) and pd.isna(cutoff_ts)):
-                cutoff_ts = _fallback_now_utc()
+
             # League leaderboard for this exact role (spreads) — TIMESTAMP cutoff
             st.markdown("**League — this exact role**")
             rb = role_leaderboard_cached(sport_str, cutoff_ts, "spreads", is_home, spread_bucket, ctx.get("is_favorite"), baseline_min_n)
@@ -614,3 +649,4 @@ def render_situation_db_tab(selected_sport: str | None = None):
                 st.write("_No teams meet N threshold in this role._")
             else:
                 st.dataframe(rb.head(20))
+
