@@ -146,73 +146,74 @@ def list_current_games_from_moves(sport: str,
     return job.result().to_dataframe()
 
 
+# ---------- 1) CURRENT GAMES (dedup per matchup; collapse all books/markets) ----------
+@st.cache_data(ttl=90, show_spinner=False)
+def list_current_games_from_moves(sport: str,
+                                  horizon_hours: int = 72,
+                                  hard_cap: int = 200) -> pd.DataFrame:
+    sql = f"""
+    WITH src AS (
+      SELECT
+        UPPER(Sport)                           AS Sport_Upper,
+        COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
+        COALESCE(Home_Team_Norm, home_l)       AS home_n,
+        COALESCE(Away_Team_Norm, away_l)       AS away_n,
+        feat_Team,
+        Market_Leader,
+        Limit,
+        Snapshot_Timestamp
+      FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
+      WHERE UPPER(Sport) = @sport_u
+        AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start)
+              BETWEEN CURRENT_TIMESTAMP()
+                  AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL @horizon_hours HOUR)
+    ),
+    canon AS (
+      SELECT
+        Sport_Upper,
+        gs,
+        IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team))   AS a_norm,
+        IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)) AS b_norm,
+        feat_Team
+      FROM src
+    ),
+    grouped AS (
+      SELECT
+        CONCAT(a_norm, "_", b_norm, "_",
+               FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)) AS Game_Id,
+        ANY_VALUE(gs) AS Game_Start,
+        ARRAY_AGG(DISTINCT feat_Team IGNORE NULLS ORDER BY feat_Team LIMIT 2) AS Teams
+      FROM canon
+      GROUP BY 1
+    )
+    SELECT *
+    FROM grouped
+    WHERE ARRAY_LENGTH(Teams) = 2
+    ORDER BY Game_Start
+    LIMIT @hard_cap
+    """
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport_u", "STRING", (sport or "").upper()),
+                bigquery.ScalarQueryParameter("horizon_hours", "INT64", int(horizon_hours)),
+                bigquery.ScalarQueryParameter("hard_cap", "INT64", int(hard_cap)),
+            ],
+            use_query_cache=True,
+        ),
+    )
+    return job.result().to_dataframe()
+
+
 # ---------- 2) TEAM ROLE CONTEXT (dedup per team; prioritize leader/limit/latest) ----------
 @st.cache_data(ttl=120, show_spinner=False)
 def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
-    """
-    Returns {team: {is_home, is_favorite, spread_bucket, cutoff}} for the given canonical Game_Id.
-    We rebuild the same canonical Game_Id inside the query and pick ONE best row per team via:
-      ORDER BY Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
-    """
     if not teams:
         return {}
 
     sql = f"""
-    WITH rows AS (
-      SELECT
-        UPPER(Sport) AS Sport_Upper,
-        COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
-        COALESCE(Home_Team_Norm, home_l) AS home_n,
-        COALESCE(Away_Team_Norm, away_l) AS away_n,
-        feat_Team,
-        Is_Home,
-        Value,  -- per-team closing spread sign: favorite < 0
-        Snapshot_Timestamp,
-        Market_Leader,
-        Limit
-      FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
-    ),
-    canon AS (
-      SELECT
-        CONCAT(
-          IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
-          IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
-          FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
-        ) AS Game_Id,
-        feat_Team,
-        Is_Home,
-        Value,
-        gs AS cutoff,
-        Market_Leader, Limit, Snapshot_Timestamp
-      FROM rows
-    ),
-    best_per_team AS (
-      SELECT AS VALUE x
-      FROM (
-        SELECT
-          feat_Team,
-          -- Choose the single best row per team using ordering priority
-          ARRAY_AGG(STRUCT(Is_Home, Value, cutoff)
-                    ORDER BY Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
-          LIMIT 1)[OFFSET(0)] AS x
-        FROM canon
-        WHERE Game_Id = @gid
-          AND feat_Team IN UNNEST(@teams)
-        GROUP BY feat_Team
-      )
-    )
-    SELECT
-      @teams[OFFSET(i)] AS team_key,
-      t.Is_Home AS is_home,
-      t.Value   AS closing_spread,
-      t.cutoff  AS cutoff
-    FROM UNNEST(GENERATE_ARRAY(0, ARRAY_LENGTH(@teams)-1)) AS i
-    LEFT JOIN best_per_team AS t
-      ON @teams[OFFSET(i)] = (SELECT feat_Team FROM (SELECT feat_Team, 1 FROM canon WHERE Game_Id=@gid LIMIT 1) WHERE TRUE)
-    """
-    # Simpler: fetch directly with ARRAY_AGG (per team)
-    sql = f"""
-    WITH rows AS (
+    WITH src AS (
       SELECT
         COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
         COALESCE(Home_Team_Norm, home_l) AS home_n,
@@ -234,7 +235,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         ) AS Game_Id,
         feat_Team, Is_Home, Value, gs AS cutoff,
         Market_Leader, Limit, Snapshot_Timestamp
-      FROM rows
+      FROM src
     ),
     picked AS (
       SELECT
@@ -290,115 +291,6 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     return out
 
 
-# ---------- 3) SITUATIONS from SCORES (history up to a DATE cutoff) ----------
-@st.cache_data(ttl=CACHE_TTL_SEC)
-def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataFrame:
-    """
-    ATS situations per team from scores_with_features (history).
-    Uses: feat_Team, Is_Home, Value (as Closing_Spread), Spread_Cover_Flag, ATS_Cover_Margin, feat_Game_Start.
-    """
-    sql = f"""
-    WITH base AS (
-      SELECT
-        feat_Team AS Team,
-        Is_Home,
-        Value AS Closing_Spread,
-        Spread_Cover_Flag,
-        ATS_Cover_Margin
-      FROM {SCORES}
-      WHERE UPPER(Sport) = @sport_upper
-        AND DATE(feat_Game_Start) <= @cutoff
-    ),
-    enriched AS (
-      SELECT
-        Team, Is_Home, Closing_Spread, Spread_Cover_Flag, ATS_Cover_Margin,
-        CASE
-          WHEN Closing_Spread IS NULL THEN ''
-          WHEN Closing_Spread <= -10.5 THEN 'Fav ≤ -10.5'
-          WHEN Closing_Spread <=  -7.5 THEN 'Fav -8 to -10.5'
-          WHEN Closing_Spread <=  -6.5 THEN 'Fav -7 to -6.5'
-          WHEN Closing_Spread <=  -3.5 THEN 'Fav -4 to -6.5'
-          WHEN Closing_Spread <=  -0.5 THEN 'Fav -0.5 to -3.5'
-          WHEN Closing_Spread =    0.0 THEN 'Pick (0)'
-          WHEN Closing_Spread <=   3.5 THEN 'Dog +0.5 to +3.5'
-          WHEN Closing_Spread <=   6.5 THEN 'Dog +4 to +6.5'
-          WHEN Closing_Spread <=  10.5 THEN 'Dog +7 to +10.5'
-          ELSE 'Dog ≥ +11'
-        END AS Spread_Bucket,
-        CASE WHEN Closing_Spread IS NULL THEN NULL
-             WHEN Closing_Spread < 0 THEN TRUE ELSE FALSE END AS Is_Favorite
-      FROM base
-    ),
-    role4 AS (
-      SELECT
-        Team,
-        CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
-               CASE WHEN Is_Favorite THEN 'Favorite' ELSE 'Underdog' END) AS Situation,
-        COUNT(*) AS N,
-        COUNTIF(Spread_Cover_Flag = 1) AS W,
-        COUNTIF(Spread_Cover_Flag = 0) AS L,
-        COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      GROUP BY Team, Situation
-    ),
-    home_road AS (
-      SELECT Team,
-             CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END AS Situation,
-             COUNT(*) AS N,
-             COUNTIF(Spread_Cover_Flag = 1) AS W,
-             COUNTIF(Spread_Cover_Flag = 0) AS L,
-             COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      GROUP BY Team, Situation
-    ),
-    fav_dog AS (
-      SELECT Team,
-             CASE WHEN Is_Favorite THEN 'Favorite' ELSE 'Underdog' END AS Situation,
-             COUNT(*) AS N,
-             COUNTIF(Spread_Cover_Flag = 1) AS W,
-             COUNTIF(Spread_Cover_Flag = 0) AS L,
-             COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      GROUP BY Team, Situation
-    ),
-    buckets AS (
-      SELECT Team, Spread_Bucket AS Situation,
-             COUNT(*) AS N,
-             COUNTIF(Spread_Cover_Flag = 1) AS W,
-             COUNTIF(Spread_Cover_Flag = 0) AS L,
-             COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      WHERE Spread_Bucket <> ''
-      GROUP BY Team, Situation
-    ),
-    unioned AS (
-      SELECT * FROM role4
-      UNION ALL SELECT * FROM home_road
-      UNION ALL SELECT * FROM fav_dog
-      UNION ALL SELECT * FROM buckets
-    )
-    SELECT
-      Team, Situation, N, W, L, P,
-      SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
-      CASE WHEN (W + L) > 0
-           THEN ((W * (100.0/110.0) + L * (-1.0)) / (W + L)) * 100.0
-           ELSE NULL END AS ROI_Pct
-    FROM unioned
-    WHERE N >= @min_n
-    ORDER BY Team, WinPct DESC, N DESC
-    """
-    job = CLIENT.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
-                bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
-                bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
-            ],
-            use_query_cache=True,
-        ),
-    )
-    return job.result().to_dataframe()
 def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
     """
     Ensure one favorite / one underdog when we have at least one spread.
