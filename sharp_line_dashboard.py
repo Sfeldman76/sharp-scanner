@@ -10604,8 +10604,8 @@ else:
     if conflicting:
         st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
     elif run_scanner:
-        scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
-            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings"]#"📚 Situation DB"
+        scan_tab, analysis_tab, power_tab = st.tabs(
+            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings"]#"📚 Situation DB"situation_tab 
         )
 
         with scan_tab:
