@@ -125,6 +125,76 @@ def _spread_bucket(v: float | None) -> str:
 
 # --- DB helpers (cached) ---------------------------------------------------
 
+def _get_view_columns(bq: bigquery.Client, fq_view: str) -> set[str]:
+    """
+    Return the set of column names for a table/view without scanning data.
+    """
+    job = bq.query(f"SELECT * FROM {fq_view} LIMIT 0")
+    result = job.result()
+    return {field.name for field in result.schema}
+
+
+def _resolve_team_expr(bq: bigquery.Client, fq_view: str = "`sharplogger.sharp_data.scores_role_view`") -> str:
+    """
+    Resolve a canonical 'team' expression from scores_role_view.
+    Priority:
+      1) Team
+      2) Team_Norm
+      3) CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END
+      4) CASE WHEN Is_Home THEN Home_Team_Norm ELSE Away_Team_Norm END
+      5) Other common pair names (Team_Home/Team_Away)
+    Raises with a helpful message if none match.
+    """
+    cols = _get_view_columns(bq, fq_view)
+
+    if "Team" in cols:
+        return "Team"
+    if "Team_Norm" in cols:
+        return "Team_Norm"
+
+    if {"Is_Home", "Home_Team", "Away_Team"}.issubset(cols):
+        return "CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END"
+
+    if {"Is_Home", "Home_Team_Norm", "Away_Team_Norm"}.issubset(cols):
+        return "CASE WHEN Is_Home THEN Home_Team_Norm ELSE Away_Team_Norm END"
+
+    if {"Is_Home", "Team_Home", "Team_Away"}.issubset(cols):
+        return "CASE WHEN Is_Home THEN Team_Home ELSE Team_Away END"
+
+    # Last-resort helpful error
+    raise RuntimeError(
+        "Could not resolve a team column/expression in scores_role_view. "
+        f"Available columns: {sorted(cols)}"
+    )
+
+
+def _resolve_spread_expr(bq: bigquery.Client, fq_view: str = "`sharplogger.sharp_data.scores_role_view`") -> str:
+    """
+    Resolve the per-team spread value column used by 'current role'.
+    Priority:
+      1) Value (your unified field)
+      2) Closing_Spread_For_Team
+      3) Spread_For_Team
+      4) Fallback: CASE WHEN Is_Home THEN Home_Spread ELSE -Away_Spread END (if present)
+    """
+    cols = _get_view_columns(bq, fq_view)
+
+    if "Value" in cols:
+        return "Value"
+    if "Closing_Spread_For_Team" in cols:
+        return "Closing_Spread_For_Team"
+    if "Spread_For_Team" in cols:
+        return "Spread_For_Team"
+
+    if {"Is_Home", "Home_Spread", "Away_Spread"}.issubset(cols):
+        return "CASE WHEN Is_Home THEN Home_Spread ELSE -Away_Spread END"
+
+    # Not fatal for totals/H2H queries, but for spreads we should be explicit:
+    raise RuntimeError(
+        "Could not resolve a spread value column in scores_role_view. "
+        f"Available columns: {sorted(cols)}"
+    )
+
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def list_games_cached(sport_label: str) -> pd.DataFrame:
     SPORT_MAP = {
@@ -255,47 +325,55 @@ def _resolve_team_expr(bq_client: bigquery.Client) -> str:
     raise RuntimeError("Could not resolve a team column/expression in scores_role_view.")
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
-def situation_stats_cached(sport_str: str, team: str, cutoff, market: str, min_n: int):
-    cutoff_ts = _coerce_timestamp(cutoff)  # from previous patch
+@st.cache_data(show_spinner=False)
+def situation_stats_cached(sport_str: str, team: str, cutoff_date, market: str, min_n: int):
+    bq = bigquery.Client(project="sharplogger", location="us")
+    view = "`sharplogger.sharp_data.scores_role_view`"
 
-    team_expr = _resolve_team_expr(CLIENT)  # e.g., "Team" or the CASE WHEN
+    team_expr   = _resolve_team_expr(bq, view)
+    # Only resolve spread expr when you actually need spreads (avoids needless errors)
+    spread_expr = _resolve_spread_expr(bq, view) if market.lower() == "spreads" else None
 
-    cutoff_filter = "AND Event_Timestamp < @cutoff_ts" if cutoff_ts is not None else ""
-
-    sql = f"""
-    WITH base AS (
-      SELECT
-        {team_expr} AS Team,
-        Win_Flag
-      FROM {SCORES_ROLE_VIEW}
-      WHERE Sport  = @sport
-        AND Market = @market
-        AND {team_expr} = @team
-        {cutoff_filter}
-    )
-    SELECT
-      Team,
-      COUNT(*) AS N,
-      AVG(CAST(Win_Flag AS INT64)) AS WinRate
-    FROM base
-    GROUP BY Team
-    HAVING N >= @min_n
-    """
-
+    # Build WHERE
+    where = f"Sport = @sport AND DATE(Game_Date) <= @cutoff"
     params = [
-        bigquery.ScalarQueryParameter("sport",  "STRING", sport_str),
-        bigquery.ScalarQueryParameter("market", "STRING", market),
-        bigquery.ScalarQueryParameter("team",   "STRING", team),
-        bigquery.ScalarQueryParameter("min_n",  "INT64",  int(min_n)),
+        bigquery.ScalarQueryParameter("sport", "STRING", sport_str.upper()),
+        bigquery.ScalarQueryParameter("cutoff", "DATE", cutoff_date),
     ]
-    if cutoff_ts is not None:
-        params.append(bigquery.ScalarQueryParameter("cutoff_ts", "TIMESTAMP", cutoff_ts))
 
-    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
-    return job.result().to_dataframe()
+    # Example minimal query (adjust to your exact metrics)
+    if market.lower() == "spreads":
+        sql = f"""
+        SELECT
+          {team_expr} AS Team,
+          ANY_VALUE(Sport) AS Sport,
+          COUNT(*) AS N,
+          AVG(CAST(Win_Flag AS INT64)) AS Win_Rate,
+          AVG({spread_expr}) AS Avg_Spread
+        FROM {view}
+        WHERE {where}
+        GROUP BY Team
+        HAVING N >= @min_n
+        ORDER BY N DESC
+        """
+        params.append(bigquery.ScalarQueryParameter("min_n", "INT64", int(min_n)))
+    else:
+        sql = f"""
+        SELECT
+          {team_expr} AS Team,
+          ANY_VALUE(Sport) AS Sport,
+          COUNT(*) AS N,
+          AVG(CAST(Win_Flag AS INT64)) AS Win_Rate
+        FROM {view}
+        WHERE {where}
+        GROUP BY Team
+        HAVING N >= @min_n
+        ORDER BY N DESC
+        """
+        params.append(bigquery.ScalarQueryParameter("min_n", "INT64", int(min_n)))
 
-
-
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    return bq.query(sql, job_config=job_config).to_dataframe()
 
 
 
