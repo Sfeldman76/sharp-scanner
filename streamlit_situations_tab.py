@@ -62,14 +62,24 @@ def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bu
             keep.append(s); seen.add(s)
     return keep
 
+# Normalized team token used across queries
+TEAM_NORM_EXPR = """
+COALESCE(
+  Team_For_Join,
+  feat_Team,
+  Home_Team_Norm, Away_Team_Norm,
+  home_l, away_l
+)
+"""
+
 # ---------- 1) CURRENT GAMES from MOVES (Sport filtered, start > NOW) ----------
 @st.cache_data(ttl=90, show_spinner=False)
 def list_current_games_from_moves(sport: str) -> pd.DataFrame:
     """
-    Build current/upcoming games from moves_with_features_merged using your actual columns:
-      - Game Id:       COALESCE(game_key_clean, feat_Game_Key, Game_Key)
-      - Game Start:    COALESCE(Game_Start, Commence_Hour, feat_Game_Start)
-      - Teams:         DISTINCT of the best available team columns
+    Build current/upcoming games from moves_with_features_merged using actual columns:
+      - Game_Id:    COALESCE(game_key_clean, feat_Game_Key, Game_Key)
+      - Game_Start: COALESCE(Game_Start, Commence_Hour, feat_Game_Start)
+      - Teams:      DISTINCT normalized team tokens (max 2)
     """
     sql = f"""
     WITH base AS (
@@ -77,13 +87,7 @@ def list_current_games_from_moves(sport: str) -> pd.DataFrame:
         COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS Game_Id,
         COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
         UPPER(Sport) AS Sport_Upper,
-        -- Build a generic normalized team token per row; we'll DISTINCT this per Game_Id
-        COALESCE(
-          Team_For_Join,
-          feat_Team,
-          Home_Team_Norm, Away_Team_Norm,
-          home_l, away_l
-        ) AS TeamNorm
+        {TEAM_NORM_EXPR} AS TeamNorm
       FROM {MOVES}
       WHERE UPPER(Sport) = @sport_upper
         AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) > CURRENT_TIMESTAMP()
@@ -104,9 +108,7 @@ def list_current_games_from_moves(sport: str) -> pd.DataFrame:
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport_upper", "STRING", (sport or "").upper()),
-            ],
+            query_parameters=[bigquery.ScalarQueryParameter("sport_upper", "STRING", (sport or "").upper())],
             use_query_cache=True,
         ),
     )
@@ -117,21 +119,21 @@ def list_current_games_from_moves(sport: str) -> pd.DataFrame:
 def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     """
     Returns {team: {is_home, is_favorite, spread_bucket, cutoff}} for the given game.
-    Reads from MOVES only (consistent, fast). Adjust Value→Closing_Spread_For_Team if desired.
+    Uses the same Game_Id & team normalization as the listing query.
     """
     if not teams:
         return {}
     sql = f"""
     WITH t AS (SELECT team FROM UNNEST(@teams) AS team)
     SELECT
-      feat_Team,
-      ANY_VALUE(Is_Home)         AS is_home,
-      ANY_VALUE(Value)           AS closing_spread,  -- or Closing_Spread_For_Team
-      ANY_VALUE(COALESCE(feat_Game_Start, Commence_Hour)) AS cutoff
+      {TEAM_NORM_EXPR} AS TeamNorm,
+      ANY_VALUE(Is_Home) AS is_home,
+      ANY_VALUE(Value)   AS closing_spread,  -- (spread value when present)
+      ANY_VALUE(COALESCE(feat_Game_Start, Commence_Hour, Game_Start)) AS cutoff
     FROM {MOVES}
-    WHERE feat_Game_Key = @gid
-      AND feat_Team IN (SELECT team FROM t)
-    GROUP BY feat_Team
+    WHERE COALESCE(game_key_clean, feat_Game_Key, Game_Key) = @gid
+      AND {TEAM_NORM_EXPR} IN (SELECT team FROM t)
+    GROUP BY TeamNorm
     """
     job = CLIENT.query(
         sql,
@@ -149,7 +151,8 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     for _, r in df.iterrows():
         sp  = r.get("closing_spread")
         spf = float(sp) if pd.notnull(sp) else None
-        out[str(r["feat_Team"])] = {
+        tname = str(r["TeamNorm"])
+        out[tname] = {
             "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
             "is_favorite": (spf is not None and spf < 0),
             "spread_bucket": _spread_bucket(spf),
@@ -162,7 +165,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
 def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataFrame:
     """
     ATS situations per team from scores_with_features (history).
-    Uses Spread_Cover_Flag and Value columns you confirmed.
+    Uses: feat_Team, Is_Home, Value (as Closing_Spread), Spread_Cover_Flag, ATS_Cover_Margin, feat_Game_Start.
     """
     sql = f"""
     WITH base AS (
@@ -173,7 +176,7 @@ def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.Data
         Spread_Cover_Flag,
         ATS_Cover_Margin
       FROM {SCORES}
-      WHERE Sport = @sport
+      WHERE UPPER(Sport) = @sport_upper
         AND DATE(feat_Game_Start) <= @cutoff
     ),
     enriched AS (
@@ -258,7 +261,7 @@ def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.Data
         sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("sport","STRING", sport),
+                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
                 bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
                 bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
             ],
@@ -277,7 +280,7 @@ def situations_ml_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataF
         Value AS Closing_Spread,
         Team_Score, Opp_Score
       FROM {SCORES}
-      WHERE Sport = @sport
+      WHERE UPPER(Sport) = @sport_upper
         AND DATE(feat_Game_Start) <= @cutoff
     ),
     enriched AS (
@@ -359,7 +362,7 @@ def situations_ml_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataF
         sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("sport","STRING", sport),
+                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
                 bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
                 bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
             ],
@@ -385,7 +388,7 @@ def league_role_leaderboard_spreads(sport: str, cutoff_ts: dt.datetime,
         ATS_Cover_Margin,
         feat_Game_Start
       FROM {SCORES}
-      WHERE Sport = @sport
+      WHERE UPPER(Sport) = @sport_upper
         AND feat_Game_Start < @cutoff
         AND feat_Game_Start >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL 10 YEAR))
     ),
@@ -442,7 +445,7 @@ def league_role_leaderboard_spreads(sport: str, cutoff_ts: dt.datetime,
         sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("sport","STRING", sport),
+                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
                 bigquery.ScalarQueryParameter("cutoff","TIMESTAMP", cutoff_ts),
                 bigquery.ScalarQueryParameter("is_home","BOOL", is_home),
                 bigquery.ScalarQueryParameter("spread_bucket","STRING", spread_bucket or ""),
@@ -456,13 +459,11 @@ def league_role_leaderboard_spreads(sport: str, cutoff_ts: dt.datetime,
 
 def render_current_games_section(selected_sport: str):
     st.subheader("📡 Current/Upcoming Games (from MOVES)")
-
     games = list_current_games_from_moves(selected_sport)
 
     if games.empty:
         st.info("No upcoming games found for this sport (from moves).")
         with st.expander("Debug this sport in moves"):
-            # Show a quick sample so you can verify labels & times
             dbg_sql = f"""
             SELECT
               UPPER(Sport) AS Sport_Upper,
@@ -477,20 +478,15 @@ def render_current_games_section(selected_sport: str):
             job = CLIENT.query(
                 dbg_sql,
                 job_config=bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("sport_upper", "STRING", (selected_sport or "").upper())
-                    ],
+                    query_parameters=[bigquery.ScalarQueryParameter("sport_upper", "STRING", (selected_sport or "").upper())],
                     use_query_cache=True,
                 ),
             )
             st.dataframe(job.result().to_dataframe())
         return
 
-    # shape for selectbox
     df = games.copy()
-    df["label"] = df.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}", axis=1
-    )
+    df["label"] = df.apply(lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}", axis=1)
 
     row = st.selectbox("Select game", df.to_dict("records"), format_func=lambda r: r["label"])
     if not row:
@@ -520,8 +516,7 @@ def render_current_situations_tab(selected_sport: str):
     games = games.copy()
     games["Teams"] = games["Teams"].apply(lambda xs: list(xs)[:2])
     games["label"] = games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}" if r["Teams"]
-                  else f"{r['Game_Start']} — (teams TBD)",
+        lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}" if r["Teams"] else f"{r['Game_Start']} — (teams TBD)",
         axis=1
     )
 
@@ -536,7 +531,7 @@ def render_current_situations_tab(selected_sport: str):
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
     cutoff_date_for_stats: date = st.date_input("Cutoff for historical stats (DATE)", value=date.today())
 
-    # Role context straight from moves
+    # Role context straight from MOVES
     ctxs = team_context_from_moves(game_id, teams)
 
     cols = st.columns(2)
@@ -556,15 +551,17 @@ def render_current_situations_tab(selected_sport: str):
             if bucket: bits.append(bucket)
             st.caption(" / ".join([b for b in bits if b]) or "Role: Unknown")
 
+            wanted = _wanted_situations(is_home, is_favorite, bucket)
+
             # ATS situations (history)
             st.markdown("**Spreads — current role**")
             ats_all = situations_ats_by_team(selected_sport, cutoff_date_for_stats, min_n)
-            _print_matching_situations(team, "spreads", ats_all[ats_all["Team"] == team], _wanted_situations(is_home, is_favorite, bucket))
+            _print_matching_situations(team, "spreads", ats_all[ats_all["Team"] == team], wanted)
 
             # ML situations (history)
             st.markdown("**Moneyline — current role**")
             ml_all = situations_ml_by_team(selected_sport, cutoff_date_for_stats, min_n)
-            _print_matching_situations(team, "moneyline", ml_all[ml_all["Team"] == team], _wanted_situations(is_home, is_favorite, bucket))
+            _print_matching_situations(team, "moneyline", ml_all[ml_all["Team"] == team], wanted)
 
             # League leaderboard for this exact role (spreads)
             st.markdown("**League — this exact role (Spreads)**")
@@ -585,7 +582,6 @@ def _print_matching_situations(team, market, df, wanted_order):
     if df is None or df.empty:
         st.write("_No situations meeting N threshold._")
         return
-    # df contains multiple situations for the team; index by name
     by_name = {row.Situation: row for _, row in df.iterrows()}
     printed = 0
     for name in wanted_order:
