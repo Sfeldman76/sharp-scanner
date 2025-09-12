@@ -78,86 +78,13 @@ COALESCE(
 def list_current_games_from_moves(sport: str,
                                   horizon_hours: int = 72,
                                   hard_cap: int = 200) -> pd.DataFrame:
-    """
-    One row per GAME (not per bookmaker/market). Uses a canonical Game_Id:
-      {min(home,away)}_{max(home,away)}_{start_utc}
-    Teams are taken from feat_Team (stable join key) limited to two.
-    """
-    sql = f"""
-    WITH rows AS (
-      SELECT
-        UPPER(Sport)                           AS Sport_Upper,
-        -- Prefer explicit game start fields; fall back in order
-        COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
-        -- Home/Away best-effort for canonical pairing
-        COALESCE(Home_Team_Norm, home_l)       AS home_n,
-        COALESCE(Away_Team_Norm, away_l)       AS away_n,
-        -- Team key used throughout scores/moves
-        feat_Team,
-        -- Keep for later prioritization (dedupe)
-        Market_Leader,
-        Limit,
-        Snapshot_Timestamp
-      FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
-      WHERE UPPER(Sport) = @sport_u
-        AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start)
-              BETWEEN CURRENT_TIMESTAMP()
-                  AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL @horizon_hours HOUR)
-    ),
-    canon AS (
-      SELECT
-        Sport_Upper,
-        gs,
-        -- canonical pair (order-insensitive)
-        IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)) AS a_norm,
-        IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)) AS b_norm,
-        feat_Team,
-        Market_Leader, Limit, Snapshot_Timestamp
-      FROM rows
-    ),
-    grouped AS (
-      SELECT
-        -- Canonical Game_Id (UTC minute precision to avoid micro drift)
-        CONCAT(a_norm, "_", b_norm, "_",
-               FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)) AS Game_Id,
-        ANY_VALUE(gs) AS Game_Start,
-        -- Up to 2 distinct feat_Team tokens (keeps names consistent with SCORES)
-        ARRAY_AGG(DISTINCT feat_Team IGNORE NULLS ORDER BY feat_Team LIMIT 2) AS Teams
-      FROM canon
-      GROUP BY 1
-    )
-    SELECT *
-    FROM grouped
-    WHERE ARRAY_LENGTH(Teams) = 2
-    ORDER BY Game_Start
-    LIMIT @hard_cap
-    """
-    job = CLIENT.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport_u", "STRING", (sport or "").upper()),
-                bigquery.ScalarQueryParameter("horizon_hours", "INT64", int(horizon_hours)),
-                bigquery.ScalarQueryParameter("hard_cap", "INT64", int(hard_cap)),
-            ],
-            use_query_cache=True,
-        ),
-    )
-    return job.result().to_dataframe()
-
-
-# ---------- 1) CURRENT GAMES (dedup per matchup; collapse all books/markets) ----------
-@st.cache_data(ttl=90, show_spinner=False)
-def list_current_games_from_moves(sport: str,
-                                  horizon_hours: int = 72,
-                                  hard_cap: int = 200) -> pd.DataFrame:
     sql = f"""
     WITH src AS (
       SELECT
-        UPPER(Sport)                           AS Sport_Upper,
+        UPPER(Sport) AS Sport_Upper,
         COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
-        COALESCE(Home_Team_Norm, home_l)       AS home_n,
-        COALESCE(Away_Team_Norm, away_l)       AS away_n,
+        COALESCE(Home_Team_Norm, home_l)  AS home_n,
+        COALESCE(Away_Team_Norm, away_l)  AS away_n,
         feat_Team,
         Market_Leader,
         Limit,
@@ -167,24 +94,28 @@ def list_current_games_from_moves(sport: str,
         AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start)
               BETWEEN CURRENT_TIMESTAMP()
                   AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL @horizon_hours HOUR)
+        AND feat_Team IS NOT NULL
     ),
     canon AS (
       SELECT
-        Sport_Upper,
+        -- canonical matchup id = sorted team tokens + start time (minute precision)
+        CONCAT(
+          IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
+          IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
+          FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
+        ) AS Game_Id,
         gs,
-        IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team))   AS a_norm,
-        IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)) AS b_norm,
         feat_Team
       FROM src
     ),
     grouped AS (
       SELECT
-        CONCAT(a_norm, "_", b_norm, "_",
-               FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)) AS Game_Id,
+        Game_Id,
         ANY_VALUE(gs) AS Game_Start,
-        ARRAY_AGG(DISTINCT feat_Team IGNORE NULLS ORDER BY feat_Team LIMIT 2) AS Teams
+        -- NOTE: DISTINCT only (no IGNORE NULLS with DISTINCT)
+        ARRAY_AGG(DISTINCT feat_Team ORDER BY feat_Team LIMIT 2) AS Teams
       FROM canon
-      GROUP BY 1
+      GROUP BY Game_Id
     )
     SELECT *
     FROM grouped
@@ -204,6 +135,95 @@ def list_current_games_from_moves(sport: str,
         ),
     )
     return job.result().to_dataframe()
+
+
+# ---------- 2) TEAM ROLE CONTEXT (one “best” row per team) ----------
+@st.cache_data(ttl=120, show_spinner=False)
+def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
+    if not teams:
+        return {}
+
+    sql = f"""
+    WITH src AS (
+      SELECT
+        COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
+        COALESCE(Home_Team_Norm, home_l) AS home_n,
+        COALESCE(Away_Team_Norm, away_l) AS away_n,
+        feat_Team,
+        Is_Home,
+        Value,
+        Snapshot_Timestamp,
+        Market_Leader,
+        Limit
+      FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
+      WHERE feat_Team IS NOT NULL
+    ),
+    canon AS (
+      SELECT
+        CONCAT(
+          IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
+          IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
+          FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
+        ) AS Game_Id,
+        feat_Team, Is_Home, Value, gs AS cutoff,
+        Market_Leader, Limit, Snapshot_Timestamp
+      FROM src
+    ),
+    picked AS (
+      SELECT
+        feat_Team,
+        ARRAY_AGG(
+          STRUCT(Is_Home, Value, cutoff)
+          ORDER BY Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
+          LIMIT 1
+        )[OFFSET(0)] AS s
+      FROM canon
+      WHERE Game_Id = @gid
+        AND feat_Team IN UNNEST(@teams)
+      GROUP BY feat_Team
+    )
+    SELECT
+      feat_Team,
+      s.Is_Home AS is_home,
+      s.Value   AS closing_spread,
+      s.cutoff  AS cutoff
+    FROM picked
+    """
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("gid",   "STRING", game_id),
+                bigquery.ArrayQueryParameter("teams", "STRING", teams),
+            ],
+            use_query_cache=True,
+        ),
+    )
+    df = job.result().to_dataframe()
+
+    out = {}
+    for _, r in df.iterrows():
+        sp  = r.get("closing_spread")
+        spf = float(sp) if pd.notnull(sp) else None
+        out[str(r["feat_Team"])] = {
+            "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
+            "is_favorite": (spf is not None and spf < 0),
+            "spread_bucket": (
+                "" if spf is None else
+                "Fav ≤ -10.5" if spf <= -10.5 else
+                "Fav -8 to -10.5" if spf <= -7.5 else
+                "Fav -7 to -6.5" if spf <= -6.5 else
+                "Fav -4 to -6.5" if spf <= -3.5 else
+                "Fav -0.5 to -3.5" if spf <= -0.5 else
+                "Pick (0)" if spf == 0.0 else
+                "Dog +0.5 to +3.5" if spf <= 3.5 else
+                "Dog +4 to +6.5" if spf <= 6.5 else
+                "Dog +7 to +10.5" if spf <= 10.5 else
+                "Dog ≥ +11"
+            ),
+            "cutoff": _to_utc_dt(r.get("cutoff")),
+        }
+    return out
 
 
 # ---------- 2) TEAM ROLE CONTEXT (dedup per team; prioritize leader/limit/latest) ----------
