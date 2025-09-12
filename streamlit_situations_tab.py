@@ -1,18 +1,22 @@
-# streamlit_situations_tab.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import datetime as dt
-from datetime import datetime, timezone
+from datetime import datetime, date, time, timezone, timedelta
 from google.cloud import bigquery
 
 # --- constants / config ----------------------------------------------------
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
 
-VIEW_GAMES       = f"`{PROJECT}.{DATASET}.scores_games_list`"
-SCORES_ROLE_VIEW = f"`{PROJECT}.{DATASET}.scores_role_view`"
-MOVES_TABLE      = f"`{PROJECT}.{DATASET}.moves_with_features_merged`"
+VIEW_GAMES_FQ       = f"{PROJECT}.{DATASET}.scores_games_list"
+SCORES_ROLE_VIEW_FQ = f"{PROJECT}.{DATASET}.scores_role_view"
+MOVES_TABLE_FQ      = f"{PROJECT}.{DATASET}.moves_with_features_merged"
+
+# Backticked for SQL
+VIEW_GAMES       = f"`{VIEW_GAMES_FQ}`"
+SCORES_ROLE_VIEW = f"`{SCORES_ROLE_VIEW_FQ}`"
+MOVES_TABLE      = f"`{MOVES_TABLE_FQ}`"
 
 # Schema-aligned columns
 HOME_COL   = "Is_Home"   # BOOL in moves/scores_role_view
@@ -22,11 +26,6 @@ CLIENT = bigquery.Client(project=PROJECT)
 CACHE_TTL_SEC = 90
 
 # --- small utils -----------------------------------------------------------
-
-# --- small utils -----------------------------------------------------------
-import datetime as dt
-import pandas as pd
-
 def _coerce_timestamp(x) -> dt.datetime | None:
     """
     Return a timezone-aware UTC datetime or None.
@@ -37,19 +36,15 @@ def _coerce_timestamp(x) -> dt.datetime | None:
     if x is None:
         return None
 
-    # Pandas Timestamp
     if isinstance(x, pd.Timestamp):
-        if pd.isna(x):                 # catches NaT
+        if pd.isna(x):
             return None
         ts = x
-    # Python datetime
     elif isinstance(x, dt.datetime):
         ts = pd.Timestamp(x)
-    # Python date (no time) → assume midnight
     elif isinstance(x, dt.date):
         ts = pd.Timestamp(dt.datetime.combine(x, dt.time(0, 0, 0)))
     else:
-        # Try to parse anything else with pandas, then re-run checks
         try:
             ts = pd.to_datetime(x)
             if pd.isna(ts):
@@ -57,7 +52,6 @@ def _coerce_timestamp(x) -> dt.datetime | None:
         except Exception:
             return None
 
-    # Ensure tz-aware UTC
     if ts.tzinfo is None:
         ts = ts.tz_localize("UTC")
     else:
@@ -79,7 +73,7 @@ def _safe_cutoff(primary: dt.datetime | None, fallback: dt.datetime | None) -> d
     b = _coerce_timestamp(fallback)
     return a or b
 
-def _coerce_teams_list(x):
+def _coerce_teams_list(x) -> list[str]:
     """Normalize Teams to a list[str]. Accepts list, array, 'A, B' string, etc."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return []
@@ -124,17 +118,12 @@ def _spread_bucket(v: float | None) -> str:
     return "Dog ≥ +11"
 
 # --- DB helpers (cached) ---------------------------------------------------
+def _get_view_columns_via_api(bq: bigquery.Client, fq_table: str) -> set[str]:
+    """Return column names using the BigQuery Table API (no data scan / no SQL)."""
+    tbl = bq.get_table(fq_table)
+    return {field.name for field in tbl.schema}
 
-def _get_view_columns(bq: bigquery.Client, fq_view: str) -> set[str]:
-    """
-    Return the set of column names for a table/view without scanning data.
-    """
-    job = bq.query(f"SELECT * FROM {fq_view} LIMIT 0")
-    result = job.result()
-    return {field.name for field in result.schema}
-
-
-def _resolve_team_expr(bq: bigquery.Client, fq_view: str = "`sharplogger.sharp_data.scores_role_view`") -> str:
+def _resolve_team_expr(bq: bigquery.Client) -> str:
     """
     Resolve a canonical 'team' expression from scores_role_view.
     Priority:
@@ -142,42 +131,44 @@ def _resolve_team_expr(bq: bigquery.Client, fq_view: str = "`sharplogger.sharp_d
       2) Team_Norm
       3) CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END
       4) CASE WHEN Is_Home THEN Home_Team_Norm ELSE Away_Team_Norm END
-      5) Other common pair names (Team_Home/Team_Away)
-    Raises with a helpful message if none match.
+      5) CASE WHEN Is_Home THEN Team_Home ELSE Team_Away END
+    Fallback to 'Team' with a warning.
     """
-    cols = _get_view_columns(bq, fq_view)
+    try:
+        cols = _get_view_columns_via_api(bq, SCORES_ROLE_VIEW_FQ)
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch schema for scores_role_view: {e}")
+        return "Team"
 
     if "Team" in cols:
         return "Team"
     if "Team_Norm" in cols:
         return "Team_Norm"
-
     if {"Is_Home", "Home_Team", "Away_Team"}.issubset(cols):
         return "CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END"
-
     if {"Is_Home", "Home_Team_Norm", "Away_Team_Norm"}.issubset(cols):
         return "CASE WHEN Is_Home THEN Home_Team_Norm ELSE Away_Team_Norm END"
-
     if {"Is_Home", "Team_Home", "Team_Away"}.issubset(cols):
         return "CASE WHEN Is_Home THEN Team_Home ELSE Team_Away END"
 
-    # Last-resort helpful error
-    raise RuntimeError(
-        "Could not resolve a team column/expression in scores_role_view. "
-        f"Available columns: {sorted(cols)}"
-    )
+    st.warning(f"⚠️ Could not resolve a team expression; available columns: {sorted(cols)}. Falling back to 'Team'.")
+    return "Team"
 
-
-def _resolve_spread_expr(bq: bigquery.Client, fq_view: str = "`sharplogger.sharp_data.scores_role_view`") -> str:
+def _resolve_spread_expr(bq: bigquery.Client) -> str:
     """
     Resolve the per-team spread value column used by 'current role'.
     Priority:
-      1) Value (your unified field)
+      1) Value (unified)
       2) Closing_Spread_For_Team
       3) Spread_For_Team
-      4) Fallback: CASE WHEN Is_Home THEN Home_Spread ELSE -Away_Spread END (if present)
+      4) CASE WHEN Is_Home THEN Home_Spread ELSE -Away_Spread END
+    Fallback to 'Value' with a warning.
     """
-    cols = _get_view_columns(bq, fq_view)
+    try:
+        cols = _get_view_columns_via_api(bq, SCORES_ROLE_VIEW_FQ)
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch schema for scores_role_view: {e}")
+        return "Value"
 
     if "Value" in cols:
         return "Value"
@@ -185,15 +176,11 @@ def _resolve_spread_expr(bq: bigquery.Client, fq_view: str = "`sharplogger.sharp
         return "Closing_Spread_For_Team"
     if "Spread_For_Team" in cols:
         return "Spread_For_Team"
-
     if {"Is_Home", "Home_Spread", "Away_Spread"}.issubset(cols):
         return "CASE WHEN Is_Home THEN Home_Spread ELSE -Away_Spread END"
 
-    # Not fatal for totals/H2H queries, but for spreads we should be explicit:
-    raise RuntimeError(
-        "Could not resolve a spread value column in scores_role_view. "
-        f"Available columns: {sorted(cols)}"
-    )
+    st.warning(f"⚠️ Could not resolve a spread column; available columns: {sorted(cols)}. Falling back to 'Value'.")
+    return "Value"
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def list_games_cached(sport_label: str) -> pd.DataFrame:
@@ -219,8 +206,9 @@ def list_games_cached(sport_label: str) -> pd.DataFrame:
     return job.result().to_dataframe()
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
-def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
+def get_contexts_for_game(game_id: str, teams: tuple[str, ...] | list[str]) -> dict:
     """Return {team: {is_home, is_favorite, spread_bucket, cutoff, source}} for up to 2 teams."""
+    teams = list(teams or [])
     if not teams:
         return {}
 
@@ -277,7 +265,7 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("gid", "STRING", game_id),
-                bigquery.ArrayQueryParameter("teams", "STRING", list(teams)),
+                bigquery.ArrayQueryParameter("teams", "STRING", teams),
             ],
             use_query_cache=True,
         ),
@@ -288,11 +276,11 @@ def get_contexts_for_game(game_id: str, teams: tuple[str, ...]) -> dict:
     for _, r in df.iterrows():
         sp = r.get("closing_spread")
         spf = float(sp) if pd.notnull(sp) else None
-        out[r["feat_Team"]] = {
+        out[str(r["feat_Team"])] = {
             "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
             "is_favorite": (spf is not None and spf < 0),
             "spread_bucket": _spread_bucket(spf),
-            "cutoff": r.get("cutoff"),
+            "cutoff": _coerce_timestamp(r.get("cutoff")),
             "source": r.get("source"),
         }
     return out
@@ -302,80 +290,58 @@ def get_team_context(game_id: str, team: str) -> dict:
     ctxs = get_contexts_for_game(game_id, (team,))
     return ctxs.get(team, {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"})
 
-
-TEAM_CANDIDATES = ["Team", "Team_Name", "Team_Norm"]
-HOME_AWAY_PAIR  = ("Home_Team", "Away_Team")  # fallback with Is_Home
-
-def _resolve_team_expr(bq_client: bigquery.Client) -> str:
-    """Return a SQL expression that yields the team name in scores_role_view."""
-    proj, dataset = PROJECT, DATASET
-    cols_sql = f"""
-      SELECT column_name
-      FROM `{proj}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
-      WHERE table_name = 'scores_role_view'
-    """
-    cols = {r["column_name"] for r in bq_client.query(cols_sql).result()}
-    # Direct team-like columns
-    for c in TEAM_CANDIDATES:
-        if c in cols:
-            return c
-    # Fallback to home/away with Is_Home
-    if "Is_Home" in cols and HOME_AWAY_PAIR[0] in cols and HOME_AWAY_PAIR[1] in cols:
-        return "CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END"
-    raise RuntimeError("Could not resolve a team column/expression in scores_role_view.")
-
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
-@st.cache_data(show_spinner=False)
-def situation_stats_cached(sport_str: str, team: str, cutoff_date, market: str, min_n: int):
-    bq = bigquery.Client(project="sharplogger", location="us")
-    view = "`sharplogger.sharp_data.scores_role_view`"
+def situation_stats_cached(sport_str: str, team: str, cutoff_date: date | None,
+                           market: str, min_n: int) -> pd.DataFrame:
+    """
+    Per-team situation stats (DATE-based cutoff).
+    Falls back to today's date if cutoff_date is None.
+    """
+    bq = bigquery.Client(project=PROJECT)
+    team_expr = _resolve_team_expr(bq)
+    spread_expr = _resolve_spread_expr(bq) if market.lower() == "spreads" else None
 
-    team_expr   = _resolve_team_expr(bq, view)
-    # Only resolve spread expr when you actually need spreads (avoids needless errors)
-    spread_expr = _resolve_spread_expr(bq, view) if market.lower() == "spreads" else None
-
-    # Build WHERE
-    where = f"Sport = @sport AND DATE(Game_Date) <= @cutoff"
+    cutoff_d = cutoff_date or date.today()
+    where = "Sport = @sport AND DATE(Game_Date) <= @cutoff"
     params = [
-        bigquery.ScalarQueryParameter("sport", "STRING", sport_str.upper()),
-        bigquery.ScalarQueryParameter("cutoff", "DATE", cutoff_date),
+        bigquery.ScalarQueryParameter("sport", "STRING", (sport_str or "").upper()),
+        bigquery.ScalarQueryParameter("cutoff", "DATE", cutoff_d),
+        bigquery.ScalarQueryParameter("min_n", "INT64", int(min_n)),
     ]
 
-    # Example minimal query (adjust to your exact metrics)
     if market.lower() == "spreads":
         sql = f"""
         SELECT
           {team_expr} AS Team,
-          ANY_VALUE(Sport) AS Sport,
           COUNT(*) AS N,
           AVG(CAST(Win_Flag AS INT64)) AS Win_Rate,
           AVG({spread_expr}) AS Avg_Spread
-        FROM {view}
+        FROM {SCORES_ROLE_VIEW}
         WHERE {where}
         GROUP BY Team
         HAVING N >= @min_n
         ORDER BY N DESC
         """
-        params.append(bigquery.ScalarQueryParameter("min_n", "INT64", int(min_n)))
     else:
         sql = f"""
         SELECT
           {team_expr} AS Team,
-          ANY_VALUE(Sport) AS Sport,
           COUNT(*) AS N,
           AVG(CAST(Win_Flag AS INT64)) AS Win_Rate
-        FROM {view}
+        FROM {SCORES_ROLE_VIEW}
         WHERE {where}
         GROUP BY Team
         HAVING N >= @min_n
         ORDER BY N DESC
         """
-        params.append(bigquery.ScalarQueryParameter("min_n", "INT64", int(min_n)))
 
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
-    return bq.query(sql, job_config=job_config).to_dataframe()
-
-
+    try:
+        job_config = bigquery.QueryJobConfig(query_parameters=params)
+        return bq.query(sql, job_config=job_config).to_dataframe()
+    except Exception as e:
+        st.error(f"❌ situation_stats_cached failed: {e}")
+        cols = ["Team", "N", "Win_Rate"] + (["Avg_Spread"] if market.lower() == "spreads" else [])
+        return pd.DataFrame(columns=cols)
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def league_baseline_filtered_cached(sport: str, cutoff: dt.datetime, market: str,
@@ -499,7 +465,6 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
     return job.result().to_dataframe()
 
 # --- display helpers -------------------------------------------------------
-
 def bullet(team: str, market: str, r: pd.Series) -> str:
     W = int(r.W) if pd.notnull(r.W) else 0
     L = int(r.L) if pd.notnull(r.L) else 0
@@ -524,19 +489,15 @@ def bullet_with_baseline(team, market, r, base):
 def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bucket: str | None):
     """Ordered list of situation names to display for the *current* role."""
     out = []
-    # Specific combos first
     if is_home is True  and is_favorite is True:   out.append("Home Favorite")
     if is_home is True  and is_favorite is False:  out.append("Home Underdog")
     if is_home is False and is_favorite is True:   out.append("Road Favorite")
     if is_home is False and is_favorite is False:  out.append("Road Underdog")
-    # Individual facets
     if is_home is True:      out.append("Home")
     if is_home is False:     out.append("Road")
     if is_favorite is True:  out.append("Favorite")
     if is_favorite is False: out.append("Underdog")
-    # Bucket
     if spread_bucket: out.append(spread_bucket)
-    # De-dupe preserve order
     seen, keep = set(), []
     for s in out:
         if s and s not in seen:
@@ -563,7 +524,6 @@ def _print_matching_situations(team, market, df, wanted_order, baseline_row):
             st.markdown(bullet_with_baseline(team, market, r, baseline_row))
 
 # --- main UI ---------------------------------------------------------------
-
 def render_situation_db_tab(selected_sport: str | None = None):
     st.header("📊 Situation Database — Best % by Team")
 
@@ -577,10 +537,11 @@ def render_situation_db_tab(selected_sport: str | None = None):
         return
 
     df_games = df_games.copy()
-    df_games["TeamsList"] = df_games["Teams"].apply(lambda x: tuple(_coerce_teams_list(x)))
+    df_games["TeamsList"] = df_games["Teams"].apply(_coerce_teams_list)
+    df_games["TeamsList"] = df_games["TeamsList"].apply(lambda xs: tuple(xs)[:2])  # max two
     df_games["label"] = df_games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}"
-                  if r["TeamsList"] else f"{r['Game_Start']} — (teams TBD)",
+        lambda r: f"{r['Game_Start']} — {', '.join(map(str, r['TeamsList']))}" if r["TeamsList"]
+                  else f"{r['Game_Start']} — (teams TBD)",
         axis=1
     )
 
@@ -596,10 +557,10 @@ def render_situation_db_tab(selected_sport: str | None = None):
     baseline_min_n = st.number_input("League baseline min N", 50, 1000, 150, step=10)
 
     # Prefetch contexts for both teams
-    contexts = get_contexts_for_game(game_id, teams[:2])
+    contexts = get_contexts_for_game(game_id, teams)
 
     cols = st.columns(2)
-    for i, team in enumerate(teams[:2]):
+    for i, team in enumerate(teams):
         with cols[i]:
             st.subheader(team)
 
@@ -614,33 +575,35 @@ def render_situation_db_tab(selected_sport: str | None = None):
             is_home       = ctx.get("is_home")
             spread_bucket = ctx.get("spread_bucket")
 
-            # ✅ SAFE CUTOFF: prefer context cutoff; else game_start; else now (never None)
-            cutoff_input = st.date_input("Cutoff (optional)", value=None)
-            #cutoff = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
+            # Cutoffs: DATE for per-team stats; TIMESTAMP for league/leaderboard
+            cutoff_input: date = st.date_input("Cutoff (DATE for stats)", value=date.today())
+            cutoff_date_for_stats = cutoff_input or date.today()
+            cutoff_ts_context = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
+            cutoff_ts = _round_cutoff(cutoff_ts_context) or _fallback_now_utc()
 
-            # Spreads (current role)
+            # Spreads (current role) — DATE cutoff
             st.markdown("**Spreads — current role**")
-            s_ats = situation_stats_cached(sport_str, team, cutoff_input, "spreads", min_n)
+            s_ats = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "spreads", min_n)
             if s_ats.empty:
                 st.write("_No ATS situations meeting N threshold._")
             else:
-                base = league_baseline_filtered_cached(sport_str, cutoff, "spreads", is_home, spread_bucket, baseline_min_n)
+                base = league_baseline_filtered_cached(sport_str, cutoff_ts, "spreads", is_home, spread_bucket, baseline_min_n)
                 wanted = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "spreads", s_ats, wanted, base)
 
-            # Moneyline (current role)
+            # Moneyline (current role) — DATE cutoff
             st.markdown("**Moneyline — current role**")
-            s_ml = situation_stats_cached(sport_str, team, cutoff, "moneyline", min_n)
+            s_ml = situation_stats_cached(sport_str, team, cutoff_date_for_stats, "moneyline", min_n)
             if s_ml.empty:
                 st.write("_No ML situations meeting N threshold._")
             else:
-                base_ml = league_baseline_filtered_cached(sport_str, cutoff, "moneyline", is_home, spread_bucket, baseline_min_n)
+                base_ml = league_baseline_filtered_cached(sport_str, cutoff_ts, "moneyline", is_home, spread_bucket, baseline_min_n)
                 wanted_ml = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "moneyline", s_ml, wanted_ml, base_ml)
 
-            # League leaderboard for this exact role (spreads)
+            # League leaderboard for this exact role (spreads) — TIMESTAMP cutoff
             st.markdown("**League — this exact role**")
-            rb = role_leaderboard_cached(sport_str, cutoff, "spreads", is_home, spread_bucket, ctx.get("is_favorite"), baseline_min_n)
+            rb = role_leaderboard_cached(sport_str, cutoff_ts, "spreads", is_home, spread_bucket, ctx.get("is_favorite"), baseline_min_n)
             if rb.empty:
                 st.write("_No teams meet N threshold in this role._")
             else:
