@@ -10427,7 +10427,7 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 # --- MUST RUN BEFORE ANY WIDGETS ---
 
 # If this file is NOT streamlit_situations_tab.py, keep this import:
-from streamlit_situations_tab import render_situation_db_tab
+#from streamlit_situations_tab import render_situation_db_tab
 
 
 # =================== SESSION-STATE SANITIZERS (run before widgets) ==============
@@ -10605,7 +10605,7 @@ else:
         st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
     elif run_scanner:
         scan_tab, analysis_tab, power_tab, situation_tab = st.tabs(
-            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings", "📚 Situation DB"]
+            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings"]#"📚 Situation DB"
         )
 
         with scan_tab:
@@ -10626,9 +10626,9 @@ else:
                 show_edges=False,
             )
 
-        with situation_tab:
+        #with situation_tab:
             # IMPORTANT: inside this function, make widget keys like "situation_ui_*"
-            render_situation_db_tab(selected_sport=sport)
+           #render_situation_db_tab(selected_sport=sport)
 
         # AFTER rendering Situation tab, sanitize its widget states for next rerun
         sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_"))
