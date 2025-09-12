@@ -63,36 +63,50 @@ def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bu
     return keep
 
 # ---------- 1) CURRENT GAMES from MOVES (Sport filtered, start > NOW) ----------
-@st.cache_data(ttl=CACHE_TTL_SEC)
+@st.cache_data(ttl=90, show_spinner=False)
 def list_current_games_from_moves(sport: str) -> pd.DataFrame:
     """
-    Build the current/upcoming games list from the live moves table.
-    Uses COALESCE(feat_Game_Start, Commence_Hour) to tolerate missing values.
-    Filters: Sport = @sport AND start > NOW().
+    Build current/upcoming games from moves_with_features_merged using your actual columns:
+      - Game Id:       COALESCE(game_key_clean, feat_Game_Key, Game_Key)
+      - Game Start:    COALESCE(Game_Start, Commence_Hour, feat_Game_Start)
+      - Teams:         DISTINCT of the best available team columns
     """
     sql = f"""
-    WITH src AS (
+    WITH base AS (
       SELECT
-        feat_Game_Key,
-        COALESCE(feat_Game_Start, Commence_Hour) AS gs,
-        feat_Team
+        COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS Game_Id,
+        COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
+        UPPER(Sport) AS Sport_Upper,
+        -- Build a generic normalized team token per row; we'll DISTINCT this per Game_Id
+        COALESCE(
+          Team_For_Join,
+          feat_Team,
+          Home_Team_Norm, Away_Team_Norm,
+          home_l, away_l
+        ) AS TeamNorm
       FROM {MOVES}
-      WHERE Sport = @sport
-        AND COALESCE(feat_Game_Start, Commence_Hour) > CURRENT_TIMESTAMP()
+      WHERE UPPER(Sport) = @sport_upper
+        AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) > CURRENT_TIMESTAMP()
+    ),
+    agg AS (
+      SELECT
+        Game_Id,
+        ANY_VALUE(gs) AS Game_Start,
+        ARRAY_AGG(DISTINCT TeamNorm IGNORE NULLS ORDER BY TeamNorm LIMIT 2) AS Teams
+      FROM base
+      GROUP BY Game_Id
     )
-    SELECT
-      feat_Game_Key AS Game_Id,
-      ANY_VALUE(gs) AS Game_Start,
-      ARRAY_AGG(DISTINCT feat_Team ORDER BY feat_Team) AS Teams
-    FROM src
-    GROUP BY feat_Game_Key
-    HAVING ARRAY_LENGTH(Teams) >= 2
+    SELECT *
+    FROM agg
+    WHERE ARRAY_LENGTH(Teams) >= 2
     ORDER BY Game_Start ASC
     """
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
-            query_parameters=[bigquery.ScalarQueryParameter("sport","STRING", sport)],
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport_upper", "STRING", (sport or "").upper()),
+            ],
             use_query_cache=True,
         ),
     )
@@ -439,6 +453,56 @@ def league_role_leaderboard_spreads(sport: str, cutoff_ts: dt.datetime,
         ),
     )
     return job.result().to_dataframe()
+
+def render_current_games_section(selected_sport: str):
+    st.subheader("📡 Current/Upcoming Games (from MOVES)")
+
+    games = list_current_games_from_moves(selected_sport)
+
+    if games.empty:
+        st.info("No upcoming games found for this sport (from moves).")
+        with st.expander("Debug this sport in moves"):
+            # Show a quick sample so you can verify labels & times
+            dbg_sql = f"""
+            SELECT
+              UPPER(Sport) AS Sport_Upper,
+              COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS Game_Id,
+              COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS Game_Start,
+              Home_Team_Norm, Away_Team_Norm, Team_For_Join, feat_Team, home_l, away_l
+            FROM {MOVES}
+            WHERE UPPER(Sport) = @sport_upper
+            ORDER BY Game_Start DESC
+            LIMIT 50
+            """
+            job = CLIENT.query(
+                dbg_sql,
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("sport_upper", "STRING", (selected_sport or "").upper())
+                    ],
+                    use_query_cache=True,
+                ),
+            )
+            st.dataframe(job.result().to_dataframe())
+        return
+
+    # shape for selectbox
+    df = games.copy()
+    df["label"] = df.apply(
+        lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}", axis=1
+    )
+
+    row = st.selectbox("Select game", df.to_dict("records"), format_func=lambda r: r["label"])
+    if not row:
+        st.stop()
+
+    game_id = row["Game_Id"]
+    game_start = row["Game_Start"]
+    teams = row["Teams"]  # list of two strings
+
+    st.write(f"**Game Id:** {game_id}")
+    st.write(f"**Teams:** {', '.join(teams)}")
+    st.write(f"**Start:** {game_start}")
 
 # ---------- RENDER ----------
 def render_current_situations_tab(selected_sport: str):
