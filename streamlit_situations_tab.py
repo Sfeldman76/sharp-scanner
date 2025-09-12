@@ -124,22 +124,17 @@ def _get_view_columns_via_api(bq: bigquery.Client, fq_table: str) -> set[str]:
     return {field.name for field in tbl.schema}
 
 def _resolve_team_expr(bq: bigquery.Client) -> str:
-    """
-    Resolve a canonical 'team' expression from scores_role_view.
-    Priority:
-      1) Team
-      2) Team_Norm
-      3) CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END
-      4) CASE WHEN Is_Home THEN Home_Team_Norm ELSE Away_Team_Norm END
-      5) CASE WHEN Is_Home THEN Team_Home ELSE Team_Away END
-    Fallback to 'Team' with a warning.
-    """
     try:
         cols = _get_view_columns_via_api(bq, SCORES_ROLE_VIEW_FQ)
     except Exception as e:
         st.warning(f"⚠️ Could not fetch schema for scores_role_view: {e}")
-        return "Team"
+        return "feat_Team"  # safer default for your schema
 
+    # ✅ Prefer feat_Team (present in your schema)
+    if "feat_Team" in cols:
+        return "feat_Team"
+
+    # Then common fallbacks
     if "Team" in cols:
         return "Team"
     if "Team_Norm" in cols:
@@ -151,8 +146,9 @@ def _resolve_team_expr(bq: bigquery.Client) -> str:
     if {"Is_Home", "Team_Home", "Team_Away"}.issubset(cols):
         return "CASE WHEN Is_Home THEN Team_Home ELSE Team_Away END"
 
-    st.warning(f"⚠️ Could not resolve a team expression; available columns: {sorted(cols)}. Falling back to 'Team'.")
-    return "Team"
+    st.warning(f"⚠️ Could not resolve a team expression; available columns: {sorted(cols)}. Falling back to 'feat_Team'.")
+    return "feat_Team"
+
 
 def _resolve_spread_expr(bq: bigquery.Client) -> str:
     """
@@ -302,7 +298,7 @@ def situation_stats_cached(sport_str: str, team: str, cutoff_date: date | None,
     spread_expr = _resolve_spread_expr(bq) if market.lower() == "spreads" else None
 
     cutoff_d = cutoff_date or date.today()
-    where = "Sport = @sport AND DATE(Game_Date) <= @cutoff"
+    where = "Sport = @sport AND DATE(feat_Game_Start) <= @cutoff"
     params = [
         bigquery.ScalarQueryParameter("sport", "STRING", (sport_str or "").upper()),
         bigquery.ScalarQueryParameter("cutoff", "DATE", cutoff_d),
@@ -375,9 +371,11 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
                             is_home: bool | None, spread_bucket: str | None,
                             is_favorite: bool | None, min_n: int = 30) -> pd.DataFrame:
     """Leaderboard of historical performance for this exact role (uses scores_role_view)."""
-    cutoff = _round_cutoff(_coerce_timestamp(cutoff))
+    cutoff = _coerce_timestamp(cutoff)
     if cutoff is None:
+        st.info("No valid cutoff available for leaderboard; skipping.")
         return pd.DataFrame()
+    cutoff = _round_cutoff(cutoff) or _fallback_now_utc()
     sql = f"""
     WITH src AS (
       SELECT
@@ -447,6 +445,7 @@ def role_leaderboard_cached(sport: str, cutoff: dt.datetime, market: str,
     FROM by_team
     ORDER BY IFNULL(ROI_Pct, 0.0) DESC, WinPct DESC, N DESC
     """
+
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
@@ -600,7 +599,14 @@ def render_situation_db_tab(selected_sport: str | None = None):
                 base_ml = league_baseline_filtered_cached(sport_str, cutoff_ts, "moneyline", is_home, spread_bucket, baseline_min_n)
                 wanted_ml = _wanted_situations(is_home, ctx.get("is_favorite"), spread_bucket)
                 _print_matching_situations(team, "moneyline", s_ml, wanted_ml, base_ml)
-
+            cutoff_ts_context = _safe_cutoff(ctx.get("cutoff"), game_start) or _fallback_now_utc()
+            cutoff_ts = _round_cutoff(cutoff_ts_context) or _fallback_now_utc()
+            
+            # Ensure pure Python datetime (not pandas.Timestamp / NaT)
+            if isinstance(cutoff_ts, pd.Timestamp):
+                cutoff_ts = cutoff_ts.to_pydatetime()
+            if cutoff_ts is None or (isinstance(cutoff_ts, float) and pd.isna(cutoff_ts)):
+                cutoff_ts = _fallback_now_utc()
             # League leaderboard for this exact role (spreads) — TIMESTAMP cutoff
             st.markdown("**League — this exact role**")
             rb = role_leaderboard_cached(sport_str, cutoff_ts, "spreads", is_home, spread_bucket, ctx.get("is_favorite"), baseline_min_n)
