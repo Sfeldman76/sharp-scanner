@@ -1,4 +1,4 @@
-# ================== Situations Tab: games from moves_with_features_merged ==================
+# ================== Situations Tab (current games from MOVES; history from SCORES) ==================
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,24 +8,26 @@ from google.cloud import bigquery
 
 PROJECT = "sharplogger"
 DATASET = "sharp_data"
-MOVES_FQ   = f"{PROJECT}.{DATASET}.moves_with_features_merged"
-SCORES_FQ  = f"{PROJECT}.{DATASET}.scores_with_features"
+MOVES_FQ  = f"{PROJECT}.{DATASET}.moves_with_features_merged"
+SCORES_FQ = f"{PROJECT}.{DATASET}.scores_with_features"
 
-MOVES   = f"`{MOVES_FQ}`"
-SCORES  = f"`{SCORES_FQ}`"
+MOVES  = f"`{MOVES_FQ}`"
+SCORES = f"`{SCORES_FQ}`"
 
 CLIENT = bigquery.Client(project=PROJECT)
-CACHE_TTL_SEC = 90
+CACHE_TTL_SEC = 120
 
-# ---------- Robust time helpers ----------
+# ---------- helpers ----------
 def _to_utc_dt(x) -> dt.datetime:
+    """Coerce anything into a tz‑aware UTC datetime; fallback to now() if bad."""
     if isinstance(x, dt.datetime):
         return x.astimezone(timezone.utc) if x.tzinfo else x.replace(tzinfo=timezone.utc)
     if isinstance(x, dt.date):
         return dt.datetime.combine(x, time(0, 0, 0, tzinfo=timezone.utc))
     ts = pd.to_datetime(x, utc=True, errors="coerce")
-    return (ts.to_pydatetime() if isinstance(ts, pd.Timestamp) and not pd.isna(ts)
-            else datetime.now(timezone.utc))
+    if isinstance(ts, pd.Timestamp) and not pd.isna(ts):
+        return ts.to_pydatetime()
+    return datetime.now(timezone.utc)
 
 def _spread_bucket(v: float | None) -> str:
     if v is None: return ""
@@ -53,32 +55,38 @@ def _wanted_situations(is_home: bool | None, is_favorite: bool | None, spread_bu
     if is_favorite is True: out.append("Favorite")
     if is_favorite is False: out.append("Underdog")
     if spread_bucket: out.append(spread_bucket)
+    # de‑dupe, keep order
     seen, keep = set(), []
     for s in out:
         if s and s not in seen:
             keep.append(s); seen.add(s)
     return keep
 
-# ---------- 1) Build games list from MOVES ----------
+# ---------- 1) CURRENT GAMES from MOVES (Sport filtered, start > NOW) ----------
 @st.cache_data(ttl=CACHE_TTL_SEC)
-def list_games_from_moves(sport: str) -> pd.DataFrame:
+def list_current_games_from_moves(sport: str) -> pd.DataFrame:
     """
-    Use the stream of moves to assemble upcoming games.
-    Assumes: feat_Game_Key, feat_Game_Start, feat_Team, Sport exist in MOVES.
+    Build the current/upcoming games list from the live moves table.
+    Uses COALESCE(feat_Game_Start, Commence_Hour) to tolerate missing values.
+    Filters: Sport = @sport AND start > NOW().
     """
     sql = f"""
-    WITH fut AS (
-      SELECT feat_Game_Key, feat_Game_Start, feat_Team
+    WITH src AS (
+      SELECT
+        feat_Game_Key,
+        COALESCE(feat_Game_Start, Commence_Hour) AS gs,
+        feat_Team
       FROM {MOVES}
       WHERE Sport = @sport
-        AND feat_Game_Start > CURRENT_TIMESTAMP()
+        AND COALESCE(feat_Game_Start, Commence_Hour) > CURRENT_TIMESTAMP()
     )
     SELECT
       feat_Game_Key AS Game_Id,
-      ANY_VALUE(feat_Game_Start) AS Game_Start,
+      ANY_VALUE(gs) AS Game_Start,
       ARRAY_AGG(DISTINCT feat_Team ORDER BY feat_Team) AS Teams
-    FROM fut
-    GROUP BY Game_Id
+    FROM src
+    GROUP BY feat_Game_Key
+    HAVING ARRAY_LENGTH(Teams) >= 2
     ORDER BY Game_Start ASC
     """
     job = CLIENT.query(
@@ -90,31 +98,29 @@ def list_games_from_moves(sport: str) -> pd.DataFrame:
     )
     return job.result().to_dataframe()
 
-# ---------- 2) Per-team role context (prefer MOVES; fallback SCORES if missing) ----------
+# ---------- 2) TEAM ROLE CONTEXT from MOVES (home/fav/spread bucket) ----------
 @st.cache_data(ttl=CACHE_TTL_SEC)
-def team_context_for_game_from_moves(game_id: str, teams: list[str]) -> dict:
+def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     """
-    Returns {team: {is_home, is_favorite, spread_bucket, cutoff}}
-    Reads MOVES first. If a team is missing values, we optionally backfill from SCORES.
+    Returns {team: {is_home, is_favorite, spread_bucket, cutoff}} for the given game.
+    Reads from MOVES only (consistent, fast). Adjust Value→Closing_Spread_For_Team if desired.
     """
     if not teams:
         return {}
-
-    # Pull from MOVES
-    sql_moves = f"""
+    sql = f"""
     WITH t AS (SELECT team FROM UNNEST(@teams) AS team)
     SELECT
       feat_Team,
       ANY_VALUE(Is_Home)         AS is_home,
-      ANY_VALUE(Value)           AS closing_spread,  -- change to Closing_Spread_For_Team if you prefer
-      ANY_VALUE(feat_Game_Start) AS cutoff
+      ANY_VALUE(Value)           AS closing_spread,  -- or Closing_Spread_For_Team
+      ANY_VALUE(COALESCE(feat_Game_Start, Commence_Hour)) AS cutoff
     FROM {MOVES}
     WHERE feat_Game_Key = @gid
       AND feat_Team IN (SELECT team FROM t)
     GROUP BY feat_Team
     """
     job = CLIENT.query(
-        sql_moves,
+        sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("gid","STRING", game_id),
@@ -123,65 +129,27 @@ def team_context_for_game_from_moves(game_id: str, teams: list[str]) -> dict:
             use_query_cache=True,
         ),
     )
-    dfm = job.result().to_dataframe()
+    df = job.result().to_dataframe()
 
-    ctx: dict[str, dict] = {}
-    for _, r in dfm.iterrows():
+    out = {}
+    for _, r in df.iterrows():
         sp  = r.get("closing_spread")
         spf = float(sp) if pd.notnull(sp) else None
-        ctx[str(r["feat_Team"])] = {
+        out[str(r["feat_Team"])] = {
             "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
             "is_favorite": (spf is not None and spf < 0),
             "spread_bucket": _spread_bucket(spf),
             "cutoff": _to_utc_dt(r.get("cutoff")),
-            "source": "moves",
         }
+    return out
 
-    # Fallback fill from SCORES for any team missing or partially missing
-    missing = [t for t in teams if t not in ctx or ctx[t]["is_home"] is None]
-    if missing:
-        sql_scores = f"""
-        WITH t AS (SELECT team FROM UNNEST(@teams) AS team)
-        SELECT
-          feat_Team,
-          ANY_VALUE(Is_Home)         AS is_home,
-          ANY_VALUE(Value)           AS closing_spread,
-          ANY_VALUE(feat_Game_Start) AS cutoff
-        FROM {SCORES}
-        WHERE feat_Game_Key = @gid
-          AND feat_Team IN (SELECT team FROM t)
-        GROUP BY feat_Team
-        """
-        job2 = CLIENT.query(
-            sql_scores,
-            job_config=bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ScalarQueryParameter("gid","STRING", game_id),
-                    bigquery.ArrayQueryParameter("teams","STRING", missing),
-                ],
-                use_query_cache=True,
-            ),
-        )
-        dfs = job2.result().to_dataframe()
-        for _, r in dfs.iterrows():
-            sp  = r.get("closing_spread")
-            spf = float(sp) if pd.notnull(sp) else None
-            cur = ctx.get(str(r["feat_Team"]), {})
-            ctx[str(r["feat_Team"])] = {
-                "is_home": cur.get("is_home") if cur.get("is_home") is not None
-                          else (bool(r["is_home"]) if pd.notnull(r["is_home"]) else None),
-                "is_favorite": cur.get("is_favorite") if cur.get("is_favorite") is not None
-                          else (spf is not None and spf < 0),
-                "spread_bucket": cur.get("spread_bucket") or _spread_bucket(spf),
-                "cutoff": cur.get("cutoff") or _to_utc_dt(r.get("cutoff")),
-                "source": cur.get("source") or "scores",
-            }
-
-    return ctx
-
-# ---------- 3) Situations from SCORES (schema you provided) ----------
+# ---------- 3) SITUATIONS from SCORES (history up to a DATE cutoff) ----------
 @st.cache_data(ttl=CACHE_TTL_SEC)
 def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataFrame:
+    """
+    ATS situations per team from scores_with_features (history).
+    Uses Spread_Cover_Flag and Value columns you confirmed.
+    """
     sql = f"""
     WITH base AS (
       SELECT
@@ -319,7 +287,6 @@ def situations_ml_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataF
         CASE WHEN Team_Score > Opp_Score THEN 1 ELSE 0 END AS ML_Win
       FROM base
     ),
-    -- build the same Situation sets as ATS, but ML_Win drives W/L
     role4 AS (
       SELECT Team,
              CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
@@ -402,8 +369,7 @@ def league_role_leaderboard_spreads(sport: str, cutoff_ts: dt.datetime,
         Value AS Closing_Spread,
         Spread_Cover_Flag,
         ATS_Cover_Margin,
-        feat_Game_Start,
-        Sport
+        feat_Game_Start
       FROM {SCORES}
       WHERE Sport = @sport
         AND feat_Game_Start < @cutoff
@@ -474,23 +440,24 @@ def league_role_leaderboard_spreads(sport: str, cutoff_ts: dt.datetime,
     )
     return job.result().to_dataframe()
 
-# ---------- Render ----------
-def render_situations_from_moves(selected_sport: str):
-    st.header("📚 Situation DB — upcoming games from moves")
+# ---------- RENDER ----------
+def render_current_situations_tab(selected_sport: str):
+    st.subheader("📚 Situation DB (Current Games)")
 
     if not selected_sport:
         st.warning("Pick a sport.")
         st.stop()
 
-    games = list_games_from_moves(selected_sport)
+    games = list_current_games_from_moves(selected_sport)
     if games.empty:
-        st.info("No upcoming games found.")
+        st.info("No upcoming games found for this sport (from moves).")
         return
 
     games = games.copy()
     games["Teams"] = games["Teams"].apply(lambda xs: list(xs)[:2])
     games["label"] = games.apply(
-        lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}" if r["Teams"] else f"{r['Game_Start']} — (teams TBD)",
+        lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}" if r["Teams"]
+                  else f"{r['Game_Start']} — (teams TBD)",
         axis=1
     )
 
@@ -503,20 +470,21 @@ def render_situations_from_moves(selected_sport: str):
     teams = row["Teams"]
 
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
-    cutoff_date_for_stats: date = st.date_input("Cutoff (DATE for stats)", value=date.today())
+    cutoff_date_for_stats: date = st.date_input("Cutoff for historical stats (DATE)", value=date.today())
 
-    # Role context (prefer MOVES)
-    ctxs = team_context_for_game_from_moves(game_id, teams)
+    # Role context straight from moves
+    ctxs = team_context_from_moves(game_id, teams)
 
     cols = st.columns(2)
     for i, team in enumerate(teams):
         with cols[i]:
-            st.subheader(team)
+            st.markdown(f"### {team}")
+
             ctx = ctxs.get(team, {})
             is_home = ctx.get("is_home")
             is_favorite = ctx.get("is_favorite")
             bucket = ctx.get("spread_bucket")
-            cutoff_ts = _to_utc_dt(ctx.get("cutoff") or game_start)
+            cutoff_ts = _to_utc_dt(ctx.get("cutoff") or game_start)  # for leaderboard
 
             bits = []
             bits.append("🏠 Home" if is_home is True else ("🚗 Road" if is_home is False else ""))
@@ -524,16 +492,17 @@ def render_situations_from_moves(selected_sport: str):
             if bucket: bits.append(bucket)
             st.caption(" / ".join([b for b in bits if b]) or "Role: Unknown")
 
+            # ATS situations (history)
             st.markdown("**Spreads — current role**")
             ats_all = situations_ats_by_team(selected_sport, cutoff_date_for_stats, min_n)
-            ats = ats_all[ats_all["Team"] == team] if not ats_all.empty else ats_all
-            _print_matching_situations(team, "spreads", ats, _wanted_situations(is_home, is_favorite, bucket))
+            _print_matching_situations(team, "spreads", ats_all[ats_all["Team"] == team], _wanted_situations(is_home, is_favorite, bucket))
 
+            # ML situations (history)
             st.markdown("**Moneyline — current role**")
             ml_all = situations_ml_by_team(selected_sport, cutoff_date_for_stats, min_n)
-            ml = ml_all[ml_all["Team"] == team] if not ml_all.empty else ml_all
-            _print_matching_situations(team, "moneyline", ml, _wanted_situations(is_home, is_favorite, bucket))
+            _print_matching_situations(team, "moneyline", ml_all[ml_all["Team"] == team], _wanted_situations(is_home, is_favorite, bucket))
 
+            # League leaderboard for this exact role (spreads)
             st.markdown("**League — this exact role (Spreads)**")
             lb = league_role_leaderboard_spreads(
                 selected_sport,
@@ -549,28 +518,35 @@ def render_situations_from_moves(selected_sport: str):
                 st.dataframe(lb.head(20))
 
 def _print_matching_situations(team, market, df, wanted_order):
-    if df.empty:
+    if df is None or df.empty:
         st.write("_No situations meeting N threshold._")
         return
+    # df contains multiple situations for the team; index by name
     by_name = {row.Situation: row for _, row in df.iterrows()}
     printed = 0
     for name in wanted_order:
         r = by_name.get(name)
         if r is None:
             continue
-        W = int(r.W); L = int(r.L); P = int(r.P) if "P" in r.index and pd.notnull(r.P) else 0
+        W = int(r.W) if pd.notnull(r.W) else 0
+        L = int(r.L) if pd.notnull(r.L) else 0
+        P = int(r.P) if ("P" in r.index and pd.notnull(r.P)) else 0
+        N = int(r.N) if pd.notnull(r.N) else 0
         winpct = float(r.WinPct) if pd.notnull(r.WinPct) else 0.0
         roi = r.get("ROI_Pct")
         roi_txt = f", ROI {float(roi):+,.1f}%" if roi is not None and pd.notnull(roi) else ""
-        st.markdown(f"• **{team} — {market.capitalize()}** · {name}: {W}-{L}{('-'+str(P)+'P') if P else ''} ({winpct:.1f}%) over {int(r.N)}{roi_txt}.")
+        st.markdown(f"• **{team} — {market.capitalize()}** · {name}: {W}-{L}{('-'+str(P)+'P') if P else ''} ({winpct:.1f}%) over {N}{roi_txt}.")
         printed += 1
         if printed >= 3:
             break
     if printed == 0:
         for _, r in df.head(3).iterrows():
             name = r.Situation
-            W = int(r.W); L = int(r.L); P = int(r.P) if "P" in r.index and pd.notnull(r.P) else 0
+            W = int(r.W) if pd.notnull(r.W) else 0
+            L = int(r.L) if pd.notnull(r.L) else 0
+            P = int(r.P) if ("P" in r.index and pd.notnull(r.P)) else 0
+            N = int(r.N) if pd.notnull(r.N) else 0
             winpct = float(r.WinPct) if pd.notnull(r.WinPct) else 0.0
             roi = r.get("ROI_Pct")
             roi_txt = f", ROI {float(roi):+,.1f}%" if roi is not None and pd.notnull(roi) else ""
-            st.markdown(f"• **{team} — {market.capitalize()}** · {name}: {W}-{L}{('-'+str(P)+'P') if P else ''} ({winpct:.1f}%) over {int(r.N)}{roi_txt}.")
+            st.markdown(f"• **{team} — {market.capitalize()}** · {name}: {W}-{L}{('-'+str(P)+'P') if P else ''} ({winpct:.1f}%) over {N}{roi_txt}.")
