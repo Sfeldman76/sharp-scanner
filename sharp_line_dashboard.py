@@ -10424,142 +10424,24 @@ def render_sharp_signal_analysis_tab(tab, sport_label, sport_key_api, start_date
 
 
 
-# --- MUST RUN BEFORE ANY WIDGETS ---
-
-# If this file is NOT streamlit_situations_tab.py, keep this import:
-#from streamlit_situations_tab import render_situation_db_tab
-
-
-# =================== SESSION-STATE SANITIZERS (run before widgets) ==============
-
-# =================== SESSION-STATE SANITIZERS (before widgets) ==================
-def _sanitize_session_state() -> None:
-    to_fix = []
-    for k in list(st.session_state.keys()):
-        v = st.session_state[k]
-        try:
-            if isinstance(v, (np.bool_, np.integer, np.floating)):
-                st.session_state[k] = v.item()
-            elif isinstance(v, np.ndarray):
-                st.session_state[k] = v.tolist()
-            elif isinstance(v, (pd.Series, pd.Index)):
-                st.session_state[k] = v.astype(object).tolist()
-            elif isinstance(v, pd.DataFrame):
-                st.session_state[k] = v.to_dict(orient="list")
-        except Exception:
-            to_fix.append(k)
-    for k in to_fix:
-        del st.session_state[k]
-
-
-def _coerce_bool_key(key: str, default: bool = False) -> None:
-    v = st.session_state.get(key, default)
-    if isinstance(v, (np.bool_, bool)):
-        st.session_state[key] = bool(v)
-    elif isinstance(v, (np.ndarray, pd.Series, list)):
-        st.session_state[key] = bool(default)
-    else:
-        st.session_state[key] = bool(v)
-
-
-def ensure_bool_widget_state(key: str, default: bool = False) -> bool:
-    v = st.session_state.get(key, default)
-    if isinstance(v, (bool, np.bool_)):
-        return bool(v)
-    if isinstance(v, (list, tuple, set, dict, np.ndarray, pd.Series, pd.Index, pd.DataFrame)):
-        st.session_state.pop(key, None)
-        return default
-    try:
-        return bool(v)
-    except Exception:
-        st.session_state.pop(key, None)
-        return default
-
-
-def purge_keys_with_prefixes(*prefixes: str) -> None:
-    """Delete any session_state entries whose key starts with these prefixes."""
-    for k in list(st.session_state.keys()):
-        if any(k.startswith(p) for p in prefixes):
-            st.session_state.pop(k, None)
-
-
-def sanitize_widget_value(value, default=None):
-    if isinstance(value, (bool, int, float, str)) or value is None:
-        return value
-    if isinstance(value, (np.bool_, np.integer, np.floating)):
-        return value.item()
-    if isinstance(value, (list, tuple, set)):
-        return [sanitize_widget_value(v) for v in value]
-    if isinstance(value, (np.ndarray, pd.Series, pd.Index)):
-        return [sanitize_widget_value(v) for v in value.tolist()]
-    if isinstance(value, pd.DataFrame):
-        return value.to_dict(orient="records")
-    if isinstance(value, dict):
-        return {k: sanitize_widget_value(v) for k, v in value.items()}
-    return default
-
-
-def sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_")) -> None:
-    for k in list(st.session_state.keys()):
-        if any(k.startswith(p) for p in prefixes):
-            v = st.session_state[k]
-            safe_v = sanitize_widget_value(v, default=None)
-            if safe_v is None and v is not None:
-                st.session_state.pop(k, None)
-            else:
-                st.session_state[k] = safe_v
-
-
-# Initial sanitize (legacy bad values)
-_sanitize_session_state()
-for legacy_key in [
-    "pause_refresh",
-    "run_nfl_scanner", "run_ncaaf_scanner", "run_nba_scanner",
-    "run_mlb_scanner", "run_cfl_scanner", "run_wnba_scanner",
-]:
-    if legacy_key in st.session_state:
-        _coerce_bool_key(legacy_key, default=False)
-
-
-# ============================ SPORT CHANGE GUARDS ===============================
-def _on_sport_change():
-    # Mark a flag; the actual purge happens immediately after we read the sport.
-    st.session_state["_sport_changed"] = True
-
-
-def _purge_on_sport_change(current_sport: str):
-    # If sport changed (or first run), purge Situation tab widget keys from prior sport.
-    if st.session_state.pop("_sport_changed", False) or st.session_state.get("_prev_sport") != current_sport:
-        # Purge any generic Situation UI keys + old sport-scoped keys (if you add such)
-        purge_keys_with_prefixes(
-            "situation_ui_",          # <-- ensure Situation tab uses this prefix for its widgets
-            "ui_situation_",          # alt prefix just in case
-        )
-        # Save current sport so we can detect changes next time
-        st.session_state["_prev_sport"] = current_sport
-
+# --- SIMPLE RENDER FLOW (no UI sanitization/purge) ---
 
 # ============================ SIDEBAR + TABS UI ================================
-# Sport selector — give it an on_change that marks the change
 sport = st.sidebar.radio(
     "Select a League",
     ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"],
-    key="ui_sport_radio",
-    on_change=_on_sport_change,
+    key="sport_radio",
 )
-
-# PURGE immediately if sport changed, **before** creating any other widgets
-_purge_on_sport_change(sport)
 
 st.sidebar.markdown("### ⚙️ Controls")
 
-PAUSE_KEY = "ui_pause_refresh"
 pause_refresh = st.sidebar.checkbox(
     "⏸️ Pause Auto Refresh",
-    key=PAUSE_KEY,
-    value=ensure_bool_widget_state(PAUSE_KEY, default=False),
+    key="pause_refresh",
+    value=False,
 )
-force_reload = st.sidebar.button("🔁 Force Reload", key="ui_force_reload_btn")
+
+force_reload = st.sidebar.button("🔁 Force Reload", key="force_reload_btn")
 
 # --- Optional: Track scanner checkboxes by sport (logical names)
 scanner_flags = {
@@ -10570,7 +10452,7 @@ scanner_flags = {
     "CFL": "run_cfl_scanner",
     "WNBA": "run_wnba_scanner",
 }
-scanner_widget_keys = {k: f"ui_{v}" for k, v in scanner_flags.items()}
+scanner_widget_keys = {k: f"{v}" for k, v in scanner_flags.items()}
 
 # === GENERAL PAGE ===
 if sport == "General":
@@ -10585,13 +10467,13 @@ else:
     run_scanner = st.checkbox(
         f"Run {sport} Scanner",
         key=scanner_key,
-        value=ensure_bool_widget_state(scanner_key, default=True),
+        value=True,
     )
 
     label = sport  # e.g., "WNBA"
     sport_key = SPORTS[sport]  # e.g., "basketball_wnba"
 
-    if st.button(f"📈 Train {sport} Sharp Model", key=f"ui_train_{sport}_btn"):
+    if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
         train_timing_opportunity_model(sport=label)
         train_sharp_model_from_bq(sport=label)
 
@@ -10605,7 +10487,7 @@ else:
         st.warning(f"⚠️ Please disable other scanners before running {sport}: {conflicting}")
     elif run_scanner:
         scan_tab, analysis_tab, power_tab = st.tabs(
-            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings"]#"📚 Situation DB"situation_tab 
+            ["📡 Live Scanner", "📈 Backtest Analysis", "🏆 Power Ratings"]
         )
 
         with scan_tab:
@@ -10625,11 +10507,3 @@ else:
                 bq_client=client,
                 show_edges=False,
             )
-
-        #with situation_tab:
-            # IMPORTANT: inside this function, make widget keys like "situation_ui_*"
-           #render_situation_db_tab(selected_sport=sport)
-
-        # AFTER rendering Situation tab, sanitize its widget states for next rerun
-        sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_"))
-
