@@ -233,29 +233,50 @@ def get_team_context(game_id: str, team: str) -> dict:
     return ctxs.get(team, {"is_home": None, "is_favorite": None, "spread_bucket": "", "cutoff": None, "source": "none"})
 
 
+TEAM_CANDIDATES = ["Team", "Team_Name", "Team_Norm"]
+HOME_AWAY_PAIR  = ("Home_Team", "Away_Team")  # fallback with Is_Home
+
+def _resolve_team_expr(bq_client: bigquery.Client) -> str:
+    """Return a SQL expression that yields the team name in scores_role_view."""
+    proj, dataset = PROJECT, DATASET
+    cols_sql = f"""
+      SELECT column_name
+      FROM `{proj}.{dataset}.INFORMATION_SCHEMA.COLUMNS`
+      WHERE table_name = 'scores_role_view'
+    """
+    cols = {r["column_name"] for r in bq_client.query(cols_sql).result()}
+    # Direct team-like columns
+    for c in TEAM_CANDIDATES:
+        if c in cols:
+            return c
+    # Fallback to home/away with Is_Home
+    if "Is_Home" in cols and HOME_AWAY_PAIR[0] in cols and HOME_AWAY_PAIR[1] in cols:
+        return "CASE WHEN Is_Home THEN Home_Team ELSE Away_Team END"
+    raise RuntimeError("Could not resolve a team column/expression in scores_role_view.")
+
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def situation_stats_cached(sport_str: str, team: str, cutoff, market: str, min_n: int):
-    # normalize cutoff
-    cutoff_ts = _coerce_timestamp(cutoff)  # -> datetime|None
+    cutoff_ts = _coerce_timestamp(cutoff)  # from previous patch
 
-    # base SQL with optional cutoff filter injected
+    team_expr = _resolve_team_expr(CLIENT)  # e.g., "Team" or the CASE WHEN
+
     cutoff_filter = "AND Event_Timestamp < @cutoff_ts" if cutoff_ts is not None else ""
 
     sql = f"""
-    -- situation stats
     WITH base AS (
-      SELECT *
+      SELECT
+        {team_expr} AS Team,
+        Win_Flag
       FROM {SCORES_ROLE_VIEW}
-      WHERE Sport = @sport
-        AND Team  = @team
+      WHERE Sport  = @sport
         AND Market = @market
+        AND {team_expr} = @team
         {cutoff_filter}
     )
     SELECT
       Team,
       COUNT(*) AS N,
-      AVG(CAST(Win_Flag AS INT64)) AS WinRate,
-      SAFE_DIVIDE(SUM(Profit_USD), NULLIF(COUNT(*), 0)) AS AvgProfit
+      AVG(CAST(Win_Flag AS INT64)) AS WinRate
     FROM base
     GROUP BY Team
     HAVING N >= @min_n
@@ -263,18 +284,19 @@ def situation_stats_cached(sport_str: str, team: str, cutoff, market: str, min_n
 
     params = [
         bigquery.ScalarQueryParameter("sport",  "STRING", sport_str),
-        bigquery.ScalarQueryParameter("team",   "STRING", team),
         bigquery.ScalarQueryParameter("market", "STRING", market),
+        bigquery.ScalarQueryParameter("team",   "STRING", team),
         bigquery.ScalarQueryParameter("min_n",  "INT64",  int(min_n)),
     ]
     if cutoff_ts is not None:
         params.append(bigquery.ScalarQueryParameter("cutoff_ts", "TIMESTAMP", cutoff_ts))
 
-    job = CLIENT.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(query_parameters=params),
-    )
+    job = CLIENT.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params))
     return job.result().to_dataframe()
+
+
+
+
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC)
