@@ -87,7 +87,7 @@ def list_current_games_from_moves(sport: str,
         COALESCE(Away_Team_Norm, away_l)  AS away_n,
         feat_Team,
         Market_Leader,
-        Limit,
+        `Limit`,
         Snapshot_Timestamp
       FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
       WHERE UPPER(Sport) = @sport_u
@@ -98,7 +98,6 @@ def list_current_games_from_moves(sport: str,
     ),
     canon AS (
       SELECT
-        -- canonical matchup id = sorted team tokens + start time (minute precision)
         CONCAT(
           IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
           IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
@@ -112,7 +111,6 @@ def list_current_games_from_moves(sport: str,
       SELECT
         Game_Id,
         ANY_VALUE(gs) AS Game_Start,
-        -- NOTE: DISTINCT only (no IGNORE NULLS with DISTINCT)
         ARRAY_AGG(DISTINCT feat_Team ORDER BY feat_Team LIMIT 2) AS Teams
       FROM canon
       GROUP BY Game_Id
@@ -154,7 +152,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         Value,
         Snapshot_Timestamp,
         Market_Leader,
-        Limit
+        `Limit`
       FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
       WHERE feat_Team IS NOT NULL
     ),
@@ -166,7 +164,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
           FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
         ) AS Game_Id,
         feat_Team, Is_Home, Value, gs AS cutoff,
-        Market_Leader, Limit, Snapshot_Timestamp
+        Market_Leader, `Limit`, Snapshot_Timestamp
       FROM src
     ),
     picked AS (
@@ -174,7 +172,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         feat_Team,
         ARRAY_AGG(
           STRUCT(Is_Home, Value, cutoff)
-          ORDER BY Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
+          ORDER BY Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
           LIMIT 1
         )[OFFSET(0)] AS s
       FROM canon
@@ -224,6 +222,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
             "cutoff": _to_utc_dt(r.get("cutoff")),
         }
     return out
+
 
 
 # ---------- 2) TEAM ROLE CONTEXT (dedup per team; prioritize leader/limit/latest) ----------
