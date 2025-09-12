@@ -10431,11 +10431,9 @@ from streamlit_situations_tab import render_situation_db_tab
 
 
 # =================== SESSION-STATE SANITIZERS (run before widgets) ==============
+
+# =================== SESSION-STATE SANITIZERS (before widgets) ==================
 def _sanitize_session_state() -> None:
-    """
-    Replace array-like / pandas objects in st.session_state with plain Python types
-    to avoid 'truth value of an array is ambiguous' during Streamlit's widget diff.
-    """
     to_fix = []
     for k in list(st.session_state.keys()):
         v = st.session_state[k]
@@ -10465,7 +10463,6 @@ def _coerce_bool_key(key: str, default: bool = False) -> None:
 
 
 def ensure_bool_widget_state(key: str, default: bool = False) -> bool:
-    """Return a safe bool for a widget's initial value; if corrupted, reset to default."""
     v = st.session_state.get(key, default)
     if isinstance(v, (bool, np.bool_)):
         return bool(v)
@@ -10479,16 +10476,14 @@ def ensure_bool_widget_state(key: str, default: bool = False) -> bool:
         return default
 
 
-def purge_non_scalar_widget_keys(prefix: str = "ui_") -> None:
-    """Remove any ui_* keys that accidentally hold arrays/Series/DFs from prior runs."""
-    bad_types = (list, tuple, set, dict, np.ndarray, pd.Series, pd.Index, pd.DataFrame)
+def purge_keys_with_prefixes(*prefixes: str) -> None:
+    """Delete any session_state entries whose key starts with these prefixes."""
     for k in list(st.session_state.keys()):
-        if k.startswith(prefix) and isinstance(st.session_state[k], bad_types):
+        if any(k.startswith(p) for p in prefixes):
             st.session_state.pop(k, None)
 
 
 def sanitize_widget_value(value, default=None):
-    """Coerce array-like/pandas objects into plain Python-safe types for widget state."""
     if isinstance(value, (bool, int, float, str)) or value is None:
         return value
     if isinstance(value, (np.bool_, np.integer, np.floating)):
@@ -10505,7 +10500,6 @@ def sanitize_widget_value(value, default=None):
 
 
 def sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_")) -> None:
-    """Convert any array/Series/DF stored under widget key prefixes into safe Python types."""
     for k in list(st.session_state.keys()):
         if any(k.startswith(p) for p in prefixes):
             v = st.session_state[k]
@@ -10516,7 +10510,7 @@ def sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_")) -> None:
                 st.session_state[k] = safe_v
 
 
-# Run sanitizers before any widgets are created
+# Initial sanitize (legacy bad values)
 _sanitize_session_state()
 for legacy_key in [
     "pause_refresh",
@@ -10526,87 +10520,36 @@ for legacy_key in [
     if legacy_key in st.session_state:
         _coerce_bool_key(legacy_key, default=False)
 
-purge_non_scalar_widget_keys(prefix="ui_")
+
+# ============================ SPORT CHANGE GUARDS ===============================
+def _on_sport_change():
+    # Mark a flag; the actual purge happens immediately after we read the sport.
+    st.session_state["_sport_changed"] = True
 
 
-# ===================== ANALYSIS TAB (fixed imports/logic) =======================
-def render_sharp_signal_analysis_tab(tab, sport_label: str, sport_key_api: str,
-                                     start_date: date | None = None,
-                                     end_date: date | None = None) -> None:
-    client = bigquery.Client(project="sharplogger", location="us")
-
-    with tab:
-        st.subheader(f"📈 Model Confidence Calibration – {sport_label}")
-
-        # === Date Filters UI ===
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("Start Date", value=date.today() - timedelta(days=14))
-        with col2:
-            end_date = st.date_input("End Date", value=date.today())
-
-        # === Build WHERE clause
-        date_filter = ""
-        if start_date and end_date:
-            date_filter = f"AND DATE(Snapshot_Timestamp) BETWEEN '{start_date}' AND '{end_date}'"
-
-        try:
-            df = client.query(f"""
-                SELECT *
-                FROM `sharplogger.sharp_data.scores_with_features`
-                WHERE Sport = '{sport_label.upper()}' {date_filter}
-            """).to_dataframe()
-        except Exception as e:
-            st.error(f"❌ Failed to load data: {e}")
-            return
-
-        st.info(f"✅ Loaded rows: {len(df)}")
-
-        # === Filter valid rows
-        df = df[df['SHARP_HIT_BOOL'].notna() & df['Model_Sharp_Win_Prob'].notna()].copy()
-        df['SHARP_HIT_BOOL'] = pd.to_numeric(df['SHARP_HIT_BOOL'], errors='coerce').astype('Int64')
-        df['Model_Sharp_Win_Prob'] = pd.to_numeric(df['Model_Sharp_Win_Prob'], errors='coerce')
-
-        # === Bin probabilities
-        prob_bins = [0.0, 0.50, 0.55, 0.70, 1.0]
-        bin_labels = ["✅ Low", "⭐ Lean", "🔥 Strong Indication", "🔥 Steam"]
-        df['Confidence_Bin'] = pd.cut(df['Model_Sharp_Win_Prob'], bins=prob_bins, labels=bin_labels, include_lowest=True)
-
-        # === Overall Summary
-        st.subheader("📊 Model Win Rate by Confidence Bin (Overall)")
-        overall = (
-            df.groupby('Confidence_Bin', dropna=False)['SHARP_HIT_BOOL']
-            .agg(['count', 'mean'])
-            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
-            .reset_index()
+def _purge_on_sport_change(current_sport: str):
+    # If sport changed (or first run), purge Situation tab widget keys from prior sport.
+    if st.session_state.pop("_sport_changed", False) or st.session_state.get("_prev_sport") != current_sport:
+        # Purge any generic Situation UI keys + old sport-scoped keys (if you add such)
+        purge_keys_with_prefixes(
+            "situation_ui_",          # <-- ensure Situation tab uses this prefix for its widgets
+            "ui_situation_",          # alt prefix just in case
         )
-        st.dataframe(overall.style.format({'Win_Rate': '{:.1%}'}))
-
-        # === By Market
-        st.markdown("#### 📉 Confidence Calibration by Market")
-        conf_summary = (
-            df.groupby(['Market', 'Confidence_Bin'], dropna=False)['SHARP_HIT_BOOL']
-            .agg(['count', 'mean'])
-            .rename(columns={'count': 'Picks', 'mean': 'Win_Rate'})
-            .reset_index()
-        )
-
-        for market in conf_summary['Market'].dropna().unique():
-            st.markdown(f"**📊 {market.upper()}**")
-            st.dataframe(
-                conf_summary[conf_summary['Market'] == market]
-                .drop(columns='Market')
-                .style.format({'Win_Rate': '{:.1%}'})
-            )
+        # Save current sport so we can detect changes next time
+        st.session_state["_prev_sport"] = current_sport
 
 
 # ============================ SIDEBAR + TABS UI ================================
-# --- Sidebar navigation
+# Sport selector — give it an on_change that marks the change
 sport = st.sidebar.radio(
     "Select a League",
     ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA"],
     key="ui_sport_radio",
+    on_change=_on_sport_change,
 )
+
+# PURGE immediately if sport changed, **before** creating any other widgets
+_purge_on_sport_change(sport)
 
 st.sidebar.markdown("### ⚙️ Controls")
 
@@ -10616,7 +10559,6 @@ pause_refresh = st.sidebar.checkbox(
     key=PAUSE_KEY,
     value=ensure_bool_widget_state(PAUSE_KEY, default=False),
 )
-
 force_reload = st.sidebar.button("🔁 Force Reload", key="ui_force_reload_btn")
 
 # --- Optional: Track scanner checkboxes by sport (logical names)
@@ -10628,8 +10570,6 @@ scanner_flags = {
     "CFL": "run_cfl_scanner",
     "WNBA": "run_wnba_scanner",
 }
-
-# Map to **widget** keys that are safely namespaced
 scanner_widget_keys = {k: f"ui_{v}" for k, v in scanner_flags.items()}
 
 # === GENERAL PAGE ===
@@ -10648,14 +10588,14 @@ else:
         value=ensure_bool_widget_state(scanner_key, default=True),
     )
 
-    label = sport  # e.g. "WNBA"
-    sport_key = SPORTS[sport]  # e.g. "basketball_wnba"
+    label = sport  # e.g., "WNBA"
+    sport_key = SPORTS[sport]  # e.g., "basketball_wnba"
 
     if st.button(f"📈 Train {sport} Sharp Model", key=f"ui_train_{sport}_btn"):
         train_timing_opportunity_model(sport=label)
-        train_sharp_model_from_bq(sport=label)  # label matches BigQuery Sport column
+        train_sharp_model_from_bq(sport=label)
 
-    # Prevent multiple scanners from running — treat only literal True as on
+    # Prevent multiple scanners from running
     conflicting = [
         k for k, v in scanner_widget_keys.items()
         if k != sport and bool(st.session_state.get(v, False)) is True
@@ -10687,10 +10627,9 @@ else:
             )
 
         with situation_tab:
-            # IMPORTANT: Namespace any widget keys inside this function "situation_ui_*"
-            # and avoid storing arrays/Series/DFs under widget keys.
+            # IMPORTANT: inside this function, make widget keys like "situation_ui_*"
             render_situation_db_tab(selected_sport=sport)
 
-        # === CRITICAL: sanitize AFTER Situation tab renders so the next rerun is safe ===
+        # AFTER rendering Situation tab, sanitize its widget states for next rerun
         sanitize_ui_keys_in_state(prefixes=("ui_", "situation_ui_"))
 
