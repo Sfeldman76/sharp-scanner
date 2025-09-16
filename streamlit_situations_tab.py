@@ -133,41 +133,49 @@ def list_current_games_from_moves(sport: str,
     return job.result().to_dataframe()
 
 
-# ---------- 2) TEAM ROLE CONTEXT (one “best” row per team) ----------
 @st.cache_data(ttl=120, show_spinner=False)
 def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     if not teams:
         return {}
 
+    teams_norm = [t.lower() for t in teams if t]
+
     sql = f"""
     WITH src AS (
       SELECT
-        COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
+        TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) AS gs,
         COALESCE(Home_Team_Norm, home_l) AS home_n,
         COALESCE(Away_Team_Norm, away_l) AS away_n,
-        feat_Team,
+        -- robust team token
+        COALESCE(feat_Team, Team_For_Join, Home_Team_Norm, home_l, Away_Team_Norm, away_l) AS team_any,
         Is_Home,
         Value,
         Snapshot_Timestamp,
         Market_Leader,
         `Limit`
       FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
-      WHERE feat_Team IS NOT NULL
+      WHERE COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
     ),
     canon AS (
       SELECT
         CONCAT(
-          IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
-          IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
+          IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), 'tbd'), "_",
+          IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), 'tbd'), "_",
           FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
         ) AS Game_Id,
-        feat_Team, Is_Home, Value, gs AS cutoff,
-        Market_Leader, `Limit`, Snapshot_Timestamp
+        LOWER(team_any) AS team_norm,
+        Is_Home,
+        Value,
+        gs AS cutoff,
+        Market_Leader,
+        `Limit`,
+        Snapshot_Timestamp
       FROM src
+      WHERE home_n IS NOT NULL AND away_n IS NOT NULL
     ),
     picked AS (
       SELECT
-        feat_Team,
+        team_norm,
         ARRAY_AGG(
           STRUCT(Is_Home, Value, cutoff)
           ORDER BY Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
@@ -175,22 +183,22 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         )[OFFSET(0)] AS s
       FROM canon
       WHERE Game_Id = @gid
-        AND feat_Team IN UNNEST(@teams)
-      GROUP BY feat_Team
+        AND team_norm IN UNNEST(@teams_norm)
+      GROUP BY team_norm
     )
     SELECT
-      feat_Team,
-      s.Is_Home AS is_home,
-      s.Value   AS closing_spread,
-      s.cutoff  AS cutoff
+      team_norm AS Team,
+      s.Is_Home      AS is_home,
+      s.Value        AS closing_spread,
+      s.cutoff       AS cutoff
     FROM picked
     """
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("gid",   "STRING", game_id),
-                bigquery.ArrayQueryParameter("teams", "STRING", teams),
+                bigquery.ScalarQueryParameter("gid", "STRING", game_id),
+                bigquery.ArrayQueryParameter("teams_norm", "STRING", teams_norm),
             ],
             use_query_cache=True,
         ),
@@ -201,25 +209,22 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     for _, r in df.iterrows():
         sp  = r.get("closing_spread")
         spf = float(sp) if pd.notnull(sp) else None
-        out[str(r["feat_Team"])] = {
+        out[str(r["Team"])] = {
             "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
             "is_favorite": (spf is not None and spf < 0),
-            "spread_bucket": (
-                "" if spf is None else
-                "Fav ≤ -10.5" if spf <= -10.5 else
-                "Fav -8 to -10.5" if spf <= -7.5 else
-                "Fav -7 to -6.5" if spf <= -6.5 else
-                "Fav -4 to -6.5" if spf <= -3.5 else
-                "Fav -0.5 to -3.5" if spf <= -0.5 else
-                "Pick (0)" if spf == 0.0 else
-                "Dog +0.5 to +3.5" if spf <= 3.5 else
-                "Dog +4 to +6.5" if spf <= 6.5 else
-                "Dog +7 to +10.5" if spf <= 10.5 else
-                "Dog ≥ +11"
-            ),
+            "spread_bucket": _spread_bucket(spf),
             "cutoff": _to_utc_dt(r.get("cutoff")),
+            "closing_spread": spf,
         }
-    return out
+
+    # map back to the exact UI team strings (case/spacing) so lookups like ctxs[team] work
+    # prefer a lowercase key match
+    remapped = {}
+    for t in teams:
+        key = (t or "").lower()
+        remapped[t] = out.get(key, {})
+    return remapped
+
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataFrame:
