@@ -221,7 +221,119 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         }
     return out
 
-
+@st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
+def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataFrame:
+    sql = f"""
+    WITH base AS (
+      SELECT
+        feat_Team AS Team,
+        Is_Home,
+        Value AS Closing_Spread,             -- spread for the team (fav < 0)
+        Spread_Cover_Flag,                   -- 1=cover, 0=no cover, NULL if missing
+        ATS_Cover_Margin,                    -- 0 means push
+        feat_Game_Start
+      FROM {SCORES}
+      WHERE UPPER(Sport) = @sport_upper
+        AND DATE(feat_Game_Start) <= @cutoff
+    ),
+    enriched AS (
+      SELECT
+        Team,
+        Is_Home,
+        Closing_Spread,
+        CASE
+          WHEN Closing_Spread IS NULL THEN ''
+          WHEN Closing_Spread <= -10.5 THEN 'Fav ≤ -10.5'
+          WHEN Closing_Spread <=  -7.5 THEN 'Fav -8 to -10.5'
+          WHEN Closing_Spread <=  -6.5 THEN 'Fav -7 to -6.5'
+          WHEN Closing_Spread <=  -3.5 THEN 'Fav -4 to -6.5'
+          WHEN Closing_Spread <=  -0.5 THEN 'Fav -0.5 to -3.5'
+          WHEN Closing_Spread =    0.0 THEN 'Pick (0)'
+          WHEN Closing_Spread <=   3.5 THEN 'Dog +0.5 to +3.5'
+          WHEN Closing_Spread <=   6.5 THEN 'Dog +4 to +6.5'
+          WHEN Closing_Spread <=  10.5 THEN 'Dog +7 to +10.5'
+          ELSE 'Dog ≥ +11'
+        END AS Spread_Bucket,
+        (Closing_Spread IS NOT NULL AND Closing_Spread < 0) AS Is_Favorite,
+        Spread_Cover_Flag,
+        ATS_Cover_Margin
+      FROM base
+    ),
+    role4 AS (
+      SELECT
+        Team,
+        CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
+               CASE WHEN Is_Favorite THEN 'Favorite' ELSE 'Underdog' END) AS Situation,
+        COUNT(*) AS N,
+        COUNTIF(Spread_Cover_Flag = 1) AS W,
+        COUNTIF(Spread_Cover_Flag = 0) AS L,
+        COUNTIF(ATS_Cover_Margin = 0)  AS P
+      FROM enriched
+      GROUP BY Team, Situation
+    ),
+    home_road AS (
+      SELECT
+        Team,
+        CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END AS Situation,
+        COUNT(*) AS N,
+        COUNTIF(Spread_Cover_Flag = 1) AS W,
+        COUNTIF(Spread_Cover_Flag = 0) AS L,
+        COUNTIF(ATS_Cover_Margin = 0)  AS P
+      FROM enriched
+      GROUP BY Team, Situation
+    ),
+    fav_dog AS (
+      SELECT
+        Team,
+        CASE WHEN Is_Favorite THEN 'Favorite' ELSE 'Underdog' END AS Situation,
+        COUNT(*) AS N,
+        COUNTIF(Spread_Cover_Flag = 1) AS W,
+        COUNTIF(Spread_Cover_Flag = 0) AS L,
+        COUNTIF(ATS_Cover_Margin = 0)  AS P
+      FROM enriched
+      GROUP BY Team, Situation
+    ),
+    buckets AS (
+      SELECT
+        Team,
+        Spread_Bucket AS Situation,
+        COUNT(*) AS N,
+        COUNTIF(Spread_Cover_Flag = 1) AS W,
+        COUNTIF(Spread_Cover_Flag = 0) AS L,
+        COUNTIF(ATS_Cover_Margin = 0)  AS P
+      FROM enriched
+      WHERE Spread_Bucket <> ''
+      GROUP BY Team, Situation
+    ),
+    unioned AS (
+      SELECT * FROM role4
+      UNION ALL SELECT * FROM home_road
+      UNION ALL SELECT * FROM fav_dog
+      UNION ALL SELECT * FROM buckets
+    )
+    SELECT
+      Team, Situation, N, W, L, P,
+      SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
+      CASE
+        WHEN (W + L) > 0 THEN ((W * (100.0/110.0) + L * (-1.0)) / (W + L)) * 100.0
+        ELSE NULL
+      END AS ROI_Pct
+    FROM unioned
+    WHERE N >= @min_n
+    ORDER BY Team, WinPct DESC, N DESC
+    """
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
+                bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
+                bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
+            ],
+            use_query_cache=True,
+        ),
+    )
+    return job.result().to_dataframe()
 
 def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
     """
