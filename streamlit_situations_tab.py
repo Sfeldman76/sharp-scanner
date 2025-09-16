@@ -72,50 +72,50 @@ COALESCE(
 )
 """
 
-
-# ---------- 1) CURRENT GAMES (dedup per matchup; collapse all books/markets) ----------
 @st.cache_data(ttl=90, show_spinner=False)
 def list_current_games_from_moves(sport: str,
-                                  horizon_hours: int = 72,
-                                  hard_cap: int = 200) -> pd.DataFrame:
+                                  horizon_hours: int = 2000,
+                                  hard_cap: int = 2000) -> pd.DataFrame:
     sql = f"""
     WITH src AS (
       SELECT
         UPPER(Sport) AS Sport_Upper,
-        COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS gs,
-        COALESCE(Home_Team_Norm, home_l)  AS home_n,
-        COALESCE(Away_Team_Norm, away_l)  AS away_n,
-        feat_Team,
-        Market_Leader,
-        `Limit`,
-        Snapshot_Timestamp
+        TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) AS gs,
+        COALESCE(Home_Team_Norm, home_l) AS home_n,
+        COALESCE(Away_Team_Norm, away_l) AS away_n,
+        COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS stable_key
       FROM `{PROJECT}.{DATASET}.moves_with_features_merged`
       WHERE UPPER(Sport) = @sport_u
-        AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start)
-              BETWEEN CURRENT_TIMESTAMP()
-                  AND TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL @horizon_hours HOUR)
-        AND feat_Team IS NOT NULL
+        AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
+        AND TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) >= CURRENT_TIMESTAMP()
     ),
     canon AS (
       SELECT
-        CONCAT(
-          IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
-          IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), LOWER(feat_Team)), "_",
-          FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
+        COALESCE(
+          stable_key,
+          CONCAT(
+            IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), 'tbd'), "_",
+            IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), 'tbd'), "_",
+            FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
+          )
         ) AS Game_Id,
-        gs,
-        feat_Team
+        gs AS Game_Start,
+        home_n,
+        away_n
       FROM src
     ),
     grouped AS (
       SELECT
         Game_Id,
-        ANY_VALUE(gs) AS Game_Start,
-        ARRAY_AGG(DISTINCT feat_Team ORDER BY feat_Team LIMIT 2) AS Teams
+        ANY_VALUE(Game_Start) AS Game_Start,
+        -- ensure we return exactly two team names when we have both
+        ARRAY(
+          SELECT t FROM UNNEST([home_n, away_n]) AS t WHERE t IS NOT NULL
+        ) AS Teams
       FROM canon
       GROUP BY Game_Id
     )
-    SELECT *
+    SELECT Game_Id, Game_Start, Teams
     FROM grouped
     WHERE ARRAY_LENGTH(Teams) = 2
     ORDER BY Game_Start
@@ -126,7 +126,6 @@ def list_current_games_from_moves(sport: str,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("sport_u", "STRING", (sport or "").upper()),
-                bigquery.ScalarQueryParameter("horizon_hours", "INT64", int(horizon_hours)),
                 bigquery.ScalarQueryParameter("hard_cap", "INT64", int(hard_cap)),
             ],
             use_query_cache=True,
