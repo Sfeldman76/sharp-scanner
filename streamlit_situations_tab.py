@@ -146,8 +146,8 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) AS gs,
         COALESCE(Home_Team_Norm, home_l) AS home_n,
         COALESCE(Away_Team_Norm, away_l) AS away_n,
-        -- robust team token
         COALESCE(feat_Team, Team_For_Join, Home_Team_Norm, home_l, Away_Team_Norm, away_l) AS team_any,
+        COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS stable_key,
         Is_Home,
         Value,
         Snapshot_Timestamp,
@@ -158,12 +158,14 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     ),
     canon AS (
       SELECT
+        -- ID built from names+time (same format as list function)
         CONCAT(
           IFNULL(LEAST(LOWER(home_n), LOWER(away_n)), 'tbd'), "_",
           IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), 'tbd'), "_",
           FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
-        ) AS Game_Id,
-        LOWER(team_any) AS team_norm,
+        ) AS concat_id,
+        LOWER(IFNULL(stable_key, ''))      AS stable_id,
+        LOWER(team_any)                    AS team_norm,
         Is_Home,
         Value,
         gs AS cutoff,
@@ -182,7 +184,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
           LIMIT 1
         )[OFFSET(0)] AS s
       FROM canon
-      WHERE Game_Id = @gid
+      WHERE (concat_id = LOWER(@gid) OR stable_id = LOWER(@gid))
         AND team_norm IN UNNEST(@teams_norm)
       GROUP BY team_norm
     )
@@ -217,14 +219,12 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
             "closing_spread": spf,
         }
 
-    # map back to the exact UI team strings (case/spacing) so lookups like ctxs[team] work
-    # prefer a lowercase key match
+    # map back to exact UI labels
     remapped = {}
     for t in teams:
-        key = (t or "").lower()
-        remapped[t] = out.get(key, {})
+        remapped[t] = out.get((t or "").lower(), {})
     return remapped
-
+    
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def situations_ats_by_team(sport: str, cutoff_date: date, min_n: int) -> pd.DataFrame:
