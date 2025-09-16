@@ -72,10 +72,11 @@ COALESCE(
 )
 """
 
+
 @st.cache_data(ttl=90, show_spinner=False)
 def list_current_games_from_moves(sport: str,
                                   horizon_hours: int = 2000,
-                                  hard_cap: int = 2000) -> pd.DataFrame:
+                                  hard_cap: int = 200) -> pd.DataFrame:
     sql = f"""
     WITH src AS (
       SELECT
@@ -100,18 +101,16 @@ def list_current_games_from_moves(sport: str,
           )
         ) AS Game_Id,
         gs AS Game_Start,
-        home_n,
-        away_n
-      FROM src
+        team
+      FROM src,
+      UNNEST([home_n, away_n]) AS team
+      WHERE team IS NOT NULL
     ),
     grouped AS (
       SELECT
         Game_Id,
         ANY_VALUE(Game_Start) AS Game_Start,
-        -- ensure we return exactly two team names when we have both
-        ARRAY(
-          SELECT t FROM UNNEST([home_n, away_n]) AS t WHERE t IS NOT NULL
-        ) AS Teams
+        ARRAY_AGG(DISTINCT team ORDER BY team LIMIT 2) AS Teams
       FROM canon
       GROUP BY Game_Id
     )
