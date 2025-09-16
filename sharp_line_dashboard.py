@@ -6054,7 +6054,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             #'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
             #'CrossMarket_Prob_Gap_Exists',
-            'Line_Moved_Away_From_Team',
+            #'Line_Moved_Away_From_Team',
             
             
             'Pct_Line_Move_From_Opening',#'Pct_Line_Move_Bin',
@@ -6078,7 +6078,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
             #'Outcome_Model_Spread','Outcome_Market_Spread',
             #'Outcome_Spread_Edge',
-            'Outcome_Cover_Prob','model_fav_vs_market_fav_agree',
+            #'Outcome_Cover_Prob',
+            'model_fav_vs_market_fav_agree',
             #'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
             #'TOT_Mispricing', 
