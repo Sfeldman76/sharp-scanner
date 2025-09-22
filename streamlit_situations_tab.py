@@ -364,7 +364,6 @@ def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
         a_fav = sa < sb
         b_fav = sb < sa
     else:
-        present = sa if sa is not None else sb
         if sa is not None:
             a_fav = sa < 0
             b_fav = not a_fav
@@ -481,7 +480,7 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       GROUP BY Situation
     ),
 
-    -- 🔥 NEW: Spread buckets split by Home/Road
+    -- Spread buckets split by Home/Road
     buckets_by_venue AS (
       SELECT
         'Bucket·Venue' AS GroupLabel,
@@ -499,7 +498,7 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       SELECT * FROM venue
       UNION ALL SELECT * FROM role4
       UNION ALL SELECT * FROM buckets
-      UNION ALL SELECT * FROM buckets_by_venue   -- 👈 include new split
+      UNION ALL SELECT * FROM buckets_by_venue
     )
 
     SELECT
@@ -730,21 +729,22 @@ def render_current_situations_tab(selected_sport: str):
                 is_favorite=is_favorite,
                 bucket=bucket
             )
-            
+
             if table3.empty:
                 st.write("_No league rows meet N threshold for this role/bucket._")
             else:
-                st.dataframe(
-                    table3,
-                    use_container_width=True
-                )
-    with st.expander("🔎 League — Full table for this sport"):
-        show = league_df.copy()
-        show = show[show["GroupLabel"].isin(["Role4","Bucket","Bucket·Venue"])]
-        for c in ["WinPct","ROI_Pct"]:
-            show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
-        st.dataframe(show, use_container_width=True)
+                st.dataframe(table3, use_container_width=True)
 
+    # League-wide (spreads) full table for quick inspection
+    with st.expander("🔎 League — Full table for this sport (Spreads Only)"):
+        if league_spreads.empty:
+            st.write("_No rows for this sport/cutoff._")
+        else:
+            show = league_spreads.copy()
+            show = show[show["GroupLabel"].isin(["Role4","Bucket","Bucket·Venue"])]
+            for c in ["WinPct","ROI_Pct"]:
+                show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
+            st.dataframe(show, use_container_width=True)
 
     # League-wide OVER/UNDER tables (separate; totals-only)
     st.markdown("### 📈 League Totals — Over/Under (Totals Only)")
@@ -755,8 +755,10 @@ def render_current_situations_tab(selected_sport: str):
         for c in ["WinPct","ROI_Pct"]:
             if c in show.columns:
                 show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
-        st.dataframe(show[["Situation","Side","N","W","L","P","WinPct","ROI_Pct"]],
-                     use_container_width=True)
+        st.dataframe(
+            show[["Situation","Side","N","W","L","P","WinPct","ROI_Pct"]],
+            use_container_width=True
+        )
 
 # ---------- optional quick debug ----------
 def render_current_games_section(selected_sport: str):
