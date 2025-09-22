@@ -261,6 +261,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     """
     Pick latest SPREADS snapshot row per team (by Market_Leader, Limit, Snapshot_Timestamp).
     Extract Is_Home + Value (team POV spread; fav < 0) to infer role/bucket.
+    If Is_Home is NULL in source, derive it by matching team to home/away names.
     """
     if not teams:
         return {}
@@ -282,7 +283,7 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         `Limit`
       FROM {MOVES}
       WHERE COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
-        AND UPPER(Market) = 'SPREADS'                  -- 🔒 SPREADS ONLY for role
+        AND UPPER(Market) = 'SPREADS'
     ),
     canon AS (
       SELECT
@@ -293,6 +294,8 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         ) AS concat_id,
         LOWER(IFNULL(stable_key, ''))      AS stable_id,
         LOWER(team_any)                    AS team_norm,
+        LOWER(home_n)                      AS home_norm,
+        LOWER(away_n)                      AS away_norm,
         Is_Home,
         Value,
         gs AS cutoff,
@@ -302,22 +305,43 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
       FROM src
       WHERE home_n IS NOT NULL AND away_n IS NOT NULL
     ),
+    with_derived_home AS (
+      SELECT
+        team_norm,
+        Value,
+        cutoff,
+        -- if Is_Home is null, infer by comparing team_norm to home/away tokens
+        COALESCE(
+          Is_Home,
+          CASE
+            WHEN team_norm = home_norm THEN TRUE
+            WHEN team_norm = away_norm THEN FALSE
+            ELSE NULL
+          END
+        ) AS is_home_final
+      FROM canon
+    ),
     picked AS (
       SELECT
         team_norm,
         ARRAY_AGG(
-          STRUCT(Is_Home, Value, cutoff)
-          ORDER BY Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
+          STRUCT(is_home_final AS is_home, Value, cutoff)
+          ORDER BY Value IS NULL, Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
           LIMIT 1
         )[OFFSET(0)] AS s
-      FROM canon
+      FROM (
+        SELECT c.*, w.is_home_final
+        FROM canon c
+        JOIN with_derived_home w
+        USING (team_norm, Value, cutoff)
+      )
       WHERE (concat_id = LOWER(@gid) OR stable_id = LOWER(@gid))
         AND team_norm IN UNNEST(@teams_norm)
       GROUP BY team_norm
     )
     SELECT
       team_norm AS Team,
-      s.Is_Home      AS is_home,
+      s.is_home      AS is_home,
       s.Value        AS closing_spread,
       s.cutoff       AS cutoff
     FROM picked
@@ -339,12 +363,13 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         sp  = r.get("closing_spread")
         spf = float(sp) if pd.notnull(sp) else None
         out[str(r["Team"])] = {
-            "is_home": bool(r["is_home"]) if pd.notnull(r["is_home"]) else None,
+            "is_home": None if pd.isna(r.get("is_home")) else bool(r.get("is_home")),
             "is_favorite": (spf is not None and spf < 0),
             "closing_spread": spf,
             "cutoff": _to_utc_dt(r.get("cutoff")),
         }
     return out
+
 
 def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
     """
