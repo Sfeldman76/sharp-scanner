@@ -113,14 +113,84 @@ def _wanted_labels(is_home: bool | None, is_favorite: bool | None, bucket: str |
     # Role4
     if (is_home is not None) and (is_favorite is not None):
         out.append(f"{'Home' if is_home else 'Road'} {'Favorite' if is_favorite else 'Underdog'}")
-    # Bucket
-    if bucket: out.append(bucket)
-    # de-dupe keep order
+    # Buckets (overall + split by venue)
+    if bucket:
+        out.append(bucket)  # overall bucket
+        if is_home is True:  out.append(f"Home · {bucket}")
+        if is_home is False: out.append(f"Road · {bucket}")
+    # de‑dupe keep order
     seen, keep = set(), []
     for s in out:
         if s and s not in seen:
             keep.append(s); seen.add(s)
     return keep
+
+def _role_label(is_home: bool | None, is_favorite: bool | None) -> str | None:
+    if is_home is None or is_favorite is None:
+        return None
+    return f"{'Home' if is_home else 'Road'} {'Favorite' if is_favorite else 'Underdog'}"
+
+def _compose_three_views(league_spreads: pd.DataFrame,
+                         is_home: bool | None, is_favorite: bool | None, bucket: str | None) -> pd.DataFrame:
+    """
+    Return a single table (in order) with 3 sections:
+      1) Overall role (Role4)
+      2) Overall by bucket (Bucket)
+      3) Bucket × Location (Bucket·Venue)
+    Only includes rows that exist / pass N filter.
+    """
+    if league_spreads is None or league_spreads.empty:
+        return pd.DataFrame(columns=["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"])
+
+    rows = []
+
+    # 1) Overall role
+    rlabel = _role_label(is_home, is_favorite)
+    if rlabel:
+        df1 = league_spreads[
+            (league_spreads["GroupLabel"] == "Role4") &
+            (league_spreads["Situation"]  == rlabel)
+        ]
+        if not df1.empty:
+            df1 = df1.copy(); df1.insert(0, "Section", "Role")
+            rows.append(df1)
+
+    # 2) Overall by bucket
+    if bucket:
+        df2 = league_spreads[
+            (league_spreads["GroupLabel"] == "Bucket") &
+            (league_spreads["Situation"]  == bucket)
+        ]
+        if not df2.empty:
+            df2 = df2.copy(); df2.insert(0, "Section", "Bucket")
+            rows.append(df2)
+
+        # 3) Bucket × Location
+        if is_home is not None:
+            bv = f"{'Home' if is_home else 'Road'} · {bucket}"
+            df3 = league_spreads[
+                (league_spreads["GroupLabel"] == "Bucket·Venue") &
+                (league_spreads["Situation"]  == bv)
+            ]
+            if not df3.empty:
+                df3 = df3.copy(); df3.insert(0, "Section", "Bucket × Location")
+                rows.append(df3)
+
+    if not rows:
+        return pd.DataFrame(columns=["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"])
+
+    out = pd.concat(rows, ignore_index=True)
+
+    # pretty: round pct columns
+    for c in ("WinPct", "ROI_Pct"):
+        if c in out.columns:
+            out[c] = out[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
+
+    # enforce order Role -> Bucket -> Bucket × Location
+    order = {"Role": 0, "Bucket": 1, "Bucket × Location": 2}
+    out["__ord"] = out["Section"].map(order).fillna(99)
+    out = out.sort_values(["__ord"]).drop(columns="__ord")
+    return out[["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]]
 
 
 # ---------- MOVES: current games (spreads only) & roles ----------
@@ -311,12 +381,6 @@ def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
 # ---------- SCORES: league-wide situation totals ----------
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.DataFrame:
-    """
-    League-wide (sport-wide) ATS results **spreads only**:
-      - Home / Road
-      - Home Favorite, Home Underdog, Road Favorite, Road Underdog
-      - Spread buckets (football vs basketball buckets)
-    """
     sql = f"""
     WITH base AS (
       SELECT
@@ -324,8 +388,8 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
         UPPER(Market) AS Market_U,
         Is_Home,
         Value AS Closing_Spread,             -- team POV spread; fav < 0
-        Spread_Cover_Flag,                   -- 1=cover, 0=no cover, NULL missing
-        ATS_Cover_Margin,                    -- 0 = push
+        Spread_Cover_Flag,
+        ATS_Cover_Margin,
         feat_Game_Start
       FROM {SCORES}
       WHERE UPPER(Sport) = @sport_upper
@@ -373,6 +437,8 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
         ATS_Cover_Margin
       FROM base
     ),
+
+    -- Home / Road
     venue AS (
       SELECT
         'Venue' AS GroupLabel,
@@ -385,6 +451,8 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       WHERE Is_Home IS NOT NULL
       GROUP BY Situation
     ),
+
+    -- Home Favorite, Home Underdog, Road Favorite, Road Underdog
     role4 AS (
       SELECT
         'Role4' AS GroupLabel,
@@ -398,6 +466,8 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       WHERE Is_Home IS NOT NULL AND Is_Favorite IS NOT NULL
       GROUP BY Situation
     ),
+
+    -- Spread buckets (overall)
     buckets AS (
       SELECT
         'Bucket' AS GroupLabel,
@@ -410,11 +480,28 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       WHERE Spread_Bucket <> ''
       GROUP BY Situation
     ),
+
+    -- 🔥 NEW: Spread buckets split by Home/Road
+    buckets_by_venue AS (
+      SELECT
+        'Bucket·Venue' AS GroupLabel,
+        CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' · ', Spread_Bucket) AS Situation,
+        COUNT(*) AS N,
+        COUNTIF(Spread_Cover_Flag = 1) AS W,
+        COUNTIF(Spread_Cover_Flag = 0) AS L,
+        COUNTIF(ATS_Cover_Margin = 0)  AS P
+      FROM enriched
+      WHERE Spread_Bucket <> '' AND Is_Home IS NOT NULL
+      GROUP BY Situation
+    ),
+
     unioned AS (
       SELECT * FROM venue
       UNION ALL SELECT * FROM role4
       UNION ALL SELECT * FROM buckets
+      UNION ALL SELECT * FROM buckets_by_venue   -- 👈 include new split
     )
+
     SELECT
       GroupLabel, Situation, N, W, L, P,
       SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
@@ -437,6 +524,7 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
         ),
     )
     return job.result().to_dataframe()
+
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0) -> pd.DataFrame:
@@ -634,19 +722,29 @@ def render_current_situations_tab(selected_sport: str):
             if bucket: bits.append(bucket)
             st.caption(" / ".join([b for b in bits if b]) or "Role: Unknown")
 
-            labels = _labels_for_team(selected_sport, ctx)
-            view = _filter_rows(league_spreads, labels)
+            st.markdown("**ATS (Spreads Only) — Role + Bucket + Bucket × Location**")
 
-            st.markdown("**ATS (Spreads Only) — League Totals for this role**")
-            if view.empty:
+            table3 = _compose_three_views(
+                league_spreads=league_spreads,
+                is_home=is_home,
+                is_favorite=is_favorite,
+                bucket=bucket
+            )
+            
+            if table3.empty:
                 st.write("_No league rows meet N threshold for this role/bucket._")
             else:
-                show = view.copy()
-                for c in ["WinPct","ROI_Pct"]:
-                    if c in show.columns:
-                        show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
-                st.dataframe(show[["GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]],
-                             use_container_width=True)
+                st.dataframe(
+                    table3,
+                    use_container_width=True
+                )
+    with st.expander("🔎 League — Full table for this sport"):
+        show = league_df.copy()
+        show = show[show["GroupLabel"].isin(["Role4","Bucket","Bucket·Venue"])]
+        for c in ["WinPct","ROI_Pct"]:
+            show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
+        st.dataframe(show, use_container_width=True)
+
 
     # League-wide OVER/UNDER tables (separate; totals-only)
     st.markdown("### 📈 League Totals — Over/Under (Totals Only)")
