@@ -1,4 +1,4 @@
-# ================== Situations Tab (league-wide by sport; roles from MOVES) ==================
+# ================== Situations Tab (league-wide by sport; roles from MOVES spreads only) ==================
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -31,12 +31,13 @@ def _to_utc_dt(x) -> dt.datetime:
         return ts.to_pydatetime()
     return datetime.now(timezone.utc)
 
+def _sport_is_football(s: str) -> bool:
+    return (s or "").upper() in {"NFL", "NCAAF"}
 
-def _fb_bucket(v: float | None) -> str:
-    """
-    Local helper used only for UI labeling when we already know we're in a football sport.
-    SQL uses its own CASE; this mirrors it.
-    """
+def _sport_is_basketball(s: str) -> bool:
+    return (s or "").upper() in {"NBA", "NCAAB", "WNBA"}
+
+def _fb_spread_bucket(v: float | None) -> str:
     if v is None: return ""
     try: v = float(v)
     except Exception: return ""
@@ -51,11 +52,7 @@ def _fb_bucket(v: float | None) -> str:
     if v <=  10.5: return "Dog +7 to +10.5"
     return "Dog ≥ +11"
 
-
-def _bb_bucket(v: float | None) -> str:
-    """
-    Basketball-ish buckets: slightly tighter near zero, wider tails.
-    """
+def _bb_spread_bucket(v: float | None) -> str:
     if v is None: return ""
     try: v = float(v)
     except Exception: return ""
@@ -71,35 +68,54 @@ def _bb_bucket(v: float | None) -> str:
     if v <=  12.5: return "Dog +10 to +12.5"
     return "Dog ≥ +13"
 
+def _fb_total_bucket(v: float | None) -> str:
+    # football total line buckets (tweak as desired)
+    if v is None: return ""
+    try: v = float(v)
+    except Exception: return ""
+    if v <= 37.5: return "OU ≤ 37.5"
+    if v <= 41.5: return "OU 38–41.5"
+    if v <= 44.5: return "OU 42–44.5"
+    if v <= 47.5: return "OU 45–47.5"
+    if v <= 50.5: return "OU 48–50.5"
+    if v <= 53.5: return "OU 51–53.5"
+    if v <= 56.5: return "OU 54–56.5"
+    if v <= 59.5: return "OU 57–59.5"
+    return "OU ≥ 60"
 
-def _sport_is_football(s: str) -> bool:
-    return (s or "").upper() in {"NFL", "NCAAF"}
+def _bb_total_bucket(v: float | None) -> str:
+    # basketball total line buckets (NBA-ish)
+    if v is None: return ""
+    try: v = float(v)
+    except Exception: return ""
+    if v <= 205.5: return "OU ≤ 205.5"
+    if v <= 209.5: return "OU 206–209.5"
+    if v <= 213.5: return "OU 210–213.5"
+    if v <= 217.5: return "OU 214–217.5"
+    if v <= 221.5: return "OU 218–221.5"
+    if v <= 225.5: return "OU 222–225.5"
+    if v <= 229.5: return "OU 226–229.5"
+    if v <= 233.5: return "OU 230–233.5"
+    return "OU ≥ 234"
 
-
-def _sport_is_basketball(s: str) -> bool:
-    return (s or "").upper() in {"NBA", "NCAAB", "WNBA"}
-
+def _derive_spread_bucket_for_ui(sport: str, closing_spread: float | None) -> str:
+    if closing_spread is None:
+        return ""
+    if _sport_is_basketball(sport):
+        return _bb_spread_bucket(closing_spread)
+    return _fb_spread_bucket(closing_spread)
 
 def _wanted_labels(is_home: bool | None, is_favorite: bool | None, bucket: str | None):
-    """
-    Build the ordered list of league labels we want to show for this team's current role.
-    """
     out = []
-    # venue only
+    # Venue
     if is_home is True:  out.append("Home")
     if is_home is False: out.append("Road")
-
-    # 4-way role
+    # Role4
     if (is_home is not None) and (is_favorite is not None):
-        if is_home and is_favorite:   out.append("Home Favorite")
-        if is_home and not is_favorite:  out.append("Home Underdog")
-        if (not is_home) and is_favorite: out.append("Road Favorite")
-        if (not is_home) and (not is_favorite): out.append("Road Underdog")
-
-    # spread bucket
+        out.append(f"{'Home' if is_home else 'Road'} {'Favorite' if is_favorite else 'Underdog'}")
+    # Bucket
     if bucket: out.append(bucket)
-
-    # de-dupe, keep order
+    # de-dupe keep order
     seen, keep = set(), []
     for s in out:
         if s and s not in seen:
@@ -107,7 +123,7 @@ def _wanted_labels(is_home: bool | None, is_favorite: bool | None, bucket: str |
     return keep
 
 
-# ---------- MOVES: find current games; infer roles ----------
+# ---------- MOVES: current games (spreads only) & roles ----------
 @st.cache_data(ttl=90, show_spinner=False)
 def list_current_games_from_moves(sport: str, hard_cap: int = 200) -> pd.DataFrame:
     """
@@ -117,12 +133,14 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200) -> pd.DataFra
     WITH src AS (
       SELECT
         UPPER(Sport) AS Sport_Upper,
+        UPPER(Market) AS Market_U,
         TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) AS gs,
         COALESCE(Home_Team_Norm, home_l) AS home_n,
         COALESCE(Away_Team_Norm, away_l) AS away_n,
         COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS stable_key
       FROM {MOVES}
       WHERE UPPER(Sport) = @sport_u
+        AND UPPER(Market) = 'SPREADS'                  -- 🔒 spreads only for listing
         AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) >= CURRENT_TIMESTAMP()
     ),
@@ -168,33 +186,33 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200) -> pd.DataFra
     )
     return job.result().to_dataframe()
 
-
 @st.cache_data(ttl=120, show_spinner=False)
 def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
     """
-    For the two teams in the selected game, pick one latest snapshot row (by Market_Leader, Limit, Snapshot_Timestamp)
-    and extract Is_Home + Value (closing_spread proxy) to infer role/bucket.
+    Pick latest SPREADS snapshot row per team (by Market_Leader, Limit, Snapshot_Timestamp).
+    Extract Is_Home + Value (team POV spread; fav < 0) to infer role/bucket.
     """
     if not teams:
         return {}
-
     teams_norm = [t.lower() for t in teams if t]
 
     sql = f"""
     WITH src AS (
       SELECT
+        UPPER(Market) AS Market_U,
         TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) AS gs,
         COALESCE(Home_Team_Norm, home_l) AS home_n,
         COALESCE(Away_Team_Norm, away_l) AS away_n,
         COALESCE(feat_Team, Team_For_Join, Home_Team_Norm, home_l, Away_Team_Norm, away_l) AS team_any,
         COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS stable_key,
         Is_Home,
-        Value,
+        Value,                          -- team POV spread; fav < 0
         Snapshot_Timestamp,
         Market_Leader,
         `Limit`
       FROM {MOVES}
       WHERE COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
+        AND UPPER(Market) = 'SPREADS'                  -- 🔒 SPREADS ONLY for role
     ),
     canon AS (
       SELECT
@@ -258,10 +276,10 @@ def team_context_from_moves(game_id: str, teams: list[str]) -> dict:
         }
     return out
 
-
 def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
     """
     Ensure exactly one favorite and one underdog iff any spread exists.
+    If both spreads present, lower (more negative) spread is the favorite.
     """
     a, b = (teams + [None, None])[:2]
     if not a or not b:
@@ -290,11 +308,11 @@ def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
     return ctxs
 
 
-# ---------- SCORES: league-wide situation totals (ATS only) ----------
+# ---------- SCORES: league-wide situation totals ----------
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.DataFrame:
     """
-    League-wide (sport-wide) ATS results by:
+    League-wide (sport-wide) ATS results **spreads only**:
       - Home / Road
       - Home Favorite, Home Underdog, Road Favorite, Road Underdog
       - Spread buckets (football vs basketball buckets)
@@ -303,41 +321,24 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
     WITH base AS (
       SELECT
         UPPER(Sport) AS Sport_U,
+        UPPER(Market) AS Market_U,
         Is_Home,
-        Value AS Closing_Spread,     -- spread for the team (fav < 0)
-        Spread_Cover_Flag,           -- 1=cover, 0=no cover, NULL missing
-        ATS_Cover_Margin,            -- 0 = push
+        Value AS Closing_Spread,             -- team POV spread; fav < 0
+        Spread_Cover_Flag,                   -- 1=cover, 0=no cover, NULL missing
+        ATS_Cover_Margin,                    -- 0 = push
         feat_Game_Start
       FROM {SCORES}
       WHERE UPPER(Sport) = @sport_upper
+        AND UPPER(Market) = 'SPREADS'        -- 🔒 spreads only for ATS
         AND DATE(feat_Game_Start) <= @cutoff
     ),
-
     enriched AS (
       SELECT
         Is_Home,
         Closing_Spread,
+        CASE WHEN Closing_Spread IS NULL THEN NULL
+             WHEN Closing_Spread < 0 THEN TRUE ELSE FALSE END AS Is_Favorite,
         CASE
-          WHEN Closing_Spread IS NULL THEN NULL
-          WHEN Closing_Spread < 0 THEN TRUE ELSE FALSE
-        END AS Is_Favorite,
-
-        -- sport-aware spread buckets
-        CASE
-          WHEN UPPER(@sport_upper) IN ('NFL','NCAAF') THEN
-            CASE
-              WHEN Closing_Spread IS NULL THEN ''
-              WHEN Closing_Spread <= -10.5 THEN 'Fav ≤ -10.5'
-              WHEN Closing_Spread <=  -7.5 THEN 'Fav -8 to -10.5'
-              WHEN Closing_Spread <=  -6.5 THEN 'Fav -7 to -6.5'
-              WHEN Closing_Spread <=  -3.5 THEN 'Fav -4 to -6.5'
-              WHEN Closing_Spread <=  -0.5 THEN 'Fav -0.5 to -3.5'
-              WHEN Closing_Spread =    0.0 THEN 'Pick (0)'
-              WHEN Closing_Spread <=   3.5 THEN 'Dog +0.5 to +3.5'
-              WHEN Closing_Spread <=   6.5 THEN 'Dog +4 to +6.5'
-              WHEN Closing_Spread <=  10.5 THEN 'Dog +7 to +10.5'
-              ELSE 'Dog ≥ +11'
-            END
           WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
             CASE
               WHEN Closing_Spread IS NULL THEN ''
@@ -354,7 +355,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
               ELSE 'Dog ≥ +13'
             END
           ELSE
-            -- default to football buckets
             CASE
               WHEN Closing_Spread IS NULL THEN ''
               WHEN Closing_Spread <= -10.5 THEN 'Fav ≤ -10.5'
@@ -369,13 +369,10 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
               ELSE 'Dog ≥ +11'
             END
         END AS Spread_Bucket,
-
         Spread_Cover_Flag,
         ATS_Cover_Margin
       FROM base
     ),
-
-    -- Home / Road
     venue AS (
       SELECT
         'Venue' AS GroupLabel,
@@ -388,8 +385,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       WHERE Is_Home IS NOT NULL
       GROUP BY Situation
     ),
-
-    -- Home Favorite, Home Underdog, Road Favorite, Road Underdog
     role4 AS (
       SELECT
         'Role4' AS GroupLabel,
@@ -403,8 +398,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       WHERE Is_Home IS NOT NULL AND Is_Favorite IS NOT NULL
       GROUP BY Situation
     ),
-
-    -- Spread buckets
     buckets AS (
       SELECT
         'Bucket' AS GroupLabel,
@@ -417,13 +410,11 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
       WHERE Spread_Bucket <> ''
       GROUP BY Situation
     ),
-
     unioned AS (
       SELECT * FROM venue
       UNION ALL SELECT * FROM role4
       UNION ALL SELECT * FROM buckets
     )
-
     SELECT
       GroupLabel, Situation, N, W, L, P,
       SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
@@ -447,24 +438,138 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
     )
     return job.result().to_dataframe()
 
+@st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
+def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0) -> pd.DataFrame:
+    """
+    League-wide (sport-wide) Over/Under results **totals only**:
+      - Side = Over / Under
+      - Total line buckets (football vs basketball buckets)
+      - Uses per-game de-duplication via feat_Game_Key
+      - ROI computed at -110 for the chosen side (pushes excluded)
+    """
+    sql = f"""
+    -- 1) Totals rows only; compute per-game total points
+    WITH base AS (
+      SELECT
+        UPPER(Sport) AS Sport_U,
+        UPPER(Market) AS Market_U,
+        COALESCE(feat_Game_Key, Game_Key) AS GKey,
+        feat_Game_Start,
+        Value AS Total_Line,                                -- totals line (same both teams)
+        SAFE_CAST(Team_Score AS FLOAT64) AS Team_Score,
+        SAFE_CAST(Opp_Score  AS FLOAT64) AS Opp_Score
+      FROM {SCORES}
+      WHERE UPPER(Sport) = @sport_upper
+        AND UPPER(Market) = 'TOTALS'                         -- 🔒 totals only
+        AND DATE(feat_Game_Start) <= @cutoff
+        AND Value IS NOT NULL
+        AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
+    ),
+    per_game AS (
+      -- de-duplicate to one row per game
+      SELECT
+        GKey,
+        ANY_VALUE(feat_Game_Start) AS gs,
+        ANY_VALUE(Total_Line)      AS Total_Line,
+        ANY_VALUE(Team_Score + Opp_Score) AS Total_Points
+      FROM base
+      GROUP BY GKey
+    ),
+    enriched AS (
+      SELECT
+        Total_Line,
+        Total_Points,
+        -- per-side win flags
+        (Total_Points > Total_Line) AS Over_Win,
+        (Total_Points < Total_Line) AS Under_Win,
+        (Total_Points = Total_Line) AS Push,
+        -- sport-aware total buckets
+        CASE
+          WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
+            CASE
+              WHEN Total_Line <= 205.5 THEN 'OU ≤ 205.5'
+              WHEN Total_Line <= 209.5 THEN 'OU 206–209.5'
+              WHEN Total_Line <= 213.5 THEN 'OU 210–213.5'
+              WHEN Total_Line <= 217.5 THEN 'OU 214–217.5'
+              WHEN Total_Line <= 221.5 THEN 'OU 218–221.5'
+              WHEN Total_Line <= 225.5 THEN 'OU 222–225.5'
+              WHEN Total_Line <= 229.5 THEN 'OU 226–229.5'
+              WHEN Total_Line <= 233.5 THEN 'OU 230–233.5'
+              ELSE 'OU ≥ 234'
+            END
+          ELSE
+            CASE
+              WHEN Total_Line <= 37.5 THEN 'OU ≤ 37.5'
+              WHEN Total_Line <= 41.5 THEN 'OU 38–41.5'
+              WHEN Total_Line <= 44.5 THEN 'OU 42–44.5'
+              WHEN Total_Line <= 47.5 THEN 'OU 45–47.5'
+              WHEN Total_Line <= 50.5 THEN 'OU 48–50.5'
+              WHEN Total_Line <= 53.5 THEN 'OU 51–53.5'
+              WHEN Total_Line <= 56.5 THEN 'OU 54–56.5'
+              WHEN Total_Line <= 59.5 THEN 'OU 57–59.5'
+              ELSE 'OU ≥ 60'
+            END
+        END AS Total_Bucket
+      FROM per_game
+    ),
+    over_rows AS (
+      SELECT
+        'Over' AS Side,
+        Total_Bucket AS Situation,
+        COUNT(*) AS N,
+        COUNTIF(Over_Win) AS W,
+        COUNTIF(Under_Win) AS L,
+        COUNTIF(Push) AS P
+      FROM enriched
+      GROUP BY Situation
+    ),
+    under_rows AS (
+      SELECT
+        'Under' AS Side,
+        Total_Bucket AS Situation,
+        COUNT(*) AS N,
+        COUNTIF(Under_Win) AS W,
+        COUNTIF(Over_Win) AS L,
+        COUNTIF(Push) AS P
+      FROM enriched
+      GROUP BY Situation
+    ),
+    unioned AS (
+      SELECT * FROM over_rows
+      UNION ALL
+      SELECT * FROM under_rows
+    )
+    SELECT
+      Side, Situation, N, W, L, P,
+      SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
+      CASE
+        WHEN (W + L) > 0 THEN ((W * (100.0/110.0) + L * (-1.0)) / (W + L)) * 100.0
+        ELSE NULL END AS ROI_Pct
+    FROM unioned
+    WHERE N >= @min_n
+    ORDER BY Situation, Side
+    """
+    job = CLIENT.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
+                bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
+                bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
+            ],
+            use_query_cache=True,
+        ),
+    )
+    return job.result().to_dataframe()
 
-# ---------- render helpers ----------
-def _derive_bucket_for_ui(sport: str, closing_spread: float | None) -> str:
-    if closing_spread is None:
-        return ""
-    if _sport_is_basketball(sport):
-        return _bb_bucket(closing_spread)
-    # default to football buckets for all others
-    return _fb_bucket(closing_spread)
 
-
-def _pick_labels_for_team(sport: str, ctx: dict) -> list[str]:
+# ---------- helpers for rendering ----------
+def _labels_for_team(sport: str, ctx: dict) -> list[str]:
     is_home = ctx.get("is_home")
     is_favorite = ctx.get("is_favorite")
     spread = ctx.get("closing_spread")
-    bucket = _derive_bucket_for_ui(sport, spread)
+    bucket = _derive_spread_bucket_for_ui(sport, spread)
     return _wanted_labels(is_home, is_favorite, bucket)
-
 
 def _filter_rows(df: pd.DataFrame, labels: list[str]) -> pd.DataFrame:
     if df is None or df.empty or not labels:
@@ -482,7 +587,7 @@ def render_current_situations_tab(selected_sport: str):
 
     games = list_current_games_from_moves(selected_sport)
     if games.empty:
-        st.info("No upcoming games found for this sport (from MOVES).")
+        st.info("No upcoming games found for this sport (from MOVES; spreads only).")
         return
 
     games = games.copy()
@@ -503,24 +608,25 @@ def render_current_situations_tab(selected_sport: str):
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
     cutoff_date_for_stats: date = st.date_input("Cutoff for historical stats (DATE)", value=date.today())
 
-    # Fetch league-wide totals once
-    league_df = league_totals_spreads(selected_sport, cutoff_date_for_stats, min_n)
+    # League-wide tables (one query each)
+    league_spreads = league_totals_spreads(selected_sport, cutoff_date_for_stats, min_n)
+    league_totals  = league_totals_overunder(selected_sport, cutoff_date_for_stats, min_n)
 
-    # Roles from MOVES (to decide which rows to show)
+    # Roles from MOVES (SPREADS-ONLY)
     ctxs = team_context_from_moves(game_id, teams)
     ctxs = _enforce_role_coherence(ctxs, teams)
 
-    # Build UI: one column per team, each shows league totals for that team's current role(s)
+    # Show per-team ROLE → league rows (spreads / ATS)
     cols = st.columns(2)
     for i, team in enumerate(teams):
         with cols[i]:
             st.markdown(f"### {team}")
-
             ctx = ctxs.get(team, {})
+
             is_home = ctx.get("is_home")
             is_favorite = ctx.get("is_favorite")
             spread = ctx.get("closing_spread")
-            bucket = _derive_bucket_for_ui(selected_sport, spread)
+            bucket = _derive_spread_bucket_for_ui(selected_sport, spread)
 
             bits = []
             bits.append("🏠 Home" if is_home is True else ("🚗 Road" if is_home is False else ""))
@@ -528,36 +634,35 @@ def render_current_situations_tab(selected_sport: str):
             if bucket: bits.append(bucket)
             st.caption(" / ".join([b for b in bits if b]) or "Role: Unknown")
 
-            labels = _pick_labels_for_team(selected_sport, ctx)
-            view = _filter_rows(league_df, labels)
+            labels = _labels_for_team(selected_sport, ctx)
+            view = _filter_rows(league_spreads, labels)
 
+            st.markdown("**ATS (Spreads Only) — League Totals for this role**")
             if view.empty:
                 st.write("_No league rows meet N threshold for this role/bucket._")
             else:
-                # Friendly formatting
                 show = view.copy()
                 for c in ["WinPct","ROI_Pct"]:
                     if c in show.columns:
                         show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
-                st.dataframe(
-                    show[["GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]],
-                    use_container_width=True
-                )
+                st.dataframe(show[["GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]],
+                             use_container_width=True)
 
-    with st.expander("🔎 League — Full table for this sport"):
-        if league_df.empty:
-            st.write("_Empty for this sport and cutoff / N filter._")
-        else:
-            show = league_df.copy()
-            for c in ["WinPct","ROI_Pct"]:
-                if c in show.columns:
-                    show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
-            st.dataframe(show, use_container_width=True)
+    # League-wide OVER/UNDER tables (separate; totals-only)
+    st.markdown("### 📈 League Totals — Over/Under (Totals Only)")
+    if league_totals.empty:
+        st.write("_No totals rows meet N threshold for this sport/cutoff._")
+    else:
+        show = league_totals.copy()
+        for c in ["WinPct","ROI_Pct"]:
+            if c in show.columns:
+                show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
+        st.dataframe(show[["Situation","Side","N","W","L","P","WinPct","ROI_Pct"]],
+                     use_container_width=True)
 
-
-# ---------- optional small section for quick game debug ----------
+# ---------- optional quick debug ----------
 def render_current_games_section(selected_sport: str):
-    st.subheader("📡 Current/Upcoming Games (from MOVES)")
+    st.subheader("📡 Current/Upcoming Games (from MOVES — spreads only)")
     games = list_current_games_from_moves(selected_sport)
     if games.empty:
         st.info("No upcoming games found for this sport (from MOVES).")
@@ -565,13 +670,15 @@ def render_current_games_section(selected_sport: str):
             dbg_sql = f"""
             SELECT
               UPPER(Sport) AS Sport_Upper,
+              UPPER(Market) AS Market_U,
               COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS Game_Id,
               COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS Game_Start,
-              Home_Team_Norm, Away_Team_Norm, Team_For_Join, feat_Team, home_l, away_l
+              Home_Team_Norm, Away_Team_Norm, Team_For_Join, feat_Team, home_l, away_l,
+              Value, Is_Home, Snapshot_Timestamp
             FROM {MOVES}
-            WHERE UPPER(Sport) = @sport_upper
+            WHERE UPPER(Sport) = @sport_upper AND UPPER(Market)='SPREADS'
             ORDER BY Game_Start DESC
-            LIMIT 50
+            LIMIT 100
             """
             job = CLIENT.query(
                 dbg_sql,
@@ -588,7 +695,6 @@ def render_current_games_section(selected_sport: str):
     row = st.selectbox("Select game", df.to_dict("records"), format_func=lambda r: r["label"])
     if not row:
         st.stop()
-
     st.write(f"**Game Id:** {row['Game_Id']}")
     st.write(f"**Teams:** {', '.join(row['Teams'])}")
     st.write(f"**Start:** {row['Game_Start']}")
