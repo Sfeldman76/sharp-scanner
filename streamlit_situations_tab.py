@@ -130,68 +130,66 @@ def _role_label(is_home: bool | None, is_favorite: bool | None) -> str | None:
         return None
     return f"{'Home' if is_home else 'Road'} {'Favorite' if is_favorite else 'Underdog'}"
 
-def _compose_three_views(league_spreads: pd.DataFrame,
-                         is_home: bool | None, is_favorite: bool | None, bucket: str | None) -> pd.DataFrame:
+def _compose_four_views_spreads(league_spreads: pd.DataFrame,
+                                is_home: bool | None, is_favorite: bool | None, bucket: str | None) -> pd.DataFrame:
     """
-    Return a single table (in order) with 3 sections:
-      1) Overall role (Role4)
-      2) Overall by bucket (Bucket)
-      3) Bucket × Location (Bucket·Venue)
-    Only includes rows that exist / pass N filter.
+    Build a compact table with up to 4 rows, in this order:
+      1) Fav/Dog (Role4)
+      2) Home/Road (Venue)
+      3) Bucket (overall)
+      4) Bucket × Location (Bucket·Venue)
     """
     if league_spreads is None or league_spreads.empty:
         return pd.DataFrame(columns=["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"])
 
-    rows = []
+    out_parts = []
 
-    # 1) Overall role
-    rlabel = _role_label(is_home, is_favorite)
-    if rlabel:
-        df1 = league_spreads[
-            (league_spreads["GroupLabel"] == "Role4") &
-            (league_spreads["Situation"]  == rlabel)
-        ]
-        if not df1.empty:
-            df1 = df1.copy(); df1.insert(0, "Section", "Role")
-            rows.append(df1)
+    # 1) Fav/Dog (Role4)
+    if is_home is not None and is_favorite is not None:
+        role_lbl = f"{'Home' if is_home else 'Road'} {'Favorite' if is_favorite else 'Underdog'}"
+        df = league_spreads[(league_spreads["GroupLabel"] == "Role4") &
+                            (league_spreads["Situation"]  == role_lbl)]
+        if not df.empty:
+            df = df.copy(); df.insert(0, "Section", "Role (Fav/Dog)")
+            out_parts.append(df)
 
-    # 2) Overall by bucket
+    # 2) Home/Road (Venue)
+    if is_home is not None:
+        v_lbl = "Home" if is_home else "Road"
+        df = league_spreads[(league_spreads["GroupLabel"] == "Venue") &
+                            (league_spreads["Situation"]  == v_lbl)]
+        if not df.empty:
+            df = df.copy(); df.insert(0, "Section", "Venue (Home/Road)")
+            out_parts.append(df)
+
+    # 3) Bucket (overall)
     if bucket:
-        df2 = league_spreads[
-            (league_spreads["GroupLabel"] == "Bucket") &
-            (league_spreads["Situation"]  == bucket)
-        ]
-        if not df2.empty:
-            df2 = df2.copy(); df2.insert(0, "Section", "Bucket")
-            rows.append(df2)
+        df = league_spreads[(league_spreads["GroupLabel"] == "Bucket") &
+                            (league_spreads["Situation"]  == bucket)]
+        if not df.empty:
+            df = df.copy(); df.insert(0, "Section", "Bucket (overall)")
+            out_parts.append(df)
 
-        # 3) Bucket × Location
+        # 4) Bucket × Location
         if is_home is not None:
-            bv = f"{'Home' if is_home else 'Road'} · {bucket}"
-            df3 = league_spreads[
-                (league_spreads["GroupLabel"] == "Bucket·Venue") &
-                (league_spreads["Situation"]  == bv)
-            ]
-            if not df3.empty:
-                df3 = df3.copy(); df3.insert(0, "Section", "Bucket × Location")
-                rows.append(df3)
+            bvl = f"{'Home' if is_home else 'Road'} · {bucket}"
+            df = league_spreads[(league_spreads["GroupLabel"] == "Bucket·Venue") &
+                                (league_spreads["Situation"]  == bvl)]
+            if not df.empty:
+                df = df.copy(); df.insert(0, "Section", "Bucket × Venue")
+                out_parts.append(df)
 
-    if not rows:
+    if not out_parts:
         return pd.DataFrame(columns=["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"])
 
-    out = pd.concat(rows, ignore_index=True)
-
-    # pretty: round pct columns
-    for c in ("WinPct", "ROI_Pct"):
+    out = pd.concat(out_parts, ignore_index=True)
+    for c in ("WinPct","ROI_Pct"):
         if c in out.columns:
             out[c] = out[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
-
-    # enforce order Role -> Bucket -> Bucket × Location
-    order = {"Role": 0, "Bucket": 1, "Bucket × Location": 2}
-    out["__ord"] = out["Section"].map(order).fillna(99)
-    out = out.sort_values(["__ord"]).drop(columns="__ord")
+    order = {"Role (Fav/Dog)":0, "Venue (Home/Road)":1, "Bucket (overall)":2, "Bucket × Venue":3}
+    out["__o"] = out["Section"].map(order).fillna(99)
+    out = out.sort_values(["__o"]).drop(columns="__o")
     return out[["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]]
-
 
 # ---------- MOVES: current games (spreads only) & roles ----------
 @st.cache_data(ttl=90, show_spinner=False)
@@ -551,115 +549,190 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0) -> pd.D
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
+@st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0) -> pd.DataFrame:
     """
-    League-wide (sport-wide) Over/Under results **totals only**:
-      - Side = Over / Under
-      - Total line buckets (football vs basketball buckets)
-      - Uses per-game de-duplication via feat_Game_Key
-      - ROI computed at -110 for the chosen side (pushes excluded)
+    League-wide Over/Under results (no points breakdown).
+    Groupings returned (for both Side=Over and Side=Under):
+      - Venue (Home/Road)           -> based on home/away label
+      - Role4 (Home Fav/Dog, Road Fav/Dog) -> inferred from spreads (home spread < 0 => Home Fav)
+      - Total Bucket (overall)
+      - Bucket × Venue (Home · bucket, Road · bucket)
+    Each game is counted once per group (no double counting).
     """
     sql = f"""
-    -- 1) Totals rows only; compute per-game total points
-    WITH base AS (
+    -- A) Pull one totals line + total points per game
+    WITH totals_base AS (
       SELECT
         UPPER(Sport) AS Sport_U,
         UPPER(Market) AS Market_U,
         COALESCE(feat_Game_Key, Game_Key) AS GKey,
         feat_Game_Start,
-        Value AS Total_Line,                                -- totals line (same both teams)
+        Value AS Total_Line,                          -- totals line
         SAFE_CAST(Team_Score AS FLOAT64) AS Team_Score,
-        SAFE_CAST(Opp_Score  AS FLOAT64) AS Opp_Score
+        SAFE_CAST(Opp_Score  AS FLOAT64) AS Opp_Score,
+        Is_Home
       FROM {SCORES}
       WHERE UPPER(Sport) = @sport_upper
-        AND UPPER(Market) = 'TOTALS'                         -- 🔒 totals only
+        AND UPPER(Market) = 'TOTALS'
         AND DATE(feat_Game_Start) <= @cutoff
         AND Value IS NOT NULL
         AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
     ),
-    per_game AS (
-      -- de-duplicate to one row per game
+    per_game_totals AS (
+      -- pick the home row to get a single row per game (and keep Is_Home=TRUE for venue logic)
       SELECT
         GKey,
         ANY_VALUE(feat_Game_Start) AS gs,
         ANY_VALUE(Total_Line)      AS Total_Line,
         ANY_VALUE(Team_Score + Opp_Score) AS Total_Points
-      FROM base
+      FROM totals_base
+      WHERE Is_Home = TRUE
       GROUP BY GKey
     ),
+
+    -- B) Pull home-team spread per game to infer role (favorite/dog + road/home favorite)
+    spreads_home AS (
+      SELECT
+        COALESCE(feat_Game_Key, Game_Key) AS GKey,
+        ANY_VALUE(Value) AS Home_Closing_Spread  -- team POV for home team; fav < 0
+      FROM {SCORES}
+      WHERE UPPER(Sport) = @sport_upper
+        AND UPPER(Market) = 'SPREADS'
+        AND DATE(feat_Game_Start) <= @cutoff
+        AND Is_Home = TRUE
+      GROUP BY GKey
+    ),
+
+    -- C) Merge and compute per-Side outcomes + buckets + role/venue
     enriched AS (
       SELECT
-        Total_Line,
-        Total_Points,
-        -- per-side win flags
-        (Total_Points > Total_Line) AS Over_Win,
-        (Total_Points < Total_Line) AS Under_Win,
-        (Total_Points = Total_Line) AS Push,
+        t.GKey,
+        t.Total_Line,
+        t.Total_Points,
+        (t.Total_Points > t.Total_Line) AS Over_Win,
+        (t.Total_Points < t.Total_Line) AS Under_Win,
+        (t.Total_Points = t.Total_Line) AS Push,
         -- sport-aware total buckets
         CASE
           WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
             CASE
-              WHEN Total_Line <= 205.5 THEN 'OU ≤ 205.5'
-              WHEN Total_Line <= 209.5 THEN 'OU 206–209.5'
-              WHEN Total_Line <= 213.5 THEN 'OU 210–213.5'
-              WHEN Total_Line <= 217.5 THEN 'OU 214–217.5'
-              WHEN Total_Line <= 221.5 THEN 'OU 218–221.5'
-              WHEN Total_Line <= 225.5 THEN 'OU 222–225.5'
-              WHEN Total_Line <= 229.5 THEN 'OU 226–229.5'
-              WHEN Total_Line <= 233.5 THEN 'OU 230–233.5'
+              WHEN t.Total_Line <= 205.5 THEN 'OU ≤ 205.5'
+              WHEN t.Total_Line <= 209.5 THEN 'OU 206–209.5'
+              WHEN t.Total_Line <= 213.5 THEN 'OU 210–213.5'
+              WHEN t.Total_Line <= 217.5 THEN 'OU 214–217.5'
+              WHEN t.Total_Line <= 221.5 THEN 'OU 218–221.5'
+              WHEN t.Total_Line <= 225.5 THEN 'OU 222–225.5'
+              WHEN t.Total_Line <= 229.5 THEN 'OU 226–229.5'
+              WHEN t.Total_Line <= 233.5 THEN 'OU 230–233.5'
               ELSE 'OU ≥ 234'
             END
           ELSE
             CASE
-              WHEN Total_Line <= 37.5 THEN 'OU ≤ 37.5'
-              WHEN Total_Line <= 41.5 THEN 'OU 38–41.5'
-              WHEN Total_Line <= 44.5 THEN 'OU 42–44.5'
-              WHEN Total_Line <= 47.5 THEN 'OU 45–47.5'
-              WHEN Total_Line <= 50.5 THEN 'OU 48–50.5'
-              WHEN Total_Line <= 53.5 THEN 'OU 51–53.5'
-              WHEN Total_Line <= 56.5 THEN 'OU 54–56.5'
-              WHEN Total_Line <= 59.5 THEN 'OU 57–59.5'
+              WHEN t.Total_Line <= 37.5 THEN 'OU ≤ 37.5'
+              WHEN t.Total_Line <= 41.5 THEN 'OU 38–41.5'
+              WHEN t.Total_Line <= 44.5 THEN 'OU 42–44.5'
+              WHEN t.Total_Line <= 47.5 THEN 'OU 45–47.5'
+              WHEN t.Total_Line <= 50.5 THEN 'OU 48–50.5'
+              WHEN t.Total_Line <= 53.5 THEN 'OU 51–53.5'
+              WHEN t.Total_Line <= 56.5 THEN 'OU 54–56.5'
+              WHEN t.Total_Line <= 59.5 THEN 'OU 57–59.5'
               ELSE 'OU ≥ 60'
             END
-        END AS Total_Bucket
-      FROM per_game
+        END AS Total_Bucket,
+        -- Role4 for the game:
+        -- if home spread < 0 => Home Favorite, else either Pick or Home Dog;
+        -- pick->treat as Dog to keep 2-way fav/dog split.
+        CASE
+          WHEN s.Home_Closing_Spread IS NULL THEN 'Home Underdog'
+          WHEN s.Home_Closing_Spread < 0 THEN 'Home Favorite'
+          WHEN s.Home_Closing_Spread = 0 THEN 'Home Underdog'
+          ELSE 'Home Underdog'
+        END AS Role4_HomeSide,
+        CASE
+          WHEN s.Home_Closing_Spread IS NULL THEN 'Road Favorite'
+          WHEN s.Home_Closing_Spread < 0 THEN 'Road Underdog'
+          WHEN s.Home_Closing_Spread = 0 THEN 'Road Favorite'
+          ELSE 'Road Favorite'
+        END AS Role4_RoadSide
+      FROM per_game_totals t
+      LEFT JOIN spreads_home s USING (GKey)
     ),
-    over_rows AS (
+
+    -- D) Aggregate: Venue (Home/Road) — using the home-side label once per game
+    venue_home AS (
       SELECT
-        'Over' AS Side,
-        Total_Bucket AS Situation,
+        'Venue' AS GroupLabel,
+        'Home'  AS Situation,
         COUNT(*) AS N,
-        COUNTIF(Over_Win) AS W,
-        COUNTIF(Under_Win) AS L,
+        COUNTIF(Over_Win) AS Over_W,
+        COUNTIF(Under_Win) AS Under_W,
         COUNTIF(Push) AS P
       FROM enriched
-      GROUP BY Situation
     ),
-    under_rows AS (
+    venue_road AS (
       SELECT
-        'Under' AS Side,
-        Total_Bucket AS Situation,
+        'Venue' AS GroupLabel,
+        'Road'  AS Situation,
         COUNT(*) AS N,
-        COUNTIF(Under_Win) AS W,
-        COUNTIF(Over_Win) AS L,
+        COUNTIF(Over_Win) AS Over_W,
+        COUNTIF(Under_Win) AS Under_W,
         COUNTIF(Push) AS P
       FROM enriched
-      GROUP BY Situation
     ),
-    unioned AS (
-      SELECT * FROM over_rows
+
+    -- E) Aggregate: Role4 (Home Fav/Home Dog/Road Fav/Road Dog)
+    role4 AS (
+      SELECT 'Role4' AS GroupLabel, Role4_HomeSide AS Situation,
+             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
+      FROM enriched GROUP BY Situation
       UNION ALL
-      SELECT * FROM under_rows
+      SELECT 'Role4', Role4_RoadSide, COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Role4_RoadSide
+    ),
+
+    -- F) Aggregate: Total Bucket (overall)
+    buckets AS (
+      SELECT 'Bucket' AS GroupLabel, Total_Bucket AS Situation,
+             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
+      FROM enriched GROUP BY Situation
+    ),
+
+    -- G) Aggregate: Total Bucket × Venue
+    buckets_by_venue AS (
+      SELECT 'Bucket·Venue' AS GroupLabel,
+             CONCAT('Home · ', Total_Bucket) AS Situation,
+             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
+      FROM enriched GROUP BY Situation
+      UNION ALL
+      SELECT 'Bucket·Venue',
+             CONCAT('Road · ', Total_Bucket),
+             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
+      FROM enriched GROUP BY Total_Bucket
+    ),
+
+    unioned AS (
+      SELECT * FROM venue_home
+      UNION ALL SELECT * FROM venue_road
+      UNION ALL SELECT * FROM role4
+      UNION ALL SELECT * FROM buckets
+      UNION ALL SELECT * FROM buckets_by_venue
     )
+
+    -- H) Split into Over and Under sides for display, compute WinPct/ROI for each side
     SELECT
-      Side, Situation, N, W, L, P,
+      Side, GroupLabel, Situation, N, W, L, P,
       SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
       CASE
         WHEN (W + L) > 0 THEN ((W * (100.0/110.0) + L * (-1.0)) / (W + L)) * 100.0
         ELSE NULL END AS ROI_Pct
-    FROM unioned
+    FROM (
+      SELECT 'Over' AS Side, GroupLabel, Situation, N, Over_W  AS W, Under_W AS L, P FROM unioned
+      UNION ALL
+      SELECT 'Under',        GroupLabel, Situation, N, Under_W AS W, Over_W  AS L, P FROM unioned
+    )
     WHERE N >= @min_n
-    ORDER BY Situation, Side
+    ORDER BY GroupLabel, Situation, Side
     """
     job = CLIENT.query(
         sql,
@@ -673,6 +746,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0) -> pd
         ),
     )
     return job.result().to_dataframe()
+
 
 
 # ---------- helpers for rendering ----------
@@ -748,12 +822,13 @@ def render_current_situations_tab(selected_sport: str):
 
             st.markdown("**ATS (Spreads Only) — Role + Bucket + Bucket × Location**")
 
-            table3 = _compose_three_views(
+            table3 = _compose_four_views_spreads(
                 league_spreads=league_spreads,
                 is_home=is_home,
                 is_favorite=is_favorite,
                 bucket=bucket
             )
+
 
             if table3.empty:
                 st.write("_No league rows meet N threshold for this role/bucket._")
