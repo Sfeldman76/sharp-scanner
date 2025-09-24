@@ -161,7 +161,7 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
       FROM {MOVES}
       WHERE UPPER(Sport) = @sport_u
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_MOVES}`) = @book_u)
+        AND (@book_u = '' OR UPPER(Book) = @book_u)  
         AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) >= CURRENT_TIMESTAMP()
     ),
@@ -233,7 +233,7 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
       FROM {MOVES}
       WHERE COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_MOVES}`) = @book_u)
+        AND (@book_u = '' OR UPPER(Book) = @book_u) 
     ),
     canon AS (
       SELECT
@@ -351,7 +351,7 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
       FROM {SCORES}
       WHERE UPPER(Sport)  = @sport_upper
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
+        AND (@book_u = '' OR UPPER(Book) = @book_u)
         AND DATE(feat_Game_Start) <= @cutoff
         AND TIMESTAMP(feat_Game_Start)
               >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
@@ -547,7 +547,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
           FROM {SCORES}
           WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
             AND UPPER(Market)='TOTALS'
-            AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
+            AND (@book_u = '' OR UPPER(Book) = @book_u)
             AND DATE(feat_Game_Start) <= @cutoff
             AND TIMESTAMP(feat_Game_Start)
                   >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
@@ -562,7 +562,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
         FROM {SCORES}
         WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
           AND UPPER(Market)='SPREADS'
-          AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
+          AND (@book_u = '' OR UPPER(Book) = @book_u)  
           AND DATE(feat_Game_Start) <= @cutoff
           AND TIMESTAMP(feat_Game_Start)
                 >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
@@ -832,7 +832,9 @@ def render_current_situations_tab(selected_sport: str):
 # ---------- optional quick debug ----------
 def render_current_games_section(selected_sport: str):
     st.subheader("📡 Current/Upcoming Games (from MOVES — spreads only)")
+
     games = list_current_games_from_moves(selected_sport, book=DEFAULT_BOOK)
+
     if games.empty:
         st.info("No upcoming games found for this sport (from MOVES).")
         with st.expander("Debug this sport in MOVES"):
@@ -843,22 +845,29 @@ def render_current_games_section(selected_sport: str):
               COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS Game_Id,
               COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS Game_Start,
               Home_Team_Norm, Away_Team_Norm, Team_For_Join, feat_Team, home_l, away_l,
-              Value, Is_Home, Snapshot_Timestamp, `{BOOK_COL_MOVES}` AS Book
+              Value, Is_Home, Snapshot_Timestamp,
+              Book                                   -- <- no braces; literal column name
             FROM {MOVES}
-            WHERE UPPER(Sport) = @sport_upper AND UPPER(Market)='SPREADS'
+            WHERE UPPER(Sport) = @sport_upper
+              AND UPPER(Market) = 'SPREADS'
+              AND (@book_u = '' OR UPPER(Book) = @book_u)   -- optional: filter to your book
             ORDER BY Game_Start DESC
             LIMIT 100
             """
             job = CLIENT.query(
                 dbg_sql,
                 job_config=bigquery.QueryJobConfig(
-                    query_parameters=[bigquery.ScalarQueryParameter("sport_upper", "STRING", (selected_sport or "").upper())],
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("sport_upper", "STRING", (selected_sport or "").upper()),
+                        bigquery.ScalarQueryParameter("book_u", "STRING", (DEFAULT_BOOK or "").upper()),
+                    ],
                     use_query_cache=True,
                 ),
             )
             st.dataframe(job.result().to_dataframe())
         return
 
+    # Show picker when we do have games
     df = games.copy()
     df["label"] = df.apply(lambda r: f"{r['Game_Start']} — {', '.join(r['Teams'])}", axis=1)
     row = st.selectbox("Select game", df.to_dict("records"), format_func=lambda r: r["label"])
@@ -867,4 +876,5 @@ def render_current_games_section(selected_sport: str):
     st.write(f"**Game Id:** {row['Game_Id']}")
     st.write(f"**Teams:** {', '.join(row['Teams'])}")
     st.write(f"**Start:** {row['Game_Start']}")
+
 
