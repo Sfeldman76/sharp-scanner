@@ -1076,10 +1076,12 @@ def compute_ev_features_sharp_vs_rec(
     dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]], on=keys, how="left")
 
     # price each row at its own line; guard against missing μ/σ
-    line_rec = pd.to_numeric(dm["Value"], errors="coerce")
-    mu = pd.to_numeric(dm.get("Truth_Margin_Mu"), errors="coerce")
-    sig = pd.to_numeric(dm.get("Truth_Sigma"), errors="coerce")
+    mu = pd.Series(mu)
+    sig = pd.Series(sig)
+    line_rec = pd.Series(line_rec)
+    
     ok = mu.notna() & sig.notna() & (sig > 0) & line_rec.notna()
+
     # keep existing NaNs where not ok
     dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi((mu[ok] - line_rec[ok]) / sig[ok])
 
