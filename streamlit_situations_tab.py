@@ -429,7 +429,7 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
         AND UPPER(Market) = 'SPREADS'
         AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
         AND DATE(feat_Game_Start) <= @cutoff
-        AND feat_Game_Start >= TIMESTAMP_SUB(TIMESTAMP(@cutoff), INTERVAL @years_back YEAR)
+        AND feat_Game_Start >= TIMESTAMP(DATE_SUB(@cutoff, INTERVAL @years_back YEAR))
     """
 
     def _run(q: str):
@@ -540,7 +540,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
             AND UPPER(Market)='TOTALS'
             AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
             AND DATE(feat_Game_Start) <= @cutoff
-            AND feat_Game_Start >= TIMESTAMP_SUB(TIMESTAMP(@cutoff), INTERVAL @years_back YEAR)
+            AND feat_Game_Start >= TIMESTAMP(DATE_SUB(@cutoff, INTERVAL @years_back YEAR))
             AND Value IS NOT NULL
             AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
         )
@@ -554,7 +554,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
           AND UPPER(Market)='SPREADS'
           AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
           AND DATE(feat_Game_Start) <= @cutoff
-          AND feat_Game_Start >= TIMESTAMP_SUB(TIMESTAMP(@cutoff), INTERVAL @years_back YEAR)
+          AND feat_Game_Start >= TIMESTAMP(DATE_SUB(@cutoff, INTERVAL @years_back YEAR))
           AND Is_Home = TRUE
         GROUP BY GKey
       ),
