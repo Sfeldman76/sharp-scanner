@@ -696,7 +696,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
     """
     df4 = _run(q_bv)
 
-d.concat([df1, df2, df3, df4], ignore_index=True)
+    out = pd.concat([df1, df2, df3, df4], ignore_index=True)
     if out.empty:
         return out
     
