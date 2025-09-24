@@ -939,6 +939,192 @@ def _ensure_predict_proba_for_prob_cal(cal_obj, eps=1e-6):
             return np.c_[1.0 - p, p]
     return _AsPredictProba(cal_obj, eps=eps)
 
+def compute_ev_features_sharp_vs_rec(
+    df_market: pd.DataFrame,
+    *,
+    sharp_books: list[str] | None = None,
+    reliability_col: str = "Book_Reliability_Score",
+    limit_col: str = "Sharp_Limit_Total",
+    sigma_col: str = "Sigma_Pts",
+) -> pd.DataFrame:
+    """
+    Adds EV features that re-price each book's line using a 'truth' distribution
+    inferred from sharp books (de-vig at sharp line -> solve mu; then price rec line).
+    Returns df_market with new columns (float32):
+        - Truth_Fair_Prob_at_SharpLine
+        - Truth_Margin_Mu
+        - Truth_Sigma
+        - Truth_Fair_Prob_at_RecLine
+        - Rec_Implied_Prob
+        - EV_Sh_vs_Rec_Prob
+        - EV_Sh_vs_Rec_Dollar
+        - Kelly_Fraction
+    Safe to call even if data are missing; will yield NaNs for unsupported rows.
+    """
+    if df_market is None or df_market.empty:
+        # still create columns to keep schema predictable
+        cols = ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma",
+                "Truth_Fair_Prob_at_RecLine","Rec_Implied_Prob",
+                "EV_Sh_vs_Rec_Prob","EV_Sh_vs_Rec_Dollar","Kelly_Fraction"]
+        out = df_market.copy()
+        for c in cols:
+            if c not in out.columns:
+                out[c] = np.nan
+        return out
+
+    dm = df_market.copy()
+    dm["Market"] = dm["Market"].astype(str).str.lower().str.strip()
+    dm["Outcome_Norm"] = dm.get("Outcome_Norm", dm.get("Outcome", "")).astype(str).str.lower().str.strip()
+
+    # ---------- odds/prob helpers ----------
+    try:
+        erfinv = np.erfinv  # numpy >= 1.17
+    except AttributeError:
+        from scipy.special import erfinv  # fallback
+
+
+    def _phi(x):  # standard normal CDF
+        return 0.5 * (1.0 + np.erf(x / np.sqrt(2.0)))
+
+    def _ppf(p):  # inverse CDF
+        p = np.clip(np.asarray(p, float), 1e-9, 1-1e-9)
+        return np.sqrt(2.0) * erfinv(2.0*p - 1.0)
+
+    def _devig_two_way(pa_raw, pb_raw):
+        s = pa_raw + pb_raw
+        good = s > 0
+        pa = np.where(good, pa_raw / s, np.nan)
+        pb = np.where(good, pb_raw / s, np.nan)
+        return pa, pb
+
+    # ---------- choose sharp rows ----------
+    SHARP_SET = set((sharp_books or SHARP_BOOKS))
+    dm["Bookmaker"] = dm["Bookmaker"].astype(str).str.lower().str.strip()
+    sharp_mask = dm["Bookmaker"].isin(SHARP_SET)
+    sharp_cols = ["Game_Key","Market","Outcome_Norm","Bookmaker","Value","Odds_Price"]
+    if reliability_col in dm.columns: sharp_cols.append(reliability_col)
+    if limit_col in dm.columns:       sharp_cols.append(limit_col)
+    sharp_rows = dm.loc[sharp_mask, list(dict.fromkeys(sharp_cols))].copy()
+
+    # Prepare output columns
+    for c in ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma",
+              "Truth_Fair_Prob_at_RecLine","Rec_Implied_Prob",
+              "EV_Sh_vs_Rec_Prob","EV_Sh_vs_Rec_Dollar","Kelly_Fraction"]:
+        if c not in dm.columns:
+            dm[c] = np.nan
+
+    if sharp_rows.empty:
+        # No sharp data: just compute Rec_Implied_Prob and return
+        dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan)).astype("float32")
+        return dm
+
+    # Rank sharp candidates by reliability then limit
+    if reliability_col not in sharp_rows.columns:
+        sharp_rows[reliability_col] = 0.0
+    sharp_rows["_rel_rank"] = sharp_rows.groupby(["Game_Key","Market","Outcome_Norm"])[reliability_col] \
+        .rank(ascending=False, method="first")
+    if limit_col in sharp_rows.columns:
+        sharp_rows["_lim_rank"] = sharp_rows.groupby(["Game_Key","Market","Outcome_Norm"])[limit_col] \
+            .rank(ascending=False, method="first")
+    else:
+        sharp_rows["_lim_rank"] = 1.0
+
+    sharp_ref = (sharp_rows
+        .sort_values(["Game_Key","Market","Outcome_Norm","_rel_rank","_lim_rank"])
+        .groupby(["Game_Key","Market","Outcome_Norm"], as_index=False)
+        .head(1)
+        .drop(columns=["_rel_rank","_lim_rank"])
+        .rename(columns={"Value":"Sharp_Line","Odds_Price":"Sharp_Odds"})
+    )
+
+    # Build a sharp "pair" per (Game_Key, Market): take top 2 outcomes from sharp set
+    # (works for spreads/h2h team sides and totals over/under)
+    pairs_base = (sharp_rows
+        .sort_values(["Game_Key","Market", reliability_col], ascending=[True,True,False])
+        .drop_duplicates(subset=["Game_Key","Market","Outcome_Norm"], keep="first"))
+
+    top2 = (pairs_base
+        .groupby(["Game_Key","Market"], as_index=False)
+        .apply(lambda g: g.head(2))
+        .reset_index(drop=True))
+
+    def _to_pair(df):
+        if len(df) < 2:
+            return pd.Series({"Outcome_A":np.nan,"Line_A":np.nan,"Odds_A":np.nan,
+                              "Outcome_B":np.nan,"Line_B":np.nan,"Odds_B":np.nan})
+        a, b = df.iloc[0], df.iloc[1]
+        return pd.Series({"Outcome_A":a["Outcome_Norm"], "Line_A":a["Value"], "Odds_A":a["Odds_Price"],
+                          "Outcome_B":b["Outcome_Norm"], "Line_B":b["Value"], "Odds_B":b["Odds_Price"]})
+
+    sharp_pairs = (top2.groupby(["Game_Key","Market"]).apply(_to_pair).reset_index())
+
+    truth = sharp_ref.merge(sharp_pairs, on=["Game_Key","Market"], how="left")
+
+    # Identify which side in the pair is our selected truth outcome
+    same_as_A = truth["Outcome_Norm"].astype(str).eq(truth["Outcome_A"].astype(str))
+    odds_this = np.where(same_as_A, truth["Odds_A"], truth["Odds_B"])
+    odds_opp  = np.where(same_as_A, truth["Odds_B"], truth["Odds_A"])
+    p_this_raw = _amer_to_prob(odds_this)
+    p_opp_raw  = _amer_to_prob(odds_opp)
+    p_fair_this, _ = _devig_two_way(p_this_raw, p_opp_raw)
+    truth["Truth_Fair_Prob_at_SharpLine"] = p_fair_this
+
+    # Sigma map
+    if sigma_col not in dm.columns:
+        dm[sigma_col] = np.nan
+    sig_map = dm[["Game_Key","Market","Outcome_Norm",sigma_col,"Sport"]].drop_duplicates(["Game_Key","Market","Outcome_Norm"])
+    truth = truth.merge(sig_map, on=["Game_Key","Market","Outcome_Norm"], how="left")
+
+    # Fallback σ by sport if needed
+    SPORT_SIGMA_DEFAULT = {'NFL':13.0,'NCAAF':14.0,'NBA':12.0,'WNBA':11.0,'MLB':5.5,'CFL':13.5,'NCAAB':11.5}
+    def _pick_sigma(row):
+        s = pd.to_numeric(row.get(sigma_col), errors="coerce")
+        if pd.notna(s) and s > 0: return float(s)
+        sport = str(row.get("Sport","NFL")).upper()
+        return float(SPORT_SIGMA_DEFAULT.get(sport, 12.0))
+
+    s_sharp = pd.to_numeric(truth["Sharp_Line"], errors="coerce")
+    p_sharp = pd.to_numeric(truth["Truth_Fair_Prob_at_SharpLine"], errors="coerce")
+    sigma   = truth.apply(_pick_sigma, axis=1).astype(float)
+    mu      = s_sharp + sigma * _ppf(p_sharp)
+    truth["Truth_Margin_Mu"] = mu
+    truth["Truth_Sigma"]     = sigma
+
+    # Join μ,σ back to every book row (so we can price each row's line)
+    keys = ["Game_Key","Market","Outcome_Norm"]
+    dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]], on=keys, how="left")
+
+    # Price each row at its own line
+    line_rec = pd.to_numeric(dm["Value"], errors="coerce")
+    mu = pd.to_numeric(dm["Truth_Margin_Mu"], errors="coerce")
+    sig = pd.to_numeric(dm["Truth_Sigma"], errors="coerce")
+    dm.loc[:, "Truth_Fair_Prob_at_RecLine"] = _phi((mu - line_rec) / sig)
+
+    # Moneyline fallback (no line shift)
+    is_ml = dm["Market"].isin(["h2h","ml","moneyline","headtohead"])
+    need_ml = is_ml & dm["Truth_Fair_Prob_at_RecLine"].isna()
+    dm.loc[need_ml, "Truth_Fair_Prob_at_RecLine"] = dm.loc[need_ml, "Truth_Fair_Prob_at_SharpLine"]
+
+    # Implied prob of the offered odds
+    dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan))
+
+    # EV per $1 stake and probability edge
+    p_truth = pd.to_numeric(dm["Truth_Fair_Prob_at_RecLine"], errors="coerce")
+    odds = pd.to_numeric(dm.get("Odds_Price", np.nan), errors="coerce")
+    payout = np.where(odds >= 0, odds/100.0, 100.0/(-odds))
+    dm["EV_Sh_vs_Rec_Dollar"] = (p_truth * payout) - (1.0 - p_truth)
+    dm["EV_Sh_vs_Rec_Prob"]   = p_truth - dm["Rec_Implied_Prob"]
+
+    # Kelly (full Kelly; clamp >=0)
+    dm["Kelly_Fraction"] = np.maximum(0.0, (p_truth * payout - (1.0 - p_truth)) / payout)
+
+    # dtype tighten
+    for c in ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma",
+              "Truth_Fair_Prob_at_RecLine","Rec_Implied_Prob",
+              "EV_Sh_vs_Rec_Prob","EV_Sh_vs_Rec_Dollar","Kelly_Fraction"]:
+        dm[c] = pd.to_numeric(dm[c], errors="coerce").astype("float32")
+
+    return dm
 
 
 def normalize_team(t):
@@ -5227,7 +5413,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             df_market,
             emit_levels_str=False,  # keep memory tiny for training
         )
-        
+        df_market = compute_ev_features_sharp_vs_rec(
+            df_market,
+            sharp_books=SHARP_BOOKS,
+            reliability_col="Book_Reliability_Score",
+            limit_col="Sharp_Limit_Total",
+            sigma_col="Sigma_Pts",  # your spreads block already tries to create Sigma_Pts
+        )
        # === NEW: final-snapshot microstructure + hybrid timing (before normalization/canonical filter) ===
         df_market = compute_snapshot_micro_features_training(
             df_market,
@@ -6092,6 +6284,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "SpreadTotal_Rho","SpreadTotal_Synergy","SpreadTotal_Sign",
             "SpreadML_Rho","SpreadML_Synergy","SpreadML_Sign","Spread_ML_ProbGap",
             "TotalML_Rho","TotalML_Synergy","TotalML_Sign",
+            "EV_Sh_vs_Rec_Prob", "EV_Sh_vs_Rec_Dollar", "Kelly_Fraction",
             
         ]
         
