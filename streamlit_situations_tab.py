@@ -237,7 +237,7 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         COALESCE(Away_Team_Norm, away_l) AS away_n,
         COALESCE(feat_Team, Team_For_Join, Home_Team_Norm, home_l, Away_Team_Norm, away_l) AS team_any,
         COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS stable_key,
-        Is_Home, Value, Snapshot_Timestamp, Market_Leader, Limit
+        Is_Home, Value, Market_Leader, `Limit`, Snapshot_Timestamp
       FROM {MOVES}
       WHERE COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND UPPER(Market) = 'SPREADS'
@@ -254,7 +254,7 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         LOWER(team_any)                    AS team_norm,
         LOWER(home_n)                      AS home_norm,
         LOWER(away_n)                      AS away_norm,
-        Is_Home, Value, gs AS cutoff, Market_Leader, Limit, Snapshot_Timestamp
+        Is_Home, Value, gs AS cutoff, Market_Leader, `Limit`, Snapshot_Timestamp
       FROM mv
       WHERE home_n IS NOT NULL AND away_n IS NOT NULL
     ),
@@ -263,9 +263,10 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         team_norm,
         ARRAY_AGG(
           STRUCT(Is_Home, Value, cutoff)
-          ORDER BY Value IS NULL, Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
+          ORDER BY Value IS NULL, Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
           LIMIT 1
         )[OFFSET(0)] AS s
+
       FROM canon
       WHERE (concat_id = LOWER(@gid) OR stable_id = LOWER(@gid))
         AND team_norm IN UNNEST(@teams_norm)
@@ -427,16 +428,19 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
         LOWER(COALESCE(feat_Team, Team_For_Join, Home_Team_Norm, home_l,
                        Away_Team_Norm, away_l)) AS team_norm,
         Value AS mv_line_val,
-        Market_Leader, Limit, Snapshot_Timestamp
+        Market_Leader, `Limit`, Snapshot_Timestamp
       FROM {MOVES}
       WHERE UPPER(Market)='SPREADS'
         AND (@book_u = '' OR UPPER(Book) = @book_u)
     ),
     mv_pick AS (
       SELECT gkey, team_norm,
-             ARRAY_AGG(STRUCT(mv_line_val, Market_Leader, Limit, Snapshot_Timestamp)
-                       ORDER BY mv_line_val IS NULL, Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
-                       LIMIT 1)[OFFSET(0)].mv_line_val AS mv_line_val
+             ARRAY_AGG(
+              STRUCT(mv_line_val, Market_Leader, `Limit`, Snapshot_Timestamp)
+              ORDER BY mv_line_val IS NULL, Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
+              LIMIT 1
+            )[OFFSET(0)].mv_line_val AS mv_line_val
+
       FROM mv
       GROUP BY gkey, team_norm
     ),
