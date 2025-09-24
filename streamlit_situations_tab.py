@@ -382,135 +382,131 @@ def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
     return ctxs
 
 # ---------- SCORES: league-wide situation totals ----------
+
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, book: str = DEFAULT_BOOK) -> pd.DataFrame:
     sql = f"""
-    WITH base AS (
+    WITH enriched AS (
       SELECT
-        UPPER(Sport) AS Sport_U,
-        UPPER(Market) AS Market_U,
         Is_Home,
         Value AS Closing_Spread,             -- team POV spread; fav < 0
         Spread_Cover_Flag,
         ATS_Cover_Margin,
-        feat_Game_Start
-      FROM {SCORES}
-      WHERE UPPER(Sport) = @sport_upper
-        AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)   -- 🔒 book filter
-        AND DATE(feat_Game_Start) <= @cutoff
-    ),
-    enriched AS (
-      SELECT
-        Is_Home,
-        Closing_Spread,
-        CASE WHEN Closing_Spread IS NULL THEN NULL
-             WHEN Closing_Spread < 0 THEN TRUE ELSE FALSE END AS Is_Favorite,
+        CASE WHEN Value IS NULL THEN NULL
+             WHEN Value < 0 THEN TRUE ELSE FALSE END AS Is_Favorite,
         CASE
           WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
             CASE
-              WHEN Closing_Spread IS NULL THEN ''
-              WHEN Closing_Spread <= -12.5 THEN 'Fav ≤ -12.5'
-              WHEN Closing_Spread <=  -9.5 THEN 'Fav -10 to -12.5'
-              WHEN Closing_Spread <=  -6.5 THEN 'Fav -7 to -9.5'
-              WHEN Closing_Spread <=  -3.5 THEN 'Fav -4 to -6.5'
-              WHEN Closing_Spread <=  -0.5 THEN 'Fav -0.5 to -3.5'
-              WHEN Closing_Spread =    0.0 THEN 'Pick (0)'
-              WHEN Closing_Spread <=   3.5 THEN 'Dog +0.5 to +3.5'
-              WHEN Closing_Spread <=   6.5 THEN 'Dog +4 to +6.5'
-              WHEN Closing_Spread <=   9.5 THEN 'Dog +7 to +9.5'
-              WHEN Closing_Spread <=  12.5 THEN 'Dog +10 to +12.5'
+              WHEN Value IS NULL THEN ''
+              WHEN Value <= -12.5 THEN 'Fav ≤ -12.5'
+              WHEN Value <=  -9.5 THEN 'Fav -10 to -12.5'
+              WHEN Value <=  -6.5 THEN 'Fav -7 to -9.5'
+              WHEN Value <=  -3.5 THEN 'Fav -4 to -6.5'
+              WHEN Value <=  -0.5 THEN 'Fav -0.5 to -3.5'
+              WHEN Value =    0.0 THEN 'Pick (0)'
+              WHEN Value <=   3.5 THEN 'Dog +0.5 to +3.5'
+              WHEN Value <=   6.5 THEN 'Dog +4 to +6.5'
+              WHEN Value <=   9.5 THEN 'Dog +7 to +9.5'
+              WHEN Value <=  12.5 THEN 'Dog +10 to +12.5'
               ELSE 'Dog ≥ +13'
             END
           ELSE
             CASE
-              WHEN Closing_Spread IS NULL THEN ''
-              WHEN Closing_Spread <= -10.5 THEN 'Fav ≤ -10.5'
-              WHEN Closing_Spread <=  -7.5 THEN 'Fav -8 to -10.5'
-              WHEN Closing_Spread <=  -6.5 THEN 'Fav -7 to -6.5'
-              WHEN Closing_Spread <=  -3.5 THEN 'Fav -4 to -6.5'
-              WHEN Closing_Spread <=  -0.5 THEN 'Fav -0.5 to -3.5'
-              WHEN Closing_Spread =    0.0 THEN 'Pick (0)'
-              WHEN Closing_Spread <=   3.5 THEN 'Dog +0.5 to +3.5'
-              WHEN Closing_Spread <=   6.5 THEN 'Dog +4 to +6.5'
-              WHEN Closing_Spread <=  10.5 THEN 'Dog +7 to +10.5'
+              WHEN Value IS NULL THEN ''
+              WHEN Value <= -10.5 THEN 'Fav ≤ -10.5'
+              WHEN Value <=  -7.5 THEN 'Fav -8 to -10.5'
+              WHEN Value <=  -6.5 THEN 'Fav -7 to -6.5'
+              WHEN Value <=  -3.5 THEN 'Fav -4 to -6.5'
+              WHEN Value <=  -0.5 THEN 'Fav -0.5 to -3.5'
+              WHEN Value =    0.0 THEN 'Pick (0)'
+              WHEN Value <=   3.5 THEN 'Dog +0.5 to +3.5'
+              WHEN Value <=   6.5 THEN 'Dog +4 to +6.5'
+              WHEN Value <=  10.5 THEN 'Dog +7 to +10.5'
               ELSE 'Dog ≥ +11'
             END
-        END AS Spread_Bucket,
-        Spread_Cover_Flag,
-        ATS_Cover_Margin
-      FROM base
-    ),
-
-    venue AS (
-      SELECT
-        'Venue' AS GroupLabel,
-        CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END AS Situation,
-        COUNT(*) AS N,
-        COUNTIF(Spread_Cover_Flag = 1) AS W,
-        COUNTIF(Spread_Cover_Flag = 0) AS L,
-        COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      WHERE Is_Home IS NOT NULL
-      GROUP BY Situation
-    ),
-
-    role4 AS (
-      SELECT
-        'Role4' AS GroupLabel,
-        CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
-               CASE WHEN Is_Favorite THEN 'Favorite' ELSE 'Underdog' END) AS Situation,
-        COUNT(*) AS N,
-        COUNTIF(Spread_Cover_Flag = 1) AS W,
-        COUNTIF(Spread_Cover_Flag = 0) AS L,
-        COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      WHERE Is_Home IS NOT NULL AND Is_Favorite IS NOT NULL
-      GROUP BY Situation
-    ),
-
-    buckets AS (
-      SELECT
-        'Bucket' AS GroupLabel,
-        Spread_Bucket AS Situation,
-        COUNT(*) AS N,
-        COUNTIF(Spread_Cover_Flag = 1) AS W,
-        COUNTIF(Spread_Cover_Flag = 0) AS L,
-        COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      WHERE Spread_Bucket <> ''
-      GROUP BY Situation
-    ),
-
-    buckets_by_venue AS (
-      SELECT
-        'Bucket·Venue' AS GroupLabel,
-        CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' · ', Spread_Bucket) AS Situation,
-        COUNT(*) AS N,
-        COUNTIF(Spread_Cover_Flag = 1) AS W,
-        COUNTIF(Spread_Cover_Flag = 0) AS L,
-        COUNTIF(ATS_Cover_Margin = 0)  AS P
-      FROM enriched
-      WHERE Spread_Bucket <> '' AND Is_Home IS NOT NULL
-      GROUP BY Situation
-    ),
-
-    unioned AS (
-      SELECT * FROM venue
-      UNION ALL SELECT * FROM role4
-      UNION ALL SELECT * FROM buckets
-      UNION ALL SELECT * FROM buckets_by_venue
+        END AS Spread_Bucket
+      FROM {SCORES}
+      WHERE UPPER(Sport)  = @sport_upper
+        AND UPPER(Market) = 'SPREADS'
+        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
+        AND DATE(feat_Game_Start) <= @cutoff
     )
 
-    SELECT
-      GroupLabel, Situation, N, W, L, P,
-      SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
-      CASE
-        WHEN (W + L) > 0 THEN ((W * (100.0/110.0) + L * (-1.0)) / (W + L)) * 100.0
-        ELSE NULL END AS ROI_Pct
-    FROM unioned
-    WHERE N >= @min_n
-    ORDER BY GroupLabel, Situation
+    -- 1) Venue
+    SELECT 'Venue' AS GroupLabel,
+           CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END AS Situation,
+           COUNT(*) AS N,
+           COUNTIF(Spread_Cover_Flag = 1) AS W,
+           COUNTIF(Spread_Cover_Flag = 0) AS L,
+           COUNTIF(ATS_Cover_Margin = 0)  AS P,
+           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0) AS WinPct,
+           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
+                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
+                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
+                ELSE NULL END AS ROI_Pct
+    FROM enriched
+    WHERE Is_Home IS NOT NULL
+    GROUP BY Situation
+    HAVING N >= @min_n
+
+    UNION ALL
+
+    -- 2) Role4
+    SELECT 'Role4',
+           CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
+                  CASE WHEN Is_Favorite THEN 'Favorite' ELSE 'Underdog' END),
+           COUNT(*),
+           COUNTIF(Spread_Cover_Flag = 1),
+           COUNTIF(Spread_Cover_Flag = 0),
+           COUNTIF(ATS_Cover_Margin = 0),
+           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0),
+           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
+                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
+                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
+                ELSE NULL END
+    FROM enriched
+    WHERE Is_Home IS NOT NULL AND Is_Favorite IS NOT NULL
+    GROUP BY 2
+    HAVING COUNT(*) >= @min_n
+
+    UNION ALL
+
+    -- 3) Bucket (overall)
+    SELECT 'Bucket',
+           Spread_Bucket,
+           COUNT(*),
+           COUNTIF(Spread_Cover_Flag = 1),
+           COUNTIF(Spread_Cover_Flag = 0),
+           COUNTIF(ATS_Cover_Margin = 0),
+           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0),
+           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
+                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
+                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
+                ELSE NULL END
+    FROM enriched
+    WHERE Spread_Bucket <> ''
+    GROUP BY Spread_Bucket
+    HAVING COUNT(*) >= @min_n
+
+    UNION ALL
+
+    -- 4) Bucket × Venue
+    SELECT 'Bucket·Venue',
+           CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' · ', Spread_Bucket),
+           COUNT(*),
+           COUNTIF(Spread_Cover_Flag = 1),
+           COUNTIF(Spread_Cover_Flag = 0),
+           COUNTIF(ATS_Cover_Margin = 0),
+           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0),
+           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
+                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
+                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
+                ELSE NULL END
+    FROM enriched
+    WHERE Spread_Bucket <> '' AND Is_Home IS NOT NULL
+    GROUP BY 2
+    HAVING COUNT(*) >= @min_n
+    ORDER BY 1, 2
     """
     job = CLIENT.query(
         sql,
@@ -526,54 +522,40 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, book: s
     )
     return job.result().to_dataframe()
 
+
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, book: str = DEFAULT_BOOK) -> pd.DataFrame:
-    """
-    League-wide Over/Under results (no points breakdown).
-    Groupings returned (for both Side=Over and Side=Under):
-      - Venue (Home/Road)
-      - Role4 (Home Fav/Dog, Road Fav/Dog) -> inferred from spreads (home spread < 0 => Home Fav)
-      - Total Bucket (overall)
-      - Bucket × Venue (Home · bucket, Road · bucket)
-    Each game is counted once per group (no double counting).
-    """
     sql = f"""
-    WITH totals_base AS (
-      SELECT
-        UPPER(Sport) AS Sport_U,
-        UPPER(Market) AS Market_U,
-        COALESCE(feat_Game_Key, Game_Key) AS GKey,
-        feat_Game_Start,
-        Value AS Total_Line,
-        SAFE_CAST(Team_Score AS FLOAT64) AS Team_Score,
-        SAFE_CAST(Opp_Score  AS FLOAT64) AS Opp_Score,
-        Is_Home
-      FROM {SCORES}
-      WHERE UPPER(Sport) = @sport_upper
-        AND UPPER(Market) = 'TOTALS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)    -- 🔒 book filter
-        AND DATE(feat_Game_Start) <= @cutoff
-        AND Value IS NOT NULL
-        AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
+    -- One home row per game for totals using ROW_NUMBER (avoids extra CTEs)
+    WITH per_game_totals AS (
+      SELECT *
+      FROM (
+        SELECT
+          COALESCE(feat_Game_Key, Game_Key) AS GKey,
+          feat_Game_Start,
+          Value AS Total_Line,
+          SAFE_CAST(Team_Score AS FLOAT64) + SAFE_CAST(Opp_Score AS FLOAT64) AS Total_Points,
+          Is_Home,
+          ROW_NUMBER() OVER (PARTITION BY COALESCE(feat_Game_Key, Game_Key)
+                             ORDER BY Is_Home DESC) AS rn
+        FROM {SCORES}
+        WHERE UPPER(Sport)  = @sport_upper
+          AND UPPER(Market) = 'TOTALS'
+          AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
+          AND DATE(feat_Game_Start) <= @cutoff
+          AND Value IS NOT NULL
+          AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
+      )
+      WHERE rn = 1   -- pick the home row
     ),
-    per_game_totals AS (
-      SELECT
-        GKey,
-        ANY_VALUE(feat_Game_Start) AS gs,
-        ANY_VALUE(Total_Line)      AS Total_Line,
-        ANY_VALUE(Team_Score + Opp_Score) AS Total_Points
-      FROM totals_base
-      WHERE Is_Home = TRUE
-      GROUP BY GKey
-    ),
-    spreads_home AS (
+    home_spreads AS (
       SELECT
         COALESCE(feat_Game_Key, Game_Key) AS GKey,
         ANY_VALUE(Value) AS Home_Closing_Spread
       FROM {SCORES}
-      WHERE UPPER(Sport) = @sport_upper
+      WHERE UPPER(Sport)  = @sport_upper
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)    -- 🔒 book filter
+        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
         AND DATE(feat_Game_Start) <= @cutoff
         AND Is_Home = TRUE
       GROUP BY GKey
@@ -612,6 +594,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, book:
               ELSE 'OU ≥ 60'
             END
         END AS Total_Bucket,
+        -- Role labels from the home spread (pick -> treat as dog)
         CASE
           WHEN s.Home_Closing_Spread IS NULL THEN 'Home Underdog'
           WHEN s.Home_Closing_Spread < 0 THEN 'Home Favorite'
@@ -625,59 +608,85 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, book:
           ELSE 'Road Favorite'
         END AS Role4_RoadSide
       FROM per_game_totals t
-      LEFT JOIN spreads_home s USING (GKey)
-    ),
-    venue_home AS (
-      SELECT 'Venue' AS GroupLabel, 'Home' AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
-      FROM enriched
-    ),
-    venue_road AS (
-      SELECT 'Venue' AS GroupLabel, 'Road' AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
-      FROM enriched
-    ),
-    role4 AS (
-      SELECT 'Role4' AS GroupLabel, Role4_HomeSide AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
-      FROM enriched GROUP BY Situation
-      UNION ALL
-      SELECT 'Role4', Role4_RoadSide, COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Role4_RoadSide
-    ),
-    buckets AS (
-      SELECT 'Bucket' AS GroupLabel, Total_Bucket AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
-      FROM enriched GROUP BY Situation
-    ),
-    buckets_by_venue AS (
-      SELECT 'Bucket·Venue' AS GroupLabel,
-             CONCAT('Home · ', Total_Bucket) AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
-      FROM enriched GROUP BY Situation
-      UNION ALL
-      SELECT 'Bucket·Venue',
-             CONCAT('Road · ', Total_Bucket),
-             COUNT(*) AS N, COUNTIF(Over_Win) AS Over_W, COUNTIF(Under_Win) AS Under_W, COUNTIF(Push) AS P
-      FROM enriched GROUP BY Total_Bucket
-    ),
-    unioned AS (
-      SELECT * FROM venue_home
-      UNION ALL SELECT * FROM venue_road
-      UNION ALL SELECT * FROM role4
-      UNION ALL SELECT * FROM buckets
-      UNION ALL SELECT * FROM buckets_by_venue
+      LEFT JOIN home_spreads s USING (GKey)
     )
-    SELECT
-      Side, GroupLabel, Situation, N, W, L, P,
-      SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W + L, 0)), 100.0) AS WinPct,
-      CASE
-        WHEN (W + L) > 0 THEN ((W * (100.0/110.0) + L * (-1.0)) / (W + L)) * 100.0
-        ELSE NULL END AS ROI_Pct
+
+    -- VENUE
+    SELECT Side, 'Venue' AS GroupLabel, Situation, N, W, L, P,
+           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0) AS WinPct,
+           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END AS ROI_Pct
     FROM (
-      SELECT 'Over' AS Side, GroupLabel, Situation, N, Over_W  AS W, Under_W AS L, P FROM unioned
+      SELECT 'Over' AS Side, 'Home' AS Situation,
+             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P FROM enriched
       UNION ALL
-      SELECT 'Under',        GroupLabel, Situation, N, Under_W AS W, Over_W  AS L, P FROM unioned
+      SELECT 'Under', 'Home', COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push) FROM enriched
+      UNION ALL
+      SELECT 'Over', 'Road', COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push) FROM enriched
+      UNION ALL
+      SELECT 'Under','Road', COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push) FROM enriched
+    )
+    WHERE N >= @min_n
+
+    UNION ALL
+
+    -- ROLE4 (home+road sides)
+    SELECT Side, 'Role4', Situation, N, W, L, P,
+           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0),
+           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END
+    FROM (
+      SELECT 'Over' AS Side, Role4_HomeSide AS Situation,
+             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
+      FROM enriched GROUP BY Role4_HomeSide
+      UNION ALL
+      SELECT 'Under', Role4_HomeSide, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Role4_HomeSide
+      UNION ALL
+      SELECT 'Over', Role4_RoadSide, COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Role4_RoadSide
+      UNION ALL
+      SELECT 'Under', Role4_RoadSide, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Role4_RoadSide
+    )
+    WHERE N >= @min_n
+
+    UNION ALL
+
+    -- BUCKET (overall)
+    SELECT Side, 'Bucket', Situation, N, W, L, P,
+           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0),
+           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END
+    FROM (
+      SELECT 'Over' AS Side, Total_Bucket AS Situation,
+             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
+      FROM enriched GROUP BY Total_Bucket
+      UNION ALL
+      SELECT 'Under', Total_Bucket, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Total_Bucket
+    )
+    WHERE N >= @min_n
+
+    UNION ALL
+
+    -- BUCKET × VENUE
+    SELECT Side, 'Bucket·Venue', Situation, N, W, L, P,
+           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0),
+           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END
+    FROM (
+      SELECT 'Over' AS Side, CONCAT('Home · ', Total_Bucket) AS Situation,
+             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
+      FROM enriched GROUP BY Total_Bucket
+      UNION ALL
+      SELECT 'Under', CONCAT('Home · ', Total_Bucket),
+             COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Total_Bucket
+      UNION ALL
+      SELECT 'Over', CONCAT('Road · ', Total_Bucket),
+             COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Total_Bucket
+      UNION ALL
+      SELECT 'Under', CONCAT('Road · ', Total_Bucket),
+             COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+      FROM enriched GROUP BY Total_Bucket
     )
     WHERE N >= @min_n
     ORDER BY GroupLabel, Situation, Side
