@@ -20,12 +20,15 @@ BOOK_COL_MOVES  = "Book"
 BOOK_COL_SCORES = "Book"
 DEFAULT_BOOK    = "Pinnacle"
 
+# backticked column-name tokens (safe to inject into SQL)
+BOOK_MOVES_COL_SQL  = f"`{BOOK_COL_MOVES}`"
+BOOK_SCORES_COL_SQL = f"`{BOOK_COL_SCORES}`"
+
 CLIENT = bigquery.Client(project=PROJECT)
 CACHE_TTL_SEC = 120
 
 # ---------- tiny utils ----------
 def _to_utc_dt(x) -> dt.datetime:
-    """Coerce anything into a tz‑aware UTC datetime; fallback to now() if bad."""
     if isinstance(x, dt.datetime):
         return x.astimezone(timezone.utc) if x.tzinfo else x.replace(tzinfo=timezone.utc)
     if isinstance(x, dt.date):
@@ -34,9 +37,6 @@ def _to_utc_dt(x) -> dt.datetime:
     if isinstance(ts, pd.Timestamp) and not pd.isna(ts):
         return ts.to_pydatetime()
     return datetime.now(timezone.utc)
-
-def _sport_is_football(s: str) -> bool:
-    return (s or "").upper() in {"NFL", "NCAAF"}
 
 def _sport_is_basketball(s: str) -> bool:
     return (s or "").upper() in {"NBA", "NCAAB", "WNBA"}
@@ -72,40 +72,10 @@ def _bb_spread_bucket(v: float | None) -> str:
     if v <=  12.5: return "Dog +10 to +12.5"
     return "Dog ≥ +13"
 
-def _fb_total_bucket(v: float | None) -> str:
-    if v is None: return ""
-    try: v = float(v)
-    except Exception: return ""
-    if v <= 37.5: return "OU ≤ 37.5"
-    if v <= 41.5: return "OU 38–41.5"
-    if v <= 44.5: return "OU 42–44.5"
-    if v <= 47.5: return "OU 45–47.5"
-    if v <= 50.5: return "OU 48–50.5"
-    if v <= 53.5: return "OU 51–53.5"
-    if v <= 56.5: return "OU 54–56.5"
-    if v <= 59.5: return "OU 57–59.5"
-    return "OU ≥ 60"
-
-def _bb_total_bucket(v: float | None) -> str:
-    if v is None: return ""
-    try: v = float(v)
-    except Exception: return ""
-    if v <= 205.5: return "OU ≤ 205.5"
-    if v <= 209.5: return "OU 206–209.5"
-    if v <= 213.5: return "OU 210–213.5"
-    if v <= 217.5: return "OU 214–217.5"
-    if v <= 221.5: return "OU 218–221.5"
-    if v <= 225.5: return "OU 222–225.5"
-    if v <= 229.5: return "OU 226–229.5"
-    if v <= 233.5: return "OU 230–233.5"
-    return "OU ≥ 234"
-
 def _derive_spread_bucket_for_ui(sport: str, closing_spread: float | None) -> str:
     if closing_spread is None:
         return ""
-    if _sport_is_basketball(sport):
-        return _bb_spread_bucket(closing_spread)
-    return _fb_spread_bucket(closing_spread)
+    return _bb_spread_bucket(closing_spread) if _sport_is_basketball(sport) else _fb_spread_bucket(closing_spread)
 
 def _wanted_labels(is_home: bool | None, is_favorite: bool | None, bucket: str | None):
     out = []
@@ -117,69 +87,40 @@ def _wanted_labels(is_home: bool | None, is_favorite: bool | None, bucket: str |
         out.append(bucket)
         if is_home is True:  out.append(f"Home · {bucket}")
         if is_home is False: out.append(f"Road · {bucket}")
-    # de‑dupe keep order
     seen, keep = set(), []
     for s in out:
         if s and s not in seen:
             keep.append(s); seen.add(s)
     return keep
 
-def _get_book_name() -> str:
-    # If you have a Streamlit control, you can wire it here; for now we honor DEFAULT_BOOK.
-    return DEFAULT_BOOK or ""
-
 def _compose_four_views_spreads(league_spreads: pd.DataFrame,
                                 is_home: bool | None, is_favorite: bool | None, bucket: str | None) -> pd.DataFrame:
-    """
-    Build a compact table with up to 4 rows, in this order:
-      1) Fav/Dog (Role4)
-      2) Home/Road (Venue)
-      3) Bucket (overall)
-      4) Bucket × Location (Bucket·Venue)
-    """
     if league_spreads is None or league_spreads.empty:
         return pd.DataFrame(columns=["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"])
-
-    out_parts = []
-
+    parts = []
     if is_home is not None and is_favorite is not None:
-        role_lbl = f"{'Home' if is_home else 'Road'} {'Favorite' if is_favorite else 'Underdog'}"
-        df = league_spreads[(league_spreads["GroupLabel"] == "Role4") &
-                            (league_spreads["Situation"]  == role_lbl)]
-        if not df.empty:
-            df = df.copy(); df.insert(0, "Section", "Role (Fav/Dog)")
-            out_parts.append(df)
-
+        role = f"{'Home' if is_home else 'Road'} {'Favorite' if is_favorite else 'Underdog'}"
+        df = league_spreads[(league_spreads["GroupLabel"]=="Role4") & (league_spreads["Situation"]==role)]
+        if not df.empty: df = df.copy(); df.insert(0,"Section","Role (Fav/Dog)"); parts.append(df)
     if is_home is not None:
-        v_lbl = "Home" if is_home else "Road"
-        df = league_spreads[(league_spreads["GroupLabel"] == "Venue") &
-                            (league_spreads["Situation"]  == v_lbl)]
-        if not df.empty:
-            df = df.copy(); df.insert(0, "Section", "Venue (Home/Road)")
-            out_parts.append(df)
-
+        v = "Home" if is_home else "Road"
+        df = league_spreads[(league_spreads["GroupLabel"]=="Venue") & (league_spreads["Situation"]==v)]
+        if not df.empty: df = df.copy(); df.insert(0,"Section","Venue (Home/Road)"); parts.append(df)
     if bucket:
-        df = league_spreads[(league_spreads["GroupLabel"] == "Bucket") &
-                            (league_spreads["Situation"]  == bucket)]
-        if not df.empty:
-            df = df.copy(); df.insert(0, "Section", "Bucket (overall)")
-            out_parts.append(df)
-
+        df = league_spreads[(league_spreads["GroupLabel"]=="Bucket") & (league_spreads["Situation"]==bucket)]
+        if not df.empty: df = df.copy(); df.insert(0,"Section","Bucket (overall)"); parts.append(df)
         if is_home is not None:
             bvl = f"{'Home' if is_home else 'Road'} · {bucket}"
-            df = league_spreads[(league_spreads["GroupLabel"] == "Bucket·Venue") &
-                                (league_spreads["Situation"]  == bvl)]
-            if not df.empty:
-                df = df.copy(); df.insert(0, "Section", "Bucket × Venue")
-                out_parts.append(df)
-
-    if not out_parts:
+            df = league_spreads[(league_spreads["GroupLabel"]=="Bucket·Venue") & (league_spreads["Situation"]==bvl)]
+            if not df.empty: df = df.copy(); df.insert(0,"Section","Bucket × Venue"); parts.append(df)
+    if not parts:
         return pd.DataFrame(columns=["Section","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"])
-
-    out = pd.concat(out_parts, ignore_index=True)
+    out = pd.concat(parts, ignore_index=True)
+    # assure numeric before rounding
+    for c in ("N","W","L","P","WinPct","ROI_Pct"):
+        if c in out.columns: out[c] = pd.to_numeric(out[c], errors="coerce")
     for c in ("WinPct","ROI_Pct"):
-        if c in out.columns:
-            out[c] = out[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
+        if c in out.columns: out[c] = out[c].round(1)
     order = {"Role (Fav/Dog)":0, "Venue (Home/Road)":1, "Bucket (overall)":2, "Bucket × Venue":3}
     out["__o"] = out["Section"].map(order).fillna(99)
     out = out.sort_values(["__o"]).drop(columns="__o")
@@ -200,7 +141,7 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
       FROM {MOVES}
       WHERE UPPER(Sport) = @sport_u
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_MOVES}`) = @book_u)
+        AND (@book_u = '' OR UPPER({BOOK_MOVES_COL_SQL}) = @book_u)
         AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) >= CURRENT_TIMESTAMP()
     ),
@@ -220,10 +161,8 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
       WHERE team IS NOT NULL
     ),
     grouped AS (
-      SELECT
-        Game_Id,
-        ANY_VALUE(Game_Start) AS Game_Start,
-        ARRAY_AGG(DISTINCT team ORDER BY team LIMIT 2) AS Teams
+      SELECT Game_Id, ANY_VALUE(Game_Start) AS Game_Start,
+             ARRAY_AGG(DISTINCT team ORDER BY team LIMIT 2) AS Teams
       FROM canon
       GROUP BY Game_Id
     )
@@ -246,18 +185,11 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
     )
     return job.result().to_dataframe()
 
-
 @st.cache_data(ttl=120, show_spinner=False)
 def team_context_from_moves(game_id: str, teams: list[str], book: str = DEFAULT_BOOK) -> dict:
-    """
-    Pick latest SPREADS snapshot row per team (by Market_Leader, Limit, Snapshot_Timestamp).
-    Extract Is_Home + Value (team POV spread; fav < 0) to infer role/bucket.
-    If Is_Home is NULL in source, derive it by matching team to home/away names.
-    """
     if not teams:
         return {}
     teams_norm = [t.lower() for t in teams if t]
-
     sql = f"""
     WITH src AS (
       SELECT
@@ -271,12 +203,11 @@ def team_context_from_moves(game_id: str, teams: list[str], book: str = DEFAULT_
         Value,
         Snapshot_Timestamp,
         Market_Leader,
-        `Limit`,
-        `{BOOK_COL_MOVES}` AS BookName
+        `Limit`
       FROM {MOVES}
       WHERE COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_MOVES}`) = @book_u)   -- 🔒 book filter
+        AND (@book_u = '' OR UPPER({BOOK_MOVES_COL_SQL}) = @book_u)
     ),
     canon AS (
       SELECT
@@ -285,57 +216,36 @@ def team_context_from_moves(game_id: str, teams: list[str], book: str = DEFAULT_
           IFNULL(GREATEST(LOWER(home_n), LOWER(away_n)), 'tbd'), "_",
           FORMAT_TIMESTAMP('%Y-%m-%d %H:%MZ', gs)
         ) AS concat_id,
-        LOWER(IFNULL(stable_key, ''))      AS stable_id,
-        LOWER(team_any)                    AS team_norm,
-        LOWER(home_n)                      AS home_norm,
-        LOWER(away_n)                      AS away_norm,
-        Is_Home,
-        Value,
-        gs AS cutoff,
-        Market_Leader,
-        `Limit`,
-        Snapshot_Timestamp
+        LOWER(IFNULL(stable_key, '')) AS stable_id,
+        LOWER(team_any)               AS team_norm,
+        LOWER(home_n)                 AS home_norm,
+        LOWER(away_n)                 AS away_norm,
+        Is_Home, Value, gs AS cutoff,
+        Market_Leader, `Limit`, Snapshot_Timestamp
       FROM src
       WHERE home_n IS NOT NULL AND away_n IS NOT NULL
     ),
-    with_derived_home AS (
+    with_home AS (
       SELECT
-        team_norm,
-        Value,
-        cutoff,
-        COALESCE(
-          Is_Home,
-          CASE
-            WHEN team_norm = home_norm THEN TRUE
-            WHEN team_norm = away_norm THEN FALSE
-            ELSE NULL
-          END
-        ) AS is_home_final
+        team_norm, Value, cutoff,
+        COALESCE(Is_Home,
+          CASE WHEN team_norm = home_norm THEN TRUE
+               WHEN team_norm = away_norm THEN FALSE
+               ELSE NULL END) AS is_home_final
       FROM canon
     ),
     picked AS (
       SELECT
         team_norm,
-        ARRAY_AGG(
-          STRUCT(is_home_final AS is_home, Value, cutoff)
-          ORDER BY Value IS NULL, Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
-          LIMIT 1
-        )[OFFSET(0)] AS s
-      FROM (
-        SELECT c.*, w.is_home_final
-        FROM canon c
-        JOIN with_derived_home w
-        USING (team_norm, Value, cutoff)
-      )
+        ARRAY_AGG(STRUCT(is_home_final AS is_home, Value, cutoff)
+                  ORDER BY Value IS NULL, Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
+                  LIMIT 1)[OFFSET(0)] AS s
+      FROM (SELECT c.*, w.is_home_final FROM canon c JOIN with_home w USING (team_norm, Value, cutoff))
       WHERE (concat_id = LOWER(@gid) OR stable_id = LOWER(@gid))
         AND team_norm IN UNNEST(@teams_norm)
       GROUP BY team_norm
     )
-    SELECT
-      team_norm AS Team,
-      s.is_home      AS is_home,
-      s.Value        AS closing_spread,
-      s.cutoff       AS cutoff
+    SELECT team_norm AS Team, s.is_home AS is_home, s.Value AS closing_spread, s.cutoff AS cutoff
     FROM picked
     """
     job = CLIENT.query(
@@ -350,7 +260,6 @@ def team_context_from_moves(game_id: str, teams: list[str], book: str = DEFAULT_
         ),
     )
     df = job.result().to_dataframe()
-
     out = {}
     for _, r in df.iterrows():
         sp  = r.get("closing_spread")
@@ -364,31 +273,24 @@ def team_context_from_moves(game_id: str, teams: list[str], book: str = DEFAULT_
     return out
 
 def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
-    """Ensure exactly one favorite and one underdog iff any spread exists."""
     a, b = (teams + [None, None])[:2]
-    if not a or not b:
-        return ctxs
+    if not a or not b: return ctxs
     sa = ctxs.get(a, {}).get("closing_spread")
     sb = ctxs.get(b, {}).get("closing_spread")
-    if sa is None and sb is None:
-        return ctxs
+    if sa is None and sb is None: return ctxs
     if sa is not None and sb is not None:
-        a_fav = sa < sb
-        b_fav = sb < sa
+        a_fav = sa < sb; b_fav = sb < sa
     else:
-        if sa is not None:
-            a_fav = sa < 0; b_fav = not a_fav
-        else:
-            b_fav = sb < 0; a_fav = not b_fav
+        if sa is not None: a_fav = sa < 0; b_fav = not a_fav
+        else:              b_fav = sb < 0; a_fav = not b_fav
     for t, fav in [(a, a_fav), (b, b_fav)]:
-        if t in ctxs:
-            ctxs[t]["is_favorite"] = bool(fav)
+        if t in ctxs: ctxs[t]["is_favorite"] = bool(fav)
     return ctxs
 
 # ---------- SCORES: league-wide situation totals ----------
-
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_back: int = 10, book: str = DEFAULT_BOOK) -> pd.DataFrame:
+    # sport-aware buckets (as SQL fragment)
     bucket_case = """
       CASE
         WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
@@ -422,16 +324,14 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
           END
       END
     """
-
     base_filter = f"""
       FROM {SCORES}
       WHERE UPPER(Sport)  = @sport_upper
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
+        AND (@book_u = '' OR UPPER({BOOK_SCORES_COL_SQL}) = @book_u)
         AND DATE(feat_Game_Start) <= @cutoff
-        AND feat_Game_Start >= TIMESTAMP(DATE_SUB(@cutoff, INTERVAL @years_back YEAR))
+        AND feat_Game_Start >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
     """
-
     def _run(q: str):
         return CLIENT.query(
             q,
@@ -447,7 +347,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
             ),
         ).result().to_dataframe()
 
-    # 1) Venue
     q_venue = f"""
     SELECT 'Venue' AS GroupLabel,
            CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END AS Situation,
@@ -461,7 +360,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
     """
     df1 = _run(q_venue)
 
-    # 2) Role4
     q_role4 = f"""
     SELECT 'Role4' AS GroupLabel,
            CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
@@ -478,7 +376,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
     """
     df2 = _run(q_role4)
 
-    # 3) Bucket (overall)
     q_bucket = f"""
     SELECT 'Bucket' AS GroupLabel,
            ({bucket_case}) AS Situation,
@@ -493,7 +390,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
     """
     df3 = _run(q_bucket)
 
-    # 4) Bucket × Venue
     q_bv = f"""
     SELECT 'Bucket·Venue' AS GroupLabel,
            CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' · ', ({bucket_case})) AS Situation,
@@ -509,35 +405,22 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
     """
     df4 = _run(q_bv)
 
-  
     out = pd.concat([df1, df2, df3, df4], ignore_index=True)
     if out.empty:
         return out
-    
-    # 🔧 force numeric types
-    for c in ("N", "W", "L", "P"):
-        out[c] = pd.to_numeric(out.get(c, np.nan), errors="coerce")
-    
-    # compute safely
+    for c in ("N","W","L","P"): out[c] = pd.to_numeric(out.get(c, np.nan), errors="coerce")
     den = (out["W"] + out["L"]).astype("float64")
-    winpct = np.where(den > 0, (out["W"].astype("float64") / den) * 100.0, np.nan)
-    roi = np.where(
-        den > 0,
-        ((out["W"].astype("float64") * (100.0 / 110.0) + out["L"].astype("float64") * -1.0) / den) * 100.0,
-        np.nan
-    )
-    
-    # assign with proper dtype, then round
-    out["WinPct"] = pd.Series(winpct, dtype="float64").round(1)
-    out["ROI_Pct"] = pd.Series(roi, dtype="float64").round(1)
-    
-    return out.sort_values(["GroupLabel", "Situation"]).reset_index(drop=True)
-
-
-
+    out["WinPct"] = np.where(den>0, (out["W"].astype("float64")/den)*100.0, np.nan)
+    out["ROI_Pct"] = np.where(den>0,
+                              ((out["W"].astype("float64")*(100.0/110.0) + out["L"].astype("float64")*(-1.0))/den)*100.0,
+                              np.nan)
+    out["WinPct"] = pd.to_numeric(out["WinPct"], errors="coerce").round(1)
+    out["ROI_Pct"] = pd.to_numeric(out["ROI_Pct"], errors="coerce").round(1)
+    return out.sort_values(["GroupLabel","Situation"]).reset_index(drop=True)
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years_back: int = 10, book: str = DEFAULT_BOOK) -> pd.DataFrame:
+    # One CTE block + parameterized filters (no braces in final SQL)
     totals_cte = f"""
       WITH per_game AS (
         SELECT *
@@ -550,25 +433,25 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
             Is_Home,
             ROW_NUMBER() OVER (PARTITION BY COALESCE(feat_Game_Key, Game_Key) ORDER BY Is_Home DESC) AS rn
           FROM {SCORES}
-          WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
-            AND UPPER(Market)='TOTALS'
-            AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
+          WHERE UPPER(Sport) = @sport_upper
+            AND UPPER(Market) = 'TOTALS'
+            AND (@book_u = '' OR UPPER({BOOK_SCORES_COL_SQL}) = @book_u)
             AND DATE(feat_Game_Start) <= @cutoff
-            AND feat_Game_Start >= TIMESTAMP(DATE_SUB(@cutoff, INTERVAL @years_back YEAR))
+            AND feat_Game_Start >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
             AND Value IS NOT NULL
             AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
         )
-        WHERE rn=1  -- one row per game (home)
+        WHERE rn = 1
       ),
       spreads AS (
         SELECT COALESCE(feat_Game_Key, Game_Key) AS GKey,
                ANY_VALUE(Value) AS Home_Closing_Spread
         FROM {SCORES}
-        WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
-          AND UPPER(Market)='SPREADS'
-          AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
+        WHERE UPPER(Sport) = @sport_upper
+          AND UPPER(Market) = 'SPREADS'
+          AND (@book_u = '' OR UPPER({BOOK_SCORES_COL_SQL}) = @book_u)
           AND DATE(feat_Game_Start) <= @cutoff
-          AND feat_Game_Start >= TIMESTAMP(DATE_SUB(@cutoff, INTERVAL @years_back YEAR))
+          AND feat_Game_Start >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
           AND Is_Home = TRUE
         GROUP BY GKey
       ),
@@ -622,7 +505,6 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
         LEFT JOIN spreads s USING (GKey)
       )
     """
-
     def _run(q: str):
         return CLIENT.query(
             totals_cte + q,
@@ -638,7 +520,6 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
             ),
         ).result().to_dataframe()
 
-    # Venue
     q_venue = """
     SELECT 'Over' AS Side, 'Venue' AS GroupLabel, 'Home' AS Situation,
            COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P FROM e
@@ -651,7 +532,6 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
     """
     df1 = _run(q_venue)
 
-    # Role4
     q_role4 = """
     SELECT 'Over' AS Side, 'Role4' AS GroupLabel, Role4_HomeSide AS Situation,
            COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
@@ -668,7 +548,6 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
     """
     df2 = _run(q_role4)
 
-    # Bucket
     q_bucket = """
     SELECT 'Over' AS Side, 'Bucket' AS GroupLabel, Total_Bucket AS Situation,
            COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
@@ -679,7 +558,6 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
     """
     df3 = _run(q_bucket)
 
-    # Bucket × Venue
     q_bv = """
     SELECT 'Over' AS Side, 'Bucket·Venue' AS GroupLabel, CONCAT('Home · ', Total_Bucket) AS Situation,
            COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
@@ -699,42 +577,17 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
     out = pd.concat([df1, df2, df3, df4], ignore_index=True)
     if out.empty:
         return out
-    
-    # collapse duplicates then force numeric
     out = out.groupby(["Side","GroupLabel","Situation"], as_index=False)[["N","W","L","P"]].sum()
-    for c in ("N","W","L","P"):
-        out[c] = pd.to_numeric(out.get(c, np.nan), errors="coerce")
-    
-    # filter after numeric cast
+    for c in ("N","W","L","P"): out[c] = pd.to_numeric(out.get(c, np.nan), errors="coerce")
     out = out[out["N"] >= min_n].copy()
-    
     den = (out["W"] + out["L"]).astype("float64")
-    winpct = np.where(den > 0, (out["W"].astype("float64") / den) * 100.0, np.nan)
-    roi = np.where(
-        den > 0,
-        ((out["W"].astype("float64") * (100.0 / 110.0) + out["L"].astype("float64") * -1.0) / den) * 100.0,
-        np.nan
-    )
-    
-    out["WinPct"] = pd.Series(winpct, dtype="float64").round(1)
-    out["ROI_Pct"] = pd.Series(roi, dtype="float64").round(1)
-    
+    out["WinPct"] = np.where(den>0, (out["W"].astype("float64")/den)*100.0, np.nan)
+    out["ROI_Pct"] = np.where(den>0,
+                              ((out["W"].astype("float64")*(100.0/110.0) + out["L"].astype("float64")*(-1.0))/den)*100.0,
+                              np.nan)
+    out["WinPct"] = pd.to_numeric(out["WinPct"], errors="coerce").round(1)
+    out["ROI_Pct"] = pd.to_numeric(out["ROI_Pct"], errors="coerce").round(1)
     return out.sort_values(["GroupLabel","Situation","Side"]).reset_index(drop=True)
-
-
-
-# ---------- helpers for rendering ----------
-def _labels_for_team(sport: str, ctx: dict) -> list[str]:
-    is_home = ctx.get("is_home")
-    is_favorite = ctx.get("is_favorite")
-    spread = ctx.get("closing_spread")
-    bucket = _derive_spread_bucket_for_ui(sport, spread)
-    return _wanted_labels(is_home, is_favorite, bucket)
-
-def _filter_rows(df: pd.DataFrame, labels: list[str]) -> pd.DataFrame:
-    if df is None or df.empty or not labels:
-        return pd.DataFrame(columns=["GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"])
-    return df[df["Situation"].isin(labels)].copy()
 
 # ---------- main UI ----------
 def render_current_situations_tab(selected_sport: str):
@@ -744,8 +597,7 @@ def render_current_situations_tab(selected_sport: str):
         st.warning("Pick a sport.")
         st.stop()
 
-    # choose book – keep it simple (hidden control or expose as input if you like)
-    book_name = DEFAULT_BOOK
+    book_name = DEFAULT_BOOK  # or expose as a control
 
     games = list_current_games_from_moves(selected_sport, book=book_name)
     if games.empty:
@@ -770,22 +622,17 @@ def render_current_situations_tab(selected_sport: str):
     min_n = st.slider("Min graded games per situation", 10, 200, 30, step=5)
     cutoff_date_for_stats: date = st.date_input("Cutoff for historical stats (DATE)", value=date.today())
 
-    # League-wide tables (one query each) — filtered to book
     league_spreads = league_totals_spreads(selected_sport, cutoff_date_for_stats, min_n, book=book_name)
     league_totals  = league_totals_overunder(selected_sport, cutoff_date_for_stats, min_n, book=book_name)
 
-
-    # Roles from MOVES (SPREADS-ONLY) — filtered to book
     ctxs = team_context_from_moves(game_id, teams, book=book_name)
     ctxs = _enforce_role_coherence(ctxs, teams)
 
-    # Per-team panels
     cols = st.columns(2)
     for i, team in enumerate(teams):
         with cols[i]:
             st.markdown(f"### {team}")
             ctx = ctxs.get(team, {})
-
             is_home = ctx.get("is_home")
             is_favorite = ctx.get("is_favorite")
             spread = ctx.get("closing_spread")
@@ -809,44 +656,33 @@ def render_current_situations_tab(selected_sport: str):
             else:
                 st.dataframe(table4, use_container_width=True)
 
-  
-    # Spreads: full league table (helpful for verifying rows)
+    # Spreads: full league table
     with st.expander("🔎 League — Full table for this sport (Spreads Only)"):
         if league_spreads.empty:
             st.write("_No rows for this sport/cutoff._")
         else:
             show = league_spreads.copy()
             show = show[show["GroupLabel"].isin(["Role4","Bucket","Bucket·Venue","Venue"])]
-            # ensure numeric dtypes before rounding
             for c in ("N","W","L","P","WinPct","ROI_Pct"):
-                if c in show.columns:
-                    show[c] = pd.to_numeric(show[c], errors="coerce")
-            # clean rounding
+                if c in show.columns: show[c] = pd.to_numeric(show[c], errors="coerce")
             for c in ("WinPct","ROI_Pct"):
-                if c in show.columns:
-                    show[c] = show[c].round(1)
-            # optional: keep a stable order
+                if c in show.columns: show[c] = show[c].round(1)
             show = show.sort_values(["GroupLabel","Situation"]).reset_index(drop=True)
             st.dataframe(show, use_container_width=True)
-    
-    # OVER/UNDER league table (totals-only; side split)
+
+    # OVER/UNDER (totals only)
     st.markdown("### 📈 League Totals — Over/Under (Totals Only)")
     if league_totals.empty:
         st.write("_No totals rows meet N threshold for this sport/cutoff._")
     else:
         show = league_totals.copy()
-        # ensure numeric dtypes before rounding/filtering
         for c in ("N","W","L","P","WinPct","ROI_Pct"):
-            if c in show.columns:
-                show[c] = pd.to_numeric(show[c], errors="coerce")
+            if c in show.columns: show[c] = pd.to_numeric(show[c], errors="coerce")
         for c in ("WinPct","ROI_Pct"):
-            if c in show.columns:
-                show[c] = show[c].round(1)
+            if c in show.columns: show[c] = show[c].round(1)
         show = show.sort_values(["GroupLabel","Situation","Side"]).reset_index(drop=True)
-        st.dataframe(
-            show[["Side","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]],
-            use_container_width=True
-        )
+        st.dataframe(show[["Side","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]],
+                     use_container_width=True)
 
 # ---------- optional quick debug ----------
 def render_current_games_section(selected_sport: str):
@@ -862,7 +698,7 @@ def render_current_games_section(selected_sport: str):
               COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS Game_Id,
               COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS Game_Start,
               Home_Team_Norm, Away_Team_Norm, Team_For_Join, feat_Team, home_l, away_l,
-              Value, Is_Home, Snapshot_Timestamp, `{BOOK_COL_MOVES}` AS Book
+              Value, Is_Home, Snapshot_Timestamp, {BOOK_MOVES_COL_SQL} AS Book
             FROM {MOVES}
             WHERE UPPER(Sport) = @sport_upper AND UPPER(Market)='SPREADS'
             ORDER BY Game_Start DESC
