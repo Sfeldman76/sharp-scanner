@@ -509,16 +509,30 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
     """
     df4 = _run(q_bv)
 
+  
     out = pd.concat([df1, df2, df3, df4], ignore_index=True)
     if out.empty:
         return out
-    out["WinPct"] = (out["W"] / out[["W","L"]].sum(axis=1).replace(0, np.nan) * 100).round(1)
-    out["ROI_Pct"] = np.where(
-        (out["W"] + out["L"]) > 0,
-        (((out["W"] * (100.0/110.0)) + (out["L"] * -1.0)) / (out["W"] + out["L"])) * 100.0,
+    
+    # 🔧 force numeric types
+    for c in ("N", "W", "L", "P"):
+        out[c] = pd.to_numeric(out.get(c, np.nan), errors="coerce")
+    
+    # compute safely
+    den = (out["W"] + out["L"]).astype("float64")
+    winpct = np.where(den > 0, (out["W"].astype("float64") / den) * 100.0, np.nan)
+    roi = np.where(
+        den > 0,
+        ((out["W"].astype("float64") * (100.0 / 110.0) + out["L"].astype("float64") * -1.0) / den) * 100.0,
         np.nan
-    ).round(1)
-    return out.sort_values(["GroupLabel","Situation"]).reset_index(drop=True)
+    )
+    
+    # assign with proper dtype, then round
+    out["WinPct"] = pd.Series(winpct, dtype="float64").round(1)
+    out["ROI_Pct"] = pd.Series(roi, dtype="float64").round(1)
+    
+    return out.sort_values(["GroupLabel", "Situation"]).reset_index(drop=True)
+
 
 
 
@@ -682,18 +696,31 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
     """
     df4 = _run(q_bv)
 
-    out = pd.concat([df1, df2, df3, df4], ignore_index=True)
+d.concat([df1, df2, df3, df4], ignore_index=True)
     if out.empty:
         return out
+    
+    # collapse duplicates then force numeric
     out = out.groupby(["Side","GroupLabel","Situation"], as_index=False)[["N","W","L","P"]].sum()
+    for c in ("N","W","L","P"):
+        out[c] = pd.to_numeric(out.get(c, np.nan), errors="coerce")
+    
+    # filter after numeric cast
     out = out[out["N"] >= min_n].copy()
-    out["WinPct"] = (out["W"] / out[["W","L"]].sum(axis=1).replace(0, np.nan) * 100).round(1)
-    out["ROI_Pct"] = np.where(
-        (out["W"] + out["L"]) > 0,
-        (((out["W"] * (100.0/110.0)) + (out["L"] * -1.0)) / (out["W"] + out["L"])) * 100.0,
+    
+    den = (out["W"] + out["L"]).astype("float64")
+    winpct = np.where(den > 0, (out["W"].astype("float64") / den) * 100.0, np.nan)
+    roi = np.where(
+        den > 0,
+        ((out["W"].astype("float64") * (100.0 / 110.0) + out["L"].astype("float64") * -1.0) / den) * 100.0,
         np.nan
-    ).round(1)
+    )
+    
+    out["WinPct"] = pd.Series(winpct, dtype="float64").round(1)
+    out["ROI_Pct"] = pd.Series(roi, dtype="float64").round(1)
+    
     return out.sort_values(["GroupLabel","Situation","Side"]).reset_index(drop=True)
+
 
 
 # ---------- helpers for rendering ----------
@@ -782,6 +809,7 @@ def render_current_situations_tab(selected_sport: str):
             else:
                 st.dataframe(table4, use_container_width=True)
 
+  
     # Spreads: full league table (helpful for verifying rows)
     with st.expander("🔎 League — Full table for this sport (Spreads Only)"):
         if league_spreads.empty:
@@ -789,19 +817,32 @@ def render_current_situations_tab(selected_sport: str):
         else:
             show = league_spreads.copy()
             show = show[show["GroupLabel"].isin(["Role4","Bucket","Bucket·Venue","Venue"])]
-            for c in ["WinPct","ROI_Pct"]:
-                show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
+            # ensure numeric dtypes before rounding
+            for c in ("N","W","L","P","WinPct","ROI_Pct"):
+                if c in show.columns:
+                    show[c] = pd.to_numeric(show[c], errors="coerce")
+            # clean rounding
+            for c in ("WinPct","ROI_Pct"):
+                if c in show.columns:
+                    show[c] = show[c].round(1)
+            # optional: keep a stable order
+            show = show.sort_values(["GroupLabel","Situation"]).reset_index(drop=True)
             st.dataframe(show, use_container_width=True)
-
+    
     # OVER/UNDER league table (totals-only; side split)
     st.markdown("### 📈 League Totals — Over/Under (Totals Only)")
     if league_totals.empty:
         st.write("_No totals rows meet N threshold for this sport/cutoff._")
     else:
         show = league_totals.copy()
-        for c in ["WinPct","ROI_Pct"]:
+        # ensure numeric dtypes before rounding/filtering
+        for c in ("N","W","L","P","WinPct","ROI_Pct"):
             if c in show.columns:
-                show[c] = show[c].map(lambda x: None if pd.isna(x) else round(float(x), 1))
+                show[c] = pd.to_numeric(show[c], errors="coerce")
+        for c in ("WinPct","ROI_Pct"):
+            if c in show.columns:
+                show[c] = show[c].round(1)
+        show = show.sort_values(["GroupLabel","Situation","Side"]).reset_index(drop=True)
         st.dataframe(
             show[["Side","GroupLabel","Situation","N","W","L","P","WinPct","ROI_Pct"]],
             use_container_width=True
