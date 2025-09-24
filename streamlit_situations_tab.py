@@ -431,7 +431,7 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
         Market_Leader, `Limit`, Snapshot_Timestamp
       FROM {MOVES}
       WHERE UPPER(Market)='SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_MOVES}`) = @book_u)
+        AND (@book_u = '' OR UPPER(Book) = @book_u)
     ),
     mv_pick AS (
       SELECT gkey, team_norm,
