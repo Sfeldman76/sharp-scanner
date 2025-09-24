@@ -15,13 +15,21 @@ SCORES_FQ = f"{PROJECT}.{DATASET}.scores_with_features"
 MOVES  = f"`{MOVES_FQ}`"
 SCORES = f"`{SCORES_FQ}`"
 
-# sportsbook columns + default
+# sportsbook columns + default (literal column names; never injected with backticks)
 BOOK_COL_MOVES  = "Book"
 BOOK_COL_SCORES = "Book"
 DEFAULT_BOOK    = "Pinnacle"
 
 CLIENT = bigquery.Client(project=PROJECT)
 CACHE_TTL_SEC = 120
+
+# ---------- dev guard: ensure no '{' reaches BigQuery ----------
+def _assert_no_curly(sql: str, label: str):
+    i = sql.find("{")
+    if i != -1:
+        snippet = sql[max(0, i-60):i+60]
+        st.error(f"Found '{{' in {label} at pos {i}:\n…{snippet}…")
+        raise RuntimeError(f"Curly brace in SQL for {label}")
 
 # ---------- tiny utils ----------
 def _to_utc_dt(x) -> dt.datetime:
@@ -161,7 +169,7 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
       FROM {MOVES}
       WHERE UPPER(Sport) = @sport_u
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(Book) = @book_u)  
+        AND (@book_u = '' OR UPPER(Book) = @book_u)
         AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) >= CURRENT_TIMESTAMP()
     ),
@@ -194,6 +202,7 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
     ORDER BY Game_Start
     LIMIT @hard_cap
     """
+    _assert_no_curly(sql, "list_current_games_from_moves")
     job = CLIENT.query(
         sql,
         job_config=bigquery.QueryJobConfig(
@@ -220,7 +229,6 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
     teams_norm = [t.lower() for t in teams if t]
 
     sql = f"""
-    -- MOVES rows (book-filtered)
     WITH mv AS (
       SELECT
         UPPER(Market) AS Market_U,
@@ -229,11 +237,11 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         COALESCE(Away_Team_Norm, away_l) AS away_n,
         COALESCE(feat_Team, Team_For_Join, Home_Team_Norm, home_l, Away_Team_Norm, away_l) AS team_any,
         COALESCE(game_key_clean, feat_Game_Key, Game_Key) AS stable_key,
-        Is_Home, Value, Snapshot_Timestamp, Market_Leader, `Limit`
+        Is_Home, Value, Snapshot_Timestamp, Market_Leader, Limit
       FROM {MOVES}
       WHERE COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(Book) = @book_u) 
+        AND (@book_u = '' OR UPPER(Book) = @book_u)
     ),
     canon AS (
       SELECT
@@ -246,7 +254,7 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         LOWER(team_any)                    AS team_norm,
         LOWER(home_n)                      AS home_norm,
         LOWER(away_n)                      AS away_norm,
-        Is_Home, Value, gs AS cutoff, Market_Leader, `Limit`, Snapshot_Timestamp
+        Is_Home, Value, gs AS cutoff, Market_Leader, Limit, Snapshot_Timestamp
       FROM mv
       WHERE home_n IS NOT NULL AND away_n IS NOT NULL
     ),
@@ -255,7 +263,7 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         team_norm,
         ARRAY_AGG(
           STRUCT(Is_Home, Value, cutoff)
-          ORDER BY Value IS NULL, Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
+          ORDER BY Value IS NULL, Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
           LIMIT 1
         )[OFFSET(0)] AS s
       FROM canon
@@ -263,8 +271,6 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         AND team_norm IN UNNEST(@teams_norm)
       GROUP BY team_norm
     ),
-
-    -- SCORES fallback (book-filtered)
     sc_lines AS (
       SELECT
         LOWER(COALESCE(feat_Game_Key, Game_Key)) AS gkey,
@@ -277,7 +283,6 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
         AND (@book_u = '' OR UPPER(Book) = @book_u)
       GROUP BY gkey, team_norm
     )
-
     SELECT
       pm.team_norm AS Team,
       pm.s.Is_Home AS is_home,
@@ -285,10 +290,10 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
       pm.s.cutoff AS cutoff
     FROM picked_mv pm
     LEFT JOIN sc_lines sl
-      ON (LOWER(@gid) = '')  -- sc_lines keyed by game key; when we used concat_id/stable_id we can't join reliably
+      ON (LOWER(@gid) = '')
       AND pm.team_norm = sl.team_norm
     """
-    # We can't reliably join sc_lines by concat_id/stable_id; if you also store feat_Game_Key in MOVES, replace the join with that key.
+    _assert_no_curly(sql, "team_context_from_moves")
 
     job = CLIENT.query(
         sql,
@@ -341,12 +346,7 @@ def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
 # ---------- SCORES: league-wide situation totals (SPREADS) with MOVES fallback ----------
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
 def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_back: int = 10, book: str = DEFAULT_BOOK) -> pd.DataFrame:
-    """
-    Build league-wide ATS groups using SCORES outcomes, but derive role/bucket from
-    COALESCE(MOVES line for the book, SCORES team-POV line).
-    Split queries to keep planner simple.
-    """
-    # shared filter block (composable)
+    # shared filter block
     base_filter = f"""
       FROM {SCORES}
       WHERE UPPER(Sport)  = @sport_upper
@@ -357,7 +357,7 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
               >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
     """
 
-    # CASE for bucket — uses the COALESCE'd line downstream
+    # bucket case uses closing_spread symbol from joined CTE
     bucket_case = """
       CASE
         WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
@@ -392,8 +392,8 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
       END
     """
 
-    # A tiny helper to run parameterized SQL
     def _run(q: str) -> pd.DataFrame:
+        _assert_no_curly(q, "league_totals_spreads query")
         return CLIENT.query(
             q,
             job_config=bigquery.QueryJobConfig(
@@ -408,7 +408,6 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
             ),
         ).result().to_dataframe()
 
-    # Core CTE: SCORES outcomes + MOVES line (book) + COALESCE to scores line
     core_cte = f"""
     WITH sc AS (
       SELECT
@@ -428,15 +427,15 @@ def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_b
         LOWER(COALESCE(feat_Team, Team_For_Join, Home_Team_Norm, home_l,
                        Away_Team_Norm, away_l)) AS team_norm,
         Value AS mv_line_val,
-        Market_Leader, `Limit`, Snapshot_Timestamp
+        Market_Leader, Limit, Snapshot_Timestamp
       FROM {MOVES}
       WHERE UPPER(Market)='SPREADS'
         AND (@book_u = '' OR UPPER(Book) = @book_u)
     ),
     mv_pick AS (
       SELECT gkey, team_norm,
-             ARRAY_AGG(STRUCT(mv_line_val, Market_Leader, `Limit`, Snapshot_Timestamp)
-                       ORDER BY mv_line_val IS NULL, Market_Leader DESC, `Limit` DESC, Snapshot_Timestamp DESC
+             ARRAY_AGG(STRUCT(mv_line_val, Market_Leader, Limit, Snapshot_Timestamp)
+                       ORDER BY mv_line_val IS NULL, Market_Leader DESC, Limit DESC, Snapshot_Timestamp DESC
                        LIMIT 1)[OFFSET(0)].mv_line_val AS mv_line_val
       FROM mv
       GROUP BY gkey, team_norm
@@ -545,7 +544,7 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
             Is_Home,
             ROW_NUMBER() OVER (PARTITION BY COALESCE(feat_Game_Key, Game_Key) ORDER BY Is_Home DESC) AS rn
           FROM {SCORES}
-          WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
+          WHERE UPPER(Sport)=@sport_upper
             AND UPPER(Market)='TOTALS'
             AND (@book_u = '' OR UPPER(Book) = @book_u)
             AND DATE(feat_Game_Start) <= @cutoff
@@ -554,15 +553,15 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
             AND Value IS NOT NULL
             AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
         )
-        WHERE rn=1  -- one row per game (home)
+        WHERE rn=1
       ),
       spreads AS (
         SELECT COALESCE(feat_Game_Key, Game_Key) AS GKey,
                ANY_VALUE(Value) AS Home_Closing_Spread
         FROM {SCORES}
-        WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
+        WHERE UPPER(Sport)=@sport_upper
           AND UPPER(Market)='SPREADS'
-          AND (@book_u = '' OR UPPER(Book) = @book_u)  
+          AND (@book_u = '' OR UPPER(Book) = @book_u)
           AND DATE(feat_Game_Start) <= @cutoff
           AND TIMESTAMP(feat_Game_Start)
                 >= TIMESTAMP(DATETIME_SUB(DATETIME(@cutoff), INTERVAL @years_back YEAR))
@@ -621,8 +620,10 @@ def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years
     """
 
     def _run(q: str):
+        full_sql = totals_cte + q
+        _assert_no_curly(full_sql, "league_totals_overunder query")
         return CLIENT.query(
-            totals_cte + q,
+            full_sql,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
@@ -733,7 +734,7 @@ def render_current_situations_tab(selected_sport: str):
         st.warning("Pick a sport.")
         st.stop()
 
-    book_name = DEFAULT_BOOK  # or expose as a selectbox
+    book_name = DEFAULT_BOOK
 
     games = list_current_games_from_moves(selected_sport, book=book_name)
     if games.empty:
@@ -846,14 +847,15 @@ def render_current_games_section(selected_sport: str):
               COALESCE(Game_Start, Commence_Hour, feat_Game_Start) AS Game_Start,
               Home_Team_Norm, Away_Team_Norm, Team_For_Join, feat_Team, home_l, away_l,
               Value, Is_Home, Snapshot_Timestamp,
-              Book                                   -- <- no braces; literal column name
+              Book
             FROM {MOVES}
             WHERE UPPER(Sport) = @sport_upper
               AND UPPER(Market) = 'SPREADS'
-              AND (@book_u = '' OR UPPER(Book) = @book_u)   -- optional: filter to your book
+              AND (@book_u = '' OR UPPER(Book) = @book_u)
             ORDER BY Game_Start DESC
             LIMIT 100
             """
+            _assert_no_curly(dbg_sql, "render_current_games_section debug")
             job = CLIENT.query(
                 dbg_sql,
                 job_config=bigquery.QueryJobConfig(
@@ -876,5 +878,3 @@ def render_current_games_section(selected_sport: str):
     st.write(f"**Game Id:** {row['Game_Id']}")
     st.write(f"**Teams:** {', '.join(row['Teams'])}")
     st.write(f"**Start:** {row['Game_Start']}")
-
-
