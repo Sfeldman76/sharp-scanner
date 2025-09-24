@@ -124,6 +124,10 @@ def _wanted_labels(is_home: bool | None, is_favorite: bool | None, bucket: str |
             keep.append(s); seen.add(s)
     return keep
 
+def _get_book_name() -> str:
+    # If you have a Streamlit control, you can wire it here; for now we honor DEFAULT_BOOK.
+    return DEFAULT_BOOK or ""
+
 def _compose_four_views_spreads(league_spreads: pd.DataFrame,
                                 is_home: bool | None, is_favorite: bool | None, bucket: str | None) -> pd.DataFrame:
     """
@@ -196,7 +200,7 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
       FROM {MOVES}
       WHERE UPPER(Sport) = @sport_u
         AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_MOVES}`) = @book_u)   -- 🔒 book filter
+        AND (@book_u = '' OR UPPER(`{BOOK_COL_MOVES}`) = @book_u)
         AND COALESCE(Game_Start, Commence_Hour, feat_Game_Start) IS NOT NULL
         AND TIMESTAMP(COALESCE(Game_Start, Commence_Hour, feat_Game_Start)) >= CURRENT_TIMESTAMP()
     ),
@@ -212,8 +216,7 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
         ) AS Game_Id,
         gs AS Game_Start,
         team
-      FROM src,
-      UNNEST([home_n, away_n]) AS team
+      FROM src, UNNEST([home_n, away_n]) AS team
       WHERE team IS NOT NULL
     ),
     grouped AS (
@@ -242,6 +245,7 @@ def list_current_games_from_moves(sport: str, hard_cap: int = 200, book: str = D
         ),
     )
     return job.result().to_dataframe()
+
 
 @st.cache_data(ttl=120, show_spinner=False)
 def team_context_from_moves(game_id: str, teams: list[str], book: str = DEFAULT_BOOK) -> dict:
@@ -384,326 +388,313 @@ def _enforce_role_coherence(ctxs: dict, teams: list[str]) -> dict:
 # ---------- SCORES: league-wide situation totals ----------
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
-def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, book: str = DEFAULT_BOOK) -> pd.DataFrame:
-    sql = f"""
-    WITH enriched AS (
-      SELECT
-        Is_Home,
-        Value AS Closing_Spread,             -- team POV spread; fav < 0
-        Spread_Cover_Flag,
-        ATS_Cover_Margin,
-        CASE WHEN Value IS NULL THEN NULL
-             WHEN Value < 0 THEN TRUE ELSE FALSE END AS Is_Favorite,
-        CASE
-          WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
-            CASE
-              WHEN Value IS NULL THEN ''
-              WHEN Value <= -12.5 THEN 'Fav ≤ -12.5'
-              WHEN Value <=  -9.5 THEN 'Fav -10 to -12.5'
-              WHEN Value <=  -6.5 THEN 'Fav -7 to -9.5'
-              WHEN Value <=  -3.5 THEN 'Fav -4 to -6.5'
-              WHEN Value <=  -0.5 THEN 'Fav -0.5 to -3.5'
-              WHEN Value =    0.0 THEN 'Pick (0)'
-              WHEN Value <=   3.5 THEN 'Dog +0.5 to +3.5'
-              WHEN Value <=   6.5 THEN 'Dog +4 to +6.5'
-              WHEN Value <=   9.5 THEN 'Dog +7 to +9.5'
-              WHEN Value <=  12.5 THEN 'Dog +10 to +12.5'
-              ELSE 'Dog ≥ +13'
-            END
-          ELSE
-            CASE
-              WHEN Value IS NULL THEN ''
-              WHEN Value <= -10.5 THEN 'Fav ≤ -10.5'
-              WHEN Value <=  -7.5 THEN 'Fav -8 to -10.5'
-              WHEN Value <=  -6.5 THEN 'Fav -7 to -6.5'
-              WHEN Value <=  -3.5 THEN 'Fav -4 to -6.5'
-              WHEN Value <=  -0.5 THEN 'Fav -0.5 to -3.5'
-              WHEN Value =    0.0 THEN 'Pick (0)'
-              WHEN Value <=   3.5 THEN 'Dog +0.5 to +3.5'
-              WHEN Value <=   6.5 THEN 'Dog +4 to +6.5'
-              WHEN Value <=  10.5 THEN 'Dog +7 to +10.5'
-              ELSE 'Dog ≥ +11'
-            END
-        END AS Spread_Bucket
+def league_totals_spreads(sport: str, cutoff_date: date, min_n: int = 0, years_back: int = 10, book: str = DEFAULT_BOOK) -> pd.DataFrame:
+    bucket_case = """
+      CASE
+        WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
+          CASE
+            WHEN Value IS NULL THEN ''
+            WHEN Value <= -12.5 THEN 'Fav ≤ -12.5'
+            WHEN Value <=  -9.5 THEN 'Fav -10 to -12.5'
+            WHEN Value <=  -6.5 THEN 'Fav -7 to -9.5'
+            WHEN Value <=  -3.5 THEN 'Fav -4 to -6.5'
+            WHEN Value <=  -0.5 THEN 'Fav -0.5 to -3.5'
+            WHEN Value =    0.0 THEN 'Pick (0)'
+            WHEN Value <=   3.5 THEN 'Dog +0.5 to +3.5'
+            WHEN Value <=   6.5 THEN 'Dog +4 to +6.5'
+            WHEN Value <=   9.5 THEN 'Dog +7 to +9.5'
+            WHEN Value <=  12.5 THEN 'Dog +10 to +12.5'
+            ELSE 'Dog ≥ +13'
+          END
+        ELSE
+          CASE
+            WHEN Value IS NULL THEN ''
+            WHEN Value <= -10.5 THEN 'Fav ≤ -10.5'
+            WHEN Value <=  -7.5 THEN 'Fav -8 to -10.5'
+            WHEN Value <=  -6.5 THEN 'Fav -7 to -6.5'
+            WHEN Value <=  -3.5 THEN 'Fav -4 to -6.5'
+            WHEN Value <=  -0.5 THEN 'Fav -0.5 to -3.5'
+            WHEN Value =    0.0 THEN 'Pick (0)'
+            WHEN Value <=   3.5 THEN 'Dog +0.5 to +3.5'
+            WHEN Value <=   6.5 THEN 'Dog +4 to +6.5'
+            WHEN Value <=  10.5 THEN 'Dog +7 to +10.5'
+            ELSE 'Dog ≥ +11'
+          END
+      END
+    """
+
+    base_filter = f"""
       FROM {SCORES}
       WHERE UPPER(Sport)  = @sport_upper
         AND UPPER(Market) = 'SPREADS'
         AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
         AND DATE(feat_Game_Start) <= @cutoff
-    )
+        AND feat_Game_Start >= TIMESTAMP_SUB(TIMESTAMP(@cutoff), INTERVAL @years_back YEAR)
+    """
 
-    -- 1) Venue
+    def _run(q: str):
+        return CLIENT.query(
+            q,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
+                    bigquery.ScalarQueryParameter("book_u","STRING",(book or "").upper()),
+                    bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
+                    bigquery.ScalarQueryParameter("years_back","INT64", int(years_back)),
+                    bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
+                ],
+                use_query_cache=True,
+            ),
+        ).result().to_dataframe()
+
+    # 1) Venue
+    q_venue = f"""
     SELECT 'Venue' AS GroupLabel,
            CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END AS Situation,
            COUNT(*) AS N,
-           COUNTIF(Spread_Cover_Flag = 1) AS W,
-           COUNTIF(Spread_Cover_Flag = 0) AS L,
-           COUNTIF(ATS_Cover_Margin = 0)  AS P,
-           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0) AS WinPct,
-           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
-                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
-                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
-                ELSE NULL END AS ROI_Pct
-    FROM enriched
-    WHERE Is_Home IS NOT NULL
+           COUNTIF(Spread_Cover_Flag=1) AS W,
+           COUNTIF(Spread_Cover_Flag=0) AS L,
+           COUNTIF(ATS_Cover_Margin=0)  AS P
+    {base_filter}
     GROUP BY Situation
     HAVING N >= @min_n
-
-    UNION ALL
-
-    -- 2) Role4
-    SELECT 'Role4',
-           CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
-                  CASE WHEN Is_Favorite THEN 'Favorite' ELSE 'Underdog' END),
-           COUNT(*),
-           COUNTIF(Spread_Cover_Flag = 1),
-           COUNTIF(Spread_Cover_Flag = 0),
-           COUNTIF(ATS_Cover_Margin = 0),
-           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0),
-           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
-                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
-                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
-                ELSE NULL END
-    FROM enriched
-    WHERE Is_Home IS NOT NULL AND Is_Favorite IS NOT NULL
-    GROUP BY 2
-    HAVING COUNT(*) >= @min_n
-
-    UNION ALL
-
-    -- 3) Bucket (overall)
-    SELECT 'Bucket',
-           Spread_Bucket,
-           COUNT(*),
-           COUNTIF(Spread_Cover_Flag = 1),
-           COUNTIF(Spread_Cover_Flag = 0),
-           COUNTIF(ATS_Cover_Margin = 0),
-           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0),
-           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
-                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
-                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
-                ELSE NULL END
-    FROM enriched
-    WHERE Spread_Bucket <> ''
-    GROUP BY Spread_Bucket
-    HAVING COUNT(*) >= @min_n
-
-    UNION ALL
-
-    -- 4) Bucket × Venue
-    SELECT 'Bucket·Venue',
-           CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' · ', Spread_Bucket),
-           COUNT(*),
-           COUNTIF(Spread_Cover_Flag = 1),
-           COUNTIF(Spread_Cover_Flag = 0),
-           COUNTIF(ATS_Cover_Margin = 0),
-           SAFE_MULTIPLY(SAFE_DIVIDE(COUNTIF(Spread_Cover_Flag=1), NULLIF(COUNTIF(Spread_Cover_Flag IN (0,1)),0)),100.0),
-           CASE WHEN COUNTIF(Spread_Cover_Flag IN (0,1))>0
-                THEN ((COUNTIF(Spread_Cover_Flag=1)*(100.0/110.0) + COUNTIF(Spread_Cover_Flag=0)*(-1.0))
-                      / COUNTIF(Spread_Cover_Flag IN (0,1))) * 100.0
-                ELSE NULL END
-    FROM enriched
-    WHERE Spread_Bucket <> '' AND Is_Home IS NOT NULL
-    GROUP BY 2
-    HAVING COUNT(*) >= @min_n
-    ORDER BY 1, 2
     """
-    job = CLIENT.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
-                bigquery.ScalarQueryParameter("book_u","STRING",(book or "").upper()),
-                bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
-                bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
-            ],
-            use_query_cache=True,
-        ),
-    )
-    return job.result().to_dataframe()
+    df1 = _run(q_venue)
+
+    # 2) Role4
+    q_role4 = f"""
+    SELECT 'Role4' AS GroupLabel,
+           CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' ',
+                  CASE WHEN Value < 0 THEN 'Favorite' ELSE 'Underdog' END) AS Situation,
+           COUNT(*) AS N,
+           COUNTIF(Spread_Cover_Flag=1) AS W,
+           COUNTIF(Spread_Cover_Flag=0) AS L,
+           COUNTIF(ATS_Cover_Margin=0)  AS P
+    {base_filter}
+      AND Value IS NOT NULL
+      AND Is_Home IS NOT NULL
+    GROUP BY Situation
+    HAVING N >= @min_n
+    """
+    df2 = _run(q_role4)
+
+    # 3) Bucket (overall)
+    q_bucket = f"""
+    SELECT 'Bucket' AS GroupLabel,
+           ({bucket_case}) AS Situation,
+           COUNT(*) AS N,
+           COUNTIF(Spread_Cover_Flag=1) AS W,
+           COUNTIF(Spread_Cover_Flag=0) AS L,
+           COUNTIF(ATS_Cover_Margin=0)  AS P
+    {base_filter}
+      AND Value IS NOT NULL
+    GROUP BY Situation
+    HAVING Situation <> '' AND N >= @min_n
+    """
+    df3 = _run(q_bucket)
+
+    # 4) Bucket × Venue
+    q_bv = f"""
+    SELECT 'Bucket·Venue' AS GroupLabel,
+           CONCAT(CASE WHEN Is_Home THEN 'Home' ELSE 'Road' END, ' · ', ({bucket_case})) AS Situation,
+           COUNT(*) AS N,
+           COUNTIF(Spread_Cover_Flag=1) AS W,
+           COUNTIF(Spread_Cover_Flag=0) AS L,
+           COUNTIF(ATS_Cover_Margin=0)  AS P
+    {base_filter}
+      AND Value IS NOT NULL
+      AND Is_Home IS NOT NULL
+    GROUP BY Situation
+    HAVING SPLIT(Situation,' · ')[OFFSET(1)] <> '' AND N >= @min_n
+    """
+    df4 = _run(q_bv)
+
+    out = pd.concat([df1, df2, df3, df4], ignore_index=True)
+    if out.empty:
+        return out
+    out["WinPct"] = (out["W"] / out[["W","L"]].sum(axis=1).replace(0, np.nan) * 100).round(1)
+    out["ROI_Pct"] = np.where(
+        (out["W"] + out["L"]) > 0,
+        (((out["W"] * (100.0/110.0)) + (out["L"] * -1.0)) / (out["W"] + out["L"])) * 100.0,
+        np.nan
+    ).round(1)
+    return out.sort_values(["GroupLabel","Situation"]).reset_index(drop=True)
+
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
-def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, book: str = DEFAULT_BOOK) -> pd.DataFrame:
-    sql = f"""
-    -- One home row per game for totals using ROW_NUMBER (avoids extra CTEs)
-    WITH per_game_totals AS (
-      SELECT *
-      FROM (
-        SELECT
-          COALESCE(feat_Game_Key, Game_Key) AS GKey,
-          feat_Game_Start,
-          Value AS Total_Line,
-          SAFE_CAST(Team_Score AS FLOAT64) + SAFE_CAST(Opp_Score AS FLOAT64) AS Total_Points,
-          Is_Home,
-          ROW_NUMBER() OVER (PARTITION BY COALESCE(feat_Game_Key, Game_Key)
-                             ORDER BY Is_Home DESC) AS rn
+def league_totals_overunder(sport: str, cutoff_date: date, min_n: int = 0, years_back: int = 10, book: str = DEFAULT_BOOK) -> pd.DataFrame:
+    totals_cte = f"""
+      WITH per_game AS (
+        SELECT *
+        FROM (
+          SELECT
+            COALESCE(feat_Game_Key, Game_Key) AS GKey,
+            feat_Game_Start,
+            Value AS Total_Line,
+            SAFE_CAST(Team_Score AS FLOAT64) + SAFE_CAST(Opp_Score AS FLOAT64) AS Total_Points,
+            Is_Home,
+            ROW_NUMBER() OVER (PARTITION BY COALESCE(feat_Game_Key, Game_Key) ORDER BY Is_Home DESC) AS rn
+          FROM {SCORES}
+          WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
+            AND UPPER(Market)='TOTALS'
+            AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
+            AND DATE(feat_Game_Start) <= @cutoff
+            AND feat_Game_Start >= TIMESTAMP_SUB(TIMESTAMP(@cutoff), INTERVAL @years_back YEAR)
+            AND Value IS NOT NULL
+            AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
+        )
+        WHERE rn=1  -- one row per game (home)
+      ),
+      spreads AS (
+        SELECT COALESCE(feat_Game_Key, Game_Key) AS GKey,
+               ANY_VALUE(Value) AS Home_Closing_Spread
         FROM {SCORES}
-        WHERE UPPER(Sport)  = @sport_upper
-          AND UPPER(Market) = 'TOTALS'
-          AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
+        WHERE UPPER(Sport)='"""+(sport or "").upper()+"""'
+          AND UPPER(Market)='SPREADS'
+          AND (@book_u = '' OR UPPER(`"""+BOOK_COL_SCORES+"""`) = @book_u)
           AND DATE(feat_Game_Start) <= @cutoff
-          AND Value IS NOT NULL
-          AND Team_Score IS NOT NULL AND Opp_Score IS NOT NULL
+          AND feat_Game_Start >= TIMESTAMP_SUB(TIMESTAMP(@cutoff), INTERVAL @years_back YEAR)
+          AND Is_Home = TRUE
+        GROUP BY GKey
+      ),
+      e AS (
+        SELECT
+          p.GKey,
+          p.Total_Line,
+          p.Total_Points,
+          (p.Total_Points > p.Total_Line) AS Over_Win,
+          (p.Total_Points < p.Total_Line) AS Under_Win,
+          (p.Total_Points = p.Total_Line) AS Push,
+          CASE
+            WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
+              CASE
+                WHEN p.Total_Line <= 205.5 THEN 'OU ≤ 205.5'
+                WHEN p.Total_Line <= 209.5 THEN 'OU 206–209.5'
+                WHEN p.Total_Line <= 213.5 THEN 'OU 210–213.5'
+                WHEN p.Total_Line <= 217.5 THEN 'OU 214–217.5'
+                WHEN p.Total_Line <= 221.5 THEN 'OU 218–221.5'
+                WHEN p.Total_Line <= 225.5 THEN 'OU 222–225.5'
+                WHEN p.Total_Line <= 229.5 THEN 'OU 226–229.5'
+                WHEN p.Total_Line <= 233.5 THEN 'OU 230–233.5'
+                ELSE 'OU ≥ 234'
+              END
+            ELSE
+              CASE
+                WHEN p.Total_Line <= 37.5 THEN 'OU ≤ 37.5'
+                WHEN p.Total_Line <= 41.5 THEN 'OU 38–41.5'
+                WHEN p.Total_Line <= 44.5 THEN 'OU 42–44.5'
+                WHEN p.Total_Line <= 47.5 THEN 'OU 45–47.5'
+                WHEN p.Total_Line <= 50.5 THEN 'OU 48–50.5'
+                WHEN p.Total_Line <= 53.5 THEN 'OU 51–53.5'
+                WHEN p.Total_Line <= 56.5 THEN 'OU 54–56.5'
+                WHEN p.Total_Line <= 59.5 THEN 'OU 57–59.5'
+                ELSE 'OU ≥ 60'
+              END
+          END AS Total_Bucket,
+          CASE
+            WHEN s.Home_Closing_Spread IS NULL THEN 'Home Underdog'
+            WHEN s.Home_Closing_Spread < 0 THEN 'Home Favorite'
+            WHEN s.Home_Closing_Spread = 0 THEN 'Home Underdog'
+            ELSE 'Home Underdog'
+          END AS Role4_HomeSide,
+          CASE
+            WHEN s.Home_Closing_Spread IS NULL THEN 'Road Favorite'
+            WHEN s.Home_Closing_Spread < 0 THEN 'Road Underdog'
+            WHEN s.Home_Closing_Spread = 0 THEN 'Road Favorite'
+            ELSE 'Road Favorite'
+          END AS Role4_RoadSide
+        FROM per_game p
+        LEFT JOIN spreads s USING (GKey)
       )
-      WHERE rn = 1   -- pick the home row
-    ),
-    home_spreads AS (
-      SELECT
-        COALESCE(feat_Game_Key, Game_Key) AS GKey,
-        ANY_VALUE(Value) AS Home_Closing_Spread
-      FROM {SCORES}
-      WHERE UPPER(Sport)  = @sport_upper
-        AND UPPER(Market) = 'SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
-        AND DATE(feat_Game_Start) <= @cutoff
-        AND Is_Home = TRUE
-      GROUP BY GKey
-    ),
-    enriched AS (
-      SELECT
-        t.GKey,
-        t.Total_Line,
-        t.Total_Points,
-        (t.Total_Points > t.Total_Line) AS Over_Win,
-        (t.Total_Points < t.Total_Line) AS Under_Win,
-        (t.Total_Points = t.Total_Line) AS Push,
-        CASE
-          WHEN UPPER(@sport_upper) IN ('NBA','NCAAB','WNBA') THEN
-            CASE
-              WHEN t.Total_Line <= 205.5 THEN 'OU ≤ 205.5'
-              WHEN t.Total_Line <= 209.5 THEN 'OU 206–209.5'
-              WHEN t.Total_Line <= 213.5 THEN 'OU 210–213.5'
-              WHEN t.Total_Line <= 217.5 THEN 'OU 214–217.5'
-              WHEN t.Total_Line <= 221.5 THEN 'OU 218–221.5'
-              WHEN t.Total_Line <= 225.5 THEN 'OU 222–225.5'
-              WHEN t.Total_Line <= 229.5 THEN 'OU 226–229.5'
-              WHEN t.Total_Line <= 233.5 THEN 'OU 230–233.5'
-              ELSE 'OU ≥ 234'
-            END
-          ELSE
-            CASE
-              WHEN t.Total_Line <= 37.5 THEN 'OU ≤ 37.5'
-              WHEN t.Total_Line <= 41.5 THEN 'OU 38–41.5'
-              WHEN t.Total_Line <= 44.5 THEN 'OU 42–44.5'
-              WHEN t.Total_Line <= 47.5 THEN 'OU 45–47.5'
-              WHEN t.Total_Line <= 50.5 THEN 'OU 48–50.5'
-              WHEN t.Total_Line <= 53.5 THEN 'OU 51–53.5'
-              WHEN t.Total_Line <= 56.5 THEN 'OU 54–56.5'
-              WHEN t.Total_Line <= 59.5 THEN 'OU 57–59.5'
-              ELSE 'OU ≥ 60'
-            END
-        END AS Total_Bucket,
-        -- Role labels from the home spread (pick -> treat as dog)
-        CASE
-          WHEN s.Home_Closing_Spread IS NULL THEN 'Home Underdog'
-          WHEN s.Home_Closing_Spread < 0 THEN 'Home Favorite'
-          WHEN s.Home_Closing_Spread = 0 THEN 'Home Underdog'
-          ELSE 'Home Underdog'
-        END AS Role4_HomeSide,
-        CASE
-          WHEN s.Home_Closing_Spread IS NULL THEN 'Road Favorite'
-          WHEN s.Home_Closing_Spread < 0 THEN 'Road Underdog'
-          WHEN s.Home_Closing_Spread = 0 THEN 'Road Favorite'
-          ELSE 'Road Favorite'
-        END AS Role4_RoadSide
-      FROM per_game_totals t
-      LEFT JOIN home_spreads s USING (GKey)
-    )
-
-    -- VENUE
-    SELECT Side, 'Venue' AS GroupLabel, Situation, N, W, L, P,
-           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0) AS WinPct,
-           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END AS ROI_Pct
-    FROM (
-      SELECT 'Over' AS Side, 'Home' AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P FROM enriched
-      UNION ALL
-      SELECT 'Under', 'Home', COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push) FROM enriched
-      UNION ALL
-      SELECT 'Over', 'Road', COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push) FROM enriched
-      UNION ALL
-      SELECT 'Under','Road', COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push) FROM enriched
-    )
-    WHERE N >= @min_n
-
-    UNION ALL
-
-    -- ROLE4 (home+road sides)
-    SELECT Side, 'Role4', Situation, N, W, L, P,
-           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0),
-           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END
-    FROM (
-      SELECT 'Over' AS Side, Role4_HomeSide AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
-      FROM enriched GROUP BY Role4_HomeSide
-      UNION ALL
-      SELECT 'Under', Role4_HomeSide, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Role4_HomeSide
-      UNION ALL
-      SELECT 'Over', Role4_RoadSide, COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Role4_RoadSide
-      UNION ALL
-      SELECT 'Under', Role4_RoadSide, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Role4_RoadSide
-    )
-    WHERE N >= @min_n
-
-    UNION ALL
-
-    -- BUCKET (overall)
-    SELECT Side, 'Bucket', Situation, N, W, L, P,
-           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0),
-           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END
-    FROM (
-      SELECT 'Over' AS Side, Total_Bucket AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
-      FROM enriched GROUP BY Total_Bucket
-      UNION ALL
-      SELECT 'Under', Total_Bucket, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Total_Bucket
-    )
-    WHERE N >= @min_n
-
-    UNION ALL
-
-    -- BUCKET × VENUE
-    SELECT Side, 'Bucket·Venue', Situation, N, W, L, P,
-           SAFE_MULTIPLY(SAFE_DIVIDE(W, NULLIF(W+L,0)),100.0),
-           CASE WHEN (W+L)>0 THEN ((W*(100.0/110.0)+L*(-1.0))/(W+L))*100.0 ELSE NULL END
-    FROM (
-      SELECT 'Over' AS Side, CONCAT('Home · ', Total_Bucket) AS Situation,
-             COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
-      FROM enriched GROUP BY Total_Bucket
-      UNION ALL
-      SELECT 'Under', CONCAT('Home · ', Total_Bucket),
-             COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Total_Bucket
-      UNION ALL
-      SELECT 'Over', CONCAT('Road · ', Total_Bucket),
-             COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Total_Bucket
-      UNION ALL
-      SELECT 'Under', CONCAT('Road · ', Total_Bucket),
-             COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
-      FROM enriched GROUP BY Total_Bucket
-    )
-    WHERE N >= @min_n
-    ORDER BY GroupLabel, Situation, Side
     """
-    job = CLIENT.query(
-        sql,
-        job_config=bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
-                bigquery.ScalarQueryParameter("book_u","STRING",(book or "").upper()),
-                bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
-                bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
-            ],
-            use_query_cache=True,
-        ),
-    )
-    return job.result().to_dataframe()
+
+    def _run(q: str):
+        return CLIENT.query(
+            totals_cte + q,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("sport_upper","STRING",(sport or "").upper()),
+                    bigquery.ScalarQueryParameter("book_u","STRING",(book or "").upper()),
+                    bigquery.ScalarQueryParameter("cutoff","DATE", cutoff_date),
+                    bigquery.ScalarQueryParameter("years_back","INT64", int(years_back)),
+                    bigquery.ScalarQueryParameter("min_n","INT64", int(min_n)),
+                ],
+                use_query_cache=True,
+            ),
+        ).result().to_dataframe()
+
+    # Venue
+    q_venue = """
+    SELECT 'Over' AS Side, 'Venue' AS GroupLabel, 'Home' AS Situation,
+           COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P FROM e
+    UNION ALL
+    SELECT 'Under','Venue','Home', COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push) FROM e
+    UNION ALL
+    SELECT 'Over','Venue','Road', COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push) FROM e
+    UNION ALL
+    SELECT 'Under','Venue','Road', COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push) FROM e
+    """
+    df1 = _run(q_venue)
+
+    # Role4
+    q_role4 = """
+    SELECT 'Over' AS Side, 'Role4' AS GroupLabel, Role4_HomeSide AS Situation,
+           COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
+    FROM e GROUP BY Role4_HomeSide
+    UNION ALL
+    SELECT 'Under','Role4', Role4_HomeSide, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+    FROM e GROUP BY Role4_HomeSide
+    UNION ALL
+    SELECT 'Over','Role4', Role4_RoadSide, COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
+    FROM e GROUP BY Role4_RoadSide
+    UNION ALL
+    SELECT 'Under','Role4', Role4_RoadSide, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+    FROM e GROUP BY Role4_RoadSide
+    """
+    df2 = _run(q_role4)
+
+    # Bucket
+    q_bucket = """
+    SELECT 'Over' AS Side, 'Bucket' AS GroupLabel, Total_Bucket AS Situation,
+           COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
+    FROM e GROUP BY Total_Bucket
+    UNION ALL
+    SELECT 'Under','Bucket', Total_Bucket, COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+    FROM e GROUP BY Total_Bucket
+    """
+    df3 = _run(q_bucket)
+
+    # Bucket × Venue
+    q_bv = """
+    SELECT 'Over' AS Side, 'Bucket·Venue' AS GroupLabel, CONCAT('Home · ', Total_Bucket) AS Situation,
+           COUNT(*) AS N, COUNTIF(Over_Win) AS W, COUNTIF(Under_Win) AS L, COUNTIF(Push) AS P
+    FROM e GROUP BY Total_Bucket
+    UNION ALL
+    SELECT 'Under','Bucket·Venue', CONCAT('Home · ', Total_Bucket), COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+    FROM e GROUP BY Total_Bucket
+    UNION ALL
+    SELECT 'Over','Bucket·Venue', CONCAT('Road · ', Total_Bucket), COUNT(*), COUNTIF(Over_Win), COUNTIF(Under_Win), COUNTIF(Push)
+    FROM e GROUP BY Total_Bucket
+    UNION ALL
+    SELECT 'Under','Bucket·Venue', CONCAT('Road · ', Total_Bucket), COUNT(*), COUNTIF(Under_Win), COUNTIF(Over_Win), COUNTIF(Push)
+    FROM e GROUP BY Total_Bucket
+    """
+    df4 = _run(q_bv)
+
+    out = pd.concat([df1, df2, df3, df4], ignore_index=True)
+    if out.empty:
+        return out
+    out = out.groupby(["Side","GroupLabel","Situation"], as_index=False)[["N","W","L","P"]].sum()
+    out = out[out["N"] >= min_n].copy()
+    out["WinPct"] = (out["W"] / out[["W","L"]].sum(axis=1).replace(0, np.nan) * 100).round(1)
+    out["ROI_Pct"] = np.where(
+        (out["W"] + out["L"]) > 0,
+        (((out["W"] * (100.0/110.0)) + (out["L"] * -1.0)) / (out["W"] + out["L"])) * 100.0,
+        np.nan
+    ).round(1)
+    return out.sort_values(["GroupLabel","Situation","Side"]).reset_index(drop=True)
+
 
 # ---------- helpers for rendering ----------
 def _labels_for_team(sport: str, ctx: dict) -> list[str]:
@@ -755,6 +746,7 @@ def render_current_situations_tab(selected_sport: str):
     # League-wide tables (one query each) — filtered to book
     league_spreads = league_totals_spreads(selected_sport, cutoff_date_for_stats, min_n, book=book_name)
     league_totals  = league_totals_overunder(selected_sport, cutoff_date_for_stats, min_n, book=book_name)
+
 
     # Roles from MOVES (SPREADS-ONLY) — filtered to book
     ctxs = team_context_from_moves(game_id, teams, book=book_name)
