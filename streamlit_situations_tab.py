@@ -274,7 +274,7 @@ def team_context_from_moves(game_id: str, teams: list[str], sport: str, book: st
       FROM {SCORES}
       WHERE UPPER(Sport)=@sport_upper
         AND UPPER(Market)='SPREADS'
-        AND (@book_u = '' OR UPPER(`{BOOK_COL_SCORES}`) = @book_u)
+        AND (@book_u = '' OR UPPER(Book) = @book_u)
       GROUP BY gkey, team_norm
     )
 
