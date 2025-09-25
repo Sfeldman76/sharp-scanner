@@ -2878,11 +2878,15 @@ def compute_ev_features_sharp_vs_rec(
         ((p_truth[ok_ev] * payout[ok_ev]) - (1.0 - p_truth[ok_ev])) / payout[ok_ev]
     )
 
-    # compact dtypes
+   
+        # --- compact dtypes (re‑ensure columns exist first to avoid KeyError) ---
     for c in out_cols:
+        if c not in dm.columns:
+            dm[c] = np.nan
         dm[c] = pd.to_numeric(dm[c], errors="coerce").astype("float32")
 
     return dm
+
 
 def hydrate_inverse_rows_from_snapshot(df_inverse: pd.DataFrame,
                                        df_all_snapshots: pd.DataFrame) -> pd.DataFrame:
