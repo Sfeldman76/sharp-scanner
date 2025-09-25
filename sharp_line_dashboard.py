@@ -940,6 +940,27 @@ def _ensure_predict_proba_for_prob_cal(cal_obj, eps=1e-6):
     return _AsPredictProba(cal_obj, eps=eps)
 
 
+def _col_or_nan(df: pd.DataFrame, col: str) -> pd.Series:
+    """Return df[col] if present; else an all-NaN Series aligned to df.index."""
+    if col in df.columns:
+        s = df[col]
+        # coerce to numeric for safety
+        return pd.to_numeric(s, errors="coerce")
+    return pd.Series(np.nan, index=df.index, dtype="float64")
+
+def _ensure_series(x, index) -> pd.Series:
+    """If x is a scalar/ndarray, broadcast to a Series aligned to index."""
+    if isinstance(x, pd.Series):
+        return x
+    arr = np.asarray(x)
+    if arr.ndim == 0:
+        return pd.Series(np.repeat(arr, len(index)), index=index)
+    # length mismatch -> broadcast or trim safely
+    if arr.shape[0] != len(index):
+        arr = np.resize(arr, len(index))
+    return pd.Series(arr, index=index)
+
+
 from scipy.special import ndtr as _phi      # Φ
 from scipy.special import ndtri as _ppf     # Φ^{-1}
 
@@ -955,9 +976,7 @@ def compute_ev_features_sharp_vs_rec(
     Compare a sharp 'truth' vs each book's offer (line + odds) and add EV features.
     Always returns same row count. Safe when sharp data or sigma are missing.
     """
-    def _amer_to_prob(odds):
-        o = pd.to_numeric(odds, errors="coerce")
-        return np.where(o >= 0, 100.0/(o+100.0), (-o)/((-o)+100.0))
+    
 
     out_cols = [
         "Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma",
@@ -1074,13 +1093,15 @@ def compute_ev_features_sharp_vs_rec(
     dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]],
                   on=keys, how="left")
 
-    # Price each row at its own line; use values from dm (not locals)
-    mu_series  = pd.to_numeric(dm.get("Truth_Margin_Mu", np.nan), errors="coerce")
-    sig_series = pd.to_numeric(dm.get("Truth_Sigma", np.nan), errors="coerce")
-    line_rec   = pd.to_numeric(dm.get("Value", np.nan), errors="coerce")
-
+    # --- Price each row at its own line (always Series, aligned to dm.index) ---
+    mu_series  = _ensure_series(_col_or_nan(dm, "Truth_Margin_Mu"), dm.index)
+    sig_series = _ensure_series(_col_or_nan(dm, "Truth_Sigma"), dm.index)
+    line_rec   = _ensure_series(_col_or_nan(dm, "Value"), dm.index)
+    
     ok = mu_series.notna() & sig_series.notna() & (sig_series > 0) & line_rec.notna()
     dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi((mu_series[ok] - line_rec[ok]) / sig_series[ok])
+    
+
 
     # Moneyline fallback (no line shift)
     is_ml = dm["Market"].isin(["h2h","ml","moneyline","headtohead"])
