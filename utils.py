@@ -389,16 +389,15 @@ def _table_has_column(bq: bigquery.Client, full_table: str, column: str) -> bool
     df = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
     return (not df.empty) and (int(df.n.iloc[0]) > 0)
 
-
 SPORT_ALIASES = {
-        "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
-        "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
-        "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF"],
-        "NBA":   ["NBA", "BASKETBALL_NBA"],
-        "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
-        "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
-        "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "COLLEGE_BASKETBALL"],
-    }
+    "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
+    "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
+    "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF"],
+    "NBA":   ["NBA", "BASKETBALL_NBA"],
+    "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
+    "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
+    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "COLLEGE_BASKETBALL"],
+}
 
 def update_power_ratings(
     bq: bigquery.Client,
@@ -407,34 +406,48 @@ def update_power_ratings(
     table_history: str = "sharplogger.sharp_data.ratings_history",
     table_current: str = "sharplogger.sharp_data.ratings_current",
     default_sport: str = "MLB",
+    project_table_market: str | None = "sharplogger.sharp_data.moves_with_features_merged",  # NEW (optional)
 ) -> pd.DataFrame:
     """
     Streamed, low-memory update of team power ratings per sport.
+
       - MLB   -> Poisson/Skellam-style attack+defense (scores-only)
-      - NFL   -> Kalman/DLM on point margin (scores-only)
-      - NCAAF -> Kalman/DLM on point margin (scores-only)
-      - NBA   -> Kalman/DLM on point margin (scores-only)
-      - WNBA  -> Kalman/DLM on point margin (scores-only)
-      - CFL   -> Kalman/DLM on point margin (scores-only)
-      - NCAAB -> Ridge-Massey (ridge regression on margins) (scores-only)
+      - NFL   -> Kalman/DLM on point margin + market spread sensor (+ SoS)
+      - NCAAF -> Kalman/DLM on point margin + market spread sensor (+ SoS)
+      - NBA   -> Kalman/DLM on point margin + market spread sensor (+ SoS)
+      - WNBA  -> Kalman/DLM on point margin + market spread sensor (+ SoS)
+      - CFL   -> Kalman/DLM on point margin + market spread sensor (+ SoS)
+      - NCAAB -> Ridge-Massey (scores-only)
 
     Notes:
       • Ratings are stored as 1500 + points_rating so existing consumers keep working.
-      • New Method values: 'poisson', 'elo_kalman', 'ridge_massey'.
+      • Method values remain: 'poisson', 'elo_kalman', 'ridge_massey'.
       • Downstream logic that relies on rating DIFFERENCES is unchanged.
     """
 
-
-
-    # Best-in-class per sport (scores-only). HFA_pts are in POINTS (not Elo).
+    # ---------- config ----------
+    # HFA_pts are in POINTS (not Elo).
+    # sigma_spread: observation SD for market spread sensor (lower => trust market more)
+    # sos_*: Strength-of-Schedule knobs (recency-weighted opponent rating at game time)
     SPORT_CFG = {
-        "MLB":   dict(model="poisson",      HFA_pts=0.20, mov_cap=None),                 # Poisson (your existing MLB block)
-        "NFL":   dict(model="elo_kalman",   HFA_pts=2.1,  mov_cap=24, phi=0.96, sigma_eta=6.0, sigma_y=13.0),
-        "NCAAF": dict(model="elo_kalman",   HFA_pts=2.6,  mov_cap=28, phi=0.96, sigma_eta=7.0, sigma_y=14.0),
-        "NBA":   dict(model="elo_kalman",   HFA_pts=2.8,  mov_cap=28, phi=0.97, sigma_eta=7.5, sigma_y=12.0),
-        "WNBA":  dict(model="elo_kalman",   HFA_pts=2.0,  mov_cap=26, phi=0.97, sigma_eta=7.0, sigma_y=11.5),
-        "CFL":   dict(model="elo_kalman",   HFA_pts=1.6,  mov_cap=30, phi=0.96, sigma_eta=6.5, sigma_y=13.5),
-        "NCAAB": dict(model="ridge_massey", HFA_pts=3.0,  mov_cap=25, ridge_lambda=50.0, window_days=120),
+        "MLB":   dict(model="poisson",      HFA_pts=0.20, mov_cap=None),
+        "NFL":   dict(model="elo_kalman",   HFA_pts=2.1,  mov_cap=24, phi=0.96,
+                      sigma_eta=6.0,  sigma_y=13.0, sigma_spread=6.0,
+                      sos_half_life_days=90, sos_gamma=0.7),
+        "NCAAF": dict(model="elo_kalman",   HFA_pts=2.6,  mov_cap=28, phi=0.96,
+                      sigma_eta=7.0,  sigma_y=14.0, sigma_spread=7.0,
+                      sos_half_life_days=90, sos_gamma=0.7),
+        "NBA":   dict(model="elo_kalman",   HFA_pts=2.8,  mov_cap=28, phi=0.97,
+                      sigma_eta=7.5, sigma_y=12.0, sigma_spread=8.0,
+                      sos_half_life_days=60, sos_gamma=0.6),
+        "WNBA":  dict(model="elo_kalman",   HFA_pts=2.0,  mov_cap=26, phi=0.97,
+                      sigma_eta=7.0, sigma_y=11.5, sigma_spread=7.5,
+                      sos_half_life_days=60, sos_gamma=0.6),
+        "CFL":   dict(model="elo_kalman",   HFA_pts=1.6,  mov_cap=30, phi=0.96,
+                      sigma_eta=6.5, sigma_y=13.5, sigma_spread=7.5,
+                      sos_half_life_days=90, sos_gamma=0.7),
+        "NCAAB": dict(model="ridge_massey", HFA_pts=3.0,  mov_cap=25,
+                      ridge_lambda=50.0, window_days=120),
     }
     BACKFILL_DAYS = 14
     PREFERRED_METHOD = {
@@ -446,6 +459,11 @@ def update_power_ratings(
         "CFL":   "elo_kalman",
         "NCAAB": "ridge_massey",
     }
+
+    # Use sharp books only for composite close (fall back safely if table absent/mismatch)
+    SHARP_BOOKS_DEFAULT = [
+        "pinnacle", "circa", "betfair_ex", "betcris", "matchbook", "superbook"
+    ]
 
     def get_aliases(canon: str) -> list[str]:
         return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
@@ -636,15 +654,30 @@ def update_power_ratings(
         ).to_dataframe()
         return df.min_ts.iloc[0], df.max_ts.iloc[0]
 
-   
-    def load_games_stream(sport: str, aliases: list[str], cutoff=None, page_rows: int = 200_000):
+    def _exp_decay_weight(gs_ts: pd.Timestamp, now_ts: pd.Timestamp, half_life_days: float) -> float:
+        age_days = max((now_ts - gs_ts).days, 0)
+        return float(np.exp(- age_days / max(half_life_days, 1.0)))
+
+    def _safe_get(d: dict, k, default=0.0):
+        v = d.get(k, default)
+        return float(v if np.isfinite(v) else default)
+
+    def load_games_stream(
+        sport: str,
+        aliases: list[str],
+        cutoff=None,
+        page_rows: int = 200_000,
+        *,
+        project_table_market: str | None = None,
+        sharp_books: list[str] | None = None,
+    ):
         cutoff_param = None
         if cutoff is not None and not pd.isna(cutoff):
             cutoff_utc = to_utc_ts(cutoff)
             if not pd.isna(cutoff_utc):
                 cutoff_param = cutoff_utc.to_pydatetime()
-    
-        base_sql = f"""
+
+        base_scores_sql = f"""
         SELECT
           CASE
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASEBALL_MLB','BASEBALL-MLB','BASEBALL','MLB') THEN 'MLB'
@@ -666,85 +699,170 @@ def update_power_ratings(
         WHERE UPPER(CAST(t.Sport AS STRING)) IN UNNEST(@sport_aliases)
           AND t.Score_Home_Score IS NOT NULL AND t.Score_Away_Score IS NOT NULL
           {"AND TIMESTAMP(t.Inserted_Timestamp) >= @cutoff" if cutoff_param else ""}
-        ORDER BY Snapshot_TS, Game_Start
         """
+
         params = {"sport_aliases": aliases, "default_sport": default_sport}
         if cutoff_param is not None:
             params["cutoff"] = cutoff_param
-    
-        need = ["Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS",
-                "Score_Home_Score","Score_Away_Score"]
-    
-        for df in stream_query_dfs(bq, base_sql, params=params, page_rows=page_rows, select_cols=need):
+
+        use_market = project_table_market is not None
+        sharp_list = (sharp_books or SHARP_BOOKS_DEFAULT)
+
+        if use_market:
+            # Try a composite home spread close (median across sharp books)
+            sql_to_run = f"""
+            WITH scores AS ({base_scores_sql}),
+            market AS (
+              SELECT
+                LOWER(TRIM(m.Home_Team)) AS Home_Team,
+                LOWER(TRIM(m.Away_Team)) AS Away_Team,
+                TIMESTAMP(m.Game_Start)  AS Game_Start,
+                APPROX_QUANTILES(m.Value, 2)[OFFSET(1)] AS Spread_Close
+              FROM `{project_table_market}` m
+              WHERE
+                UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@sport_aliases)
+                AND m.Market IN ('spreads','spread','Spread','SPREADS')
+                AND LOWER(COALESCE(m.Bookmaker, m.Book)) IN UNNEST(@sharp_books)
+                AND TIMESTAMP(m.Game_Start) IS NOT NULL
+                AND LOWER(TRIM(m.Team)) = LOWER(TRIM(m.Home_Team))
+                AND m.Value IS NOT NULL
+              QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY LOWER(TRIM(m.Home_Team)), LOWER(TRIM(m.Away_Team)),
+                             TIMESTAMP(m.Game_Start), LOWER(COALESCE(m.Bookmaker, m.Book))
+                ORDER BY m.Snapshot_Timestamp DESC
+              ) = 1
+              GROUP BY Home_Team, Away_Team, Game_Start
+            )
+            SELECT s.*, m.Spread_Close
+            FROM scores s
+            LEFT JOIN market m
+              USING (Home_Team, Away_Team, Game_Start)
+            ORDER BY s.Snapshot_TS, s.Game_Start
+            """
+            params["sharp_books"] = [b.lower() for b in sharp_list]
+        else:
+            sql_to_run = base_scores_sql + "\nORDER BY Snapshot_TS, Game_Start"
+
+        for df in stream_query_dfs(bq, sql_to_run, params=params, page_rows=page_rows, select_cols=None):
+            if "Spread_Close" not in df.columns:
+                df["Spread_Close"] = np.nan
+            df = df[["Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS",
+                     "Score_Home_Score","Score_Away_Score","Spread_Close"]]
             df = downcast_numeric(df)
             df = to_cats(df, ["Sport","Home_Team","Away_Team"])
             yield df
             del df; gc.collect()
 
-
-    # ---------------- new engines ----------------
+    # ---------------- engines ----------------
     def _cap_margin(mov, cap):
         if cap is None:
             return float(mov)
         return float(min(max(mov, -cap), cap))
 
     def run_kalman_elo(bq, sport: str, aliases: list[str], cfg: dict, window_start):
-        phi        = float(cfg.get("phi", 0.96))
-        sigma_eta  = float(cfg.get("sigma_eta", 6.0))
-        sigma_y    = float(cfg.get("sigma_y", 13.0))
-        mov_cap    = cfg.get("mov_cap", None)
-        HFA_pts    = float(cfg.get("HFA_pts", 2.0))
-    
+        phi         = float(cfg.get("phi", 0.96))
+        sigma_eta   = float(cfg.get("sigma_eta", 6.0))
+        sigma_y     = float(cfg.get("sigma_y", 13.0))      # score sensor SD
+        sigma_s     = float(cfg.get("sigma_spread", 7.0))  # market sensor SD
+        mov_cap     = cfg.get("mov_cap", None)
+        HFA_pts     = float(cfg.get("HFA_pts", 2.0))
+
+        sos_hl      = float(cfg.get("sos_half_life_days", 60))
+        sos_gamma   = float(cfg.get("sos_gamma", 0.6))
+
         r_mean, r_var = {}, {}
         def _m(t): return r_mean.get(t, 0.0)
         def _v(t): return r_var.get(t, 100.0)
-    
+
+        # SoS accumulators: recency-weighted opponent rating at game time (pre-update)
+        sos_num, sos_den = {}, {}
+
+        def _do_update(obs_value, obs_var, Rh, Ra, Vh, Va):
+            y_hat = (Rh - Ra + HFA_pts)
+            e     = obs_value - y_hat
+            S     = Vh + Va + obs_var
+            if S <= 0: S = 1e-6
+            Kh, Ka = Vh / S, Va / S
+            Rh_post, Ra_post = Rh + Kh*e, Ra - Ka*e
+            Vh_post, Va_post = Vh - Kh*Vh, Va - Ka*Va
+            return Rh_post, Ra_post, Vh_post, Va_post
+
         history_batch, BATCH_SZ = [], 50_000
-    
-        for chunk in load_games_stream(sport, aliases, cutoff=window_start, page_rows=200_000):
+        utc_now = pd.Timestamp.now(tz="UTC")
+
+        for chunk in load_games_stream(
+            sport, aliases, cutoff=window_start, page_rows=200_000,
+            project_table_market=project_table_market, sharp_books=SHARP_BOOKS_DEFAULT
+        ):
             for _, g in chunk.iterrows():
                 h, a = g.Home_Team, g.Away_Team
+                gs_ts = g.Game_Start if isinstance(g.Game_Start, pd.Timestamp) else pd.Timestamp(g.Game_Start, tz="UTC")
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
                 mov = _cap_margin(hs - as_, mov_cap)
-    
+
                 Rh, Ra = _m(h), _m(a)
                 Vh, Va = _v(h), _v(a)
-    
-                # ⬇️ no neutral logic; always add HFA_pts for home team
-                y_hat = (Rh - Ra + HFA_pts)
-                e = mov - y_hat
-                S = Vh + Va + sigma_y**2
-                if S <= 0: S = 1e-6
-                Kh, Ka = Vh / S, Va / S
-    
-                Rh_post, Ra_post = Rh + Kh*e, Ra - Ka*e
-                Vh_post, Va_post = Vh - Kh*Vh, Va - Ka*Va
-    
-                Rh_next, Ra_next = phi*Rh_post, phi*Ra_post
-                Vh_next, Va_next = (phi**2)*Vh_post + sigma_eta**2, (phi**2)*Va_post + sigma_eta**2
-    
+
+                # 1) score sensor
+                Rh, Ra, Vh, Va = _do_update(mov, sigma_y**2, Rh, Ra, Vh, Va)
+
+                # 2) market spread sensor (home spread, fav < 0)
+                sc = g.Spread_Close
+                if pd.notna(sc):
+                    Rh, Ra, Vh, Va = _do_update(float(sc), sigma_s**2, Rh, Ra, Vh, Va)
+
+                # SoS accumulation using opponent rating *before* propagation
+                w = _exp_decay_weight(gs_ts if gs_ts.tzinfo else gs_ts.tz_localize("UTC"), utc_now, sos_hl)
+                sos_num[h] = _safe_get(sos_num, h) + w * _safe_get(r_mean, a, 0.0)
+                sos_den[h] = _safe_get(sos_den, h) + w
+                sos_num[a] = _safe_get(sos_num, a) + w * _safe_get(r_mean, h, 0.0)
+                sos_den[a] = _safe_get(sos_den, a) + w
+
+                # propagate
+                Rh_next, Ra_next = phi*Rh, phi*Ra
+                Vh_next, Va_next = (phi**2)*Vh + sigma_eta**2, (phi**2)*Va + sigma_eta**2
+
                 r_mean[h], r_var[h] = Rh_next, Vh_next
                 r_mean[a], r_var[a] = Ra_next, Va_next
-    
-                ts = g.Snapshot_TS
+
+                ts  = g.Snapshot_TS
                 tag = "backfill" if window_start is None else "incremental"
                 history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + Rh_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
                 history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + Ra_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-    
+
                 if len(history_batch) >= BATCH_SZ:
                     bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
                     history_batch.clear()
             del chunk; gc.collect()
-    
+
         if history_batch:
             bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
-    
-        utc_now = pd.Timestamp.now(tz="UTC")
-        return [{"Sport": sport, "Team": t, "Rating": 1500.0 + r_mean[t],
-                 "Method": "elo_kalman", "Updated_At": utc_now} for t in r_mean.keys()]
 
+        if not r_mean:
+            return []
+
+        # ---- SoS correction (one shot) ----
+        teams = list(r_mean.keys())
+        raw_R = np.array([r_mean[t] for t in teams], dtype=float)
+        sos   = np.array([ (_safe_get(sos_num, t) / max(_safe_get(sos_den, t), 1e-9)) for t in teams ], dtype=float)
+        sos   = np.where(np.isfinite(sos), sos, np.nan)
+
+        league_mean_R = float(np.nanmean(raw_R)) if np.isfinite(np.nanmean(raw_R)) else 0.0
+        sos = np.where(np.isnan(sos), league_mean_R, sos)
+
+        adj_R = raw_R + sos_gamma * (league_mean_R - sos)
+
+        USE_ADJUSTED_FOR_OUTPUT = True
+        final_R = adj_R if USE_ADJUSTED_FOR_OUTPUT else raw_R
+
+        utc_now = pd.Timestamp.now(tz="UTC")
+        return [
+            {"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
+             "Method": "elo_kalman", "Updated_At": utc_now}
+            for t, r in zip(teams, final_R)
+        ]
 
     def run_ridge_massey(bq, sport: str, aliases: list[str], cfg: dict):
         """Ridge-Massey fit on recent window of finals. Stores 1500+points_rating with Method='ridge_massey'."""
@@ -846,7 +964,7 @@ def update_power_ratings(
         aliases = get_aliases(sport)
 
         if cfg["model"] == "poisson":
-            # ---------- your existing MLB Poisson block ----------
+            # ---------- MLB Poisson ----------
             GF: dict[str, float] = {}
             GA: dict[str, float] = {}
             GP: dict[str, int]   = {}
@@ -873,7 +991,8 @@ def update_power_ratings(
             history_batch = []
             BATCH_SZ = 50_000
 
-            for chunk in load_games_stream(sport, aliases, cutoff=window_start, page_rows=200_000):
+            for chunk in load_games_stream(sport, aliases, cutoff=window_start, page_rows=200_000,
+                                           project_table_market=project_table_market):
                 for _, g in chunk.iterrows():
                     hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
                     add_game(g.Home_Team, g.Away_Team, hs, as_)
@@ -916,22 +1035,15 @@ def update_power_ratings(
                 updated_sports.append(sport)
 
         else:
-            # Fallback: do nothing for unknown model keys
             continue
 
     # Write current + reconcile (in-place swap, per (Sport,Team,Method))
     upsert_current(current_rows_all)
 
     # Bring current in sync with latest history for updated sports
-
-       
-    
-    
     if updated_sports:
         pm_values = [{"s": s, "m": PREFERRED_METHOD[s]} for s in updated_sports]
-    
-        # Each element must be a flat sequence of ScalarQueryParameter
-        # build the array<struct> param correctly
+
         struct_params = [
             bigquery.StructQueryParameter(
                 "",
@@ -940,13 +1052,10 @@ def update_power_ratings(
             )
             for item in pm_values
         ]
-        
         job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ArrayQueryParameter("pm", "STRUCT", struct_params)
-            ]
+            query_parameters=[bigquery.ArrayQueryParameter("pm", "STRUCT", struct_params)]
         )
-        
+
         sql = f"""
         MERGE `{table_current}` T
         USING (
@@ -975,10 +1084,11 @@ def update_power_ratings(
           VALUES (S.Sport, S.Team, S.Method, S.Rating, S.Updated_At)
         """
         bq.query(sql, job_config=job_config).result()
-    # Fill any still-missing current from history (safety)
+
+    # Safety backfill for any missing current rows
     fill_missing_current_from_history(None)
 
-    # Final tiny read of current ratings for processed sports
+    # Final read of current ratings for processed sports
     if not updated_sports:
         return pd.DataFrame(columns=["Sport", "Team", "Method", "Rating", "Updated_At"])
 
@@ -991,7 +1101,6 @@ def update_power_ratings(
     params = [bigquery.ArrayQueryParameter("sports", "STRING", [s.upper() for s in updated_sports])]
     result_df = bq.query(q, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
     return result_df
-
 
 
 def normalize_team(t):
