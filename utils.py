@@ -705,32 +705,47 @@ def update_power_ratings(
         if cutoff_param is not None:
             params["cutoff"] = cutoff_param
 
+        
+        # inside load_games_stream(...):
+        
         use_market = project_table_market is not None
         sharp_list = (sharp_books or SHARP_BOOKS_DEFAULT)
-
+        
         if use_market:
-            # Try a composite home spread close (median across sharp books)
+            # ✅ FIXED: do QUALIFY in inner subquery, aggregate (median) in outer subquery
             sql_to_run = f"""
             WITH scores AS ({base_scores_sql}),
-            market AS (
+            latest_per_book AS (
               SELECT
                 LOWER(TRIM(m.Home_Team)) AS Home_Team,
                 LOWER(TRIM(m.Away_Team)) AS Away_Team,
                 TIMESTAMP(m.Game_Start)  AS Game_Start,
-                APPROX_QUANTILES(m.Value, 2)[OFFSET(1)] AS Spread_Close
+                LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))) AS BookKey,
+                m.Value AS SpreadValue
               FROM `{project_table_market}` m
               WHERE
                 UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@sport_aliases)
                 AND m.Market IN ('spreads','spread','Spread','SPREADS')
-                AND LOWER(COALESCE(m.Bookmaker, m.Book)) IN UNNEST(@sharp_books)
+                AND LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))) IN UNNEST(@sharp_books)
                 AND TIMESTAMP(m.Game_Start) IS NOT NULL
-                AND LOWER(TRIM(m.Team)) = LOWER(TRIM(m.Home_Team))
+                AND LOWER(TRIM(m.Team)) = LOWER(TRIM(m.Home_Team))   -- home-side spread only
                 AND m.Value IS NOT NULL
               QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY LOWER(TRIM(m.Home_Team)), LOWER(TRIM(m.Away_Team)),
-                             TIMESTAMP(m.Game_Start), LOWER(COALESCE(m.Bookmaker, m.Book))
+                PARTITION BY LOWER(TRIM(m.Home_Team)),
+                             LOWER(TRIM(m.Away_Team)),
+                             TIMESTAMP(m.Game_Start),
+                             LOWER(TRIM(COALESCE(m.Bookmaker, m.Book)))
                 ORDER BY m.Snapshot_Timestamp DESC
               ) = 1
+            ),
+            market AS (
+              SELECT
+                Home_Team,
+                Away_Team,
+                Game_Start,
+                -- median across sharp books
+                APPROX_QUANTILES(SpreadValue, 2)[OFFSET(1)] AS Spread_Close
+              FROM latest_per_book
               GROUP BY Home_Team, Away_Team, Game_Start
             )
             SELECT s.*, m.Spread_Close
@@ -742,6 +757,7 @@ def update_power_ratings(
             params["sharp_books"] = [b.lower() for b in sharp_list]
         else:
             sql_to_run = base_scores_sql + "\nORDER BY Snapshot_TS, Game_Start"
+
 
         for df in stream_query_dfs(bq, sql_to_run, params=params, page_rows=page_rows, select_cols=None):
             if "Spread_Close" not in df.columns:
