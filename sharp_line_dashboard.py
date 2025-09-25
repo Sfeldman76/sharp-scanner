@@ -940,6 +940,10 @@ def _ensure_predict_proba_for_prob_cal(cal_obj, eps=1e-6):
     return _AsPredictProba(cal_obj, eps=eps)
 
 
+
+from scipy.special import ndtr as _phi      # Φ
+from scipy.special import ndtri as _ppf     # Φ^{-1}
+
 def _col_or_nan(df: pd.DataFrame, col: str) -> pd.Series:
     """Return df[col] if present; else an all-NaN numeric Series aligned to df.index."""
     if col in df.columns:
@@ -957,10 +961,6 @@ def _ensure_series(x, index) -> pd.Series:
         arr = np.resize(arr, len(index))
     return pd.Series(arr, index=index)
 
-
-from scipy.special import ndtr as _phi      # Φ
-from scipy.special import ndtri as _ppf     # Φ^{-1}
-
 def compute_ev_features_sharp_vs_rec(
     df_market: pd.DataFrame,
     *,
@@ -973,7 +973,9 @@ def compute_ev_features_sharp_vs_rec(
     Compare a sharp 'truth' vs each book's offer (line + odds) and add EV features.
     Always returns same row count. Safe when sharp data or sigma are missing.
     """
-    
+    def _amer_to_prob(odds):
+        o = pd.to_numeric(odds, errors="coerce")
+        return np.where(o >= 0, 100.0/(o+100.0), (-o)/((-o)+100.0))
 
     out_cols = [
         "Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma",
@@ -993,25 +995,22 @@ def compute_ev_features_sharp_vs_rec(
     for c in out_cols:
         if c not in dm.columns:
             dm[c] = np.nan
-    def _amer_to_prob(odds):
-        o = pd.to_numeric(odds, errors="coerce")
-        return np.where(o >= 0, 100.0/(o+100.0), (-o)/((-o)+100.0))
 
     SHARP_SET = set(sharp_books or SHARP_BOOKS)
     sharp_mask = dm["Bookmaker"].isin(SHARP_SET)
 
     # No sharp rows → still compute Rec_Implied_Prob and return
     if not sharp_mask.any():
-        dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan)).astype("float32")
+        dm["Rec_Implied_Prob"] = _amer_to_prob(_col_or_nan(dm, "Odds_Price")).astype("float32")
         return dm
 
     keep = ["Game_Key","Market","Outcome_Norm","Bookmaker","Value","Odds_Price"]
     if reliability_col in dm.columns: keep.append(reliability_col)
     if limit_col in dm.columns:       keep.append(limit_col)
     sharp_rows = dm.loc[sharp_mask, keep].copy()
-    
+
     if sharp_rows.empty:
-        dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan)).astype("float32")
+        dm["Rec_Implied_Prob"] = _amer_to_prob(_col_or_nan(dm, "Odds_Price")).astype("float32")
         return dm
 
     # Rank sharp by reliability then limit
@@ -1088,51 +1087,50 @@ def compute_ev_features_sharp_vs_rec(
     truth["Truth_Margin_Mu"] = mu
     truth["Truth_Sigma"]     = sigma
 
-    # Merge μ,σ back to every book row (aligns to dm.index automatically)
+    # Merge μ,σ back to every book row (merge can drop pre-created cols)
     keys = ["Game_Key","Market","Outcome_Norm"]
     dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]],
                   on=keys, how="left")
+
+    # Re‑assert output cols after merge (idsempotent)
+    for c in out_cols:
+        if c not in dm.columns:
+            dm[c] = np.nan
 
     # --- Price each row at its own line (always Series, aligned to dm.index) ---
     mu_series  = _ensure_series(_col_or_nan(dm, "Truth_Margin_Mu"), dm.index)
     sig_series = _ensure_series(_col_or_nan(dm, "Truth_Sigma"), dm.index)
     line_rec   = _ensure_series(_col_or_nan(dm, "Value"), dm.index)
-    
+
     ok = mu_series.notna() & sig_series.notna() & (sig_series > 0) & line_rec.notna()
     dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi((mu_series[ok] - line_rec[ok]) / sig_series[ok])
-    
+
     # --- Moneyline fallback (no line shift) ---
-    if "Truth_Fair_Prob_at_RecLine" not in dm.columns:
-        dm["Truth_Fair_Prob_at_RecLine"] = np.nan  # ensure target exists
-    
     is_ml   = dm["Market"].isin(["h2h","ml","moneyline","headtohead"])
     need_ml = is_ml & dm["Truth_Fair_Prob_at_RecLine"].isna()
-    
-    sharp_base = _ensure_series(_col_or_nan(dm, "Truth_Fair_Prob_at_SharpLine"), dm.index)
-    # Only assign where we still need values
-    dm.loc[need_ml, "Truth_Fair_Prob_at_RecLine"] = sharp_base[need_ml].values
-    
 
+    sharp_base = _ensure_series(_col_or_nan(dm, "Truth_Fair_Prob_at_SharpLine"), dm.index)
+    dm.loc[need_ml, "Truth_Fair_Prob_at_RecLine"] = sharp_base[need_ml].values
 
     # Implied prob of offered odds
-    dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan))
+    dm["Rec_Implied_Prob"] = _amer_to_prob(_col_or_nan(dm, "Odds_Price"))
 
-    # EV per $1 stake & probability edge (only where p_truth exists)
+    # EV per $1 stake & probability edge
     p_truth = pd.to_numeric(dm["Truth_Fair_Prob_at_RecLine"], errors="coerce")
-    odds = pd.to_numeric(dm.get("Odds_Price", np.nan), errors="coerce")
+    odds = pd.to_numeric(_col_or_nan(dm, "Odds_Price"), errors="coerce")
     payout = np.where(odds >= 0, odds/100.0, 100.0/(-odds))
     ok_ev = p_truth.notna() & np.isfinite(payout)
     dm.loc[ok_ev, "EV_Sh_vs_Rec_Dollar"] = (p_truth[ok_ev] * payout[ok_ev]) - (1.0 - p_truth[ok_ev])
     dm.loc[ok_ev, "EV_Sh_vs_Rec_Prob"]   = p_truth[ok_ev] - dm.loc[ok_ev, "Rec_Implied_Prob"]
     dm.loc[ok_ev, "Kelly_Fraction"]      = np.maximum(0.0, (p_truth[ok_ev] * payout[ok_ev] - (1.0 - p_truth[ok_ev])) / payout[ok_ev])
 
-    # Tighten dtypes
+    # --- Final: ensure outputs exist and are numeric (column-safe)
     for c in out_cols:
+        if c not in dm.columns:
+            dm[c] = np.nan
         dm[c] = pd.to_numeric(dm[c], errors="coerce").astype("float32")
 
     return dm
-
-
 
 
 def normalize_team(t):
