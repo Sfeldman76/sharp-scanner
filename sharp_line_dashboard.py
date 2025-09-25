@@ -939,6 +939,7 @@ def _ensure_predict_proba_for_prob_cal(cal_obj, eps=1e-6):
             return np.c_[1.0 - p, p]
     return _AsPredictProba(cal_obj, eps=eps)
 
+
 from scipy.special import ndtr as _phi      # Φ
 from scipy.special import ndtri as _ppf     # Φ^{-1}
 
@@ -951,47 +952,40 @@ def compute_ev_features_sharp_vs_rec(
     sigma_col: str = "Sigma_Pts",
 ) -> pd.DataFrame:
     """
-    Adds EV features comparing a sharp 'truth' vs each book's offer (line + odds).
-    Always returns the same number of rows and pre-creates output columns to avoid KeyErrors.
+    Compare a sharp 'truth' vs each book's offer (line + odds) and add EV features.
+    Always returns same row count. Safe when sharp data or sigma are missing.
     """
+    def _amer_to_prob(odds):
+        o = pd.to_numeric(odds, errors="coerce")
+        return np.where(o >= 0, 100.0/(o+100.0), (-o)/((-o)+100.0))
+
     out_cols = [
         "Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma",
         "Truth_Fair_Prob_at_RecLine","Rec_Implied_Prob",
         "EV_Sh_vs_Rec_Prob","EV_Sh_vs_Rec_Dollar","Kelly_Fraction"
     ]
+
     if df_market is None or df_market.empty:
         dm = (df_market.copy() if df_market is not None else pd.DataFrame())
         for c in out_cols: dm[c] = np.nan
         return dm
 
     dm = df_market.copy()
-    # normalize
     dm["Market"] = dm["Market"].astype(str).str.lower().str.strip()
     dm["Outcome_Norm"] = dm.get("Outcome_Norm", dm.get("Outcome", "")).astype(str).str.lower().str.strip()
     dm["Bookmaker"] = dm["Bookmaker"].astype(str).str.lower().str.strip()
-
-    # --- pre-create outputs to avoid KeyError later ---
     for c in out_cols:
         if c not in dm.columns:
             dm[c] = np.nan
 
-
-    def _devig_two_way(pa_raw, pb_raw):
-        s = pa_raw + pb_raw
-        good = s > 0
-        pa = np.where(good, pa_raw / s, np.nan)
-        pb = np.where(good, pb_raw / s, np.nan)
-        return pa, pb
-
-    SHARP_SET = set((sharp_books or SHARP_BOOKS))
+    SHARP_SET = set(sharp_books or SHARP_BOOKS)
     sharp_mask = dm["Bookmaker"].isin(SHARP_SET)
 
-    # if no sharp rows → still compute Rec_Implied_Prob then bail
+    # No sharp rows → still compute Rec_Implied_Prob and return
     if not sharp_mask.any():
         dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan)).astype("float32")
         return dm
 
-    # pick sharp ref by reliability then limit
     keep = ["Game_Key","Market","Outcome_Norm","Bookmaker","Value","Odds_Price"]
     if reliability_col in dm.columns: keep.append(reliability_col)
     if limit_col in dm.columns:       keep.append(limit_col)
@@ -1001,6 +995,7 @@ def compute_ev_features_sharp_vs_rec(
         dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan)).astype("float32")
         return dm
 
+    # Rank sharp by reliability then limit
     if reliability_col not in sharp_rows.columns:
         sharp_rows[reliability_col] = 0.0
     sharp_rows["_rel_rank"] = sharp_rows.groupby(["Game_Key","Market","Outcome_Norm"])[reliability_col] \
@@ -1019,10 +1014,11 @@ def compute_ev_features_sharp_vs_rec(
         .rename(columns={"Value":"Sharp_Line","Odds_Price":"Sharp_Odds"})
     )
 
-    # build top-2 sharp pair per (Game_Key, Market) for de-vig
+    # Take top-2 sharp outcomes per (Game_Key, Market) → de‑vig pair
     pairs_base = (sharp_rows
         .sort_values(["Game_Key","Market", reliability_col], ascending=[True,True,False])
         .drop_duplicates(subset=["Game_Key","Market","Outcome_Norm"], keep="first"))
+
     top2 = (pairs_base.groupby(["Game_Key","Market"], as_index=False)
         .apply(lambda g: g.head(2))
         .reset_index(drop=True))
@@ -1038,16 +1034,18 @@ def compute_ev_features_sharp_vs_rec(
 
     truth = sharp_ref.merge(sharp_pairs, on=["Game_Key","Market"], how="left")
 
-    # de‑vig at sharp line (if pair available)
+    # De‑vig at the sharp line (if pair available)
     same_as_A = truth["Outcome_Norm"].astype(str).eq(truth["Outcome_A"].astype(str))
     odds_this = np.where(same_as_A, truth["Odds_A"], truth["Odds_B"])
     odds_opp  = np.where(same_as_A, truth["Odds_B"], truth["Odds_A"])
     p_this_raw = _amer_to_prob(odds_this)
     p_opp_raw  = _amer_to_prob(odds_opp)
-    p_fair_this, _ = _devig_two_way(p_this_raw, p_opp_raw)
+    s = p_this_raw + p_opp_raw
+    good = s > 0
+    p_fair_this = np.where(good, p_this_raw / s, np.nan)
     truth["Truth_Fair_Prob_at_SharpLine"] = p_fair_this
 
-    # σ: prefer Sigma_Pts row value; else sport defaults
+    # Sigma: prefer row sigma; else sport defaults
     if sigma_col not in dm.columns:
         dm[sigma_col] = np.nan
     sig_map = dm[["Game_Key","Market","Outcome_Norm",sigma_col,"Sport"]].drop_duplicates(["Game_Key","Market","Outcome_Norm"])
@@ -1063,7 +1061,7 @@ def compute_ev_features_sharp_vs_rec(
     p_sharp = pd.to_numeric(truth["Truth_Fair_Prob_at_SharpLine"], errors="coerce")
     sigma   = truth.apply(_pick_sigma, axis=1).astype(float)
 
-    # Only solve μ where we have both p_sharp and s_sharp
+    # Solve μ only where both pieces exist
     mask_mu = p_sharp.notna() & s_sharp.notna()
     mu = np.full(len(truth), np.nan, dtype=float)
     mu[mask_mu.values] = (s_sharp[mask_mu] + sigma[mask_mu] * _ppf(p_sharp[mask_mu])).astype(float)
@@ -1071,46 +1069,42 @@ def compute_ev_features_sharp_vs_rec(
     truth["Truth_Margin_Mu"] = mu
     truth["Truth_Sigma"]     = sigma
 
-    # merge μ,σ back to every book row
+    # Merge μ,σ back to every book row (aligns to dm.index automatically)
     keys = ["Game_Key","Market","Outcome_Norm"]
-    dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]], on=keys, how="left")
+    dm = dm.merge(truth[keys + ["Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma"]],
+                  on=keys, how="left")
 
-    # price each row at its own line; guard against missing μ/σ
-    mu = pd.Series(mu)
-    sig = pd.Series(sig)
-    line_rec = pd.Series(line_rec)
-    
-    ok = mu.notna() & sig.notna() & (sig > 0) & line_rec.notna()
+    # Price each row at its own line; use values from dm (not locals)
+    mu_series  = pd.to_numeric(dm.get("Truth_Margin_Mu", np.nan), errors="coerce")
+    sig_series = pd.to_numeric(dm.get("Truth_Sigma", np.nan), errors="coerce")
+    line_rec   = pd.to_numeric(dm.get("Value", np.nan), errors="coerce")
 
-    # keep existing NaNs where not ok
-    dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi((mu[ok] - line_rec[ok]) / sig[ok])
+    ok = mu_series.notna() & sig_series.notna() & (sig_series > 0) & line_rec.notna()
+    dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi((mu_series[ok] - line_rec[ok]) / sig_series[ok])
 
-    # moneyline fallback (no line shift)
+    # Moneyline fallback (no line shift)
     is_ml = dm["Market"].isin(["h2h","ml","moneyline","headtohead"])
     need_ml = is_ml & dm["Truth_Fair_Prob_at_RecLine"].isna()
     dm.loc[need_ml, "Truth_Fair_Prob_at_RecLine"] = dm.loc[need_ml, "Truth_Fair_Prob_at_SharpLine"]
 
-    # implied prob of offered odds (always safe)
+    # Implied prob of offered odds
     dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan))
 
-    # EV per $1 stake & prob edge (only where p_truth exists)
+    # EV per $1 stake & probability edge (only where p_truth exists)
     p_truth = pd.to_numeric(dm["Truth_Fair_Prob_at_RecLine"], errors="coerce")
     odds = pd.to_numeric(dm.get("Odds_Price", np.nan), errors="coerce")
     payout = np.where(odds >= 0, odds/100.0, 100.0/(-odds))
     ok_ev = p_truth.notna() & np.isfinite(payout)
     dm.loc[ok_ev, "EV_Sh_vs_Rec_Dollar"] = (p_truth[ok_ev] * payout[ok_ev]) - (1.0 - p_truth[ok_ev])
     dm.loc[ok_ev, "EV_Sh_vs_Rec_Prob"]   = p_truth[ok_ev] - dm.loc[ok_ev, "Rec_Implied_Prob"]
+    dm.loc[ok_ev, "Kelly_Fraction"]      = np.maximum(0.0, (p_truth[ok_ev] * payout[ok_ev] - (1.0 - p_truth[ok_ev])) / payout[ok_ev])
 
-    # Kelly (full Kelly; clamp >=0)
-    dm.loc[ok_ev, "Kelly_Fraction"] = np.maximum(
-        0.0, (p_truth[ok_ev] * payout[ok_ev] - (1.0 - p_truth[ok_ev])) / payout[ok_ev]
-    )
-
-    # tighten dtypes
+    # Tighten dtypes
     for c in out_cols:
         dm[c] = pd.to_numeric(dm[c], errors="coerce").astype("float32")
 
     return dm
+
 
 
 
