@@ -2648,10 +2648,8 @@ def compute_small_book_liquidity_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-from scipy.special import ndtr as _phi      # CDF Φ
+from scipy.special import ndtr as _phi      # CDF Φ (kept for compatibility elsewhere)
 from scipy.special import ndtri as _ppf     # inverse Φ^{-1}
-
-
 
 def _col_or_nan(df: pd.DataFrame, col: str) -> pd.Series:
     """Return df[col] if present; else an all-NaN numeric Series aligned to df.index."""
@@ -2678,7 +2676,7 @@ def _amer_to_prob(odds_like) -> np.ndarray | float:
     """
     o = pd.to_numeric(odds_like, errors="coerce")
 
-    # Scalar path: return a single float (lets pandas broadcast if assigned to a column)
+    # Scalar path
     if np.isscalar(o):
         if not np.isfinite(o):
             return np.nan
@@ -2687,17 +2685,14 @@ def _amer_to_prob(odds_like) -> np.ndarray | float:
     # Vector path
     o = np.asarray(o, dtype="float64")
     if o.size == 0:
-        return o  # empty, stays empty
-
+        return o  # empty
     p = np.full(o.shape, np.nan, dtype="float64")
     neg = o < 0
     pos = ~neg & np.isfinite(o)
-
     oo = -o
     p[neg] = oo[neg] / (oo[neg] + 100.0)
     p[pos] = 100.0 / (o[pos] + 100.0)
     return p
-
 
 def compute_ev_features_sharp_vs_rec(
     df_market: pd.DataFrame,
@@ -2716,6 +2711,19 @@ def compute_ev_features_sharp_vs_rec(
       - Truth_Fair_Prob_at_RecLine, Rec_Implied_Prob
       - EV_Sh_vs_Rec_Prob, EV_Sh_vs_Rec_Dollar, Kelly_Fraction
     """
+    # --- local, empty-safe Φ so we don't depend on a global vectorize() variant ---
+    def _phi_local(z):
+        z = np.asarray(z, dtype=float)
+        if z.size == 0:
+            return z
+        try:
+            from scipy.special import ndtr
+            return ndtr(z)
+        except Exception:
+            from numpy import special as nsp
+            import math
+            return 0.5 * (1.0 + nsp.erf(z / math.sqrt(2.0)))
+
     out_cols = [
         "Truth_Fair_Prob_at_SharpLine","Truth_Margin_Mu","Truth_Sigma",
         "Truth_Fair_Prob_at_RecLine","Rec_Implied_Prob",
@@ -2746,7 +2754,7 @@ def compute_ev_features_sharp_vs_rec(
 
     # if no sharp rows, still compute Rec_Implied_Prob and return
     if not sharp_mask.any():
-        dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan)).astype("float32")
+        dm["Rec_Implied_Prob"] = np.asarray(_amer_to_prob(dm.get("Odds_Price", np.nan)), dtype="float64")
         return dm
 
     # collect sharp candidates
@@ -2756,7 +2764,7 @@ def compute_ev_features_sharp_vs_rec(
     sharp_rows = dm.loc[sharp_mask, keep].copy()
 
     if sharp_rows.empty:
-        dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan)).astype("float32")
+        dm["Rec_Implied_Prob"] = np.asarray(_amer_to_prob(dm.get("Odds_Price", np.nan)), dtype="float64")
         return dm
 
     # rank sharp by reliability then limit (both optional)
@@ -2799,8 +2807,8 @@ def compute_ev_features_sharp_vs_rec(
     same_as_A = truth["Outcome_Norm"].astype(str).eq(truth["Outcome_A"].astype(str))
     odds_this = np.where(same_as_A, truth["Odds_A"], truth["Odds_B"])
     odds_opp  = np.where(same_as_A, truth["Odds_B"], truth["Odds_A"])
-    p_this_raw = _amer_to_prob(odds_this)
-    p_opp_raw  = _amer_to_prob(odds_opp)
+    p_this_raw = np.asarray(_amer_to_prob(odds_this), dtype="float64")
+    p_opp_raw  = np.asarray(_amer_to_prob(odds_opp),  dtype="float64")
     s = p_this_raw + p_opp_raw
     good = s > 0
     p_fair_this = np.where(good, p_this_raw / s, np.nan)
@@ -2843,7 +2851,11 @@ def compute_ev_features_sharp_vs_rec(
     line_rec   = _ensure_series(_col_or_nan(dm, "Value"), dm.index)
 
     ok = mu_series.notna() & sig_series.notna() & (sig_series > 0) & line_rec.notna()
-    dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi((mu_series[ok] - line_rec[ok]) / sig_series[ok])
+    if ok.any():  # avoid calling any vectorized CDF on size-0 inputs
+        z = (mu_series[ok].to_numpy(dtype=float, copy=False)
+             - line_rec[ok].to_numpy(dtype=float, copy=False)) \
+            / sig_series[ok].to_numpy(dtype=float, copy=False)
+        dm.loc[ok, "Truth_Fair_Prob_at_RecLine"] = _phi_local(z)
 
     # moneyline fallback (no line shift)
     is_ml   = dm["Market"].isin(["h2h","ml","moneyline","headtohead"])
@@ -2852,7 +2864,7 @@ def compute_ev_features_sharp_vs_rec(
     dm.loc[need_ml, "Truth_Fair_Prob_at_RecLine"] = base_sharp[need_ml].values
 
     # implied prob of offered odds (always)
-    dm["Rec_Implied_Prob"] = _amer_to_prob(dm.get("Odds_Price", np.nan))
+    dm["Rec_Implied_Prob"] = np.asarray(_amer_to_prob(dm.get("Odds_Price", np.nan)), dtype="float64")
 
     # EV per $1 stake & prob edge
     p_truth = pd.to_numeric(dm["Truth_Fair_Prob_at_RecLine"], errors="coerce")
