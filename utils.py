@@ -2670,17 +2670,34 @@ def _ensure_series(x, index) -> pd.Series:
         arr = np.resize(arr, len(index))
     return pd.Series(arr, index=index)
 
-def _amer_to_prob(odds_like) -> np.ndarray:
-    """American odds -> implied prob; vectorized; returns np.ndarray of floats."""
-    o = pd.to_numeric(odds_like, errors="coerce").to_numpy(dtype="float64", copy=False)
+def _amer_to_prob(odds_like) -> np.ndarray | float:
+    """
+    American odds -> implied probability.
+    Works for pandas Series / numpy arrays / lists / scalars.
+    Returns an ndarray for vector inputs, or a scalar float for scalar input.
+    """
+    o = pd.to_numeric(odds_like, errors="coerce")
+
+    # Scalar path: return a single float (lets pandas broadcast if assigned to a column)
+    if np.isscalar(o):
+        if not np.isfinite(o):
+            return np.nan
+        return (100.0 / (o + 100.0)) if (o >= 0) else ((-o) / ((-o) + 100.0))
+
+    # Vector path
+    o = np.asarray(o, dtype="float64")
+    if o.size == 0:
+        return o  # empty, stays empty
+
     p = np.full(o.shape, np.nan, dtype="float64")
-    if o.size:
-        neg = o < 0
-        pos = ~neg & np.isfinite(o)
-        oo = -o
-        p[neg] = oo[neg] / (oo[neg] + 100.0)
-        p[pos] = 100.0 / (o[pos] + 100.0)
+    neg = o < 0
+    pos = ~neg & np.isfinite(o)
+
+    oo = -o
+    p[neg] = oo[neg] / (oo[neg] + 100.0)
+    p[pos] = 100.0 / (o[pos] + 100.0)
     return p
+
 
 def compute_ev_features_sharp_vs_rec(
     df_market: pd.DataFrame,
