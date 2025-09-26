@@ -6907,7 +6907,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 else:
                     is_sharp = train_df[bk_col].isin(SHARP_BOOKS).to_numpy(dtype=np.float32)
         
-                w_base *= (1.0 + 0.60 * is_sharp)
+                w_base *= (1.0 + 0.20 * is_sharp)
         
             # Market/context multiplier (no row drops)
             def _ctx(m: pd.DataFrame) -> np.ndarray:
@@ -7254,7 +7254,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X=X_train_df,
             y=y_train,
             folds=folds,                # (train_idx, valid_idx)
-            topk_per_fold=10,
+            topk_per_fold=30,
             min_presence=0.6,           # a bit stricter is fine
             max_keep=120,               # loose pre-cap; prune correlations next
             sample_per_fold=10000,
@@ -7300,7 +7300,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
 
         # (Optional) Hard cap after pruning
-        MAX_FEATS = 60
+        MAX_FEATS = 100
         if len(FEATURE_COLS_FINAL) > MAX_FEATS:
             # keep best by SHAP among the pruned set
             keep_order = shap_summary.loc[list(FEATURE_COLS_FINAL)].sort_values(
