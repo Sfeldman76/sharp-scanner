@@ -170,6 +170,29 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 import numpy as np, pandas as pd
 from math import erf as _erf
+import html, unicodedata, re
+
+# ---- HTML sanitizers (define once, top-level) ----
+_ALLOW_HTML_COLS = {"Confidence Spark"}  # whitelist columns that intentionally contain HTML
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+
+def _clean_text(x: str) -> str:
+    # Normalize, strip control chars, then escape HTML
+    x = unicodedata.normalize("NFC", x)
+    x = _CONTROL_CHARS.sub("", x)
+    return html.escape(x, quote=True)
+
+def _clean_cell(val, colname: str):
+    if val is None or (hasattr(val, "__class__") and str(val) == "nan"):
+        return ""
+    s = str(val)
+    if colname in _ALLOW_HTML_COLS:
+        # Keep HTML but normalize & remove control chars
+        s = unicodedata.normalize("NFC", s)
+        s = _CONTROL_CHARS.sub("", s)
+        return s
+    return _clean_text(s)
 
 
 from sklearn.feature_selection import VarianceThreshold
@@ -10205,7 +10228,27 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 st.warning(f"Missing columns ignored: {missing}")
             
             table_df = summary_grouped[cols].copy()
+            table_df.columns = [
+                _clean_text(str(c)) if str(c) not in _ALLOW_HTML_COLS else _clean_cell(str(c), str(c))
+                for c in table_df.columns
+            ]
             
+            # Clean each cell
+            for c in table_df.columns:
+                table_df[c] = table_df[c].map(lambda v: _clean_cell(v, str(c)))
+            
+            # Build HTML (cells already escaped; allow HTML only in whitelisted cols)
+            table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
+            
+            # Guard: refuse to inject if malformed tag appears
+            if "td�" in table_html or "\uFFFD" in table_html:
+                st.error("Detected malformed character in generated table; refusing to render HTML table.")
+            else:
+                safe_id = f"tbl-{_title_key}"
+                st.markdown(
+                    f"<div id='{safe_id}' class='scrollable-table-container'>{table_html}</div>",
+                    unsafe_allow_html=True
+                )
             # 2) DEBUG: raw view for NCAAF (AFTER table_df exists)
             if label.upper() == "NCAAF":
                 with st.expander("🔍 Raw NCAAF summary (no formatting)"):
@@ -10226,14 +10269,7 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     # Safe HTML peek (escaped so content can't break tags)
                     html_safe = table_df.to_html(index=False, escape=True)
                     st.code(html_safe[:2000], language="html")
-            
-            # 3) Your existing HTML render (once)
-            table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
-            safe_id = f"tbl-{_title_key}"  # assumes _title_key is defined above
-            st.markdown(
-                f"<div id='{safe_id}' class='scrollable-table-container'>{table_html}</div>",
-                unsafe_allow_html=True
-            )
+       
             
             st.success("✅ Finished rendering sharp picks table.")
             st.caption(f"Showing {len(table_df)} rows")
