@@ -7271,14 +7271,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 grow_policy="lossguide",
                 max_bin=256,
                 max_delta_step=0.5,
-                n_jobs=1,
+                n_jobs=4,
                 random_state=42
             ),
             X=X_train_df,
             y=y_train,
             folds=folds,                # (train_idx, valid_idx)
-            topk_per_fold=30,
-            min_presence=0.6,           # a bit stricter is fine
+            topk_per_fold=45,
+            min_presence=0.75,           # a bit stricter is fine
             max_keep=120,               # loose pre-cap; prune correlations next
             sample_per_fold=10000,
             random_state=42,
