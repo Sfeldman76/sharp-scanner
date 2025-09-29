@@ -10276,79 +10276,124 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
 
             pass
     # === 2. Render Live Odds Snapshot Table
+       
     with st.container():  # or a dedicated tab/expander if you want
-        st.subheader(f"📊 Live Odds Snapshot – {label} (Odds + Limit)")
+        st.subheader(f"📊 Live Odds Snapshot – {label} (Value @ Odds + Limit)")
     
         # ✅ Only this block will autorefresh
-        #st_autorefresh(interval=180 * 1000, key=f"{label}_odds_refresh")  # every 3 minutes
+        # st_autorefresh(interval=180 * 1000, key=f"{label}_odds_refresh")  # every 3 minutes
     
         # === Live odds fetch + display logic
         live = fetch_live_odds(sport_key)
         odds_rows = []
-   
     
-    
-        
         for game in live:
             game_name = f"{game['home_team']} vs {game['away_team']}"
             game_start = pd.to_datetime(game.get("commence_time"), utc=True) if game.get("commence_time") else pd.NaT
-        
+    
             for book in game.get("bookmakers", []):
                 if book.get("key") not in SHARP_BOOKS + REC_BOOKS:
                     continue
-        
+    
                 for market in book.get("markets", []):
-                    if market.get("key") not in ['h2h', 'spreads', 'totals']:
+                    mkey = market.get("key")
+                    if mkey not in ["h2h", "spreads", "totals"]:
                         continue
-        
+    
                     for outcome in market.get("outcomes", []):
-                        price = outcome.get('point') if market['key'] != 'h2h' else outcome.get('price')
-        
+                        # odds APIs usually provide:
+                        # - 'price' (American odds) for ALL markets
+                        # - 'point' ONLY for spreads/totals
+                        odds_price = outcome.get("price", None)
+                        point_val  = outcome.get("point", None) if mkey != "h2h" else None  # no point for h2h
+    
                         odds_rows.append({
                             "Game": game_name,
-                            "Market": market["key"],
-                            "Outcome": outcome["name"],
-                            "Bookmaker": normalize_book_name(book.get("key", ""), book.get("key", "")),  # ✅ normalized key only
-                            "Value": price,
+                            "Market": mkey,
+                            "Outcome": outcome.get("name"),
+                            "Bookmaker": normalize_book_name(book.get("key", ""), book.get("key", "")),
+                            "Value": point_val,                  # spread/totals number; NaN for h2h
+                            "Odds_Price": odds_price,            # American odds (e.g., -115, +105)
                             "Limit": outcome.get("bet_limit", 0),
-                            "Game_Start": game_start
+                            "Game_Start": game_start,
                         })
-
-        
+    
         df_odds_raw = pd.DataFrame(odds_rows)
-        
+    
         if not df_odds_raw.empty:
-            # Combine Value + Limit
-            df_odds_raw['Value_Limit'] = df_odds_raw.apply(
-                lambda r: f"{round(r['Value'], 1)} ({int(r['Limit'])})" if pd.notnull(r['Limit']) and pd.notnull(r['Value'])
-                else "" if pd.isnull(r['Value']) else f"{round(r['Value'], 1)}",
-                axis=1
-            )
-        
+            # Build a friendly "Value @ Odds (Limit)" string
+            def _fmt(row):
+                val  = row.get("Value")
+                odds = row.get("Odds_Price")
+                lim  = row.get("Limit")
+    
+                parts = []
+                # value only for spreads/totals
+                if pd.notnull(val):
+                    parts.append(f"{float(val):.1f}")  # -3.5 style
+                # odds for all markets
+                if pd.notnull(odds):
+                    # render odds as integer if possible
+                    try:
+                        parts.append(f"@ {int(odds)}")
+                    except Exception:
+                        parts.append(f"@ {odds}")
+    
+                display = " ".join(parts).strip()
+    
+                # append limit if present
+                if pd.notnull(lim):
+                    try:
+                        display = f"{display} ({int(lim)})" if display else f"({int(lim)})"
+                    except Exception:
+                        display = f"{display} ({lim})" if display else f"({lim})"
+    
+                # fallbacks so we don't show 'nan'
+                if not display:
+                    # for pure h2h with no limit somehow, show odds or blank
+                    if pd.notnull(odds):
+                        try:
+                            display = f"{int(odds)}"
+                        except Exception:
+                            display = f"{odds}"
+                    else:
+                        display = ""
+    
+                return display
+    
+            df_odds_raw["Value@Odds(Limit)"] = df_odds_raw.apply(_fmt, axis=1)
+    
             # Localize to EST
-            eastern = pytz_timezone('US/Eastern')
-            df_odds_raw['Date + Time (EST)'] = df_odds_raw['Game_Start'].apply(
-                lambda x: x.tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x) and x.tzinfo
-                else pd.to_datetime(x).tz_localize('UTC').tz_convert(eastern).strftime('%Y-%m-%d %I:%M %p') if pd.notnull(x)
+            eastern = pytz_timezone("US/Eastern")
+            df_odds_raw["Date + Time (EST)"] = df_odds_raw["Game_Start"].apply(
+                lambda x: x.tz_convert(eastern).strftime("%Y-%m-%d %I:%M %p") if pd.notnull(x) and x.tzinfo
+                else pd.to_datetime(x).tz_localize("UTC").tz_convert(eastern).strftime("%Y-%m-%d %I:%M %p") if pd.notnull(x)
                 else ""
             )
-        
-            # Pivot into Bookmaker columns
+    
+            # Pivot into Bookmaker columns (human-readable)
             df_display = (
                 df_odds_raw.pivot_table(
                     index=["Date + Time (EST)", "Game", "Market", "Outcome"],
                     columns="Bookmaker",
-                    values="Value_Limit",
+                    values="Value@Odds(Limit)",
                     aggfunc="first"
                 )
-                .rename_axis(columns=None)  # Removes the "Bookmaker" column level name
+                .rename_axis(columns=None)
                 .reset_index()
             )
-        
+    
+            # (Optional) keep a raw, analytics-friendly table for later use
+            # with separate numeric columns Value, Odds_Price, Limit
+            # df_odds_raw[['Game','Market','Outcome','Bookmaker','Value','Odds_Price','Limit','Date + Time (EST)']]
+    
             # Render as HTML
             table_html_2 = df_display.to_html(classes="custom-table", index=False, escape=False)
             st.markdown(f"<div class='scrollable-table-container'>{table_html_2}</div>", unsafe_allow_html=True)
             st.success(f"✅ Live odds snapshot rendered — {len(df_display)} rows.")
+        else:
+            st.info("No live odds available right now.")
+
 
 def fetch_scores_and_backtest(*args, **kwargs):
     print("⚠️ fetch_scores_and_backtest() is deprecated in UI and will be handled by Cloud Scheduler.")
