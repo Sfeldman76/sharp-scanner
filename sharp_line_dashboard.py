@@ -7890,13 +7890,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
-        
+        # --- Calibrator compatibility shim: always return P(y=1) as 1-D array -------------
+        def _prob1(cal, p):
+            """Return positive-class probability for various calibrator types."""
+            if cal is None:
+                return np.asarray(p, float).ravel()
+            # scikit-style: predict_proba
+            if hasattr(cal, "predict_proba"):
+                out = cal.predict_proba(p)
+                out = np.asarray(out)
+                if out.ndim == 2 and out.shape[1] == 2:
+                    return out[:, 1].astype(float)
+                return out.astype(float).ravel()
+            # iso/identity-style: transform
+            if hasattr(cal, "transform"):
+                return np.asarray(cal.transform(p), float).ravel()
+            # callable
+            if callable(cal):
+                return np.asarray(cal(p), float).ravel()
+            # fallback
+            return np.asarray(p, float).ravel()
+
         # ECE-driven selection (prefer beta when clearly better)
-        ece_iso  = expected_calibration_error(y_oof, cals["iso"].predict_proba(p_oof_for_cal))
-        ece_beta = (expected_calibration_error(y_oof, cals["beta"].predict_proba(p_oof_for_cal))
-                    if cals["beta"] else np.inf)
-        sel = ("beta", cals["beta"]) if (cals["beta"] and (ece_beta + 1e-6 < ece_iso)) else ("iso", cals["iso"])
+        p_iso  = _prob1(cals["iso"],  p_oof_for_cal)
+        p_beta = _prob1(cals["beta"], p_oof_for_cal) if cals.get("beta") is not None else None
+        
+        ece_iso  = expected_calibration_error(y_oof, p_iso)
+        ece_beta = expected_calibration_error(y_oof, p_beta) if p_beta is not None else np.inf
+        
+        sel = ("beta", cals["beta"]) if (p_beta is not None and ece_beta + 1e-6 < ece_iso) else ("iso", cals["iso"])
         cal_name, cal_obj = sel
+
+    
         iso_blend = _CalAdapter((cal_name, cal_obj), clip=(CLIP, 1 - CLIP))
         st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag)})
         
