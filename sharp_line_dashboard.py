@@ -7714,7 +7714,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # OOF predictions (train-only) + blending
         # -----------------------------------------
         
-        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000))
+        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000)
         MIN_OOF = 40 if SMALL else 120
         RUN_LOGLOSS = True  # keep on; you can tie to SMALL if desired
         
