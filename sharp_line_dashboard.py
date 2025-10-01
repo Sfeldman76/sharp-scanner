@@ -5839,7 +5839,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                         use_container_width=True
                     )
         # ===================== end SPREADS branch =====================
-
+        def expected_calibration_error(y_true, p_pred, n_bins: int = 10):
+            y = np.asarray(y_true, int)
+            p = np.asarray(p_pred, float)
+            p = np.clip(p, 1e-9, 1 - 1e-9)
+            bins = np.linspace(0.0, 1.0, n_bins + 1)
+            idx = np.minimum(np.digitize(p, bins) - 1, n_bins - 1)
+            ece = 0.0
+            for b in range(n_bins):
+                m = (idx == b)
+                if not np.any(m):
+                    continue
+                conf = p[m].mean()
+                acc  = y[m].mean()
+                ece += (m.mean()) * abs(acc - conf)
+            return float(ece)
+        
+        def population_stability_index(p_ref, p_new, bins: int = 20):
+            r = np.asarray(p_ref, float); n = np.asarray(p_new, float)
+            r = np.clip(r, 1e-9, 1 - 1e-9); n = np.clip(n, 1e-9, 1 - 1e-9)
+            qs = np.quantile(r, np.linspace(0, 1, bins + 1))
+            qs[0], qs[-1] = 0.0, 1.0
+            R, N = [], []
+            for i in range(bins):
+                lo, hi = qs[i], qs[i+1]
+                R.append(((r >= lo) & (r <= hi)).mean())
+                N.append(((n >= lo) & (n <= hi)).mean())
+            R = np.clip(np.asarray(R), 1e-6, 1); N = np.clip(np.asarray(N), 1e-6, 1)
+            return float(np.sum((N - R) * np.log(N / R)))
 
         def label_team_role(row):
             market = row['Market']
@@ -7137,21 +7164,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------------------------------------------------------------------------
       
           #  CV with purge + embargo (snapshot-aware)
-        # ---------------------------------------------------------------------------
-        rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
-        target_games  = 8 if sport_key in SMALL_LEAGUES else 20
-        min_val_size  = max(10 if sport_key in SMALL_LEAGUES else 20, target_games * rows_per_game)
-        
-        n_groups_train = pd.unique(g_train).size
-        target_folds   = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
-        
-        cv = PurgedGroupTimeSeriesSplit(
-            n_splits=target_folds,
-            embargo=embargo_td,
-            time_values=t_train,
-            min_val_size=min_val_size,
-        )
-        
+
        
         
         # Require BOTH classes with a minimum count (train & val)
@@ -7236,8 +7249,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # --- Snapshot‑aware CV with purge + embargo -----------------------------------------
         rows_per_game = int(np.ceil(len(X_train) / max(1, pd.unique(g_train).size)))
-        target_games  = 8 if sport_key in SMALL_LEAGUES else 20
-        min_val_size  = max(10 if sport_key in SMALL_LEAGUES else 20, target_games * rows_per_game)
+        if sport_key in SMALL_LEAGUES:
+            target_games  = 10
+            min_val_size  = max(12, target_games * rows_per_game)
+            embargo_td    = pd.Timedelta(hours=24) if 'embargo_td' not in locals() else embargo_td
+        else:
+            target_games  = 28
+            min_val_size  = max(28, target_games * rows_per_game)
+            # Slightly stronger embargo for dense-snapshot sports
+            _dense = str(sport_key).upper() in {"NBA", "MLB", "WNBA", "CFL"}
+            embargo_td    = pd.Timedelta(hours=18 if _dense else 36)
         
         n_groups_train = pd.unique(g_train).size
         target_folds   = 5 if n_groups_train >= 200 else (4 if n_groups_train >= 120 else 3)
@@ -7249,88 +7270,63 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             min_val_size=min_val_size,
         )
         
-        # y must be clean binary before calling
+        # Enforce per-fold class presence; reuse your build_deterministic_folds
         y_train = pd.Series(y_train, copy=False).astype(int).clip(0, 1).to_numpy()
-        
         folds, tr_es_rel, va_es_rel = build_deterministic_folds(
             X_train, y_train,
             cv=cv,
             groups=g_train,
             n_splits=getattr(cv, 'n_splits', 5),
-            min_pos=5, min_neg=5, seed=GLOBAL_SEED,
+            min_pos=5, min_neg=5, seed=1337,
         )
         
         # ================== SHAP stability selection (on pruned set) ==================
         # 1) SHAP stability on a pruned base set
-        X_train_df = pd.DataFrame(X_train, columns=list(features_pruned))
+      
+        FAMILIES = {
+            "move":   ["Abs_Line_Move_From_Opening", "Implied_Prob_Shift", "SharpMove_Magnitude_"],
+            "timing": ["Minutes_To_Game_Tier", "Late_Game_Steam_Flag", "OddsMove_Magnitude_"],
+            "resist": ["Was_Line_Resistance_Broken", "Line_Resistance_Crossed_Count"],
+            "xmarket":["Spread_vs_H2H_Aligned", "Total_vs_Spread_Contradiction", "ProbGap"],
+        }
+        def _family(name):
+            return [f for f in selected_feats if any(t in f for t in FAMILIES[name])]
         
-        selected_feats, shap_summary = shap_stability_select(
-            model_proto=XGBClassifier(
-                objective="binary:logistic",
-                tree_method="hist",
-                grow_policy="lossguide",
-                max_bin=256,
-                max_delta_step=0.5,
-                n_jobs=4,
-                random_state=42
-            ),
-            X=X_train_df,
-            y=y_train,
-            folds=folds,                # (train_idx, valid_idx)
-            topk_per_fold=45,
-            min_presence=0.75,           # a bit stricter is fine
-            max_keep=120,               # loose pre-cap; prune correlations next
-            sample_per_fold=10000,
-            random_state=42,
-
-        )
-        
-        # Optional: enforce extra stability filters BEFORE corr pruning
-        stable_mask = (
-            (shap_summary["sign_flip_rate"] <= 0.30) &
-            (shap_summary["shap_cv"] <= 1.00)        # cv <= 1 is a reasonable soft guard
-        )
-        selected_feats = [f for f in selected_feats if f in shap_summary.index[stable_mask]]
-        
-        # 2) Greedy correlation prune → tidy, diverse set
+        FEATURE_COLS_FINAL = []
+        for fam in ("move","timing","resist","xmarket"):
+            fam_feats = _family(fam)
+            if not fam_feats:
+                continue
+            keep = greedy_corr_prune(
+                X=pd.DataFrame(X_train, columns=list(features_pruned)),
+                candidates=fam_feats,
+                rank_df=shap_summary,
+                corr_thresh=0.90,  # tighter within family
+                must_keep=None
+            )
+            FEATURE_COLS_FINAL.extend(list(keep))
+        # Add any remaining non-family candidates with global pruning
+        other = [f for f in selected_feats if f not in set(FEATURE_COLS_FINAL)]
         FEATURE_COLS_FINAL = tuple(
             greedy_corr_prune(
-                X=X_train_df,
-                candidates=selected_feats,
+                X=pd.DataFrame(X_train, columns=list(features_pruned)),
+                candidates=list(dict.fromkeys(FEATURE_COLS_FINAL + other)),
                 rank_df=shap_summary,
-                corr_thresh=0.92,        # tighten to 0.90 if still redundant
-                must_keep=["Is_Home_Team_Bet","Is_Favorite_Bet"]  # keep your invariants
+                corr_thresh=0.92,  # global
+                must_keep=["Is_Home_Team_Bet","Is_Favorite_Bet"]
             )
         )
-        SOFT_KEEP_BONUS = {
-            "Minutes_To_Game_Tier": 0.05,
-            "Abs_Line_Move_From_Opening": 0.03,
-            "Abs_Odds_Move_From_Opening": 0.03,
-            "Is_Sharp_Book": 0.02,
-            "Spread_vs_H2H_Aligned": 0.02,
-        }
-        ss = shap_summary.copy()
-        ss["_score"] = (
-            ss["avg_abs_shap"].rank(pct=True, ascending=False)
-            + 0.5*ss["presence"]
-            - 0.2*ss["sign_flip_rate"]
-            - 0.1*ss["shap_cv"]
-            + ss.index.to_series().map(SOFT_KEEP_BONUS).fillna(0.0)
-        )
-        ranked = ss.loc[selected_feats].sort_values("_score", ascending=False).index.tolist()
-        FEATURE_COLS_FINAL = tuple(
-            greedy_corr_prune(X_train_df, ranked, rank_df=shap_summary, corr_thresh=0.92, must_keep=None)
-        )
-
-        # (Optional) Hard cap after pruning
-        MAX_FEATS = 100
+        MAX_FEATS = 80 if str(sport_key).upper() in {"NBA","MLB"} else 100
         if len(FEATURE_COLS_FINAL) > MAX_FEATS:
-            # keep best by SHAP among the pruned set
-            keep_order = shap_summary.loc[list(FEATURE_COLS_FINAL)].sort_values(
-                ["avg_abs_shap","presence"], ascending=[False, False]
-            ).index.tolist()
+            keep_order = (shap_summary.loc[list(FEATURE_COLS_FINAL)]
+                          .sort_values(["avg_abs_shap","presence"], ascending=[False, False])).index.tolist()
             FEATURE_COLS_FINAL = tuple(keep_order[:MAX_FEATS])
-
+        
+        feature_cols = list(FEATURE_COLS_FINAL)
+        X_train = (pd.DataFrame(X_train, columns=list(features_pruned))
+                     .loc[:, feature_cols].to_numpy(np.float32))
+        X_full  = (pd.DataFrame(X_full,  columns=list(features_pruned))
+                     .loc[:, feature_cols].to_numpy(np.float32))
 
         
         feature_cols = list(FEATURE_COLS_FINAL)
@@ -7358,25 +7354,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert np.isfinite(X_train).all()
         assert set(np.unique(y_train)) <= {0, 1}
         
-        # ================== Search space + base kwargs ======================================
+        # ================== Search space + base kwargs (REFactored) ==================
         pos_rate = float(np.mean(y_train))
         n_jobs = 1
         base_kwargs, params_ll, params_auc = get_xgb_search_space(
-            sport=sport,
-            X_rows=X_train.shape[0],
-            n_jobs=n_jobs,
-            features=features,
+            sport=sport, X_rows=X_train.shape[0], n_jobs=n_jobs, features=feature_cols
         )
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
         
-   # ================== FAST SEARCH → MODERATE/DEEP REFIT ===============================
-       
-        
+        # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
         # Capacity knobs (right-sized for ~6 vCPUs)
         SEARCH_N_EST    = 800
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 4000
-        DEEP_MAX_BIN    = 512
+        DEEP_N_EST      = 4000        # used only for the preliminary deep fit to gauge cap
+        DEEP_MAX_BIN    = 320         # tighter bins for smoother proba
         EARLY_STOP      = 500
         HALVING_FACTOR  = 4
         MIN_RESOURCES   = 64
@@ -7386,7 +7377,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "logloss", "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "auc",     "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         
-        # Leaner search space
+        # Lean(er) search space
         param_space_common = dict(
             max_depth        = randint(3, 8),
             max_leaves       = randint(64, 320),
@@ -7470,52 +7461,34 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_ll_params  = rs_ll.best_params_.copy()
         best_auc_params = rs_auc.best_params_.copy()
         
-        # Common stabilizers (no callables in eval_metric)
-        STABLE = dict(
-            objective="binary:logistic",
-            tree_method="hist",
-            grow_policy="lossguide",
-            max_delta_step=0.5,
-        )
+        # ---------------- stabilize best params (regularization-first) ----------------
+        STABLE = dict(objective="binary:logistic", tree_method="hist", grow_policy="lossguide", max_delta_step=0.5)
         
-        best_auc_params.update({
-            **STABLE,
-            "min_child_weight": max(2.0, float(best_auc_params.get("min_child_weight", 2.0))),
-            "gamma": max(1.0, float(best_auc_params.get("gamma", 1.0))),
-            "max_leaves": min(384, int(best_auc_params.get("max_leaves", 256) or 256)),
-            "max_depth": min(10,  int(best_auc_params.get("max_depth", 8)   or 8)),
-            "subsample": min(0.90, float(best_auc_params.get("subsample", 0.85))),
-            "colsample_bytree": min(0.85, float(best_auc_params.get("colsample_bytree", 0.80))),
-            "colsample_bynode": min(0.85, float(best_auc_params.get("colsample_bynode", 0.80))),
-            "reg_alpha": max(1e-3, float(best_auc_params.get("reg_alpha", 0.005))),
-            "reg_lambda": max(2.0, float(best_auc_params.get("reg_lambda", 3.0))),
-            "max_bin": min(384, int(best_auc_params.get("max_bin", 320))),
-            "learning_rate": min(0.03, float(best_auc_params.get("learning_rate", 0.03))),
-        })
+        def _stabilize(best_params, leaf_cap=256):
+            bp = dict(best_params)
+            bp.update({
+                **STABLE,
+                "max_leaves":       min(leaf_cap, int(bp.get("max_leaves", leaf_cap))),
+                "min_child_weight": max(4.0, float(bp.get("min_child_weight", 4.0))),
+                "gamma":            max(2.0, float(bp.get("gamma", 2.0))),
+                "reg_alpha":        max(0.02, float(bp.get("reg_alpha", 0.02))),
+                "reg_lambda":       max(5.0, float(bp.get("reg_lambda", 5.0))),
+                "subsample":        min(0.90, float(bp.get("subsample", 0.85))),
+                "colsample_bytree": min(0.85, float(bp.get("colsample_bytree", 0.80))),
+                "colsample_bynode": min(0.85, float(bp.get("colsample_bynode", 0.80))),
+                "max_bin":          min(320, int(bp.get("max_bin", 256))),
+                "learning_rate":    min(0.018, float(bp.get("learning_rate", 0.025))),
+            })
+            for k in ("monotone_constraints","interaction_constraints","predictor","objective",
+                      "eval_metric","_estimator_type","response_method",
+                      "n_estimators","n_jobs","scale_pos_weight","max_depth"):
+                bp.pop(k, None)
+            return bp
         
-        best_ll_params.update({
-            **STABLE,
-            "min_child_weight": max(2.0, float(best_ll_params.get("min_child_weight", 2.0))),
-            "gamma": max(2.0, float(best_ll_params.get("gamma", 2.0))),
-            "max_leaves": min(256, int(best_ll_params.get("max_leaves", 192) or 192)),
-            "max_depth": min(8,   int(best_ll_params.get("max_depth", 6)   or 6)),
-            "subsample": min(0.85, float(best_ll_params.get("subsample", 0.80))),
-            "colsample_bytree": min(0.80, float(best_ll_params.get("colsample_bytree", 0.75))),
-            "colsample_bynode": min(0.80, float(best_ll_params.get("colsample_bynode", 0.75))),
-            "reg_alpha": max(5e-3, float(best_ll_params.get("reg_alpha", 0.01))),
-            "reg_lambda": max(3.0, float(best_ll_params.get("reg_lambda", 5.0))),
-            "max_bin": min(320, int(best_ll_params.get("max_bin", 256))),
-            "learning_rate": min(0.025, float(best_ll_params.get("learning_rate", 0.025))),
-        })
+        best_auc_params = _stabilize(best_auc_params, leaf_cap=256)
+        best_ll_params  = _stabilize(best_ll_params,  leaf_cap=256)
         
-        # Remove keys we'll set explicitly (and any metrics)
-        for k in ("monotone_constraints","interaction_constraints","predictor","objective",
-                  "eval_metric","_estimator_type","response_method",
-                  "n_estimators","n_jobs","max_bin","scale_pos_weight"):
-            best_auc_params.pop(k, None)
-            best_ll_params.pop(k, None)
-        
-        # ================== ES refit on last fold (deterministic) ===========================
+        # ================== ES refit on last fold (deterministic) ===================
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
         
@@ -7542,30 +7515,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_jobs=refit_threads,
             eval_metric="logloss",          # avoid auc.cc issue
             scale_pos_weight=scale_pos_weight,
-            random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
-            subsample=min(0.90, float(deep_auc.get_xgb_params().get("subsample", 0.85))),
-            colsample_bytree=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bytree", 0.80))),
-            colsample_bynode=min(0.85, float(deep_auc.get_xgb_params().get("colsample_bynode", 0.80))),
-            learning_rate=min(0.03, float(deep_auc.get_xgb_params().get("learning_rate", 0.03))),
-            min_child_weight=max(2.0, float(deep_auc.get_xgb_params().get("min_child_weight", 2.0))),
-            gamma=max(1.0, float(deep_auc.get_xgb_params().get("gamma", 1.0))),
-            grow_policy="lossguide",
-            max_leaves=min(384, int(deep_auc.get_xgb_params().get("max_leaves", 256) or 256)),
-            max_depth=min(10,  int(deep_auc.get_xgb_params().get("max_depth", 8)   or 8)),
-            reg_alpha=max(1e-3, float(deep_auc.get_xgb_params().get("reg_alpha", 0.005))),
-            reg_lambda=max(2.0, float(deep_auc.get_xgb_params().get("reg_lambda", 3.0))),
+            random_state=1337, seed=1337,
         )
-        
         deep_ll = XGBClassifier(**{**base_kwargs, **best_ll_params})
         deep_ll.set_params(
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
             eval_metric="logloss",
-            random_state=GLOBAL_SEED, seed=GLOBAL_SEED,
+            random_state=1337, seed=1337,
         )
         
-        # === Final deep AUC fit (stabilized) ===
+        # === Preliminary deep fits (for diagnostics/cap sense) ===
         deep_auc.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -7574,20 +7535,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
-        
-        # diagnostics
-        planned_cap = int(deep_auc.get_xgb_params().get("n_estimators", 1500))
+        planned_cap = int(deep_auc.get_xgb_params().get("n_estimators", DEEP_N_EST))
         p_va_raw    = np.clip(deep_auc.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
         auc_va      = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
         spread_std_raw   = float(np.std(p_va_raw))
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-        best_iter   = getattr(deep_auc, "best_iteration", None)
-        cap_hit     = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
-        
+        best_iter        = getattr(deep_auc, "best_iteration", None)
+        cap_hit          = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
         if best_iter is not None and best_iter >= 50:
             deep_auc.set_params(n_estimators=best_iter + 1)
         
-        # === Final deep LogLoss fit ===
         deep_ll.fit(
             X_tr_es, y_tr_es,
             sample_weight=w_tr_es,
@@ -7600,7 +7557,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             deep_ll.set_params(n_estimators=deep_ll.best_iteration + 1)
         
         st.session_state.setdefault("calibration", {})
-        st.session_state["calibration"]["spread_favorite_offset"] = float(0.0)  # kept for compatibility
+        st.session_state["calibration"]["spread_favorite_offset"] = float(0.0)
         
         st.subheader("Spread AUC diagnostics")
         y_bar = float(np.mean(y_va_es == 1))
@@ -7613,54 +7570,50 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "auc_va_es": auc_va,
         })
         
-        # --- Final capacity / ES suggestions ------------------------------------------------
-        DEFAULT_FINAL_N_EST   = 4000
-        DEFAULT_ES_ROUNDS     = 400
-        final_estimators_cap  = int(locals().get("final_estimators_cap", DEFAULT_FINAL_N_EST))
-        early_stopping_rounds = int(locals().get("early_stopping_rounds", DEFAULT_ES_ROUNDS))
-        final_estimators_cap  = int(np.clip(final_estimators_cap, 1200, 2400))
+        # --- Final capacity / ES suggestions (stable defaults) ----------------------
+        final_estimators_cap  = int(np.clip(int(locals().get("final_estimators_cap", 2200)), 1200, 2400))
+        learning_rate         = float(locals().get("learning_rate", 0.018))
+        es_suggest            = 0.08 * final_estimators_cap * (0.03 / max(learning_rate, 1e-6))**0.5
+        early_stopping_rounds = int(np.clip(int(locals().get("early_stopping_rounds", es_suggest)), 60, max(50, final_estimators_cap // 3)))
         
-        lr = float(locals().get("learning_rate", base_kwargs.get("learning_rate", 0.03)))
-        es_suggest = 0.08 * final_estimators_cap * (0.03 / max(lr, 1e-6))**0.5
-        early_stopping_rounds = int(np.clip(es_suggest, 60, 220))
-        early_stopping_rounds = min(early_stopping_rounds, max(50, final_estimators_cap // 3))
-        
-        # --- Final params and models (single instantiation) --------------------------------
+        # --- Final params and models (single instantiation) -------------------------
         params_ll_final = {**base_kwargs, **best_ll_params}
         params_ll_final.pop("predictor", None)
         params_ll_final.update(
             n_estimators=int(final_estimators_cap),
-            eval_metric="logloss",   # keep logloss to avoid auc.cc
-            max_bin=512,
+            eval_metric="logloss",
+            max_bin=DEEP_MAX_BIN,
             n_jobs=int(VCPUS),
+            learning_rate=learning_rate,
         )
         
         params_auc_final = {**base_kwargs, **best_auc_params}
         params_auc_final.pop("predictor", None)
         params_auc_final.update(
             n_estimators=int(final_estimators_cap),
-            eval_metric="logloss",   # also logloss; compute AUC separately if needed
-            max_bin=512,
+            eval_metric="logloss",  # compute AUC separately if needed
+            max_bin=DEEP_MAX_BIN,
             n_jobs=int(VCPUS),
+            learning_rate=learning_rate,
         )
         
-        # --- Monotone constraints (SET AFTER the updates above) ----------------------------
+        # --- Monotone constraints (only on features present) ------------------------
         MONO = {
-            'Abs_Line_Move_From_Opening':           +1,
-            'Implied_Prob_Shift':                   +1,
-            'Was_Line_Resistance_Broken':           +1,
-            'Line_Resistance_Crossed_Count':        +1,
-            'Potential_Overmove_Flag':              +1,
-            'Value_Reversal_Flag':                  -1,
-            'Odds_Reversal_Flag':                   -1,
+            'Abs_Line_Move_From_Opening': +1,
+            'Implied_Prob_Shift': +1,
+            'Was_Line_Resistance_Broken': +1,
+            'Line_Resistance_Crossed_Count': +1,
+            # Leave these unconstrained to avoid flat-tops; reg handles damping better:
+            # 'Potential_Overmove_Flag': +1,
+            # 'Value_Reversal_Flag': -1,
+            'Odds_Reversal_Flag': -1,
         }
-        # IMPORTANT: feature_cols should be your final selected columns (after SHAP/whitelist)
         mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
         mono_str = f"({','.join(map(str, mono_vec))})"
         params_ll_final['monotone_constraints']  = mono_str
         params_auc_final['monotone_constraints'] = mono_str
         
-        # --- Instantiate & fit -------------------------------------------------------------
+        # --- Instantiate & fit ------------------------------------------------------
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
         
@@ -7680,7 +7633,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             verbose=False,
             early_stopping_rounds=early_stopping_rounds,
         )
-
         
         # Best rounds
         n_trees_ll  = _best_rounds(model_logloss)
@@ -7694,9 +7646,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if n_trees_auc > 0:
             model_auc.set_params(n_estimators=n_trees_auc)
             model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
-
         
-
         # Metric tails (compact) — auc may be None since we trained with logloss only
         def _safe_metric_tail(clf, prefer):
             ev = getattr(clf, "evals_result_", {}) or {}
@@ -7719,6 +7669,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "val_logloss_last10": val_logloss_last10,
             "val_auc_last10": val_auc_last10,
         })
+        # ================= end refactor ======================================================
 
         # ================== Lightweight interpretation (optional, guarded) ==================
         DEBUG_INTERP = True
@@ -7763,9 +7714,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # OOF predictions (train-only) + blending
         # -----------------------------------------
         
-        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000)
-        MIN_OOF = 15 if SMALL else 50
-        RUN_LOGLOSS = True  # (kept semantics: logloss stream always on; you can tie to SMALL if desired)
+        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000))
+        MIN_OOF = 40 if SMALL else 120
+        RUN_LOGLOSS = True  # keep on; you can tie to SMALL if desired
         
         # Preallocate
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
@@ -7782,13 +7733,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p = np.asarray(p, float)
             return (1.0 - p) if flip else p
         
-        def _decide_flip_on_oof(y, p):
+        def _decide_flip_on_oof(y, p, min_margin=0.01):
             y = np.asarray(y, int); p = np.asarray(p, float)
             if np.unique(y).size < 2:
                 return False
-            auc0 = roc_auc_score(y, p)
-            auc1 = roc_auc_score(y, 1.0 - p)
-            return bool(auc1 > auc0)
+            auc0 = roc_auc_score(y, p); auc1 = roc_auc_score(y, 1.0 - p)
+            return bool((auc1 - auc0) > min_margin)
         
         # --- Make OOFs with safe proba + per-fold flip only for AUC semantics ----------
         for tr_rel, va_rel in folds:
@@ -7806,7 +7756,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
                 oof_pred_logloss[va_rel] = np.clip(pl.astype(np.float64), eps, 1 - eps)
         
-        # Primary mask
+        # Primary mask & coverage
         mask_auc = np.isfinite(oof_pred_auc)
         mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
         mask_oof = mask_auc & mask_log
@@ -7830,7 +7780,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             mask_oof = mask_auc & mask_log
             n_oof = int(mask_oof.sum())
         
-        # --- Final fallback policies ---------------------------------------------------
+        # --- Assemble OOF sources (handles low/normal coverage cleanly) ----------------
         if n_oof < MIN_OOF:
             if SMALL:
                 _, va_es_rel = folds[-1]
@@ -7838,13 +7788,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 pa_es, _ = pos_proba_safe(model_auc, X_train[va_es_rel], positive=1)
                 _, p_oof_auc, _ = auc_with_flip(y_oof, pa_es, w_train[va_es_rel])
                 p_oof_auc = np.clip(p_oof_auc.astype(np.float64), eps, 1 - eps)
-        
                 if RUN_LOGLOSS:
                     pl_es, _ = pos_proba_safe(model_logloss, X_train[va_es_rel], positive=1)
                     p_oof_log = np.clip(pl_es, eps, 1 - eps).astype(np.float64)
                 else:
                     p_oof_log = None
-        
                 st.info(f"Small-league fallback: using last-fold validation only (n={len(va_es_rel)}) for blend weight.")
             else:
                 y_oof = y_train[mask_auc].astype(int)
@@ -7856,10 +7804,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p_oof_auc = np.clip(oof_pred_auc[mask_oof], eps, 1 - eps).astype(np.float64)
             p_oof_log = (np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64) if RUN_LOGLOSS else None)
         
-        # --- Pick blend weight on OOF (AUC-only if no logloss) ------------------------
-        best_w, p_oof_blend, flipped_unused = pick_blend_weight_on_oof(
-            y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=p_oof_log if RUN_LOGLOSS else None, eps=eps, metric="logloss"
-        )
+        # --- Choose blend weight ------------------------------------------------------
+        # If coverage is still thin, use discrete weight grid for stability;
+        # else, delegate to pick_blend_weight_on_oof as before.
+        use_discrete_grid = (n_oof < MIN_OOF) and RUN_LOGLOSS and (p_oof_log is not None)
+        if use_discrete_grid:
+            CAND = [0.35, 0.50, 0.65] if not SMALL else [0.35, 0.50]
+            best_w, best_ll = 0.50, np.inf
+            for w in CAND:
+                mix = np.clip(w * p_oof_log + (1 - w) * p_oof_auc, 1e-6, 1 - 1e-6)
+                ll = log_loss(y_oof, mix, labels=[0,1])
+                if ll < best_ll:
+                    best_ll, best_w = ll, w
+            p_oof_blend = np.clip(best_w * (p_oof_log if p_oof_log is not None else p_oof_auc)
+                                  + (1 - best_w) * p_oof_auc, 1e-6, 1 - 1e-6)
+        else:
+            best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
+                y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=p_oof_log if RUN_LOGLOSS else None,
+                eps=eps, metric="logloss"
+            )
         
         # Final safety
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
@@ -7878,38 +7841,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
         # ---------------- Calibration ----------------
-        CLIP = 0.0005 if sport_key not in SMALL_LEAGUES else 0.01
-        use_quantile_iso = False
-        
-        # Decide flip ONCE using OOF (pre‑calibration), apply everywhere BEFORE cal
+        CLIP = 0.01 if SMALL else 0.001
         flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
-        p_oof_for_cal = _maybe_flip(p_oof_blend, flip_flag)
+        p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
         
-        # Fit iso/platt/beta on the (maybe flipped) OOF
-        cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=eps, use_quantile_iso=use_quantile_iso)
+        cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=False)
         cals = _normalize_cals(cals_raw)
-        cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=eps)
-        cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=eps)
-        cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=eps)
-        if cals["platt"] is None and cals["beta"] is None:
-            cals["platt"] = _IdentityProbCal(eps=eps)
+        cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
+        cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
+        cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
         
-        sel = select_blend(cals, p_oof_for_cal, y_oof, eps=eps)
-        
-        # Optional robust calibrator; falls back to identity-iso
-        cal_blend = None
-        try:
-            _cb = fit_robust_calibrator(p_oof=p_oof_for_cal, y_oof=y_oof, eps=eps,
-                                        min_unique=200, prefer_beta=True)
-            if _cb is not None:
-                cal_blend = _cb
-        except Exception as e:
-            st.info(f"Robust calibrator skipped: {e}")
-        
-        if cal_blend is None:
-            cal_blend = ("iso", _IdentityIsoCal(eps=eps))
-        
-        cal_name, cal_obj = (cal_blend[0], cal_blend[1]) if isinstance(cal_blend, tuple) and len(cal_blend) >= 2 else ("custom", cal_blend)
+        # ECE-driven selection (prefer beta when clearly better)
+        ece_iso  = expected_calibration_error(y_oof, cals["iso"].predict_proba(p_oof_for_cal))
+        ece_beta = (expected_calibration_error(y_oof, cals["beta"].predict_proba(p_oof_for_cal))
+                    if cals["beta"] else np.inf)
+        sel = ("beta", cals["beta"]) if (cals["beta"] and (ece_beta + 1e-6 < ece_iso)) else ("iso", cals["iso"])
+        cal_name, cal_obj = sel
         iso_blend = _CalAdapter((cal_name, cal_obj), clip=(CLIP, 1 - CLIP))
         st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag)})
         
@@ -7932,16 +7879,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_hold_blend_raw  = _maybe_flip(p_hold_blend_raw,  flip_flag)
         
         # Calibrate (no flipping downstream)
-        p_cal_tr  = apply_blend(sel, p_train_blend_raw, eps=eps, clip=(CLIP, 1 - CLIP))
-        p_cal_ho  = apply_blend(sel, p_hold_blend_raw,  eps=eps, clip=(CLIP, 1 - CLIP))
+        p_cal_tr = apply_blend(sel, p_train_blend_raw, eps=1e-6, clip=(CLIP, 1 - CLIP))
+        p_cal_ho = apply_blend(sel, p_hold_blend_raw,  eps=1e-6, clip=(CLIP, 1 - CLIP))
         
-        # Final clipped vectors
-        p_train_vec = np.asarray(np.clip(p_cal_tr, eps, 1 - eps), dtype=float)
-        p_hold_vec  = np.asarray(np.clip(p_cal_ho, eps, 1 - eps), dtype=float)
+        # Gentle shrink of extremes for live stability
+        p_train_vec = 0.98*np.asarray(np.clip(p_cal_tr, 1e-6, 1 - 1e-6)) + 0.01*0.5
+        p_hold_vec  = 0.98*np.asarray(np.clip(p_cal_ho, 1e-6, 1 - 1e-6)) + 0.01*0.5
+        
+        # Diagnostics you’ll use
+        ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
+        ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
+        psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
+        st.write({"cal_used": cal_name, "flip_on_oof": bool(flip_flag),
+                  "ece_train": float(ece_tr), "ece_hold": float(ece_ho), "psi": float(psi)})
         
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
-        
+
         # ---------- Metrics (no flips here) -------------------------------------------
         y_train_vec = y_full[train_all_idx].astype(int)
         y_hold_vec  = y_full[hold_idx].astype(int)
