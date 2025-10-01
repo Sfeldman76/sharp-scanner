@@ -7281,75 +7281,115 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
         
         # ================== SHAP stability selection (on pruned set) ==================
-        # 1) SHAP stability on a pruned base set
-      
+        # ================== SHAP stability selection (on pruned set) ==================
+        # 1) SHAP stability on a pruned base set (safe & fallback-friendly)
+        
+        # Build once; cheaper than rebuilding repeatedly
+        X_df_train = pd.DataFrame(X_train, columns=list(features_pruned))
+        
+        # Ensure shap_summary/selected_feats exist or synthesize sane fallbacks
+        if ('selected_feats' not in locals()) or (selected_feats is None):
+            if ('shap_summary' in locals()) and (shap_summary is not None) and (len(getattr(shap_summary, "index", [])) > 0):
+                have_flip = "sign_flip_rate" in shap_summary.columns
+                have_cv   = "shap_cv" in shap_summary.columns
+                if have_flip or have_cv:
+                    mask = pd.Series(True, index=shap_summary.index)
+                    if have_flip: mask &= shap_summary["sign_flip_rate"].fillna(1.0) <= 0.30
+                    if have_cv:   mask &= shap_summary["shap_cv"].fillna(1.0)        <= 1.00
+                    selected_feats = shap_summary.index[mask].tolist()
+                else:
+                    selected_feats = shap_summary.index.tolist()
+        
+                if not selected_feats:
+                    if "avg_abs_shap" in shap_summary.columns:
+                        selected_feats = (shap_summary.sort_values("avg_abs_shap", ascending=False)
+                                          .head(120).index.tolist())
+                    else:
+                        selected_feats = shap_summary.index.tolist()
+            else:
+                selected_feats = list(features_pruned)
+                shap_summary = pd.DataFrame(
+                    {
+                        "avg_abs_shap": np.linspace(1.0, 0.0, num=len(selected_feats), endpoint=False),
+                        "presence": 1.0,
+                        "sign_flip_rate": 0.0,
+                        "shap_cv": 0.0,
+                    },
+                    index=selected_feats,
+                )
+        
+        # Dedupe & intersect to avoid stray names
+        selected_feats = list(dict.fromkeys(selected_feats))  # stable dedupe
+        selected_feats = [f for f in selected_feats if f in set(features_pruned)]
+        
+        # Align shap_summary to available features (safe if it already aligns)
+        if isinstance(shap_summary, pd.DataFrame):
+            present = [f for f in shap_summary.index if f in set(selected_feats)]
+            shap_summary = shap_summary.loc[present]
+        
+        # Family tokens
         FAMILIES = {
             "move":   ["Abs_Line_Move_From_Opening", "Implied_Prob_Shift", "SharpMove_Magnitude_"],
             "timing": ["Minutes_To_Game_Tier", "Late_Game_Steam_Flag", "OddsMove_Magnitude_"],
             "resist": ["Was_Line_Resistance_Broken", "Line_Resistance_Crossed_Count"],
             "xmarket":["Spread_vs_H2H_Aligned", "Total_vs_Spread_Contradiction", "ProbGap"],
         }
-        def _family(name):
-            return [f for f in selected_feats if any(t in f for t in FAMILIES[name])]
+        def _family(name: str) -> list[str]:
+            toks = FAMILIES.get(name, [])
+            return [f for f in selected_feats if any(tok in f for tok in toks)]
         
-        FEATURE_COLS_FINAL = []
+        # Per-family prune @0.90, then global @0.92
+        FEATURE_COLS_FINAL: list[str] = []
         for fam in ("move","timing","resist","xmarket"):
             fam_feats = _family(fam)
             if not fam_feats:
                 continue
             keep = greedy_corr_prune(
-                X=pd.DataFrame(X_train, columns=list(features_pruned)),
+                X=X_df_train,
                 candidates=fam_feats,
                 rank_df=shap_summary,
                 corr_thresh=0.90,  # tighter within family
-                must_keep=None
+                must_keep=None,
             )
             FEATURE_COLS_FINAL.extend(list(keep))
-        # Add any remaining non-family candidates with global pruning
+        
+        # Add remaining non-family candidates then global prune
         other = [f for f in selected_feats if f not in set(FEATURE_COLS_FINAL)]
+        candidates = list(dict.fromkeys(FEATURE_COLS_FINAL + other))  # preserve order
+        
         FEATURE_COLS_FINAL = tuple(
             greedy_corr_prune(
-                X=pd.DataFrame(X_train, columns=list(features_pruned)),
-                candidates=list(dict.fromkeys(FEATURE_COLS_FINAL + other)),
+                X=X_df_train,
+                candidates=candidates,
                 rank_df=shap_summary,
                 corr_thresh=0.92,  # global
-                must_keep=["Is_Home_Team_Bet","Is_Favorite_Bet"]
+                must_keep=["Is_Home_Team_Bet","Is_Favorite_Bet"],
             )
         )
+        
+        # Feature cap
         MAX_FEATS = 80 if str(sport_key).upper() in {"NBA","MLB"} else 100
         if len(FEATURE_COLS_FINAL) > MAX_FEATS:
-            keep_order = (shap_summary.loc[list(FEATURE_COLS_FINAL)]
-                          .sort_values(["avg_abs_shap","presence"], ascending=[False, False])).index.tolist()
+            cols_in_summary = [c for c in FEATURE_COLS_FINAL if c in shap_summary.index]
+            if cols_in_summary and "avg_abs_shap" in shap_summary.columns:
+                keep_order = (shap_summary.loc[cols_in_summary]
+                              .assign(_presence=shap_summary.get("presence", pd.Series(1.0, index=shap_summary.index))
+                                      .reindex(cols_in_summary).fillna(0.0))
+                              .sort_values(["avg_abs_shap","_presence"], ascending=[False, False])
+                              .index.tolist())
+            else:
+                keep_order = list(FEATURE_COLS_FINAL)
             FEATURE_COLS_FINAL = tuple(keep_order[:MAX_FEATS])
         
+        # Rebuild matrices in the final column order
         feature_cols = list(FEATURE_COLS_FINAL)
-        X_train = (pd.DataFrame(X_train, columns=list(features_pruned))
-                     .loc[:, feature_cols].to_numpy(np.float32))
-        X_full  = (pd.DataFrame(X_full,  columns=list(features_pruned))
-                     .loc[:, feature_cols].to_numpy(np.float32))
-
-        
-        feature_cols = list(FEATURE_COLS_FINAL)
-        features     = feature_cols
-        
-        # UI: how many SHAP removed
-        n_before = len(features_pruned); n_after = len(FEATURE_COLS_FINAL); removed = n_before - n_after
-        st.success(f"🧠 SHAP selection kept {n_after} / {n_before} features (−{removed} removed).")
-        if removed > 0:
-            dropped = [c for c in features_pruned if c not in FEATURE_COLS_FINAL]
-            st.caption("Dropped (sample): " + ", ".join(dropped[:20]) + (" ..." if removed > 20 else ""))
-        
-        # Rebuild design matrices ONCE by name (keeps order identical)
-        X_train = (pd.DataFrame(X_train, columns=list(features_pruned))
-                     .loc[:, list(FEATURE_COLS_FINAL)]
-                     .to_numpy(np.float32))
-        X_full  = (pd.DataFrame(X_full,  columns=list(features_pruned))
-                     .loc[:, list(FEATURE_COLS_FINAL)]
-                     .to_numpy(np.float32))
+        X_train = X_df_train.loc[:, feature_cols].to_numpy(np.float32)
+        X_full  = pd.DataFrame(X_full, columns=list(features_pruned)).loc[:, feature_cols].to_numpy(np.float32)
         
         # Sanity checks
         assert X_train.shape[1] == len(feature_cols), f"X_train={X_train.shape[1]} vs feature_cols={len(feature_cols)}"
-        assert X_full.shape[1]  == len(feature_cols),  f"X_full={X_full.shape[1]}  vs feature_cols={len(feature_cols)}"
+        assert X_full.shape[1]  == len(feature_cols), f"X_full={X_full.shape[1]} vs feature_cols={len(feature_cols)}"
+
         assert X_train.shape[0] == y_train.shape[0] == len(train_all_idx)
         assert np.isfinite(X_train).all()
         assert set(np.unique(y_train)) <= {0, 1}
