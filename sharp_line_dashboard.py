@@ -7885,45 +7885,31 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
         
+        # Fit/normalize available calibrators
         cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=False)
         cals = _normalize_cals(cals_raw)
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
-        # --- Calibrator compatibility shim: always return P(y=1) as 1-D array -------------
-        def _prob1(cal, p):
-            """Return positive-class probability for various calibrator types."""
-            if cal is None:
-                return np.asarray(p, float).ravel()
-            # scikit-style: predict_proba
-            if hasattr(cal, "predict_proba"):
-                out = cal.predict_proba(p)
-                out = np.asarray(out)
-                if out.ndim == 2 and out.shape[1] == 2:
-                    return out[:, 1].astype(float)
-                return out.astype(float).ravel()
-            # iso/identity-style: transform
-            if hasattr(cal, "transform"):
-                return np.asarray(cal.transform(p), float).ravel()
-            # callable
-            if callable(cal):
-                return np.asarray(cal(p), float).ravel()
-            # fallback
-            return np.asarray(p, float).ravel()
-
-        # ECE-driven selection (prefer beta when clearly better)
-        p_iso  = _prob1(cals["iso"],  p_oof_for_cal)
-        p_beta = _prob1(cals["beta"], p_oof_for_cal) if cals.get("beta") is not None else None
         
-        ece_iso  = expected_calibration_error(y_oof, p_iso)
-        ece_beta = expected_calibration_error(y_oof, p_beta) if p_beta is not None else np.inf
+        # Evaluate candidates by ECE (lower is better)
+        candidates = []
+        if cals.get("beta")  is not None:  candidates.append(("beta",  cals["beta"]))
+        if cals.get("platt") is not None:  candidates.append(("platt", cals["platt"]))
+        if cals.get("iso")   is not None:  candidates.append(("iso",   cals["iso"]))
+        if not candidates:
+            candidates = [("iso", _IdentityIsoCal(eps=1e-6))]
         
-        sel = ("beta", cals["beta"]) if (p_beta is not None and ece_beta + 1e-6 < ece_iso) else ("iso", cals["iso"])
-        cal_name, cal_obj = sel
-
-    
-        iso_blend = _CalAdapter((cal_name, cal_obj), clip=(CLIP, 1 - CLIP))
-        st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag)})
+        scores = []
+        for kind, cal in candidates:
+            pp = _apply_cal(kind, cal, p_oof_for_cal)           # uses your helper
+            pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float) # stabilize tails for ECE
+            ece = expected_calibration_error(y_oof, pp)
+            scores.append((ece, kind, cal))
+        
+        scores.sort(key=lambda t: t[0])
+        ece_best, cal_name, cal_obj = scores[0]
+        st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
         
         # --- Raw model preds (AUC + optional LogLoss model) ---------------------------
         p_tr_auc, _ = pos_proba_safe(model_auc,     X_full[train_all_idx], positive=1)
@@ -7943,13 +7929,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_train_blend_raw = _maybe_flip(p_train_blend_raw, flip_flag)
         p_hold_blend_raw  = _maybe_flip(p_hold_blend_raw,  flip_flag)
         
-        # Calibrate (no flipping downstream)
-        p_cal_tr = apply_blend(sel, p_train_blend_raw, eps=1e-6, clip=(CLIP, 1 - CLIP))
-        p_cal_ho = apply_blend(sel, p_hold_blend_raw,  eps=1e-6, clip=(CLIP, 1 - CLIP))
+        # Calibrate via the chosen calibrator (no apply_blend; use your helper)
+        p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_blend_raw)
+        p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_blend_raw)
         
-        # Gentle shrink of extremes for live stability
-        p_train_vec = 0.98*np.asarray(np.clip(p_cal_tr, 1e-6, 1 - 1e-6)) + 0.01*0.5
-        p_hold_vec  = 0.98*np.asarray(np.clip(p_cal_ho, 1e-6, 1 - 1e-6)) + 0.01*0.5
+        # Clip + gentle shrink of extremes for live stability
+        p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
+        p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
+        
+        p_train_vec = 0.98 * p_cal_tr + 0.01 * 0.5
+        p_hold_vec  = 0.98 * p_cal_ho + 0.01 * 0.5
         
         # Diagnostics you’ll use
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
@@ -7960,6 +7949,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
+
 
         # ---------- Metrics (no flips here) -------------------------------------------
         y_train_vec = y_full[train_all_idx].astype(int)
