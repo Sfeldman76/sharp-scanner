@@ -7502,29 +7502,69 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_auc_params = rs_auc.best_params_.copy()
         
         # ---------------- stabilize best params (regularization-first) ----------------
-        STABLE = dict(objective="binary:logistic", tree_method="hist", grow_policy="lossguide", max_delta_step=0.5)
+        # Stable defaults applied after search (keep 'objective'!)
+        STABLE = dict(
+            objective="binary:logistic",
+            tree_method="hist",
+            grow_policy="lossguide",
+            max_delta_step=0.5,
+        )
         
         def _stabilize(best_params, leaf_cap=256):
-            bp = dict(best_params)
-            bp.update({
-                **STABLE,
-                "max_leaves":       min(leaf_cap, int(bp.get("max_leaves", leaf_cap))),
-                "min_child_weight": max(4.0, float(bp.get("min_child_weight", 4.0))),
-                "gamma":            max(2.0, float(bp.get("gamma", 2.0))),
-                "reg_alpha":        max(0.02, float(bp.get("reg_alpha", 0.02))),
-                "reg_lambda":       max(5.0, float(bp.get("reg_lambda", 5.0))),
-                "subsample":        min(0.90, float(bp.get("subsample", 0.85))),
-                "colsample_bytree": min(0.85, float(bp.get("colsample_bytree", 0.80))),
-                "colsample_bynode": min(0.85, float(bp.get("colsample_bynode", 0.80))),
-                "max_bin":          min(320, int(bp.get("max_bin", 256))),
-                "learning_rate":    min(0.018, float(bp.get("learning_rate", 0.025))),
-            })
-            for k in ("monotone_constraints","interaction_constraints","predictor","objective",
-                      "eval_metric","_estimator_type","response_method",
-                      "n_estimators","n_jobs","scale_pos_weight","max_depth"):
-                bp.pop(k, None)
-            return bp
+            """Harden searched params with stability-biased clamps and version-safe keys."""
+            from xgboost import XGBClassifier
         
+            bp = dict(best_params or {})
+        
+            # ---- Version-safe handling for colsample_bynode vs colsample_bylevel ----
+            try:
+                _supports_bynode = ("colsample_bynode" in XGBClassifier().get_xgb_params())
+            except Exception:
+                _supports_bynode = False
+        
+            # If only bynode present but not supported, remap to bylevel
+            if (not _supports_bynode) and ("colsample_bynode" in bp):
+                bp["colsample_bylevel"] = float(bp.get("colsample_bynode"))
+                bp.pop("colsample_bynode", None)
+        
+            # ---- Apply stable defaults & clamps (ensure correct dtypes) ----
+            # choose node/level key based on support
+            node_key = "colsample_bynode" if _supports_bynode else "colsample_bylevel"
+            node_val = float(bp.get(node_key, bp.get("colsample_bylevel", bp.get("colsample_bynode", 0.80))))
+        
+            updates = {
+                **STABLE,  # keep objective + tree_method + grow_policy + max_delta_step
+                "max_leaves":       int(min(leaf_cap, int(bp.get("max_leaves", leaf_cap)))),
+                "min_child_weight": float(max(4.0, float(bp.get("min_child_weight", 4.0)))),
+                "gamma":            float(max(2.0, float(bp.get("gamma", 2.0)))),
+                "reg_alpha":        float(max(0.02, float(bp.get("reg_alpha", 0.02)))),
+                "reg_lambda":       float(max(5.0, float(bp.get("reg_lambda", 5.0)))),
+                "subsample":        float(min(0.90, float(bp.get("subsample", 0.85)))),
+                "colsample_bytree": float(min(0.85, float(bp.get("colsample_bytree", 0.80)))),
+                node_key:           float(min(0.85, node_val)),
+                "max_bin":          int(min(320, int(bp.get("max_bin", 256)))),
+                "learning_rate":    float(min(0.018, float(bp.get("learning_rate", 0.025)))),
+            }
+            bp.update(updates)
+        
+            # ---- Drop only sklearn/wrapper/managed keys (DO NOT drop 'objective') ----
+            for k in (
+                "monotone_constraints",
+                "interaction_constraints",
+                "predictor",
+                # "objective",  # ← keep it!
+                "eval_metric",
+                "_estimator_type",
+                "response_method",
+                "n_estimators",
+                "n_jobs",
+                "scale_pos_weight",
+                "max_depth",
+            ):
+                bp.pop(k, None)
+        
+            return bp
+
         best_auc_params = _stabilize(best_auc_params, leaf_cap=256)
         best_ll_params  = _stabilize(best_ll_params,  leaf_cap=256)
         
@@ -7686,7 +7726,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if n_trees_auc > 0:
             model_auc.set_params(n_estimators=n_trees_auc)
             model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
-        
+        try:
+            model_auc.feature_names_in_ = np.array(feature_cols)
+            model_logloss.feature_names_in_ = np.array(feature_cols)
+        except Exception:
+            pass
         # Metric tails (compact) — auc may be None since we trained with logloss only
         def _safe_metric_tail(clf, prefer):
             ev = getattr(clf, "evals_result_", {}) or {}
@@ -7743,13 +7787,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 feat_idx = [feature_cols.index(f) for f in top_feats if f in feature_cols]
                 if feat_idx:
                     st.subheader("PDP/ICE (AUC model, ES fold)")
+                    X_va_es_df = pd.DataFrame(X_va_es, columns=feature_cols)  # ← build DF here
                     PartialDependenceDisplay.from_estimator(
-                        model_auc, X_va_es, features=feat_idx,
+                        model_auc, X_va_es_df, features=feat_idx,
                         kind="both", grid_resolution=20, response_method="predict_proba"
                     )
                     st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
+     
 
-        
+        # Example:
+        PartialDependenceDisplay.from_estimator(
+            model_auc, X_va_es_df, features=feat_idx,
+            kind="both", grid_resolution=20, response_method="predict_proba"
+        )
         # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
@@ -7881,12 +7931,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
         # ---------------- Calibration ----------------
-        CLIP = 0.01 if SMALL else 0.001
+        CLIP = 0.02 if SMALL else 0.01
         flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
         
         # Fit/normalize available calibrators
-        cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=False)
+       
+        use_qiso = (len(np.unique(np.round(p_oof_for_cal, 4))) < 400)  # small OOF → safer iso
+        cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
         cals = _normalize_cals(cals_raw)
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
@@ -7938,8 +7990,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
         
-        p_train_vec = 0.98 * p_cal_tr + 0.01 * 0.5
-        p_hold_vec  = 0.98 * p_cal_ho + 0.01 * 0.5
+        p_train_vec = 0.95 * np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP)) + 0.05 * 0.5
+        p_hold_vec  = 0.95 * np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP)) + 0.05 * 0.5
         
         # Diagnostics you’ll use
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
@@ -7950,12 +8002,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
-
+        
 
         # ---------- Metrics (no flips here) -------------------------------------------
         y_train_vec = y_full[train_all_idx].astype(int)
         y_hold_vec  = y_full[hold_idx].astype(int)
+        try:
+            t_tr_max = pd.to_datetime(t_full[train_all_idx]).max()
+            t_ho_min = pd.to_datetime(t_full[hold_idx]).min()
+            assert t_ho_min > t_tr_max, f"Holdout overlap: {t_ho_min=} <= {t_tr_max=}"
+        except Exception as e:
+            st.warning(f"Time-split check skipped/failed: {e}")
         
+        # Prevalence shift (can wreck calibration/AUC)
+        rate_tr = float(y_full[train_all_idx].mean())
+        rate_ho = float(y_full[hold_idx].mean())
+        st.write({"label_rate_train": rate_tr, "label_rate_hold": rate_ho})
+
         auc_train = auc_safe(y_train_vec, p_train_vec)
         auc_val   = auc_safe(y_hold_vec,  p_hold_vec)
         brier_tr  = brier_score_loss(y_train_vec, p_train_vec)
