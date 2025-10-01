@@ -7909,6 +7909,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         scores.sort(key=lambda t: t[0])
         ece_best, cal_name, cal_obj = scores[0]
+        cal_blend = (cal_name, cal_obj) 
         st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
         
         # --- Raw model preds (AUC + optional LogLoss model) ---------------------------
