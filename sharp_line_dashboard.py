@@ -1968,8 +1968,15 @@ def holdout_by_percent_groups(
     Returns (train_idx, hold_idx) as row indices.
     """
     SPORT_HOLDOUT_PCT = {
-        "NFL": 0.10, "NCAAF": 0.10, "NBA": 0.18, "WNBA": 0.10,
-        "NHL": 0.18, "MLB": 0.20, "MLS": 0.18, "CFL": 0.10, "DEFAULT": 0.20,
+        "NFL":   0.12,   # ~2–3 weeks worth; small season → keep enough train
+        "NCAAF": 0.12,   # similar logic to NFL
+        "NBA":   0.18,   # long season; 15–20% works well; 18% is a sweet spot
+        "WNBA":  0.12,   # shorter season; 10% can be too thin → bump slightly
+        "NHL":   0.18,   # long season; mirrors NBA
+        "MLB":   0.20,   # very long season + drift; keep 20%
+        "MLS":   0.18,   # medium length; mirrors NBA/NHL logic
+        "CFL":   0.12,   # small season like NFL/NCAAF
+        "DEFAULT": 0.18, # safe general default
     }
     if pct_holdout is None:
         key = (sport or "DEFAULT").upper()
@@ -6623,7 +6630,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         SPORT_EMBARGO = {
             "MLB":   pd.Timedelta("2 hours"),
             "NBA":   pd.Timedelta("12 hours"),
-            "NHL":   pd.Timedelta("1 hours"),
+            "NHL":   pd.Timedelta("2 hours"),
             "NCAAB": pd.Timedelta("11 hours"),
             "NFL":   pd.Timedelta("1 days"),
             "NCAAF": pd.Timedelta("1 days"),
@@ -7109,7 +7116,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             else:
                 is_sharp = train_df[bk_col].isin(SHARP_BOOKS).to_numpy(dtype=np.float32)
         
-            ALPHA_SHARP = 0.60
+            ALPHA_SHARP = 0.20
             mult = 1.0 + ALPHA_SHARP * is_sharp
         
             w_train = (w_base * mult).astype(np.float32)
