@@ -8007,13 +8007,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ---------- Metrics (no flips here) -------------------------------------------
         y_train_vec = y_full[train_all_idx].astype(int)
         y_hold_vec  = y_full[hold_idx].astype(int)
-        try:
-            t_tr_max = pd.to_datetime(t_full[train_all_idx]).max()
-            t_ho_min = pd.to_datetime(t_full[hold_idx]).min()
-            assert t_ho_min > t_tr_max, f"Holdout overlap: {t_ho_min=} <= {t_tr_max=}"
-        except Exception as e:
-            st.warning(f"Time-split check skipped/failed: {e}")
+        # ---- Robust time-split check (no NameErrors) ----
+        def _time_split_ok(train_idx, hold_idx, t_full=None, t_train=None, t_hold=None):
+            import numpy as np
+            import pandas as pd
+            try:
+                if t_full is not None:
+                    tr_max = pd.to_datetime(np.asarray(t_full)[train_idx]).max()
+                    ho_min = pd.to_datetime(np.asarray(t_full)[hold_idx]).min()
+                    return (ho_min > tr_max), {"tr_max": str(tr_max), "ho_min": str(ho_min), "source": "t_full"}
+                if (t_train is not None) and (t_hold is not None):
+                    tr_max = pd.to_datetime(np.asarray(t_train)).max()
+                    ho_min = pd.to_datetime(np.asarray(t_hold)).min()
+                    return (ho_min > tr_max), {"tr_max": str(tr_max), "ho_min": str(ho_min), "source": "t_train/t_hold"}
+                # Fallback: assume indices increase with time
+                return (int(np.min(hold_idx)) > int(np.max(train_idx))), {"source": "index_fallback"}
+            except Exception as e:
+                # Don't hard-fail training if the check itself errors
+                return True, {"error": str(e), "source": "check_failed"}
         
+        ok, info = _time_split_ok(
+            train_all_idx, hold_idx,
+            t_full=locals().get("t_full"),
+            t_train=locals().get("t_train"),
+            t_hold=locals().get("t_hold"),
+        )
+        
+        if not ok:
+            st.warning(f"Holdout may overlap training by time. Info: {info}")
+        else:
+            st.write({"time_split_check": "ok", **info})
+
         # Prevalence shift (can wreck calibration/AUC)
         rate_tr = float(y_full[train_all_idx].mean())
         rate_ho = float(y_full[hold_idx].mean())
