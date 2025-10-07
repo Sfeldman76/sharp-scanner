@@ -7806,6 +7806,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         except Exception:
             pass
         # Metric tails (compact) — auc may be None since we trained with logloss only
+        # ---- Stamp feature names on the models so we don't get f0,f1,... ----
+        # Stamp real names if and only if lengths match the fitted model
+        try:
+            n_model = int(getattr(model_auc, "n_features_in_", X_train.shape[1]))
+            if len(feature_cols) == n_model:
+                real_names = list(map(str, feature_cols))
+                model_auc.feature_names_in_ = np.asarray(real_names, dtype=object)
+                model_logloss.feature_names_in_ = np.asarray(real_names, dtype=object)
+                try: model_auc.get_booster().feature_names = real_names
+                except Exception: pass
+                try: model_logloss.get_booster().feature_names = real_names
+                except Exception: pass
+        except Exception:
+            pass
+
+        
+    
         def _safe_metric_tail(clf, prefer):
             ev = getattr(clf, "evals_result_", {}) or {}
             ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
@@ -8214,10 +8231,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
      
         # ---- Feature importance using model-native names only -------------------------
         # ---- Feature importance using model-native names only (small corrections) ----
+        # ---- Feature importance using model-native names only (hardened) ----
         def _model_feature_names(clf, n_expected: int | None = None) -> list[str]:
+            # 1) sklearn wrapper
             names = getattr(clf, "feature_names_in_", None)
             if names is not None and len(names) > 0:
                 return [str(x) for x in list(names)]
+            # 2) Booster names
             try:
                 booster = clf.get_booster()
                 if getattr(booster, "feature_names", None):
@@ -8226,75 +8246,116 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                         return [str(x) for x in names]
             except Exception:
                 pass
-            n = 0
-            if hasattr(clf, "n_features_in_"):
-                n = int(getattr(clf, "n_features_in_", 0))
-            if not n and hasattr(clf, "feature_importances_"):
-                n = int(len(getattr(clf, "feature_importances_")))
-            if not n and n_expected is not None:
-                n = int(n_expected)
+            # 3) Positional fallback
+            n = int(getattr(clf, "n_features_in_", 0)) or \
+                int(len(getattr(clf, "feature_importances_", []))) or \
+                int(n_expected or 0)
             return [f"f{i}" for i in range(max(0, n))]
+        
+        def _corr_sign_from_matrix(clf, X_mat: np.ndarray, feat_names: list[str]) -> list[str] | None:
+            """Return '↑ Increases' / '↓ Decreases' per feature by corr with proba."""
+            try:
+                p = clf.predict_proba(X_mat)[:, 1]
+            except Exception:
+                return None
+            p = np.asarray(p, float)
+            finite_p = np.isfinite(p)
+            out = []
+            for j in range(X_mat.shape[1]):
+                x = X_mat[:, j]
+                m = finite_p & np.isfinite(x)
+                if m.sum() < 3 or np.std(x[m]) <= 0:
+                    out.append("↓ Decreases")  # neutral default
+                else:
+                    c = np.corrcoef(x[m], p[m])[0, 1]
+                    out.append("↑ Increases" if float(c) > 0 else "↓ Decreases")
+            return out
         
         importances = np.asarray(getattr(model_auc, "feature_importances_", []), dtype=float)
         if importances.size == 0:
             st.error("❌ model_auc.feature_importances_ is empty. (Was the model fit?)")
         else:
-            names = _model_feature_names(model_auc, n_expected=importances.size)
-            k = min(importances.size, len(names))
-            importances, names = importances[:k], names[:k]
+            # Prefer model-stamped names; fallback to Booster; else f0..f{n-1}
+            names_all = _model_feature_names(model_auc, n_expected=importances.size)
+        
+            # Strict alignment for display
+            k = min(importances.size, len(names_all))
+            names = names_all[:k]
+            importances = importances[:k]
         
             importance_df = (
                 pd.DataFrame({"Feature": names, "Importance": importances})
-                .sort_values("Importance", ascending=False)
-                .reset_index(drop=True)
+                  .sort_values("Importance", ascending=False)
+                  .reset_index(drop=True)
             )
             st.markdown("#### 📊 Feature Importance (model-native names)")
-            if (importance_df["Importance"] > 0).any():
-                st.dataframe(importance_df, use_container_width=True)
-            else:
-                st.info("All importances are zero (heavy regularization or identical features).")
+            st.dataframe(importance_df, use_container_width=True)
         
-            # Impact sign only if df_market exists and has these columns
-            if "df_market" in locals():
-                available = [c for c in names if c in df_market.columns]
-                if len(available) >= 2:
-                    X_features = (
-                        df_market[available]
-                        .apply(pd.to_numeric, errors="coerce")
-                        .replace([np.inf, -np.inf], np.nan)
-                        .fillna(0.0)
-                        .astype("float32")
-                    )
-                    # Reorder to model-native name order for predict_proba
-                    cols_for_pred = [c for c in names if c in X_features.columns][:k]
-                    try:
-                        preds = model_auc.predict_proba(X_features[cols_for_pred])[:, 1]
-                        finite_mask = np.isfinite(preds)
+            # Try df_market (if columns match); otherwise fall back to X_train matrix.
+            did_sign = False
+            try:
+                if "df_market" in locals():
+                    available = [n for n in names if n in df_market.columns]
+                    if len(available) >= 2:
+                        # keep the same order and length cap as 'names'
+                        available = [n for n in names if n in set(available)]
+                        X_features = (
+                            df_market[available]
+                            .apply(pd.to_numeric, errors="coerce")
+                            .replace([np.inf, -np.inf], np.nan)
+                            .fillna(0.0)
+                            .astype("float32")
+                        )
+                        preds = model_auc.predict_proba(X_features[available])[:, 1]
+                        finite = np.isfinite(preds)
                         corrs = []
-                        for col in cols_for_pred:
+                        for col in available:
                             x = X_features[col].to_numpy()
-                            m = finite_mask & np.isfinite(x)
+                            m = finite & np.isfinite(x)
                             if m.sum() < 3 or np.std(x[m]) <= 0:
                                 corrs.append(0.0)
                             else:
-                                c = np.corrcoef(x[m], preds[m])
-                                corrs.append(float(np.nan_to_num(c[0, 1], nan=0.0)))
-                        impact = np.where(np.asarray(corrs) > 0, "↑ Increases", "↓ Decreases")
-                        sign_df = pd.DataFrame({"Feature": cols_for_pred, "Impact": impact})
+                                c = np.corrcoef(x[m], preds[m])[0, 1]
+                                corrs.append(float(np.nan_to_num(c, nan=0.0)))
+                        sign_map = {n: ("↑ Increases" if v > 0 else "↓ Decreases") for n, v in zip(available, corrs)}
                         final_df = (
-                            pd.DataFrame({"Feature": names, "Importance": importances})
-                            .merge(sign_df, on="Feature", how="left")
-                            .sort_values("Importance", ascending=False)
-                            .reset_index(drop=True)
+                            importance_df.merge(pd.DataFrame({"Feature": list(sign_map.keys()),
+                                                              "Impact": list(sign_map.values())}),
+                                                on="Feature", how="left")
+                                        .sort_values("Importance", ascending=False)
+                                        .reset_index(drop=True)
                         )
-                        st.markdown("##### ➕ Impact sign (where columns exist in df_market)")
+                        st.markdown("##### ➕ Impact sign (from df_market)")
                         st.dataframe(final_df, use_container_width=True)
-                    except Exception:
-                        st.info("Skipped impact sign: predict_proba failed on df_market slice.")
-                else:
-                    st.info("Skipped impact sign: model-native feature names not present in df_market.")
-            else:
-                st.info("Skipped impact sign: df_market not available in this scope.")
+                        did_sign = True
+            except Exception:
+                # soft-fail; we’ll try the matrix fallback
+                pass
+        
+            if not did_sign:
+                try:
+                    # Align with names/importances length to avoid indexing errors
+                    X_mat = np.asarray(X_train, dtype=np.float32)
+                    X_mat = X_mat[:, :min(X_mat.shape[1], len(names))]  # extra guard
+                    if X_mat.shape[1] != len(names):
+                        # If this happens, the model was fit with a different view than X_train here.
+                        # Keep them aligned by truncation.
+                        names = names[:X_mat.shape[1]]
+                        importances = importances[:X_mat.shape[1]]
+                    signs = _corr_sign_from_matrix(model_auc, X_mat, names)
+                    if signs is not None:
+                        final_df = (
+                            pd.DataFrame({"Feature": names, "Importance": importances, "Impact": signs})
+                              .sort_values("Importance", ascending=False)
+                              .reset_index(drop=True)
+                        )
+                        st.markdown("##### ➕ Impact sign (from train matrix)")
+                        st.dataframe(final_df, use_container_width=True)
+                    else:
+                        st.info("Skipped impact sign: could not compute predictions on train matrix.")
+                except Exception:
+                    st.info("Skipped impact sign: fallback computation failed.")
+
 
         # ==== TRAIN: Calibration curve table (quantile bins, robust) ==================
         
