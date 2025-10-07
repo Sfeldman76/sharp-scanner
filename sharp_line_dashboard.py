@@ -1955,7 +1955,7 @@ def holdout_by_percent_groups(
     *,
     sport: str | None = None,
     groups: np.ndarray,
-    times: np.ndarray,
+    times: np.ndarray | None,
     y: np.ndarray,
     pct_holdout: float | None = None,
     min_train_games: int = 25,
@@ -1963,70 +1963,124 @@ def holdout_by_percent_groups(
     ensure_label_diversity: bool = True,
 ):
     """
-    Time‑forward holdout by last % of GROUPS (Game_Key).
+    Time-forward holdout by last % of GROUPS (e.g., Game_Key).
     If pct_holdout is None, choose per sport via SPORT_HOLDOUT_PCT.
-    Returns (train_idx, hold_idx) as row indices.
+    Returns (train_idx, hold_idx) as **row indices** (int arrays), sorted ascending.
     """
+    import numpy as np
+    import pandas as pd
+
+    # ---- sport-defaults ----
     SPORT_HOLDOUT_PCT = {
-        "NFL":   0.12,   # ~2–3 weeks worth; small season → keep enough train
-        "NCAAF": 0.12,   # similar logic to NFL
-        "NBA":   0.18,   # long season; 15–20% works well; 18% is a sweet spot
-        "WNBA":  0.12,   # shorter season; 10% can be too thin → bump slightly
-        "NHL":   0.18,   # long season; mirrors NBA
-        "MLB":   0.20,   # very long season + drift; keep 20%
-        "MLS":   0.18,   # medium length; mirrors NBA/NHL logic
-        "CFL":   0.12,   # small season like NFL/NCAAF
-        "DEFAULT": 0.18, # safe general default
+        "NFL": 0.12, "NCAAF": 0.12, "NBA": 0.18, "WNBA": 0.12,
+        "NHL": 0.18, "MLB": 0.20, "MLS": 0.18, "CFL": 0.12, "DEFAULT": 0.18,
     }
     if pct_holdout is None:
         key = (sport or "DEFAULT").upper()
         pct_holdout = float(SPORT_HOLDOUT_PCT.get(key, SPORT_HOLDOUT_PCT["DEFAULT"]))
+    pct_holdout = float(np.clip(pct_holdout, 0.05, 0.50))  # keep reasonable bounds
 
-    # Build group-time meta (one row per group)
-    meta_rows = pd.DataFrame({
-        "row_idx": np.arange(len(groups)),
-        "group":   groups.astype(str),
-        "time":    pd.to_datetime(times, utc=True, errors="coerce"),
-        "y":       y.astype(int),
-    }).dropna(subset=["time"])  # drop NaT rows if any
+    # ---- align lengths safely (no crashes on mismatches) ----
+    n = int(min(len(groups), len(y), len(times) if times is not None else len(groups)))
+    groups = np.asarray(groups)[:n]
+    y = np.asarray(y).astype(int)[:n]
+    if times is None:
+        # Use an increasing counter as a last-resort "time"
+        times = np.arange(n)
+        times_is_datetime = False
+    else:
+        times = np.asarray(times)[:n]
+        times_is_datetime = True
 
-    gmeta = (meta_rows.groupby("group")
-             .agg(start=("time", "min"), end=("time", "max"))
-             .sort_values("start")
-             .reset_index())
+    # ---- row-level frame (we keep all rows; do not drop NaT rows) ----
+    df_rows = pd.DataFrame({
+        "row_idx": np.arange(n, dtype=int),
+        "group":   pd.Series(groups).astype(str),
+        "y":       y,
+    })
+    # Parse times; may produce NaT
+    if times_is_datetime:
+        t_ser = pd.to_datetime(times, utc=True, errors="coerce")
+    else:
+        # fallback: monotonic increasing pseudo-time
+        t_ser = pd.to_datetime(pd.Series(times, dtype="int64"), unit="s", utc=True, errors="ignore")
+    df_rows["time"] = t_ser
+
+    # ---- group-level meta (order by real time; fallback to first row order) ----
+    gfirst = df_rows.groupby("group", sort=False)["row_idx"].min()
+    gstart = df_rows.dropna(subset=["time"]).groupby("group")["time"].min()
+    gend   = df_rows.dropna(subset=["time"]).groupby("group")["time"].max()
+
+    gmeta = pd.DataFrame({
+        "group": gfirst.index,
+        "first_row": gfirst.values,                  # fallback order
+        "start": gstart.reindex(gfirst.index),       # may be NaT
+        "end":   gend.reindex(gfirst.index),         # may be NaT
+    })
+    # Primary sort: by start time; Secondary: by first occurrence (stable for NaT)
+    gmeta = gmeta.sort_values(by=["start", "first_row"], na_position="last").reset_index(drop=True)
 
     n_groups = len(gmeta)
     if n_groups == 0:
         return np.array([], dtype=int), np.array([], dtype=int)
 
-    n_hold_groups = max(min_hold_games, int(np.ceil(n_groups * pct_holdout)))
-    n_hold_groups = min(n_groups - max(1, min_train_games), n_hold_groups)
-    n_hold_groups = max(min_hold_games, n_hold_groups)
+    # ---- choose #hold groups with bounds ----
+    # ensure at least 1 train group exists
+    min_train_groups = max(1, int(min_train_games))
+    min_hold_groups  = max(1, int(min_hold_games))
 
-    # Take last n_hold_groups by start time as holdout
+    # requested hold groups by pct
+    wanted_hold = int(np.ceil(n_groups * pct_holdout))
+    # clamp to feasible window
+    max_hold_allowed = max(1, n_groups - min_train_groups)
+    n_hold_groups = int(np.clip(wanted_hold, min_hold_groups, max_hold_allowed))
+
+    # If dataset is too small, shrink gracefully
+    if n_groups < (min_train_groups + min_hold_groups):
+        # leave at least 1 train group
+        n_hold_groups = int(np.clip(n_groups - 1, 1, n_groups))
+
+    # ---- select train/hold groups (last % by time) ----
     hold_groups = gmeta["group"].iloc[-n_hold_groups:].to_numpy()
     train_groups = gmeta["group"].iloc[: n_groups - n_hold_groups].to_numpy()
 
-    # Map back to row indices
-    all_groups = meta_rows["group"].to_numpy()
-    hold_idx = np.flatnonzero(np.isin(all_groups, hold_groups))
-    train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
+    # ---- map groups back to rows (non-overlapping; sorted) ----
+    all_groups = df_rows["group"].to_numpy()
+    hold_mask = np.isin(all_groups, hold_groups)
+    train_mask = np.isin(all_groups, train_groups)
 
-    if ensure_label_diversity:
-        # If holdout has only one class, expand boundary until it has both or we run out
-        def _has_both(idx):
-            if idx.size == 0: return False
-            return np.unique(meta_rows.loc[idx, "y"]).size >= 2
+    # enforce disjointness (just in case)
+    both = train_mask & hold_mask
+    if np.any(both):
+        hold_mask[both] = False  # keep in train if ever ambiguous
 
-        k = n_hold_groups
-        while not _has_both(hold_idx) and (n_groups - k) >= max(1, min_train_games):
-            k += 1
-            hold_groups = gmeta["group"].iloc[-k:].to_numpy()
-            train_groups = gmeta["group"].iloc[: n_groups - k].to_numpy()
-            hold_idx = np.flatnonzero(np.isin(all_groups, hold_groups))
-            train_idx = np.flatnonzero(np.isin(all_groups, train_groups))
+    hold_idx = np.sort(np.flatnonzero(hold_mask).astype(int))
+    train_idx = np.sort(np.flatnonzero(train_mask).astype(int))
+
+    # ---- optional: ensure label diversity in holdout (expand boundary if needed) ----
+    if ensure_label_diversity and hold_idx.size > 0:
+        def _has_both(idx_rows: np.ndarray) -> bool:
+            if idx_rows.size == 0:
+                return False
+            return np.unique(df_rows.loc[idx_rows, "y"]).size >= 2
+
+        if not _has_both(hold_idx):
+            k = n_hold_groups
+            # expand hold boundary forward as much as possible while leaving min_train_groups
+            while (not _has_both(hold_idx)) and ((n_groups - k) >= min_train_groups) and (k < n_groups):
+                k += 1
+                hold_groups = gmeta["group"].iloc[-k:].to_numpy()
+                train_groups = gmeta["group"].iloc[: n_groups - k].to_numpy()
+                hold_mask = np.isin(all_groups, hold_groups)
+                train_mask = np.isin(all_groups, train_groups)
+                both = train_mask & hold_mask
+                if np.any(both):
+                    hold_mask[both] = False
+                hold_idx = np.sort(np.flatnonzero(hold_mask).astype(int))
+                train_idx = np.sort(np.flatnonzero(train_mask).astype(int))
 
     return train_idx, hold_idx
+
 
 
 def sharp_row_weights(df, a_sharp=0.8, b_limit=0.15, c_liq=0.10, d_steam=0.10):
@@ -6899,7 +6953,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                    .agg(start="min", end="max")
                    .sort_values("start")
                    .reset_index(drop=True))
+        # ---- Build time vector once (aligned to df_valid) ----
+        t_full = pd.to_datetime(df_valid["Snapshot_Timestamp"], utc=True, errors="coerce")
         
+        # Fallback to Commence_Hour where Snapshot_Timestamp is NaT
+        if t_full.isna().any() and "Commence_Hour" in df_valid.columns:
+            t_full = t_full.fillna(pd.to_datetime(df_valid["Commence_Hour"], utc=True, errors="coerce"))
+        
+        # Fill any remaining gaps to keep ordering/stability
+        t_full = t_full.fillna(method="ffill").fillna(method="bfill")
+        
+        # Numpy array for downstream use
+        times = t_full.to_numpy()
+
         # --- (7) time‑forward, group‑safe holdout as before ---
         train_all_idx, hold_idx = holdout_by_percent_groups(
             sport=sport,
@@ -7088,9 +7154,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
                 
         # --- Base weights from book/group structure ------------------------------------
-        bk_col = "Bookmaker" if "Bookmaker" in df_market.columns else (
-            "Bookmaker_Norm" if "Bookmaker_Norm" in df_market.columns else None
+        bk_col = "Bookmaker" if "Bookmaker" in train_df.columns else (
+            "Bookmaker_Norm" if "Bookmaker_Norm" in train_df.columns else None
         )
+
         
         if bk_col is None:
             w_train = np.ones(len(train_df), dtype=np.float32)
@@ -7803,10 +7870,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
      
 
         # Example:
-        PartialDependenceDisplay.from_estimator(
-            model_auc, X_va_es_df, features=feat_idx,
-            kind="both", grid_resolution=20, response_method="predict_proba"
-        )
+        # Example (guarded):
+        if "feat_idx" in locals() and feat_idx and "X_va_es_df" in locals():
+            PartialDependenceDisplay.from_estimator(
+                model_auc, X_va_es_df, features=feat_idx,
+                kind="both", grid_resolution=20, response_method="predict_proba"
+            )
+
         # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
@@ -8015,35 +8085,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_train_vec = y_full[train_all_idx].astype(int)
         y_hold_vec  = y_full[hold_idx].astype(int)
         # ---- Robust time-split check (no NameErrors) ----
-        def _time_split_ok(train_idx, hold_idx, t_full=None, t_train=None, t_hold=None):
-            import numpy as np
-            import pandas as pd
-            try:
-                if t_full is not None:
-                    tr_max = pd.to_datetime(np.asarray(t_full)[train_idx]).max()
-                    ho_min = pd.to_datetime(np.asarray(t_full)[hold_idx]).min()
-                    return (ho_min > tr_max), {"tr_max": str(tr_max), "ho_min": str(ho_min), "source": "t_full"}
-                if (t_train is not None) and (t_hold is not None):
-                    tr_max = pd.to_datetime(np.asarray(t_train)).max()
-                    ho_min = pd.to_datetime(np.asarray(t_hold)).min()
-                    return (ho_min > tr_max), {"tr_max": str(tr_max), "ho_min": str(ho_min), "source": "t_train/t_hold"}
-                # Fallback: assume indices increase with time
-                return (int(np.min(hold_idx)) > int(np.max(train_idx))), {"source": "index_fallback"}
-            except Exception as e:
-                # Don't hard-fail training if the check itself errors
-                return True, {"error": str(e), "source": "check_failed"}
-        
-        ok, info = _time_split_ok(
-            train_all_idx, hold_idx,
-            t_full=locals().get("t_full"),
-            t_train=locals().get("t_train"),
-            t_hold=locals().get("t_hold"),
-        )
-        
-        if not ok:
-            st.warning(f"Holdout may overlap training by time. Info: {info}")
-        else:
-            st.write({"time_split_check": "ok", **info})
+      
 
         # Prevalence shift (can wreck calibration/AUC)
         rate_tr = float(y_full[train_all_idx].mean())
