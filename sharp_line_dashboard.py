@@ -8147,7 +8147,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "Avg ROI (unit)": gb.apply(_roi_mean_inline).values.astype(float),
             "Avg Pred P": gb["p"].mean().values.astype(float),
         }).sort_values("Avg Pred P").reset_index(drop=True)
-        st.dataframe(df_bins)
+        st.dataframe(df_bins, use_container_width=True)
         
         # ---- Overfitting check (gaps) ------------------------------------------------
         auc_tr  = auc_train
@@ -8211,114 +8211,91 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             f"- ECE(holdout): `{ece_ho:.4f}` | Brier(holdout): `{brier_ho_v:.4f}` = "
             f"Unc `{unc_ho:.4f}` - Res `{res_ho:.4f}` + Rel `{rel_ho:.4f}`"
         )
+     
+        # ---- Feature importance using model-native names only -------------------------
+        # ---- Feature importance using model-native names only (small corrections) ----
+        def _model_feature_names(clf, n_expected: int | None = None) -> list[str]:
+            names = getattr(clf, "feature_names_in_", None)
+            if names is not None and len(names) > 0:
+                return [str(x) for x in list(names)]
+            try:
+                booster = clf.get_booster()
+                if getattr(booster, "feature_names", None):
+                    names = list(booster.feature_names)
+                    if names:
+                        return [str(x) for x in names]
+            except Exception:
+                pass
+            n = 0
+            if hasattr(clf, "n_features_in_"):
+                n = int(getattr(clf, "n_features_in_", 0))
+            if not n and hasattr(clf, "feature_importances_"):
+                n = int(len(getattr(clf, "feature_importances_")))
+            if not n and n_expected is not None:
+                n = int(n_expected)
+            return [f"f{i}" for i in range(max(0, n))]
         
-        # ---- Feature importance + directional sign (robust & UI‑safe) ----------------
-        try:
-            feat_in = getattr(model_auc, "feature_names_in_", None)
-            if feat_in is None:
-                feat_in = np.array([str(c) for c in features], dtype=object)
+        importances = np.asarray(getattr(model_auc, "feature_importances_", []), dtype=float)
+        if importances.size == 0:
+            st.error("❌ model_auc.feature_importances_ is empty. (Was the model fit?)")
+        else:
+            names = _model_feature_names(model_auc, n_expected=importances.size)
+            k = min(importances.size, len(names))
+            importances, names = importances[:k], names[:k]
         
-            available = [c for c in feat_in if c in df_market.columns]
-            missing   = [c for c in feat_in if c not in df_market.columns]
-        
-            if len(available) == 0:
-                st.error("❌ Feature-importance skipped: none of the model's features are present in df_market.")
-                st.write({"model_features": list(map(str, feat_in))[:30],
-                          "df_columns_sample": df_market.columns.tolist()[:30]})
+            importance_df = (
+                pd.DataFrame({"Feature": names, "Importance": importances})
+                .sort_values("Importance", ascending=False)
+                .reset_index(drop=True)
+            )
+            st.markdown("#### 📊 Feature Importance (model-native names)")
+            if (importance_df["Importance"] > 0).any():
+                st.dataframe(importance_df, use_container_width=True)
             else:
-                X_features = (df_market[available]
-                              .apply(pd.to_numeric, errors="coerce")
-                              .replace([np.inf, -np.inf], np.nan)
-                              .fillna(0.0)
-                              .astype("float32"))
+                st.info("All importances are zero (heavy regularization or identical features).")
         
-                if X_features.shape[0] == 0:
-                    st.error("❌ Feature-importance skipped: X_features has 0 rows after cleaning.")
-                else:
-                    importances = np.asarray(getattr(model_auc, "feature_importances_", None))
-                    if importances is None or importances.size == 0:
-                        st.error("❌ model_auc.feature_importances_ is empty. (Was the model fit?)")
-                    else:
-                        n_model_feats = importances.size
-                        if n_model_feats != len(feat_in):
-                            st.warning(
-                                f"⚠️ model n_features ({n_model_feats}) != feature_names_in_ ({len(feat_in)}). "
-                                "Truncating to the smaller size for display."
-                            )
-                        k = min(n_model_feats, len(available))
-                        available   = available[:k]
-                        X_features  = X_features.iloc[:, :k]
-                        importances = importances[:k]
-        
-                        # Predict proba for correlation sign
-                        try:
-                            preds_auc = model_auc.predict_proba(X_features)[:, 1]
-                        except Exception as e:
-                            st.exception(RuntimeError(f"predict_proba failed on X_features: {e}"))
-                            preds_auc = np.full(X_features.shape[0], np.nan, dtype=float)
-        
+            # Impact sign only if df_market exists and has these columns
+            if "df_market" in locals():
+                available = [c for c in names if c in df_market.columns]
+                if len(available) >= 2:
+                    X_features = (
+                        df_market[available]
+                        .apply(pd.to_numeric, errors="coerce")
+                        .replace([np.inf, -np.inf], np.nan)
+                        .fillna(0.0)
+                        .astype("float32")
+                    )
+                    # Reorder to model-native name order for predict_proba
+                    cols_for_pred = [c for c in names if c in X_features.columns][:k]
+                    try:
+                        preds = model_auc.predict_proba(X_features[cols_for_pred])[:, 1]
+                        finite_mask = np.isfinite(preds)
                         corrs = []
-                        finite_mask = np.isfinite(preds_auc)
-                        for col in X_features.columns:
+                        for col in cols_for_pred:
                             x = X_features[col].to_numpy()
                             m = finite_mask & np.isfinite(x)
                             if m.sum() < 3 or np.std(x[m]) <= 0:
                                 corrs.append(0.0)
                             else:
-                                c = np.corrcoef(x[m], preds_auc[m])
+                                c = np.corrcoef(x[m], preds[m])
                                 corrs.append(float(np.nan_to_num(c[0, 1], nan=0.0)))
                         impact = np.where(np.asarray(corrs) > 0, "↑ Increases", "↓ Decreases")
-        
-                        importance_df = (
-                            pd.DataFrame({
-                                "Feature": list(map(str, available)),
-                                "Importance": importances.astype(float),
-                                "Impact": impact,
-                            })
+                        sign_df = pd.DataFrame({"Feature": cols_for_pred, "Impact": impact})
+                        final_df = (
+                            pd.DataFrame({"Feature": names, "Importance": importances})
+                            .merge(sign_df, on="Feature", how="left")
                             .sort_values("Importance", ascending=False)
-                            .reset_index(drop=True)  # ← fix: was drop_u=True
+                            .reset_index(drop=True)
                         )
+                        st.markdown("##### ➕ Impact sign (where columns exist in df_market)")
+                        st.dataframe(final_df, use_container_width=True)
+                    except Exception:
+                        st.info("Skipped impact sign: predict_proba failed on df_market slice.")
+                else:
+                    st.info("Skipped impact sign: model-native feature names not present in df_market.")
+            else:
+                st.info("Skipped impact sign: df_market not available in this scope.")
 
-                        active = importance_df[importance_df["Importance"] > 0].copy().reset_index(drop=True)
-        
-                        def _to_streamlit_scalar(x):
-                            if x is None: return None
-                            if isinstance(x, (bool, int, float, str)): return x
-                            if isinstance(x, (np.bool_, np.integer, np.floating)): return x.item()
-                            return str(x)
-        
-                        if not active.empty:
-                            active["Feature"]    = active["Feature"].astype("string")
-                            active["Impact"]     = active["Impact"].astype("string")
-                            active["Importance"] = (
-                                pd.to_numeric(active["Importance"], errors="coerce")
-                                  .replace([np.inf, -np.inf], np.nan)
-                                  .fillna(0.0)
-                                  .astype(float)
-                                  .round(6)
-                            )
-                            active = active.applymap(_to_streamlit_scalar)
-        
-                        st.markdown(f"#### 📊 Feature Importance & Impact for `{market.upper()}`")
-                        if active.empty:
-                            st.info("No non‑zero importances to display (model very regularized or features pruned).")
-                        else:
-                            try:
-                                st.dataframe(active, width="stretch", hide_index=True)
-                            except Exception:
-                                st.table(active)
-        
-                        with st.expander("🔧 Debug: feature‑importance inputs"):
-                            st.write({
-                                "missing_model_features": missing[:40],
-                                "used_features": available[:40],
-                                "X_features_shape": X_features.shape,
-                                "any_nonfinite_preds": (not np.isfinite(preds_auc).all()),
-                            })
-        except Exception as e:
-            st.error("Feature‑importance block failed safely.")
-            st.exception(e)
-        
         # ==== TRAIN: Calibration curve table (quantile bins, robust) ==================
         
         
@@ -8350,7 +8327,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "N": g.size().astype(int).values,
         }).sort_values("Predicted Bin Center").reset_index(drop=True)
         
-        st.markdown(f"#### 🎯 Calibration Bins – {market.upper()} (Train)")
+        st.markdown("#### 🎯 Calibration Bins – Train")
         st.dataframe(calib_df)
         
         # ---- CV fold health -----------------------------------------------------------
