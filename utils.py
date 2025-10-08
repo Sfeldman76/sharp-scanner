@@ -461,9 +461,7 @@ def update_power_ratings(
     }
 
     # Use sharp books only for composite close (fall back safely if table absent/mismatch)
-    SHARP_BOOKS_DEFAULT = [
-        "pinnacle", "circa", "betfair_ex", "betcris", "matchbook", "superbook"
-    ]
+    SHARP_BOOKS_DEFAULT = ["pinnacle"]
 
     def get_aliases(canon: str) -> list[str]:
         return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
@@ -708,55 +706,73 @@ def update_power_ratings(
         
         # inside load_games_stream(...):
         
+        # inside load_games_stream(...):
+        
         use_market = project_table_market is not None
         sharp_list = (sharp_books or SHARP_BOOKS_DEFAULT)
         
         if use_market:
-            # ✅ FIXED: do QUALIFY in inner subquery, aggregate (median) in outer subquery
             sql_to_run = f"""
             WITH scores AS ({base_scores_sql}),
+        
             latest_per_book AS (
               SELECT
-                LOWER(TRIM(m.Home_Team)) AS Home_Team,
-                LOWER(TRIM(m.Away_Team)) AS Away_Team,
-                TIMESTAMP(m.Game_Start)  AS Game_Start,
-                LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))) AS BookKey,
-                m.Value AS SpreadValue
+                -- Use your normalized matchup columns
+                LOWER(TRIM(COALESCE(m.Home_Team_Norm, m.Home_Team))) AS Home_Team,
+                LOWER(TRIM(COALESCE(m.Away_Team_Norm, m.Away_Team))) AS Away_Team,
+                TIMESTAMP(m.Game_Start) AS Game_Start,
+        
+                -- Normalize book names: collapse betfair_ex_* → betfair_ex
+                REGEXP_REPLACE(LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+                               r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex') AS BookKey,
+        
+                -- Use the team-specific value for the HOME side only
+                SAFE_CAST(m.Value AS FLOAT64) AS SpreadValue,
+        
+                -- Keep for ordering
+                m.Snapshot_Timestamp
               FROM `{project_table_market}` m
               WHERE
                 UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@sport_aliases)
                 AND m.Market IN ('spreads','spread','Spread','SPREADS')
-                AND LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))) IN UNNEST(@sharp_books)
-                AND TIMESTAMP(m.Game_Start) IS NOT NULL
-                AND LOWER(TRIM(m.Team)) = LOWER(TRIM(m.Home_Team))   -- home-side spread only
+                AND m.Is_Home = TRUE                      -- ← robust home-side filter
                 AND m.Value IS NOT NULL
+                AND TIMESTAMP(m.Game_Start) IS NOT NULL
               QUALIFY ROW_NUMBER() OVER (
-                PARTITION BY LOWER(TRIM(m.Home_Team)),
-                             LOWER(TRIM(m.Away_Team)),
-                             TIMESTAMP(m.Game_Start),
-                             LOWER(TRIM(COALESCE(m.Bookmaker, m.Book)))
+                PARTITION BY
+                  LOWER(TRIM(COALESCE(m.Home_Team_Norm, m.Home_Team))),
+                  LOWER(TRIM(COALESCE(m.Away_Team_Norm, m.Away_Team))),
+                  TIMESTAMP(m.Game_Start),
+                  REGEXP_REPLACE(LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+                                 r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex')
                 ORDER BY m.Snapshot_Timestamp DESC
               ) = 1
             ),
+        
             market AS (
               SELECT
                 Home_Team,
                 Away_Team,
                 Game_Start,
-                -- median across sharp books
+                -- Median across sharp books (book filter applied in the outer select)
                 APPROX_QUANTILES(SpreadValue, 2)[OFFSET(1)] AS Spread_Close
               FROM latest_per_book
+              WHERE BookKey IN UNNEST(@sharp_books)      -- ← filter AFTER normalization
               GROUP BY Home_Team, Away_Team, Game_Start
             )
+        
             SELECT s.*, m.Spread_Close
             FROM scores s
             LEFT JOIN market m
               USING (Home_Team, Away_Team, Game_Start)
             ORDER BY s.Snapshot_TS, s.Game_Start
             """
+        
+            # Lowercase sharp list (and keep 'betfair_ex' canonical)
             params["sharp_books"] = [b.lower() for b in sharp_list]
         else:
             sql_to_run = base_scores_sql + "\nORDER BY Snapshot_TS, Game_Start"
+
 
 
         for df in stream_query_dfs(bq, sql_to_run, params=params, page_rows=page_rows, select_cols=None):
