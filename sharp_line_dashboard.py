@@ -237,14 +237,13 @@ SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
 SHARP_BOOKS = [
     'pinnacle', 'betus', 'mybookieag', 'smarkets',
     'betfair_ex_eu', 'betfair_ex_uk', 'betfair_ex_au',
-    'lowvig', 'betonlineag', 'matchbook'
+    'lowvig', 'betonlineag', 'matchbook', 'sport888'
 ]
 
 # Recreational set (deduped)
 REC_BOOKS = [
     'betmgm', 'bet365', 'draftkings', 'fanduel', 'betrivers',
-    'fanatics', 'espnbet', 'hardrockbet', '888sport',
-    'williamhillus', 'ballybet', 'bet365_au', 'betopenly'
+    'fanatics', 'espnbet', 'hardrockbet', 'williamhillus', 'ballybet', 'bet365_au', 'betopenly'
 ]
 
 _BOOK_ALIASES = {
@@ -256,7 +255,7 @@ _BOOK_ALIASES = {
     "lowvig":       {"lowvig"},
     "betonlineag":  {"betonlineag", "betonline"},
     "matchbook":    {"matchbook"},
-
+    "sport888":     {"sports888"},
     # betfair exchange + regions
     "betfair_ex_eu": {"betfair_ex_eu"},
     "betfair_ex_uk": {"betfair_ex_uk"},
