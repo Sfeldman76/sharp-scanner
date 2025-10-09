@@ -7657,7 +7657,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
         
         # --- Overfit hardening decision (pre-final-fit; uses ES fold diagnostics) ---
-
+         # --- Helpers (local) -----------------------------------------------------------
+        def auc_safe(y, p):
+            y = np.asarray(y, int)
+            if np.unique(y).size < 2:
+                return np.nan
+            return roc_auc_score(y, p)
+            
         def _overfit_harden(bp):
             bp = dict(bp)  # don’t mutate caller
             bp["max_leaves"]       = int(min(128, bp.get("max_leaves", 128)))
@@ -7889,12 +7895,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
         oof_pred_logloss = np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None
         
-        # --- Helpers (local) -----------------------------------------------------------
-        def auc_safe(y, p):
-            y = np.asarray(y, int)
-            if np.unique(y).size < 2:
-                return np.nan
-            return roc_auc_score(y, p)
+       
         
         def _maybe_flip(p, flip):
             p = np.asarray(p, float)
