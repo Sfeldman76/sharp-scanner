@@ -704,10 +704,7 @@ def update_power_ratings(
             params["cutoff"] = cutoff_param
 
         
-        # inside load_games_stream(...):
-        
-        # inside load_games_stream(...):
-        
+
         use_market = project_table_market is not None
         sharp_list = (sharp_books or SHARP_BOOKS_DEFAULT)
         
@@ -717,31 +714,28 @@ def update_power_ratings(
         
             latest_per_book AS (
               SELECT
-                -- Use your normalized matchup columns
-                LOWER(TRIM(COALESCE(m.Home_Team_Norm, m.Home_Team))) AS Home_Team,
-                LOWER(TRIM(COALESCE(m.Away_Team_Norm, m.Away_Team))) AS Away_Team,
-                TIMESTAMP(m.Game_Start) AS Game_Start,
+                -- Use ONLY the normalized matchup columns present in the table
+                LOWER(TRIM(m.Home_Team_Norm)) AS Home_Team,
+                LOWER(TRIM(m.Away_Team_Norm)) AS Away_Team,
+                TIMESTAMP(m.Game_Start)       AS Game_Start,
         
-                -- Normalize book names: collapse betfair_ex_* → betfair_ex
+                -- Normalize book names: betfair_ex_au/eu → betfair_ex
                 REGEXP_REPLACE(LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
                                r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex') AS BookKey,
         
-                -- Use the team-specific value for the HOME side only
                 SAFE_CAST(m.Value AS FLOAT64) AS SpreadValue,
-        
-                -- Keep for ordering
                 m.Snapshot_Timestamp
               FROM `{project_table_market}` m
               WHERE
                 UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@sport_aliases)
                 AND m.Market IN ('spreads','spread','Spread','SPREADS')
-                AND m.Is_Home = TRUE                      -- ← robust home-side filter
+                AND m.Is_Home = TRUE                -- home-side rows only
                 AND m.Value IS NOT NULL
                 AND TIMESTAMP(m.Game_Start) IS NOT NULL
               QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY
-                  LOWER(TRIM(COALESCE(m.Home_Team_Norm, m.Home_Team))),
-                  LOWER(TRIM(COALESCE(m.Away_Team_Norm, m.Away_Team))),
+                  LOWER(TRIM(m.Home_Team_Norm)),
+                  LOWER(TRIM(m.Away_Team_Norm)),
                   TIMESTAMP(m.Game_Start),
                   REGEXP_REPLACE(LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
                                  r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex')
@@ -754,10 +748,10 @@ def update_power_ratings(
                 Home_Team,
                 Away_Team,
                 Game_Start,
-                -- Median across sharp books (book filter applied in the outer select)
+                -- median across sharp books after normalization
                 APPROX_QUANTILES(SpreadValue, 2)[OFFSET(1)] AS Spread_Close
               FROM latest_per_book
-              WHERE BookKey IN UNNEST(@sharp_books)      -- ← filter AFTER normalization
+              WHERE BookKey IN UNNEST(@sharp_books)
               GROUP BY Home_Team, Away_Team, Game_Start
             )
         
@@ -768,10 +762,11 @@ def update_power_ratings(
             ORDER BY s.Snapshot_TS, s.Game_Start
             """
         
-            # Lowercase sharp list (and keep 'betfair_ex' canonical)
+            # ensure lowercased sharp list; keep betfair_ex canonical
             params["sharp_books"] = [b.lower() for b in sharp_list]
         else:
             sql_to_run = base_scores_sql + "\nORDER BY Snapshot_TS, Game_Start"
+
 
 
 
@@ -4649,80 +4644,139 @@ def _row_entropy(df_like: pd.DataFrame, cols: list[str]) -> pd.Series:
     return pd.Series(ent, index=df_like.index, dtype="float32")
 
 def compute_hybrid_timing_derivatives_training(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty: 
+    """
+    Builds hybrid timing magnitude/split features for line/odds moves.
+    Robust to cases where early/mid/late lists (or *all*) magnitude columns are missing.
+    Returns a new DataFrame; never mutates the input.
+    """
+    if df is None or getattr(df, "empty", True):
         return df
+
+    import numpy as np
+    import pandas as pd
+
     out = df.copy()
+    eps = 1e-6
+
+    # ---------- small helpers ----------
+
+    def _zero_series(idx, dtype="float32") -> pd.Series:
+        return pd.Series(0.0, index=idx, dtype=dtype)
+
+    def _row_sum(df_: pd.DataFrame, cols: list[str], dtype: str = "float32") -> pd.Series:
+        """Rowwise sum of `cols`; if empty, return 0 Series aligned to df_.index."""
+        if cols:
+            s = df_[cols].sum(axis=1)
+            # guard against object dtype sneaking in
+            try:
+                return s.astype(dtype)
+            except Exception:
+                return pd.to_numeric(s, errors="coerce").fillna(0.0).astype(dtype)
+        return _zero_series(df_.index, dtype)
+
+    def _row_entropy_from_cols(df_: pd.DataFrame, cols: list[str], dtype: str = "float32") -> pd.Series:
+        """
+        Rowwise entropy of nonnegative weights in `cols`.
+        If empty, return zeros. Entropy computed as -sum(p * log p).
+        """
+        if not cols:
+            return _zero_series(df_.index, dtype)
+        W = df_[cols].to_numpy(dtype="float32")
+        # coerce negatives/NaNs to 0
+        np.nan_to_num(W, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        W = np.where(W < 0, 0.0, W)
+        tot = W.sum(axis=1, keepdims=True)
+        # p = W / max(tot, eps); where tot>0 else 0
+        denom = np.maximum(tot, eps)
+        P = np.divide(W, denom, out=np.zeros_like(W), where=tot > 0)
+        H = -(np.where(P > 0, P * np.log(P), 0.0)).sum(axis=1)
+        return pd.Series(H, index=df_.index, dtype=dtype)
+
+    # ---------- identify column pools ----------
 
     line_cols = [c for c in out.columns if c.startswith("SharpMove_Magnitude_")]
     odds_cols = [c for c in out.columns if c.startswith("OddsMove_Magnitude_")]
-    
-  
+
+    # fallback heuristics if strict prefixes are missing
     if not line_cols:
-        line_cols += [c for c in out.columns if ("line" in c.lower() or "value" in c.lower()) and "magnitude" in c.lower()]
+        line_cols += [
+            c for c in out.columns
+            if ("line" in c.lower() or "value" in c.lower()) and "magnitude" in c.lower()
+        ]
     if not odds_cols:
-        odds_cols += [c for c in out.columns if ("odds" in c.lower() or "price" in c.lower() or "prob" in c.lower()) and "magnitude" in c.lower()]
-    out["Hybrid_Timing_Entropy_Line"] = _row_entropy(out, line_cols)
-    out["Hybrid_Timing_Entropy_Odds"] = _row_entropy(out, odds_cols)
+        odds_cols += [
+            c for c in out.columns
+            if ("odds" in c.lower() or "price" in c.lower() or "prob" in c.lower())
+            and "magnitude" in c.lower()
+        ]
+
     def _pick(cols, pats):
         pats = tuple(p.lower() for p in pats)
         return [c for c in cols if any(p in c.lower() for p in pats)]
 
-    early_l = _pick(line_cols, ("overnight","veryearly","early"))
-    mid_l   = _pick(line_cols, ("midday","midrange"))
-    late_l  = _pick(line_cols, ("late","urgent"))
+    early_l = _pick(line_cols, ("overnight", "veryearly", "early"))
+    mid_l   = _pick(line_cols, ("midday", "midrange"))
+    late_l  = _pick(line_cols, ("late", "urgent"))
 
-    early_o = _pick(odds_cols, ("overnight","veryearly","early"))
-    mid_o   = _pick(odds_cols, ("midday","midrange"))
-    late_o  = _pick(odds_cols, ("late","urgent"))
+    early_o = _pick(odds_cols, ("overnight", "veryearly", "early"))
+    mid_o   = _pick(odds_cols, ("midday", "midrange"))
+    late_o  = _pick(odds_cols, ("late", "urgent"))
 
-    out["Hybrid_Line_TotalMag"] = (out[line_cols].sum(axis=1) if line_cols else 0.0).astype("float32")
-    out["Hybrid_Line_EarlyMag"] = (out[early_l].sum(axis=1)   if early_l   else 0.0).astype("float32")
-    out["Hybrid_Line_MidMag"]   = (out[mid_l].sum(axis=1)     if mid_l     else 0.0).astype("float32")
-    out["Hybrid_Line_LateMag"]  = (out[late_l].sum(axis=1)    if late_l    else 0.0).astype("float32")
+    # ---------- magnitudes (safe for empty lists) ----------
 
-    out["Hybrid_Odds_TotalMag"] = (out[odds_cols].sum(axis=1) if odds_cols else 0.0).astype("float32")
-    out["Hybrid_Odds_EarlyMag"] = (out[early_o].sum(axis=1)   if early_o   else 0.0).astype("float32")
-    out["Hybrid_Odds_MidMag"]   = (out[mid_o].sum(axis=1)     if mid_o     else 0.0).astype("float32")
-    out["Hybrid_Odds_LateMag"]  = (out[late_o].sum(axis=1)    if late_o    else 0.0).astype("float32")
+    out["Hybrid_Line_TotalMag"] = _row_sum(out, line_cols)
+    out["Hybrid_Line_EarlyMag"] = _row_sum(out, early_l)
+    out["Hybrid_Line_MidMag"]   = _row_sum(out, mid_l)
+    out["Hybrid_Line_LateMag"]  = _row_sum(out, late_l)
 
-    eps = 1e-6
-    out["Hybrid_Line_LateShare"] = (out["Hybrid_Line_LateMag"] / (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
-    out["Hybrid_Line_EarlyShare"]= (out["Hybrid_Line_EarlyMag"]/ (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
-    out["Hybrid_Odds_LateShare"] = (out["Hybrid_Odds_LateMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
-    out["Hybrid_Odds_EarlyShare"]= (out["Hybrid_Odds_EarlyMag"]/ (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Odds_TotalMag"] = _row_sum(out, odds_cols)
+    out["Hybrid_Odds_EarlyMag"] = _row_sum(out, early_o)
+    out["Hybrid_Odds_MidMag"]   = _row_sum(out, mid_o)
+    out["Hybrid_Odds_LateMag"]  = _row_sum(out, late_o)
+
+    # ---------- shares / ratios (guarded by eps) ----------
+
+    out["Hybrid_Line_LateShare"]  = (out["Hybrid_Line_LateMag"]  / (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Line_EarlyShare"] = (out["Hybrid_Line_EarlyMag"] / (out["Hybrid_Line_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Odds_LateShare"]  = (out["Hybrid_Odds_LateMag"]  / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
+    out["Hybrid_Odds_EarlyShare"] = (out["Hybrid_Odds_EarlyMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
     out["Hybrid_Line_Odds_Mag_Ratio"] = (out["Hybrid_Line_TotalMag"] / (out["Hybrid_Odds_TotalMag"] + eps)).astype("float32")
 
     out["Hybrid_Line_Imbalance_LateVsEarly"] = (
         (out["Hybrid_Line_LateMag"] - out["Hybrid_Line_EarlyMag"]) / (out["Hybrid_Line_TotalMag"] + eps)
     ).astype("float32")
 
-    if line_cols:
-        W = out[line_cols].to_numpy(dtype="float32")
-        tot = W.sum(axis=1, keepdims=True)
-        P = np.divide(W, np.maximum(tot, eps), out=np.zeros_like(W), where=tot>0)
-        out["Hybrid_Timing_Entropy_Line"] = (-(np.where(P>0, P*np.log(P), 0.0)).sum(axis=1)).astype("float32")
-    else:
-        out["Hybrid_Timing_Entropy_Line"] = 0.0
+    # ---------- entropies (rowwise; safe for empty lists) ----------
 
-    if odds_cols:
-        W2 = out[odds_cols].to_numpy(dtype="float32")
-        tot2 = W2.sum(axis=1, keepdims=True)
-        P2 = np.divide(W2, np.maximum(tot2, eps), out=np.zeros_like(W2), where=tot2>0)
-        out["Hybrid_Timing_Entropy_Odds"] = (-(np.where(P2>0, P2*np.log(P2), 0.0)).sum(axis=1)).astype("float32")
-    else:
-        out["Hybrid_Timing_Entropy_Odds"] = 0.0
+    out["Hybrid_Timing_Entropy_Line"] = _row_entropy_from_cols(out, line_cols)
+    out["Hybrid_Timing_Entropy_Odds"] = _row_entropy_from_cols(out, odds_cols)
 
-    for c in ("Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening"):
+    # ---------- base movement fields (ensure present & numeric) ----------
+
+    for c in ("Abs_Line_Move_From_Opening", "Abs_Odds_Move_From_Opening"):
         if c not in out.columns:
             out[c] = 0.0
         out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0).astype("float32")
 
+    # ---------- interaction features (only if source exists) ----------
+
     if "Key_Corridor_Pressure" in out.columns:
-        out["Corridor_x_LateShare_Line"] = (out["Key_Corridor_Pressure"] * out["Hybrid_Line_LateShare"]).astype("float32")
+        out["Corridor_x_LateShare_Line"] = (
+            pd.to_numeric(out["Key_Corridor_Pressure"], errors="coerce").fillna(0.0).astype("float32")
+            * out["Hybrid_Line_LateShare"]
+        ).astype("float32")
+
     if "Dist_To_Next_Key" in out.columns:
-        out["Dist_x_LateShare_Line"]      = (out["Dist_To_Next_Key"] * out["Hybrid_Line_LateShare"]).astype("float32")
+        out["Dist_x_LateShare_Line"] = (
+            pd.to_numeric(out["Dist_To_Next_Key"], errors="coerce").fillna(0.0).astype("float32")
+            * out["Hybrid_Line_LateShare"]
+        ).astype("float32")
+
     if "Book_PctRank_Line" in out.columns:
-        out["PctRank_x_LateShare_Line"]   = (out["Book_PctRank_Line"] * out["Hybrid_Line_LateShare"]).astype("float32")
+        out["PctRank_x_LateShare_Line"] = (
+            pd.to_numeric(out["Book_PctRank_Line"], errors="coerce").fillna(0.0).astype("float32")
+            * out["Hybrid_Line_LateShare"]
+        ).astype("float32")
 
     return out
 
