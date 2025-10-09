@@ -7573,18 +7573,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         best_auc_params = _stabilize(best_auc_params, leaf_cap=256)
         best_ll_params  = _stabilize(best_ll_params,  leaf_cap=256)
-        def _overfit_harden(bp):
-            bp["max_leaves"]       = int(min(128, bp.get("max_leaves", 128)))
-            bp["min_child_weight"] = float(max(12.0, float(bp.get("min_child_weight", 8.0))))
-            bp["gamma"]            = float(max(4.0, float(bp.get("gamma", 2.0))))
-            bp["reg_alpha"]        = float(max(0.08, float(bp.get("reg_alpha", 0.05))))
-            bp["reg_lambda"]       = float(max(8.0, float(bp.get("reg_lambda", 6.0))))
-            bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.018))))
-            return bp
-        # after best_*_params = _stabilize(...):
-        if (auc_train - auc_val) > 0.25 or ece_ho > 0.2:
-            best_auc_params = _overfit_harden(best_auc_params)
-            best_ll_params  = _overfit_harden(best_ll_params)
+        
         # ================== ES refit on last fold (deterministic) ===================
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
@@ -7667,6 +7656,57 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "auc_va_es": auc_va,
         })
         
+        # --- Overfit hardening decision (pre-final-fit; uses ES fold diagnostics) ---
+
+        def _overfit_harden(bp):
+            bp = dict(bp)  # don’t mutate caller
+            bp["max_leaves"]       = int(min(128, bp.get("max_leaves", 128)))
+            bp["min_child_weight"] = float(max(12.0, float(bp.get("min_child_weight", 8.0))))
+            bp["gamma"]            = float(max(4.0, float(bp.get("gamma", 2.0))))
+            bp["reg_alpha"]        = float(max(0.08, float(bp.get("reg_alpha", 0.05))))
+            bp["reg_lambda"]       = float(max(8.0, float(bp.get("reg_lambda", 6.0))))
+            bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.018))))
+            return bp
+
+        def _ece(y_true, p, bins=10):
+            y = np.asarray(y_true, float)
+            p = np.asarray(p, float)
+            edges = np.linspace(0.0, 1.0, bins + 1)
+            idx = np.digitize(p, edges) - 1
+            ece = 0.0
+            N = len(p)
+            for b in range(bins):
+                m = (idx == b)
+                if m.any():
+                    conf = float(np.mean(p[m]))
+                    acc  = float(np.mean(y[m]))
+                    ece += (m.mean()) * abs(acc - conf)
+            return float(ece)
+        
+        # AUC gap on the ES fold (train vs val) as an overfit proxy
+        p_tr_es_raw = np.clip(deep_auc.predict_proba(X_tr_es)[:, 1], 1e-12, 1-1e-12)
+        auc_tr_es   = auc_safe(y_tr_es.astype(int), p_tr_es_raw)
+        
+        # Optional: ECE on ES val as a calibration/overfit proxy
+        ece_va_es = _ece(y_va_es.astype(int), p_va_raw, bins=10)
+        
+        # Heuristics: large AUC gap, very peaky probs, or poor ECE on ES val
+        NEEDS_HARDEN = (
+            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.20)
+            or (extreme_frac_raw > 0.70)
+            or (ece_va_es > 0.20)
+        )
+        
+        if NEEDS_HARDEN:
+            st.warning({
+                "harden":"on",
+                "auc_gap_es": float(auc_tr_es - auc_va) if np.isfinite(auc_tr_es) and np.isfinite(auc_va) else None,
+                "extreme_frac_es": float(extreme_frac_raw),
+                "ece_val_es": float(ece_va_es),
+            })
+            best_auc_params = _overfit_harden(best_auc_params.copy())
+            best_ll_params  = _overfit_harden(best_ll_params.copy())
+
         # --- Final capacity / ES suggestions (stable defaults) ----------------------
         final_estimators_cap  = int(np.clip(int(locals().get("final_estimators_cap", 2200)), 1200, 2400))
         learning_rate         = float(locals().get("learning_rate", 0.018))
