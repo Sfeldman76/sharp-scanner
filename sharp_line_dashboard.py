@@ -9568,6 +9568,49 @@ def ensure_opposite_side_rows(df, scored_df):
 
 from math import erf, sqrt
 
+import html, re
+
+# Columns that may intentionally contain safe HTML fragments
+_ALLOW_HTML_COLS = {"Confidence Spark"}  # add others if you truly need raw HTML
+
+# Strip invalid/invisible chars that can corrupt tags (incl. U+FFFD, ZWJ/ZWNJ, etc.)
+_INVALID_XML_RE = re.compile(
+    r"[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\uFDD0-\uFDEF\uFFFE\uFFFF]"
+)
+_INVISIBLE_RE = re.compile(r"[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE0E\uFE0F]")
+
+def _strip_bad_chars(s: str) -> str:
+    s = _INVALID_XML_RE.sub("", s)
+    s = _INVISIBLE_RE.sub("", s)
+    # guard against the replacement char itself
+    s = s.replace("\uFFFD", "")
+    return s
+
+def _clean_text(x: str) -> str:
+    """Plain text only (for headers and most cells)."""
+    if not isinstance(x, str): 
+        return x
+    return html.escape(_strip_bad_chars(str(x)), quote=True)
+
+def _clean_cell(val, colname: str):
+    """Cells: escape by default; allow safe HTML only for whitelisted columns."""
+    if isinstance(val, (int, float)) or val is None:
+        return val
+    s = _strip_bad_chars(str(val))
+    if colname not in _ALLOW_HTML_COLS:
+        return html.escape(s, quote=True)
+    # Very small, conservative allow-list: no table tags, no <script>, no <style>.
+    if re.search(r"</?(?:table|thead|tbody|tr|th|td|script|style)\b", s, flags=re.I):
+        # If someone tried to sneak table tags in, fall back to escaped text
+        return html.escape(s, quote=True)
+    return s
+
+def _looks_malformed(html_str: str) -> bool:
+    """Heuristics to detect broken tags before injecting."""
+    return any(
+        bad in html_str
+        for bad in ("<td�", "\uFFFD", "<td\uFFFD", "<th\uFFFD", "<tr\uFFFD")
+    )
 
 
 def render_scanner_tab(label, sport_key, container, force_reload=False):
@@ -10404,56 +10447,40 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
             </style>
             """, unsafe_allow_html=True)
             
-            # 1) Build table_df FIRST (tolerate missing columns)
+         
+            # Keep only columns that actually exist
             cols = [c for c in view_cols if c in summary_grouped.columns]
             missing = sorted(set(view_cols) - set(cols))
             if missing:
                 st.warning(f"Missing columns ignored: {missing}")
             
             table_df = summary_grouped[cols].copy()
-            table_df.columns = [
-                _clean_text(str(c)) if str(c) not in _ALLOW_HTML_COLS else _clean_cell(str(c), str(c))
-                for c in table_df.columns
-            ]
             
-            # Clean each cell
+            # Sanitize headers (plain text only)
+            table_df.columns = [_clean_text(str(c)) for c in table_df.columns]   # // NEW: shorter, same effect
+            
+            # Sanitize each cell (escape by default; allow limited HTML in whitelisted cols)
             for c in table_df.columns:
-                table_df[c] = table_df[c].map(lambda v: _clean_cell(v, str(c)))
+                colname_for_policy = c  # header after cleaning
+                table_df[c] = table_df[c].map(lambda v: _clean_cell(v, colname_for_policy))
             
-            # Build HTML (cells already escaped; allow HTML only in whitelisted cols)
+            # Build HTML; cells are sanitized so escape=False is OK
             table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
             
-            # Guard: refuse to inject if malformed tag appears
-            if "td�" in table_html or "\uFFFD" in table_html:
-                st.error("Detected malformed character in generated table; refusing to render HTML table.")
+            # Optional: remove rare line-separator chars that can upset some HTML parsers
+            table_html = table_html.replace("\u2028", "").replace("\u2029", "")  # // NEW: extra safety
+            
+            if _looks_malformed(table_html):
+                st.error("Detected malformed characters in table HTML. Showing a safe table instead.")
+                st.table(summary_grouped[cols].head(300))  # safe fallback
             else:
                 safe_id = f"tbl-{_title_key}"
                 st.markdown(
-                    f"<div id='{safe_id}' class='scrollable-table-container'>{table_html}</div>",
+                    f"<div id='{html.escape(safe_id)}' class='scrollable-table-container'>{table_html}</div>",
                     unsafe_allow_html=True
                 )
-            # 2) DEBUG: raw view for NCAAF (AFTER table_df exists)
-            if label.upper() == "NCAAF":
-                with st.expander("🔍 Raw NCAAF summary (no formatting)"):
-                    st.caption("Unfixed, original Unicode; no Styler, so this won't crash.")
-                    st.table(table_df.head(50))  # or: st.dataframe(table_df, use_container_width=True)
-            
-                    def _non_ascii_cols(df):
-                        return [c for c in df.columns if any(ord(ch) > 127 for ch in str(c))]
-                    def _non_ascii_rows(df):
-                        return df.applymap(lambda x: isinstance(x, str) and any(ord(ch) > 127 for ch in x)).any(axis=1)
-            
-                    st.write("Non-ASCII columns:", _non_ascii_cols(table_df))
-                    bad_rows = _non_ascii_rows(table_df)
-                    if bad_rows.any():
-                        st.write(f"Rows containing non-ASCII characters: {int(bad_rows.sum())}")
-                        st.dataframe(table_df.loc[bad_rows].head(25), use_container_width=True)
-            
-                    # Safe HTML peek (escaped so content can't break tags)
-                    html_safe = table_df.to_html(index=False, escape=True)
-                    st.code(html_safe[:2000], language="html")
-       
-            
+
+              
             st.success("✅ Finished rendering sharp picks table.")
             st.caption(f"Showing {len(table_df)} rows")
 
