@@ -3420,137 +3420,76 @@ def get_xgb_search_space(
     n_jobs: int = 1,
     scale_pos_weight: float = 1.0,   # kept for API compatibility; ignored inside
     features: list[str] | None = None,
-    use_monotone: bool = False,      # kept for compatibility; unused unless you wire constraints
+    use_monotone: bool = False,
 ) -> tuple[dict, dict, dict]:
-    """
-    Returns (base_kwargs, params_ll, params_auc) for XGBClassifier randomized searches.
-
-    Design:
-    - No eval_metric and no scale_pos_weight here.
-    - Base kwargs are safe, CPU-friendly, and consistent.
-    - Two search spaces:
-        * params_ll  → logloss-oriented (probability quality)
-        * params_auc → AUC-oriented (ranking lift)
-    - "Small leagues" get a slightly hotter learning rate and lighter models.
-
-    Tips:
-    - If you want a better prior, set after this call:
-          base_kwargs["base_score"] = float(np.clip(np.mean(y_train), 1e-4, 1-1e-4))
-    - Set n_estimators on the estimator you pass to CV, not here.
-    """
     s = str(sport).upper()
-    _ = float(scale_pos_weight)  # kept only for API compatibility
     n_jobs = int(n_jobs)
-
-    # You can tweak this set as you wish
-    SMALL_LEAGUES = {"WNBA", "CFL"}  # add/remove: {"NCAAB-W", ...}
+    SMALL_LEAGUES = {"WNBA", "CFL"}    # keep your set
     SMALL = (s in SMALL_LEAGUES)
 
-    # ---------------- Base kwargs (single, consistent block) ----------------
+    # ---- Base kwargs: conservative + deterministic ----
     base_kwargs = dict(
         objective="binary:logistic",
         tree_method="hist",
         predictor="cpu_predictor",
         grow_policy="lossguide",
-        max_bin=256,                # solid CPU default
         sampling_method="uniform",
-        max_delta_step=0.0,         # no update clamp
-        reg_lambda=2.0,             # moderate L2
-        min_child_weight=1.0,       # allow splits; grids will widen
+        max_bin=256,
+        max_delta_step=0.5,        # small clamp helps stability
+        reg_lambda=6.0,            # stronger L2 default
+        reg_alpha=0.05,            # small L1 default
+        min_child_weight=8.0,      # raise split threshold to fight memorization
         n_jobs=n_jobs,
         random_state=42,
         importance_type="total_gain",
-        # intentionally: no eval_metric, no scale_pos_weight
     )
 
-    # If you ever want monotone constraints, wire them here.
-    # (Kept off by default; supplying a dummy/all-zeros map is usually pointless.)
+    # (optional) monotone scaffolding unchanged
     if use_monotone and features:
-        # Example skeleton (disabled by default):
-        # base_kwargs["monotone_constraints"] = "(" + ",".join("0" for _ in features) + ")"
         pass
 
-    # ---------------- Search spaces ----------------
+    # ---- Search spaces: tightened + no explosive wideners ----
     if SMALL:
-        # Small leagues — allow exploration but keep it sane
+        # small-league => fewer leaves, slower LR
         params_ll = {
-            "max_depth":        randint(3, 7),              # {3,4,5,6}
-            "max_leaves":       randint(64, 128),           # {64..127}
-            "learning_rate":    loguniform(3e-2, 1.0e-1),   # 0.03–0.10
-            "subsample":        uniform(0.70, 0.30),        # 0.70–1.00
-            "colsample_bytree": uniform(0.70, 0.30),        # 0.70–1.00
-            "colsample_bynode": uniform(0.60, 0.30),        # 0.60–0.90
-            "min_child_weight": randint(1, 5),              # {1..4}
-            "gamma":            uniform(0.00, 0.30),        # 0.00–0.30
-            "reg_lambda":       loguniform(0.5, 6.0),       # 0.5–6
-            "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
+            "max_depth":        randint(3, 5),
+            "max_leaves":       randint(48, 96),
+            "learning_rate":    loguniform(0.010, 0.035),
+            "subsample":        uniform(0.65, 0.25),      # 0.65–0.90
+            "colsample_bytree": uniform(0.60, 0.30),      # 0.60–0.90
+            "colsample_bynode": uniform(0.60, 0.30),
+            "min_child_weight": loguniform(4.0, 24.0),
+            "gamma":            uniform(1.0, 5.0),
+            "reg_lambda":       loguniform(4.0, 12.0),
+            "reg_alpha":        loguniform(0.02, 0.8),
+            "max_bin":          randint(192, 289),
         }
-        params_auc = {
-            "max_depth":        randint(3, 8),              # {3..7}
-            "max_leaves":       randint(64, 128),           # {64..127}
-            "learning_rate":    loguniform(3e-2, 1.0e-1),   # 0.03–0.10
-            "subsample":        uniform(0.75, 0.25),        # 0.75–1.00
-            "colsample_bytree": uniform(0.70, 0.30),        # 0.70–1.00
-            "colsample_bynode": uniform(0.60, 0.30),        # 0.60–0.90
-            "min_child_weight": randint(1, 6),              # {1..5}
-            "gamma":            uniform(0.00, 0.30),        # 0.00–0.30
-            "reg_lambda":       loguniform(0.5, 6.0),       # 0.5–6
-            "reg_alpha":        loguniform(1e-4, 5e-1),     # 0.0001–0.5
-        }
+        params_auc = dict(params_ll)  # same shape; AUC will pick slightly larger leaves via search
     else:
-        # Big leagues — more capacity & diversity
-        # LogLoss-oriented (probability quality)
+        # bigger leagues can afford a bit more depth, still regularized
         params_ll = {
-            "max_depth":        randint(3, 6),              # {3,4,5}
-            "max_leaves":       randint(64, 128),           # {64..127}
-            "learning_rate":    loguniform(0.03, 0.08),     # 0.03–0.08
-            "subsample":        uniform(0.70, 0.25),        # 0.70–0.95
-            "colsample_bytree": uniform(0.65, 0.25),        # 0.65–0.90
-            "colsample_bynode": uniform(0.70, 0.25),        # 0.70–0.95
-            "min_child_weight": randint(2, 8),              # {2..7}
-            "gamma":            uniform(0.03, 0.30),        # 0.03–0.30
-            "reg_alpha":        loguniform(1e-3, 0.5),      # 0.001–0.5
-            "reg_lambda":       loguniform(1.5, 10.0),      # 1.5–10
+            "max_depth":        randint(3, 6),
+            "max_leaves":       randint(64, 160),
+            "learning_rate":    loguniform(0.012, 0.045),
+            "subsample":        uniform(0.65, 0.25),      # 0.65–0.90
+            "colsample_bytree": uniform(0.60, 0.30),      # 0.60–0.90
+            "colsample_bynode": uniform(0.60, 0.30),
+            "min_child_weight": loguniform(4.0, 28.0),
+            "gamma":            uniform(1.0, 6.0),
+            "reg_lambda":       loguniform(4.0, 12.0),
+            "reg_alpha":        loguniform(0.02, 1.2),
+            "max_bin":          randint(192, 321),
         }
-        # AUC-oriented (rank pickup)
-        params_auc = {
-            "max_depth":        randint(4, 7),              # {4,5,6}
-            "max_leaves":       randint(96, 160),           # {96..159}
-            "learning_rate":    loguniform(0.04, 0.10),     # 0.04–0.10
-            "subsample":        uniform(0.75, 0.25),        # 0.75–1.00
-            "colsample_bytree": uniform(0.70, 0.25),        # 0.70–0.95
-            "colsample_bynode": uniform(0.70, 0.25),        # 0.70–0.95
-            "min_child_weight": randint(1, 6),              # {1..5}
-            "gamma":            uniform(0.02, 0.25),        # 0.02–0.25
-            "reg_alpha":        loguniform(1e-4, 0.3),      # 0.0001–0.3
-            "reg_lambda":       loguniform(1.5, 8.0),       # 1.5–8
-        }
+        params_auc = dict(params_ll)
 
-    # -------- Optional common wideners (mix of discrete choices) --------
-    params_common = {
-        "min_child_weight": [0.0, 0.1, 0.25, 0.5, 1.0, 2.0],
-        "gamma":            [0.0, 0.02, 0.05, 0.10],
-        "subsample":        [0.6, 0.7, 0.8, 0.9, 1.0],
-        "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
-        "max_leaves":       [256, 512, 1024],  # allows bigger capacity if search hits it
-        "max_bin":          [128, 256],
-        "learning_rate":    [0.05, 0.07, 0.09],
-        "reg_lambda":       [0.0, 0.5, 1.0, 2.0],
-        "reg_alpha":        [0.0, 0.1, 0.3],
-    }
-    params_ll.update(params_common)
-    params_auc.update(params_common)
+    # ⚠️ remove the old params_common “wideners” (max_leaves=512/1024, LR up to .10, etc.)
+    # They were a big overfit lever.
 
-    # -------------- scrub params (defensive) --------------
-    danger_keys = {
-        "objective", "_estimator_type", "response_method",
-        "eval_metric", "scale_pos_weight"
-    }
-    params_ll  = {k: v for k, v in params_ll.items()  if k not in danger_keys}
-    params_auc = {k: v for k, v in params_auc.items() if k not in danger_keys}
-
+    # scrub danger keys, as before
+    danger = {"objective","_estimator_type","response_method","eval_metric","scale_pos_weight"}
+    params_ll  = {k:v for k,v in params_ll.items()  if k not in danger}
+    params_auc = {k:v for k,v in params_auc.items() if k not in danger}
     return base_kwargs, params_ll, params_auc
-
 
 
 def pick_blend_weight_on_oof(
@@ -6519,13 +6458,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             feature_cols = [c for c in feature_cols if not any(x in c for x in drop_like)]
 
         st.markdown(f"### 📈 Features Used: `{len(features)}`")
-        X = (df_market[feature_cols]
-             .apply(pd.to_numeric, errors='coerce')
-             .replace([np.inf, -np.inf], np.nan)
-             .fillna(0.0)
-             .astype('float32'))
-                
-     
+           
         
         # ─────────────────────────────────────────────────────────────────────────────
         # Safe feature matrix + high‑corr report (Arrow/Streamlit‑proof)
@@ -7640,7 +7573,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         best_auc_params = _stabilize(best_auc_params, leaf_cap=256)
         best_ll_params  = _stabilize(best_ll_params,  leaf_cap=256)
-        
+        def _overfit_harden(bp):
+            bp["max_leaves"]       = int(min(128, bp.get("max_leaves", 128)))
+            bp["min_child_weight"] = float(max(12.0, float(bp.get("min_child_weight", 8.0))))
+            bp["gamma"]            = float(max(4.0, float(bp.get("gamma", 2.0))))
+            bp["reg_alpha"]        = float(max(0.08, float(bp.get("reg_alpha", 0.05))))
+            bp["reg_lambda"]       = float(max(8.0, float(bp.get("reg_lambda", 6.0))))
+            bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.018))))
+            return bp
+        # after best_*_params = _stabilize(...):
+        if (auc_train - auc_val) > 0.25 or ece_ho > 0.2:
+            best_auc_params = _overfit_harden(best_auc_params)
+            best_ll_params  = _overfit_harden(best_ll_params)
         # ================== ES refit on last fold (deterministic) ===================
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
