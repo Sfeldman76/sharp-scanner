@@ -8077,16 +8077,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         deploy_pos = float(np.mean(y_full[hold_idx] == 1))
         
         # ---------------- Calibration ----------------
-        CLIP = 0.02 if SMALL else 0.01
+
+        
+        # 0) Safe defaults (prevents UnboundLocalError on any path)
+        CLIP = 0.02 if bool(locals().get("SMALL", False)) else 0.01
+        cal_name = "iso"
+        cal_obj  = _IdentityIsoCal(eps=1e-6)
+        cal_blend = (cal_name, cal_obj)
+        
+        # 1) Decide global flip on OOF
         flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
         
-        # Apply SAME flip to OOF before calibration
+        # 2) OOF prior (train) and deployment prior (hold) — define BEFORE prior-correction
+        oof_pos    = float(np.mean(y_oof == 1))
+        deploy_pos = float(np.mean(y_full[hold_idx] == 1))  # or your rolling/ES estimate
+        
+        # 3) Apply SAME flip to OOF before prior-correction
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
         
-        # >>> PRIOR-CORRECT OOF before fitting calibrators <<<
+        # 4) PRIOR-CORRECT OOF before fitting calibrators
         p_oof_prior = _prior_correct(p_oof_for_cal, train_pos=oof_pos, hold_pos=deploy_pos)
         
-        # Fit/normalize available calibrators on prior-corrected OOF
+        # 5) Fit/normalize available calibrators on prior-corrected OOF
         use_qiso = (len(np.unique(np.round(p_oof_prior, 4))) < 400)
         cals_raw = fit_iso_platt_beta(p_oof_prior, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
         cals = _normalize_cals(cals_raw)
@@ -8094,24 +8106,33 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
         
-        # Evaluate candidates by ECE (lower is better) on the same prior-corrected OOF
+        # 6) Evaluate candidates by ECE (lower is better) on prior-corrected OOF
         candidates = []
         if cals.get("beta")  is not None:  candidates.append(("beta",  cals["beta"]))
         if cals.get("platt") is not None:  candidates.append(("platt", cals["platt"]))
         if cals.get("iso")   is not None:  candidates.append(("iso",   cals["iso"]))
         if not candidates:
-            candidates = [("iso", _IdentityIsoCal(eps=1e-6))]
+            candidates = [("iso", _IdentityIsoCal(eps=1e-6))]  # still safe
         
         scores = []
         for kind, cal in candidates:
-            pp = _apply_cal(kind, cal, p_oof_prior)           # calibrated, prior-corrected
-            pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
-            ece = expected_calibration_error(y_oof, pp)
-            scores.append((ece, kind, cal))
+            try:
+                pp = _apply_cal(kind, cal, p_oof_prior)
+                pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
+                ece = expected_calibration_error(y_oof, pp)
+                if np.isfinite(ece):
+                    scores.append((float(ece), kind, cal))
+            except Exception as e:
+                st.debug(f"Calibrator {kind} failed: {e}")
         
-        scores.sort(key=lambda t: t[0])
-        ece_best, cal_name, cal_obj = scores[0]
-        st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
+        if scores:
+            scores.sort(key=lambda t: t[0])
+            ece_best, cal_name, cal_obj = scores[0]
+            cal_blend = (cal_name, cal_obj)
+            st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
+        else:
+            st.warning("No valid calibrator produced finite ECE; using identity isotonic.")
+            # cal_blend remains ('iso', IdentityIsoCal)
         
         # --- Raw model preds (AUC + optional LogLoss model) ---------------------------
         p_tr_auc, _ = pos_proba_safe(model_auc,     X_full[train_all_idx], positive=1)
@@ -8127,25 +8148,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
             p_hold_blend_raw  = np.clip(p_ho_auc,  eps, 1 - eps)
         
-        # Apply the SAME flip to train/hold BEFORE prior-correction & calibration
+        # Apply SAME flip before prior-correction & calibration
         p_train_blend_raw = _maybe_flip(p_train_blend_raw, flip_flag)
         p_hold_blend_raw  = _maybe_flip(p_hold_blend_raw,  flip_flag)
         
-        # >>> PRIOR-CORRECT train/hold to the deployment prior <<<
+        # PRIOR-CORRECT train/hold to deployment prior
         train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
         p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, hold_pos=deploy_pos)
         
-        # Calibrate via the chosen calibrator on PRIOR-CORRECTED probs
+        # Calibrate using the chosen calibrator
         p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_prior)
         p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_prior)
         
-        # Clip + gentle shrink of extremes for live stability
+        # Clip + gentle shrink of extremes
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
-        
         p_train_vec = 0.95 * p_cal_tr + 0.05 * 0.5
         p_hold_vec  = 0.95 * p_cal_ho + 0.05 * 0.5
+
         
         # Diagnostics
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
@@ -8610,11 +8631,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         _bake_feature_names_in_(model_logloss, feature_cols)
         _bake_feature_names_in_(model_auc, feature_cols)
-       
         if cal_blend is None:
-            cal_blend = ("iso", _IdentityIsoCal(eps=eps))
-        
+            cal_blend = ("iso", _IdentityIsoCal(eps=1e-6))
+        cal_name, cal_obj = cal_blend
         iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1-CLIP))
+
 
 
         # --- Helper to get final calibrated probs (blend → optional flip → calibrate+clip) ---
