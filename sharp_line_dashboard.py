@@ -23,6 +23,7 @@ div[data-testid="stDataFrame"] > div {
 """, unsafe_allow_html=True)
 
 
+
 st.markdown("""
 <style>
 .scrollable-table-container {
