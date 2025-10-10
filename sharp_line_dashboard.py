@@ -7423,22 +7423,53 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "logloss", "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "auc",     "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         
-        # Lean(er) search space
+      
+
+  
+        
         param_space_common = dict(
-            max_depth        = randint(3, 8),
-            max_leaves       = randint(64, 320),
-            learning_rate    = loguniform(0.018, 0.08),
-            subsample        = uniform(0.70, 0.25),
-            colsample_bytree = uniform(0.55, 0.35),
-            colsample_bynode = uniform(0.55, 0.35),
-            min_child_weight = loguniform(1.0, 32.0),
-            gamma            = uniform(0.0, 6.0),
-            reg_alpha        = loguniform(1e-4, 2.0),
-            reg_lambda       = loguniform(0.5, 10.0),
-            max_bin          = randint(192, 321),
+            # shallower trees + fewer leaves → simpler interactions
+            max_depth        = randint(2, 6),          # was 2–8
+            max_leaves       = randint(24, 160),       # was 64–320
+        
+            # slower learning rate lets early stopping pick a safer point
+            learning_rate    = loguniform(0.008, 0.05),  # was 0.018–0.08
+        
+            # slightly stronger stochasticity
+            subsample        = uniform(0.55, 0.30),    # 0.55–0.85 (was 0.70–0.95)
+            colsample_bytree = uniform(0.45, 0.35),    # 0.45–0.80 (was 0.55–0.90)
+            colsample_bynode = uniform(0.45, 0.35),    # 0.45–0.80 (was 0.55–0.90)
+        
+            # bias toward larger leaves to split only on strong signals
+            min_child_weight = loguniform(3.0, 64.0),  # was 1–32 (pushes up)
+        
+            # more split penalty (a.k.a. min_split_loss) to prune weak splits
+            gamma            = loguniform(0.5, 12.0),  # was uniform 0–6
+        
+            # stronger L1/L2; widen upper bound to allow heavier shrinkage
+            reg_alpha        = loguniform(1e-3, 5.0),  # was 1e-4–2.0
+            reg_lambda       = loguniform(1.0, 30.0),  # was 0.5–10.0
+        
+            # slightly coarser hist bins to reduce variance
+            max_bin          = randint(128, 257),      # was 192–320
+        
+            # gentle cap on per-iteration step (helps with class-imbalance spikiness)
+            max_delta_step   = loguniform(0.25, 2.0),
         )
+        
+        # You can bias AUC vs LogLoss variants a bit differently if you like:
+        
         params_ll  = dict(param_space_common)
         params_auc = dict(param_space_common)
+        
+        # Make AUC variant a touch stricter (ranking models can overfit interactions):
+        params_auc.update(dict(
+            subsample        = uniform(0.50, 0.25),   # 0.50–0.75
+            colsample_bytree = uniform(0.40, 0.30),   # 0.40–0.70
+            gamma            = loguniform(1.0, 16.0),
+            reg_lambda       = loguniform(3.0, 40.0),
+        ))
+
         
         # Prefer Halving; fallback to RandomizedSearch
         try:
@@ -10449,21 +10480,31 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                 colname_for_policy = c  # header after cleaning
                 table_df[c] = table_df[c].map(lambda v: _clean_cell(v, colname_for_policy))
             
-            # Build HTML; cells are sanitized so escape=False is OK
+           # Build HTML
             table_html = table_df.to_html(classes="custom-table", index=False, escape=False)
             
-            # Optional: remove rare line-separator chars that can upset some HTML parsers
-            table_html = table_html.replace("\u2028", "").replace("\u2029", "")  # // NEW: extra safety
+            # Drop any stray replacement/invisible chars *from the whole HTML string* (including tags)
+            table_html = (
+                table_html
+                .replace("\uFFFD", "")          # replacement char
+                .replace("\u2028", "")          # line sep
+                .replace("\u2029", "")          # paragraph sep
+            )
             
-            if _looks_malformed(table_html):
-                st.error("Detected malformed characters in table HTML. Showing a safe table instead.")
-                st.table(summary_grouped[cols].head(300))  # safe fallback
+            # Optional: if your environment ever re-encodes, force a clean UTF-8 pass
+            table_html = table_html.encode("utf-8", "ignore").decode("utf-8", "ignore")
+            
+            # Final guard: refuse to inject if any td/th/tr tag name is corrupted
+            if re.search(r"<(?:td|th|tr)\uFFFD", table_html, flags=re.I):
+                st.error("Detected malformed <td>/<th>/<tr> tag. Showing safe table instead.")
+                st.table(summary_grouped[cols].head(300))
             else:
                 safe_id = f"tbl-{_title_key}"
                 st.markdown(
                     f"<div id='{html.escape(safe_id)}' class='scrollable-table-container'>{table_html}</div>",
                     unsafe_allow_html=True
                 )
+
 
               
             st.success("✅ Finished rendering sharp picks table.")
