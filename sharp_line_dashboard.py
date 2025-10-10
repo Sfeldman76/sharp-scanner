@@ -7410,50 +7410,50 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
         
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
-        # Capacity knobs (right-sized for ~6 vCPUs; favors earlier stops)
-        SEARCH_N_EST    = 512          # was 800: smaller search budget per trial
+        # --------- Capacity knobs (looser search; still guarded later) ----------
+        SEARCH_N_EST    = 900           # was 512
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 1600         # was 4000: keep the “deep” probe modest
-        DEEP_MAX_BIN    = 256          # was 320: smoother, less variance
-        EARLY_STOP      = 200          # was 500: forces earlier plateau detection
-        HALVING_FACTOR  = 3            # was 4: gentler cull → more param diversity survives
-        MIN_RESOURCES   = 32           # was 64: allow more configs to start cheaply
+        DEEP_N_EST      = 2200          # was 1600
+        DEEP_MAX_BIN    = 256
+        EARLY_STOP      = 120           # was 200 → earlier plateau detection during probe
+        HALVING_FACTOR  = 2             # was 3 → fewer configs killed each round
+        MIN_RESOURCES   = 16            # was 32 → more configs admitted cheaply
         VCPUS           = get_vcpus()
         
-        # Base estimators for search (keep n_jobs=1 for parallel CV)
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "logloss", "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "auc",     "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
-        
-      
-
-  
+       
         
         param_space_common = dict(
-            max_depth        = randint(2, 5),
-            max_leaves       = randint(16, 96),
-            learning_rate    = loguniform(0.01, 0.04),
-            subsample        = uniform(0.5, 0.3),     # 0.5–0.8
-            colsample_bytree = uniform(0.4, 0.3),     # 0.4–0.7
-            min_child_weight = loguniform(8, 128),    # ↑ floor (was 5)
-            gamma            = loguniform(2, 20),     # ↑ floor (was 1)
-            reg_alpha        = loguniform(0.02, 10),  # ↑ floor
-            reg_lambda       = loguniform(8, 50),     # ↑ floor
-            max_bin          = randint(128, 256),
-            max_delta_step   = loguniform(0.5, 2),
-        )
-
+            # allow a bit more tree expressiveness in search
+            max_depth        = randint(2, 6),          # was 2–5
+            max_leaves       = randint(16, 192),       # was 16–96
+            learning_rate    = loguniform(0.008, 0.06),# was 0.01–0.04
         
-        # You can bias AUC vs LogLoss variants a bit differently if you like:
+            # widen stochasticity space
+            subsample        = uniform(0.45, 0.45),    # 0.45–0.90 (was 0.5–0.8)
+            colsample_bytree = uniform(0.35, 0.45),    # 0.35–0.80 (was 0.4–0.7)
+        
+            # let splitter try lower min_child + lower gamma if needed
+            min_child_weight = loguniform(3, 128),     # was 8–128
+            gamma            = loguniform(0.5, 20),    # was 2–20
+        
+            # regularization can be lighter at search time
+            reg_alpha        = loguniform(0.01, 10),   # was 0.02–10
+            reg_lambda       = loguniform(3, 60),      # was 8–50
+        
+            max_bin          = randint(128, 256),
+            max_delta_step   = loguniform(0.25, 2),
+        )
         
         params_ll  = dict(param_space_common)
         params_auc = dict(param_space_common)
-        
-        # Make AUC variant a touch stricter (ranking models can overfit interactions):
+        # AUC stream slightly stricter still
         params_auc.update(dict(
-            subsample        = uniform(0.50, 0.25),   # 0.50–0.75
-            colsample_bytree = uniform(0.40, 0.30),   # 0.40–0.70
+            subsample        = uniform(0.45, 0.35),    # 0.45–0.80
+            colsample_bytree = uniform(0.35, 0.35),    # 0.35–0.70
             gamma            = loguniform(1.0, 16.0),
-            reg_lambda       = loguniform(3.0, 40.0),
+            reg_lambda       = loguniform(5.0, 50.0),
         ))
 
         
