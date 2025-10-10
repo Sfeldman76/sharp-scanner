@@ -7652,13 +7652,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_iter = getattr(deep_auc, "best_iteration", None)
         cap_hit   = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)  # 0.8 → 0.7
         learning_rate = float(np.clip(float(locals().get("learning_rate", 0.02)), 0.008, 0.04))
-        early_stopping_rounds = int(np.clip( int(0.12 * final_estimators_cap), 60, 180 ))
-        # If ES found a peak, set a tight cap around it; else be conservative
+        
         if best_iter is not None and best_iter >= 50:
             final_estimators_cap = int(np.clip(int(1.10 * (best_iter + 1)), 500, 1200))
         else:
             final_estimators_cap = 900  # fallback
-        
+        early_stopping_rounds = int(np.clip( int(0.12 * final_estimators_cap), 60, 180 ))
+        # If ES found a peak, set a tight cap around it; else be conservative
+       
       
         
         deep_ll.fit(
