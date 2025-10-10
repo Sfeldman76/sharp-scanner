@@ -7602,8 +7602,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_tr_es = y_train[tr_es_rel]; y_va_es = y_train[va_es_rel]
         w_tr_es = np.maximum(np.nan_to_num(w_train[tr_es_rel], 0.0), 1e-6)
         w_va_es = np.maximum(np.nan_to_num(w_train[va_es_rel], 0.0), 1e-6)
-        w_tr_es = np.clip(w_tr_es, 0.0, 5.0)
-        w_va_es = np.clip(w_va_es, 0.0, 5.0)
+        W_CLIP = 5.0
+        w_tr_es = np.clip(w_tr_es, 0.0, W_CLIP)
+        w_va_es = np.clip(w_va_es, 0.0, W_CLIP)
+
         # class presence
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
         assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
@@ -7648,20 +7650,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
         best_iter = getattr(deep_auc, "best_iteration", None)
         cap_hit   = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)  # 0.8 → 0.7
-        
+        learning_rate = float(np.clip(float(locals().get("learning_rate", 0.02)), 0.008, 0.04))
+        early_stopping_rounds = int(np.clip( int(0.12 * final_estimators_cap), 60, 180 ))
         # If ES found a peak, set a tight cap around it; else be conservative
         if best_iter is not None and best_iter >= 50:
-            # lock deep model to its own peak for the diagnostics we already printed
-            deep_auc.set_params(n_estimators=best_iter + 1)
-        
-        # ---- Final capacity decision from probe ----
-        if best_iter is not None and best_iter >= 50:
-            # cap final to ~1.25x the probe's best (bounded)
-            final_estimators_cap = int(np.clip(int(1.25 * (best_iter + 1)), 600, 1500))
+            final_estimators_cap = int(np.clip(int(1.10 * (best_iter + 1)), 500, 1200))
         else:
-            # if probe didn't stabilize, choose a conservative mid-cap
-            final_estimators_cap = 1200
-
+            final_estimators_cap = 900  # fallback
+        
+      
         
         deep_ll.fit(
             X_tr_es, y_tr_es,
@@ -7699,15 +7696,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         def _overfit_harden(bp):
             bp = dict(bp)
-            bp["max_leaves"]       = int(min(96, bp.get("max_leaves", 96)))     # 128 → 96
-            bp["min_child_weight"] = float(max(16.0, float(bp.get("min_child_weight", 12.0))))
-            bp["gamma"]            = float(max(8.0, float(bp.get("gamma", 6.0))))
-            bp["reg_alpha"]        = float(max(0.20, float(bp.get("reg_alpha", 0.10))))
-            bp["reg_lambda"]       = float(max(20.0, float(bp.get("reg_lambda", 15.0))))
-            bp["subsample"]        = float(min(0.75, float(bp.get("subsample", 0.80))))
-            bp["colsample_bytree"] = float(min(0.65, float(bp.get("colsample_bytree", 0.70))))
+            bp["max_leaves"]       = int(min(80, bp.get("max_leaves", 80)))
+            bp["min_child_weight"] = float(max(20.0, float(bp.get("min_child_weight", 12.0))))
+            bp["gamma"]            = float(max(10.0, float(bp.get("gamma", 6.0))))
+            bp["reg_alpha"]        = float(max(0.25, float(bp.get("reg_alpha", 0.10))))
+            bp["reg_lambda"]       = float(max(25.0, float(bp.get("reg_lambda", 15.0))))
+            bp["subsample"]        = float(min(0.70, float(bp.get("subsample", 0.80))))
+            bp["colsample_bytree"] = float(min(0.60, float(bp.get("colsample_bytree", 0.70))))
             bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.02))))
             return bp
+        
+        
 
 
         def _ece(y_true, p, bins=10):
@@ -7734,27 +7733,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Heuristics: large AUC gap, very peaky probs, or poor ECE on ES val
         NEEDS_HARDEN = (
-            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.15)  # 0.20 → 0.15
-            or (extreme_frac_raw > 0.60)                                                     # 0.70 → 0.60
-            or (ece_va_es > 0.15)                                                            # 0.20 → 0.15
+            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.12)
+            or (extreme_frac_raw > 0.55)
+            or (ece_va_es > 0.12)
         )
-        
         if NEEDS_HARDEN:
-            st.warning({
-                "harden":"on",
-                "auc_gap_es": float(auc_tr_es - auc_va) if np.isfinite(auc_tr_es) and np.isfinite(auc_va) else None,
-                "extreme_frac_es": float(extreme_frac_raw),
-                "ece_val_es": float(ece_va_es),
-            })
-            best_auc_params = _overfit_harden(best_auc_params.copy())
-            best_ll_params  = _overfit_harden(best_ll_params.copy())
+            best_auc_params = _overfit_harden(best_auc_params)
+            best_ll_params  = _overfit_harden(best_ll_params)
 
         # --- Final capacity / ES suggestions (stable defaults) ----------------------
-        final_estimators_cap = int(np.clip(
-            int(locals().get("final_estimators_cap", 1600)),  # default down from 2200
-            800, 1800
-        ))
-        learning_rate         = float(locals().get("learning_rate", 0.018))
+       
         # original es_suggest scaled by smaller multiplier → more aggressive early stop
         es_suggest = 0.04 * final_estimators_cap * (0.03 / max(learning_rate, 1e-6)) ** 0.5
         
@@ -7787,6 +7775,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_jobs=int(VCPUS),
             learning_rate=learning_rate,
             scale_pos_weight=scale_pos_weight,  # <-- add
+        )
+        # clip histogram bins (less variance) + class weight in finals
+        params_ll_final.update(
+            max_bin= int(np.clip(DEEP_MAX_BIN, 128, 256)),
+            scale_pos_weight= scale_pos_weight,
+        )
+        params_auc_final.update(
+            max_bin= int(np.clip(DEEP_MAX_BIN, 128, 256)),
+            scale_pos_weight= scale_pos_weight,
         )
 
         
@@ -8061,21 +8058,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
+        def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
+   
+            p = np.clip(p, clip, 1-clip)
+            def logit(x): return np.log(x/(1-x))
+            def sigmoid(z): return 1.0/(1.0+np.exp(-z))
+            # logit shift by prior odds ratio
+            shift = np.log((hold_pos/(1-hold_pos)) / (train_pos/(1-train_pos)))
+            return sigmoid(logit(p) + shift)
+        
+        # --- Choose priors for calibration context ---
+        # OOF "train" prior:
+        oof_pos = float(np.mean(y_oof == 1))
+        # Deployment/hold prior estimate. Use your true hold labels if available,
+        # or a rolling/ES estimate if you prefer. Here we use the actual hold split:
+        deploy_pos = float(np.mean(y_full[hold_idx] == 1))
+        
         # ---------------- Calibration ----------------
         CLIP = 0.02 if SMALL else 0.01
         flip_flag = _decide_flip_on_oof(y_oof, p_oof_blend)
+        
+        # Apply SAME flip to OOF before calibration
         p_oof_for_cal = (1.0 - p_oof_blend) if flip_flag else p_oof_blend
         
-        # Fit/normalize available calibrators
-       
-        use_qiso = (len(np.unique(np.round(p_oof_for_cal, 4))) < 400)  # small OOF → safer iso
-        cals_raw = fit_iso_platt_beta(p_oof_for_cal, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
+        # >>> PRIOR-CORRECT OOF before fitting calibrators <<<
+        p_oof_prior = _prior_correct(p_oof_for_cal, train_pos=oof_pos, hold_pos=deploy_pos)
+        
+        # Fit/normalize available calibrators on prior-corrected OOF
+        use_qiso = (len(np.unique(np.round(p_oof_prior, 4))) < 400)
+        cals_raw = fit_iso_platt_beta(p_oof_prior, y_oof, eps=1e-6, use_quantile_iso=use_qiso)
         cals = _normalize_cals(cals_raw)
         cals["iso"]   = _ensure_transform_for_iso(cals.get("iso")) or _IdentityIsoCal(eps=1e-6)
         cals["platt"] = _ensure_predict_proba_for_prob_cal(cals.get("platt"), eps=1e-6)
         cals["beta"]  = _ensure_predict_proba_for_prob_cal(cals.get("beta"),  eps=1e-6)
         
-        # Evaluate candidates by ECE (lower is better)
+        # Evaluate candidates by ECE (lower is better) on the same prior-corrected OOF
         candidates = []
         if cals.get("beta")  is not None:  candidates.append(("beta",  cals["beta"]))
         if cals.get("platt") is not None:  candidates.append(("platt", cals["platt"]))
@@ -8085,14 +8102,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         scores = []
         for kind, cal in candidates:
-            pp = _apply_cal(kind, cal, p_oof_for_cal)           # uses your helper
-            pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float) # stabilize tails for ECE
+            pp = _apply_cal(kind, cal, p_oof_prior)           # calibrated, prior-corrected
+            pp = np.asarray(np.clip(pp, CLIP, 1 - CLIP), float)
             ece = expected_calibration_error(y_oof, pp)
             scores.append((ece, kind, cal))
         
         scores.sort(key=lambda t: t[0])
         ece_best, cal_name, cal_obj = scores[0]
-        cal_blend = (cal_name, cal_obj) 
         st.write({"calibrator_used": str(cal_name), "flip_on_oof": bool(flip_flag), "ece_best": float(ece_best)})
         
         # --- Raw model preds (AUC + optional LogLoss model) ---------------------------
@@ -8107,24 +8123,29 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         else:
             p_tr_log = np.array([], dtype=float); p_ho_log = np.array([], dtype=float)
             p_train_blend_raw = np.clip(p_tr_auc, eps, 1 - eps)
-            p_hold_blend_raw  = np.clip(p_ho_auc, eps, 1 - eps)
+            p_hold_blend_raw  = np.clip(p_ho_auc,  eps, 1 - eps)
         
-        # Apply the SAME flip to train/hold BEFORE calibration
+        # Apply the SAME flip to train/hold BEFORE prior-correction & calibration
         p_train_blend_raw = _maybe_flip(p_train_blend_raw, flip_flag)
         p_hold_blend_raw  = _maybe_flip(p_hold_blend_raw,  flip_flag)
         
-        # Calibrate via the chosen calibrator (no apply_blend; use your helper)
-        p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_blend_raw)
-        p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_blend_raw)
+        # >>> PRIOR-CORRECT train/hold to the deployment prior <<<
+        train_pos_for_pc = float(np.mean(y_full[train_all_idx] == 1))
+        p_train_prior = _prior_correct(p_train_blend_raw, train_pos=train_pos_for_pc, hold_pos=deploy_pos)
+        p_hold_prior  = _prior_correct(p_hold_blend_raw,  train_pos=train_pos_for_pc, hold_pos=deploy_pos)
+        
+        # Calibrate via the chosen calibrator on PRIOR-CORRECTED probs
+        p_cal_tr = _apply_cal(cal_name, cal_obj, p_train_prior)
+        p_cal_ho = _apply_cal(cal_name, cal_obj, p_hold_prior)
         
         # Clip + gentle shrink of extremes for live stability
         p_cal_tr = np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP), float)
         p_cal_ho = np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP), float)
         
-        p_train_vec = 0.95 * np.asarray(np.clip(p_cal_tr, CLIP, 1 - CLIP)) + 0.05 * 0.5
-        p_hold_vec  = 0.95 * np.asarray(np.clip(p_cal_ho, CLIP, 1 - CLIP)) + 0.05 * 0.5
+        p_train_vec = 0.95 * p_cal_tr + 0.05 * 0.5
+        p_hold_vec  = 0.95 * p_cal_ho + 0.05 * 0.5
         
-        # Diagnostics you’ll use
+        # Diagnostics
         ece_tr = expected_calibration_error(y_full[train_all_idx].astype(int), p_train_vec, n_bins=10)
         ece_ho = expected_calibration_error(y_full[hold_idx].astype(int),      p_hold_vec,  n_bins=10)
         psi    = population_stability_index(p_train_vec, p_hold_vec, bins=20)
@@ -8133,6 +8154,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         assert p_train_vec.shape[0] == len(train_all_idx), "p_train_vec length mismatch"
         assert p_hold_vec.shape[0]  == len(hold_idx),      "p_hold_vec length mismatch"
+
         
 
         # ---------- Metrics (no flips here) -------------------------------------------
