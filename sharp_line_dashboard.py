@@ -7698,15 +7698,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         def _overfit_harden(bp):
             bp = dict(bp)
-            bp["max_leaves"]       = int(min(80, bp.get("max_leaves", 80)))
-            bp["min_child_weight"] = float(max(20.0, float(bp.get("min_child_weight", 12.0))))
-            bp["gamma"]            = float(max(10.0, float(bp.get("gamma", 6.0))))
-            bp["reg_alpha"]        = float(max(0.25, float(bp.get("reg_alpha", 0.10))))
-            bp["reg_lambda"]       = float(max(25.0, float(bp.get("reg_lambda", 15.0))))
-            bp["subsample"]        = float(min(0.70, float(bp.get("subsample", 0.80))))
-            bp["colsample_bytree"] = float(min(0.60, float(bp.get("colsample_bytree", 0.70))))
+            bp["max_leaves"]       = int(min(96, bp.get("max_leaves", 96)))
+            bp["min_child_weight"] = float(max(16.0, float(bp.get("min_child_weight", 12.0))))
+            bp["gamma"]            = float(max(8.0,  float(bp.get("gamma", 6.0))))
+            bp["reg_alpha"]        = float(max(0.20, float(bp.get("reg_alpha", 0.10))))
+            bp["reg_lambda"]       = float(max(20.0, float(bp.get("reg_lambda", 15.0))))
+            bp["subsample"]        = float(min(0.75, float(bp.get("subsample", 0.80))))
+            bp["colsample_bytree"] = float(min(0.65, float(bp.get("colsample_bytree", 0.70))))
             bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.02))))
             return bp
+
         
         
 
