@@ -7409,14 +7409,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
         
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
-        # Capacity knobs (right-sized for ~6 vCPUs)
-        SEARCH_N_EST    = 800
+        # Capacity knobs (right-sized for ~6 vCPUs; favors earlier stops)
+        SEARCH_N_EST    = 512          # was 800: smaller search budget per trial
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 4000        # used only for the preliminary deep fit to gauge cap
-        DEEP_MAX_BIN    = 320         # tighter bins for smoother proba
-        EARLY_STOP      = 500
-        HALVING_FACTOR  = 4
-        MIN_RESOURCES   = 64
+        DEEP_N_EST      = 1600         # was 4000: keep the “deep” probe modest
+        DEEP_MAX_BIN    = 256          # was 320: smoother, less variance
+        EARLY_STOP      = 200          # was 500: forces earlier plateau detection
+        HALVING_FACTOR  = 3            # was 4: gentler cull → more param diversity survives
+        MIN_RESOURCES   = 32           # was 64: allow more configs to start cheaply
         VCPUS           = get_vcpus()
         
         # Base estimators for search (keep n_jobs=1 for parallel CV)
@@ -7428,34 +7428,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
   
         
         param_space_common = dict(
-            # shallower trees + fewer leaves → simpler interactions
-            max_depth        = randint(2, 6),          # was 2–8
-            max_leaves       = randint(24, 160),       # was 64–320
-        
-            # slower learning rate lets early stopping pick a safer point
-            learning_rate    = loguniform(0.008, 0.05),  # was 0.018–0.08
-        
-            # slightly stronger stochasticity
-            subsample        = uniform(0.55, 0.30),    # 0.55–0.85 (was 0.70–0.95)
-            colsample_bytree = uniform(0.45, 0.35),    # 0.45–0.80 (was 0.55–0.90)
-            colsample_bynode = uniform(0.45, 0.35),    # 0.45–0.80 (was 0.55–0.90)
-        
-            # bias toward larger leaves to split only on strong signals
-            min_child_weight = loguniform(3.0, 64.0),  # was 1–32 (pushes up)
-        
-            # more split penalty (a.k.a. min_split_loss) to prune weak splits
-            gamma            = loguniform(0.5, 12.0),  # was uniform 0–6
-        
-            # stronger L1/L2; widen upper bound to allow heavier shrinkage
-            reg_alpha        = loguniform(1e-3, 5.0),  # was 1e-4–2.0
-            reg_lambda       = loguniform(1.0, 30.0),  # was 0.5–10.0
-        
-            # slightly coarser hist bins to reduce variance
-            max_bin          = randint(128, 257),      # was 192–320
-        
-            # gentle cap on per-iteration step (helps with class-imbalance spikiness)
-            max_delta_step   = loguniform(0.25, 2.0),
+            max_depth        = randint(2, 5),
+            max_leaves       = randint(16, 96),
+            learning_rate    = loguniform(0.01, 0.04),
+            subsample        = uniform(0.5, 0.3),     # 0.5–0.8
+            colsample_bytree = uniform(0.4, 0.3),     # 0.4–0.7
+            min_child_weight = loguniform(8, 128),    # ↑ floor (was 5)
+            gamma            = loguniform(2, 20),     # ↑ floor (was 1)
+            reg_alpha        = loguniform(0.02, 10),  # ↑ floor
+            reg_lambda       = loguniform(8, 50),     # ↑ floor
+            max_bin          = randint(128, 256),
+            max_delta_step   = loguniform(0.5, 2),
         )
+
         
         # You can bias AUC vs LogLoss variants a bit differently if you like:
         
@@ -7570,18 +7555,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             node_val = float(bp.get(node_key, bp.get("colsample_bylevel", bp.get("colsample_bynode", 0.80))))
         
             updates = {
-                **STABLE,  # keep objective + tree_method + grow_policy + max_delta_step
-                "max_leaves":       int(min(leaf_cap, int(bp.get("max_leaves", leaf_cap)))),
-                "min_child_weight": float(max(4.0, float(bp.get("min_child_weight", 4.0)))),
-                "gamma":            float(max(2.0, float(bp.get("gamma", 2.0)))),
-                "reg_alpha":        float(max(0.02, float(bp.get("reg_alpha", 0.02)))),
-                "reg_lambda":       float(max(5.0, float(bp.get("reg_lambda", 5.0)))),
-                "subsample":        float(min(0.90, float(bp.get("subsample", 0.85)))),
-                "colsample_bytree": float(min(0.85, float(bp.get("colsample_bytree", 0.80)))),
-                node_key:           float(min(0.85, node_val)),
-                "max_bin":          int(min(320, int(bp.get("max_bin", 256)))),
-                "learning_rate":    float(min(0.018, float(bp.get("learning_rate", 0.025)))),
+                **STABLE,  # objective/tree_method/grow_policy/max_delta_step
+                # Prefer leaf-capped trees; set max_depth=0 when using max_leaves
+                "max_depth":         0,
+                "max_leaves":        int(min(128, int(bp.get("max_leaves", leaf_cap)))),
+                "min_child_weight":  float(max(12.0, float(bp.get("min_child_weight", 8.0)))),  # ↑
+                "gamma":             float(max(6.0, float(bp.get("gamma", 2.0)))),              # ↑
+                "reg_alpha":         float(max(0.10, float(bp.get("reg_alpha", 0.05)))),        # ↑
+                "reg_lambda":        float(max(15.0, float(bp.get("reg_lambda", 6.0)))),        # ↑
+                "subsample":         float(min(0.80, float(bp.get("subsample", 0.85)))),        # ↓
+                "colsample_bytree":  float(min(0.70, float(bp.get("colsample_bytree", 0.80)))), # ↓
+                node_key:            float(min(0.75, node_val)),                                 # ↓
+                "max_bin":           int(min(256, int(bp.get("max_bin", 256)))),                 # ↓
+                "learning_rate":     float(min(0.02, float(bp.get("learning_rate", 0.025)))),    # ↓
             }
+
             bp.update(updates)
         
             # ---- Drop only sklearn/wrapper/managed keys (DO NOT drop 'objective') ----
@@ -7614,7 +7602,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         y_tr_es = y_train[tr_es_rel]; y_va_es = y_train[va_es_rel]
         w_tr_es = np.maximum(np.nan_to_num(w_train[tr_es_rel], 0.0), 1e-6)
         w_va_es = np.maximum(np.nan_to_num(w_train[va_es_rel], 0.0), 1e-6)
-        
+        w_tr_es = np.clip(w_tr_es, 0.0, 5.0)
+        w_va_es = np.clip(w_va_es, 0.0, 5.0)
         # class presence
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
         assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
@@ -7657,10 +7646,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         auc_va      = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
         spread_std_raw   = float(np.std(p_va_raw))
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-        best_iter        = getattr(deep_auc, "best_iteration", None)
-        cap_hit          = bool(best_iter is not None and best_iter >= 0.8 * planned_cap)
+        best_iter = getattr(deep_auc, "best_iteration", None)
+        cap_hit   = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)  # 0.8 → 0.7
+        
+        # If ES found a peak, set a tight cap around it; else be conservative
         if best_iter is not None and best_iter >= 50:
+            # lock deep model to its own peak for the diagnostics we already printed
             deep_auc.set_params(n_estimators=best_iter + 1)
+        
+        # ---- Final capacity decision from probe ----
+        if best_iter is not None and best_iter >= 50:
+            # cap final to ~1.25x the probe's best (bounded)
+            final_estimators_cap = int(np.clip(int(1.25 * (best_iter + 1)), 600, 1500))
+        else:
+            # if probe didn't stabilize, choose a conservative mid-cap
+            final_estimators_cap = 1200
+
         
         deep_ll.fit(
             X_tr_es, y_tr_es,
@@ -7694,16 +7695,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if np.unique(y).size < 2:
                 return np.nan
             return roc_auc_score(y, p)
-            
+
+
         def _overfit_harden(bp):
-            bp = dict(bp)  # don’t mutate caller
-            bp["max_leaves"]       = int(min(128, bp.get("max_leaves", 128)))
-            bp["min_child_weight"] = float(max(12.0, float(bp.get("min_child_weight", 8.0))))
-            bp["gamma"]            = float(max(4.0, float(bp.get("gamma", 2.0))))
-            bp["reg_alpha"]        = float(max(0.08, float(bp.get("reg_alpha", 0.05))))
-            bp["reg_lambda"]       = float(max(8.0, float(bp.get("reg_lambda", 6.0))))
-            bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.018))))
+            bp = dict(bp)
+            bp["max_leaves"]       = int(min(96, bp.get("max_leaves", 96)))     # 128 → 96
+            bp["min_child_weight"] = float(max(16.0, float(bp.get("min_child_weight", 12.0))))
+            bp["gamma"]            = float(max(8.0, float(bp.get("gamma", 6.0))))
+            bp["reg_alpha"]        = float(max(0.20, float(bp.get("reg_alpha", 0.10))))
+            bp["reg_lambda"]       = float(max(20.0, float(bp.get("reg_lambda", 15.0))))
+            bp["subsample"]        = float(min(0.75, float(bp.get("subsample", 0.80))))
+            bp["colsample_bytree"] = float(min(0.65, float(bp.get("colsample_bytree", 0.70))))
+            bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.02))))
             return bp
+
 
         def _ece(y_true, p, bins=10):
             y = np.asarray(y_true, float)
@@ -7729,9 +7734,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # Heuristics: large AUC gap, very peaky probs, or poor ECE on ES val
         NEEDS_HARDEN = (
-            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.20)
-            or (extreme_frac_raw > 0.70)
-            or (ece_va_es > 0.20)
+            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.15)  # 0.20 → 0.15
+            or (extreme_frac_raw > 0.60)                                                     # 0.70 → 0.60
+            or (ece_va_es > 0.15)                                                            # 0.20 → 0.15
         )
         
         if NEEDS_HARDEN:
@@ -7745,31 +7750,45 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             best_ll_params  = _overfit_harden(best_ll_params.copy())
 
         # --- Final capacity / ES suggestions (stable defaults) ----------------------
-        final_estimators_cap  = int(np.clip(int(locals().get("final_estimators_cap", 2200)), 1200, 2400))
+        final_estimators_cap = int(np.clip(
+            int(locals().get("final_estimators_cap", 1600)),  # default down from 2200
+            800, 1800
+        ))
         learning_rate         = float(locals().get("learning_rate", 0.018))
-        es_suggest            = 0.08 * final_estimators_cap * (0.03 / max(learning_rate, 1e-6))**0.5
-        early_stopping_rounds = int(np.clip(int(locals().get("early_stopping_rounds", es_suggest)), 60, max(50, final_estimators_cap // 3)))
+        # original es_suggest scaled by smaller multiplier → more aggressive early stop
+        es_suggest = 0.04 * final_estimators_cap * (0.03 / max(learning_rate, 1e-6)) ** 0.5
         
+        # stricter lower/upper bounds (stops faster; avoids 1000+ rounds)
+        early_stopping_rounds = int(
+            np.clip(int(locals().get("early_stopping_rounds", es_suggest)),
+                    50, max(100, final_estimators_cap // 4))
+        )
+
+        
+        # --- Final params and models (single instantiation) -------------------------
         # --- Final params and models (single instantiation) -------------------------
         params_ll_final = {**base_kwargs, **best_ll_params}
         params_ll_final.pop("predictor", None)
         params_ll_final.update(
             n_estimators=int(final_estimators_cap),
             eval_metric="logloss",
-            max_bin=DEEP_MAX_BIN,
+            max_bin=int(np.clip(DEEP_MAX_BIN, 128, 256)),
             n_jobs=int(VCPUS),
             learning_rate=learning_rate,
+            scale_pos_weight=scale_pos_weight,  # <-- add
         )
         
         params_auc_final = {**base_kwargs, **best_auc_params}
         params_auc_final.pop("predictor", None)
         params_auc_final.update(
             n_estimators=int(final_estimators_cap),
-            eval_metric="logloss",  # compute AUC separately if needed
-            max_bin=DEEP_MAX_BIN,
+            eval_metric="logloss",
+            max_bin=int(np.clip(DEEP_MAX_BIN, 128, 256)),
             n_jobs=int(VCPUS),
             learning_rate=learning_rate,
+            scale_pos_weight=scale_pos_weight,  # <-- add
         )
+
         
         # --- Monotone constraints (only on features present) ------------------------
         MONO = {
@@ -7784,8 +7803,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         }
         mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
         mono_str = f"({','.join(map(str, mono_vec))})"
-        params_ll_final['monotone_constraints']  = mono_str
-        params_auc_final['monotone_constraints'] = mono_str
+        if len(mono_vec) == len(feature_cols):
+            mono_str = f"({','.join(map(str, mono_vec))})"
+            params_ll_final['monotone_constraints']  = mono_str
+            params_auc_final['monotone_constraints'] = mono_str
+
         
         # --- Instantiate & fit ------------------------------------------------------
         model_logloss = XGBClassifier(**params_ll_final)
