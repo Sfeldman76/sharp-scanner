@@ -7722,7 +7722,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             or (extreme_frac_raw > 0.70)
             or (ece_va_es > 0.20)
         )
-         def _overfit_harden(bp):
+        def _overfit_harden(bp):
             bp = dict(bp)
             bp["max_leaves"]       = int(min(96, bp.get("max_leaves", 96)))
             bp["min_child_weight"] = float(max(16.0, float(bp.get("min_child_weight", 12.0))))
