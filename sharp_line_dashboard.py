@@ -4834,7 +4834,7 @@ def c_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
 
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
-    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 60, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 45, "NCAAB": 60}
+    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 90, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 90, "NCAAB": 60}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
     st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
@@ -6286,7 +6286,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
-            #'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
+            'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
             #'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',#'Sharp_Leads',
@@ -6297,17 +6297,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # 🔥 Timing flags
             #'Late_Game_Steam_Flag',
         
-            #'Abs_Line_Move_From_Opening',
+            'Abs_Line_Move_From_Opening',
             #'Abs_Odds_Move_From_Opening',
-            #'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
-            #'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
-            #'CrossMarket_Prob_Gap_Exists',
-            #'Line_Moved_Away_From_Team',
+            'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
+            'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
+            'CrossMarket_Prob_Gap_Exists',
+            'Line_Moved_Away_From_Team',
             
             
             'Pct_Line_Move_From_Opening',#'Pct_Line_Move_Bin',
             'Potential_Overmove_Flag',
-            #'Potential_Overmove_Total_Pct_Flag',#'Mispricing_Flag',
+            'Potential_Overmove_Total_Pct_Flag',#'Mispricing_Flag',
             #'Was_Line_Resistance_Broken',
             'Line_Resistance_Crossed_Count','SharpMove_Resistance_Break',
         
@@ -6322,20 +6322,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Book_Reliability_x_PROB_SHIFT',
         
             # Power ratings / edges
-            #'PR_Team_Rating','PR_Opp_Rating',
+            'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
-            #'Outcome_Model_Spread','Outcome_Market_Spread',
-            #'Outcome_Spread_Edge',
-            #'Outcome_Cover_Prob',
+            'Outcome_Model_Spread','Outcome_Market_Spread',
+            'Outcome_Spread_Edge',
+            'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
             #'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
             #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
             #'TOT_Mispricing', 
             'ATS_EB_Rate',
-            #'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
-            #'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
-            #'ATS_EB_Rate_Home',
-            #'ATS_EB_Rate_Away',
+            'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
+            'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
+            'ATS_EB_Rate_Home',
+            'ATS_EB_Rate_Away',
             'PR_Model_Agree_H2H_Flag',#'PR_Market_Agree_H2H_Flag',
             "SpreadTotal_Rho","SpreadTotal_Synergy","SpreadTotal_Sign",
             "SpreadML_Rho","SpreadML_Synergy","SpreadML_Sign","Spread_ML_ProbGap",
@@ -6383,15 +6383,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         # add recent team model performance stats
         extend_unique(features, [
-            #'Team_Past_Avg_Model_Prob',
-            #'Team_Past_Hit_Rate',
-            #'Team_Past_Avg_Model_Prob_Home',
-            #'Team_Past_Hit_Rate_Home',
-            #'Team_Past_Avg_Model_Prob_Away',
-            #'Team_Past_Hit_Rate_Away',
+            'Team_Past_Avg_Model_Prob',
+            'Team_Past_Hit_Rate',
+            'Team_Past_Avg_Model_Prob_Home',
+            'Team_Past_Hit_Rate_Home',
+            'Team_Past_Avg_Model_Prob_Away',
+            'Team_Past_Hit_Rate_Away',
             
-            #'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
-            #'Avg_Recent_Cover_Streak_Away'
+            'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
+            'Avg_Recent_Cover_Streak_Away'
         ])
         
         # add time-context flags
@@ -7116,7 +7116,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             else:
                 is_sharp = train_df[bk_col].isin(SHARP_BOOKS).to_numpy(dtype=np.float32)
         
-            ALPHA_SHARP = 0.20
+            ALPHA_SHARP = 0.10
             mult = 1.0 + ALPHA_SHARP * is_sharp
         
             w_train = (w_base * mult).astype(np.float32)
@@ -7425,26 +7425,28 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
         
         param_space_common = dict(
-            # allow a bit more tree expressiveness in search
-            max_depth        = randint(2, 6),          # was 2–5
-            max_leaves       = randint(16, 192),       # was 16–96
-            learning_rate    = loguniform(0.008, 0.06),# was 0.01–0.04
-        
+            # allow more expressive, deeper trees
+            max_depth        = randint(2, 8),           # was 2–6 → +1 depth headroom
+            max_leaves       = randint(16, 256),        # was 16–192 → allows more complex interactions
+            learning_rate    = loguniform(0.006, 0.08), # slightly wider, still bounded away from too-small
+            
             # widen stochasticity space
-            subsample        = uniform(0.45, 0.45),    # 0.45–0.90 (was 0.5–0.8)
-            colsample_bytree = uniform(0.35, 0.45),    # 0.35–0.80 (was 0.4–0.7)
-        
-            # let splitter try lower min_child + lower gamma if needed
-            min_child_weight = loguniform(3, 128),     # was 8–128
-            gamma            = loguniform(0.5, 20),    # was 2–20
-        
-            # regularization can be lighter at search time
-            reg_alpha        = loguniform(0.01, 10),   # was 0.02–10
-            reg_lambda       = loguniform(3, 60),      # was 8–50
-        
-            max_bin          = randint(128, 256),
-            max_delta_step   = loguniform(0.25, 2),
+            subsample        = uniform(0.40, 0.55),     # 0.40–0.95 (was fixed 0.45–0.45)
+            colsample_bytree = uniform(0.30, 0.55),     # 0.30–0.85 (was 0.35–0.45)
+            
+            # let splitter be more flexible
+            min_child_weight = loguniform(2, 256),      # 2–256 (was 3–128)
+            gamma            = loguniform(0.3, 25),     # 0.3–25 (was 0.5–20)
+            
+            # more room for regularization tradeoffs
+            reg_alpha        = loguniform(0.005, 20),   # 0.005–20 (was 0.01–10)
+            reg_lambda       = loguniform(2, 100),      # 2–100 (was 3–60)
+            
+            # minor tweaks to bins / delta step
+            max_bin          = randint(128, 320),       # extend upper bound slightly
+            max_delta_step   = loguniform(0.2, 3),      # allow more flexibility on step scaling
         )
+
         
         params_ll  = dict(param_space_common)
         params_auc = dict(param_space_common)
@@ -7940,7 +7942,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # OOF predictions (train-only) + blending
         # -----------------------------------------
         
-        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 120) or (len(y_train) < 2000)
+        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 30) or (len(y_train) < 500)
         MIN_OOF = 40 if SMALL else 120
         RUN_LOGLOSS = True  # keep on; you can tie to SMALL if desired
         
