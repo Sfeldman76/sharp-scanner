@@ -7722,17 +7722,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             or (extreme_frac_raw > 0.70)
             or (ece_va_es > 0.20)
         )
-        if NEEDS_HARDEN:
-            st.warning({
-                "harden": "on",
-                "auc_gap_es": float(auc_tr_es - auc_va) if np.isfinite(auc_tr_es) and np.isfinite(auc_va) else None,
-                "extreme_frac_es": float(extreme_frac_raw),
-                "ece_val_es": float(ece_va_es),
-            })
-            best_auc_params = _overfit_harden(best_auc_params.copy())
-            best_ll_params  = _overfit_harden(best_ll_params.copy())
-
-        def _overfit_harden(bp):
+         def _overfit_harden(bp):
             bp = dict(bp)
             bp["max_leaves"]       = int(min(96, bp.get("max_leaves", 96)))
             bp["min_child_weight"] = float(max(16.0, float(bp.get("min_child_weight", 12.0))))
@@ -7745,6 +7735,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return bp
 
         
+        if NEEDS_HARDEN:
+            st.warning({
+                "harden": "on",
+                "auc_gap_es": float(auc_tr_es - auc_va) if np.isfinite(auc_tr_es) and np.isfinite(auc_va) else None,
+                "extreme_frac_es": float(extreme_frac_raw),
+                "ece_val_es": float(ece_va_es),
+            })
+            best_auc_params = _overfit_harden(best_auc_params.copy())
+            best_ll_params  = _overfit_harden(best_ll_params.copy())
+
+           
         
 
 
