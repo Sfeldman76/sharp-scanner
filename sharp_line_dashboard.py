@@ -6780,6 +6780,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = feature_cols
 
         # ============================================================================
+        def auc_safe(y, p):
+            y = np.asarray(y, int)
+            if np.unique(y).size < 2:
+                return np.nan
+            return roc_auc_score(y, p)
 
 
         # === Build y and mask FIRST ===
@@ -7600,18 +7605,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
         
+        # Use DataFrames so XGBoost keeps real column names
         X_tr_es = np.nan_to_num(X_train[tr_es_rel], copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         X_va_es = np.nan_to_num(X_train[va_es_rel], copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        X_tr_es_df = pd.DataFrame(X_tr_es, columns=feature_cols)
+        X_va_es_df = pd.DataFrame(X_va_es, columns=feature_cols)
+        
         y_tr_es = y_train[tr_es_rel]; y_va_es = y_train[va_es_rel]
         w_tr_es = np.maximum(np.nan_to_num(w_train[tr_es_rel], 0.0), 1e-6)
         w_va_es = np.maximum(np.nan_to_num(w_train[va_es_rel], 0.0), 1e-6)
         W_CLIP = 5.0
         w_tr_es = np.clip(w_tr_es, 0.0, W_CLIP)
         w_va_es = np.clip(w_va_es, 0.0, W_CLIP)
-
+        
         # class presence
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
-        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
+        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), \
+            "ES fold single-class; widen min_val_size or choose different fold."
         
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
@@ -7634,40 +7644,39 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
             eval_metric="logloss",
+            scale_pos_weight=scale_pos_weight,  # keep consistent
             random_state=1337, seed=1337,
         )
         
         # === Preliminary deep fits (for diagnostics/cap sense) ===
         deep_auc.fit(
-            X_tr_es, y_tr_es,
+            X_tr_es_df, y_tr_es,
             sample_weight=w_tr_es,
-            eval_set=[(X_va_es, y_va_es)],
+            eval_set=[(X_va_es_df, y_va_es)],
             sample_weight_eval_set=[w_va_es],
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
         )
         planned_cap = int(deep_auc.get_xgb_params().get("n_estimators", DEEP_N_EST))
-        p_va_raw    = np.clip(deep_auc.predict_proba(X_va_es)[:, 1], 1e-12, 1 - 1e-12)
+        p_va_raw    = np.clip(deep_auc.predict_proba(X_va_es_df)[:, 1], 1e-12, 1 - 1e-12)
         auc_va      = float(roc_auc_score(y_va_es.astype(int), p_va_raw, sample_weight=w_va_es))
         spread_std_raw   = float(np.std(p_va_raw))
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
-        best_iter = getattr(deep_auc, "best_iteration", None)
-        cap_hit   = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)  # 0.8 → 0.7
-        learning_rate = float(np.clip(float(locals().get("learning_rate", 0.02)), 0.008, 0.04))
+        best_iter        = getattr(deep_auc, "best_iteration", None)
+        cap_hit          = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)  # 0.8 → 0.7
+        learning_rate    = float(np.clip(float(locals().get("learning_rate", 0.02)), 0.008, 0.04))
         
+        # If ES found a peak, set a tight cap around it; else be conservative
         if best_iter is not None and best_iter >= 50:
             final_estimators_cap = int(np.clip(int(1.10 * (best_iter + 1)), 500, 1200))
         else:
             final_estimators_cap = 900  # fallback
-        early_stopping_rounds = int(np.clip( int(0.12 * final_estimators_cap), 60, 180 ))
-        # If ES found a peak, set a tight cap around it; else be conservative
-       
-      
+        early_stopping_rounds = int(np.clip(int(0.12 * final_estimators_cap), 60, 180))
         
         deep_ll.fit(
-            X_tr_es, y_tr_es,
+            X_tr_es_df, y_tr_es,
             sample_weight=w_tr_es,
-            eval_set=[(X_va_es, y_va_es)],
+            eval_set=[(X_va_es_df, y_va_es)],
             sample_weight_eval_set=[w_va_es],
             verbose=False,
             early_stopping_rounds=EARLY_STOP,
@@ -7690,13 +7699,38 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         })
         
         # --- Overfit hardening decision (pre-final-fit; uses ES fold diagnostics) ---
-         # --- Helpers (local) -----------------------------------------------------------
-        def auc_safe(y, p):
-            y = np.asarray(y, int)
-            if np.unique(y).size < 2:
-                return np.nan
-            return roc_auc_score(y, p)
-
+        def _ece(y_true, p, bins=10):
+            y = np.asarray(y_true, float)
+            p = np.asarray(p, float)
+            edges = np.linspace(0.0, 1.0, bins + 1)
+            idx = np.digitize(p, edges) - 1
+            ece = 0.0
+            N = len(p)
+            for b in range(bins):
+                m = (idx == b)
+                if m.any():
+                    ece += (m.mean()) * abs(float(np.mean(y[m])) - float(np.mean(p[m])))
+            return float(ece)
+        
+        # Train-vs-val AUC gap on the same ES split
+        p_tr_es_raw = np.clip(deep_auc.predict_proba(X_tr_es_df)[:, 1], 1e-12, 1-1e-12)
+        auc_tr_es   = auc_safe(y_tr_es.astype(int), p_tr_es_raw)
+        ece_va_es   = _ece(y_va_es.astype(int), p_va_raw, bins=10)
+        
+        NEEDS_HARDEN = (
+            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.20)
+            or (extreme_frac_raw > 0.70)
+            or (ece_va_es > 0.20)
+        )
+        if NEEDS_HARDEN:
+            st.warning({
+                "harden": "on",
+                "auc_gap_es": float(auc_tr_es - auc_va) if np.isfinite(auc_tr_es) and np.isfinite(auc_va) else None,
+                "extreme_frac_es": float(extreme_frac_raw),
+                "ece_val_es": float(ece_va_es),
+            })
+            best_auc_params = _overfit_harden(best_auc_params.copy())
+            best_ll_params  = _overfit_harden(best_ll_params.copy())
 
         def _overfit_harden(bp):
             bp = dict(bp)
