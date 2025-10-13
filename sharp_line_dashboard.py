@@ -8246,53 +8246,79 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         st.write(f"🎯 Brier:   train={brier_tr:.4f},  val={brier_val:.4f}")
         
         # ==== HOLDOUT: Calibration bins (quantile) + ROI per bin ======================
+        # ==== HOLDOUT: Calibration bins (quantile) + ROI per bin ======================
         st.markdown("#### 🎯 Calibration Bins (blended + calibrated)")
+        
+        # Strong shape/alignment guard
         assert p_hold_vec.shape[0] == y_hold_vec.shape[0] == len(hold_idx)
+        _hold_pos = np.asarray(hold_idx, dtype=int)
+        
         df_eval = pd.DataFrame({
-            "p":    np.clip(p_hold_vec, eps, 1 - eps),
-            "y":    y_hold_vec.astype(int),
-            "odds": pd.to_numeric(df_valid.iloc[np.asarray(hold_idx)]["Odds_Price"], errors="coerce"),
+            "p":    np.clip(np.asarray(p_hold_vec, float), eps, 1 - eps),
+            "y":    np.asarray(y_hold_vec, int),
+            "odds": pd.to_numeric(df_valid.iloc[_hold_pos]["Odds_Price"], errors="coerce"),
         }).dropna(subset=["p", "y"])
         
+        # Degeneracy check: nearly (or exactly) constant probabilities
         uniq_hold = np.unique(np.round(df_eval["p"].to_numpy(), 6)).size
         if uniq_hold < 5:
-            st.warning(f"⚠️ Holdout predictions are nearly discrete (unique≈{uniq_hold}). "
-                       "If this persists, check upstream constraints/regularization and calibrator inputs.")
+            st.warning(
+                f"⚠️ Holdout predictions are nearly discrete (unique≈{uniq_hold}). "
+                "If this persists, check upstream constraints/regularization and calibrator inputs."
+            )
         
-        try:
-            cuts = pd.qcut(df_eval["p"], q=10, duplicates="drop")
-        except Exception:
-            cuts = pd.cut(df_eval["p"], bins=np.linspace(0, 1, 11), include_lowest=True)
+        # If there's no variation, skip binning to avoid misleading output
+        if uniq_hold <= 1 or len(df_eval) == 0:
+            st.info("Holdout predictions are effectively constant; skipping calibration bins.")
+            st.dataframe(
+                pd.DataFrame(columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"]),
+                use_container_width=True
+            )
+        else:
+            # Try quantile bins; fall back to uniform bins
+            try:
+                cuts = pd.qcut(df_eval["p"], q=10, duplicates="drop")
+            except Exception:
+                cuts = pd.cut(df_eval["p"], bins=np.linspace(0.0, 1.0, 11), include_lowest=True)
         
-        def _roi_mean_inline(sub: pd.DataFrame) -> float:
-            if not sub["odds"].notna().any():
-                return float("nan")
-            odds = pd.to_numeric(sub["odds"], errors="coerce")
-            win  = sub["y"].astype(int)
-            profit_pos = odds.where(odds > 0, np.nan) / 100.0
-            profit_neg = 100.0 / odds.abs()
-            profit_on_win = np.where(odds > 0, profit_pos, profit_neg)
-            profit_on_win = pd.Series(profit_on_win, index=odds.index).fillna(0.0)
-            roi = win * profit_on_win - (1 - win) * 1.0
-            return float(roi.mean())
+            def _roi_mean_inline(sub: pd.DataFrame) -> float:
+                if not sub["odds"].notna().any():
+                    return float("nan")
+                odds = pd.to_numeric(sub["odds"], errors="coerce")
+                win  = sub["y"].astype(int)
+                # Profit on win (American odds)
+                profit_pos = odds.where(odds > 0, np.nan) / 100.0
+                profit_neg = 100.0 / odds.abs()
+                profit_on_win = np.where(odds > 0, profit_pos, profit_neg)
+                profit_on_win = pd.Series(profit_on_win, index=odds.index).fillna(0.0)
+                # ROI per bet (unit stake on each example)
+                roi = win * profit_on_win - (1 - win) * 1.0
+                return float(roi.mean())
         
-        gb = df_eval.groupby(cuts, observed=True, sort=False)
+            gb = df_eval.groupby(cuts, observed=True, sort=False)
+        
+            if getattr(gb, "ngroups", 0) == 0:
+                df_bins = pd.DataFrame(columns=["Prob Bin", "N", "Hit Rate", "Avg ROI (unit)", "Avg Pred P"])
+            else:
+                # Build columns explicitly as 1-D python lists
+                prob_bins = [f"{s.min():.2f}-{s.max():.2f}" for _, s in gb["p"]]
+                n_vals    = gb.size().astype(int).to_list()
+                hit_rate  = gb["y"].mean().astype(float).to_list()
+                avg_pred  = gb["p"].mean().astype(float).to_list()
+                avg_roi   = gb.apply(_roi_mean_inline).astype(float).to_list()
+        
+                df_bins = (pd.DataFrame({
+                    "Prob Bin": prob_bins,
+                    "N": n_vals,
+                    "Hit Rate": hit_rate,
+                    "Avg ROI (unit)": avg_roi,
+                    "Avg Pred P": avg_pred,
+                })
+                .sort_values("Avg Pred P")
+                .reset_index(drop=True))
+        
+            st.dataframe(df_bins, use_container_width=True)
 
-        prob_bin = gb["p"].agg(lambda s: f"{float(s.min()):.2f}-{float(s.max()):.2f}").reset_index(drop=True)
-        N        = gb.size().reset_index(drop=True)
-        hit_rate = gb["y"].mean().reset_index(drop=True)
-        avg_roi  = gb.apply(_roi_mean_inline).reset_index(drop=True)
-        avg_p    = gb["p"].mean().reset_index(drop=True)
-        
-        df_bins = pd.DataFrame({
-            "Prob Bin":        prob_bin.astype(str).tolist(),
-            "N":               N.astype(int).tolist(),
-            "Hit Rate":        hit_rate.astype(float).tolist(),
-            "Avg ROI (unit)":  pd.to_numeric(avg_roi, errors="coerce").astype(float).tolist(),
-            "Avg Pred P":      avg_p.astype(float).tolist(),
-        }).sort_values("Avg Pred P").reset_index(drop=True)
-        
-        st.dataframe(df_bins, use_container_width=True)
         
         # ---- Overfitting check (gaps) ------------------------------------------------
         auc_tr  = auc_train
