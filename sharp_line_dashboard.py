@@ -8276,13 +8276,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return float(roi.mean())
         
         gb = df_eval.groupby(cuts, observed=True, sort=False)
+
+        prob_bin = gb["p"].agg(lambda s: f"{float(s.min()):.2f}-{float(s.max()):.2f}").reset_index(drop=True)
+        N        = gb.size().reset_index(drop=True)
+        hit_rate = gb["y"].mean().reset_index(drop=True)
+        avg_roi  = gb.apply(_roi_mean_inline).reset_index(drop=True)
+        avg_p    = gb["p"].mean().reset_index(drop=True)
+        
         df_bins = pd.DataFrame({
-            "Prob Bin": gb["p"].apply(lambda s: f"{s.min():.2f}-{s.max():.2f}").values,
-            "N": gb.size().astype(int).values,
-            "Hit Rate": gb["y"].mean().values.astype(float),
-            "Avg ROI (unit)": gb.apply(_roi_mean_inline).values.astype(float),
-            "Avg Pred P": gb["p"].mean().values.astype(float),
+            "Prob Bin":        prob_bin.astype(str).tolist(),
+            "N":               N.astype(int).tolist(),
+            "Hit Rate":        hit_rate.astype(float).tolist(),
+            "Avg ROI (unit)":  pd.to_numeric(avg_roi, errors="coerce").astype(float).tolist(),
+            "Avg Pred P":      avg_p.astype(float).tolist(),
         }).sort_values("Avg Pred P").reset_index(drop=True)
+        
         st.dataframe(df_bins, use_container_width=True)
         
         # ---- Overfitting check (gaps) ------------------------------------------------
