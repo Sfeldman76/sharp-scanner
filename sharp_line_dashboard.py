@@ -7429,39 +7429,42 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "auc",     "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
        
         
+        # ======================= COMMON PARAMETER SPACE =======================
         param_space_common = dict(
             # allow more expressive, deeper trees
-            max_depth        = randint(2, 8),           # was 2–6 → +1 depth headroom
-            max_leaves       = randint(16, 256),        # was 16–192 → allows more complex interactions
-            learning_rate    = loguniform(0.006, 0.08), # slightly wider, still bounded away from too-small
+            max_depth        = randint(2, 8),            # 2–8 (was 2–6)
+            max_leaves       = randint(16, 256),         # 16–256 (was 16–192)
+            learning_rate    = loguniform(0.006, 0.08),  # slightly wider learning window
             
-            # widen stochasticity space
-            subsample        = uniform(0.40, 0.55),     # 0.40–0.95 (was fixed 0.45–0.45)
-            colsample_bytree = uniform(0.30, 0.55),     # 0.30–0.85 (was 0.35–0.45)
+            # stochastic sampling
+            subsample        = uniform(0.40, 0.55),      # 0.40–0.95 (was fixed 0.45)
+            colsample_bytree = uniform(0.30, 0.55),      # 0.30–0.85 (was 0.35–0.45)
             
-            # let splitter be more flexible
-            min_child_weight = loguniform(2, 256),      # 2–256 (was 3–128)
-            gamma            = loguniform(0.3, 25),     # 0.3–25 (was 0.5–20)
+            # splitter flexibility
+            min_child_weight = loguniform(2, 256),       # 2–256 (was 3–128)
+            gamma            = loguniform(0.3, 25),      # 0.3–25 (was 0.5–20)
             
-            # more room for regularization tradeoffs
-            reg_alpha        = loguniform(0.005, 20),   # 0.005–20 (was 0.01–10)
-            reg_lambda       = loguniform(2, 100),      # 2–100 (was 3–60)
+            # regularization trade-offs
+            reg_alpha        = loguniform(0.005, 20),    # 0.005–20 (was 0.01–10)
+            reg_lambda       = loguniform(2, 100),       # 2–100 (was 3–60)
             
-            # minor tweaks to bins / delta step
-            max_bin          = randint(128, 320),       # extend upper bound slightly
-            max_delta_step   = loguniform(0.2, 3),      # allow more flexibility on step scaling
+            # histogram and step granularity
+            max_bin          = randint(128, 320),        # extended upper bound
+            max_delta_step   = loguniform(0.2, 3),       # 0.2–3 for more flexible scaling
         )
-
         
-        params_ll  = dict(param_space_common)
-        params_auc = dict(param_space_common)
-        # AUC stream slightly stricter still
+        # ======================= STREAM-SPECIFIC ADJUSTMENTS =======================
+        
+        params_ll  = dict(param_space_common)  # LogLoss stream uses full loosened search space
+        params_auc = dict(param_space_common)  # AUC stream slightly more regularized / narrower
+        
         params_auc.update(dict(
-            subsample        = uniform(0.45, 0.35),    # 0.45–0.80
-            colsample_bytree = uniform(0.35, 0.35),    # 0.35–0.70
-            gamma            = loguniform(1.0, 16.0),
-            reg_lambda       = loguniform(5.0, 50.0),
+            subsample        = uniform(0.45, 0.35),     # 0.45–0.80 → less variance
+            colsample_bytree = uniform(0.35, 0.35),     # 0.35–0.70 → narrower feature sampling
+            gamma            = loguniform(1.0, 16.0),   # higher split gain threshold
+            reg_lambda       = loguniform(5.0, 50.0),   # tighter L2 regularization
         ))
+
 
         
         # Prefer Halving; fallback to RandomizedSearch
