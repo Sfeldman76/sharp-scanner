@@ -7209,13 +7209,25 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return -abs(p - 0.5)
         
         def build_deterministic_folds(
-            X, y, *, cv=None, groups=None, n_splits=5, min_pos=5, min_neg=5, seed=GLOBAL_SEED
+
+
+        def build_deterministic_folds(
+            X, y, *, cv=None, groups=None, times=None, n_splits=5, min_pos=5, min_neg=5, seed=GLOBAL_SEED
         ):
             yb = pd.Series(y, copy=False).astype(int).clip(0, 1).to_numpy()
         
             # (1) candidate splits
             if cv is not None:
-                raw = [(tr, va) for tr, va in cv.split(X, yb, groups)]
+                # Try passing times= into cv.split; fall back if the splitter doesn't accept it.
+                raw = None
+                if times is not None:
+                    try:
+                        raw = [(tr, va) for tr, va in cv.split(X, yb, groups=groups, times=times)]
+                    except TypeError:
+                        # Splitter doesn't take 'times' kwarg
+                        pass
+                if raw is None:
+                    raw = [(tr, va) for tr, va in cv.split(X, yb, groups=groups)]
                 if not raw and hasattr(cv, "n_splits"):
                     n_splits = int(cv.n_splits)
             else:
@@ -7238,12 +7250,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     if folds:
                         break
                 if not folds:
-                    raise RuntimeError("No class‑balanced CV split available.")
+                    raise RuntimeError("No class-balanced CV split available.")
         
             # (4) pick ES fold: val closest to 50/50
             folds.sort(key=lambda tv: _balance_score(tv[1], yb), reverse=True)
             tr_es_rel, va_es_rel = folds[0]
             return folds, tr_es_rel, va_es_rel
+
         
         def _best_rounds(clf):
             br = getattr(clf, "best_iteration", None)
@@ -7288,6 +7301,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             X_train, y_train,
             cv=cv,
             groups=g_train,
+            times=t_train,   
             n_splits=getattr(cv, 'n_splits', 5),
             min_pos=5, min_neg=5, seed=1337,
         )
@@ -7459,10 +7473,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         params_auc = dict(param_space_common)  # AUC stream slightly more regularized / narrower
         
         params_auc.update(dict(
-            subsample        = uniform(0.45, 0.35),     # 0.45–0.80 → less variance
-            colsample_bytree = uniform(0.35, 0.35),     # 0.35–0.70 → narrower feature sampling
-            gamma            = loguniform(1.0, 16.0),   # higher split gain threshold
-            reg_lambda       = loguniform(5.0, 50.0),   # tighter L2 regularization
+            max_depth        = randint(2, 6),          # shallower to reduce memorization
+            max_leaves       = randint(16, 160),
+            learning_rate    = loguniform(0.008, 0.05),
+            subsample        = uniform(0.55, 0.35),    # 0.55–0.90 (more averaging)
+            colsample_bytree = uniform(0.45, 0.35),    # 0.45–0.80
+            colsample_bynode = uniform(0.6, 0.3),      # inject noise per split
+            min_child_weight = loguniform(5, 256),
+            gamma            = loguniform(1.0, 25),
+            reg_alpha        = loguniform(0.01, 10),
+            reg_lambda       = loguniform(8.0, 80),
         ))
 
 
