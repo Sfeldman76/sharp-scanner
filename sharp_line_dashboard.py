@@ -2431,34 +2431,60 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 import numpy as np, pandas as pd
 
-def perm_auc_importance_ci(model, X_df, y, *, n_repeats=20, random_state=42):
+from sklearn.metrics import roc_auc_score
+import numpy as np, pandas as pd
+
+def perm_auc_importance_ci(
+    model, X_df: pd.DataFrame, y: np.ndarray, *,
+    n_repeats: int = 20,
+    random_state: int = 42,
+    stratify: bool = True
+):
+    """
+    Returns:
+      base_auc: float
+      df: DataFrame indexed by feature with columns:
+          perm_auc_drop_mean, perm_auc_drop_std, ci_lo, ci_hi
+    CI uses a normal approximation over repeated permutations.
+    If stratify=True, permutes each feature within class labels to preserve class balance.
+    """
     rng = np.random.RandomState(random_state)
-    base_auc = roc_auc_score(y, model.predict_proba(X_df)[:,1])
+    proba = model.predict_proba(X_df)[:, 1]
+    base_auc = roc_auc_score(y, proba)
 
     drops = []
-    for col in X_df.columns:
+    cols = list(X_df.columns)
+    idx0 = np.where(y == 0)[0]
+    idx1 = np.where(y == 1)[0]
+
+    for col in cols:
         vals = []
-        for _ in range(n_repeats):
+        c = X_df.columns.get_loc(col)
+        for _ in range(int(n_repeats)):
             Xp = X_df.copy()
-            # stratified permutation: permute within y strata to keep class balance
-            idx0 = np.where(y == 0)[0]; idx1 = np.where(y == 1)[0]
-            Xp.iloc[idx0, Xp.columns.get_loc(col)] = Xp.iloc[idx0][col].sample(
-                frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)
-            ).values
-            Xp.iloc[idx1, Xp.columns.get_loc(col)] = Xp.iloc[idx1][col].sample(
-                frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)
-            ).values
+            if stratify:
+                Xp.iloc[idx0, c] = Xp.iloc[idx0, c].sample(
+                    frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)
+                ).values
+                Xp.iloc[idx1, c] = Xp.iloc[idx1, c].sample(
+                    frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)
+                ).values
+            else:
+                Xp.iloc[:, c] = Xp.iloc[:, c].sample(
+                    frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)
+                ).values
 
-            vals.append(base_auc - roc_auc_score(y, model.predict_proba(Xp)[:,1]))
-        mu, sd = float(np.mean(vals)), float(np.std(vals, ddof=1))
-        # normal approx CI (fast); for small n, use bootstrap
-        ci_lo, ci_hi = mu - 1.96*sd/np.sqrt(n_repeats), mu + 1.96*sd/np.sqrt(n_repeats)
-        drops.append((col, mu, sd, ci_lo, ci_hi))
+            vals.append(base_auc - roc_auc_score(y, model.predict_proba(Xp)[:, 1]))
 
-    df = pd.DataFrame(drops, columns=["feature","perm_auc_drop_mean","perm_auc_drop_std","ci_lo","ci_hi"]).set_index("feature")
-    # optional: keep features where CI excludes ~0 (tolerate tiny negatives)
-    df["keep_perm"] = df["ci_lo"] > 0.001
+        mu = float(np.mean(vals))
+        sd = float(np.std(vals, ddof=1))
+        half = 1.96 * sd / np.sqrt(n_repeats) if n_repeats > 1 else 0.0
+        drops.append((col, mu, sd, mu - half, mu + half))
+
+    df = (pd.DataFrame(drops, columns=["feature","perm_auc_drop_mean","perm_auc_drop_std","ci_lo","ci_hi"])
+          .set_index("feature"))
     return base_auc, df
+
 
 
 def _to_float_1d(x):
