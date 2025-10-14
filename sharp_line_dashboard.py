@@ -2338,6 +2338,8 @@ def select_features_auto(
     corr_within=0.90,
     corr_global=0.92,
     max_feats_major=100,
+    sign_flip_max=0.35,    # NEW: drop features that flip sign across folds too often
+    shap_cv_max=1.00,      # NEW: drop features with unstable magnitude (std/mean)
     max_feats_small=80,
     sport_key: str = "NFL",
     must_keep: list[str] = None,
@@ -2370,7 +2372,21 @@ def select_features_auto(
         perm["shap_cv"] = 0.0
         rank_df = perm
         sel = list(perm.sort_values("avg_abs_shap", ascending=False).head(topk_per_fold).index)
+    # after you build rank_df (from SHAP or perm fallback), apply stability filter
+    # rank_df index = features, columns include: avg_abs_shap, presence, sign_flip_rate, shap_cv
+    filt = pd.Series(True, index=rank_df.index)
+    if "sign_flip_rate" in rank_df.columns:
+        filt &= (rank_df["sign_flip_rate"].fillna(1.0) <= float(sign_flip_max))
+    if "shap_cv" in rank_df.columns:
+        filt &= (rank_df["shap_cv"].fillna(1.0) <= float(shap_cv_max))
 
+    # keep at least the top-K by |SHAP| even if they barely miss stability, to avoid over-pruning
+    top_by_abs = rank_df.sort_values("avg_abs_shap", ascending=False).head(25).index
+    filt.loc[top_by_abs] = True
+
+    # apply
+    rank_df = rank_df.loc[filt].copy()
+    sel = [c for c in sel if c in rank_df.index]
     # ensure list, stable dedupe, intersect with columns
     sel = [c for c in dict.fromkeys(sel) if c in X_df_train.columns]
 
@@ -2405,10 +2421,44 @@ def select_features_auto(
     # 4) build final matrices
     feature_cols = list(final)
     summary = rank_df.loc[[c for c in feature_cols if c in rank_df.index]].copy()
+
+    
     return feature_cols, summary
 
 
 
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score
+import numpy as np, pandas as pd
+
+def perm_auc_importance_ci(model, X_df, y, *, n_repeats=20, random_state=42):
+    rng = np.random.RandomState(random_state)
+    base_auc = roc_auc_score(y, model.predict_proba(X_df)[:,1])
+
+    drops = []
+    for col in X_df.columns:
+        vals = []
+        for _ in range(n_repeats):
+            Xp = X_df.copy()
+            # stratified permutation: permute within y strata to keep class balance
+            idx0 = np.where(y == 0)[0]; idx1 = np.where(y == 1)[0]
+            Xp.iloc[idx0, Xp.columns.get_loc(col)] = Xp.iloc[idx0][col].sample(
+                frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)
+            ).values
+            Xp.iloc[idx1, Xp.columns.get_loc(col)] = Xp.iloc[idx1][col].sample(
+                frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)
+            ).values
+
+            vals.append(base_auc - roc_auc_score(y, model.predict_proba(Xp)[:,1]))
+        mu, sd = float(np.mean(vals)), float(np.std(vals, ddof=1))
+        # normal approx CI (fast); for small n, use bootstrap
+        ci_lo, ci_hi = mu - 1.96*sd/np.sqrt(n_repeats), mu + 1.96*sd/np.sqrt(n_repeats)
+        drops.append((col, mu, sd, ci_lo, ci_hi))
+
+    df = pd.DataFrame(drops, columns=["feature","perm_auc_drop_mean","perm_auc_drop_std","ci_lo","ci_hi"]).set_index("feature")
+    # optional: keep features where CI excludes ~0 (tolerate tiny negatives)
+    df["keep_perm"] = df["ci_lo"] > 0.001
+    return base_auc, df
 
 
 def _to_float_1d(x):
@@ -7374,6 +7424,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             corr_global=0.92,
             max_feats_major=100,
             max_feats_small=80,
+            sign_flip_max=0.35,     # <- tighter
+            shap_cv_max=1.00,       # <- reasonable
         )
         
         # 4) Rebuild matrices in the final selected order
@@ -7922,41 +7974,67 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ================= end refactor ======================================================
 
         # ================== Lightweight interpretation (optional, guarded) ==================
-        # ================== Lightweight interpretation (optional, guarded) ==================
         DEBUG_INTERP = True
         if DEBUG_INTERP:
-            # --- Permutation AUC importance (guard single-class) ---
+            
+            # --- Permutation AUC importance with 95% CI (guard single-class) ---
             if np.unique(y_va_es).size < 2:
                 st.warning("Permutation importance skipped: ES validation fold has a single class.")
+                perm_df = None
             else:
                 assert X_va_es.shape[1] == len(feature_cols)
-                # Ensure DataFrame with proper column names for interpretability
                 X_va_es_df = pd.DataFrame(X_va_es, columns=feature_cols)
         
-                # Our shim returns (base_auc, perm_df) and accepts flexible kwargs
-                base_auc, perm_df = perm_auc_importance(
+                base_auc, perm_df = perm_auc_importance_ci(
                     model_auc,
                     X_va_es_df,
                     y_va_es,
-                    n_repeats=10,           # repeats OK
-                    random_state=42         # rnd / random_state supported by shim
-                    # ← DO NOT pass sample weights or feature_names unless your helper supports them
+                    n_repeats=50,        # more repeats → tighter CI (20–100 typical)
+                    random_state=42,
+                    stratify=True
                 )
                 st.write({"perm_base_auc": float(base_auc)})
-                st.dataframe(perm_df.sort_values("perm_auc_drop_mean", ascending=False).head(25))
+        
+                # Mark “significant” features whose CI excludes ~0
+                thresh = 0.001
+                perm_df = perm_df.sort_values("perm_auc_drop_mean", ascending=False)
+                perm_df["significant"] = perm_df["ci_lo"] > thresh
+        
+                st.subheader("Permutation AUC importance with 95% CI")
+                st.dataframe(perm_df.head(25))
+        
+                # (Optional) show only significant ones on top
+                sig_top = perm_df[perm_df["significant"]].head(20)
+                if not sig_top.empty:
+                    try:
+                        import matplotlib.pyplot as plt
+                        fig, ax = plt.subplots(figsize=(8, 6))
+                        y_pos = np.arange(len(sig_top))
+                        ax.errorbar(
+                            sig_top["perm_auc_drop_mean"].values,
+                            y_pos,
+                            xerr=(sig_top["perm_auc_drop_mean"] - sig_top["ci_lo"],
+                                  sig_top["ci_hi"] - sig_top["perm_auc_drop_mean"]),
+                            fmt="o", capsize=3,
+                        )
+                        ax.set_yticks(y_pos)
+                        ax.set_yticklabels(sig_top.index.tolist())
+                        ax.set_xlabel("AUC drop (mean ± 95% CI)")
+                        ax.set_title("Significant permutation importances")
+                        plt.tight_layout()
+                        st.pyplot(fig, clear_figure=True)
+                    except Exception as e:
+                        st.info(f"(Optional plot skipped: {e})")
         
             # --- SHAP on fixed, time-correct slice ---
             ns = int(min(4000, X_va_es.shape[0]))
             if ns >= 10:  # small guard
-                # sample a contiguous slice from ES fold (or use rng choice for a broader sample)
                 X_shap = pd.DataFrame(X_va_es[:ns], columns=feature_cols)
         
                 import shap
                 expl = shap.TreeExplainer(model_auc, feature_perturbation="tree_path_dependent")
                 sv = expl.shap_values(X_shap)
-        
-                # binary models sometimes return [shap_class0, shap_class1]
-                if isinstance(sv, list):
+                if isinstance(sv, list):  # binary models sometimes return [class0, class1]
                     sv = sv[1]
                 sv = np.asarray(sv)
         
@@ -7969,19 +8047,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 st.dataframe(shap_top.head(25))
         
                 # --- PDP/ICE for top features (render via matplotlib for Streamlit) ---
-                top_feats = shap_top["feature"].head(6).tolist()
-                # Pass feature names directly (sklearn 1.2+ supports string names)
                 try:
                     from sklearn.inspection import PartialDependenceDisplay
                     import matplotlib.pyplot as plt
         
+                    top_feats = shap_top["feature"].head(6).tolist()
                     fig = plt.figure(figsize=(10, 8))
                     ax = plt.gca()
-                    # For binary classification, use predict_proba with target=1
-                    disp = PartialDependenceDisplay.from_estimator(
+                    PartialDependenceDisplay.from_estimator(
                         estimator=model_auc,
                         X=X_shap,
-                        features=top_feats,          # list of names is fine when X is a DataFrame
+                        features=top_feats,          # names OK when X is a DataFrame
                         kind="both",
                         grid_resolution=20,
                         response_method="predict_proba",
