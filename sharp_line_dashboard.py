@@ -7302,10 +7302,30 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # 1) Build a DataFrame view once
         X_df_train = pd.DataFrame(X_train, columns=list(features_pruned))
         
-        # 2) Pick a model prototype for SHAP/perm importance
-        #    Prefer your AUC stream; fall back to logloss if not present.
-        _model_proto = est_auc if 'est_auc' in locals() else est_ll
+        def _default_proto():
+            # Lightweight, single-threaded proto just for SHAP/perm importance
+            return XGBClassifier(
+                objective="binary:logistic",
+                eval_metric=["logloss","auc"],
+                tree_method="hist",
+                grow_policy="lossguide",
+                max_bin=256,
+                n_estimators=400,     # modest; SHAP uses this proto only
+                learning_rate=0.05,
+                subsample=0.7,
+                colsample_bytree=0.6,
+                n_jobs=1,            # avoid thread storms during CV/SHAP
+            )
         
+        try:
+            _model_proto = est_auc     # if already defined earlier in your script
+        except NameError:
+            try:
+                _model_proto = est_ll  # else try logloss stream if it exists
+            except NameError:
+                _model_proto = _default_proto()
+        # 2) Pick a model prototype for SHAP/perm importance
+  
         # 3) Run automatic selection (SHAP-stability with safe fallback to perm AUC),
         #    then family-wise and global correlation pruning, then league-aware cap.
         feature_cols, shap_summary = select_features_auto(
