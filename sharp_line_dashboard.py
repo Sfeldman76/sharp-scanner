@@ -2190,19 +2190,52 @@ def greedy_corr_prune(X: pd.DataFrame, candidates, rank_df: pd.DataFrame,
     return keep
 
 # ------- permutation AUC importance (fallback) -------
-def perm_auc_importance(model, X: pd.DataFrame, y: np.ndarray, n_repeats=5, rnd=42):
-    rng = np.random.RandomState(rnd)
-    base = roc_auc_score(y, model.predict_proba(X)[:,1])
+# --- Drop-in shim: make perm AUC robust to mixed call styles and return (base_auc, df)
+from sklearn.metrics import roc_auc_score
+
+def perm_auc_importance(model, X, y, *args, **kwargs):
+    """
+    Compatible with calls like:
+        base_auc, perm_df = perm_auc_importance(model, X_df, y, n_repeats=5, rnd=42)
+        base_auc, perm_df = perm_auc_importance(model, X_df, y, 5)  # positional repeats
+        base_auc, perm_df = perm_auc_importance(model, X_df, y, repeats=10, random_state=123)
+    Returns:
+        base_auc: float
+        perm_df : DataFrame with [feature, perm_auc_drop_mean, perm_auc_drop_std] indexed by feature
+    """
+    import numpy as np
+    import pandas as pd
+
+    # Resolve repeats / n_repeats from args/kwargs
+    n_repeats_kw = kwargs.pop("n_repeats", None)
+    repeats_kw   = kwargs.pop("repeats", None)
+    repeats_pos  = args[0] if len(args) >= 1 else None
+    repeats = repeats_kw if repeats_kw is not None else (n_repeats_kw if n_repeats_kw is not None else (repeats_pos if repeats_pos is not None else 5))
+
+    # Resolve RNG seed (rnd OR random_state)
+    rnd_kw          = kwargs.pop("rnd", None)
+    random_state_kw = kwargs.pop("random_state", None)
+    seed = random_state_kw if random_state_kw is not None else (rnd_kw if rnd_kw is not None else 42)
+    rng  = np.random.RandomState(seed)
+
+    # Compute base AUC once
+    proba = model.predict_proba(X)[:, 1]
+    base_auc = roc_auc_score(y, proba)
+
+    # Permutation drops
     drops = []
+    X = X.copy()
     for col in X.columns:
         vals = []
-        for _ in range(n_repeats):
+        for _ in range(int(repeats)):
             Xp = X.copy()
-            Xp[col] = Xp[col].sample(frac=1.0, replace=False, random_state=rng.randint(1e9)).values
-            vals.append(base - roc_auc_score(y, model.predict_proba(Xp)[:,1]))
+            Xp[col] = Xp[col].sample(frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)).values
+            vals.append(base_auc - roc_auc_score(y, model.predict_proba(Xp)[:, 1]))
         drops.append((col, float(np.mean(vals)), float(np.std(vals))))
-    df = pd.DataFrame(drops, columns=["feature", "perm_auc_drop_mean", "perm_auc_drop_std"]).set_index("feature")
-    return df
+    perm_df = (pd.DataFrame(drops, columns=["feature","perm_auc_drop_mean","perm_auc_drop_std"])
+                 .set_index("feature"))
+    return base_auc, perm_df
+
 
 # ------- SHAP stability (your function) -------
 def shap_stability_select(
@@ -7889,44 +7922,78 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ================= end refactor ======================================================
 
         # ================== Lightweight interpretation (optional, guarded) ==================
+        # ================== Lightweight interpretation (optional, guarded) ==================
         DEBUG_INTERP = True
         if DEBUG_INTERP:
-            # Permutation AUC importance (guard single‑class)
+            # --- Permutation AUC importance (guard single-class) ---
             if np.unique(y_va_es).size < 2:
                 st.warning("Permutation importance skipped: ES validation fold has a single class.")
             else:
                 assert X_va_es.shape[1] == len(feature_cols)
+                # Ensure DataFrame with proper column names for interpretability
+                X_va_es_df = pd.DataFrame(X_va_es, columns=feature_cols)
+        
+                # Our shim returns (base_auc, perm_df) and accepts flexible kwargs
                 base_auc, perm_df = perm_auc_importance(
-                    model_auc, X_va_es, y_va_es, w_va_es,
-                    n_repeats=10, feature_names=feature_cols,
+                    model_auc,
+                    X_va_es_df,
+                    y_va_es,
+                    n_repeats=10,           # repeats OK
+                    random_state=42         # rnd / random_state supported by shim
+                    # ← DO NOT pass sample weights or feature_names unless your helper supports them
                 )
                 st.write({"perm_base_auc": float(base_auc)})
-                st.dataframe(perm_df.head(25))
+                st.dataframe(perm_df.sort_values("perm_auc_drop_mean", ascending=False).head(25))
         
-            # SHAP on fixed, time‑correct slice
+            # --- SHAP on fixed, time-correct slice ---
             ns = int(min(4000, X_va_es.shape[0]))
             if ns >= 10:  # small guard
-                X_shap = X_va_es[:ns]
-                expl = shap.TreeExplainer(model_auc)
+                # sample a contiguous slice from ES fold (or use rng choice for a broader sample)
+                X_shap = pd.DataFrame(X_va_es[:ns], columns=feature_cols)
+        
+                import shap
+                expl = shap.TreeExplainer(model_auc, feature_perturbation="tree_path_dependent")
                 sv = expl.shap_values(X_shap)
+        
+                # binary models sometimes return [shap_class0, shap_class1]
+                if isinstance(sv, list):
+                    sv = sv[1]
+                sv = np.asarray(sv)
+        
                 shap_mean = np.abs(sv).mean(0)
-                shap_top = (pd.DataFrame({"feature": feature_cols, "mean|SHAP|": shap_mean})
-                              .sort_values("mean|SHAP|", ascending=False))
+                shap_top = (
+                    pd.DataFrame({"feature": feature_cols, "mean|SHAP|": shap_mean})
+                    .sort_values("mean|SHAP|", ascending=False)
+                )
                 st.subheader("SHAP (AUC model, ES fold)")
                 st.dataframe(shap_top.head(25))
         
-                # PDP/ICE for top features
+                # --- PDP/ICE for top features (render via matplotlib for Streamlit) ---
                 top_feats = shap_top["feature"].head(6).tolist()
-                feat_idx = [feature_cols.index(f) for f in top_feats if f in feature_cols]
-                if feat_idx:
-                    st.subheader("PDP/ICE (AUC model, ES fold)")
-                    X_va_es_df = pd.DataFrame(X_va_es, columns=feature_cols)  # ← build DF here
-                    PartialDependenceDisplay.from_estimator(
-                        model_auc, X_va_es_df, features=feat_idx,
-                        kind="both", grid_resolution=20, response_method="predict_proba"
+                # Pass feature names directly (sklearn 1.2+ supports string names)
+                try:
+                    from sklearn.inspection import PartialDependenceDisplay
+                    import matplotlib.pyplot as plt
+        
+                    fig = plt.figure(figsize=(10, 8))
+                    ax = plt.gca()
+                    # For binary classification, use predict_proba with target=1
+                    disp = PartialDependenceDisplay.from_estimator(
+                        estimator=model_auc,
+                        X=X_shap,
+                        features=top_feats,          # list of names is fine when X is a DataFrame
+                        kind="both",
+                        grid_resolution=20,
+                        response_method="predict_proba",
+                        target=1,
+                        ax=ax
                     )
+                    st.subheader("PDP/ICE (AUC model, ES fold)")
+                    st.pyplot(fig, clear_figure=True)
                     st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
-     
+                except Exception as e:
+                    st.warning(f"PDP/ICE rendering skipped: {e}")
+
 
         # Example:
         # Example (guarded):
