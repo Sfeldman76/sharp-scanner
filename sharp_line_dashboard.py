@@ -7208,7 +7208,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             p = float((y[idx] == 1).mean())
             return -abs(p - 0.5)
         
-        def build_deterministic_folds(
+  
 
 
         def build_deterministic_folds(
