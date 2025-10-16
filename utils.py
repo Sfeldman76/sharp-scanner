@@ -8164,43 +8164,106 @@ def detect_cross_market_sharp_support(
     SHARP_BOOKS,
     game_col="Game_Key",
     outcome_col="Outcome_Norm",
+    sharp_col=None,         # optional: let caller specify the signal column explicitly
 ):
     """
-    Compute cross-market sharp support with minimal allocations:
-    - No string concat keys
+    Compute cross-market sharp support with minimal allocations and schema-robustness.
+    - Resolves book/sharp/market columns defensively
+    - No string-concat keys
     - One groupby + one merge
-    - Safe categorical casting AFTER merge
     """
-    df = df_moves  # operate on the provided frame (caller controls copying if needed)
-    sharp_books = set(SHARP_BOOKS)
+    import numpy as np
+    import pandas as pd
 
-    # Ensure join keys exist
+    df = df_moves  # operate on provided frame
+
+    # --- 0) Preconditions on join keys
     if game_col not in df.columns or outcome_col not in df.columns:
         raise KeyError(f"Missing join keys: need '{game_col}' and '{outcome_col}' in df_moves")
 
-    # Build a boolean mask for "sharp rows"
-    mask = df["Book"].isin(sharp_books) & df["Sharp_Move_Signal"].astype(bool)
+    # --- 1) Resolve book column
+    def _resolve_book_col(d: pd.DataFrame) -> str:
+        for c in ("Book", "Book_Norm", "Book_Key", "Bookmaker", "Bookmaker_Norm"):
+            if c in d.columns:
+                return c
+        raise KeyError("Could not find a book column among ['Book','Book_Norm','Book_Key','Bookmaker','Bookmaker_Norm'].")
 
-    # Group on a skinny slice; count distinct markets and sharp books per (game, outcome)
+    book_col = _resolve_book_col(df)
+    sharp_books = set(SHARP_BOOKS)
+
+    # --- 2) Resolve market column
+    def _resolve_market_col(d: pd.DataFrame) -> str:
+        for c in ("Market", "Market_Norm", "Market_Type"):
+            if c in d.columns:
+                return c
+        # If truly missing, create a dummy single-market column to avoid crash
+        d["__MarketDummy__"] = "unknown"
+        return "__MarketDummy__"
+
+    market_col = _resolve_market_col(df)
+
+    # --- 3) Resolve sharp signal boolean
+    def _as_bool(s: pd.Series) -> pd.Series:
+        if s.dtype == bool:
+            return s.fillna(False)
+        # numeric or string-y truthy
+        try:
+            return s.fillna(0).astype(float) > 0
+        except Exception:
+            # last resort: string truthiness
+            return s.fillna("").astype(str).str.lower().isin(("true", "t", "yes", "y", "1"))
+
+    def _resolve_sharp_series(d: pd.DataFrame) -> pd.Series:
+        # If caller specified a column name and it's present, use it.
+        if sharp_col and sharp_col in d.columns:
+            return _as_bool(d[sharp_col])
+
+        # Common candidates (old & new names)
+        candidates = [
+            "Sharp_Move_Signal", "SharpMove_Signal", "Sharp_Move_Flag", "Has_Sharp_Signal",
+            "SharpSignal", "Sharp_Signal", "Active_Sharp_Signals", "Active_Sharp_Signal_Count",
+        ]
+        for c in candidates:
+            if c in d.columns:
+                return _as_bool(d[c])
+
+        # Heuristic fallback: any positive magnitude implies a sharp move on that row
+        mag_cols = [c for c in d.columns if c.startswith("SharpMove_Magnitude_")]
+        if not mag_cols:
+            # try looser match
+            mag_cols = [c for c in d.columns if ("sharp" in c.lower() and "magnitude" in c.lower())]
+
+        if mag_cols:
+            # rowwise "any > 0"
+            return (d[mag_cols].fillna(0).astype(float) > 0).any(axis=1)
+
+        # If we reach here, no signal available; return all False to keep pipeline alive.
+        return pd.Series(False, index=d.index)
+
+    sharp_series = _resolve_sharp_series(df)
+
+    # --- 4) Build mask of "sharp rows" on sharp books
+    mask = df[book_col].isin(sharp_books) & sharp_series
+
+    # --- 5) Group & aggregate per (game, outcome)
+    cols = [game_col, outcome_col, market_col, book_col]
     gb = (
-        df.loc[mask, [game_col, outcome_col, "Market", "Book"]]
+        df.loc[mask, cols]
           .groupby([game_col, outcome_col], observed=True)
           .agg(
-              CrossMarketSharpSupport=("Market", "nunique"),
-              Unique_Sharp_Books=("Book", "nunique"),
+              CrossMarketSharpSupport=(market_col, "nunique"),
+              Unique_Sharp_Books=(book_col, "nunique"),
           )
           .reset_index()
     )
 
-    # Downcast counts before merge
+    # --- 6) Merge back onto df and finalize types
     if not gb.empty:
         gb["CrossMarketSharpSupport"] = gb["CrossMarketSharpSupport"].astype("int16")
         gb["Unique_Sharp_Books"]      = gb["Unique_Sharp_Books"].astype("int16")
 
-    # ❌ No 'inplace' here — Pandas merge doesn't support it
     df = df.merge(gb, on=[game_col, outcome_col], how="left")
 
-    # Fill and finalize types
     if "CrossMarketSharpSupport" not in df.columns:
         df["CrossMarketSharpSupport"] = 0
     if "Unique_Sharp_Books" not in df.columns:
@@ -8209,12 +8272,10 @@ def detect_cross_market_sharp_support(
     df["CrossMarketSharpSupport"] = df["CrossMarketSharpSupport"].fillna(0).astype("int16")
     df["Unique_Sharp_Books"]      = df["Unique_Sharp_Books"].fillna(0).astype("int16")
 
-    # Final flag
+    # --- 7) Final composite flag
     df["Is_Reinforced_MultiMarket"] = (
         (df["CrossMarketSharpSupport"] >= 2) | (df["Unique_Sharp_Books"] >= 2)
     )
-
-    
 
     return df
 import io, gzip, logging, pickle, re, time
