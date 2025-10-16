@@ -2178,8 +2178,17 @@ def apply_compute_sharp_metrics_rowwise(
         n_ts = int(g['Snapshot_Timestamp'].notna().sum()) if 'Snapshot_Timestamp' in g else 0
         has_val  = 'Value' in g and g['Value'].notna().any()
         has_odds = 'Odds_Price' in g and g['Odds_Price'].notna().any()
-        if n_ts < 2 or not (has_val or has_odds):
-            continue  # skip: insufficient data to compute timing buckets reliably
+        
+        if n_ts < 2 and not (has_val or has_odds):
+            # Emit a zeroed record so merge creates the columns
+            append({
+                keys[0]: name[0], keys[1]: name[1], keys[2]: name[2], keys[3]: name[3],
+                'Open_Value': None, 'Open_Odds': None, 'Opening_Limit': None, 'First_Imp_Prob': None,
+                'Sharp_Move_Signal': 0, 'Sharp_Line_Magnitude': 0.0, 'Odds_Move_Magnitude': 0.0,
+                'Sharp_Limit_Jump': 0, 'Sharp_Limit_Total': 0.0,
+                'SharpMove_Timing_Dominant': 'unknown'
+            })
+            continue
 
         game_start    = g['Game_Start'].dropna().iloc[0] if 'Game_Start' in g and g['Game_Start'].notna().any() else None
         open_val      = g['Value'].dropna().iloc[0] if has_val else None
@@ -2459,7 +2468,9 @@ def compute_sharp_magnitude_by_time_bucket(df_all_snapshots: pd.DataFrame) -> pd
         return pd.DataFrame()
 
     keys = ['Game_Key', 'Market', 'Outcome', 'Bookmaker']
-    need = list(dict.fromkeys(keys + ['Limit', 'Value', 'Snapshot_Timestamp', 'Game_Start']))
+    need = list(dict.fromkeys(keys + ['Limit', 'Value', 'Odds_Price', 'Snapshot_Timestamp', 'Game_Start']))
+
+
     snaps = df_all_snapshots.loc[:, [c for c in need if c in df_all_snapshots.columns]].copy()
 
     # ---- normalize keys (string, lower) ----
@@ -4508,7 +4519,14 @@ def compute_snapshot_micro_features_training(
         "Book_PctRank_Line","Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
     ]
     out = out.merge(agg[keep], on=["Game_Key","Market","Bookmaker"], how="left", copy=False)
-
+    for c, dtype in [
+        ('Sharp_Move_Signal', 'float32'),
+        ('Sharp_Line_Magnitude', 'float32'),
+        ('Sharp_Limit_Jump', 'float32'),
+        ('Sharp_Limit_Total', 'float32'),
+    ]:
+        if c not in out.columns:
+            out[c] = np.float32(0.0)
     # Fill / downcast
     u8  = ["Two_Sided_Offered","Outlier_Flag_SharpBooks"]
     f32 = ["Implied_Hold_Book","Juice_Abs_Delta","Dist_To_Next_Key","Key_Corridor_Pressure",
