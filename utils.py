@@ -6670,19 +6670,24 @@ def apply_blended_sharp_score(
         df_canon['Rec_Line_Delta']   = np.where(df_canon['Is_Sharp_Book'] == 0, df_canon['Line_Delta'], 0.0)
         df_canon['Sharp_Line_Magnitude'] = df_canon['Sharp_Line_Delta'].abs()
         df_canon['Rec_Line_Magnitude']   = df_canon['Rec_Line_Delta'].abs()
-
+        # Odds → implied prob
         if 'Odds_Price' in df_canon.columns:
             df_canon['Odds_Price'] = pd.to_numeric(df_canon['Odds_Price'], errors='coerce')
         else:
             df_canon['Odds_Price'] = np.nan
         df_canon['Implied_Prob'] = df_canon['Odds_Price'].apply(implied_prob)
+        
+        # --- FIX: use Series default, not scalar ---
+        limits = pd.to_numeric(
+            df_canon.get('Sharp_Limit_Total', pd.Series(np.nan, index=df_canon.index)),
+            errors='coerce'
+        )
+        df_canon['High_Limit_Flag'] = (limits >= 10000).astype('int8')
+        
+        home_norm = df_canon.get('Home_Team_Norm', pd.Series('', index=df_canon.index))
+        df_canon['Is_Home_Team_Bet'] = (df_canon['Outcome'] == home_norm).astype('int8')
 
-        df_canon['High_Limit_Flag'] = (
-            (pd.to_numeric(df_canon.get('Sharp_Limit_Total', np.nan), errors='coerce') >= 10000).astype(int)
-        )
-        df_canon['Is_Home_Team_Bet'] = (
-            (df_canon['Outcome'] == df_canon.get('Home_Team_Norm','')).astype(int)
-        )
+     
         df_canon['Is_Favorite_Bet']  = (pd.to_numeric(df_canon['Value'], errors='coerce') < 0).astype(int)
 
         if 'Odds_Shift' in df_canon.columns and 'Sharp_Move_Signal' in df_canon.columns:
@@ -7982,41 +7987,120 @@ def assign_confidence_scores(df, market_weights):
     return df
 
 def summarize_consensus(df, SHARP_BOOKS, REC_BOOKS):
-    def summarize_group(g):
-        return pd.Series({
-            'Rec_Book_Consensus': g[g['Book'].isin(REC_BOOKS)]['Value'].mean(),
-            'Sharp_Book_Consensus': g[g['Book'].isin(SHARP_BOOKS)]['Value'].mean(),
-            'Rec_Open': g[g['Book'].isin(REC_BOOKS)]['Open_Value'].mean(),
-            'Sharp_Open': g[g['Book'].isin(SHARP_BOOKS)]['Open_Value'].mean()
-        })
+
+
+    d = df.copy()
+
+    # -------- column resolvers --------
+    def _first(colnames, default=None):
+        for c in colnames:
+            if c in d.columns:
+                return c
+        return default
+
+    book_col    = _first(['Book', 'Book_Norm', 'Book_Key', 'Bookmaker', 'Bookmaker_Norm'])
+    value_col   = _first(['Value', 'Line_Value', 'Spread_Value', 'Total_Value'])
+    open_col    = _first(['Open_Value', 'Open_Line_Value', 'OpenValue'])
+    event_col   = _first(['Event_Date', 'Snapshot_Date', 'Game_Date', 'feat_Game_Start'], 'Event_Date')
+    game_col    = _first(['Game', 'Game_Key', 'feat_Game_Key', 'game_key_clean'], 'Game')
+    market_col  = _first(['Market', 'Market_Norm', 'Market_Type'], 'Market')
+    outcome_col = _first(['Outcome', 'Outcome_Norm', 'feat_Team'], 'Outcome')
+
+    # score / confidence columns (optional)
+    score_col        = _first(['SharpBetScore', 'Blended_Sharp_Score', 'Sharp_Score',
+                               'BlendedScore', 'Model_Prob_Blend', 'p_blend',
+                               'Calibrated_Prob', 'Sharp_Prob', 'Model_Prob', 'Prob'])
+    conf_col         = _first(['Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Score',
+                               'Confidence_Score'])
+    tier_col         = _first(['Sharp_Confidence_Tier', 'Confidence_Tier', 'Tier'])
+
+    # -------- safety guards --------
+    # If required columns are missing, create safe defaults
+    if book_col is None:
+        d['__Book__'] = ''
+        book_col = '__Book__'
+    if value_col is None:
+        d['__Value__'] = np.nan
+        value_col = '__Value__'
+    if open_col is None:
+        d['__Open__'] = np.nan
+        open_col = '__Open__'
+    for c in (value_col, open_col):
+        d[c] = pd.to_numeric(d[c], errors='coerce')
+
+    keys = [event_col, game_col, market_col, outcome_col]
+
+    # -------- aggregate Rec vs Sharp means --------
+    rec_mask   = d[book_col].isin(set(REC_BOOKS)) if REC_BOOKS else pd.Series(False, index=d.index)
+    sharp_mask = d[book_col].isin(set(SHARP_BOOKS)) if SHARP_BOOKS else pd.Series(False, index=d.index)
+
+    rec_agg = (
+        d.loc[rec_mask, keys + [value_col, open_col]]
+         .groupby(keys, observed=True)
+         .agg(Rec_Book_Consensus=(value_col, 'mean'),
+              Rec_Open=(open_col, 'mean'))
+         .reset_index()
+    )
+    sharp_agg = (
+        d.loc[sharp_mask, keys + [value_col, open_col]]
+         .groupby(keys, observed=True)
+         .agg(Sharp_Book_Consensus=(value_col, 'mean'),
+              Sharp_Open=(open_col, 'mean'))
+         .reset_index()
+    )
 
     summary_df = (
-        df.groupby(['Event_Date', 'Game', 'Market', 'Outcome'])
-        .apply(summarize_group)
-        .reset_index()
+        rec_agg.merge(sharp_agg, on=keys, how='outer')
+               .rename(columns={event_col: 'Event_Date',
+                                game_col: 'Game',
+                                market_col: 'Market',
+                                outcome_col: 'Outcome'})
     )
 
+    # preserve your fields
     summary_df['Recommended_Outcome'] = summary_df['Outcome']
-    summary_df['Move_From_Open_Rec'] = (summary_df['Rec_Book_Consensus'] - summary_df['Rec_Open']).fillna(0)
+    summary_df['Move_From_Open_Rec']   = (summary_df['Rec_Book_Consensus']   - summary_df['Rec_Open']).fillna(0)
     summary_df['Move_From_Open_Sharp'] = (summary_df['Sharp_Book_Consensus'] - summary_df['Sharp_Open']).fillna(0)
 
-    sharp_scores = df[df['SharpBetScore'].notnull()][[
-        'Event_Date', 'Game', 'Market', 'Outcome',
-        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score', 'Sharp_Confidence_Tier'
-    ]].drop_duplicates()
+    # -------- attach scores / confidence if present --------
+    if score_col or conf_col or tier_col:
+        cols = ['Event_Date', 'Game', 'Market', 'Outcome']
+        extra = d.copy()
 
-    summary_df = summary_df.merge(
-        sharp_scores,
-        on=['Event_Date', 'Game', 'Market', 'Outcome'],
-        how='left'
+        sel = cols.copy()
+        if score_col: sel.append(score_col)
+        if conf_col:  sel.append(conf_col)
+        if tier_col:  sel.append(tier_col)
+
+        sharp_scores = (
+            extra[sel]
+            .drop_duplicates()
+        )
+
+        # rename optional columns to expected output names
+        rename_map = {}
+        if score_col: rename_map[score_col] = 'SharpBetScore'
+        if conf_col:  rename_map[conf_col]  = 'Enhanced_Sharp_Confidence_Score'
+        if tier_col:  rename_map[tier_col]  = 'Sharp_Confidence_Tier'
+        sharp_scores = sharp_scores.rename(columns=rename_map)
+
+        summary_df = summary_df.merge(sharp_scores, on=cols, how='left')
+
+    # fill if missing (keep your original behavior)
+    if 'SharpBetScore' not in summary_df.columns:
+        summary_df['SharpBetScore'] = 0.0
+    if 'Enhanced_Sharp_Confidence_Score' not in summary_df.columns:
+        summary_df['Enhanced_Sharp_Confidence_Score'] = 0.0
+    if 'Sharp_Confidence_Tier' not in summary_df.columns:
+        summary_df['Sharp_Confidence_Tier'] = '⚠️ Low'
+
+    summary_df[['SharpBetScore', 'Enhanced_Sharp_Confidence_Score']] = (
+        summary_df[['SharpBetScore', 'Enhanced_Sharp_Confidence_Score']].fillna(0)
     )
-
-    summary_df[['SharpBetScore', 'Enhanced_Sharp_Confidence_Score']] = summary_df[[
-        'SharpBetScore', 'Enhanced_Sharp_Confidence_Score'
-    ]].fillna(0)
     summary_df['Sharp_Confidence_Tier'] = summary_df['Sharp_Confidence_Tier'].fillna('⚠️ Low')
 
     return summary_df
+
 
 
 
