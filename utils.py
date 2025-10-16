@@ -6961,15 +6961,29 @@ def apply_blended_sharp_score(
             df_inverse['Line_Magnitude_Abs']  = df_inverse['Line_Move_Magnitude']
             df_inverse['Sharp_Line_Delta']    = np.where(df_inverse['Is_Sharp_Book'] == 1, df_inverse['Line_Delta'], 0)
             df_inverse['Rec_Line_Delta']      = np.where(df_inverse['Is_Sharp_Book'] == 0, df_inverse['Line_Delta'], 0)
-            df_inverse['Sharp_Line_Magnitude'] = df_inverse['Sharp_Line_Delta'].abs()
-            df_inverse['Rec_Line_Magnitude']   = df_inverse['Rec_Line_Delta'].abs()
-            df_inverse['High_Limit_Flag']      = (df_inverse.get('Sharp_Limit_Total', 0) >= 10000).astype(int)
-        
+          
+            # magnitudes (keep as-is but numeric-safe)
+            df_inverse['Sharp_Line_Magnitude'] = pd.to_numeric(df_inverse.get('Sharp_Line_Delta'), errors='coerce').abs()
+            df_inverse['Rec_Line_Magnitude']   = pd.to_numeric(df_inverse.get('Rec_Line_Delta'),   errors='coerce').abs()
+            
+            # High limit flag — use Series default aligned to index (NOT a scalar)
+            limits = pd.to_numeric(
+                df_inverse['Sharp_Limit_Total'] if 'Sharp_Limit_Total' in df_inverse.columns
+                else pd.Series(np.nan, index=df_inverse.index),
+                errors='coerce'
+            )
+            df_inverse['High_Limit_Flag'] = (limits >= 10_000).astype('int8')
+            
+            # Sharp move × odds shift (only if Odds_Shift exists)
             if 'Odds_Shift' in df_inverse.columns:
-                df_inverse['SharpMove_OddsShift'] = df_inverse['Sharp_Move_Signal'] * df_inverse['Odds_Shift']
+                sig = df_inverse['Sharp_Move_Signal'] if 'Sharp_Move_Signal' in df_inverse.columns else pd.Series(False, index=df_inverse.index)
+                df_inverse['SharpMove_OddsShift'] = sig.astype('int8') * pd.to_numeric(df_inverse['Odds_Shift'], errors='coerce').fillna(0)
+            
+            # Market leader × implied prob shift (only if Implied_Prob_Shift exists)
             if 'Implied_Prob_Shift' in df_inverse.columns:
-                df_inverse['MarketLeader_ImpProbShift'] = df_inverse['Market_Leader'] * df_inverse['Implied_Prob_Shift']
-        
+                leader = df_inverse['Market_Leader'] if 'Market_Leader' in df_inverse.columns else pd.Series(False, index=df_inverse.index)
+                df_inverse['MarketLeader_ImpProbShift'] = leader.astype('int8') * pd.to_numeric(df_inverse['Implied_Prob_Shift'], errors='coerce').fillna(0)
+
             df_inverse['SharpLimit_SharpBook']  = df_inverse['Is_Sharp_Book'] * df_inverse.get('Sharp_Limit_Total', 0)
             df_inverse['LimitProtect_SharpMag'] = df_inverse['LimitUp_NoMove_Flag'] * df_inverse['Sharp_Line_Magnitude']
             df_inverse['HomeRecLineMag']        = df_inverse['Is_Home_Team_Bet'] * df_inverse['Rec_Line_Magnitude']
