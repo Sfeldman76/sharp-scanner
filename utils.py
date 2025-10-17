@@ -6993,10 +6993,35 @@ def apply_blended_sharp_score(
             df_inverse['High_Limit_Flag'] = (limits >= 10_000).astype('int8')
             
             # Sharp move × odds shift (only if Odds_Shift exists)
-            if 'Odds_Shift' in df_inverse.columns:
-                sig = df_inverse['Sharp_Move_Signal'] if 'Sharp_Move_Signal' in df_inverse.columns else pd.Series(False, index=df_inverse.index)
-                df_inverse['SharpMove_OddsShift'] = sig.astype('int8') * pd.to_numeric(df_inverse['Odds_Shift'], errors='coerce').fillna(0)
+            sig = (
+                pd.to_numeric(
+                    df_inverse['Sharp_Move_Signal']
+                    if 'Sharp_Move_Signal' in df_inverse.columns
+                    else pd.Series(0, index=df_inverse.index),
+                    errors='coerce'
+                )
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0)
+                .astype('int8')
+            )
             
+            odds = (
+                pd.to_numeric(
+                    df_inverse['Odds_Shift']
+                    if 'Odds_Shift' in df_inverse.columns
+                    else pd.Series(0.0, index=df_inverse.index),
+                    errors='coerce'
+                )
+                .replace([np.inf, -np.inf], np.nan)
+                .fillna(0.0)
+                .astype('float32')
+            )
+            
+            # products/flags (no integer cast until inputs are clean)
+            df_inverse['SharpMove_OddsShift'] = (sig.astype('float32') * odds)
+            
+            df_inverse['SharpMove_Odds_Up']   = ((sig == 1) & (odds > 0)).astype('int8')
+            df_inverse['SharpMove_Odds_Down'] = ((sig == 1) & (odds < 0)).astype('int8')
             # Market leader × implied prob shift (only if Implied_Prob_Shift exists)
             if 'Implied_Prob_Shift' in df_inverse.columns:
                 leader = df_inverse['Market_Leader'] if 'Market_Leader' in df_inverse.columns else pd.Series(False, index=df_inverse.index)
