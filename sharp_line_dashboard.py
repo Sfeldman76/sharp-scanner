@@ -5039,19 +5039,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # overall cover signal (intentionally off for now)
         "Cover_Rate_Last5",
         "Cover_Rate_After_Win_Last5",
-        # "Cover_Rate_After_Loss_Last5",
+        "Cover_Rate_After_Loss_Last5",
         # situational cover rates (intentionally off for now)
-        # "Cover_Rate_Home_After_Home_Win_Last5",
-        # "Cover_Rate_Home_After_Home_Loss_Last5",
-        # "Cover_Rate_Home_After_Away_Win_Last5",
-        # "Cover_Rate_Home_After_Away_Loss_Last5",
-        # "Cover_Rate_Away_After_Home_Win_Last5",
-        # "Cover_Rate_Away_After_Home_Loss_Last5",
-        # "Cover_Rate_Away_After_Away_Win_Last5",
-        # "Cover_Rate_Away_After_Away_Loss_Last5",
+        "Cover_Rate_Home_After_Home_Win_Last5",
+        "Cover_Rate_Home_After_Home_Loss_Last5",
+        "Cover_Rate_Home_After_Away_Win_Last5",
+        "Cover_Rate_Home_After_Away_Loss_Last5",
+        "Cover_Rate_Away_After_Home_Win_Last5",
+        "Cover_Rate_Away_After_Home_Loss_Last5",
+        "Cover_Rate_Away_After_Away_Win_Last5",
+        "Cover_Rate_Away_After_Away_Loss_Last5",
         # margin distribution
-        #"ATS_Cover_Margin_Last5_Prior_Mean",
-        #"ATS_Cover_Margin_Last5_Prior_Std",
+        "ATS_Cover_Margin_Last5_Prior_Mean",
+        "ATS_Cover_Margin_Last5_Prior_Std",
         "Market_Bucket",
         "Market_OddsProb_Bucket"
     ]
@@ -6370,22 +6370,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         features = [
             # 🔹 Core sharp signals
             'Sharp_Move_Signal',
-            #'Sharp_Limit_Jump',#'Sharp_Time_Score','Book_lift_x_Sharp',
-            #'Book_lift_x_Magnitude',
+            'Sharp_Limit_Jump','Sharp_Time_Score','Book_lift_x_Sharp',
+            'Book_lift_x_Magnitude',
             'Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket','Market_Leader',#'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
-            #'Sharp_Line_Magnitude',
-            #'Is_Home_Team_Bet',
+            'Sharp_Line_Magnitude',
+            'Is_Home_Team_Bet',
             'Line_Moved_Toward_Team',
-            #'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
+            'Team_Implied_Prob_Gap_Home','Team_Implied_Prob_Gap_Away',
         
             # 🔹 Engineered odds shift decomposition
             'SharpMove_Odds_Up','SharpMove_Odds_Down','SharpMove_Odds_Mag',
         
             # 🔹 Engineered interactions
-            #'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',#'Sharp_Leads',
+            'MarketLeader_ImpProbShift','LimitProtect_SharpMag','Delta_Sharp_vs_Rec',#'Sharp_Leads',
         
             # 🔁 Reversal logic
             'Value_Reversal_Flag','Odds_Reversal_Flag',
@@ -6394,7 +6394,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             #'Late_Game_Steam_Flag',
         
             'Abs_Line_Move_From_Opening',
-            #'Abs_Odds_Move_From_Opening',
+            'Abs_Odds_Move_From_Opening',
             'Market_Mispricing',#'Spread_vs_H2H_Aligned','Total_vs_Spread_Contradiction',
             'Spread_vs_H2H_ProbGap','Total_vs_H2H_ProbGap','Total_vs_Spread_ProbGap',
             'CrossMarket_Prob_Gap_Exists',
@@ -6404,16 +6404,16 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Pct_Line_Move_From_Opening',#'Pct_Line_Move_Bin',
             'Potential_Overmove_Flag',
             'Potential_Overmove_Total_Pct_Flag',#'Mispricing_Flag',
-            #'Was_Line_Resistance_Broken',
+            'Was_Line_Resistance_Broken',
             'Line_Resistance_Crossed_Count','SharpMove_Resistance_Break',
         
             # 🧠 Cross-market alignment
             'Potential_Odds_Overmove_Flag',
-            #'Abs_Line_Move_Z','Pct_Line_Move_Z',
+            'Abs_Line_Move_Z','Pct_Line_Move_Z',
             'SmallBook_Limit_Skew',
             'SmallBook_Heavy_Liquidity_Flag','SmallBook_Limit_Skew_Flag',
-            #'Book_Reliability_Score',
-            #'Book_Reliability_Lift',#'Book_Reliability_x_Sharp',
+            'Book_Reliability_Score',
+            'Book_Reliability_Lift',#'Book_Reliability_x_Sharp',
             'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
         
@@ -6424,9 +6424,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
-            #'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
-            #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
-            #'TOT_Mispricing', 
+            'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
+            'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
+            'TOT_Mispricing', 
             'ATS_EB_Rate',
             'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
             'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
@@ -6494,9 +6494,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         extend_unique(features, ['Is_Night_Game','Is_PrimeTime','DOW_Sin'])
         
         extend_unique(features, [
-            #"Implied_Hold_Book",#"Two_Sided_Offered","Juice_Abs_Delta",
+            "Implied_Hold_Book","Two_Sided_Offered","Juice_Abs_Delta",
             "Dist_To_Next_Key","Key_Corridor_Pressure",
-            #"Book_PctRank_Line",
+            "Book_PctRank_Line",
             "Book_Line_Diff_vs_SharpMedian","Outlier_Flag_SharpBooks",
         ])
         
@@ -6508,7 +6508,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "Hybrid_Line_Imbalance_LateVsEarly",
             "Hybrid_Odds_LateShare","Hybrid_Odds_EarlyShare",
             "Hybrid_Line_Odds_Mag_Ratio",
-            #"Hybrid_Timing_Entropy_Line","Hybrid_Timing_Entropy_Odds",
+            "Hybrid_Timing_Entropy_Line","Hybrid_Timing_Entropy_Odds",
             "Abs_Line_Move_From_Opening","Abs_Odds_Move_From_Opening",
             # interactions (only exist if microstructure ran)
             "Corridor_x_LateShare_Line","Dist_x_LateShare_Line","PctRank_x_LateShare_Line",
