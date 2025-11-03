@@ -6,7 +6,9 @@ SPORTS = {
     "CFL": "americanfootball_cfl",
     "WNBA": "basketball_wnba",
     "NCAAF": "americanfootball_ncaaf",
-    "NFL": "americanfootball_nfl",     # National Football League
+    "NFL": "americanfootball_nfl", 
+    "NCAAM": "basketball_ncaam",
+    # National Football League
 
 }
 
