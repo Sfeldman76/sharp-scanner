@@ -1463,7 +1463,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         "football_ncaaf": "NCAAF",
         "basketball_wnba": "WNBA",
         "canadianfootball_cfl": "CFL",
-        "basketball_ncaaB": "NCAAB",
+        "basketball_ncaab": "NCAAB",
     }
     if 'Sport' in df.columns:
         df['Sport'] = df['Sport'].astype(str).str.strip()
@@ -3205,7 +3205,7 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
     out['Game_DOW'] = ts_local.dt.dayofweek  # Mon=0..Sun=6
     out['Is_Weekend'] = out['Game_DOW'].isin([5, 6]).astype(int)
 
-    SPORT_NIGHT_CUTOFF = {'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'ncaab': 18}
+    SPORT_NIGHT_CUTOFF = {'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'NCAAB': 18}
     cutoff = SPORT_NIGHT_CUTOFF.get(str(sport).upper(), 18)
     out['Is_Night_Game'] = (out['Game_Local_Hour'] >= cutoff).astype(int)
 
