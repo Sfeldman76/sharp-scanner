@@ -3205,7 +3205,7 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
     out['Game_DOW'] = ts_local.dt.dayofweek  # Mon=0..Sun=6
     out['Is_Weekend'] = out['Game_DOW'].isin([5, 6]).astype(int)
 
-    SPORT_NIGHT_CUTOFF = {'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'NCAAB': 18}
+    SPORT_NIGHT_CUTOFF = {'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'NCAAM': 18}
     cutoff = SPORT_NIGHT_CUTOFF.get(str(sport).upper(), 18)
     out['Is_Night_Game'] = (out['Game_Local_Hour'] >= cutoff).astype(int)
 
@@ -8728,7 +8728,7 @@ def normalize_sport(sport_key: str) -> str:
         "basketball_ncaam": "NCAAM",
         # Friendly aliases just in case
         "mlb": "MLB", "nfl": "NFL", "ncaaf": "NCAAF",
-        "nba": "NBA", "wnba": "WNBA", "cfl": "CFL","ncaam": "NCAAM",
+        "nba": "NBA", "wnba": "WNBA", "cfl": "CFL", "ncaam": "NCAAM",
     }
     return mapping.get(s, s.upper() or "MLB")
 
