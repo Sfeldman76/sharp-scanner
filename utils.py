@@ -98,7 +98,8 @@ SPORTS = {
     "CFL": "americanfootball_cfl",
     "WNBA": "basketball_wnba",
     "NCAAF": "americanfootball_ncaaf",
-    "NFL": "americanfootball_nfl",     # National Football League
+    "NFL": "americanfootball_nfl", 
+    "NCAAM": "basketball_NCAAM", # National Football League
    
 }
 
@@ -396,7 +397,7 @@ SPORT_ALIASES = {
     "NBA":   ["NBA", "BASKETBALL_NBA"],
     "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
     "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
-    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "COLLEGE_BASKETBALL"],
+    "NCAAM": ["NCAAM", "BASKETBALL_NCAAM", "COLLEGE_BASKETBALL"],
 }
 
 def update_power_ratings(
@@ -417,7 +418,7 @@ def update_power_ratings(
       - NBA   -> Kalman/DLM on point margin + market spread sensor (+ SoS)
       - WNBA  -> Kalman/DLM on point margin + market spread sensor (+ SoS)
       - CFL   -> Kalman/DLM on point margin + market spread sensor (+ SoS)
-      - NCAAB -> Ridge-Massey (scores-only)
+      - NCAAM -> Ridge-Massey (scores-only)
 
     Notes:
       • Ratings are stored as 1500 + points_rating so existing consumers keep working.
@@ -446,7 +447,7 @@ def update_power_ratings(
         "CFL":   dict(model="elo_kalman",   HFA_pts=1.6,  mov_cap=30, phi=0.96,
                       sigma_eta=6.5, sigma_y=13.5, sigma_spread=7.5,
                       sos_half_life_days=90, sos_gamma=0.7),
-        "NCAAB": dict(model="ridge_massey", HFA_pts=3.0,  mov_cap=25,
+        "NCAAM": dict(model="ridge_massey", HFA_pts=3.0,  mov_cap=25,
                       ridge_lambda=50.0, window_days=120),
     }
     BACKFILL_DAYS = 14
@@ -457,7 +458,7 @@ def update_power_ratings(
         "NBA":   "elo_kalman",
         "WNBA":  "elo_kalman",
         "CFL":   "elo_kalman",
-        "NCAAB": "ridge_massey",
+        "NCAAM": "ridge_massey",
     }
 
     # Use sharp books only for composite close (fall back safely if table absent/mismatch)
@@ -683,7 +684,7 @@ def update_power_ratings(
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('AMERICANFOOTBALL_NCAAF','FOOTBALL_NCAAF','NCAAF','CFB','COLLEGE_FOOTBALL') THEN 'NCAAF'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NBA','NBA') THEN 'NBA'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_WNBA','WNBA') THEN 'WNBA'
-            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NCAAB','NCAAB','COLLEGE_BASKETBALL') THEN 'NCAAB'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NCAAM','NCAAM','COLLEGE_BASKETBALL') THEN 'NCAAM'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('CFL','CANADIANFOOTBALL','CANADIAN_FOOTBALL') THEN 'CFL'
             ELSE COALESCE(CAST(t.Sport AS STRING), @default_sport)
           END AS Sport,
@@ -1462,6 +1463,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
         "football_ncaaf": "NCAAF",
         "basketball_wnba": "WNBA",
         "canadianfootball_cfl": "CFL",
+        "basketball_ncaam": "NCAAM",
     }
     if 'Sport' in df.columns:
         df['Sport'] = df['Sport'].astype(str).str.strip()
@@ -1473,6 +1475,7 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
             'FOOTBALL_NCAAF': 'NCAAF',
             'BASKETBALL_WNBA': 'WNBA',
             'CANADIANFOOTBALL_CFL': 'CFL',
+            'BASKETBALL_NCAAM': 'NCAAM',
         })
         df['Sport'] = df['Sport'].astype('category')
 
@@ -2273,14 +2276,14 @@ SPORT_ALIAS = {
     'AMERICANFOOTBALL_NFL': 'NFL',
     'AMERICANFOOTBALL_NCAAF': 'NCAAF',
     'BASKETBALL_NBA': 'NBA',
-    'BASKETBALL_NCAAB': 'NCAAB',
+    'BASKETBALL_NCAAM': 'NCAAM',
     'CFL': 'CFL',
     'MLB': 'MLB',
     'WNBA': 'WNBA',
     'NFL': 'NFL',
     'NCAAF': 'NCAAF',
     'NBA': 'NBA',
-    'NCAAB': 'NCAAB'
+    'NCAAM': 'NCAAM'
 }
 
 
@@ -2297,6 +2300,7 @@ KEY_LEVELS = {
     ("nba","totals"):   [210,212.5,215,217.5,220,222.5,225],
     ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
     ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
+    ("ncaam","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
 }
 
 def _keys_for(sport: str, market: str) -> np.ndarray:
@@ -2620,7 +2624,7 @@ def add_line_and_crossmarket_features(df):
     # === Normalize sport/market
     SPORT_ALIAS = {
         'MLB': 'MLB', 'NFL': 'NFL', 'CFL': 'CFL',
-        'WNBA': 'WNBA', 'NBA': 'NBA', 'NCAAF': 'NCAAF', 'NCAAB': 'NCAAB'
+        'WNBA': 'WNBA', 'NBA': 'NBA', 'NCAAF': 'NCAAF', 'NCAAM': 'NCAAM'
     }
     df['Sport_Norm'] = df['Sport'].map(SPORT_ALIAS).fillna(df['Sport'])
     df['Market_Norm'] = df['Market'].str.lower()
@@ -2968,7 +2972,7 @@ def compute_ev_features_sharp_vs_rec(
                 .drop_duplicates(["Game_Key","Market","Outcome_Norm"])
     truth = truth.merge(sig_map, on=["Game_Key","Market","Outcome_Norm"], how="left")
 
-    SPORT_SIGMA_DEFAULT = {'NFL':13.0,'NCAAF':14.0,'NBA':12.0,'WNBA':11.0,'MLB':5.5,'CFL':13.5,'NCAAB':11.5}
+    SPORT_SIGMA_DEFAULT = {'NFL':13.0,'NCAAF':14.0,'NBA':12.0,'WNBA':11.0,'MLB':5.5,'CFL':13.5,'NCAAM':11.5}
     def _pick_sigma(row):
         s = pd.to_numeric(row.get(sigma_col), errors="coerce")
         if pd.notna(s) and s > 0: return float(s)
@@ -3273,6 +3277,7 @@ SPORT_SPREAD_CFG = {
     "CFL":   dict(scale=np.float32(1.0),  HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
     # MLB ratings are 1500 + 400*(atk+dfn) → not run units; scale≈89–90 maps diff → runs
     "MLB":   dict(scale=np.float32(89.0), HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
+    "NCAAM":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(12.0)),
 }
 
 
@@ -4400,6 +4405,7 @@ TRAIN_KEY_LEVELS = {
     ("nba","totals"):   [210,212.5,215,217.5,220,222.5,225],
     ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
     ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
+    ("ncaam","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
 }
 
 def _keys_for_training(sport: str, market: str) -> np.ndarray:
@@ -5289,7 +5295,7 @@ def add_internal_consistency_features(
     # sport scale for converting spread -> favorite prob (tunable)
     k_map = {
         "NFL": 6.0, "NCAAF": 7.0, "CFL": 6.5,
-        "NBA": 12.0, "WNBA": 10.0, "NCAAB": 10.0,
+        "NBA": 12.0, "WNBA": 10.0, "NCAAM": 10.0,
         "MLB": 2.0,  # runline approximate (weakly used here)
         "NHL": 1.8,
     }
@@ -8719,9 +8725,10 @@ def normalize_sport(sport_key: str) -> str:
         "basketball_nba": "NBA",
         "basketball_wnba": "WNBA",
         "canadianfootball_cfl": "CFL",
+        "basketball_ncaam": "NCAAM",
         # Friendly aliases just in case
         "mlb": "MLB", "nfl": "NFL", "ncaaf": "NCAAF",
-        "nba": "NBA", "wnba": "WNBA", "cfl": "CFL",
+        "nba": "NBA", "wnba": "WNBA", "cfl": "CFL","ncaam": "NCAAM",
     }
     return mapping.get(s, s.upper() or "MLB")
 
@@ -9424,7 +9431,9 @@ def fetch_scores_and_backtest(sport_key, df_moves=None, days_back=3, api_key=API
               'NBA':             'NBA',
               'BASKETBALL_WNBA': 'WNBA',
               'WNBA':            'WNBA',
-    
+              'BASKETBALL_NCAAM':  'NCAAM',
+              'NCAAM':             'NCAAM',
+              
               # Football – NFL
               'AMERICANFOOTBALL_NFL': 'NFL',
               'FOOTBALL_NFL':         'NFL',
