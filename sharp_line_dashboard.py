@@ -220,7 +220,7 @@ SPORTS = {
     "CFL": "americanfootball_cfl",
     "NFL": "americanfootball_nfl",
     "NCAAF": "americanfootball_ncaaf",
-    "NCAAM": "basketball_ncaam"
+    "NCAAB": "basketball_ncaab"
 }
 SPORT_ALIAS_MAP = {
     "NBA": "basketball_nba",
@@ -229,7 +229,7 @@ SPORT_ALIAS_MAP = {
     "CFL": "americanfootball_cfl",
     "NFL": "americanfootball_nfl",
     "NCAAF": "americanfootball_ncaaf",
-    "NCAAM": "basketball_ncaam",
+    "NCAAB": "basketball_ncaab",
 }
 # Sharp limit anchor(s)
 SHARP_BOOKS_FOR_LIMITS = ['pinnacle']
@@ -418,7 +418,7 @@ SPORT_ALIASES = {
     "NBA":   ["NBA", "BASKETBALL_NBA", "BASKETBALL-NBA"],
     "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
     "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIANFOOTBALL_CFL"],
-    "NCAAM":   ["NCAAM", "BASKETBALL_NCAAM", "BASKETBALL-NCAAM"],
+    "NCAAB":   ["NCAAB", "BASKETBALL_NCAAB", "BASKETBALL-NCAAB"],
     # extend as needed
 }
 
@@ -1384,7 +1384,7 @@ def add_time_context_flags(df: pd.DataFrame, sport: str, local_tz: str = "Americ
 
     # 3) Night cutoffs by sport (tweak to taste)
     SPORT_NIGHT_CUTOFF = {
-        'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'NCAAM': 18
+        'MLB': 18, 'NFL': 18, 'CFL': 18, 'NBA': 18, 'WNBA': 18, 'NCAAF': 18, 'NCAAB': 18
     }
     night_cutoff = SPORT_NIGHT_CUTOFF.get(str(sport).upper(), 18)
     out['Is_Night_Game'] = (out['Game_Local_Hour'] >= night_cutoff).astype(int)
@@ -2921,7 +2921,7 @@ def enrich_power_for_training_lowmem(
         "NBA":   "elo_kalman",
         "WNBA":  "elo_kalman",
         "CFL":   "elo_kalman",
-        "NCAAM": "ridge_massey",
+        "NCAAB": "ridge_massey",
     }
 
     def _norm_team_series(s: pd.Series) -> pd.Series:
@@ -3186,7 +3186,7 @@ SPORT_SPREAD_CFG = {
     "CFL":   dict(scale=np.float32(1.0),  HFA=np.float32(1.6),  sigma_pts=np.float32(13.5)),
     # MLB ratings are not in run units (1500 + 400*(atk+dfn)), so scale ≈ 89–90.
     "MLB":   dict(scale=np.float32(89.0), HFA=np.float32(0.20), sigma_pts=np.float32(3.1)),
-    "NCAAM":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(11.5)),
+    "NCAAB":   dict(scale=np.float32(1.0),  HFA=np.float32(2.8),  sigma_pts=np.float32(11.5)),
 }
 
 
@@ -3506,7 +3506,7 @@ def totals_features_for_upcoming(df_scores: pd.DataFrame,
 
 
 SMALL_LEAGUES = {"WNBA", "CFL"}
-BIG_LEAGUES   = {"MLB", "NBA", "NFL", "NCAAF", "NCAAM"}  # extend as needed
+BIG_LEAGUES   = {"MLB", "NBA", "NFL", "NCAAF", "NCAAB"}  # extend as needed
 
 from scipy.stats import randint, uniform, loguniform
 # Requires:
@@ -3731,7 +3731,7 @@ TRAIN_KEY_LEVELS = {
     ("nba","totals"):   [210,212.5,215,217.5,220,222.5,225],
     ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
     ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
-    ("ncaam","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
+    ("ncaab","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
 }
 
 def _keys_for_training(sport: str, market: str) -> np.ndarray:
@@ -4732,7 +4732,7 @@ SPORT_PRIOR_CFG = {
     "MLB":  {"m_prior": 18, "alpha": 0.4, "min_n": 7},
     "CFL":  {"m_prior": 20, "alpha": 0.5, "min_n": 3},
     "NCAAF":{"m_prior": 22, "alpha": 0.55,"min_n": 3},
-    "NCAAM":{"m_prior": 16, "alpha": 0.5, "min_n": 5},
+    "NCAAB":{"m_prior": 16, "alpha": 0.5, "min_n": 5},
 }
 SPORT_PERIOD_OVERRIDES = {
     "NBA": {
@@ -6160,7 +6160,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'WNBA': 'WNBA',
             'NBA': 'NBA',
             'NCAAF': 'NCAAF',
-            'NCAAM': 'NCAAM',
+            'NCAAB': 'NCAAB',
         }
                 # === Sport and Market Normalization (if not already present)
         df_market['Sport_Norm'] = df_market['Sport'].map(SPORT_ALIAS).fillna(df_market['Sport'])
@@ -6717,7 +6717,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "MLB":   pd.Timedelta("2 hours"),
             "NBA":   pd.Timedelta("12 hours"),
             "NHL":   pd.Timedelta("2 hours"),
-            "NCAAM": pd.Timedelta("11 hours"),
+            "NCAAB": pd.Timedelta("11 hours"),
             "NFL":   pd.Timedelta("1 days"),
             "NCAAF": pd.Timedelta("1 days"),
             "WNBA":  pd.Timedelta("8 hours"),
@@ -11220,7 +11220,7 @@ from streamlit_situations_tab import render_current_situations_tab
 # ============================ SIDEBAR + TABS UI ================================
 sport = st.sidebar.radio(
     "Select a League",
-    ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA","NCAAM"],
+    ["General", "NFL", "NCAAF", "NBA", "MLB", "CFL", "WNBA","NCAAB"],
     key="sport_radio",
 )
 
@@ -11242,7 +11242,7 @@ scanner_flags = {
     "MLB": "run_mlb_scanner",
     "CFL": "run_cfl_scanner",
     "WNBA": "run_wnba_scanner",
-    "NCAAM": "run_ncaam_scanner"
+    "NCAAB": "run_ncaab_scanner"
 }
 scanner_widget_keys = {k: f"{v}" for k, v in scanner_flags.items()}
 
