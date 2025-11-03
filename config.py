@@ -7,7 +7,7 @@ SPORTS = {
     "WNBA": "basketball_wnba",
     "NCAAF": "americanfootball_ncaaf",
     "NFL": "americanfootball_nfl", 
-    "NCAAM": "basketball_ncaam",
+    "NCAAB": "basketball_ncaab",
     # National Football League
 
 }
