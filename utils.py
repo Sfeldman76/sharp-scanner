@@ -2301,6 +2301,7 @@ KEY_LEVELS = {
     ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
     ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
     ("ncaab","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
+    ("ncaab","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
 }
 
 def _keys_for(sport: str, market: str) -> np.ndarray:
@@ -4406,6 +4407,7 @@ TRAIN_KEY_LEVELS = {
     ("wnba","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
     ("cfl","totals"):   [44.5,46.5,48.5,50.5,52.5],
     ("ncaab","spreads"):  [1.5,2.5,3,4.5,5.5,6.5,7.5,9.5],
+    ("ncaab","totals"):  [158.5,160.5,162.5,164.5,166.5,168.5],
 }
 
 def _keys_for_training(sport: str, market: str) -> np.ndarray:
