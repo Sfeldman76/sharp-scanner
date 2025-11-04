@@ -5027,14 +5027,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     # === Columns we expect from the view ===
     history_cols = [
         "After_Win_Flag",#"Revenge_Flag",
-        "Current_Win_Streak_Prior",#"Current_Loss_Streak_Prior",
-        "H2H_Win_Pct_Prior",  # "Opp_WinPct_Prior",
-        # "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
-        # "Wins_Last5_Prior",
+        "Current_Win_Streak_Prior", "Current_Loss_Streak_Prior",
+        "H2H_Win_Pct_Prior",  "Opp_WinPct_Prior",
+        "Last_Matchup_Result","Last_Matchup_Margin","Days_Since_Last_Matchup",
+        "Wins_Last5_Prior",
         "Margin_Last5_Prior",
-        #"Days_Since_Last_Game",
-        # "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
-        # "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
+        "Days_Since_Last_Game",
+        "Close_Game_Rate_Prior","Blowout_Game_Rate_Prior",
+        "Avg_Home_Margin_Prior","Avg_Away_Margin_Prior",
     ]
     
     # === New team ATS cover / margin stats (prior-only, last-5) ===
