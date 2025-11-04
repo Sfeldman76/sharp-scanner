@@ -99,7 +99,7 @@ SPORTS = {
     "WNBA": "basketball_wnba",
     "NCAAF": "americanfootball_ncaaf",
     "NFL": "americanfootball_nfl", 
-    "NCAAB": "basketball_NCAAB", # National Football League
+    "NCAAB": "basketball_ncaab",  # ✅ was "basketball_NCAAB"
    
 }
 
@@ -397,8 +397,9 @@ SPORT_ALIASES = {
     "NBA":   ["NBA", "BASKETBALL_NBA"],
     "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
     "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
-    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "COLLEGE_BASKETBALL"],
+    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "BASKETBALL_NCAAM", "NCAAM", "COLLEGE_BASKETBALL"],  # ✅ added NCAAM forms
 }
+
 
 def update_power_ratings(
     bq: bigquery.Client,
@@ -684,7 +685,7 @@ def update_power_ratings(
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('AMERICANFOOTBALL_NCAAF','FOOTBALL_NCAAF','NCAAF','CFB','COLLEGE_FOOTBALL') THEN 'NCAAF'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NBA','NBA') THEN 'NBA'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_WNBA','WNBA') THEN 'WNBA'
-            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NCAAB','NCAAB','COLLEGE_BASKETBALL') THEN 'NCAAB'
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NCAAB','BASKETBALL_NCAAM','NCAAB','NCAAM','COLLEGE_BASKETBALL') THEN 'NCAAB'  -- ✅ added
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('CFL','CANADIANFOOTBALL','CANADIAN_FOOTBALL') THEN 'CFL'
             ELSE COALESCE(CAST(t.Sport AS STRING), @default_sport)
           END AS Sport,
@@ -1459,11 +1460,12 @@ def write_sharp_moves_to_master(df, table='sharp_data.sharp_moves_master'):
     SPORT_KEY_TO_LABEL = {
         "baseball_mlb": "MLB",
         "basketball_nba": "NBA",
-        "football_nfl": "NFL",
-        "football_ncaaf": "NCAAF",
+        "americanfootball_nfl": "NFL",   # ✅ was "football_nfl"
+        "americanfootball_ncaaf": "NCAAF",  # ✅ was "football_ncaaf"
         "basketball_wnba": "WNBA",
         "canadianfootball_cfl": "CFL",
         "basketball_ncaab": "NCAAB",
+        "basketball_ncaam": "NCAAB",     # ✅ new
     }
     if 'Sport' in df.columns:
         df['Sport'] = df['Sport'].astype(str).str.strip()
@@ -8720,7 +8722,6 @@ def write_to_bigquery(df, table='sharp_data.sharp_scores_full', force_replace=Fa
 def normalize_sport(sport_key: str) -> str:
     s = str(sport_key).strip().lower()
     mapping = {
-        # Odds API style keys
         "baseball_mlb": "MLB",
         "americanfootball_nfl": "NFL",
         "americanfootball_ncaaf": "NCAAF",
@@ -8728,9 +8729,11 @@ def normalize_sport(sport_key: str) -> str:
         "basketball_wnba": "WNBA",
         "canadianfootball_cfl": "CFL",
         "basketball_ncaab": "NCAAB",
-        # Friendly aliases just in case
+        "basketball_ncaam": "NCAAB",   # ✅ new
+        # Friendly aliases
         "mlb": "MLB", "nfl": "NFL", "ncaaf": "NCAAF",
-        "nba": "NBA", "wnba": "WNBA", "cfl": "CFL", "ncaab": "NCAAB",
+        "nba": "NBA", "wnba": "WNBA", "cfl": "CFL",
+        "ncaab": "NCAAB", "ncaam": "NCAAB",  # ✅ new
     }
     return mapping.get(s, s.upper() or "MLB")
 
