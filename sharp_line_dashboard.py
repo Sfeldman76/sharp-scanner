@@ -8094,12 +8094,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.02))))
             return bp
 
-        
-     
-
-           
-        
-
 
         def _ece(y_true, p, bins=10):
             y = np.asarray(y_true, float)
@@ -8123,6 +8117,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Optional: ECE on ES val as a calibration/overfit proxy
         ece_va_es = _ece(y_va_es.astype(int), p_va_raw, bins=10)
         
+       # ---------------- Overfit check on ES probe (single pass) -----------------
         # Heuristics: large AUC gap, very peaky probs, or poor ECE on ES val
         NEEDS_HARDEN = (
             (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.12)
@@ -8132,86 +8127,19 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         if NEEDS_HARDEN:
             best_auc_params = _overfit_harden(best_auc_params)
             best_ll_params  = _overfit_harden(best_ll_params)
-
-        # --- Final capacity / ES suggestions (stable defaults) ----------------------
-       
+        
+        # --- Final capacity / ES suggestions (stable defaults) -------------------
         # original es_suggest scaled by smaller multiplier → more aggressive early stop
         es_suggest = 0.04 * final_estimators_cap * (0.03 / max(learning_rate, 1e-6)) ** 0.5
-        
         # stricter lower/upper bounds (stops faster; avoids 1000+ rounds)
         early_stopping_rounds = int(
             np.clip(int(locals().get("early_stopping_rounds", es_suggest)),
                     50, max(100, final_estimators_cap // 4))
         )
-
-        # Re-apply monotone constraints after closed-loop param updates
-        MONO = {
-            'Abs_Line_Move_From_Opening': +1,
-            'Implied_Prob_Shift': +1,
-            'Was_Line_Resistance_Broken': +1,
-            'Line_Resistance_Crossed_Count': +1,
-            'Odds_Reversal_Flag': -1,
-        }
-        mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
-        if len(mono_vec) == len(feature_cols):
-            mono_str = f"({','.join(map(str, mono_vec))})"
-            params_ll_final['monotone_constraints']  = mono_str
-            params_auc_final['monotone_constraints'] = mono_str
-         
-        # --- Final params and models (single instantiation) -------------------------
-        # --- Final params and models (single instantiation) -------------------------
-        params_ll_final = {**base_kwargs, **best_ll_params}
-        params_ll_final.pop("predictor", None)
-        params_ll_final.update(
-            n_estimators=int(final_estimators_cap),
-            eval_metric="logloss",
-            max_bin=int(np.clip(DEEP_MAX_BIN, 128, 256)),
-            n_jobs=int(VCPUS),
-            learning_rate=learning_rate,
-            scale_pos_weight=scale_pos_weight,  # <-- add
-        )
         
-        params_auc_final = {**base_kwargs, **best_auc_params}
-        params_auc_final.pop("predictor", None)
-        params_auc_final.update(
-            n_estimators=int(final_estimators_cap),
-            eval_metric="logloss",
-            max_bin=int(np.clip(DEEP_MAX_BIN, 128, 256)),
-            n_jobs=int(VCPUS),
-            learning_rate=learning_rate,
-            scale_pos_weight=scale_pos_weight,  # <-- add
-        )
-        # clip histogram bins (less variance) + class weight in finals
-        params_ll_final.update(
-            max_bin= int(np.clip(DEEP_MAX_BIN, 128, 256)),
-            scale_pos_weight= scale_pos_weight,
-        )
-        params_auc_final.update(
-            max_bin= int(np.clip(DEEP_MAX_BIN, 128, 256)),
-            scale_pos_weight= scale_pos_weight,
-        )
-
-        
-        # --- Monotone constraints (only on features present) ------------------------
-        MONO = {
-            'Abs_Line_Move_From_Opening': +1,
-            'Implied_Prob_Shift': +1,
-            'Was_Line_Resistance_Broken': +1,
-            'Line_Resistance_Crossed_Count': +1,
-            # Leave these unconstrained to avoid flat-tops; reg handles damping better:
-            # 'Potential_Overmove_Flag': +1,
-            # 'Value_Reversal_Flag': -1,
-            'Odds_Reversal_Flag': -1,
-        }
-        mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
-        mono_str = f"({','.join(map(str, mono_vec))})"
-        if len(mono_vec) == len(feature_cols):
-            mono_str = f"({','.join(map(str, mono_vec))})"
-            params_ll_final['monotone_constraints']  = mono_str
-            params_auc_final['monotone_constraints'] = mono_str
-
-        # AUC stream closed-loop
-        auc_params, cap_auc, lr_auc, es_auc, hist_auc, auc_probe = auto_harden_until_ok(
+        # ---------------- Closed-loop hardening (AUC + LogLoss) -------------------
+        # These calls may further tighten params/cap/lr until signals are within targets.
+        auc_params, cap_auc, lr_auc, es_auc, hist_auc, _ = auto_harden_until_ok(
             X_tr_es_df=X_tr_es_df, y_tr_es=y_tr_es, w_tr_es=w_tr_es,
             X_va_es_df=X_va_es_df, y_va_es=y_va_es, w_va_es=w_va_es,
             base_kwargs=base_kwargs,
@@ -8220,12 +8148,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             start_lr=learning_rate,
             early_stop_default=early_stopping_rounds,
             scale_pos_weight=scale_pos_weight,
-            max_loops=3,  # try up to 3 harden steps
-            verbose=True
+            max_loops=3, verbose=True
         )
         
-        # LogLoss stream closed-loop
-        ll_params, cap_ll, lr_ll, es_ll, hist_ll, ll_probe = auto_harden_until_ok(
+        ll_params, cap_ll, lr_ll, es_ll, hist_ll, _ = auto_harden_until_ok(
             X_tr_es_df=X_tr_es_df, y_tr_es=y_tr_es, w_tr_es=w_tr_es,
             X_va_es_df=X_va_es_df, y_va_es=y_va_es, w_va_es=w_va_es,
             base_kwargs=base_kwargs,
@@ -8234,16 +8160,44 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             start_lr=learning_rate,
             early_stop_default=early_stopping_rounds,
             scale_pos_weight=scale_pos_weight,
-            max_loops=3,
-            verbose=True
+            max_loops=3, verbose=True
         )
         
-        # Final instantiate with closed-loop params/cap/lr
-        params_ll_final  = {**base_kwargs, **ll_params,  "n_estimators": cap_ll,  "learning_rate": lr_ll,
-                            "eval_metric": "logloss", "n_jobs": VCPUS, "scale_pos_weight": scale_pos_weight}
-        params_auc_final = {**base_kwargs, **auc_params, "n_estimators": cap_auc, "learning_rate": lr_auc,
-                            "eval_metric": "logloss", "n_jobs": VCPUS, "scale_pos_weight": scale_pos_weight}
-        # (retain your monotone constraints merge if lengths match)
+        # ---------------- Build final param dicts (now they exist) -----------------
+        VCPUS = max(1, int(VCPUS))
+        
+        params_auc_final = {
+            **base_kwargs, **auc_params,
+            "n_estimators": int(cap_auc),
+            "learning_rate": float(lr_auc),
+            "eval_metric": "logloss",
+            "n_jobs": VCPUS,
+            "scale_pos_weight": float(scale_pos_weight),
+            "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
+        }
+        params_ll_final = {
+            **base_kwargs, **ll_params,
+            "n_estimators": int(cap_ll),
+            "learning_rate": float(lr_ll),
+            "eval_metric": "logloss",
+            "n_jobs": VCPUS,
+            "scale_pos_weight": float(scale_pos_weight),
+            "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
+        }
+        
+        # ---------------- Apply monotone constraints ONCE --------------------------
+        MONO = {
+            'Abs_Line_Move_From_Opening': +1,
+            'Implied_Prob_Shift': +1,
+            'Was_Line_Resistance_Broken': +1,
+            'Line_Resistance_Crossed_Count': +1,
+            'Odds_Reversal_Flag': -1,
+        }
+        mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
+        if len(mono_vec) == len(feature_cols):
+            mono_str = "(" + ",".join(map(str, mono_vec)) + ")"
+            params_ll_final['monotone_constraints']  = mono_str
+            params_auc_final['monotone_constraints'] = mono_str
 
         
         # --- Instantiate & fit ------------------------------------------------------
