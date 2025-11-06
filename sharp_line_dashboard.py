@@ -157,7 +157,7 @@ from xgboost import XGBClassifier
 # put near your imports (only once)
 from sklearn.base import is_classifier as sk_is_classifier
 import sys, inspect, xgboost, sklearn
-
+from pandas.api.types import is_numeric_dtype
 import numpy as np
 from xgboost import XGBClassifier
 from dataclasses import dataclass, asdict
@@ -7931,23 +7931,43 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert X_va_es_df.shape[0] == len(y_va_es) == len(w_va_es)
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
         assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
-        
         # -------- Median-impute (from TRAIN) + low-variance drop (critical) --------
-        num_cols = [c for c in feature_cols if np.issubdtype(X_tr_es_df[c].dtype, np.number)]
-        med = X_tr_es_df[num_cols].median(numeric_only=True)
-        X_tr_es_df[num_cols] = X_tr_es_df[num_cols].fillna(med)
-        X_va_es_df[num_cols] = X_va_es_df[num_cols].fillna(med)
+       
         
-        var = X_tr_es_df[num_cols].var(numeric_only=True)
-        keep_cols = [c for c in num_cols if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
-        drop_cols = [c for c in num_cols if c not in keep_cols]
+        # numeric columns that are actually present
+        num_cols = [c for c in feature_cols if c in X_tr_es_df.columns and is_numeric_dtype(X_tr_es_df[c])]
+        
+        if num_cols:
+            med = X_tr_es_df[num_cols].median(numeric_only=True)
+            X_tr_es_df.loc[:, num_cols] = X_tr_es_df[num_cols].fillna(med)
+            X_va_es_df.loc[:, num_cols] = X_va_es_df[num_cols].fillna(med)
+        
+            var = X_tr_es_df[num_cols].var(numeric_only=True)
+            keep_cols = [c for c in num_cols if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
+            drop_cols = [c for c in num_cols if c not in keep_cols]
+        else:
+            keep_cols, drop_cols = [], []
+        
         if drop_cols:
-            try: st.info({"dropped_low_variance": drop_cols[:25], "n_drop": len(drop_cols)})
-            except Exception: pass
+            try:
+                st.info({"dropped_low_variance": drop_cols[:25], "n_drop": len(drop_cols)})
+            except Exception:
+                pass
             X_tr_es_df = X_tr_es_df.drop(columns=drop_cols, errors="ignore")
             X_va_es_df = X_va_es_df.drop(columns=drop_cols, errors="ignore")
-            feature_cols = [c for c in feature_cols if c in X_tr_es_df.columns]
         
+        # Build an ES-scoped feature list so we don’t mutate global feature_cols
+        feature_cols_es = [c for c in feature_cols if c in X_tr_es_df.columns]
+        
+        # --- Rebuild arrays from the cleaned DF views so shapes match feature list ---
+        X_tr_es = X_tr_es_df[feature_cols_es].to_numpy(copy=False)
+        X_va_es = X_va_es_df[feature_cols_es].to_numpy(copy=False)
+        
+        # Sanity: both train/val must now match the cleaned feature set
+        assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
+            f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
+
+       
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
@@ -8277,55 +8297,87 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # ================== Lightweight interpretation (optional, guarded) ==================
         DEBUG_INTERP = True
         if DEBUG_INTERP:
-            
+        
             # --- Permutation AUC importance with 95% CI (guard single-class) ---
+            perm_df = None
             if np.unique(y_va_es).size < 2:
-                st.warning("Permutation importance skipped: ES validation fold has a single class.")
-                perm_df = None
+                try: st.warning("Permutation importance skipped: ES validation fold has a single class.")
+                except Exception: pass
             else:
-                assert X_va_es.shape[1] == len(feature_cols)
-                X_va_es_df = pd.DataFrame(X_va_es, columns=feature_cols)
+                # Make sure arrays align to ES feature set
+                assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
+                    f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
         
-                base_auc, perm_df = perm_auc_importance_ci(
-                    model_auc,
-                    X_va_es_df,
-                    y_va_es,
-                    n_repeats=50,        # more repeats → tighter CI (20–100 typical)
-                    random_state=42,
-                    stratify=True
-                )
-                st.write({"perm_base_auc": float(base_auc)})
+                # Build a DF with proper column names (XGB likes real names for debugging)
+                X_va_es_df_perm = pd.DataFrame(X_va_es, columns=feature_cols_es)
         
-                # Mark “significant” features whose CI excludes ~0
-                thresh = 0.001
-                perm_df = perm_df.sort_values("perm_auc_drop_mean", ascending=False)
-                perm_df["significant"] = perm_df["ci_lo"] > thresh
+                # Pick a fitted model available at this point
+                perm_model = None
+                for cand in ("deep_auc", "model_auc", "deep_ll", "model_logloss"):
+                    if cand in locals() and hasattr(locals()[cand], "predict_proba"):
+                        perm_model = locals()[cand]
+                        break
         
+                if perm_model is None:
+                    try: st.warning("Permutation importance skipped: no fitted model available at this point.")
+                    except Exception: pass
+                else:
+                    # Some versions of helper don’t support 'stratify'
+                    kwargs = dict(n_repeats=50, random_state=42)
+                    try:
+                        import inspect
+                        if "stratify" in inspect.signature(perm_auc_importance_ci).parameters:
+                            kwargs["stratify"] = True
+                    except Exception:
+                        pass
+        
+                    base_auc, perm_df = perm_auc_importance_ci(
+                        perm_model,
+                        X_va_es_df_perm,
+                        y_va_es,
+                        **kwargs
+                    )
+                    try: st.write({"perm_base_auc": float(base_auc)})
+                    except Exception: pass
+        
+                    if perm_df is not None and not perm_df.empty:
+                        # Ensure a 'feature' column exists for labels
+                        if "feature" not in perm_df.columns:
+                            perm_df = perm_df.reset_index().rename(columns={"index": "feature"})
+                        perm_df = perm_df.sort_values("perm_auc_drop_mean", ascending=False)
+                        perm_df["significant"] = perm_df["ci_lo"] > 0.001
+        
+            # ---- Render only if we actually have results ----
+            if perm_df is not None and not perm_df.empty:
                 st.subheader("Permutation AUC importance with 95% CI")
                 st.dataframe(perm_df.head(25))
         
                 # (Optional) show only significant ones on top
-                sig_top = perm_df[perm_df["significant"]].head(20)
+                sig_top = perm_df.loc[perm_df["significant"]].head(20)
                 if not sig_top.empty:
                     try:
+                        import numpy as np
                         import matplotlib.pyplot as plt
                         fig, ax = plt.subplots(figsize=(8, 6))
                         y_pos = np.arange(len(sig_top))
                         ax.errorbar(
-                            sig_top["perm_auc_drop_mean"].values,
+                            sig_top["perm_auc_drop_mean"].to_numpy(),
                             y_pos,
-                            xerr=(sig_top["perm_auc_drop_mean"] - sig_top["ci_lo"],
-                                  sig_top["ci_hi"] - sig_top["perm_auc_drop_mean"]),
+                            xerr=(
+                                (sig_top["perm_auc_drop_mean"] - sig_top["ci_lo"]).to_numpy(),
+                                (sig_top["ci_hi"] - sig_top["perm_auc_drop_mean"]).to_numpy()
+                            ),
                             fmt="o", capsize=3,
                         )
                         ax.set_yticks(y_pos)
-                        ax.set_yticklabels(sig_top.index.tolist())
+                        ax.set_yticklabels(sig_top["feature"].tolist())
                         ax.set_xlabel("AUC drop (mean ± 95% CI)")
                         ax.set_title("Significant permutation importances")
                         plt.tight_layout()
                         st.pyplot(fig, clear_figure=True)
                     except Exception as e:
                         st.info(f"(Optional plot skipped: {e})")
+
         
             # --- SHAP on fixed, time-correct slice ---
             ns = int(min(4000, X_va_es.shape[0]))
