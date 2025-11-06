@@ -8401,66 +8401,140 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
             # --- SHAP on fixed, time-correct slice ---
-         
             # --- SHAP on fixed, time-correct ES slice ---
             ns = int(min(4000, X_va_es.shape[0]))
             if ns >= 10:  # small guard
                 ns = max(1, min(200, X_va_es.shape[0]))
             
-                # ✅ ES width must match ES feature list
+                # ES width must match ES feature list
                 assert X_va_es.shape[1] == len(feature_cols_es), \
                     f"ES val width {X_va_es.shape[1]} != len(feature_cols_es) {len(feature_cols_es)}"
             
-                # ✅ Build SHAP frame with ES feature names (NOT global feature_cols)
-                X_shap = pd.DataFrame(X_va_es[:ns], columns=list(feature_cols_es))  # <-- CHANGED
+                # Build ES-scoped frame
+                X_shap_df = pd.DataFrame(X_va_es[:ns], columns=list(feature_cols_es))
             
-                # Build explainer (TreeExplainer or fallback to generic)
-                try:
-                    expl = shap.TreeExplainer(model_auc, feature_perturbation="tree_path_dependent")
-                except Exception:
-                    expl = shap.Explainer(model_auc)
+                # Helper to read expected feature names from a fitted xgboost.sklearn model
+                def _expected_features(m):
+                    names = None
+                    try:
+                        # Prefer scikit wrapper's names if present
+                        names = getattr(m, "feature_names_in_", None)
+                        if names is not None:
+                            names = list(map(str, list(names)))
+                    except Exception:
+                        pass
+                    if not names:
+                        try:
+                            # Fallback: booster feature names
+                            names = list(m.get_booster().feature_names)
+                        except Exception:
+                            names = None
+                    return names
             
-                sv = expl.shap_values(X_shap)
-                if isinstance(sv, list):  # binary models sometimes return [class0, class1]
-                    sv = sv[1]
-                sv = np.asarray(sv)
+                # Try to use the most “final” AUC model first
+                shap_model = None
+                for cand in ("model_auc", "deep_auc", "model_logloss", "deep_ll"):
+                    if cand in locals() and hasattr(locals()[cand], "predict_proba"):
+                        shap_model = locals()[cand]
+                        break
             
-                shap_mean = np.abs(sv).mean(0)
+                if shap_model is None:
+                    try: st.warning("SHAP skipped: no fitted model available at this point.")
+                    except Exception: pass
+                else:
+                    exp_feats = _expected_features(shap_model)
             
-                # ✅ Use ES feature list to label SHAP output
-                shap_top = (
-                    pd.DataFrame({"feature": list(feature_cols_es), "mean|SHAP|": shap_mean})  # <-- CHANGED
-                    .sort_values("mean|SHAP|", ascending=False)
-                )
-                st.subheader("SHAP (AUC model, ES fold)")
-                st.dataframe(shap_top.head(25))
+                    def _align(df, exp):
+                        if not exp:
+                            # No expectation available → assume ES set is fine
+                            return df, df.columns.tolist()
+                        # Add any missing expected columns as zeros
+                        missing = [c for c in exp if c not in df.columns]
+                        if missing:
+                            for c in missing:
+                                df[c] = 0.0
+                        # Keep only expected columns and order them
+                        df = df[exp]
+                        return df, exp
             
-                # --- PDP/ICE for top features (use ES names that exist in X_shap) ---
-                try:
-                    from sklearn.inspection import PartialDependenceDisplay
-                    import matplotlib.pyplot as plt
+                    # First attempt: align ES DataFrame to the model's expected schema
+                    X_shap_df, used_cols = _align(X_shap_df.copy(), exp_feats)
             
-                    top_feats = [f for f in shap_top["feature"].head(6).tolist() if f in X_shap.columns]  # <-- CHANGED
-                    if top_feats:
-                        fig = plt.figure(figsize=(10, 8))
-                        ax = plt.gca()
-                        PartialDependenceDisplay.from_estimator(
-                            estimator=model_auc,
-                            X=X_shap,
-                            features=top_feats,          # names OK when X is a DataFrame
-                            kind="both",
-                            grid_resolution=20,
-                            response_method="predict_proba",
-                            target=1,
-                            ax=ax
+                    # If we still have a size mismatch at predict time, try the ES-trained model
+                    try:
+                        # Prefer TreeExplainer, fallback to generic
+                        try:
+                            expl = shap.TreeExplainer(shap_model, feature_perturbation="tree_path_dependent")
+                        except Exception:
+                            expl = shap.Explainer(shap_model)
+            
+                        sv = expl.shap_values(X_shap_df)
+                    except Exception as e_pred:
+                        # Try deep_auc (generally fit on ES DF) as a fallback
+                        fallback_model = None
+                        if "deep_auc" in locals() and hasattr(deep_auc, "predict_proba"):
+                            exp2 = _expected_features(deep_auc)
+                            # Rebuild from ES frame (already ES columns); align to deep_auc if needed
+                            X_shap_df2, used_cols2 = _align(X_shap_df.copy(), exp2)
+                            try:
+                                try:
+                                    expl = shap.TreeExplainer(deep_auc, feature_perturbation="tree_path_dependent")
+                                except Exception:
+                                    expl = shap.Explainer(deep_auc)
+                                sv = expl.shap_values(X_shap_df2)
+                                shap_model = deep_auc
+                                X_shap_df = X_shap_df2
+                                used_cols = used_cols2
+                            except Exception as e_pred2:
+                                try:
+                                    st.warning(f"SHAP skipped (both models failed): {e_pred2}")
+                                except Exception:
+                                    pass
+                                sv = None
+                        else:
+                            try: st.warning(f"SHAP skipped: {e_pred}")
+                            except Exception: pass
+                            sv = None
+            
+                    if sv is not None:
+                        if isinstance(sv, list):  # binary models sometimes return [class0, class1]
+                            sv = sv[1]
+                        sv = np.asarray(sv)
+            
+                        shap_mean = np.abs(sv).mean(0)
+                        shap_top = (
+                            pd.DataFrame({"feature": used_cols, "mean|SHAP|": shap_mean})
+                            .sort_values("mean|SHAP|", ascending=False)
                         )
-                        st.subheader("PDP/ICE (AUC model, ES fold)")
-                        st.pyplot(fig, clear_figure=True)
-                        st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
-                    else:
-                        st.info("PDP/ICE skipped: no top features available in ES column set.")
-                except Exception as e:
-                    st.warning(f"PDP/ICE rendering skipped: {e}")
+                        st.subheader("SHAP (AUC model, ES fold)")
+                        st.dataframe(shap_top.head(25))
+            
+                        # PDP/ICE for top features (ensure names exist in the DataFrame)
+                        try:
+                            from sklearn.inspection import PartialDependenceDisplay
+                            import matplotlib.pyplot as plt
+            
+                            top_feats = [f for f in shap_top["feature"].head(6).tolist() if f in X_shap_df.columns]
+                            if top_feats:
+                                fig = plt.figure(figsize=(10, 8))
+                                ax = plt.gca()
+                                PartialDependenceDisplay.from_estimator(
+                                    estimator=shap_model,
+                                    X=X_shap_df,
+                                    features=top_feats,
+                                    kind="both",
+                                    grid_resolution=20,
+                                    response_method="predict_proba",
+                                    target=1,
+                                    ax=ax
+                                )
+                                st.subheader("PDP/ICE (AUC model, ES fold)")
+                                st.pyplot(fig, clear_figure=True)
+                                st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
+                            else:
+                                st.info("PDP/ICE skipped: no top features available in SHAP frame.")
+                        except Exception as e:
+                            st.warning(f"PDP/ICE rendering skipped: {e}")
 
 
 
