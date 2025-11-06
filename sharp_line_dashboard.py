@@ -8401,48 +8401,67 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         
             # --- SHAP on fixed, time-correct slice ---
+         
+            # --- SHAP on fixed, time-correct ES slice ---
             ns = int(min(4000, X_va_es.shape[0]))
             if ns >= 10:  # small guard
-                X_shap = pd.DataFrame(X_va_es[:ns], columns=feature_cols)
-        
-                
-                expl = shap.TreeExplainer(model_auc, feature_perturbation="tree_path_dependent")
+                ns = max(1, min(200, X_va_es.shape[0]))
+            
+                # ✅ ES width must match ES feature list
+                assert X_va_es.shape[1] == len(feature_cols_es), \
+                    f"ES val width {X_va_es.shape[1]} != len(feature_cols_es) {len(feature_cols_es)}"
+            
+                # ✅ Build SHAP frame with ES feature names (NOT global feature_cols)
+                X_shap = pd.DataFrame(X_va_es[:ns], columns=list(feature_cols_es))  # <-- CHANGED
+            
+                # Build explainer (TreeExplainer or fallback to generic)
+                try:
+                    expl = shap.TreeExplainer(model_auc, feature_perturbation="tree_path_dependent")
+                except Exception:
+                    expl = shap.Explainer(model_auc)
+            
                 sv = expl.shap_values(X_shap)
                 if isinstance(sv, list):  # binary models sometimes return [class0, class1]
                     sv = sv[1]
                 sv = np.asarray(sv)
-        
+            
                 shap_mean = np.abs(sv).mean(0)
+            
+                # ✅ Use ES feature list to label SHAP output
                 shap_top = (
-                    pd.DataFrame({"feature": feature_cols, "mean|SHAP|": shap_mean})
+                    pd.DataFrame({"feature": list(feature_cols_es), "mean|SHAP|": shap_mean})  # <-- CHANGED
                     .sort_values("mean|SHAP|", ascending=False)
                 )
                 st.subheader("SHAP (AUC model, ES fold)")
                 st.dataframe(shap_top.head(25))
-        
-                # --- PDP/ICE for top features (render via matplotlib for Streamlit) ---
+            
+                # --- PDP/ICE for top features (use ES names that exist in X_shap) ---
                 try:
                     from sklearn.inspection import PartialDependenceDisplay
                     import matplotlib.pyplot as plt
-        
-                    top_feats = shap_top["feature"].head(6).tolist()
-                    fig = plt.figure(figsize=(10, 8))
-                    ax = plt.gca()
-                    PartialDependenceDisplay.from_estimator(
-                        estimator=model_auc,
-                        X=X_shap,
-                        features=top_feats,          # names OK when X is a DataFrame
-                        kind="both",
-                        grid_resolution=20,
-                        response_method="predict_proba",
-                        target=1,
-                        ax=ax
-                    )
-                    st.subheader("PDP/ICE (AUC model, ES fold)")
-                    st.pyplot(fig, clear_figure=True)
-                    st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
+            
+                    top_feats = [f for f in shap_top["feature"].head(6).tolist() if f in X_shap.columns]  # <-- CHANGED
+                    if top_feats:
+                        fig = plt.figure(figsize=(10, 8))
+                        ax = plt.gca()
+                        PartialDependenceDisplay.from_estimator(
+                            estimator=model_auc,
+                            X=X_shap,
+                            features=top_feats,          # names OK when X is a DataFrame
+                            kind="both",
+                            grid_resolution=20,
+                            response_method="predict_proba",
+                            target=1,
+                            ax=ax
+                        )
+                        st.subheader("PDP/ICE (AUC model, ES fold)")
+                        st.pyplot(fig, clear_figure=True)
+                        st.caption(f"PDP/ICE for: {', '.join(top_feats)}")
+                    else:
+                        st.info("PDP/ICE skipped: no top features available in ES column set.")
                 except Exception as e:
                     st.warning(f"PDP/ICE rendering skipped: {e}")
+
 
 
         # Example:
