@@ -8152,7 +8152,20 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     50, max(100, final_estimators_cap // 4))
         )
 
-        
+        # Re-apply monotone constraints after closed-loop param updates
+        MONO = {
+            'Abs_Line_Move_From_Opening': +1,
+            'Implied_Prob_Shift': +1,
+            'Was_Line_Resistance_Broken': +1,
+            'Line_Resistance_Crossed_Count': +1,
+            'Odds_Reversal_Flag': -1,
+        }
+        mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
+        if len(mono_vec) == len(feature_cols):
+            mono_str = f"({','.join(map(str, mono_vec))})"
+            params_ll_final['monotone_constraints']  = mono_str
+            params_auc_final['monotone_constraints'] = mono_str
+         
         # --- Final params and models (single instantiation) -------------------------
         # --- Final params and models (single instantiation) -------------------------
         params_ll_final = {**base_kwargs, **best_ll_params}
