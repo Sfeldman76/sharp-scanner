@@ -7748,64 +7748,56 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
         # --------- Capacity knobs (looser search; still guarded later) ----------
-        SEARCH_N_EST    = 900           # was 512
+        SEARCH_N_EST    = 900
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 2200          # was 1600
+        DEEP_N_EST      = 2200
         DEEP_MAX_BIN    = 256
-        EARLY_STOP      = 120           # was 200 → earlier plateau detection during probe
-        HALVING_FACTOR  = 2             # was 3 → fewer configs killed each round
-        MIN_RESOURCES   = 16            # was 32 → more configs admitted cheaply
+        EARLY_STOP      = 120                   # earlier plateau detection during probe
+        HALVING_FACTOR  = 2
+        MIN_RESOURCES   = 16
         VCPUS           = get_vcpus()
         
+        # --- Estimators for search (keep n_jobs=1 for parallel CV) ---
         est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "logloss", "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
         est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "auc",     "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
-       
         
         # ======================= COMMON PARAMETER SPACE =======================
         param_space_common = dict(
-            # allow more expressive, deeper trees
-            max_depth        = randint(2, 8),            # 2–8 (was 2–6)
-            max_leaves       = randint(16, 256),         # 16–256 (was 16–192)
-            learning_rate    = loguniform(0.006, 0.08),  # slightly wider learning window
-            
-            # stochastic sampling
-            subsample        = uniform(0.40, 0.55),      # 0.40–0.95 (was fixed 0.45)
-            colsample_bytree = uniform(0.30, 0.55),      # 0.30–0.85 (was 0.35–0.45)
-            
-            # splitter flexibility
-            min_child_weight = loguniform(2, 256),       # 2–256 (was 3–128)
-            gamma            = loguniform(0.3, 25),      # 0.3–25 (was 0.5–20)
-            
-            # regularization trade-offs
-            reg_alpha        = loguniform(0.005, 20),    # 0.005–20 (was 0.01–10)
-            reg_lambda       = loguniform(2, 100),       # 2–100 (was 3–60)
-            
-            # histogram and step granularity
-            max_bin          = randint(128, 320),        # extended upper bound
-            max_delta_step   = loguniform(0.2, 3),       # 0.2–3 for more flexible scaling
+            max_depth        = randint(2, 8),
+            max_leaves       = randint(16, 256),
+            learning_rate    = loguniform(0.006, 0.08),
+        
+            subsample        = uniform(0.40, 0.55),     # 0.40–0.95 via width
+            colsample_bytree = uniform(0.30, 0.55),     # 0.30–0.85 via width
+            colsample_bynode = uniform(0.30, 0.55),
+        
+            min_child_weight = loguniform(2, 256),
+            gamma            = loguniform(0.3, 25),
+        
+            reg_alpha        = loguniform(0.005, 20),
+            reg_lambda       = loguniform(2, 100),
+        
+            max_bin          = randint(128, 320),
+            max_delta_step   = loguniform(0.2, 3),
         )
         
         # ======================= STREAM-SPECIFIC ADJUSTMENTS =======================
-        
-        params_ll  = dict(param_space_common)  # LogLoss stream uses full loosened search space
-        params_auc = dict(param_space_common)  # AUC stream slightly more regularized / narrower
-        
+        params_ll  = dict(param_space_common)  # LogLoss stream (wider)
+        params_auc = dict(param_space_common)  # AUC stream (slightly narrower/safer)
         params_auc.update(dict(
-            max_depth        = randint(2, 6),          # shallower to reduce memorization
+            max_depth        = randint(2, 6),
             max_leaves       = randint(16, 160),
             learning_rate    = loguniform(0.008, 0.05),
-            subsample        = uniform(0.55, 0.35),    # 0.55–0.90 (more averaging)
-            colsample_bytree = uniform(0.45, 0.35),    # 0.45–0.80
-            colsample_bynode = uniform(0.6, 0.3),      # inject noise per split
+            subsample        = uniform(0.55, 0.35),     # 0.55–0.90
+            colsample_bytree = uniform(0.45, 0.35),     # 0.45–0.80
+            colsample_bynode = uniform(0.45, 0.35),
             min_child_weight = loguniform(5, 256),
             gamma            = loguniform(1.0, 25),
             reg_alpha        = loguniform(0.01, 10),
             reg_lambda       = loguniform(8.0, 80),
         ))
-
-
         
-        # Prefer Halving; fallback to RandomizedSearch
+        # ---- Search (Prefer Halving; fallback to RandomizedSearch) ----
         try:
             rs_ll = HalvingRandomSearchCV(
                 estimator=est_ll,
@@ -7842,7 +7834,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 search_trials = _resolve_search_trials(sport, X_train.shape[0])
             search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
             search_trials = max(50, int(search_trials * 1.2))
-        
             rs_ll = RandomizedSearchCV(
                 estimator=est_ll,
                 param_distributions=params_ll,
@@ -7873,7 +7864,6 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_auc_params = rs_auc.best_params_.copy()
         
         # ---------------- stabilize best params (regularization-first) ----------------
-        # Stable defaults applied after search (keep 'objective'!)
         STABLE = dict(
             objective="binary:logistic",
             tree_method="hist",
@@ -7881,88 +7871,82 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             max_delta_step=0.5,
         )
         
-        def _stabilize(best_params, leaf_cap=256):
-            """Harden searched params with stability-biased clamps and version-safe keys."""
+        def _stabilize(best_params: dict, leaf_cap: int = 128) -> dict:
             from xgboost import XGBClassifier
-        
             bp = dict(best_params or {})
         
-            # ---- Version-safe handling for colsample_bynode vs colsample_bylevel ----
+            # Version-safe handling for colsample_bynode vs colsample_bylevel
             try:
                 _supports_bynode = ("colsample_bynode" in XGBClassifier().get_xgb_params())
             except Exception:
                 _supports_bynode = False
-        
-            # If only bynode present but not supported, remap to bylevel
-            if (not _supports_bynode) and ("colsample_bynode" in bp):
-                bp["colsample_bylevel"] = float(bp.get("colsample_bynode"))
-                bp.pop("colsample_bynode", None)
-        
-            # ---- Apply stable defaults & clamps (ensure correct dtypes) ----
-            # choose node/level key based on support
             node_key = "colsample_bynode" if _supports_bynode else "colsample_bylevel"
-            node_val = float(bp.get(node_key, bp.get("colsample_bylevel", bp.get("colsample_bynode", 0.80))))
+            node_val = float(bp.get("colsample_bynode", bp.get("colsample_bylevel", 0.80)))
         
             updates = {
-                **STABLE,  # objective/tree_method/grow_policy/max_delta_step
-                # Prefer leaf-capped trees; set max_depth=0 when using max_leaves
-                "max_depth":         0,
-                "max_leaves":        int(min(128, int(bp.get("max_leaves", leaf_cap)))),
-                "min_child_weight":  float(max(12.0, float(bp.get("min_child_weight", 8.0)))),  # ↑
-                "gamma":             float(max(6.0, float(bp.get("gamma", 2.0)))),              # ↑
-                "reg_alpha":         float(max(0.10, float(bp.get("reg_alpha", 0.05)))),        # ↑
-                "reg_lambda":        float(max(15.0, float(bp.get("reg_lambda", 6.0)))),        # ↑
-                "subsample":         float(min(0.80, float(bp.get("subsample", 0.85)))),        # ↓
-                "colsample_bytree":  float(min(0.70, float(bp.get("colsample_bytree", 0.80)))), # ↓
-                node_key:            float(min(0.75, node_val)),                                 # ↓
-                "max_bin":           int(min(256, int(bp.get("max_bin", 256)))),                 # ↓
-                "learning_rate":     float(min(0.02, float(bp.get("learning_rate", 0.025)))),    # ↓
+                **STABLE,
+                "max_depth":         0,  # use leaves
+                "max_leaves":        int(min(leaf_cap, int(bp.get("max_leaves", leaf_cap)))),
+                "min_child_weight":  float(max(12.0, float(bp.get("min_child_weight", 8.0)))),
+                "gamma":             float(max(6.0,  float(bp.get("gamma", 2.0)))),
+                "reg_alpha":         float(max(0.10, float(bp.get("reg_alpha", 0.05)))),
+                "reg_lambda":        float(max(15.0, float(bp.get("reg_lambda", 6.0)))),
+                "subsample":         float(min(0.80, float(bp.get("subsample", 0.85)))),
+                "colsample_bytree":  float(min(0.70, float(bp.get("colsample_bytree", 0.80)))),
+                node_key:            float(min(0.75, node_val)),
+                "max_bin":           int(min(256, int(bp.get("max_bin", 256)))),
+                "learning_rate":     float(min(0.02, float(bp.get("learning_rate", 0.025)))),
             }
-
             bp.update(updates)
         
-            # ---- Drop only sklearn/wrapper/managed keys (DO NOT drop 'objective') ----
-            for k in (
-                "monotone_constraints",
-                "interaction_constraints",
-                "predictor",
-                # "objective",  # ← keep it!
-                "eval_metric",
-                "_estimator_type",
-                "response_method",
-                "n_estimators",
-                "n_jobs",
-                "scale_pos_weight",
-                "max_depth",
-            ):
+            # Drop only wrapper/managed keys
+            for k in ("monotone_constraints","interaction_constraints","predictor",
+                      "eval_metric","_estimator_type","response_method","n_estimators",
+                      "n_jobs","scale_pos_weight","max_depth"):
                 bp.pop(k, None)
-        
             return bp
-
-        best_auc_params = _stabilize(best_auc_params, leaf_cap=256)
-        best_ll_params  = _stabilize(best_ll_params,  leaf_cap=256)
+        
+        best_auc_params = _stabilize(best_auc_params, leaf_cap=128)
+        best_ll_params  = _stabilize(best_ll_params,  leaf_cap=128)
         
         # ================== ES refit on last fold (deterministic) ===================
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
         
         # Use DataFrames so XGBoost keeps real column names
-        X_tr_es = np.nan_to_num(X_train[tr_es_rel], copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-        X_va_es = np.nan_to_num(X_train[va_es_rel], copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        X_tr_es = X_train[tr_es_rel]
+        X_va_es = X_train[va_es_rel]
         X_tr_es_df = pd.DataFrame(X_tr_es, columns=feature_cols)
         X_va_es_df = pd.DataFrame(X_va_es, columns=feature_cols)
         
         y_tr_es = y_train[tr_es_rel]; y_va_es = y_train[va_es_rel]
         w_tr_es = np.maximum(np.nan_to_num(w_train[tr_es_rel], 0.0), 1e-6)
         w_va_es = np.maximum(np.nan_to_num(w_train[va_es_rel], 0.0), 1e-6)
-        W_CLIP = 5.0
-        w_tr_es = np.clip(w_tr_es, 0.0, W_CLIP)
-        w_va_es = np.clip(w_va_es, 0.0, W_CLIP)
+        W_CLIP  = 5.0
+        w_tr_es = np.clip(w_tr_es, 0.0, W_CLIP); w_va_es = np.clip(w_va_es, 0.0, W_CLIP)
         
-        # class presence
+        # Leak/shape checks
+        assert set(tr_es_rel).isdisjoint(set(va_es_rel)), "Train/val overlap in ES fold!"
+        assert X_tr_es_df.shape[0] == len(y_tr_es) == len(w_tr_es)
+        assert X_va_es_df.shape[0] == len(y_va_es) == len(w_va_es)
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
-        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), \
-            "ES fold single-class; widen min_val_size or choose different fold."
+        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
+        
+        # -------- Median-impute (from TRAIN) + low-variance drop (critical) --------
+        num_cols = [c for c in feature_cols if np.issubdtype(X_tr_es_df[c].dtype, np.number)]
+        med = X_tr_es_df[num_cols].median(numeric_only=True)
+        X_tr_es_df[num_cols] = X_tr_es_df[num_cols].fillna(med)
+        X_va_es_df[num_cols] = X_va_es_df[num_cols].fillna(med)
+        
+        var = X_tr_es_df[num_cols].var(numeric_only=True)
+        keep_cols = [c for c in num_cols if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
+        drop_cols = [c for c in num_cols if c not in keep_cols]
+        if drop_cols:
+            try: st.info({"dropped_low_variance": drop_cols[:25], "n_drop": len(drop_cols)})
+            except Exception: pass
+            X_tr_es_df = X_tr_es_df.drop(columns=drop_cols, errors="ignore")
+            X_va_es_df = X_va_es_df.drop(columns=drop_cols, errors="ignore")
+            feature_cols = [c for c in feature_cols if c in X_tr_es_df.columns]
         
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
@@ -7975,7 +7959,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
-            eval_metric="logloss",          # avoid auc.cc issue
+            eval_metric=["logloss","auc"],
             scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
         )
@@ -7984,8 +7968,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             n_estimators=DEEP_N_EST,
             max_bin=DEEP_MAX_BIN,
             n_jobs=refit_threads,
-            eval_metric="logloss",
-            scale_pos_weight=scale_pos_weight,  # keep consistent
+            eval_metric=["logloss","auc"],
+            scale_pos_weight=scale_pos_weight,
             random_state=1337, seed=1337,
         )
         
@@ -8004,14 +7988,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         spread_std_raw   = float(np.std(p_va_raw))
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
         best_iter        = getattr(deep_auc, "best_iteration", None)
-        cap_hit          = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)  # 0.8 → 0.7
+        cap_hit          = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)
         learning_rate    = float(np.clip(float(locals().get("learning_rate", 0.02)), 0.008, 0.04))
         
-        # If ES found a peak, set a tight cap around it; else be conservative
+        # If ES found a peak, set a tight cap around it; else conservative
         if best_iter is not None and best_iter >= 50:
             final_estimators_cap = int(np.clip(int(1.10 * (best_iter + 1)), 500, 1200))
         else:
-            final_estimators_cap = 900  # fallback
+            final_estimators_cap = 900
         early_stopping_rounds = int(np.clip(int(0.12 * final_estimators_cap), 60, 180))
         
         deep_ll.fit(
@@ -8039,103 +8023,114 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "auc_va_es": auc_va,
         })
         
-        # --- Overfit hardening decision (pre-final-fit; uses ES fold diagnostics) ---
+        # ----------------- Helpers (once) -----------------
         def _ece(y_true, p, bins=10):
-            y = np.asarray(y_true, float)
-            p = np.asarray(p, float)
+            y = np.asarray(y_true, float); p = np.asarray(p, float)
             edges = np.linspace(0.0, 1.0, bins + 1)
             idx = np.digitize(p, edges) - 1
-            ece = 0.0
-            N = len(p)
+            e = 0.0
             for b in range(bins):
                 m = (idx == b)
                 if m.any():
-                    ece += (m.mean()) * abs(float(np.mean(y[m])) - float(np.mean(p[m])))
-            return float(ece)
+                    e += (m.mean()) * abs(float(np.mean(y[m])) - float(np.mean(p[m])))
+            return float(e)
         
-        # Train-vs-val AUC gap on the same ES split
+        def _fast_auc(y, p, w=None):
+            try:
+                return float(roc_auc_score(y, p, sample_weight=w)) if np.unique(y).size==2 else np.nan
+            except Exception:
+                return np.nan
+        
+        def _psi(a: np.ndarray, b: np.ndarray, bins: int = 10) -> float:
+            a = np.asarray(a, float); b = np.asarray(b, float)
+            edges = np.quantile(a, np.linspace(0, 1, bins+1))
+            edges[0]  = min(edges[0],  np.min([a.min(), b.min()]) - 1e-9)
+            edges[-1] = max(edges[-1], np.max([a.max(), b.max()]) + 1e-9)
+            ah, _ = np.histogram(a, bins=edges); bh, _ = np.histogram(b, bins=edges)
+            ah = np.clip(ah / max(len(a),1), 1e-6, 1); bh = np.clip(bh / max(len(b),1), 1e-6, 1)
+            return float(np.sum((ah - bh) * np.log(ah / bh)))
+        
+        def _drift_report(X_tr_df, X_va_df, top_k: int = 25) -> dict:
+            out = {}
+            try:
+                var = X_tr_df.var(numeric_only=True).abs().sort_values(ascending=False)
+                cols = [c for c in var.index if np.issubdtype(X_tr_df[c].dtype, np.number)][:top_k]
+                for c in cols:
+                    try: out[c] = _psi(X_tr_df[c].to_numpy(), X_va_df[c].to_numpy(), bins=10)
+                    except Exception: pass
+            except Exception:
+                pass
+            return out
+        
+        # --- Overfit/mismatch diagnostics on ES probe ---
         p_tr_es_raw = np.clip(deep_auc.predict_proba(X_tr_es_df)[:, 1], 1e-12, 1-1e-12)
         auc_tr_es   = auc_safe(y_tr_es.astype(int), p_tr_es_raw)
         ece_va_es   = _ece(y_va_es.astype(int), p_va_raw, bins=10)
         
+        # Sanity panel (shuffle / flip / PSI)
+        rng = np.random.default_rng(123)
+        y_va_shuff = rng.permutation(y_va_es)
+        report_auc_va         = _fast_auc(y_va_es, p_va_raw, w_va_es)
+        report_auc_va_flip    = _fast_auc(y_va_es, 1.0 - p_va_raw, w_va_es)
+        report_auc_va_shuffle = _fast_auc(y_va_shuff, p_va_raw, w_va_es)
+        psi_map = _drift_report(X_tr_es_df, X_va_es_df, top_k=25)
+        psi_max = float(max(psi_map.values()) if psi_map else 0.0)
+        try:
+            st.json({"auto_harden_sanity": {
+                "auc_va": report_auc_va, "auc_va_flipped": report_auc_va_flip, "auc_va_shuffle": report_auc_va_shuffle,
+                "psi_max": psi_max, "psi_top": dict(sorted(psi_map.items(), key=lambda kv: kv[1], reverse=True)[:8]),
+                "ece_va": ece_va_es, "extreme_frac": extreme_frac_raw,
+                "y_tr_mean": float(np.mean(y_tr_es)), "y_va_mean": float(np.mean(y_va_es)),
+            }})
+        except Exception:
+            pass
+        
+        ES_SUSPECT = (
+            (np.isfinite(report_auc_va_shuffle) and abs(report_auc_va - report_auc_va_shuffle) < 0.03)  # looks random vs shuffle
+            or (report_auc_va < 0.52 and report_auc_va_flip > 0.55)                                     # possible label polarity
+            or (psi_max >= 0.25)                                                                        # heavy drift
+        )
+        
+        if ES_SUSPECT:
+            try:
+                st.warning({"es_suspect": True, "why": "shuffle≈val or flip better or PSI high",
+                            "auc_va": report_auc_va, "auc_va_shuffle": report_auc_va_shuffle,
+                            "auc_va_flipped": report_auc_va_flip, "psi_max": psi_max})
+            except Exception:
+                pass
+            # Short-circuit: return safer config; caller will still proceed but with smaller capacity/LR
+            best_auc_params = harden_params(best_auc_params, level=2)
+            best_ll_params  = harden_params(best_ll_params,  level=2)
+            final_estimators_cap = int(np.clip(final_estimators_cap * 0.7, 300, 900))
+            learning_rate        = float(np.clip(learning_rate, 0.005, 0.012))
+        
+        # If predictions are too flat, allow a small LR bump so the model can move off 0.5
+        if float(np.std(p_va_raw)) < 0.02:
+            learning_rate = float(np.clip(learning_rate * 1.25, 0.008, 0.03))
+        
+        # ---------------- Overfit check (single-pass heuristics) -----------------
         signals = compute_overfit_signals(
             y_tr_es.astype(int), p_tr_es_raw,
             y_va_es.astype(int), p_va_raw,
             w_tr_es, w_va_es, bins=10
         )
         level = decide_harden_level(signals)
-        
         if level > 0:
-            st.warning({
-                "overfit_harden": level,
-                **{k: float(v) if isinstance(v, (int,float,np.floating)) else v for k,v in signals.items()}
-            })
+            try:
+                st.warning({"overfit_harden": level,
+                            **{k: float(v) if isinstance(v, (int,float,np.floating)) else v for k,v in signals.items()}})
+            except Exception:
+                pass
             best_auc_params = harden_params(best_auc_params, level)
             best_ll_params  = harden_params(best_ll_params,  level)
         
         # Adjust capacity (n_estimators cap + ES rounds) based on the chosen level
         final_estimators_cap, early_stopping_rounds = tighten_capacity(final_estimators_cap, level)
         
-        # Also nudge LR used in finals (keep your learning_rate variable in scope)
-        if level == 1:
-            learning_rate = float(np.clip(learning_rate, 0.008, 0.018))
-        elif level == 2:
-            learning_rate = float(np.clip(learning_rate, 0.006, 0.014))
-
-        def _overfit_harden(bp):
-            bp = dict(bp)
-            bp["max_leaves"]       = int(min(96, bp.get("max_leaves", 96)))
-            bp["min_child_weight"] = float(max(16.0, float(bp.get("min_child_weight", 12.0))))
-            bp["gamma"]            = float(max(8.0,  float(bp.get("gamma", 6.0))))
-            bp["reg_alpha"]        = float(max(0.20, float(bp.get("reg_alpha", 0.10))))
-            bp["reg_lambda"]       = float(max(20.0, float(bp.get("reg_lambda", 15.0))))
-            bp["subsample"]        = float(min(0.75, float(bp.get("subsample", 0.80))))
-            bp["colsample_bytree"] = float(min(0.65, float(bp.get("colsample_bytree", 0.70))))
-            bp["learning_rate"]    = float(min(0.015, float(bp.get("learning_rate", 0.02))))
-            return bp
-
-
-        def _ece(y_true, p, bins=10):
-            y = np.asarray(y_true, float)
-            p = np.asarray(p, float)
-            edges = np.linspace(0.0, 1.0, bins + 1)
-            idx = np.digitize(p, edges) - 1
-            ece = 0.0
-            N = len(p)
-            for b in range(bins):
-                m = (idx == b)
-                if m.any():
-                    conf = float(np.mean(p[m]))
-                    acc  = float(np.mean(y[m]))
-                    ece += (m.mean()) * abs(acc - conf)
-            return float(ece)
-        
-        # AUC gap on the ES fold (train vs val) as an overfit proxy
-        p_tr_es_raw = np.clip(deep_auc.predict_proba(X_tr_es)[:, 1], 1e-12, 1-1e-12)
-        auc_tr_es   = auc_safe(y_tr_es.astype(int), p_tr_es_raw)
-        
-        # Optional: ECE on ES val as a calibration/overfit proxy
-        ece_va_es = _ece(y_va_es.astype(int), p_va_raw, bins=10)
-        
-       # ---------------- Overfit check on ES probe (single pass) -----------------
-        # Heuristics: large AUC gap, very peaky probs, or poor ECE on ES val
-        NEEDS_HARDEN = (
-            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.12)
-            or (extreme_frac_raw > 0.55)
-            or (ece_va_es > 0.12)
-        )
-        if NEEDS_HARDEN:
-            best_auc_params = _overfit_harden(best_auc_params)
-            best_ll_params  = _overfit_harden(best_ll_params)
-        
-        # --- Final capacity / ES suggestions (stable defaults) -------------------
-        # original es_suggest scaled by smaller multiplier → more aggressive early stop
+        # Recompute a suggested ES rounds from updated cap/LR
         es_suggest = 0.04 * final_estimators_cap * (0.03 / max(learning_rate, 1e-6)) ** 0.5
-        # stricter lower/upper bounds (stops faster; avoids 1000+ rounds)
-        early_stopping_rounds = int(
-            np.clip(int(locals().get("early_stopping_rounds", es_suggest)),
-                    50, max(100, final_estimators_cap // 4))
-        )
+        early_stopping_rounds = int(np.clip(int(early_stopping_rounds or es_suggest),
+                                            50, max(100, final_estimators_cap // 4)))
         
         # ---------------- Closed-loop hardening (AUC + LogLoss) -------------------
         # These calls may further tighten params/cap/lr until signals are within targets.
@@ -8198,11 +8193,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             mono_str = "(" + ",".join(map(str, mono_vec)) + ")"
             params_ll_final['monotone_constraints']  = mono_str
             params_auc_final['monotone_constraints'] = mono_str
-
         
-        # --- Instantiate & fit ------------------------------------------------------
+        # --- Instantiate & fit finals ---------------------------------------------
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
+
         
         model_logloss.fit(
             X_tr_es, y_tr_es,
