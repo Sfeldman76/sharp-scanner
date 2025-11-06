@@ -158,6 +158,9 @@ from xgboost import XGBClassifier
 from sklearn.base import is_classifier as sk_is_classifier
 import sys, inspect, xgboost, sklearn
 
+import numpy as np
+from xgboost import XGBClassifier
+from dataclasses import dataclass, asdict
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import confusion_matrix
@@ -3546,6 +3549,33 @@ def get_xgb_search_space(
     # (optional) monotone scaffolding unchanged
     if use_monotone and features:
         pass
+    # ---- Auto-regularize search if data are thin ---------------------------------
+    n = int(X_rows)
+    p = int(len(features) if features else 0)
+    rows_per_feat = (n / max(p, 1)) if p else float("inf")
+    
+    # Tightness levels based on sample size / dimensionality
+    THIN = (n < 600 or rows_per_feat < 25)       # moderate
+    VERY_THIN = (n < 300 or rows_per_feat < 12)  # aggressive
+    
+    def _shrink(space: dict, *, thin=False, very_thin=False) -> dict:
+        s = dict(space)
+        # Clamp max_leaves / depth (lower variance trees)
+        if "max_leaves" in s and hasattr(s["max_leaves"], "high"):
+            s["max_leaves"] = randint(32, min(128, s["max_leaves"].high if not very_thin else 96))
+        if "max_depth" in s and hasattr(s["max_depth"], "high"):
+            s["max_depth"] = randint(2, min(5, s["max_depth"].high))
+        # Push LR lower; raise min_child_weight / gamma; tighten sampling
+        s["learning_rate"]    = loguniform(0.006, 0.03 if very_thin else 0.035)
+        s["min_child_weight"] = loguniform(8.0, 32.0 if thin else 24.0)
+        s["gamma"]            = loguniform(2.0, 12.0 if thin else 8.0)
+        s["subsample"]        = uniform(0.55, 0.25)      # 0.55–0.80
+        s["colsample_bytree"] = uniform(0.50, 0.25)      # 0.50–0.75
+        s["colsample_bynode"] = uniform(0.55, 0.25)      # 0.55–0.80
+        s["reg_lambda"]       = loguniform(8.0, 24.0)    # ↑ ridge
+        s["reg_alpha"]        = loguniform(0.05, 1.5)    # ↑ lasso
+        s["max_bin"]          = randint(160, 256)        # keep hist bins tight
+        return s
 
     # ---- Search spaces: tightened + no explosive wideners ----
     if SMALL:
@@ -3583,13 +3613,247 @@ def get_xgb_search_space(
 
     # ⚠️ remove the old params_common “wideners” (max_leaves=512/1024, LR up to .10, etc.)
     # They were a big overfit lever.
-
+    if VERY_THIN:
+        params_ll  = _shrink(params_ll,  very_thin=True)
+        params_auc = _shrink(params_auc, very_thin=True)
+    elif THIN:
+        params_ll  = _shrink(params_ll,  thin=True)
+        params_auc = _shrink(params_auc, thin=True)
     # scrub danger keys, as before
     danger = {"objective","_estimator_type","response_method","eval_metric","scale_pos_weight"}
     params_ll  = {k:v for k,v in params_ll.items()  if k not in danger}
     params_auc = {k:v for k,v in params_auc.items() if k not in danger}
     return base_kwargs, params_ll, params_auc
 
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def compute_overfit_signals(
+    y_tr, p_tr, y_va, p_va, w_tr=None, w_va=None, bins: int = 10
+) -> dict:
+    # AUCs
+    auc_tr = float(roc_auc_score(y_tr, p_tr, sample_weight=w_tr)) if np.unique(y_tr).size==2 else np.nan
+    auc_va = float(roc_auc_score(y_va, p_va, sample_weight=w_va)) if np.unique(y_va).size==2 else np.nan
+    auc_gap = float(auc_tr - auc_va) if np.isfinite(auc_tr) and np.isfinite(auc_va) else np.nan
+
+    # Peakiness (too many extremes)
+    extreme_frac = float(((p_va < 0.35) | (p_va > 0.65)).mean())
+
+    # Simple ECE
+    def _ece(y_true, p, bins=10, w=None):
+        y = np.asarray(y_true, float)
+        p = np.asarray(p, float)
+        edges = np.linspace(0.0, 1.0, bins + 1)
+        idx = np.digitize(p, edges) - 1
+        ece = 0.0
+        N = len(p)
+        w = np.ones_like(p) if w is None else np.asarray(w, float)
+        w = w / max(w.sum(), 1e-12)
+        for b in range(bins):
+            m = (idx == b)
+            if m.any():
+                conf = float(np.average(p[m], weights=w[m]))
+                acc  = float(np.average(y[m], weights=w[m]))
+                ece += float(w[m].sum()) * abs(acc - conf)
+        return float(ece)
+
+    ece_va = _ece(y_va, p_va, bins=bins, w=w_va)
+
+    # Return all
+    return dict(
+        auc_tr=auc_tr, auc_va=auc_va, auc_gap=auc_gap,
+        extreme_frac=extreme_frac, ece_va=ece_va
+    )
+
+def decide_harden_level(sig: dict) -> int:
+    """
+    0 = no hardening, 1 = moderate, 2 = aggressive
+    Thresholds chosen to be conservative; tune if needed.
+    """
+    auc_gap      = sig.get("auc_gap", np.nan)
+    extreme_frac = sig.get("extreme_frac", 0.0)
+    ece_va       = sig.get("ece_va", 0.0)
+
+    # Aggressive if any very large issues
+    if (np.isfinite(auc_gap) and auc_gap > 0.20) or extreme_frac > 0.70 or ece_va > 0.20:
+        return 2
+    # Moderate if moderate issues
+    if (np.isfinite(auc_gap) and auc_gap > 0.12) or extreme_frac > 0.55 or ece_va > 0.12:
+        return 1
+    return 0
+
+def harden_params(bp: dict, level: int) -> dict:
+    """Return a hardened copy of params depending on level."""
+    if level <= 0:
+        return dict(bp)
+
+    out = dict(bp)
+    # Base clamps
+    out["max_leaves"]       = int(min(out.get("max_leaves", 128), 96 if level==1 else 64))
+    out["min_child_weight"] = float(max(float(out.get("min_child_weight", 8.0)), 16.0 if level==1 else 24.0))
+    out["gamma"]            = float(max(float(out.get("gamma", 2.0)), 8.0 if level==1 else 12.0))
+    out["reg_alpha"]        = float(max(float(out.get("reg_alpha", 0.10)), 0.20 if level==1 else 0.40))
+    out["reg_lambda"]       = float(max(float(out.get("reg_lambda", 15.0)), 20.0 if level==1 else 32.0))
+    out["subsample"]        = float(min(float(out.get("subsample", 0.85)), 0.75 if level==1 else 0.65))
+    out["colsample_bytree"] = float(min(float(out.get("colsample_bytree", 0.80)), 0.65 if level==1 else 0.55))
+    # bynode/bylevel handled later by your version-safe logic
+    out["learning_rate"]    = float(min(float(out.get("learning_rate", 0.02)), 0.015 if level==1 else 0.010))
+    out["max_bin"]          = int(min(int(out.get("max_bin", 256)), 256))  # stay tight
+    return out
+
+
+
+
+# --- Targets (tune if needed) ---
+IDEAL = dict(
+    auc_gap_max      = 0.08,   # train - val AUC gap
+    extreme_frac_max = 0.50,   # share of p in (<0.35 or >0.65)
+    ece_max          = 0.10,   # simple ECE
+)
+
+@dataclass
+class OverfitSignals:
+    auc_tr: float
+    auc_va: float
+    auc_gap: float
+    extreme_frac: float
+    ece_va: float
+
+def _signals_ok(sig: dict, ideal=IDEAL) -> bool:
+    ok = True
+    if np.isfinite(sig.get("auc_gap", np.inf)):
+        ok &= (sig["auc_gap"] <= ideal["auc_gap_max"])
+    ok &= (sig["extreme_frac"] <= ideal["extreme_frac_max"])
+    ok &= (sig["ece_va"] <= ideal["ece_max"])
+    return bool(ok)
+
+def _level_for(sig: dict) -> int:
+    """0=ok, 1=moderate harden, 2=aggressive harden."""
+    auc_gap      = sig.get("auc_gap", np.nan)
+    extreme_frac = sig.get("extreme_frac", 0.0)
+    ece_va       = sig.get("ece_va", 0.0)
+    if (np.isfinite(auc_gap) and auc_gap > 0.20) or extreme_frac > 0.70 or ece_va > 0.20:
+        return 2
+    if (np.isfinite(auc_gap) and auc_gap > 0.12) or extreme_frac > 0.55 or ece_va > 0.12:
+        return 1
+    return 0
+
+def _apply_learning_rate_floor(lr: float, level: int) -> float:
+    # Nudge LR down as we harden; keep a sane lower bound
+    if level == 1:
+        return float(np.clip(lr, 0.006, 0.016))
+    if level == 2:
+        return float(np.clip(lr, 0.005, 0.012))
+    return lr
+
+def auto_harden_until_ok(
+    *,
+    X_tr_es_df, y_tr_es, w_tr_es,
+    X_va_es_df, y_va_es, w_va_es,
+    base_kwargs: dict,
+    start_params: dict,
+    start_cap: int,
+    start_lr: float,
+    early_stop_default: int,
+    scale_pos_weight: float,
+    max_loops: int = 3,
+    verbose: bool = True,
+):
+    """
+    Iteratively fit a probe model on the ES split, measure overfit signals, and
+    harden params/cap/learning_rate until signals meet IDEAL thresholds or loops exhausted.
+    Returns: final_params, final_cap, final_lr, final_es_rounds, signals_history, probe_model
+    """
+    params = dict(start_params)
+    cap    = int(start_cap)
+    lr     = float(start_lr)
+    es0    = int(early_stop_default)
+
+    history: list[dict] = []
+    model = None
+
+    for loop in range(max_loops + 1):
+        # Instantiate fresh probe model
+        probe = XGBClassifier(**{**base_kwargs, **params})
+        probe.set_params(
+            n_estimators=cap,
+            learning_rate=lr,
+            eval_metric="logloss",
+            n_jobs=max(1, int(base_kwargs.get("n_jobs", 1))),
+            scale_pos_weight=float(scale_pos_weight),
+            random_state=1337 + loop, seed=1337 + loop,
+        )
+
+        probe.fit(
+            X_tr_es_df, y_tr_es,
+            sample_weight=w_tr_es,
+            eval_set=[(X_va_es_df, y_va_es)],
+            sample_weight_eval_set=[w_va_es],
+            verbose=False,
+            early_stopping_rounds=es0 if loop == 0 else int(max(50, es0)),
+        )
+
+        # Predictions
+        p_tr = np.clip(probe.predict_proba(X_tr_es_df)[:, 1], 1e-12, 1-1e-12)
+        p_va = np.clip(probe.predict_proba(X_va_es_df)[:, 1], 1e-12, 1-1e-12)
+
+        # Signals (uses your existing utility)
+        sig = compute_overfit_signals(
+            y_tr_es.astype(int), p_tr, y_va_es.astype(int), p_va, w_tr_es, w_va_es, bins=10
+        )
+
+        # Record
+        rec = dict(loop=loop, cap=int(cap), lr=float(lr), **sig)
+        history.append(rec)
+        if verbose:
+            try:
+                st.json({"auto_harden_probe": rec})
+            except Exception:
+                pass  # not in Streamlit
+
+        # Check stop condition
+        if _signals_ok(sig, IDEAL):
+            model = probe
+            break
+
+        # Decide hardening level and tighten
+        level = _level_for(sig)
+        if level == 0 and not _signals_ok(sig, IDEAL):
+            # Slightly below thresholds but not ideal: treat as moderate
+            level = 1
+
+        # Harden params
+        params = harden_params(params, level)
+
+        # Tighten capacity / early stop
+        cap, es_tuned = tighten_capacity(cap, level)
+        es0 = int(es_tuned)
+
+        # Reduce LR a bit
+        lr = _apply_learning_rate_floor(lr, level)
+
+        # Optional: add a mild dropout effect via sampling if still too peaky
+        if level >= 1:
+            params["subsample"]        = float(min(params.get("subsample", 0.8),        0.70 if level==1 else 0.60))
+            params["colsample_bytree"] = float(min(params.get("colsample_bytree", 0.7), 0.60 if level==1 else 0.50))
+            # bynode handled by your version-safe stabilizer (keep as-is elsewhere)
+
+        model = probe  # keep latest; loop continues
+
+    return params, int(cap), float(lr), int(es0), history, model
+
+def tighten_capacity(final_estimators_cap: int, level: int) -> tuple[int,int]:
+    """Scale n_estimators cap and early stopping given hardening level."""
+    cap = int(final_estimators_cap)
+    if level == 1:
+        cap = int(np.clip(0.85 * cap, 500, 1000))
+        es  = int(np.clip(0.10 * cap, 60, 150))
+    elif level == 2:
+        cap = int(np.clip(0.70 * cap, 400, 900))
+        es  = int(np.clip(0.08 * cap, 50, 120))
+    else:
+        es  = int(np.clip(0.12 * cap, 60, 180))
+    return cap, es
 
 def pick_blend_weight_on_oof(
     y_oof, p_oof_auc, p_oof_log=None, grid=None, eps=1e-4,
@@ -7794,11 +8058,30 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         auc_tr_es   = auc_safe(y_tr_es.astype(int), p_tr_es_raw)
         ece_va_es   = _ece(y_va_es.astype(int), p_va_raw, bins=10)
         
-        NEEDS_HARDEN = (
-            (np.isfinite(auc_tr_es) and np.isfinite(auc_va) and (auc_tr_es - auc_va) > 0.20)
-            or (extreme_frac_raw > 0.70)
-            or (ece_va_es > 0.20)
+        signals = compute_overfit_signals(
+            y_tr_es.astype(int), p_tr_es_raw,
+            y_va_es.astype(int), p_va_raw,
+            w_tr_es, w_va_es, bins=10
         )
+        level = decide_harden_level(signals)
+        
+        if level > 0:
+            st.warning({
+                "overfit_harden": level,
+                **{k: float(v) if isinstance(v, (int,float,np.floating)) else v for k,v in signals.items()}
+            })
+            best_auc_params = harden_params(best_auc_params, level)
+            best_ll_params  = harden_params(best_ll_params,  level)
+        
+        # Adjust capacity (n_estimators cap + ES rounds) based on the chosen level
+        final_estimators_cap, early_stopping_rounds = tighten_capacity(final_estimators_cap, level)
+        
+        # Also nudge LR used in finals (keep your learning_rate variable in scope)
+        if level == 1:
+            learning_rate = float(np.clip(learning_rate, 0.008, 0.018))
+        elif level == 2:
+            learning_rate = float(np.clip(learning_rate, 0.006, 0.014))
+
         def _overfit_harden(bp):
             bp = dict(bp)
             bp["max_leaves"]       = int(min(96, bp.get("max_leaves", 96)))
@@ -7921,6 +8204,41 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             mono_str = f"({','.join(map(str, mono_vec))})"
             params_ll_final['monotone_constraints']  = mono_str
             params_auc_final['monotone_constraints'] = mono_str
+
+        # AUC stream closed-loop
+        auc_params, cap_auc, lr_auc, es_auc, hist_auc, auc_probe = auto_harden_until_ok(
+            X_tr_es_df=X_tr_es_df, y_tr_es=y_tr_es, w_tr_es=w_tr_es,
+            X_va_es_df=X_va_es_df, y_va_es=y_va_es, w_va_es=w_va_es,
+            base_kwargs=base_kwargs,
+            start_params=best_auc_params,
+            start_cap=final_estimators_cap,
+            start_lr=learning_rate,
+            early_stop_default=early_stopping_rounds,
+            scale_pos_weight=scale_pos_weight,
+            max_loops=3,  # try up to 3 harden steps
+            verbose=True
+        )
+        
+        # LogLoss stream closed-loop
+        ll_params, cap_ll, lr_ll, es_ll, hist_ll, ll_probe = auto_harden_until_ok(
+            X_tr_es_df=X_tr_es_df, y_tr_es=y_tr_es, w_tr_es=w_tr_es,
+            X_va_es_df=X_va_es_df, y_va_es=y_va_es, w_va_es=w_va_es,
+            base_kwargs=base_kwargs,
+            start_params=best_ll_params,
+            start_cap=final_estimators_cap,
+            start_lr=learning_rate,
+            early_stop_default=early_stopping_rounds,
+            scale_pos_weight=scale_pos_weight,
+            max_loops=3,
+            verbose=True
+        )
+        
+        # Final instantiate with closed-loop params/cap/lr
+        params_ll_final  = {**base_kwargs, **ll_params,  "n_estimators": cap_ll,  "learning_rate": lr_ll,
+                            "eval_metric": "logloss", "n_jobs": VCPUS, "scale_pos_weight": scale_pos_weight}
+        params_auc_final = {**base_kwargs, **auc_params, "n_estimators": cap_auc, "learning_rate": lr_auc,
+                            "eval_metric": "logloss", "n_jobs": VCPUS, "scale_pos_weight": scale_pos_weight}
+        # (retain your monotone constraints merge if lengths match)
 
         
         # --- Instantiate & fit ------------------------------------------------------
