@@ -8095,15 +8095,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return bp
 
         
-        if NEEDS_HARDEN:
-            st.warning({
-                "harden": "on",
-                "auc_gap_es": float(auc_tr_es - auc_va) if np.isfinite(auc_tr_es) and np.isfinite(auc_va) else None,
-                "extreme_frac_es": float(extreme_frac_raw),
-                "ece_val_es": float(ece_va_es),
-            })
-            best_auc_params = _overfit_harden(best_auc_params.copy())
-            best_ll_params  = _overfit_harden(best_ll_params.copy())
+     
 
            
         
