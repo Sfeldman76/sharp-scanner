@@ -8201,6 +8201,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         }
         
         # ---------------- Apply monotone constraints ONCE --------------------------
+        FEATS_FOR_ES = list(feature_cols_es)  # must correspond to X_tr_es / X_va_es matrices
+        
+        # Define your directional priors only for features that exist
         MONO = {
             'Abs_Line_Move_From_Opening': +1,
             'Implied_Prob_Shift': +1,
@@ -8208,11 +8211,30 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             'Line_Resistance_Crossed_Count': +1,
             'Odds_Reversal_Flag': -1,
         }
-        mono_vec = [int(MONO.get(c, 0)) for c in feature_cols]
-        if len(mono_vec) == len(feature_cols):
+        
+        # Build vector aligned to FEATS_FOR_ES (zeros for everything else)
+        mono_vec = [int(MONO.get(c, 0)) for c in FEATS_FOR_ES]
+        
+        # Only attach if there is at least one non-zero constraint
+        if any(m != 0 for m in mono_vec):
+            # XGBoost accepts either a Python list or a "(...)" string.
+            # Using the string keeps broad version compatibility.
             mono_str = "(" + ",".join(map(str, mono_vec)) + ")"
             params_ll_final['monotone_constraints']  = mono_str
             params_auc_final['monotone_constraints'] = mono_str
+        else:
+            # No constraints worth applying
+            params_ll_final.pop('monotone_constraints',  None)
+            params_auc_final.pop('monotone_constraints', None)
+        
+        # Final safety: if a mismatch still slips through due to any later column changes,
+        # drop the constraints rather than crash.
+        for _p in (params_ll_final, params_auc_final):
+            if isinstance(_p.get('monotone_constraints'), (list, tuple, str)):
+                expected = len(FEATS_FOR_ES)
+                size = len(mono_vec)
+                if size > expected:
+                    _p.pop('monotone_constraints', None)
         
         # --- Instantiate & fit finals ---------------------------------------------
         model_logloss = XGBClassifier(**params_ll_final)
