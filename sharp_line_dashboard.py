@@ -175,7 +175,7 @@ from sklearn.metrics import roc_auc_score
 import numpy as np, pandas as pd
 from math import erf as _erf
 import html, unicodedata, re
-
+import shap
 # ---- HTML sanitizers (define once, top-level) ----
 _ALLOW_HTML_COLS = {"Confidence Spark"}  # whitelist columns that intentionally contain HTML
 
@@ -8356,8 +8356,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 sig_top = perm_df.loc[perm_df["significant"]].head(20)
                 if not sig_top.empty:
                     try:
-                        import numpy as np
-                        import matplotlib.pyplot as plt
+                     
                         fig, ax = plt.subplots(figsize=(8, 6))
                         y_pos = np.arange(len(sig_top))
                         ax.errorbar(
@@ -8384,7 +8383,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             if ns >= 10:  # small guard
                 X_shap = pd.DataFrame(X_va_es[:ns], columns=feature_cols)
         
-                import shap
+                
                 expl = shap.TreeExplainer(model_auc, feature_perturbation="tree_path_dependent")
                 sv = expl.shap_values(X_shap)
                 if isinstance(sv, list):  # binary models sometimes return [class0, class1]
