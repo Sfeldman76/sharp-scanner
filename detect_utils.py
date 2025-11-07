@@ -84,7 +84,7 @@ def detect_and_save_all_sports():
     # ---- 1) Cache shared resources
    
 
-    sports_order = ["MLB", "NCAAF", "WNBA", "CFL","NFL", "NBA", "NCAAB"]
+    sports_order = ["NFL", "NCAAF","NBA", "NCAAB" "WNBA", "CFL","MLB" ]
 
     for sport_label in sports_order:
         try:
