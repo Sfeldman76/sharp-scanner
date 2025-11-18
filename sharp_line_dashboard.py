@@ -5197,7 +5197,7 @@ def c_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
 
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
-    SPORT_DAYS_BACK = {"NBA": 35, "NFL": 90, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 90, "NCAAB": 60}
+    SPORT_DAYS_BACK = {"NBA": 365, "NFL": 365, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 365, "NCAAB": 365}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
     st.info(f"🎯 Training sharp model for {sport.upper()} with {days_back} days of historical data...")
