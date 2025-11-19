@@ -390,16 +390,26 @@ def _table_has_column(bq: bigquery.Client, full_table: str, column: str) -> bool
     df = bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=params)).to_dataframe()
     return (not df.empty) and (int(df.n.iloc[0]) > 0)
 
+
+
+# ---------------------------------------------------------------------
+# Sport aliases
+# ---------------------------------------------------------------------
+
 SPORT_ALIASES = {
     "MLB":   ["MLB", "BASEBALL_MLB", "BASEBALL-MLB", "BASEBALL"],
     "NFL":   ["NFL", "AMERICANFOOTBALL_NFL", "FOOTBALL_NFL"],
-    "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF"],
+    "NCAAF": ["NCAAF", "AMERICANFOOTBALL_NCAAF", "FOOTBALL_NCAAF", "CFB", "COLLEGE_FOOTBALL"],
     "NBA":   ["NBA", "BASKETBALL_NBA"],
     "WNBA":  ["WNBA", "BASKETBALL_WNBA"],
     "CFL":   ["CFL", "CANADIANFOOTBALL", "CANADIAN_FOOTBALL"],
-    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "BASKETBALL_NCAAM", "NCAAM", "COLLEGE_BASKETBALL"],  # ✅ added NCAAM forms
+    "NCAAB": ["NCAAB", "BASKETBALL_NCAAB", "BASKETBALL_NCAAM", "NCAAM", "COLLEGE_BASKETBALL"],
 }
 
+
+# ---------------------------------------------------------------------
+# Main power-ratings updater
+# ---------------------------------------------------------------------
 
 def update_power_ratings(
     bq: bigquery.Client,
@@ -408,7 +418,7 @@ def update_power_ratings(
     table_history: str = "sharplogger.sharp_data.ratings_history",
     table_current: str = "sharplogger.sharp_data.ratings_current",
     default_sport: str = "MLB",
-    project_table_market: str | None = "sharplogger.sharp_data.moves_with_features_merged",  # NEW (optional)
+    project_table_market: str | None = "sharplogger.sharp_data.moves_with_features_merged",
 ) -> pd.DataFrame:
     """
     Streamed, low-memory update of team power ratings per sport.
@@ -419,18 +429,21 @@ def update_power_ratings(
       - NBA   -> Kalman/DLM on point margin + market spread sensor (+ SoS)
       - WNBA  -> Kalman/DLM on point margin + market spread sensor (+ SoS)
       - CFL   -> Kalman/DLM on point margin + market spread sensor (+ SoS)
-      - NCAAB -> Ridge-Massey (scores-only)
+      - NCAAB -> Ridge-Massey (scores-only, with sharp-spread calibration)
 
     Notes:
       • Ratings are stored as 1500 + points_rating so existing consumers keep working.
       • Method values remain: 'poisson', 'elo_kalman', 'ridge_massey'.
       • Downstream logic that relies on rating DIFFERENCES is unchanged.
+
+    Assumes helper functions exist in this module:
+      - to_utc_ts(ts) -> pd.Timestamp in UTC
+      - stream_query_dfs(bq, sql, params, page_rows, select_cols)
+      - downcast_numeric(df)
+      - to_cats(df, cols)
     """
 
     # ---------- config ----------
-    # HFA_pts are in POINTS (not Elo).
-    # sigma_spread: observation SD for market spread sensor (lower => trust market more)
-    # sos_*: Strength-of-Schedule knobs (recency-weighted opponent rating at game time)
     SPORT_CFG = {
         "MLB":   dict(model="poisson",      HFA_pts=0.20, mov_cap=None),
         "NFL":   dict(model="elo_kalman",   HFA_pts=2.1,  mov_cap=24, phi=0.96,
@@ -462,13 +475,14 @@ def update_power_ratings(
         "NCAAB": "ridge_massey",
     }
 
-    # Use sharp books only for composite close (fall back safely if table absent/mismatch)
-    SHARP_BOOKS_DEFAULT = ["pinnacle"]
+    # Use sharp books only for composite close
+    SHARP_BOOKS_DEFAULT = ["pinnacle", "betfair_ex"]
 
     def get_aliases(canon: str) -> list[str]:
         return SPORT_ALIASES.get(canon.upper(), [canon.upper()])
 
     # ---------------- seed + state helpers ----------------
+
     def load_seed_ratings(sport: str, asof_ts: dt.datetime | pd.Timestamp | None) -> dict[str, float]:
         if asof_ts is None:
             cur = bq.query(
@@ -633,6 +647,7 @@ def update_power_ratings(
             ).result()
 
     # ---------------- streaming games ----------------
+
     def _get_game_time_bounds(sport_aliases: list[str], cutoff_param):
         sql = f"""
         SELECT
@@ -685,7 +700,7 @@ def update_power_ratings(
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('AMERICANFOOTBALL_NCAAF','FOOTBALL_NCAAF','NCAAF','CFB','COLLEGE_FOOTBALL') THEN 'NCAAF'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NBA','NBA') THEN 'NBA'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_WNBA','WNBA') THEN 'WNBA'
-            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NCAAB','BASKETBALL_NCAAM','NCAAB','NCAAM','COLLEGE_BASKETBALL') THEN 'NCAAB'  -- ✅ added
+            WHEN UPPER(CAST(t.Sport AS STRING)) IN ('BASKETBALL_NCAAB','BASKETBALL_NCAAM','NCAAB','NCAAM','COLLEGE_BASKETBALL') THEN 'NCAAB'
             WHEN UPPER(CAST(t.Sport AS STRING)) IN ('CFL','CANADIANFOOTBALL','CANADIAN_FOOTBALL') THEN 'CFL'
             ELSE COALESCE(CAST(t.Sport AS STRING), @default_sport)
           END AS Sport,
@@ -701,37 +716,44 @@ def update_power_ratings(
           {"AND TIMESTAMP(t.Inserted_Timestamp) >= @cutoff" if cutoff_param else ""}
         """
 
-        params = {"sport_aliases": aliases, "default_sport": default_sport}
+        params: Dict[str, object] = {"sport_aliases": aliases, "default_sport": default_sport}
         if cutoff_param is not None:
             params["cutoff"] = cutoff_param
 
-        
-
         use_market = project_table_market is not None
         sharp_list = (sharp_books or SHARP_BOOKS_DEFAULT)
-        
+
         if use_market:
             sql_to_run = f"""
             WITH scores AS ({base_scores_sql}),
-        
+
             latest_per_book AS (
               SELECT
-                -- Use ONLY the normalized matchup columns present in the table
                 LOWER(TRIM(m.Home_Team_Norm)) AS Home_Team,
                 LOWER(TRIM(m.Away_Team_Norm)) AS Away_Team,
                 TIMESTAMP(m.Game_Start)       AS Game_Start,
-        
-                -- Normalize book names: betfair_ex_au/eu → betfair_ex
-                REGEXP_REPLACE(LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
-                               r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex') AS BookKey,
-        
-                SAFE_CAST(m.Value AS FLOAT64) AS SpreadValue,
+
+                REGEXP_REPLACE(
+                  LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+                  r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+                ) AS BookKey,
+
+                -- Convert team-based Value to HOME-based spread:
+                SAFE_CAST(
+                  CASE
+                    WHEN LOWER(TRIM(m.Team_For_Join)) = LOWER(TRIM(m.Home_Team_Norm))
+                      THEN m.Value           -- row is home team → this is home spread
+                    ELSE
+                      -m.Value               -- row is away team → flip sign
+                  END
+                  AS FLOAT64
+                ) AS SpreadValue,
+
                 m.Snapshot_Timestamp
               FROM `{project_table_market}` m
               WHERE
                 UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@sport_aliases)
                 AND m.Market IN ('spreads','spread','Spread','SPREADS')
-                AND m.Is_Home = TRUE                -- home-side rows only
                 AND m.Value IS NOT NULL
                 AND TIMESTAMP(m.Game_Start) IS NOT NULL
               QUALIFY ROW_NUMBER() OVER (
@@ -739,56 +761,62 @@ def update_power_ratings(
                   LOWER(TRIM(m.Home_Team_Norm)),
                   LOWER(TRIM(m.Away_Team_Norm)),
                   TIMESTAMP(m.Game_Start),
-                  REGEXP_REPLACE(LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
-                                 r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex')
+                  REGEXP_REPLACE(
+                    LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+                    r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+                  )
                 ORDER BY m.Snapshot_Timestamp DESC
               ) = 1
             ),
-        
+
             market AS (
               SELECT
                 Home_Team,
                 Away_Team,
                 Game_Start,
-                -- median across sharp books after normalization
                 APPROX_QUANTILES(SpreadValue, 2)[OFFSET(1)] AS Spread_Close
               FROM latest_per_book
               WHERE BookKey IN UNNEST(@sharp_books)
               GROUP BY Home_Team, Away_Team, Game_Start
             )
-        
+
             SELECT s.*, m.Spread_Close
             FROM scores s
             LEFT JOIN market m
               USING (Home_Team, Away_Team, Game_Start)
             ORDER BY s.Snapshot_TS, s.Game_Start
             """
-        
-            # ensure lowercased sharp list; keep betfair_ex canonical
+
             params["sharp_books"] = [b.lower() for b in sharp_list]
         else:
             sql_to_run = base_scores_sql + "\nORDER BY Snapshot_TS, Game_Start"
 
-
-
-
         for df in stream_query_dfs(bq, sql_to_run, params=params, page_rows=page_rows, select_cols=None):
             if "Spread_Close" not in df.columns:
                 df["Spread_Close"] = np.nan
-            df = df[["Sport","Home_Team","Away_Team","Game_Start","Snapshot_TS",
-                     "Score_Home_Score","Score_Away_Score","Spread_Close"]]
+            df = df[[
+                "Sport",
+                "Home_Team",
+                "Away_Team",
+                "Game_Start",
+                "Snapshot_TS",
+                "Score_Home_Score",
+                "Score_Away_Score",
+                "Spread_Close",
+            ]]
             df = downcast_numeric(df)
-            df = to_cats(df, ["Sport","Home_Team","Away_Team"])
+            df = to_cats(df, ["Sport", "Home_Team", "Away_Team"])
             yield df
-            del df; gc.collect()
+            del df
+            gc.collect()
 
     # ---------------- engines ----------------
+
     def _cap_margin(mov, cap):
         if cap is None:
             return float(mov)
         return float(min(max(mov, -cap), cap))
 
-    def run_kalman_elo(bq, sport: str, aliases: list[str], cfg: dict, window_start):
     def run_kalman_elo(bq, sport: str, aliases: list[str], cfg: dict, window_start):
         phi         = float(cfg.get("phi", 0.96))
         sigma_eta   = float(cfg.get("sigma_eta", 6.0))
@@ -796,31 +824,36 @@ def update_power_ratings(
         sigma_s     = float(cfg.get("sigma_spread", 7.0))  # market sensor SD
         mov_cap     = cfg.get("mov_cap", None)
         HFA_pts     = float(cfg.get("HFA_pts", 2.0))
-    
+
         sos_hl      = float(cfg.get("sos_half_life_days", 60))
         sos_gamma   = float(cfg.get("sos_gamma", 0.6))
-    
-        r_mean, r_var = {}, {}
+
+        r_mean: Dict[str, float] = {}
+        r_var: Dict[str, float] = {}
+
         def _m(t): return r_mean.get(t, 0.0)
         def _v(t): return r_var.get(t, 100.0)
-    
-        # SoS accumulators: recency-weighted opponent rating at game time (pre-update)
-        sos_num, sos_den = {}, {}
-    
+
+        # SoS accumulators
+        sos_num: Dict[str, float] = {}
+        sos_den: Dict[str, float] = {}
+
         def _do_update(obs_value, obs_var, Rh, Ra, Vh, Va):
-            # obs_value is ALWAYS interpreted as expected MOV (home − away)
+            # obs_value is observed MOV from home POV
             y_hat = (Rh - Ra + HFA_pts)
             e     = obs_value - y_hat
             S     = Vh + Va + obs_var
-            if S <= 0: S = 1e-6
+            if S <= 0:
+                S = 1e-6
             Kh, Ka = Vh / S, Va / S
-            Rh_post, Ra_post = Rh + Kh*e, Ra - Ka*e
-            Vh_post, Va_post = Vh - Kh*Vh, Va - Ka*Va
+            Rh_post, Ra_post = Rh + Kh * e, Ra - Ka * e
+            Vh_post, Va_post = Vh - Kh * Vh, Va - Ka * Va
             return Rh_post, Ra_post, Vh_post, Va_post
-    
-        history_batch, BATCH_SZ = [], 50_000
+
+        history_batch: List[dict] = []
+        BATCH_SZ = 50_000
         utc_now = pd.Timestamp.now(tz="UTC")
-    
+
         for chunk in load_games_stream(
             sport, aliases, cutoff=window_start, page_rows=200_000,
             project_table_market=project_table_market, sharp_books=SHARP_BOOKS_DEFAULT
@@ -829,98 +862,98 @@ def update_power_ratings(
                 h, a = g.Home_Team, g.Away_Team
                 gs_ts = g.Game_Start if isinstance(g.Game_Start, pd.Timestamp) else pd.Timestamp(g.Game_Start, tz="UTC")
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
-                mov = _cap_margin(hs - as_, mov_cap)  # true MOV (home − away)
-    
+                mov = _cap_margin(hs - as_, mov_cap)  # home MOV
+
                 Rh, Ra = _m(h), _m(a)
                 Vh, Va = _v(h), _v(a)
-    
-                # 1) score sensor (MOV)
+
+                # 1) score sensor
                 Rh, Ra, Vh, Va = _do_update(mov, sigma_y**2, Rh, Ra, Vh, Va)
-    
-                # 2) market spread sensor (home spread line → expected MOV)
+
+                # 2) market spread sensor (Spread_Close is home spread)
                 sc = g.Spread_Close
                 if pd.notna(sc):
-                    spread_home = float(sc)
-                    # spread_home is the handicap on home team; convert to expected MOV:
-                    #   home -5.5 → expected MOV +5.5
-                    #   home +3.5 → expected MOV -3.5
-                    obs_spread_mov = -spread_home
-                    Rh, Ra, Vh, Va = _do_update(obs_spread_mov, sigma_s**2, Rh, Ra, Vh, Va)
-    
+                    # spread is home spread (negative if home favored)
+                    obs_mov_market = -float(sc)  # home -5.5 → expected MOV +5.5
+                    Rh, Ra, Vh, Va = _do_update(obs_mov_market, sigma_s**2, Rh, Ra, Vh, Va)
+
                 # SoS accumulation using opponent rating *before* propagation
-                w = _exp_decay_weight(gs_ts if gs_ts.tzinfo else gs_ts.tz_localize("UTC"), utc_now, sos_hl)
+                gs_ts_utc = gs_ts if gs_ts.tzinfo else gs_ts.tz_localize("UTC")
+                w = _exp_decay_weight(gs_ts_utc, utc_now, sos_hl)
                 sos_num[h] = _safe_get(sos_num, h) + w * _safe_get(r_mean, a, 0.0)
                 sos_den[h] = _safe_get(sos_den, h) + w
                 sos_num[a] = _safe_get(sos_num, a) + w * _safe_get(r_mean, h, 0.0)
                 sos_den[a] = _safe_get(sos_den, a) + w
-    
+
                 # propagate
-                Rh_next, Ra_next = phi*Rh, phi*Ra
-                Vh_next, Va_next = (phi**2)*Vh + sigma_eta**2, (phi**2)*Va + sigma_eta**2
-    
+                Rh_next, Ra_next = phi * Rh, phi * Ra
+                Vh_next, Va_next = (phi ** 2) * Vh + sigma_eta ** 2, (phi ** 2) * Va + sigma_eta ** 2
+
                 r_mean[h], r_var[h] = Rh_next, Vh_next
                 r_mean[a], r_var[a] = Ra_next, Va_next
-    
+
                 ts  = g.Snapshot_TS
                 tag = "backfill" if window_start is None else "incremental"
                 history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + Rh_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
                 history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + Ra_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-    
+
                 if len(history_batch) >= BATCH_SZ:
                     bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
                     history_batch.clear()
-            del chunk; gc.collect()
-    
+            del chunk
+            gc.collect()
+
         if history_batch:
             bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
-    
+
         if not r_mean:
             return []
-    
-        # ---- SoS correction (one shot) ----
+
+        # ---- SoS correction ----
         teams = list(r_mean.keys())
         raw_R = np.array([r_mean[t] for t in teams], dtype=float)
-        sos   = np.array([ (_safe_get(sos_num, t) / max(_safe_get(sos_den, t), 1e-9)) for t in teams ], dtype=float)
+        sos   = np.array([(_safe_get(sos_num, t) / max(_safe_get(sos_den, t), 1e-9)) for t in teams], dtype=float)
         sos   = np.where(np.isfinite(sos), sos, np.nan)
-    
+
         league_mean_R = float(np.nanmean(raw_R)) if np.isfinite(np.nanmean(raw_R)) else 0.0
         sos = np.where(np.isnan(sos), league_mean_R, sos)
-    
+
         adj_R = raw_R + sos_gamma * (league_mean_R - sos)
-    
+
         USE_ADJUSTED_FOR_OUTPUT = True
         final_R = adj_R if USE_ADJUSTED_FOR_OUTPUT else raw_R
-    
+
         utc_now = pd.Timestamp.now(tz="UTC")
         return [
-            {"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
-             "Method": "elo_kalman", "Updated_At": utc_now}
+            {
+                "Sport": sport,
+                "Team": t,
+                "Rating": 1500.0 + float(r),
+                "Method": "elo_kalman",
+                "Updated_At": utc_now,
+            }
             for t, r in zip(teams, final_R)
-    ]
+        ]
 
-   
     def run_ridge_massey(bq, sport: str, aliases: list[str], cfg: dict):
         """
         Ridge-Massey fit for NCAAB:
-    
+
         • Fit ratings from MOV (score data)
         • Pull sharp-book closing spreads from sharplogger.sharp_data.moves_with_features_merged
-          where Value is stored **for each team** (favorite negative, dog positive)
-        • Use ONLY favorite-side rows (Value < 0) to define the market spread
-        • Calibrate: Spread_Close ≈ -k * (Rating_Fav - Rating_Dog)
-          → ratings_pts *= k so rating diffs are in spread units
-        • Store 1500 + ratings_pts in ratings_history / ratings_current
+          where Value is stored for each team (favorite negative, dog positive).
+        • Use only favorite-side rows (Value < 0) to define the market favorite & spread.
+        • Calibrate: spread_close (negative) ≈ -k * (rating_fav - rating_dog)
+          → ratings_pts *= k so rating diffs are in spread units.
         """
-    
-        # ---------------- config ----------------
+
         window_days  = int(cfg.get("window_days", 120))
         mov_cap      = cfg.get("mov_cap", 25)
         ridge_lambda = float(cfg.get("ridge_lambda", 50.0))
-    
-        # ---------------- 1) GET SCORES + MARKET ----------------
-        sql = f"""
+
+        sql = """
         WITH scores AS (
           SELECT
             LOWER(TRIM(Home_Team)) AS home,
@@ -935,29 +968,28 @@ def update_power_ratings(
             AND Score_Away_Score IS NOT NULL
             AND TIMESTAMP(Game_Start) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @win_days DAY)
         ),
-    
+
         latest_per_book AS (
           SELECT
             LOWER(TRIM(m.Home_Team_Norm)) AS home,
             LOWER(TRIM(m.Away_Team_Norm)) AS away,
             TIMESTAMP(m.Game_Start)       AS game_start_raw,
-    
+
             REGEXP_REPLACE(
               LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
               r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
             ) AS BookKey,
-    
-            SAFE_CAST(m.Value AS FLOAT64) AS spread_value,      -- spread for *this team*
+
+            SAFE_CAST(m.Value AS FLOAT64) AS spread_value,      -- spread for this team
             m.Snapshot_Timestamp,
-    
-            LOWER(TRIM(m.Team_For_Join)) AS fav_team           -- TEAM this row belongs to
+            LOWER(TRIM(m.Team_For_Join)) AS fav_team           -- team this row is for
           FROM `sharplogger.sharp_data.moves_with_features_merged` m
           WHERE
             UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@aliases)
             AND m.Market IN ('spreads','spread','Spread','SPREADS')
             AND m.Value IS NOT NULL
             AND TIMESTAMP(m.Game_Start) IS NOT NULL
-            AND m.Value < 0    -- ⭐ FAVORITE SIDE ONLY (fav lines are negative)
+            AND m.Value < 0    -- favorite side only (fav lines are negative)
           QUALIFY ROW_NUMBER() OVER (
             PARTITION BY
               LOWER(TRIM(m.Home_Team_Norm)),
@@ -970,25 +1002,22 @@ def update_power_ratings(
             ORDER BY m.Snapshot_Timestamp DESC
           ) = 1
         ),
-    
+
         market AS (
           SELECT
             home,
             away,
             game_start_raw,
-            -- favorite team across sharp books
             ANY_VALUE(fav_team) AS favorite_team,
-            -- dog is the "other" team
             CASE
               WHEN ANY_VALUE(fav_team) = home THEN away ELSE home
             END AS dog_team,
-            -- median favorite spread across sharp books
             APPROX_QUANTILES(spread_value, 2)[OFFSET(1)] AS spread_close
           FROM latest_per_book
           WHERE BookKey IN UNNEST(@sharp_books)
           GROUP BY home, away, game_start_raw
         )
-    
+
         SELECT
           s.home,
           s.away,
@@ -1004,79 +1033,73 @@ def update_power_ratings(
          AND s.away = m.away
          AND s.game_start_raw = m.game_start_raw
         """
-    
+
         df = bq.query(
             sql,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
                     bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
                     bigquery.ScalarQueryParameter("win_days", "INT64", window_days),
-                    bigquery.ArrayQueryParameter("sharp_books", "STRING", ["pinnacle", "betfair_ex"]),
+                    bigquery.ArrayQueryParameter("sharp_books", "STRING", SHARP_BOOKS_DEFAULT),
                 ]
             )
         ).to_dataframe()
-    
+
         if df.empty:
             return []
-    
-        # ---------------- 2) Ridge Solve (Massey with ridge + HFA) ----------------
+
+        # Ridge-Massey system
         df["mov"] = (df["hs"] - df["as_"]).astype(float).clip(lower=-mov_cap, upper=mov_cap)
-    
+
         teams = pd.Index(sorted(set(df.home) | set(df.away)))
         n = len(teams)
         idx = {t: i for i, t in enumerate(teams)}
-    
-        m = len(df)
-        X = np.zeros((m, n + 1), dtype=float)  # +1 for HFA indicator
+
+        m_rows = len(df)
+        X = np.zeros((m_rows, n + 1), dtype=float)  # +1 for HFA
         y = df["mov"].to_numpy(float)
-    
+
         for i, row in df.iterrows():
             hi, ai = idx[row.home], idx[row.away]
             X[i, hi] = 1.0
             X[i, ai] = -1.0
-            X[i, n]  = 1.0  # home-court indicator
-    
+            X[i, n]  = 1.0  # home indicator
+
         XtX = X.T @ X
         XtX[:n, :n] += np.eye(n) * ridge_lambda
         XtX[n, n]   += ridge_lambda * 0.01
-    
+
         beta = np.linalg.solve(XtX, X.T @ y)
         ratings_pts = beta[:n]
-    
-        # center to 0
+
+        # center
         ratings_pts = ratings_pts - ratings_pts.mean()
-    
-        # ---------------- 3) MARKET CALIBRATION ----------------
-        # Use only games where we have a favorite spread + favorite/dog labels
+
+        # Market calibration (favorite vs dog)
         df_cal = df[
             df["spread_close"].notna()
             & df["favorite_team"].notna()
             & df["dog_team"].notna()
         ].copy()
-    
+
         if not df_cal.empty:
             rating_map = {t: r for t, r in zip(teams, ratings_pts)}
-    
-            # rating diff = favorite - dog
             df_cal["rdiff"] = (
                 df_cal["favorite_team"].map(rating_map)
                 - df_cal["dog_team"].map(rating_map)
             )
-    
-            # We want: spread_close ≈ -k * rdiff  (spread is negative for favorite)
+
+            # spread_close (negative) ≈ -k * rdiff
             num = float((df_cal["rdiff"] * df_cal["spread_close"]).sum())
             den = float((df_cal["rdiff"] ** 2).sum())
-    
             if den > 0:
-                k = - num / den  # NOTE the minus sign
+                k = - num / den
                 ratings_pts = ratings_pts * float(k)
-    
-        # ---------------- 4) Write Ratings ----------------
+
         ts = df["gs"].max()
         if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
-    
-        # history
+
         hist_rows = [
             {
                 "Sport": sport,
@@ -1089,12 +1112,8 @@ def update_power_ratings(
             for t, r in zip(teams, ratings_pts)
         ]
         if hist_rows:
-            bq.load_table_from_dataframe(
-                pd.DataFrame(hist_rows),
-                "sharplogger.sharp_data.ratings_history"
-            ).result()
-    
-        # current
+            bq.load_table_from_dataframe(pd.DataFrame(hist_rows), table_history).result()
+
         utc_now = pd.Timestamp.now(tz="UTC")
         current_rows = [
             {
@@ -1106,11 +1125,10 @@ def update_power_ratings(
             }
             for t, r in zip(teams, ratings_pts)
         ]
-    
         return current_rows
 
-
     # ---------------- MAIN ----------------
+
     sports_available = fetch_sports_present()
     sports = [s for s in sports_available if s.upper() in SPORT_CFG]
     if not sports:
@@ -1146,8 +1164,12 @@ def update_power_ratings(
             GP: dict[str, int]   = {}
 
             def add_game(h, a, hs, as_):
-                GF[h] = GF.get(h, 0.0) + hs; GA[h] = GA.get(h, 0.0) + as_; GP[h] = GP.get(h, 0) + 1
-                GF[a] = GF.get(a, 0.0) + as_; GA[a] = GA.get(a, 0.0) + hs; GP[a] = GP.get(a, 0) + 1
+                GF[h] = GF.get(h, 0.0) + hs
+                GA[h] = GA.get(h, 0.0) + as_
+                GP[h] = GP.get(h, 0) + 1
+                GF[a] = GF.get(a, 0.0) + as_
+                GA[a] = GA.get(a, 0.0) + hs
+                GP[a] = GP.get(a, 0) + 1
 
             def team_rating(team: str) -> float:
                 g = int(GP.get(team, 0))
@@ -1161,10 +1183,11 @@ def update_power_ratings(
                 rate_against = float(GA.get(team, 0.0)) / max(g, 1)
                 atk_ratio = max(rate_for / league_rate, eps)
                 dfn_ratio = max(rate_against / league_rate, eps)
-                atk = np.log(atk_ratio); dfn = -np.log(dfn_ratio)
+                atk = np.log(atk_ratio)
+                dfn = -np.log(dfn_ratio)
                 return float(1500.0 + 400.0 * (atk + dfn))
 
-            history_batch = []
+            history_batch: list[dict] = []
             BATCH_SZ = 50_000
 
             for chunk in load_games_stream(sport, aliases, cutoff=window_start, page_rows=200_000,
@@ -1185,7 +1208,8 @@ def update_power_ratings(
                     if len(history_batch) >= BATCH_SZ:
                         bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
                         history_batch.clear()
-                del chunk; gc.collect()
+                del chunk
+                gc.collect()
 
             if history_batch:
                 bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
@@ -1194,8 +1218,13 @@ def update_power_ratings(
             utc_now = pd.Timestamp.now(tz="UTC")
             all_teams = set(GP.keys())
             for team in all_teams:
-                current_rows_all.append({"Sport": sport, "Team": team, "Rating": float(team_rating(team)),
-                                         "Method": "poisson", "Updated_At": utc_now})
+                current_rows_all.append({
+                    "Sport": sport,
+                    "Team": team,
+                    "Rating": float(team_rating(team)),
+                    "Method": "poisson",
+                    "Updated_At": utc_now,
+                })
             updated_sports.append(sport)
 
         elif cfg["model"] == "elo_kalman":
@@ -1213,7 +1242,7 @@ def update_power_ratings(
         else:
             continue
 
-    # Write current + reconcile (in-place swap, per (Sport,Team,Method))
+    # Write current + reconcile
     upsert_current(current_rows_all)
 
     # Bring current in sync with latest history for updated sports
@@ -1264,7 +1293,6 @@ def update_power_ratings(
     # Safety backfill for any missing current rows
     fill_missing_current_from_history(None)
 
-    # Final read of current ratings for processed sports
     if not updated_sports:
         return pd.DataFrame(columns=["Sport", "Team", "Method", "Rating", "Updated_At"])
 
