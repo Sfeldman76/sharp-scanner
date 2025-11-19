@@ -944,16 +944,42 @@ def update_power_ratings(
         XtX[n, n]   += ridge_lambda * 0.01
         Xty = X.T @ y
         beta = np.linalg.solve(XtX, Xty)
-
+        
+        # --- raw ridge ratings (in "points") ---
         ratings_pts = beta[:n]
-        ratings_pts = ratings_pts - ratings_pts.mean()  # center to 0
+        
+        # center to 0 (doesn't affect differences)
+        ratings_pts = ratings_pts - ratings_pts.mean()
+        
+        # ---------- NEW: force a realistic spread for rating differences ----------
+        # We want typical Home–Away rating differences to have a certain SD in points.
+        # If team ratings each have SD = s, and are ~independent, diff SD ≈ sqrt(2)*s.
+      
+        
+        current_sd = float(np.std(ratings_pts))
+        if current_sd > 1e-6:
+            TARGET_DIFF_SD = 6.0  # <- tune this: 5–8 is a good starting range
+            target_rating_sd = TARGET_DIFF_SD / np.sqrt(2.0)
+            scale = target_rating_sd / current_sd
+            ratings_pts = ratings_pts * scale  # expand/shrink all gaps
+        # ------------------------------------------------------------------------
+        
+        
         ts = df["gs"].max()
         if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
-
-        hist_rows = [{"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
-                      "Method": "ridge_massey", "Updated_At": ts, "Source": "window_fit"}
-                     for t, r in zip(teams, ratings_pts)]
+        
+        hist_rows = [
+            {
+                "Sport": sport,
+                "Team": t,
+                "Rating": 1500.0 + float(r),  # still centered near 1500, but now with real spread
+                "Method": "ridge_massey",
+                "Updated_At": ts,
+                "Source": "window_fit",
+            }
+            for t, r in zip(teams, ratings_pts)
+        ]
         if hist_rows:
             bq.load_table_from_dataframe(pd.DataFrame(hist_rows), table_history).result()
 
