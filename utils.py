@@ -464,7 +464,7 @@ def update_power_ratings(
         "NCAAB": dict(model="ridge_massey", HFA_pts=3.0,  mov_cap=25,
                       ridge_lambda=50.0, window_days=120),
     }
-    BACKFILL_DAYS = 14
+    BACKFILL_DAYS = 365
     PREFERRED_METHOD = {
         "MLB":   "poisson",
         "NFL":   "elo_kalman",
