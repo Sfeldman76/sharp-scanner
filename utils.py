@@ -789,24 +789,26 @@ def update_power_ratings(
         return float(min(max(mov, -cap), cap))
 
     def run_kalman_elo(bq, sport: str, aliases: list[str], cfg: dict, window_start):
+    def run_kalman_elo(bq, sport: str, aliases: list[str], cfg: dict, window_start):
         phi         = float(cfg.get("phi", 0.96))
         sigma_eta   = float(cfg.get("sigma_eta", 6.0))
         sigma_y     = float(cfg.get("sigma_y", 13.0))      # score sensor SD
         sigma_s     = float(cfg.get("sigma_spread", 7.0))  # market sensor SD
         mov_cap     = cfg.get("mov_cap", None)
         HFA_pts     = float(cfg.get("HFA_pts", 2.0))
-
+    
         sos_hl      = float(cfg.get("sos_half_life_days", 60))
         sos_gamma   = float(cfg.get("sos_gamma", 0.6))
-
+    
         r_mean, r_var = {}, {}
         def _m(t): return r_mean.get(t, 0.0)
         def _v(t): return r_var.get(t, 100.0)
-
+    
         # SoS accumulators: recency-weighted opponent rating at game time (pre-update)
         sos_num, sos_den = {}, {}
-
+    
         def _do_update(obs_value, obs_var, Rh, Ra, Vh, Va):
+            # obs_value is ALWAYS interpreted as expected MOV (home − away)
             y_hat = (Rh - Ra + HFA_pts)
             e     = obs_value - y_hat
             S     = Vh + Va + obs_var
@@ -815,10 +817,10 @@ def update_power_ratings(
             Rh_post, Ra_post = Rh + Kh*e, Ra - Ka*e
             Vh_post, Va_post = Vh - Kh*Vh, Va - Ka*Va
             return Rh_post, Ra_post, Vh_post, Va_post
-
+    
         history_batch, BATCH_SZ = [], 50_000
         utc_now = pd.Timestamp.now(tz="UTC")
-
+    
         for chunk in load_games_stream(
             sport, aliases, cutoff=window_start, page_rows=200_000,
             project_table_market=project_table_market, sharp_books=SHARP_BOOKS_DEFAULT
@@ -827,71 +829,76 @@ def update_power_ratings(
                 h, a = g.Home_Team, g.Away_Team
                 gs_ts = g.Game_Start if isinstance(g.Game_Start, pd.Timestamp) else pd.Timestamp(g.Game_Start, tz="UTC")
                 hs, as_ = float(g.Score_Home_Score), float(g.Score_Away_Score)
-                mov = _cap_margin(hs - as_, mov_cap)
-
+                mov = _cap_margin(hs - as_, mov_cap)  # true MOV (home − away)
+    
                 Rh, Ra = _m(h), _m(a)
                 Vh, Va = _v(h), _v(a)
-
-                # 1) score sensor
+    
+                # 1) score sensor (MOV)
                 Rh, Ra, Vh, Va = _do_update(mov, sigma_y**2, Rh, Ra, Vh, Va)
-
-                # 2) market spread sensor (home spread, fav < 0)
+    
+                # 2) market spread sensor (home spread line → expected MOV)
                 sc = g.Spread_Close
                 if pd.notna(sc):
-                    Rh, Ra, Vh, Va = _do_update(float(sc), sigma_s**2, Rh, Ra, Vh, Va)
-
+                    spread_home = float(sc)
+                    # spread_home is the handicap on home team; convert to expected MOV:
+                    #   home -5.5 → expected MOV +5.5
+                    #   home +3.5 → expected MOV -3.5
+                    obs_spread_mov = -spread_home
+                    Rh, Ra, Vh, Va = _do_update(obs_spread_mov, sigma_s**2, Rh, Ra, Vh, Va)
+    
                 # SoS accumulation using opponent rating *before* propagation
                 w = _exp_decay_weight(gs_ts if gs_ts.tzinfo else gs_ts.tz_localize("UTC"), utc_now, sos_hl)
                 sos_num[h] = _safe_get(sos_num, h) + w * _safe_get(r_mean, a, 0.0)
                 sos_den[h] = _safe_get(sos_den, h) + w
                 sos_num[a] = _safe_get(sos_num, a) + w * _safe_get(r_mean, h, 0.0)
                 sos_den[a] = _safe_get(sos_den, a) + w
-
+    
                 # propagate
                 Rh_next, Ra_next = phi*Rh, phi*Ra
                 Vh_next, Va_next = (phi**2)*Vh + sigma_eta**2, (phi**2)*Va + sigma_eta**2
-
+    
                 r_mean[h], r_var[h] = Rh_next, Vh_next
                 r_mean[a], r_var[a] = Ra_next, Va_next
-
+    
                 ts  = g.Snapshot_TS
                 tag = "backfill" if window_start is None else "incremental"
                 history_batch.append({"Sport": sport, "Team": h, "Rating": 1500.0 + Rh_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
                 history_batch.append({"Sport": sport, "Team": a, "Rating": 1500.0 + Ra_next,
                                       "Method": "elo_kalman", "Updated_At": ts, "Source": tag})
-
+    
                 if len(history_batch) >= BATCH_SZ:
                     bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
                     history_batch.clear()
             del chunk; gc.collect()
-
+    
         if history_batch:
             bq.load_table_from_dataframe(pd.DataFrame(history_batch), table_history).result()
-
+    
         if not r_mean:
             return []
-
+    
         # ---- SoS correction (one shot) ----
         teams = list(r_mean.keys())
         raw_R = np.array([r_mean[t] for t in teams], dtype=float)
         sos   = np.array([ (_safe_get(sos_num, t) / max(_safe_get(sos_den, t), 1e-9)) for t in teams ], dtype=float)
         sos   = np.where(np.isfinite(sos), sos, np.nan)
-
+    
         league_mean_R = float(np.nanmean(raw_R)) if np.isfinite(np.nanmean(raw_R)) else 0.0
         sos = np.where(np.isnan(sos), league_mean_R, sos)
-
+    
         adj_R = raw_R + sos_gamma * (league_mean_R - sos)
-
+    
         USE_ADJUSTED_FOR_OUTPUT = True
         final_R = adj_R if USE_ADJUSTED_FOR_OUTPUT else raw_R
-
+    
         utc_now = pd.Timestamp.now(tz="UTC")
         return [
             {"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
              "Method": "elo_kalman", "Updated_At": utc_now}
             for t, r in zip(teams, final_R)
-        ]
+    ]
 
    
     def run_ridge_massey(bq, sport: str, aliases: list[str], cfg: dict):
