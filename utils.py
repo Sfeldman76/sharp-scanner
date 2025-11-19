@@ -893,87 +893,188 @@ def update_power_ratings(
             for t, r in zip(teams, final_R)
         ]
 
+   
     def run_ridge_massey(bq, sport: str, aliases: list[str], cfg: dict):
-        """Ridge-Massey fit on recent window of finals. Stores 1500+points_rating with Method='ridge_massey'."""
+        """
+        Ridge-Massey fit for NCAAB:
+    
+        • Fit ratings from MOV (score data)
+        • Pull sharp-book closing spreads from sharplogger.sharp_data.moves_with_features_merged
+          where Value is stored **for each team** (favorite negative, dog positive)
+        • Use ONLY favorite-side rows (Value < 0) to define the market spread
+        • Calibrate: Spread_Close ≈ -k * (Rating_Fav - Rating_Dog)
+          → ratings_pts *= k so rating diffs are in spread units
+        • Store 1500 + ratings_pts in ratings_history / ratings_current
+        """
+    
+        # ---------------- config ----------------
         window_days  = int(cfg.get("window_days", 120))
         mov_cap      = cfg.get("mov_cap", 25)
         ridge_lambda = float(cfg.get("ridge_lambda", 50.0))
-
+    
+        # ---------------- 1) GET SCORES + MARKET ----------------
         sql = f"""
+        WITH scores AS (
+          SELECT
+            LOWER(TRIM(Home_Team)) AS home,
+            LOWER(TRIM(Away_Team)) AS away,
+            SAFE_CAST(Score_Home_Score AS FLOAT64) AS hs,
+            SAFE_CAST(Score_Away_Score AS FLOAT64) AS as_,
+            TIMESTAMP(Game_Start) AS gs,
+            TIMESTAMP(Game_Start) AS game_start_raw
+          FROM `sharplogger.sharp_data.game_scores_final`
+          WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
+            AND Score_Home_Score IS NOT NULL
+            AND Score_Away_Score IS NOT NULL
+            AND TIMESTAMP(Game_Start) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @win_days DAY)
+        ),
+    
+        latest_per_book AS (
+          SELECT
+            LOWER(TRIM(m.Home_Team_Norm)) AS home,
+            LOWER(TRIM(m.Away_Team_Norm)) AS away,
+            TIMESTAMP(m.Game_Start)       AS game_start_raw,
+    
+            REGEXP_REPLACE(
+              LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+              r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+            ) AS BookKey,
+    
+            SAFE_CAST(m.Value AS FLOAT64) AS spread_value,      -- spread for *this team*
+            m.Snapshot_Timestamp,
+    
+            LOWER(TRIM(m.Team_For_Join)) AS fav_team           -- TEAM this row belongs to
+          FROM `sharplogger.sharp_data.moves_with_features_merged` m
+          WHERE
+            UPPER(CAST(m.Sport AS STRING)) IN UNNEST(@aliases)
+            AND m.Market IN ('spreads','spread','Spread','SPREADS')
+            AND m.Value IS NOT NULL
+            AND TIMESTAMP(m.Game_Start) IS NOT NULL
+            AND m.Value < 0    -- ⭐ FAVORITE SIDE ONLY (fav lines are negative)
+          QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY
+              LOWER(TRIM(m.Home_Team_Norm)),
+              LOWER(TRIM(m.Away_Team_Norm)),
+              TIMESTAMP(m.Game_Start),
+              REGEXP_REPLACE(
+                LOWER(TRIM(COALESCE(m.Bookmaker, m.Book))),
+                r'^betfair_ex(?:_[a-z]+)?$', 'betfair_ex'
+              )
+            ORDER BY m.Snapshot_Timestamp DESC
+          ) = 1
+        ),
+    
+        market AS (
+          SELECT
+            home,
+            away,
+            game_start_raw,
+            -- favorite team across sharp books
+            ANY_VALUE(fav_team) AS favorite_team,
+            -- dog is the "other" team
+            CASE
+              WHEN ANY_VALUE(fav_team) = home THEN away ELSE home
+            END AS dog_team,
+            -- median favorite spread across sharp books
+            APPROX_QUANTILES(spread_value, 2)[OFFSET(1)] AS spread_close
+          FROM latest_per_book
+          WHERE BookKey IN UNNEST(@sharp_books)
+          GROUP BY home, away, game_start_raw
+        )
+    
         SELECT
-          LOWER(TRIM(Home_Team)) AS home,
-          LOWER(TRIM(Away_Team)) AS away,
-          SAFE_CAST(Score_Home_Score AS FLOAT64) AS hs,
-          SAFE_CAST(Score_Away_Score AS FLOAT64) AS as_,
-          TIMESTAMP(Game_Start) AS gs
-        FROM `{project_table_scores}`
-        WHERE UPPER(CAST(Sport AS STRING)) IN UNNEST(@aliases)
-          AND Score_Home_Score IS NOT NULL AND Score_Away_Score IS NOT NULL
-          AND TIMESTAMP(Game_Start) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @win_days DAY)
+          s.home,
+          s.away,
+          s.hs,
+          s.as_,
+          s.gs,
+          m.spread_close,
+          m.favorite_team,
+          m.dog_team
+        FROM scores s
+        LEFT JOIN market m
+          ON s.home = m.home
+         AND s.away = m.away
+         AND s.game_start_raw = m.game_start_raw
         """
+    
         df = bq.query(
             sql,
             job_config=bigquery.QueryJobConfig(
                 query_parameters=[
-                    bigquery.ArrayQueryParameter("aliases","STRING", aliases),
+                    bigquery.ArrayQueryParameter("aliases", "STRING", aliases),
                     bigquery.ScalarQueryParameter("win_days", "INT64", window_days),
+                    bigquery.ArrayQueryParameter("sharp_books", "STRING", ["pinnacle", "betfair_ex"]),
                 ]
             )
         ).to_dataframe()
+    
         if df.empty:
             return []
-
+    
+        # ---------------- 2) Ridge Solve (Massey with ridge + HFA) ----------------
         df["mov"] = (df["hs"] - df["as_"]).astype(float).clip(lower=-mov_cap, upper=mov_cap)
-
+    
         teams = pd.Index(sorted(set(df.home) | set(df.away)))
         n = len(teams)
-        idx = {t:i for i,t in enumerate(teams)}
-
+        idx = {t: i for i, t in enumerate(teams)}
+    
         m = len(df)
         X = np.zeros((m, n + 1), dtype=float)  # +1 for HFA indicator
         y = df["mov"].to_numpy(float)
-
+    
         for i, row in df.iterrows():
             hi, ai = idx[row.home], idx[row.away]
             X[i, hi] = 1.0
             X[i, ai] = -1.0
-            X[i, n]  = 1.0
-
+            X[i, n]  = 1.0  # home-court indicator
+    
         XtX = X.T @ X
         XtX[:n, :n] += np.eye(n) * ridge_lambda
         XtX[n, n]   += ridge_lambda * 0.01
-        Xty = X.T @ y
-        beta = np.linalg.solve(XtX, Xty)
-        
-        # --- raw ridge ratings (in "points") ---
+    
+        beta = np.linalg.solve(XtX, X.T @ y)
         ratings_pts = beta[:n]
-        
-        # center to 0 (doesn't affect differences)
+    
+        # center to 0
         ratings_pts = ratings_pts - ratings_pts.mean()
-        
-        # ---------- NEW: force a realistic spread for rating differences ----------
-        # We want typical Home–Away rating differences to have a certain SD in points.
-        # If team ratings each have SD = s, and are ~independent, diff SD ≈ sqrt(2)*s.
-      
-        
-        current_sd = float(np.std(ratings_pts))
-        if current_sd > 1e-6:
-            TARGET_DIFF_SD = 10.0  # <- tune this: 5–8 is a good starting range
-            target_rating_sd = TARGET_DIFF_SD / np.sqrt(2.0)
-            scale = target_rating_sd / current_sd
-            ratings_pts = ratings_pts * scale  # expand/shrink all gaps
-        # ------------------------------------------------------------------------
-        
-        
+    
+        # ---------------- 3) MARKET CALIBRATION ----------------
+        # Use only games where we have a favorite spread + favorite/dog labels
+        df_cal = df[
+            df["spread_close"].notna()
+            & df["favorite_team"].notna()
+            & df["dog_team"].notna()
+        ].copy()
+    
+        if not df_cal.empty:
+            rating_map = {t: r for t, r in zip(teams, ratings_pts)}
+    
+            # rating diff = favorite - dog
+            df_cal["rdiff"] = (
+                df_cal["favorite_team"].map(rating_map)
+                - df_cal["dog_team"].map(rating_map)
+            )
+    
+            # We want: spread_close ≈ -k * rdiff  (spread is negative for favorite)
+            num = float((df_cal["rdiff"] * df_cal["spread_close"]).sum())
+            den = float((df_cal["rdiff"] ** 2).sum())
+    
+            if den > 0:
+                k = - num / den  # NOTE the minus sign
+                ratings_pts = ratings_pts * float(k)
+    
+        # ---------------- 4) Write Ratings ----------------
         ts = df["gs"].max()
         if isinstance(ts, pd.Timestamp) and ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
-        
+    
+        # history
         hist_rows = [
             {
                 "Sport": sport,
                 "Team": t,
-                "Rating": 1500.0 + float(r),  # still centered near 1500, but now with real spread
+                "Rating": 1500.0 + float(r),
                 "Method": "ridge_massey",
                 "Updated_At": ts,
                 "Source": "window_fit",
@@ -981,13 +1082,26 @@ def update_power_ratings(
             for t, r in zip(teams, ratings_pts)
         ]
         if hist_rows:
-            bq.load_table_from_dataframe(pd.DataFrame(hist_rows), table_history).result()
-
+            bq.load_table_from_dataframe(
+                pd.DataFrame(hist_rows),
+                "sharplogger.sharp_data.ratings_history"
+            ).result()
+    
+        # current
         utc_now = pd.Timestamp.now(tz="UTC")
-        current_rows = [{"Sport": sport, "Team": t, "Rating": 1500.0 + float(r),
-                         "Method": "ridge_massey", "Updated_At": utc_now}
-                        for t, r in zip(teams, ratings_pts)]
+        current_rows = [
+            {
+                "Sport": sport,
+                "Team": t,
+                "Rating": 1500.0 + float(r),
+                "Method": "ridge_massey",
+                "Updated_At": utc_now,
+            }
+            for t, r in zip(teams, ratings_pts)
+        ]
+    
         return current_rows
+
 
     # ---------------- MAIN ----------------
     sports_available = fetch_sports_present()
