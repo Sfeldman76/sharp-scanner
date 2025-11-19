@@ -958,7 +958,7 @@ def update_power_ratings(
         
         current_sd = float(np.std(ratings_pts))
         if current_sd > 1e-6:
-            TARGET_DIFF_SD = 6.0  # <- tune this: 5–8 is a good starting range
+            TARGET_DIFF_SD = 10.0  # <- tune this: 5–8 is a good starting range
             target_rating_sd = TARGET_DIFF_SD / np.sqrt(2.0)
             scale = target_rating_sd / current_sd
             ratings_pts = ratings_pts * scale  # expand/shrink all gaps
