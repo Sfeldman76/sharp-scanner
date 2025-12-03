@@ -128,7 +128,12 @@ from pandas.api.types import (
     is_bool_dtype, is_numeric_dtype, is_categorical_dtype, is_datetime64_any_dtype,
     is_period_dtype, is_interval_dtype, is_object_dtype
 )
-              
+from copy import deepcopy
+
+from sklearn.model_selection import RandomizedSearchCV
+
+from sklearn.base import clone
+             
 GCP_PROJECT_ID = "sharplogger"  # ✅ confirmed project ID
 BQ_DATASET = "sharp_data"       # ✅ your dataset name
 BQ_TABLE = "sharp_moves_master" # ✅ your table name
@@ -5195,6 +5200,137 @@ def c_features_inplace(df: pd.DataFrame, features: list[str]) -> list[str]:
 
     return kept
 
+def _eval_on_train(estimator, X, y):
+    """Simple train-metrics helper."""
+    proba = estimator.predict_proba(X)[:, 1]
+    auc   = roc_auc_score(y, proba)
+    ll    = log_loss(y, proba)
+    return auc, ll
+
+def hyperparam_search_until_good(
+    base_estimator,
+    param_distributions,
+    X,
+    y,
+    cv,
+    *,
+    min_auc=0.58,
+    max_logloss=0.693,
+    max_overfit_gap=0.03,
+    max_rounds=4,
+    n_iter_per_round=25,
+    random_state=42,
+    logger=None,
+):
+    """
+    Run multiple random-search rounds until a model meets minimum conditions.
+    If none do, raise RuntimeError("no optimal solution found") and return
+    the best-so-far metrics so you can log them.
+    """
+    rng = np.random.RandomState(random_state)
+
+    best_global = None
+    best_metrics_global = None  # (cv_auc, cv_logloss, train_auc, train_logloss, params)
+
+    for round_idx in range(1, max_rounds + 1):
+        seed = int(rng.randint(0, 1e9))
+        if logger:
+            logger.info(
+                "🔁 Hyperparam search round %d/%d (n_iter=%d, seed=%d)",
+                round_idx, max_rounds, n_iter_per_round, seed
+            )
+
+        search = RandomizedSearchCV(
+            estimator=clone(base_estimator),
+            param_distributions=param_distributions,
+            n_iter=n_iter_per_round,
+            scoring={
+                "auc": "roc_auc",
+                "logloss": "neg_log_loss",
+            },
+            refit="auc",      # best AUC model kept as best_estimator_
+            cv=cv,
+            n_jobs=-1,
+            random_state=seed,
+            verbose=0,
+        )
+        search.fit(X, y)
+
+        # CV metrics from the search object
+        cv_auc = search.best_score_
+        cv_logloss = -search.cv_results_["mean_test_logloss"][search.best_index_]
+
+        # Train metrics on whole training fold (for overfit gap)
+        train_auc, train_logloss = _eval_on_train(search.best_estimator_, X, y)
+        overfit_gap = train_auc - cv_auc
+
+        params = deepcopy(search.best_params_)
+        msg = (
+            f"Round {round_idx}: cv_auc={cv_auc:.4f}, cv_logloss={cv_logloss:.4f}, "
+            f"train_auc={train_auc:.4f}, train_logloss={train_logloss:.4f}, "
+            f"overfit_gap={overfit_gap:.4f}"
+        )
+        if logger:
+            logger.info("📊 %s", msg)
+        else:
+            print(msg)
+
+        # Update global best even if it doesn't pass the gate
+        if (
+            best_metrics_global is None
+            or cv_auc > best_metrics_global[0]
+            or (cv_auc == best_metrics_global[0] and cv_logloss < best_metrics_global[1])
+        ):
+            best_global = deepcopy(search.best_estimator_)
+            best_metrics_global = (cv_auc, cv_logloss, train_auc, train_logloss, params)
+
+        # Check minimum conditions
+        passes_gate = (
+            (cv_auc >= min_auc) and
+            (cv_logloss <= max_logloss) and
+            (overfit_gap <= max_overfit_gap)
+        )
+        if passes_gate:
+            if logger:
+                logger.info(
+                    "✅ Model passed minimum conditions in round %d; promoting as optimal.",
+                    round_idx,
+                )
+            return {
+                "estimator": search.best_estimator_,
+                "params": params,
+                "metrics": {
+                    "cv_auc": cv_auc,
+                    "cv_logloss": cv_logloss,
+                    "train_auc": train_auc,
+                    "train_logloss": train_logloss,
+                    "overfit_gap": overfit_gap,
+                },
+                "status": "ok",
+            }
+
+    # If we get here: nothing passed the gate
+    if logger and best_metrics_global is not None:
+        cv_auc, cv_logloss, train_auc, train_logloss, params = best_metrics_global
+        logger.warning(
+            "❌ No optimal solution found after %d rounds. "
+            "Best CV AUC=%.4f, CV logloss=%.4f, overfit_gap=%.4f. Params=%s",
+            max_rounds, cv_auc, cv_logloss, train_auc - cv_auc, params,
+        )
+
+    return {
+        "estimator": best_global,
+        "params": best_metrics_global[-1] if best_metrics_global else None,
+        "metrics": {
+            "cv_auc": best_metrics_global[0],
+            "cv_logloss": best_metrics_global[1],
+            "train_auc": best_metrics_global[2],
+            "train_logloss": best_metrics_global[3],
+            "overfit_gap": best_metrics_global[2] - best_metrics_global[0],
+        } if best_metrics_global else None,
+        "status": "no_optimal_solution",
+    }
+
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     SPORT_DAYS_BACK = {"NBA": 365, "NFL": 365, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 365, "NCAAB": 365}
@@ -7925,70 +8061,131 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         ))
         
         # ---- Search (Prefer Halving; fallback to RandomizedSearch) ----
-        try:
-            rs_ll = HalvingRandomSearchCV(
-                estimator=est_ll,
-                param_distributions=params_ll,
-                factor=HALVING_FACTOR,
-                resource="n_estimators",
-                min_resources=MIN_RESOURCES,
-                max_resources=SEARCH_N_EST,
-                aggressive_elimination=True,
-                scoring="neg_log_loss",
-                cv=folds,
-                n_jobs=max(1, min(VCPUS, 6)),
-                random_state=42,
-                verbose=1 if st.session_state.get("debug", False) else 0,
-            )
-            rs_auc = HalvingRandomSearchCV(
-                estimator=est_auc,
-                param_distributions=params_auc,
-                factor=HALVING_FACTOR,
-                resource="n_estimators",
-                min_resources=MIN_RESOURCES,
-                max_resources=SEARCH_N_EST,
-                aggressive_elimination=True,
-                scoring="roc_auc",
-                cv=folds,
-                n_jobs=max(1, min(VCPUS, 6)),
-                random_state=137,
-                verbose=1 if st.session_state.get("debug", False) else 0,
-            )
-        except Exception:
-            try:
-                search_trials  # type: ignore
-            except NameError:
-                search_trials = _resolve_search_trials(sport, X_train.shape[0])
-            search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
-            search_trials = max(50, int(search_trials * 1.2))
-            rs_ll = RandomizedSearchCV(
-                estimator=est_ll,
-                param_distributions=params_ll,
-                n_iter=search_trials,
-                scoring="neg_log_loss",
-                cv=folds,
-                n_jobs=max(1, min(VCPUS, 6)),
-                random_state=42,
-                verbose=1 if st.session_state.get("debug", False) else 0,
-            )
-            rs_auc = RandomizedSearchCV(
-                estimator=est_auc,
-                param_distributions=params_auc,
-                n_iter=search_trials,
-                scoring="roc_auc",
-                cv=folds,
-                n_jobs=max(1, min(VCPUS, 6)),
-                random_state=137,
-                verbose=1 if st.session_state.get("debug", False) else 0,
-            )
+                # -------------------- Robust Search: run until "good enough" --------------------
+        MIN_AUC      = 0.58    # tweak per sport/market if you want
+        MAX_LOGLOSS  = 0.693   # ~coinflip baseline
+        MAX_ROUNDS   = 10       # max independent search rounds
         
         fit_params_search = dict(sample_weight=w_train, verbose=False)
-        with threadpool_limits(limits=1):
-            rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
-            rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
-        
-        best_ll_params  = rs_ll.best_params_.copy()
-        best_auc_params = rs_auc.best_params_.copy()
+        n_jobs_search = max(1, min(VCPUS, 6))
+
+        def _make_search_objects(seed_ll: int, seed_auc: int):
+            """Build rs_ll, rs_auc for a given pair of seeds (Halving if possible, else Randomized)."""
+            try:
+                rs_ll = HalvingRandomSearchCV(
+                    estimator=est_ll,
+                    param_distributions=params_ll,
+                    factor=HALVING_FACTOR,
+                    resource="n_estimators",
+                    min_resources=MIN_RESOURCES,
+                    max_resources=SEARCH_N_EST,
+                    aggressive_elimination=True,
+                    scoring="neg_log_loss",
+                    cv=folds,
+                    n_jobs=n_jobs_search,
+                    random_state=seed_ll,
+                    verbose=1 if st.session_state.get("debug", False) else 0,
+                )
+                rs_auc = HalvingRandomSearchCV(
+                    estimator=est_auc,
+                    param_distributions=params_auc,
+                    factor=HALVING_FACTOR,
+                    resource="n_estimators",
+                    min_resources=MIN_RESOURCES,
+                    max_resources=SEARCH_N_EST,
+                    aggressive_elimination=True,
+                    scoring="roc_auc",
+                    cv=folds,
+                    n_jobs=n_jobs_search,
+                    random_state=seed_auc,
+                    verbose=1 if st.session_state.get("debug", False) else 0,
+                )
+            except Exception:
+                # Fallback: pure RandomizedSearchCV with expanded trials
+                try:
+                    search_trials  # type: ignore
+                except NameError:
+                    search_trials = _resolve_search_trials(sport, X_train.shape[0])
+                search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
+                search_trials = max(50, int(search_trials * 1.2))
+
+                rs_ll = RandomizedSearchCV(
+                    estimator=est_ll,
+                    param_distributions=params_ll,
+                    n_iter=search_trials,
+                    scoring="neg_log_loss",
+                    cv=folds,
+                    n_jobs=n_jobs_search,
+                    random_state=seed_ll,
+                    verbose=1 if st.session_state.get("debug", False) else 0,
+                )
+                rs_auc = RandomizedSearchCV(
+                    estimator=est_auc,
+                    param_distributions=params_auc,
+                    n_iter=search_trials,
+                    scoring="roc_auc",
+                    cv=folds,
+                    n_jobs=n_jobs_search,
+                    random_state=seed_auc,
+                    verbose=1 if st.session_state.get("debug", False) else 0,
+                )
+            return rs_ll, rs_auc
+
+        best_ll_params  = None
+        best_auc_params = None
+        best_auc_score  = -np.inf
+        best_ll_score   = np.inf
+
+        found_good = False
+
+        for round_idx in range(MAX_ROUNDS):
+            seed_ll  = 42  + round_idx
+            seed_auc = 137 + round_idx
+
+            logger.info("🔎 Hyperparam search round %d/%d (seeds: ll=%d, auc=%d)",
+                        round_idx + 1, MAX_ROUNDS, seed_ll, seed_auc)
+
+            rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
+
+            with threadpool_limits(limits=1):
+                rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
+                rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
+
+            # Remember: neg_log_loss → flip sign
+            auc_cv     = float(rs_auc.best_score_)
+            logloss_cv = float(-rs_ll.best_score_)
+
+            logger.info("   🧪 Round %d CV metrics: AUC=%.4f, LogLoss=%.4f",
+                        round_idx + 1, auc_cv, logloss_cv)
+
+            # Track best seen across all rounds
+            if auc_cv > best_auc_score:
+                best_auc_score  = auc_cv
+                best_ll_score   = logloss_cv
+                best_auc_params = rs_auc.best_params_.copy()
+                best_ll_params  = rs_ll.best_params_.copy()
+
+            # Check stopping conditions
+            if (auc_cv >= MIN_AUC) and (logloss_cv <= MAX_LOGLOSS):
+                logger.info(
+                    "✅ Conditions met in round %d for %s %s (AUC=%.4f, LL=%.4f ≥|≤ targets).",
+                    round_idx + 1, sport, market, auc_cv, logloss_cv
+                )
+                found_good = True
+                break
+
+        if not found_good:
+            logger.error(
+                "❌ No optimal solution found for %s %s after %d rounds. "
+                "Best CV AUC=%.4f, LogLoss=%.4f. Keeping existing champion model (no overwrite).",
+                sport, market, MAX_ROUNDS, best_auc_score, best_ll_score
+            )
+            # Bail out of training for this market without saving a new model
+            return
+
+        # At this point best_*_params are the ones from the round that hit thresholds
+        assert best_auc_params is not None and best_ll_params is not None
+
         
         # ---------------- stabilize best params (regularization-first) ----------------
         STABLE = dict(
