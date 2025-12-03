@@ -5780,11 +5780,77 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             return np.where(s > 0, 100.0/(s+100.0),
                    np.where(s < 0, (-s)/((-s)+100.0), np.nan)).astype("float32")
         df_market = df_market.merge(df_cross_market, on="Game_Key", how="left")
+        
         # Ensure columns exist; if missing, create as NaN
         for c in ["Spread_Odds","Total_Odds","H2H_Odds"]:
             if c not in df_market.columns:
                 df_market[c] = np.nan
-        
+                # === Value-aware line magnitude features (spread & total) ===
+        # Ensure numeric game-level values from the pivot
+        for c in ["Spread_Value", "Total_Value"]:
+            if c in df_market.columns:
+                df_market[c] = pd.to_numeric(df_market[c], errors="coerce")
+
+        is_spread = df_market["Market"].eq("spreads")
+        is_totals = df_market["Market"].eq("totals")
+
+        # Game-level absolute spread (fav line magnitude) and total points
+        df_market["Spread_Abs_Game"] = np.where(
+            is_spread,
+            df_market["Spread_Value"].abs(),
+            np.nan,
+        )
+        df_market["Total_Game"] = np.where(
+            is_totals,
+            df_market["Total_Value"],
+            np.nan,
+        )
+
+        # Z-scores within sport for spread and total separately (value-aware, but season-relative)
+        df_market["Spread_Abs_Game_Z"] = np.nan
+        df_market["Total_Game_Z"] = np.nan
+
+        mask_spread = is_spread & df_market["Spread_Abs_Game"].notna()
+        mask_total  = is_totals & df_market["Total_Game"].notna()
+
+        if mask_spread.any():
+            df_market.loc[mask_spread, "Spread_Abs_Game_Z"] = (
+                df_market.loc[mask_spread]
+                .groupby("Sport")["Spread_Abs_Game"]
+                .transform(lambda x: zscore(x, ddof=0))
+            )
+
+        if mask_total.any():
+            df_market.loc[mask_total, "Total_Game_Z"] = (
+                df_market.loc[mask_total]
+                .groupby("Sport")["Total_Game"]
+                .transform(lambda x: zscore(x, ddof=0))
+            )
+
+        # Spread size bucket (generic but sport-aware via z-score & abs value)
+        df_market["Spread_Size_Bucket"] = pd.cut(
+            df_market["Spread_Abs_Game"],
+            bins=[-0.01, 2.5, 6.5, 10.5, np.inf],
+            labels=["Close", "Medium", "Large", "Huge"],
+        )
+
+        # Total size bucket: per-sport quantiles (Low / Medium / High / Very High)
+        df_market["Total_Size_Bucket"] = None
+        if mask_total.any():
+            for sport_val, g in df_market[mask_total].groupby("Sport"):
+                qs = g["Total_Game"].quantile([0.25, 0.50, 0.75]).values
+                bins = [-np.inf, qs[0], qs[1], qs[2], np.inf]
+                labels = ["Low", "Medium", "High", "Very_High"]
+                df_market.loc[g.index, "Total_Size_Bucket"] = pd.cut(
+                    g["Total_Game"], bins=bins, labels=labels
+                )
+        df_market["Total_Size_Bucket"] = df_market["Total_Size_Bucket"].astype(str)
+
+        # Interactions / volatility proxies
+        df_market["Spread_x_Total"] = df_market["Spread_Abs_Game"] * df_market["Total_Game"]
+        df_market["Spread_over_Total"] = df_market["Spread_Abs_Game"] / df_market["Total_Game"].replace(0, np.nan)
+        df_market["Total_over_Spread"] = df_market["Total_Game"] / df_market["Spread_Abs_Game"].replace(0, np.nan)
+
         # Compute implied probs with row-level fallback to Odds_Price (no KeyError, vectorized)
         df_market["Spread_Implied_Prob"] = _amer_to_prob_vec(
             df_market["Spread_Odds"].where(df_market["Spread_Odds"].notna(), df_market.get("Odds_Price"))
@@ -6704,6 +6770,15 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "SpreadML_Rho","SpreadML_Synergy","SpreadML_Sign","Spread_ML_ProbGap",
             "TotalML_Rho","TotalML_Synergy","TotalML_Sign",
             "EV_Sh_vs_Rec_Prob", "EV_Sh_vs_Rec_Dollar", "Kelly_Fraction",
+            "Spread_Abs_Game",
+            "Spread_Abs_Game_Z",
+            "Spread_Size_Bucket",
+            "Total_Game",
+            "Total_Game_Z",
+            "Total_Size_Bucket",
+            "Spread_x_Total",
+            "Spread_over_Total",
+            "Total_over_Spread",
             
         ]
         
