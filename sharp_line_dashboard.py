@@ -187,12 +187,17 @@ _ALLOW_HTML_COLS = {"Confidence Spark"}  # whitelist columns that intentionally 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
 class StreamlitLogger:
-    def info(self, msg):
-        st.info(msg)
-    def warning(self, msg):
-        st.warning(msg)
-    def error(self, msg):
-        st.error(msg)
+    def _fmt(self, msg, args):
+        return msg % args if args else msg
+
+    def info(self, msg, *args, **kwargs):
+        st.info(self._fmt(msg, args))
+
+    def warning(self, msg, *args, **kwargs):
+        st.warning(self._fmt(msg, args))
+
+    def error(self, msg, *args, **kwargs):
+        st.error(self._fmt(msg, args))
 
 logger = StreamlitLogger()
 
