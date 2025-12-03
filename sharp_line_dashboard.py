@@ -186,6 +186,16 @@ _ALLOW_HTML_COLS = {"Confidence Spark"}  # whitelist columns that intentionally 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
+class StreamlitLogger:
+    def info(self, msg):
+        st.info(msg)
+    def warning(self, msg):
+        st.warning(msg)
+    def error(self, msg):
+        st.error(msg)
+
+logger = StreamlitLogger()
+
 def _clean_text(x: str) -> str:
     # Normalize, strip control chars, then escape HTML
     x = unicodedata.normalize("NFC", x)
