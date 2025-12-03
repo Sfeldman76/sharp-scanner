@@ -5779,88 +5779,114 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             s = pd.to_numeric(s, errors="coerce")
             return np.where(s > 0, 100.0/(s+100.0),
                    np.where(s < 0, (-s)/((-s)+100.0), np.nan)).astype("float32")
+                # Merge game-level cross-market values (Spread_Value / Total_Value / H2H_Value)
         df_market = df_market.merge(df_cross_market, on="Game_Key", how="left")
-        
-        # Ensure columns exist; if missing, create as NaN
-        for c in ["Spread_Odds","Total_Odds","H2H_Odds"]:
-            if c not in df_market.columns:
-                df_market[c] = np.nan
-                # === Value-aware line magnitude features (spread & total) ===
-        # Ensure numeric game-level values from the pivot
-        for c in ["Spread_Value", "Total_Value"]:
-            if c in df_market.columns:
-                df_market[c] = pd.to_numeric(df_market[c], errors="coerce")
 
-        is_spread = df_market["Market"].eq("spreads")
-        is_totals = df_market["Market"].eq("totals")
-
-        # Game-level absolute spread (fav line magnitude) and total points
-        df_market["Spread_Abs_Game"] = np.where(
-            is_spread,
-            df_market["Spread_Value"].abs(),
-            np.nan,
-        )
-        df_market["Total_Game"] = np.where(
-            is_totals,
-            df_market["Total_Value"],
-            np.nan,
+        # === GAME-LEVEL value-aware features: compute once per Game_Key, then broadcast ===
+        game_vals = (
+            df_market[["Game_Key", "Sport", "Spread_Value", "Total_Value"]]
+            .drop_duplicates("Game_Key")
+            .copy()
         )
 
-        # Z-scores within sport for spread and total separately (value-aware, but season-relative)
-        df_market["Spread_Abs_Game_Z"] = np.nan
-        df_market["Total_Game_Z"] = np.nan
+        # Make sure these are numeric
+        game_vals["Spread_Value"] = pd.to_numeric(game_vals["Spread_Value"], errors="coerce")
+        game_vals["Total_Value"] = pd.to_numeric(game_vals["Total_Value"], errors="coerce")
 
-        mask_spread = is_spread & df_market["Spread_Abs_Game"].notna()
-        mask_total  = is_totals & df_market["Total_Game"].notna()
+        # Absolute spread magnitude (fav line) and total points for the game
+        game_vals["Spread_Abs_Game"] = game_vals["Spread_Value"].abs()
+        game_vals["Total_Game"] = game_vals["Total_Value"]
 
-        if mask_spread.any():
-            df_market.loc[mask_spread, "Spread_Abs_Game_Z"] = (
-                df_market.loc[mask_spread]
-                .groupby("Sport")["Spread_Abs_Game"]
-                .transform(lambda x: zscore(x, ddof=0))
-            )
+        # Z-scores per sport (season-relative)
+        game_vals["Spread_Abs_Game_Z"] = (
+            game_vals.groupby("Sport")["Spread_Abs_Game"]
+            .transform(lambda x: zscore(x.fillna(0), ddof=0))
+        )
+        game_vals["Total_Game_Z"] = (
+            game_vals.groupby("Sport")["Total_Game"]
+            .transform(lambda x: zscore(x.fillna(0), ddof=0))
+        )
 
-        if mask_total.any():
-            df_market.loc[mask_total, "Total_Game_Z"] = (
-                df_market.loc[mask_total]
-                .groupby("Sport")["Total_Game"]
-                .transform(lambda x: zscore(x, ddof=0))
-            )
-
-        # Spread size bucket (generic but sport-aware via z-score & abs value)
-        df_market["Spread_Size_Bucket"] = pd.cut(
-            df_market["Spread_Abs_Game"],
+        # Spread size bucket (generic but meaningful)
+        game_vals["Spread_Size_Bucket"] = pd.cut(
+            game_vals["Spread_Abs_Game"],
             bins=[-0.01, 2.5, 6.5, 10.5, np.inf],
             labels=["Close", "Medium", "Large", "Huge"],
         )
 
         # Total size bucket: per-sport quantiles (Low / Medium / High / Very High)
-        df_market["Total_Size_Bucket"] = None
-        if mask_total.any():
-            for sport_val, g in df_market[mask_total].groupby("Sport"):
-                qs = g["Total_Game"].quantile([0.25, 0.50, 0.75]).values
-                bins = [-np.inf, qs[0], qs[1], qs[2], np.inf]
-                labels = ["Low", "Medium", "High", "Very_High"]
-                df_market.loc[g.index, "Total_Size_Bucket"] = pd.cut(
-                    g["Total_Game"], bins=bins, labels=labels
-                )
-        df_market["Total_Size_Bucket"] = df_market["Total_Size_Bucket"].astype(str)
+        game_vals["Total_Size_Bucket"] = ""
+        for sport_val, g in game_vals.groupby("Sport"):
+            # need a few games to get sensible quantiles
+            if g["Total_Game"].notna().sum() < 5:
+                continue
+            qs = g["Total_Game"].quantile([0.25, 0.50, 0.75]).values
+            bins = [-np.inf, qs[0], qs[1], qs[2], np.inf]
+            labels = ["Low", "Medium", "High", "Very_High"]
+            game_vals.loc[g.index, "Total_Size_Bucket"] = pd.cut(
+                g["Total_Game"], bins=bins, labels=labels
+            ).astype(str)
 
         # Interactions / volatility proxies
-        df_market["Spread_x_Total"] = df_market["Spread_Abs_Game"] * df_market["Total_Game"]
-        df_market["Spread_over_Total"] = df_market["Spread_Abs_Game"] / df_market["Total_Game"].replace(0, np.nan)
-        df_market["Total_over_Spread"] = df_market["Total_Game"] / df_market["Spread_Abs_Game"].replace(0, np.nan)
+        game_vals["Spread_x_Total"] = game_vals["Spread_Abs_Game"] * game_vals["Total_Game"]
+        game_vals["Spread_over_Total"] = game_vals["Spread_Abs_Game"] / game_vals["Total_Game"].replace(0, np.nan)
+        game_vals["Total_over_Spread"] = game_vals["Total_Game"] / game_vals["Spread_Abs_Game"].replace(0, np.nan)
 
-        # Compute implied probs with row-level fallback to Odds_Price (no KeyError, vectorized)
-        df_market["Spread_Implied_Prob"] = _amer_to_prob_vec(
-            df_market["Spread_Odds"].where(df_market["Spread_Odds"].notna(), df_market.get("Odds_Price"))
+        # (Optional but 🔥 for NFL/NCAAF): key number distances
+        def _dist_to_key(abs_spread, key):
+            return np.abs(abs_spread - key)
+
+        is_fb = game_vals["Sport"].isin(["NFL", "NCAAF"])
+        if is_fb.any():
+            g_fb = game_vals[is_fb]
+            game_vals.loc[is_fb, "Dist_to_3"]  = _dist_to_key(g_fb["Spread_Abs_Game"], 3)
+            game_vals.loc[is_fb, "Dist_to_7"]  = _dist_to_key(g_fb["Spread_Abs_Game"], 7)
+            game_vals.loc[is_fb, "Dist_to_10"] = _dist_to_key(g_fb["Spread_Abs_Game"], 10)
+        else:
+            for k in ["Dist_to_3", "Dist_to_7", "Dist_to_10"]:
+                game_vals[k] = np.nan
+
+        # Merge these back to every training row for the game
+        df_market = df_market.merge(
+            game_vals[
+                [
+                    "Game_Key",
+                    "Spread_Abs_Game",
+                    "Spread_Abs_Game_Z",
+                    "Spread_Size_Bucket",
+                    "Total_Game",
+                    "Total_Game_Z",
+                    "Total_Size_Bucket",
+                    "Spread_x_Total",
+                    "Spread_over_Total",
+                    "Total_over_Spread",
+                    "Dist_to_3",
+                    "Dist_to_7",
+                    "Dist_to_10",
+                ]
+            ],
+            on="Game_Key",
+            how="left",
+            validate="many_to_one",
         )
-        df_market["Total_Implied_Prob"] = _amer_to_prob_vec(
-            df_market["Total_Odds"].where(df_market["Total_Odds"].notna(), df_market.get("Odds_Price"))
+
+        # ensure buckets are plain strings (not Categorical)
+        df_market["Spread_Size_Bucket"] = df_market["Spread_Size_Bucket"].astype(str)
+        df_market["Total_Size_Bucket"] = df_market["Total_Size_Bucket"].astype(str)
+
+        # === Implied probabilities directly from Odds_Price by market (unchanged in spirit) ===
+        df_market["Market_Implied_Prob"] = _amer_to_prob_vec(df_market["Odds_Price"])
+        df_market["Spread_Implied_Prob"] = np.where(
+            df_market["Market"].eq("spreads"), df_market["Market_Implied_Prob"], np.nan
         )
-        df_market["H2H_Implied_Prob"] = _amer_to_prob_vec(
-            df_market["H2H_Odds"].where(df_market["H2H_Odds"].notna(), df_market.get("Odds_Price"))
+        df_market["Total_Implied_Prob"] = np.where(
+            df_market["Market"].eq("totals"), df_market["Market_Implied_Prob"], np.nan
         )
+        df_market["H2H_Implied_Prob"] = np.where(
+            df_market["Market"].eq("h2h"), df_market["Market_Implied_Prob"], np.nan
+        )
+
+
 
         # Your existing FE before resistance
         df_market = compute_small_book_liquidity_features(df_market)
@@ -6779,6 +6805,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "Spread_x_Total",
             "Spread_over_Total",
             "Total_over_Spread",
+            "Dist_to_3",
+            "Dist_to_7",
+            "Dist_to_10",
             
         ]
         
