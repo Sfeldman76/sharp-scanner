@@ -5750,129 +5750,152 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     for i, market in enumerate(markets_present, 1):
         pct = int(round(i / n_markets * 100))
         status.write(f"🚧 Training model for `{market.upper()}`...")
-    
-        df_market = df_bt[df_bt['Market'].astype(str).str.lower() == market].copy()
+
+        df_market = df_bt[df_bt["Market"].astype(str).str.lower() == market].copy()
+
         # --- Canonical side filter (EARLY to reduce noise/compute) ---
         if market == "totals":
-            df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"]
+            df_market = df_market[
+                df_market["Outcome"].astype(str).str.lower().str.strip() == "over"
+            ]
         else:  # spreads + h2h
             df_market["Value"] = pd.to_numeric(df_market["Value"], errors="coerce")
             df_market = df_market[df_market["Value"] < 0]
-        if df_market.empty:
-            pb.progress(min(100, max(0, pct)));  continue
-        df_market = (df_market.sort_values('Snapshot_Timestamp')
-                       .drop_duplicates(subset=['Game_Key','Market','Outcome','Bookmaker'], keep='last'))
 
-       
+        if df_market.empty:
+            pb.progress(min(100, max(0, pct)))
+            continue
+
+        df_market = (
+            df_market.sort_values("Snapshot_Timestamp")
+                     .drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"], keep="last")
+        )
+
         if df_market.empty:
             status.warning(f"⚠️ No data for {market.upper()} — skipping.")
             pb.progress(min(100, max(0, pct)))
             continue
-        
- 
-        
+
         # Defuse categoricals that can raise setitem errors
-        for col in ("Sport","Market","Bookmaker"):
+        for col in ("Sport", "Market", "Bookmaker"):
             if col in df_market.columns and str(df_market[col].dtype).startswith("category"):
                 df_market[col] = df_market[col].astype(str)
+
         def _amer_to_prob_vec(s):
             s = pd.to_numeric(s, errors="coerce")
-            return np.where(s > 0, 100.0/(s+100.0),
-                   np.where(s < 0, (-s)/((-s)+100.0), np.nan)).astype("float32")
-                # Merge game-level cross-market values (Spread_Value / Total_Value / H2H_Value)
+            return np.where(
+                s > 0,
+                100.0 / (s + 100.0),
+                np.where(s < 0, (-s) / ((-s) + 100.0), np.nan),
+            ).astype("float32")
+
+        # === Merge game-level cross-market values (Spread_Value / Total_Value / H2H_Value) ===
         df_market = df_market.merge(df_cross_market, on="Game_Key", how="left")
 
         # === GAME-LEVEL value-aware features: compute once per Game_Key, then broadcast ===
+        # If there are no spread/total values, this may be empty, so guard downstream usage.
         game_vals = (
             df_market[["Game_Key", "Sport", "Spread_Value", "Total_Value"]]
             .drop_duplicates("Game_Key")
             .copy()
         )
 
-        # Make sure these are numeric
-        game_vals["Spread_Value"] = pd.to_numeric(game_vals["Spread_Value"], errors="coerce")
-        game_vals["Total_Value"] = pd.to_numeric(game_vals["Total_Value"], errors="coerce")
+        if not game_vals.empty:
+            # Make sure these are numeric
+            game_vals["Spread_Value"] = pd.to_numeric(game_vals["Spread_Value"], errors="coerce")
+            game_vals["Total_Value"]  = pd.to_numeric(game_vals["Total_Value"],  errors="coerce")
 
-        # Absolute spread magnitude (fav line) and total points for the game
-        game_vals["Spread_Abs_Game"] = game_vals["Spread_Value"].abs()
-        game_vals["Total_Game"] = game_vals["Total_Value"]
+            # Absolute spread magnitude (fav line) and total points for the game
+            game_vals["Spread_Abs_Game"] = game_vals["Spread_Value"].abs()
+            game_vals["Total_Game"]      = game_vals["Total_Value"]
 
-        # Z-scores per sport (season-relative)
-        game_vals["Spread_Abs_Game_Z"] = (
-            game_vals.groupby("Sport")["Spread_Abs_Game"]
-            .transform(lambda x: zscore(x.fillna(0), ddof=0))
-        )
-        game_vals["Total_Game_Z"] = (
-            game_vals.groupby("Sport")["Total_Game"]
-            .transform(lambda x: zscore(x.fillna(0), ddof=0))
-        )
+            # Z-scores per sport (season-relative)
+            game_vals["Spread_Abs_Game_Z"] = (
+                game_vals.groupby("Sport")["Spread_Abs_Game"]
+                         .transform(lambda x: zscore(x.fillna(0), ddof=0))
+            )
+            game_vals["Total_Game_Z"] = (
+                game_vals.groupby("Sport")["Total_Game"]
+                         .transform(lambda x: zscore(x.fillna(0), ddof=0))
+            )
 
-        # Spread size bucket (generic but meaningful)
-        game_vals["Spread_Size_Bucket"] = pd.cut(
-            game_vals["Spread_Abs_Game"],
-            bins=[-0.01, 2.5, 6.5, 10.5, np.inf],
-            labels=["Close", "Medium", "Large", "Huge"],
-        )
+            # Spread size bucket (generic but meaningful)
+            game_vals["Spread_Size_Bucket"] = pd.cut(
+                game_vals["Spread_Abs_Game"],
+                bins=[-0.01, 2.5, 6.5, 10.5, np.inf],
+                labels=["Close", "Medium", "Large", "Huge"],
+            )
 
-        # Total size bucket: per-sport quantiles (Low / Medium / High / Very High)
-        game_vals["Total_Size_Bucket"] = ""
-        for sport_val, g in game_vals.groupby("Sport"):
-            # need a few games to get sensible quantiles
-            if g["Total_Game"].notna().sum() < 5:
-                continue
-            qs = g["Total_Game"].quantile([0.25, 0.50, 0.75]).values
-            bins = [-np.inf, qs[0], qs[1], qs[2], np.inf]
-            labels = ["Low", "Medium", "High", "Very_High"]
-            game_vals.loc[g.index, "Total_Size_Bucket"] = pd.cut(
-                g["Total_Game"], bins=bins, labels=labels
-            ).astype(str)
+            # Total size bucket: per-sport quantiles (Low / Medium / High / Very High)
+            game_vals["Total_Size_Bucket"] = ""
+            for sport_val, g in game_vals.groupby("Sport"):
+                # need a few games to get sensible quantiles
+                if g["Total_Game"].notna().sum() < 5:
+                    continue
+                qs    = g["Total_Game"].quantile([0.25, 0.50, 0.75]).values
+                bins  = [-np.inf, qs[0], qs[1], qs[2], np.inf]
+                labels = ["Low", "Medium", "High", "Very_High"]
+                game_vals.loc[g.index, "Total_Size_Bucket"] = (
+                    pd.cut(g["Total_Game"], bins=bins, labels=labels).astype(str)
+                )
 
-        # Interactions / volatility proxies
-        game_vals["Spread_x_Total"] = game_vals["Spread_Abs_Game"] * game_vals["Total_Game"]
-        game_vals["Spread_over_Total"] = game_vals["Spread_Abs_Game"] / game_vals["Total_Game"].replace(0, np.nan)
-        game_vals["Total_over_Spread"] = game_vals["Total_Game"] / game_vals["Spread_Abs_Game"].replace(0, np.nan)
+            # Interactions / volatility proxies
+            game_vals["Spread_x_Total"]    = game_vals["Spread_Abs_Game"] * game_vals["Total_Game"]
+            game_vals["Spread_over_Total"] = game_vals["Spread_Abs_Game"] / game_vals["Total_Game"].replace(0, np.nan)
+            game_vals["Total_over_Spread"] = game_vals["Total_Game"] / game_vals["Spread_Abs_Game"].replace(0, np.nan)
 
-        # (Optional but 🔥 for NFL/NCAAF): key number distances
-        def _dist_to_key(abs_spread, key):
-            return np.abs(abs_spread - key)
+            # (Optional but 🔥 for NFL/NCAAF): key number distances
+            def _dist_to_key(abs_spread, key):
+                return np.abs(abs_spread - key)
 
-        is_fb = game_vals["Sport"].isin(["NFL", "NCAAF"])
-        if is_fb.any():
-            g_fb = game_vals[is_fb]
-            game_vals.loc[is_fb, "Dist_to_3"]  = _dist_to_key(g_fb["Spread_Abs_Game"], 3)
-            game_vals.loc[is_fb, "Dist_to_7"]  = _dist_to_key(g_fb["Spread_Abs_Game"], 7)
-            game_vals.loc[is_fb, "Dist_to_10"] = _dist_to_key(g_fb["Spread_Abs_Game"], 10)
-        else:
-            for k in ["Dist_to_3", "Dist_to_7", "Dist_to_10"]:
-                game_vals[k] = np.nan
+            is_fb = game_vals["Sport"].isin(["NFL", "NCAAF"])
+            if is_fb.any():
+                g_fb = game_vals[is_fb]
+                game_vals.loc[is_fb, "Dist_to_3"]  = _dist_to_key(g_fb["Spread_Abs_Game"], 3)
+                game_vals.loc[is_fb, "Dist_to_7"]  = _dist_to_key(g_fb["Spread_Abs_Game"], 7)
+                game_vals.loc[is_fb, "Dist_to_10"] = _dist_to_key(g_fb["Spread_Abs_Game"], 10)
+            else:
+                for k in ["Dist_to_3", "Dist_to_7", "Dist_to_10"]:
+                    game_vals[k] = np.nan
 
-        # Merge these back to every training row for the game
-        df_market = df_market.merge(
-            game_vals[
-                [
-                    "Game_Key",
-                    "Spread_Abs_Game",
-                    "Spread_Abs_Game_Z",
-                    "Spread_Size_Bucket",
-                    "Total_Game",
-                    "Total_Game_Z",
-                    "Total_Size_Bucket",
-                    "Spread_x_Total",
-                    "Spread_over_Total",
-                    "Total_over_Spread",
-                    "Dist_to_3",
-                    "Dist_to_7",
-                    "Dist_to_10",
-                ]
-            ],
-            on="Game_Key",
-            how="left",
-            validate="many_to_one",
-        )
+            # Merge these back to every training row for the game
+            df_market = df_market.merge(
+                game_vals[
+                    [
+                        "Game_Key",
+                        "Spread_Abs_Game",
+                        "Spread_Abs_Game_Z",
+                        "Spread_Size_Bucket",
+                        "Total_Game",
+                        "Total_Game_Z",
+                        "Total_Size_Bucket",
+                        "Spread_x_Total",
+                        "Spread_over_Total",
+                        "Total_over_Spread",
+                        "Dist_to_3",
+                        "Dist_to_7",
+                        "Dist_to_10",
+                    ]
+                ],
+                on="Game_Key",
+                how="left",
+                validate="many_to_one",
+            )
 
-        # ensure buckets are plain strings (not Categorical)
-        df_market["Spread_Size_Bucket"] = df_market["Spread_Size_Bucket"].astype(str)
-        df_market["Total_Size_Bucket"] = df_market["Total_Size_Bucket"].astype(str)
+        # === Guard: ensure value-aware columns exist even if game_vals was empty ===
+        value_aware_cols = [
+            "Spread_Abs_Game", "Spread_Abs_Game_Z", "Spread_Size_Bucket",
+            "Total_Game", "Total_Game_Z", "Total_Size_Bucket",
+            "Spread_x_Total", "Spread_over_Total", "Total_over_Spread",
+            "Dist_to_3", "Dist_to_7", "Dist_to_10",
+        ]
+        for c in value_aware_cols:
+            if c not in df_market.columns:
+                df_market[c] = np.nan
+
+        # ensure buckets are plain strings (not Categorical / NaN)
+        for c in ["Spread_Size_Bucket", "Total_Size_Bucket"]:
+            df_market[c] = df_market[c].astype(str).fillna("")
 
         # === Implied probabilities directly from Odds_Price by market (unchanged in spirit) ===
         df_market["Market_Implied_Prob"] = _amer_to_prob_vec(df_market["Odds_Price"])
