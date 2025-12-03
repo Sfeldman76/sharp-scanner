@@ -6349,7 +6349,6 @@ def apply_blended_sharp_score(
                     break
 
 
-    # === Cross-Market Pivots (Value + Odds) with guaranteed columns ===
     MARKETS = ["spreads","totals","h2h"]
     
     df_latest = (
@@ -6380,24 +6379,27 @@ def apply_blended_sharp_score(
     
     # Merge into the working frame
     df = df.merge(df_cross_market, on="Game_Key", how="left", validate="m:1")
-        # === GAME-LEVEL spread/total magnitude & buckets (must mirror training) ===
+
+   
+ 
+    # === GAME-LEVEL spread/total magnitude & buckets (must mirror training) ===
     game_vals = (
         df[["Game_Key", "Sport", "Spread_Value", "Total_Value"]]
         .dropna(subset=["Game_Key"])
         .drop_duplicates("Game_Key")
         .copy()
     )
-
+    
     if not game_vals.empty:
-        # Make sure these are numeric
+        # numeric coercion
         game_vals["Spread_Value"] = pd.to_numeric(game_vals["Spread_Value"], errors="coerce")
         game_vals["Total_Value"]  = pd.to_numeric(game_vals["Total_Value"],  errors="coerce")
-
-        # Absolute spread magnitude (fav line) and total points for the game
+    
+        # absolute spread + total
         game_vals["Spread_Abs_Game"] = game_vals["Spread_Value"].abs()
         game_vals["Total_Game"]      = game_vals["Total_Value"]
-
-        # Z-scores per sport (season-relative)
+    
+        # z-scores per sport
         game_vals["Spread_Abs_Game_Z"] = (
             game_vals.groupby("Sport")["Spread_Abs_Game"]
                      .transform(lambda x: zscore(x.fillna(0), ddof=0))
@@ -6406,18 +6408,17 @@ def apply_blended_sharp_score(
             game_vals.groupby("Sport")["Total_Game"]
                      .transform(lambda x: zscore(x.fillna(0), ddof=0))
         )
-
-        # Spread size bucket (generic but meaningful)
+    
+        # spread size bucket
         game_vals["Spread_Size_Bucket"] = pd.cut(
             game_vals["Spread_Abs_Game"],
             bins=[-0.01, 2.5, 6.5, 10.5, np.inf],
             labels=["Close", "Medium", "Large", "Huge"],
         )
-
-        # Total size bucket: per-sport quantiles (Low / Medium / High / Very High)
+    
+        # per-sport total buckets via quantiles
         game_vals["Total_Size_Bucket"] = ""
         for sport_val, g in game_vals.groupby("Sport"):
-            # need a few games to get sensible quantiles
             if g["Total_Game"].notna().sum() < 5:
                 continue
             qs    = g["Total_Game"].quantile([0.25, 0.50, 0.75]).values
@@ -6426,16 +6427,16 @@ def apply_blended_sharp_score(
             game_vals.loc[g.index, "Total_Size_Bucket"] = (
                 pd.cut(g["Total_Game"], bins=bins, labels=labels).astype(str)
             )
-
-        # Interactions / volatility proxies
+    
+        # interactions
         game_vals["Spread_x_Total"]    = game_vals["Spread_Abs_Game"] * game_vals["Total_Game"]
         game_vals["Spread_over_Total"] = game_vals["Spread_Abs_Game"] / game_vals["Total_Game"].replace(0, np.nan)
         game_vals["Total_over_Spread"] = game_vals["Total_Game"] / game_vals["Spread_Abs_Game"].replace(0, np.nan)
-
-        # (Optional but 🔥 for NFL/NCAAF): key number distances
+    
+        # NFL / NCAAF key-number distances
         def _dist_to_key(abs_spread, key):
             return np.abs(abs_spread - key)
-
+    
         is_fb = game_vals["Sport"].isin(["NFL", "NCAAF"])
         if is_fb.any():
             g_fb = game_vals[is_fb]
@@ -6445,7 +6446,7 @@ def apply_blended_sharp_score(
         else:
             for k in ["Dist_to_3", "Dist_to_7", "Dist_to_10"]:
                 game_vals[k] = np.nan
-
+    
         # Merge these back to every scoring row for the game
         df = df.merge(
             game_vals[
@@ -6470,6 +6471,7 @@ def apply_blended_sharp_score(
             validate="many_to_one",
         )
 
+
     # Guard: ensure columns exist even if game_vals was empty
     value_aware_cols = [
         "Spread_Abs_Game", "Spread_Abs_Game_Z", "Spread_Size_Bucket",
@@ -6480,8 +6482,8 @@ def apply_blended_sharp_score(
     for c in value_aware_cols:
         if c not in df.columns:
             df[c] = np.nan
-
-    # Buckets as plain strings (avoid category setitem headaches)
+    
+    # Buckets as strings (avoid category headaches)
     for c in ["Spread_Size_Bucket", "Total_Size_Bucket"]:
         df[c] = df[c].astype("string").fillna("")
 
