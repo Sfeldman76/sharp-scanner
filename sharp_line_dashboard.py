@@ -8069,6 +8069,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         n_jobs_search = max(1, min(VCPUS, 6))
 
+     
         def _make_search_objects(seed_ll: int, seed_auc: int):
             """Build rs_ll, rs_auc for a given pair of seeds (Halving if possible, else Randomized)."""
             try:
@@ -8085,6 +8086,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     n_jobs=n_jobs_search,
                     random_state=seed_ll,
                     verbose=1 if st.session_state.get("debug", False) else 0,
+                    return_train_score=True,
                 )
                 rs_auc = HalvingRandomSearchCV(
                     estimator=est_auc,
@@ -8099,6 +8101,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     n_jobs=n_jobs_search,
                     random_state=seed_auc,
                     verbose=1 if st.session_state.get("debug", False) else 0,
+                    return_train_score=True,
                 )
             except Exception:
                 # Fallback: pure RandomizedSearchCV with expanded trials
@@ -8118,6 +8121,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     n_jobs=n_jobs_search,
                     random_state=seed_ll,
                     verbose=1 if st.session_state.get("debug", False) else 0,
+                    return_train_score=True,
                 )
                 rs_auc = RandomizedSearchCV(
                     estimator=est_auc,
@@ -8128,9 +8132,12 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     n_jobs=n_jobs_search,
                     random_state=seed_auc,
                     verbose=1 if st.session_state.get("debug", False) else 0,
+                    return_train_score=True,
                 )
             return rs_ll, rs_auc
 
+
+       
         best_ll_params  = None
         best_auc_params = None
         best_auc_score  = -np.inf
@@ -8142,8 +8149,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             seed_ll  = 42  + round_idx
             seed_auc = 137 + round_idx
 
-            logger.info("🔎 Hyperparam search round %d/%d (seeds: ll=%d, auc=%d)",
-                        round_idx + 1, MAX_ROUNDS, seed_ll, seed_auc)
+            logger.info(
+                "🔎 Hyperparam search round %d/%d (seeds: ll=%d, auc=%d)",
+                round_idx + 1, MAX_ROUNDS, seed_ll, seed_auc
+            )
 
             rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
 
@@ -8151,27 +8160,51 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
                 rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
 
-            # Remember: neg_log_loss → flip sign
-            auc_cv     = float(rs_auc.best_score_)
-            logloss_cv = float(-rs_ll.best_score_)
+            # CV metrics
+            auc_cv     = float(rs_auc.best_score_)        # already roc_auc
+            logloss_cv = float(-rs_ll.best_score_)        # neg_log_loss → logloss
 
-            logger.info("   🧪 Round %d CV metrics: AUC=%.4f, LogLoss=%.4f",
-                        round_idx + 1, auc_cv, logloss_cv)
+            # Train vs CV AUC gap (overfit measure)
+            train_auc = np.nan
+            try:
+                cv_res_auc = rs_auc.cv_results_
+                if "mean_train_score" in cv_res_auc:
+                    train_auc = float(cv_res_auc["mean_train_score"][rs_auc.best_index_])
+            except Exception as e:
+                logger.warning("⚠️ Could not compute train AUC for overfit gap: %s", e)
 
-            # Track best seen across all rounds
+            if np.isfinite(train_auc):
+                overfit_gap = float(train_auc - auc_cv)
+            else:
+                overfit_gap = np.nan
+
+            logger.info(
+                "   🧪 Round %d CV: AUC=%.4f, LogLoss=%.4f, TrainAUC=%.4f, OverfitGap=%.4f",
+                round_idx + 1, auc_cv, logloss_cv, train_auc, overfit_gap
+            )
+
+            # Track best seen across all rounds (even if overfit) for reporting
             if auc_cv > best_auc_score:
                 best_auc_score  = auc_cv
                 best_ll_score   = logloss_cv
                 best_auc_params = rs_auc.best_params_.copy()
                 best_ll_params  = rs_ll.best_params_.copy()
 
-            # Check stopping conditions
-            if (auc_cv >= MIN_AUC) and (logloss_cv <= MAX_LOGLOSS):
+            # Overfit condition: allow NaN gap (no train scores) or small positive gap
+            gap_ok = (not np.isfinite(overfit_gap)) or (overfit_gap <= MAX_OVERFIT_GAP)
+
+            # Final stopping conditions
+            if (auc_cv >= MIN_AUC) and (logloss_cv <= MAX_LOGLOSS) and gap_ok:
                 logger.info(
-                    "✅ Conditions met in round %d for %s %s (AUC=%.4f, LL=%.4f ≥|≤ targets).",
-                    round_idx + 1, sport, market, auc_cv, logloss_cv
+                    "✅ Conditions met in round %d for %s %s "
+                    "(AUC=%.4f, LL=%.4f, gap=%.4f ≤ %.4f).",
+                    round_idx + 1, sport, market, auc_cv, logloss_cv,
+                    overfit_gap, MAX_OVERFIT_GAP
                 )
                 found_good = True
+                # Lock in the params that actually satisfied the gap condition
+                best_auc_params = rs_auc.best_params_.copy()
+                best_ll_params  = rs_ll.best_params_.copy()
                 break
 
         if not found_good:
@@ -8183,8 +8216,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             # Bail out of training for this market without saving a new model
             return
 
-        # At this point best_*_params are the ones from the round that hit thresholds
+        # At this point best_*_params are the ones from the accepted round
         assert best_auc_params is not None and best_ll_params is not None
+
 
         
         # ---------------- stabilize best params (regularization-first) ----------------
