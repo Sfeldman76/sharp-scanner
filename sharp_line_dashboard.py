@@ -8056,49 +8056,58 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             }
         )
 
-        # ======================= COMMON PARAMETER SPACE (HARDENED) =======================
-        # This is the key: much more conservative ranges
+    
+        # ======================= COMMON PARAMETER SPACE (ULTRA-HARDENED) =======================
         param_space_common = dict(
-            max_depth        = randint(2, 5),          # shallower trees
-            max_leaves       = randint(16, 96),        # cap leaf count
-            learning_rate    = loguniform(0.008, 0.035),
+            # Much shallower / fewer leaves
+            max_depth        = randint(2, 4),          # was up to 5
+            max_leaves       = randint(12, 48),        # was up to ~96
 
-            subsample        = uniform(0.50, 0.30),    # 0.50–0.80
-            colsample_bytree = uniform(0.45, 0.25),    # 0.45–0.70
-            colsample_bynode = uniform(0.45, 0.25),
+            # Slow learning
+            learning_rate    = loguniform(0.006, 0.022),
 
-            min_child_weight = loguniform(8, 128),     # push towards bigger children
-            gamma            = loguniform(3.0, 20),    # stronger split penalty
+            # Aggressive subsampling → weaker trees
+            subsample        = uniform(0.45, 0.25),    # 0.45–0.70
+            colsample_bytree = uniform(0.45, 0.20),    # 0.45–0.65
+            colsample_bynode = uniform(0.45, 0.20),
 
-            reg_alpha        = loguniform(0.20, 10),   # stronger L1
-            reg_lambda       = loguniform(20.0, 80),   # stronger L2
+            # Stronger child / split penalties
+            min_child_weight = loguniform(16, 256),    # push heavily toward larger leaves
+            gamma            = loguniform(5.0, 30.0),
 
+            # Stronger regularization
+            reg_alpha        = loguniform(0.5, 15.0),  # L1
+            reg_lambda       = loguniform(40.0, 120.0),# L2
+
+            # Conservative histogram / step size
             max_bin          = randint(192, 320),
-            max_delta_step   = loguniform(0.5, 2.0),
+            max_delta_step   = loguniform(0.5, 1.8),
         )
 
         # ======================= STREAM-SPECIFIC ADJUSTMENTS =======================
-        params_ll  = dict(param_space_common)  # LogLoss stream
-        params_auc = dict(param_space_common)  # AUC stream slightly safer
+        params_ll  = dict(param_space_common)
 
+        params_auc = dict(param_space_common)
         params_auc.update(
             dict(
-                max_depth        = randint(2, 4),
-                max_leaves       = randint(16, 72),
-                learning_rate    = loguniform(0.010, 0.030),
-                subsample        = uniform(0.55, 0.20),   # 0.55–0.75
-                colsample_bytree = uniform(0.50, 0.20),   # 0.50–0.70
-                colsample_bynode = uniform(0.50, 0.20),
-                min_child_weight = loguniform(10, 128),
-                gamma            = loguniform(4.0, 20),
-                reg_alpha        = loguniform(0.30, 8),
-                reg_lambda       = loguniform(25.0, 70),
+                # AUC stream: even slightly smaller trees
+                max_depth        = randint(2, 3),
+                max_leaves       = randint(12, 40),
+
+                learning_rate    = loguniform(0.007, 0.018),
+
+                subsample        = uniform(0.50, 0.20),   # 0.50–0.70
+                colsample_bytree = uniform(0.48, 0.17),   # 0.48–0.65
+                colsample_bynode = uniform(0.48, 0.17),
+
+                min_child_weight = loguniform(20, 256),
+                gamma            = loguniform(6.0, 30.0),
+
+                reg_alpha        = loguniform(0.8, 12.0),
+                reg_lambda       = loguniform(45.0, 100.0),
             )
         )
 
-        
-        # ---- Search (Prefer Halving; fallback to RandomizedSearch) ----
-                # -------------------- Robust Search: run until "good enough" --------------------
        
         # --------- Quality thresholds / search config ----------
         MIN_AUC           = 0.58      # tweak per sport/market if you want
