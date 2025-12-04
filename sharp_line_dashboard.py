@@ -8043,17 +8043,17 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         param_space_common = dict(
             max_depth        = randint(2, 8),
             max_leaves       = randint(16, 256),
-            learning_rate    = loguniform(0.006, 0.08),
+            learning_rate    = loguniform(0.006, 0.05),
         
             subsample        = uniform(0.40, 0.55),     # 0.40–0.95 via width
             colsample_bytree = uniform(0.30, 0.55),     # 0.30–0.85 via width
             colsample_bynode = uniform(0.30, 0.55),
         
-            min_child_weight = loguniform(2, 256),
-            gamma            = loguniform(0.3, 25),
+            min_child_weight = loguniform(8, 256),
+            gamma            = loguniform(2, 25),
         
-            reg_alpha        = loguniform(0.005, 20),
-            reg_lambda       = loguniform(2, 100),
+            reg_alpha        = loguniform(0.02, 20),
+            reg_lambda       = loguniform(8, 100),
         
             max_bin          = randint(128, 320),
             max_delta_step   = loguniform(0.2, 3),
@@ -8065,7 +8065,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         params_auc.update(dict(
             max_depth        = randint(2, 6),
             max_leaves       = randint(16, 160),
-            learning_rate    = loguniform(0.008, 0.05),
+            learning_rate    = loguniform(0.008, 0.03),
             subsample        = uniform(0.55, 0.35),     # 0.55–0.90
             colsample_bytree = uniform(0.45, 0.35),     # 0.45–0.80
             colsample_bynode = uniform(0.45, 0.35),
@@ -8077,19 +8077,22 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         # ---- Search (Prefer Halving; fallback to RandomizedSearch) ----
                 # -------------------- Robust Search: run until "good enough" --------------------
-        MIN_AUC      = 0.58    # tweak per sport/market if you want
-        MAX_LOGLOSS  = 0.693   # ~coinflip baseline
-        MAX_ROUNDS   = 20       # max independent search rounds
-        MAX_OVERFIT_GAP = 0.101      # max allowed (AUC_train - AUC_val)
-        MIN_AUC_THRESHOLD = 0.58    # minimum acceptable AUC to consider model "valid"
-     
-        
-        fit_params_search = dict(sample_weight=w_train, verbose=False)
-        n_jobs_search = max(1, min(VCPUS, 6))
+       
+        # --------- Quality thresholds / search config ----------
+        MIN_AUC           = 0.58      # tweak per sport/market if you want
+        MAX_LOGLOSS       = 0.693     # ~coinflip baseline
+        MAX_ROUNDS        = 20        # max independent search rounds
+        MAX_OVERFIT_GAP   = 0.125     # max allowed (AUC_train - AUC_val)
+        MIN_AUC_THRESHOLD = 0.58      # minimum AUC to consider model "valid" at all
 
-     
+        fit_params_search = dict(sample_weight=w_train, verbose=False)
+        n_jobs_search     = max(1, min(VCPUS, 6))
+
         def _make_search_objects(seed_ll: int, seed_auc: int):
-            """Build rs_ll, rs_auc for a given pair of seeds (Halving if possible, else Randomized)."""
+            """
+            Build rs_ll, rs_auc for a given pair of seeds
+            (Halving if possible, else Randomized).
+            """
             try:
                 rs_ll = HalvingRandomSearchCV(
                     estimator=est_ll,
@@ -8127,7 +8130,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     search_trials  # type: ignore
                 except NameError:
                     search_trials = _resolve_search_trials(sport, X_train.shape[0])
-                search_trials = int(search_trials) if str(search_trials).isdigit() else _resolve_search_trials(sport, X_train.shape[0])
+                search_trials = (
+                    int(search_trials)
+                    if str(search_trials).isdigit()
+                    else _resolve_search_trials(sport, X_train.shape[0])
+                )
                 search_trials = max(50, int(search_trials * 1.2))
 
                 rs_ll = RandomizedSearchCV(
@@ -8154,22 +8161,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 )
             return rs_ll, rs_auc
 
-
-       
-        best_ll_params  = None
-        best_auc_params = None
-        best_auc_score  = -np.inf
-        best_ll_score   = np.inf
+        # ======= multi-round search with overfit / quality guards =======
+        best_ll_params     = None
+        best_auc_params    = None
+        best_auc_score     = -np.inf
+        best_ll_score      = np.inf
+        best_round_metrics = None
 
         found_good = False
 
         for round_idx in range(MAX_ROUNDS):
+            round_no = round_idx + 1
             seed_ll  = 42  + round_idx
             seed_auc = 137 + round_idx
 
             logger.info(
-                "🔎 Hyperparam search round %d/%d (seeds: ll=%d, auc=%d)",
-                round_idx + 1, MAX_ROUNDS, seed_ll, seed_auc
+                f"🔎 Hyperparam search round {round_no}/{MAX_ROUNDS} "
+                f"(seeds: ll={seed_ll}, auc={seed_auc})"
             )
 
             rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
@@ -8179,8 +8187,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
 
             # CV metrics
-            auc_cv     = float(rs_auc.best_score_)        # already roc_auc
-            logloss_cv = float(-rs_ll.best_score_)        # neg_log_loss → logloss
+            auc_cv     = float(rs_auc.best_score_)       # already roc_auc
+            logloss_cv = float(-rs_ll.best_score_)       # neg_log_loss → logloss
 
             # Train vs CV AUC gap (overfit measure)
             train_auc = np.nan
@@ -8189,7 +8197,9 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 if "mean_train_score" in cv_res_auc:
                     train_auc = float(cv_res_auc["mean_train_score"][rs_auc.best_index_])
             except Exception as e:
-                logger.warning("⚠️ Could not compute train AUC for overfit gap: %s", e)
+                logger.warning(
+                    f"⚠️ Could not compute train AUC for overfit gap in round {round_no}: {e}"
+                )
 
             if np.isfinite(train_auc):
                 overfit_gap = float(train_auc - auc_cv)
@@ -8197,39 +8207,68 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 overfit_gap = np.nan
 
             logger.info(
-                "   🧪 Round %d CV: AUC=%.4f, LogLoss=%.4f, TrainAUC=%.4f, OverfitGap=%.4f",
-                round_idx + 1, auc_cv, logloss_cv, train_auc, overfit_gap
+                f"   🧪 Round {round_no} CV: "
+                f"AUC={auc_cv:.4f}, LogLoss={logloss_cv:.4f}, "
+                f"TrainAUC={train_auc:.4f}, OverfitGap={overfit_gap:.4f}"
             )
 
             # Track best seen across all rounds (even if overfit) for reporting
-            if auc_cv > best_auc_score:
-                best_auc_score  = auc_cv
-                best_ll_score   = logloss_cv
-                best_auc_params = rs_auc.best_params_.copy()
-                best_ll_params  = rs_ll.best_params_.copy()
+            if np.isfinite(auc_cv):
+                better_global = (
+                    (auc_cv > best_auc_score + 1e-6) or
+                    (
+                        abs(auc_cv - best_auc_score) <= 1e-6 and
+                        logloss_cv < best_ll_score - 1e-6
+                    )
+                )
+                if better_global:
+                    best_auc_score  = auc_cv
+                    best_ll_score   = logloss_cv
+                    best_auc_params = rs_auc.best_params_.copy()
+                    best_ll_params  = rs_ll.best_params_.copy()
+                    best_round_metrics = dict(
+                        round_no    = round_no,
+                        auc_cv      = auc_cv,
+                        logloss_cv  = logloss_cv,
+                        train_auc   = train_auc,
+                        overfit_gap = overfit_gap,
+                    )
 
             # Overfit condition: allow NaN gap (no train scores) or small positive gap
             gap_ok = (not np.isfinite(overfit_gap)) or (overfit_gap <= MAX_OVERFIT_GAP)
+            auc_ok = np.isfinite(auc_cv)     and (auc_cv     >= MIN_AUC)
+            ll_ok  = np.isfinite(logloss_cv) and (logloss_cv <= MAX_LOGLOSS)
 
-            # Final stopping conditions
-            if (auc_cv >= MIN_AUC) and (logloss_cv <= MAX_LOGLOSS) and gap_ok:
+            if auc_ok and ll_ok and gap_ok:
                 logger.info(
-                    "✅ Conditions met in round %d for %s %s "
-                    "(AUC=%.4f, LL=%.4f, gap=%.4f ≤ %.4f).",
-                    round_idx + 1, sport, market, auc_cv, logloss_cv,
-                    overfit_gap, MAX_OVERFIT_GAP
+                    f"✅ Conditions met in round {round_no} for {sport} {market} "
+                    f"(AUC={auc_cv:.4f}, LL={logloss_cv:.4f}, "
+                    f"gap={overfit_gap:.4f} ≤ {MAX_OVERFIT_GAP:.4f})."
                 )
-                found_good = True
-                # Lock in the params that actually satisfied the gap condition
+                found_good     = True
                 best_auc_params = rs_auc.best_params_.copy()
                 best_ll_params  = rs_ll.best_params_.copy()
                 break
 
         if not found_good:
+            if best_round_metrics is not None:
+                logger.warning(
+                    "⚠️ No config met all constraints for %s %s after %d rounds. "
+                    "Best round=%d, AUC=%.4f, LogLoss=%.4f, TrainAUC=%.4f, OverfitGap=%.4f.",
+                    sport,
+                    market,
+                    MAX_ROUNDS,
+                    best_round_metrics["round_no"],
+                    best_round_metrics["auc_cv"],
+                    best_round_metrics["logloss_cv"],
+                    best_round_metrics["train_auc"],
+                    best_round_metrics["overfit_gap"],
+                )
+
             logger.error(
-                "❌ No optimal solution found for %s %s after %d rounds. "
-                "Best CV AUC=%.4f, LogLoss=%.4f. Keeping existing champion model (no overwrite).",
-                sport, market, MAX_ROUNDS, best_auc_score, best_ll_score
+                f"❌ No optimal solution found for {sport} {market} after {MAX_ROUNDS} rounds. "
+                f"Best CV AUC={best_auc_score:.4f}, LogLoss={best_ll_score:.4f}. "
+                "Keeping existing champion model (no overwrite)."
             )
             # Bail out of training for this market without saving a new model
             return
