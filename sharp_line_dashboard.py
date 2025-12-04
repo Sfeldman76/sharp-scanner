@@ -5231,7 +5231,7 @@ def hyperparam_search_until_good(
     *,
     min_auc=0.60,
     max_logloss=0.693,
-    max_overfit_gap=0.101,
+    max_overfit_gap=0.10,
     max_rounds=4,
     n_iter_per_round=25,
     random_state=42,
@@ -8114,7 +8114,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         MIN_AUC           = 0.58      # tweak per sport/market if you want
         MAX_LOGLOSS       = 0.693     # ~coinflip baseline
         MAX_ROUNDS        = 30        # max independent search rounds
-        MAX_OVERFIT_GAP   = 0.155     # max allowed (AUC_train - AUC_val)
+        MAX_OVERFIT_GAP   = 0.12     # max allowed (AUC_train - AUC_val)
         MIN_AUC_THRESHOLD = 0.58      # minimum AUC to consider model "valid" at all
         
         fit_params_search = dict(sample_weight=w_train, verbose=False)
