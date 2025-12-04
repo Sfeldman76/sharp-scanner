@@ -5346,6 +5346,85 @@ def hyperparam_search_until_good(
         "status": "no_optimal_solution",
     }
 
+
+def get_quality_thresholds(sport: str, market: str) -> dict:
+    """
+    Return quality thresholds for hyperparam search based on sport + market.
+
+    sport:  e.g. "NFL", "NBA", "MLB", "NCAAF", "NCAAB"
+    market: e.g. "spreads", "totals", "h2h"
+    """
+    s = (sport or "").upper()
+    m = (market or "").lower()
+
+    # Defaults (conservative, generic binary)
+    MIN_AUC           = 0.58     # minimum useful AUC
+    MAX_LOGLOSS       = 0.693    # ~coinflip baseline
+    MAX_OVERFIT_GAP   = 0.12     # AUC_train - AUC_val
+    MIN_AUC_THRESHOLD = 0.58
+
+    # ---- NFL ----
+    if s == "NFL":
+        if m == "spreads":
+            MIN_AUC         = 0.60
+            MAX_OVERFIT_GAP = 0.12    # what you're using now
+        elif m == "totals":
+            MIN_AUC         = 0.58
+            MAX_OVERFIT_GAP = 0.10
+        else:  # h2h / others
+            MIN_AUC         = 0.58
+            MAX_OVERFIT_GAP = 0.10
+
+    # ---- NBA ----
+    elif s == "NBA":
+        if m == "spreads":
+            MIN_AUC         = 0.60
+            MAX_OVERFIT_GAP = 0.10
+        elif m == "totals":
+            MIN_AUC         = 0.58
+            MAX_OVERFIT_GAP = 0.09
+
+    # ---- MLB ----
+    elif s == "MLB":
+        if m == "totals":
+            MIN_AUC         = 0.60
+            MAX_OVERFIT_GAP = 0.08
+        elif m == "spreads":   # RL
+            MIN_AUC         = 0.58
+            MAX_OVERFIT_GAP = 0.10
+        else:  # moneyline
+            MIN_AUC         = 0.58
+            MAX_OVERFIT_GAP = 0.10
+
+    # ---- NCAAF ----
+    elif s in {"NCAAF", "CFB"}:
+        # Crazy tails, more variance; allow a bit more gap
+        if m == "spreads":
+            MIN_AUC         = 0.60
+            MAX_OVERFIT_GAP = 0.15
+        else:
+            MIN_AUC         = 0.58
+            MAX_OVERFIT_GAP = 0.13
+
+    # ---- NCAAB ----
+    elif s in {"NCAAB", "NCAAM", "NCAAW"}:
+        if m == "spreads":
+            MIN_AUC         = 0.60
+            MAX_OVERFIT_GAP = 0.13
+        else:
+            MIN_AUC         = 0.58
+            MAX_OVERFIT_GAP = 0.12
+
+    # You can extend for WNBA, CFL, etc. as needed
+
+    return dict(
+        MIN_AUC=MIN_AUC,
+        MAX_LOGLOSS=MAX_LOGLOSS,
+        MAX_OVERFIT_GAP=MAX_OVERFIT_GAP,
+        MIN_AUC_THRESHOLD=MIN_AUC_THRESHOLD,
+    )
+
+
 # Use it in training
 def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
     SPORT_DAYS_BACK = {"NBA": 365, "NFL": 365, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 365, "NCAAB": 365}
@@ -8111,11 +8190,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
        
       
                 # --------- Quality thresholds / search config ----------
-        MIN_AUC           = 0.58      # tweak per sport/market if you want
-        MAX_LOGLOSS       = 0.693     # ~coinflip baseline
-        MAX_ROUNDS        = 30        # max independent search rounds
-        MAX_OVERFIT_GAP   = 0.12     # max allowed (AUC_train - AUC_val)
-        MIN_AUC_THRESHOLD = 0.58      # minimum AUC to consider model "valid" at all
+        thr = get_quality_thresholds(sport, market)
+
+        MIN_AUC           = thr["MIN_AUC"]
+        MAX_LOGLOSS       = thr["MAX_LOGLOSS"]
+        MAX_ROUNDS        = 20  # still global
+        MAX_OVERFIT_GAP   = thr["MAX_OVERFIT_GAP"]
+        MIN_AUC_THRESHOLD = thr["MIN_AUC_THRESHOLD"]
         
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         n_jobs_search     = max(1, min(VCPUS, 6))
