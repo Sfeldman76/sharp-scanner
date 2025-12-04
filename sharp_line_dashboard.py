@@ -8194,7 +8194,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
 
         MIN_AUC           = thr["MIN_AUC"]
         MAX_LOGLOSS       = thr["MAX_LOGLOSS"]
-        MAX_ROUNDS        = 20  # still global
+        MAX_ROUNDS        = 100  # still global
         MAX_OVERFIT_GAP   = thr["MAX_OVERFIT_GAP"]
         MIN_AUC_THRESHOLD = thr["MIN_AUC_THRESHOLD"]
         
