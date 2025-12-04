@@ -8025,55 +8025,77 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         base_kwargs["base_score"] = float(np.clip(pos_rate, 1e-4, 1 - 1e-4))
         
         # -------------------- FAST SEARCH → MODERATE/DEEP REFIT ---------------------
-        # --------- Capacity knobs (looser search; still guarded later) ----------
-        SEARCH_N_EST    = 900
+   
+        # --------- Capacity knobs (tighter, less overfit) ----------
+        SEARCH_N_EST    = 600   # was 900 – reduce trees used in CV search
         SEARCH_MAX_BIN  = 256
-        DEEP_N_EST      = 2200
+        DEEP_N_EST      = 1600  # final deep refit is still allowed more trees
         DEEP_MAX_BIN    = 256
-        EARLY_STOP      = 120                   # earlier plateau detection during probe
+        EARLY_STOP      = 100
         HALVING_FACTOR  = 2
-        MIN_RESOURCES   = 16
+        MIN_RESOURCES   = 24
         VCPUS           = get_vcpus()
-        
+
         # --- Estimators for search (keep n_jobs=1 for parallel CV) ---
-        est_ll  = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "logloss", "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
-        est_auc = XGBClassifier(**{**base_kwargs, "n_estimators": SEARCH_N_EST, "eval_metric": "auc",     "max_bin": SEARCH_MAX_BIN, "n_jobs": 1})
-        
-        # ======================= COMMON PARAMETER SPACE =======================
-        param_space_common = dict(
-            max_depth        = randint(2, 8),
-            max_leaves       = randint(16, 256),
-            learning_rate    = loguniform(0.006, 0.05),
-        
-            subsample        = uniform(0.40, 0.55),     # 0.40–0.95 via width
-            colsample_bytree = uniform(0.30, 0.55),     # 0.30–0.85 via width
-            colsample_bynode = uniform(0.30, 0.55),
-        
-            min_child_weight = loguniform(8, 256),
-            gamma            = loguniform(2, 25),
-        
-            reg_alpha        = loguniform(0.02, 20),
-            reg_lambda       = loguniform(8, 100),
-        
-            max_bin          = randint(128, 320),
-            max_delta_step   = loguniform(0.2, 3),
+        est_ll  = XGBClassifier(
+            **{
+                **base_kwargs,
+                "n_estimators": SEARCH_N_EST,
+                "eval_metric": "logloss",
+                "max_bin": SEARCH_MAX_BIN,
+                "n_jobs": 1,
+            }
         )
-        
+        est_auc = XGBClassifier(
+            **{
+                **base_kwargs,
+                "n_estimators": SEARCH_N_EST,
+                "eval_metric": "auc",
+                "max_bin": SEARCH_MAX_BIN,
+                "n_jobs": 1,
+            }
+        )
+
+        # ======================= COMMON PARAMETER SPACE (HARDENED) =======================
+        # This is the key: much more conservative ranges
+        param_space_common = dict(
+            max_depth        = randint(2, 5),          # shallower trees
+            max_leaves       = randint(16, 96),        # cap leaf count
+            learning_rate    = loguniform(0.008, 0.035),
+
+            subsample        = uniform(0.50, 0.30),    # 0.50–0.80
+            colsample_bytree = uniform(0.45, 0.25),    # 0.45–0.70
+            colsample_bynode = uniform(0.45, 0.25),
+
+            min_child_weight = loguniform(8, 128),     # push towards bigger children
+            gamma            = loguniform(3.0, 20),    # stronger split penalty
+
+            reg_alpha        = loguniform(0.20, 10),   # stronger L1
+            reg_lambda       = loguniform(20.0, 80),   # stronger L2
+
+            max_bin          = randint(192, 320),
+            max_delta_step   = loguniform(0.5, 2.0),
+        )
+
         # ======================= STREAM-SPECIFIC ADJUSTMENTS =======================
-        params_ll  = dict(param_space_common)  # LogLoss stream (wider)
-        params_auc = dict(param_space_common)  # AUC stream (slightly narrower/safer)
-        params_auc.update(dict(
-            max_depth        = randint(2, 6),
-            max_leaves       = randint(16, 160),
-            learning_rate    = loguniform(0.008, 0.03),
-            subsample        = uniform(0.55, 0.35),     # 0.55–0.90
-            colsample_bytree = uniform(0.45, 0.35),     # 0.45–0.80
-            colsample_bynode = uniform(0.45, 0.35),
-            min_child_weight = loguniform(5, 256),
-            gamma            = loguniform(1.0, 25),
-            reg_alpha        = loguniform(0.01, 10),
-            reg_lambda       = loguniform(8.0, 80),
-        ))
+        params_ll  = dict(param_space_common)  # LogLoss stream
+        params_auc = dict(param_space_common)  # AUC stream slightly safer
+
+        params_auc.update(
+            dict(
+                max_depth        = randint(2, 4),
+                max_leaves       = randint(16, 72),
+                learning_rate    = loguniform(0.010, 0.030),
+                subsample        = uniform(0.55, 0.20),   # 0.55–0.75
+                colsample_bytree = uniform(0.50, 0.20),   # 0.50–0.70
+                colsample_bynode = uniform(0.50, 0.20),
+                min_child_weight = loguniform(10, 128),
+                gamma            = loguniform(4.0, 20),
+                reg_alpha        = loguniform(0.30, 8),
+                reg_lambda       = loguniform(25.0, 70),
+            )
+        )
+
         
         # ---- Search (Prefer Halving; fallback to RandomizedSearch) ----
                 # -------------------- Robust Search: run until "good enough" --------------------
@@ -8082,7 +8104,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         MIN_AUC           = 0.58      # tweak per sport/market if you want
         MAX_LOGLOSS       = 0.693     # ~coinflip baseline
         MAX_ROUNDS        = 20        # max independent search rounds
-        MAX_OVERFIT_GAP   = 0.125     # max allowed (AUC_train - AUC_val)
+        MAX_OVERFIT_GAP   = 0.145     # max allowed (AUC_train - AUC_val)
         MIN_AUC_THRESHOLD = 0.58      # minimum AUC to consider model "valid" at all
 
         fit_params_search = dict(sample_weight=w_train, verbose=False)
