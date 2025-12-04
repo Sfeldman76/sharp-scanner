@@ -8109,20 +8109,24 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         )
 
        
-        # --------- Quality thresholds / search config ----------
+      
+                # --------- Quality thresholds / search config ----------
         MIN_AUC           = 0.58      # tweak per sport/market if you want
         MAX_LOGLOSS       = 0.693     # ~coinflip baseline
-        MAX_ROUNDS        = 20        # max independent search rounds
-        MAX_OVERFIT_GAP   = 0.145     # max allowed (AUC_train - AUC_val)
+        MAX_ROUNDS        = 30        # max independent search rounds
+        MAX_OVERFIT_GAP   = 0.155     # max allowed (AUC_train - AUC_val)
         MIN_AUC_THRESHOLD = 0.58      # minimum AUC to consider model "valid" at all
-
+        
         fit_params_search = dict(sample_weight=w_train, verbose=False)
         n_jobs_search     = max(1, min(VCPUS, 6))
-
+        
+        
         def _make_search_objects(seed_ll: int, seed_auc: int):
             """
             Build rs_ll, rs_auc for a given pair of seeds
             (Halving if possible, else Randomized).
+        
+            Expects HALVING_FACTOR, MIN_RESOURCES, SEARCH_N_EST to be defined above.
             """
             try:
                 rs_ll = HalvingRandomSearchCV(
@@ -8161,13 +8165,14 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     search_trials  # type: ignore
                 except NameError:
                     search_trials = _resolve_search_trials(sport, X_train.shape[0])
+        
                 search_trials = (
                     int(search_trials)
                     if str(search_trials).isdigit()
                     else _resolve_search_trials(sport, X_train.shape[0])
                 )
                 search_trials = max(50, int(search_trials * 1.2))
-
+        
                 rs_ll = RandomizedSearchCV(
                     estimator=est_ll,
                     param_distributions=params_ll,
@@ -8191,36 +8196,37 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     return_train_score=True,
                 )
             return rs_ll, rs_auc
-
+        
+        
         # ======= multi-round search with overfit / quality guards =======
         best_ll_params     = None
         best_auc_params    = None
         best_auc_score     = -np.inf
         best_ll_score      = np.inf
         best_round_metrics = None
-
+        
         found_good = False
-
+        
         for round_idx in range(MAX_ROUNDS):
             round_no = round_idx + 1
             seed_ll  = 42  + round_idx
             seed_auc = 137 + round_idx
-
+        
             logger.info(
                 f"🔎 Hyperparam search round {round_no}/{MAX_ROUNDS} "
                 f"(seeds: ll={seed_ll}, auc={seed_auc})"
             )
-
+        
             rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
-
+        
             with threadpool_limits(limits=1):
                 rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
                 rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
-
+        
             # CV metrics
             auc_cv     = float(rs_auc.best_score_)       # already roc_auc
             logloss_cv = float(-rs_ll.best_score_)       # neg_log_loss → logloss
-
+        
             # Train vs CV AUC gap (overfit measure)
             train_auc = np.nan
             try:
@@ -8231,18 +8237,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                 logger.warning(
                     f"⚠️ Could not compute train AUC for overfit gap in round {round_no}: {e}"
                 )
-
+        
             if np.isfinite(train_auc):
                 overfit_gap = float(train_auc - auc_cv)
             else:
                 overfit_gap = np.nan
-
+        
             logger.info(
                 f"   🧪 Round {round_no} CV: "
                 f"AUC={auc_cv:.4f}, LogLoss={logloss_cv:.4f}, "
                 f"TrainAUC={train_auc:.4f}, OverfitGap={overfit_gap:.4f}"
             )
-
+        
             # Track best seen across all rounds (even if overfit) for reporting
             if np.isfinite(auc_cv):
                 better_global = (
@@ -8264,23 +8270,23 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                         train_auc   = train_auc,
                         overfit_gap = overfit_gap,
                     )
-
+        
             # Overfit condition: allow NaN gap (no train scores) or small positive gap
             gap_ok = (not np.isfinite(overfit_gap)) or (overfit_gap <= MAX_OVERFIT_GAP)
             auc_ok = np.isfinite(auc_cv)     and (auc_cv     >= MIN_AUC)
             ll_ok  = np.isfinite(logloss_cv) and (logloss_cv <= MAX_LOGLOSS)
-
+        
             if auc_ok and ll_ok and gap_ok:
                 logger.info(
                     f"✅ Conditions met in round {round_no} for {sport} {market} "
                     f"(AUC={auc_cv:.4f}, LL={logloss_cv:.4f}, "
                     f"gap={overfit_gap:.4f} ≤ {MAX_OVERFIT_GAP:.4f})."
                 )
-                found_good     = True
+                found_good      = True
                 best_auc_params = rs_auc.best_params_.copy()
                 best_ll_params  = rs_ll.best_params_.copy()
                 break
-
+        
         if not found_good:
             if best_round_metrics is not None:
                 logger.warning(
@@ -8295,7 +8301,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     best_round_metrics["train_auc"],
                     best_round_metrics["overfit_gap"],
                 )
-
+        
             logger.error(
                 f"❌ No optimal solution found for {sport} {market} after {MAX_ROUNDS} rounds. "
                 f"Best CV AUC={best_auc_score:.4f}, LogLoss={best_ll_score:.4f}. "
@@ -8303,11 +8309,10 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             )
             # Bail out of training for this market without saving a new model
             return
-
+        
         # At this point best_*_params are the ones from the accepted round
         assert best_auc_params is not None and best_ll_params is not None
-
-
+        
         
         # ---------------- stabilize best params (regularization-first) ----------------
         STABLE = dict(
@@ -8355,6 +8360,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         best_auc_params = _stabilize(best_auc_params, leaf_cap=128)
         best_ll_params  = _stabilize(best_ll_params,  leaf_cap=128)
         
+        
         # ================== ES refit on last fold (deterministic) ===================
         tr_es_rel, va_es_rel = folds[-1]
         tr_es_rel = np.asarray(tr_es_rel); va_es_rel = np.asarray(va_es_rel)
@@ -8377,10 +8383,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         assert X_va_es_df.shape[0] == len(y_va_es) == len(w_va_es)
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
         assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
-        # -------- Median-impute (from TRAIN) + low-variance drop (critical) --------
-       
         
-        # numeric columns that are actually present
+        # -------- Median-impute (from TRAIN) + low-variance drop (critical) --------
         num_cols = [c for c in feature_cols if c in X_tr_es_df.columns and is_numeric_dtype(X_tr_es_df[c])]
         
         if num_cols:
@@ -8412,8 +8416,8 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         # Sanity: both train/val must now match the cleaned feature set
         assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
             f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
-
-       
+        
+        
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
@@ -8455,7 +8459,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
         best_iter        = getattr(deep_auc, "best_iteration", None)
         cap_hit          = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)
-        learning_rate    = float(np.clip(float(locals().get("learning_rate", 0.02)), 0.008, 0.04))
+        learning_rate    = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)), 0.008, 0.04))
         
         # If ES found a peak, set a tight cap around it; else conservative
         if best_iter is not None and best_iter >= 50:
@@ -8489,6 +8493,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             "auc_va_es": auc_va,
         })
         
+        
         # ----------------- Helpers (once) -----------------
         def _ece(y_true, p, bins=10):
             y = np.asarray(y_true, float); p = np.asarray(p, float)
@@ -8501,11 +8506,13 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
                     e += (m.mean()) * abs(float(np.mean(y[m])) - float(np.mean(p[m])))
             return float(e)
         
+        
         def _fast_auc(y, p, w=None):
             try:
-                return float(roc_auc_score(y, p, sample_weight=w)) if np.unique(y).size==2 else np.nan
+                return float(roc_auc_score(y, p, sample_weight=w)) if np.unique(y).size == 2 else np.nan
             except Exception:
                 return np.nan
+        
         
         def _psi(a: np.ndarray, b: np.ndarray, bins: int = 10) -> float:
             a = np.asarray(a, float); b = np.asarray(b, float)
@@ -8516,17 +8523,21 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             ah = np.clip(ah / max(len(a),1), 1e-6, 1); bh = np.clip(bh / max(len(b),1), 1e-6, 1)
             return float(np.sum((ah - bh) * np.log(ah / bh)))
         
+        
         def _drift_report(X_tr_df, X_va_df, top_k: int = 25) -> dict:
             out = {}
             try:
                 var = X_tr_df.var(numeric_only=True).abs().sort_values(ascending=False)
                 cols = [c for c in var.index if np.issubdtype(X_tr_df[c].dtype, np.number)][:top_k]
                 for c in cols:
-                    try: out[c] = _psi(X_tr_df[c].to_numpy(), X_va_df[c].to_numpy(), bins=10)
-                    except Exception: pass
+                    try:
+                        out[c] = _psi(X_tr_df[c].to_numpy(), X_va_df[c].to_numpy(), bins=10)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             return out
+        
         
         # --- Overfit/mismatch diagnostics on ES probe ---
         p_tr_es_raw = np.clip(deep_auc.predict_proba(X_tr_es_df)[:, 1], 1e-12, 1-1e-12)
@@ -8541,12 +8552,18 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         report_auc_va_shuffle = _fast_auc(y_va_shuff, p_va_raw, w_va_es)
         psi_map = _drift_report(X_tr_es_df, X_va_es_df, top_k=25)
         psi_max = float(max(psi_map.values()) if psi_map else 0.0)
+        
         try:
             st.json({"auto_harden_sanity": {
-                "auc_va": report_auc_va, "auc_va_flipped": report_auc_va_flip, "auc_va_shuffle": report_auc_va_shuffle,
-                "psi_max": psi_max, "psi_top": dict(sorted(psi_map.items(), key=lambda kv: kv[1], reverse=True)[:8]),
-                "ece_va": ece_va_es, "extreme_frac": extreme_frac_raw,
-                "y_tr_mean": float(np.mean(y_tr_es)), "y_va_mean": float(np.mean(y_va_es)),
+                "auc_va": report_auc_va,
+                "auc_va_flipped": report_auc_va_flip,
+                "auc_va_shuffle": report_auc_va_shuffle,
+                "psi_max": psi_max,
+                "psi_top": dict(sorted(psi_map.items(), key=lambda kv: kv[1], reverse=True)[:8]),
+                "ece_va": ece_va_es,
+                "extreme_frac": extreme_frac_raw,
+                "y_tr_mean": float(np.mean(y_tr_es)),
+                "y_va_mean": float(np.mean(y_va_es)),
             }})
         except Exception:
             pass
@@ -8559,92 +8576,59 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
         
         if ES_SUSPECT:
             try:
-                st.warning({"es_suspect": True, "why": "shuffle≈val or flip better or PSI high",
-                            "auc_va": report_auc_va, "auc_va_shuffle": report_auc_va_shuffle,
-                            "auc_va_flipped": report_auc_va_flip, "psi_max": psi_max})
+                st.warning({
+                    "es_suspect": True,
+                    "why": "shuffle≈val or flip better or PSI high",
+                    "auc_va": report_auc_va,
+                    "auc_va_shuffle": report_auc_va_shuffle,
+                    "auc_va_flipped": report_auc_va_flip,
+                    "psi_max": psi_max,
+                })
             except Exception:
                 pass
-            # Short-circuit: return safer config; caller will still proceed but with smaller capacity/LR
-            best_auc_params = harden_params(best_auc_params, level=2)
-            best_ll_params  = harden_params(best_ll_params,  level=2)
-            final_estimators_cap = int(np.clip(final_estimators_cap * 0.7, 300, 900))
-            learning_rate        = float(np.clip(learning_rate, 0.005, 0.012))
         
         # If predictions are too flat, allow a small LR bump so the model can move off 0.5
         if float(np.std(p_va_raw)) < 0.02:
             learning_rate = float(np.clip(learning_rate * 1.25, 0.008, 0.03))
         
-        # ---------------- Overfit check (single-pass heuristics) -----------------
-        signals = compute_overfit_signals(
-            y_tr_es.astype(int), p_tr_es_raw,
-            y_va_es.astype(int), p_va_raw,
-            w_tr_es, w_va_es, bins=10
-        )
-        level = decide_harden_level(signals)
-        if level > 0:
-            try:
-                st.warning({"overfit_harden": level,
-                            **{k: float(v) if isinstance(v, (int,float,np.floating)) else v for k,v in signals.items()}})
-            except Exception:
-                pass
-            best_auc_params = harden_params(best_auc_params, level)
-            best_ll_params  = harden_params(best_ll_params,  level)
+        # Very light guard against over-peaky ES behaviour (no full auto-hardening)
+        MAX_EXTREME_FRAC_ES = 0.30
+        if extreme_frac_raw > MAX_EXTREME_FRAC_ES:
+            final_estimators_cap = int(np.clip(final_estimators_cap * 0.85, 300, 1200))
         
-        # Adjust capacity (n_estimators cap + ES rounds) based on the chosen level
-        final_estimators_cap, early_stopping_rounds = tighten_capacity(final_estimators_cap, level)
         
-        # Recompute a suggested ES rounds from updated cap/LR
-        es_suggest = 0.04 * final_estimators_cap * (0.03 / max(learning_rate, 1e-6)) ** 0.5
-        early_stopping_rounds = int(np.clip(int(early_stopping_rounds or es_suggest),
-                                            50, max(100, final_estimators_cap // 4)))
-        
-        # ---------------- Closed-loop hardening (AUC + LogLoss) -------------------
-        # These calls may further tighten params/cap/lr until signals are within targets.
-        auc_params, cap_auc, lr_auc, es_auc, hist_auc, _ = auto_harden_until_ok(
-            X_tr_es_df=X_tr_es_df, y_tr_es=y_tr_es, w_tr_es=w_tr_es,
-            X_va_es_df=X_va_es_df, y_va_es=y_va_es, w_va_es=w_va_es,
-            base_kwargs=base_kwargs,
-            start_params=best_auc_params,
-            start_cap=final_estimators_cap,
-            start_lr=learning_rate,
-            early_stop_default=early_stopping_rounds,
-            scale_pos_weight=scale_pos_weight,
-            max_loops=3, verbose=True
-        )
-        
-        ll_params, cap_ll, lr_ll, es_ll, hist_ll, _ = auto_harden_until_ok(
-            X_tr_es_df=X_tr_es_df, y_tr_es=y_tr_es, w_tr_es=w_tr_es,
-            X_va_es_df=X_va_es_df, y_va_es=y_va_es, w_va_es=w_va_es,
-            base_kwargs=base_kwargs,
-            start_params=best_ll_params,
-            start_cap=final_estimators_cap,
-            start_lr=learning_rate,
-            early_stop_default=early_stopping_rounds,
-            scale_pos_weight=scale_pos_weight,
-            max_loops=3, verbose=True
-        )
-        
-        # ---------------- Build final param dicts (now they exist) -----------------
+        # ---------------- Build final param dicts (simple, no auto-hardening) -----------------
         VCPUS = max(1, int(VCPUS))
         
         params_auc_final = {
-            **base_kwargs, **auc_params,
-            "n_estimators": int(cap_auc),
-            "learning_rate": float(lr_auc),
+            **base_kwargs,
+            **best_auc_params,                  # stabilized AUC params
+            "n_estimators": int(final_estimators_cap),
+            "learning_rate": float(learning_rate),
             "eval_metric": "logloss",
             "n_jobs": VCPUS,
             "scale_pos_weight": float(scale_pos_weight),
             "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
         }
+        
+        # For logloss model, we can use deep_ll.best_iteration as cap if available
+        ll_n_estimators = getattr(deep_ll, "best_iteration", None)
+        if ll_n_estimators is None or ll_n_estimators < 50:
+            ll_n_estimators = final_estimators_cap
+        else:
+            ll_n_estimators = int(np.clip(ll_n_estimators + 1, 300, 1200))
+        
         params_ll_final = {
-            **base_kwargs, **ll_params,
-            "n_estimators": int(cap_ll),
-            "learning_rate": float(lr_ll),
+            **base_kwargs,
+            **best_ll_params,                   # stabilized LL params
+            "n_estimators": int(ll_n_estimators),
+            "learning_rate": float(learning_rate),
             "eval_metric": "logloss",
             "n_jobs": VCPUS,
             "scale_pos_weight": float(scale_pos_weight),
             "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
         }
+
         
         # ---------------- Apply monotone constraints ONCE --------------------------
         FEATS_FOR_ES = list(feature_cols_es)  # must correspond to X_tr_es / X_va_es matrices
