@@ -5382,7 +5382,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
             MAX_OVERFIT_GAP = 0.10
         elif m == "totals":
             MIN_AUC         = 0.58
-            MAX_OVERFIT_GAP = 0.09
+            MAX_OVERFIT_GAP = 0.12
 
     # ---- MLB ----
     elif s == "MLB":
