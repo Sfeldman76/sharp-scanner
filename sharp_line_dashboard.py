@@ -12450,17 +12450,17 @@ else:
     sport_key = SPORTS[sport]  # e.g., "basketball_wnba"
 
     if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
-    # Optional: still train timing model as before
-    train_timing_opportunity_model(sport=label)
-
-    # Everything logged by train_sharp_model_from_bq will go inside this expander
-    with st.expander("Feature Selection Logs", expanded=False):
-
-        # pass st.write into the training function so it can log
-        train_sharp_model_from_bq(
-            sport=label,
-            log_func=st.write,    # 👈 NEW
-        )
+        # Optional: still train timing model as before
+        train_timing_opportunity_model(sport=label)
+    
+        # Everything logged by train_sharp_model_from_bq will go inside this expander
+        with st.expander("Feature Selection Logs", expanded=False):
+    
+            # pass st.write into the training function so it can log
+            train_sharp_model_from_bq(
+                sport=label,
+                log_func=st.write,    # 👈 NEW
+            )
         
     # Prevent multiple scanners from running
     conflicting = [
