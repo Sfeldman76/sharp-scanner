@@ -5661,7 +5661,13 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
 
 
 # Use it in training
-def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
+def train_sharp_model_from_bq(
+    sport: str = "NBA",
+    days_back: int = 35,
+    *,
+    log_func=print,     # 👈 NEW
+    **kwargs            # optional safety to absorb extra args
+):
     SPORT_DAYS_BACK = {"NBA": 365, "NFL": 365, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 365, "NCAAB": 365}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
@@ -8296,6 +8302,7 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
   
         # 3) Run automatic selection (SHAP-stability with safe fallback to perm AUC),
         #    then family-wise and global correlation pruning, then league-aware cap.
+        
         feature_cols, shap_summary = select_features_auto(
             model_proto=_model_proto,
             X_df_train=X_df_train,
@@ -8309,8 +8316,11 @@ def train_sharp_model_from_bq(sport: str = "NBA", days_back: int = 35):
             corr_global=0.92,
             max_feats_major=100,
             max_feats_small=80,
-            sign_flip_max=0.35,     # <- tighter
-            shap_cv_max=1.00,       # <- reasonable
+            sign_flip_max=0.35,                  # tighter
+            shap_cv_max=1.00,                    # reasonable
+            # NEW: streamlit-aware logging + AUC trace
+            auc_verbose=True,
+            log_func=log_func,                   # <- this is the key line
         )
         
         # 4) Rebuild matrices in the final selected order
