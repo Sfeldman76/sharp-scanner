@@ -2414,7 +2414,6 @@ def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list):
 
     return float(np.mean(aucs))
 
-
 def _auto_select_k_by_auc(
     model_proto,
     X,
@@ -2427,12 +2426,15 @@ def _auto_select_k_by_auc(
     patience=5,
     min_improve=1e-4,
     verbose=True,
+    log_func=print,   # 👈 can be st.write
 ):
     """
     Greedy prefix scan over `ordered_features`:
       - evaluates AUC for top-k prefixes
       - picks k with best mean CV AUC
       - early-stops if no improvement for `patience` steps.
+    Returns:
+      best_k, best_auc, history[(k, auc_k), ...]
     """
     if max_k is None:
         max_k = len(ordered_features)
@@ -2448,7 +2450,7 @@ def _auto_select_k_by_auc(
         history.append((k, auc_k))
 
         if verbose:
-            print(f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}")
+            log_func(f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}")
 
         if auc_k > best_auc + min_improve:
             best_auc = auc_k
@@ -2459,19 +2461,19 @@ def _auto_select_k_by_auc(
 
         if k >= min_k and no_improve >= patience:
             if verbose:
-                print(
+                log_func(
                     f"[AUTO-FEAT] Early stop at k={k} "
                     f"(best_k={best_k}, best_auc={best_auc:.6f})"
                 )
             break
 
     if verbose and history:
-        print(
+        log_func(
             f"[AUTO-FEAT] Final best_k={best_k}, best_auc={best_auc:.6f}, "
             f"tried up to k={history[-1][0]}"
         )
 
-    return best_k, history
+    return best_k, best_auc, history
 
 
 # ------- One-call AUTO selector that does everything -------
@@ -2492,12 +2494,14 @@ def select_features_auto(
     must_keep: list[str] = None,
     topk_per_fold=60,
     min_presence=0.6,
-    # NEW: AUC-driven auto-K controls
+    # AUC-driven auto-K controls
     use_auc_auto: bool = True,
     auc_min_k: int = 10,
     auc_patience: int = 5,
     auc_min_improve: float = 1e-4,
     auc_verbose: bool = True,
+    # NEW: logging hook for Streamlit or plain print
+    log_func=print,
 ):
     must_keep = must_keep or ["Is_Home_Team_Bet", "Is_Favorite_Bet"]
     families = families or {
@@ -2521,7 +2525,6 @@ def select_features_auto(
         )
         rank_df = shap_summary
     except Exception:
-        # SHAP failed → fallback: fit on all train then perm importance
         mdl = clone(model_proto).fit(X_df_train, y_train)
         _, perm = perm_auc_importance(mdl, X_df_train, y_train)
         perm["presence"] = 1.0
@@ -2543,7 +2546,7 @@ def select_features_auto(
     if "shap_cv" in rank_df.columns:
         filt &= rank_df["shap_cv"].fillna(1.0) <= float(shap_cv_max)
 
-    # keep at least the top-K by |SHAP| even if they barely miss stability
+    # keep at least the top-K by |SHAP|
     top_by_abs = (
         rank_df.sort_values("avg_abs_shap", ascending=False)
         .head(25)
@@ -2614,9 +2617,11 @@ def select_features_auto(
         keep_order = keep_order[:cap]
 
     # 3b) AUC-driven auto-selection of best prefix size
+    best_k = None
+    best_auc = None
     if use_auc_auto and keep_order:
         y_arr = np.asarray(y_train)
-        best_k, _ = _auto_select_k_by_auc(
+        best_k, best_auc, history = _auto_select_k_by_auc(
             model_proto,
             X_df_train,
             y_arr,
@@ -2627,10 +2632,50 @@ def select_features_auto(
             patience=auc_patience,
             min_improve=auc_min_improve,
             verbose=auc_verbose,
+            log_func=log_func,   # 👈 Streamlit logging
         )
         final_feats = keep_order[:best_k]
     else:
         final_feats = keep_order
+
+    # 3c) extra logging: ΔAUC vs full set + top-10 features
+    if auc_verbose and keep_order:
+        try:
+            y_arr = np.asarray(y_train)
+            auc_full = _cv_auc_for_feature_set(
+                model_proto, X_df_train, y_arr, folds, keep_order
+            )
+        except Exception as e:
+            log_func(f"[AUTO-FEAT] Failed to compute AUC for full candidate set: {e}")
+            auc_full = np.nan
+
+        if best_auc is not None and np.isfinite(auc_full):
+            delta_auc = best_auc - auc_full
+            log_func(
+                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc:.6f} | "
+                f"AUC(full={len(keep_order)}) = {auc_full:.6f} | "
+                f"ΔAUC = {delta_auc:+.6f}"
+            )
+        elif best_auc is not None:
+            log_func(
+                f"[AUTO-FEAT] AUC(best_k={best_k}, n_feats={len(final_feats)}) = {best_auc:.6f} "
+                f"(full-set AUC unavailable)"
+            )
+
+        log_func("[AUTO-FEAT] Top chosen features (up to 10):")
+        for f in final_feats[:10]:
+            if f in rank_df.index:
+                row = rank_df.loc[f]
+                avg_abs = row.get("avg_abs_shap", np.nan)
+                pres   = row.get("presence", np.nan)
+                sfr    = row.get("sign_flip_rate", np.nan)
+                cv     = row.get("shap_cv", np.nan)
+                log_func(
+                    f"  - {f:40s} | SHAP={avg_abs: .4e} | "
+                    f"presence={pres: .2f} | flip={sfr: .2f} | cv={cv: .2f}"
+                )
+            else:
+                log_func(f"  - {f:40s} | (no SHAP stats in rank_df)")
 
     # 4) build final matrices
     feature_cols = list(final_feats)
@@ -2639,7 +2684,6 @@ def select_features_auto(
     ].copy()
 
     return feature_cols, summary
-
 
 
 from sklearn.model_selection import StratifiedKFold
@@ -12406,9 +12450,18 @@ else:
     sport_key = SPORTS[sport]  # e.g., "basketball_wnba"
 
     if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
-        train_timing_opportunity_model(sport=label)
-        train_sharp_model_from_bq(sport=label)
+    # Optional: still train timing model as before
+    train_timing_opportunity_model(sport=label)
 
+    # Everything logged by train_sharp_model_from_bq will go inside this expander
+    with st.expander("Feature Selection Logs", expanded=False):
+
+        # pass st.write into the training function so it can log
+        train_sharp_model_from_bq(
+            sport=label,
+            log_func=st.write,    # 👈 NEW
+        )
+        
     # Prevent multiple scanners from running
     conflicting = [
         k for k, v in scanner_widget_keys.items()
