@@ -2213,10 +2213,12 @@ def greedy_corr_prune(X: pd.DataFrame, candidates, rank_df: pd.DataFrame,
             keep.append(m)
     return keep
 
-# ------- permutation AUC importance (fallback) -------
-# --- Drop-in shim: make perm AUC robust to mixed call styles and return (base_auc, df)
+from sklearn.base import clone
 from sklearn.metrics import roc_auc_score
 
+
+# ------- permutation AUC importance (fallback) -------
+# --- Drop-in shim: make perm AUC robust to mixed call styles and return (base_auc, df)
 def perm_auc_importance(model, X, y, *args, **kwargs):
     """
     Compatible with calls like:
@@ -2227,14 +2229,19 @@ def perm_auc_importance(model, X, y, *args, **kwargs):
         base_auc: float
         perm_df : DataFrame with [feature, perm_auc_drop_mean, perm_auc_drop_std] indexed by feature
     """
-    import numpy as np
-    import pandas as pd
-
     # Resolve repeats / n_repeats from args/kwargs
     n_repeats_kw = kwargs.pop("n_repeats", None)
     repeats_kw   = kwargs.pop("repeats", None)
     repeats_pos  = args[0] if len(args) >= 1 else None
-    repeats = repeats_kw if repeats_kw is not None else (n_repeats_kw if n_repeats_kw is not None else (repeats_pos if repeats_pos is not None else 5))
+    repeats = (
+        repeats_kw
+        if repeats_kw is not None
+        else (
+            n_repeats_kw
+            if n_repeats_kw is not None
+            else (repeats_pos if repeats_pos is not None else 5)
+        )
+    )
 
     # Resolve RNG seed (rnd OR random_state)
     rnd_kw          = kwargs.pop("rnd", None)
@@ -2253,11 +2260,16 @@ def perm_auc_importance(model, X, y, *args, **kwargs):
         vals = []
         for _ in range(int(repeats)):
             Xp = X.copy()
-            Xp[col] = Xp[col].sample(frac=1.0, replace=False, random_state=rng.randint(1_000_000_000)).values
+            Xp[col] = Xp[col].sample(
+                frac=1.0, replace=False,
+                random_state=rng.randint(1_000_000_000)
+            ).values
             vals.append(base_auc - roc_auc_score(y, model.predict_proba(Xp)[:, 1]))
         drops.append((col, float(np.mean(vals)), float(np.std(vals))))
-    perm_df = (pd.DataFrame(drops, columns=["feature","perm_auc_drop_mean","perm_auc_drop_std"])
-                 .set_index("feature"))
+    perm_df = (
+        pd.DataFrame(drops, columns=["feature", "perm_auc_drop_mean", "perm_auc_drop_std"])
+        .set_index("feature")
+    )
     return base_auc, perm_df
 
 
@@ -2293,10 +2305,17 @@ def shap_stability_select(
         Xtr, ytr = X.iloc[tr_idx], y[tr_idx]
         mdl = clone(model_proto).fit(Xtr, ytr)
 
-        Xs = Xtr if len(Xtr) <= sample_per_fold else Xtr.iloc[rng.choice(len(Xtr), size=sample_per_fold, replace=False)]
-        explainer = shap.TreeExplainer(mdl, feature_perturbation="tree_path_dependent")
+        if len(Xtr) <= sample_per_fold:
+            Xs = Xtr
+        else:
+            Xs = Xtr.iloc[rng.choice(len(Xtr), size=sample_per_fold, replace=False)]
+
+        explainer = shap.TreeExplainer(
+            mdl, feature_perturbation="tree_path_dependent"
+        )
         sval = explainer.shap_values(Xs)
-        if isinstance(sval, list): sval = sval[1]
+        if isinstance(sval, list):
+            sval = sval[1]
         sval = np.asarray(sval)
 
         abs_mean  = pd.Series(np.abs(sval).mean(axis=0), index=feat)
@@ -2307,7 +2326,9 @@ def shap_stability_select(
         per_fold_sign.append(sign_mean)
         fold_rank_frames.append(abs_mean.rank(ascending=False, method="average"))
 
-        topk = abs_mean.sort_values(ascending=False).head(min(topk_per_fold, len(feat))).index
+        topk = abs_mean.sort_values(ascending=False).head(
+            min(topk_per_fold, len(feat))
+        ).index
         counts_in_topk.loc[topk] += 1
 
     n_folds  = max(len(fold_rank_frames), 1)
@@ -2324,12 +2345,23 @@ def shap_stability_select(
         sign_flip_rate = pd.Series(0.0, index=feat)
 
     A = pd.concat(per_fold_abs, axis=1) if per_fold_abs else pd.DataFrame(index=feat)
-    shap_cv = ((A.std(axis=1) / (A.mean(axis=1).replace(0, np.nan))).fillna(0.0)) if not A.empty else pd.Series(0.0, index=feat)
+    if not A.empty:
+        shap_cv = (A.std(axis=1) / (A.mean(axis=1).replace(0, np.nan))).fillna(0.0)
+    else:
+        shap_cv = pd.Series(0.0, index=feat)
 
     keep_presence   = presence.index[presence >= float(min_presence)].tolist()
     keep_top_global = avg_abs.sort_values(ascending=False).head(topk_per_fold).index.tolist()
     selected = list(dict.fromkeys(keep_top_global + keep_presence))
-    selected = sorted(selected, key=lambda c: (-float(avg_abs[c]), float(avg_rank[c]), float(sign_flip_rate[c]), float(shap_cv[c])))
+    selected = sorted(
+        selected,
+        key=lambda c: (
+            -float(avg_abs[c]),
+            float(avg_rank[c]),
+            float(sign_flip_rate[c]),
+            float(shap_cv[c]),
+        ),
+    )
 
     if must_keep:
         for c in must_keep:
@@ -2339,17 +2371,108 @@ def shap_stability_select(
     if max_keep is not None and len(selected) > max_keep:
         base = [c for c in selected if (not must_keep or c not in must_keep)]
         head = base[: max_keep - (len(must_keep or []))]
-        selected = head + [c for c in (must_keep or []) if c in feat and c not in head]
+        selected = head + [
+            c for c in (must_keep or []) if c in feat and c not in head
+        ]
 
-    summary = (pd.DataFrame({
-        "avg_rank":       avg_rank,
-        "presence":       presence,
-        "avg_abs_shap":   avg_abs,
-        "sign_flip_rate": sign_flip_rate,
-        "shap_cv":        shap_cv,
-    }).loc[selected].sort_values(["avg_abs_shap","presence"], ascending=[False, False]))
+    summary = (
+        pd.DataFrame(
+            {
+                "avg_rank":       avg_rank,
+                "presence":       presence,
+                "avg_abs_shap":   avg_abs,
+                "sign_flip_rate": sign_flip_rate,
+                "shap_cv":        shap_cv,
+            }
+        )
+        .loc[selected]
+        .sort_values(["avg_abs_shap", "presence"], ascending=[False, False])
+    )
     summary.index.name = "feature"
     return selected, summary
+
+
+# ------- AUC helpers for auto-K selection -------
+def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list):
+    """
+    Compute mean CV AUC for a fixed feature subset.
+    `folds` is any iterable of (train_idx, val_idx).
+    """
+    aucs = []
+    for tr_idx, val_idx in folds:
+        X_tr, X_val = X.iloc[tr_idx][feature_list], X.iloc[val_idx][feature_list]
+        y_tr, y_val = y[tr_idx], y[val_idx]
+
+        mdl = clone(model_proto)
+        mdl.fit(X_tr, y_tr)
+
+        try:
+            proba = mdl.predict_proba(X_val)[:, 1]
+        except AttributeError:
+            proba = mdl.predict(X_val)
+        aucs.append(roc_auc_score(y_val, proba))
+
+    return float(np.mean(aucs))
+
+
+def _auto_select_k_by_auc(
+    model_proto,
+    X,
+    y,
+    folds,
+    ordered_features,
+    *,
+    min_k=10,
+    max_k=None,
+    patience=5,
+    min_improve=1e-4,
+    verbose=True,
+):
+    """
+    Greedy prefix scan over `ordered_features`:
+      - evaluates AUC for top-k prefixes
+      - picks k with best mean CV AUC
+      - early-stops if no improvement for `patience` steps.
+    """
+    if max_k is None:
+        max_k = len(ordered_features)
+
+    best_auc = -np.inf
+    best_k = min_k
+    no_improve = 0
+    history = []
+
+    for k in range(1, max_k + 1):
+        feats_k = ordered_features[:k]
+        auc_k = _cv_auc_for_feature_set(model_proto, X, y, folds, feats_k)
+        history.append((k, auc_k))
+
+        if verbose:
+            print(f"[AUTO-FEAT] k={k:3d}, AUC={auc_k:.6f}")
+
+        if auc_k > best_auc + min_improve:
+            best_auc = auc_k
+            best_k = k
+            no_improve = 0
+        else:
+            no_improve += 1
+
+        if k >= min_k and no_improve >= patience:
+            if verbose:
+                print(
+                    f"[AUTO-FEAT] Early stop at k={k} "
+                    f"(best_k={best_k}, best_auc={best_auc:.6f})"
+                )
+            break
+
+    if verbose and history:
+        print(
+            f"[AUTO-FEAT] Final best_k={best_k}, best_auc={best_auc:.6f}, "
+            f"tried up to k={history[-1][0]}"
+        )
+
+    return best_k, history
+
 
 # ------- One-call AUTO selector that does everything -------
 def select_features_auto(
@@ -2362,13 +2485,19 @@ def select_features_auto(
     corr_within=0.90,
     corr_global=0.92,
     max_feats_major=100,
-    sign_flip_max=0.35,    # NEW: drop features that flip sign across folds too often
-    shap_cv_max=1.00,      # NEW: drop features with unstable magnitude (std/mean)
+    sign_flip_max=0.35,    # drop features that flip sign across folds too often
+    shap_cv_max=1.00,      # drop features with unstable magnitude (std/mean)
     max_feats_small=80,
     sport_key: str = "NFL",
     must_keep: list[str] = None,
     topk_per_fold=60,
-    min_presence=0.6
+    min_presence=0.6,
+    # NEW: AUC-driven auto-K controls
+    use_auc_auto: bool = True,
+    auc_min_k: int = 10,
+    auc_patience: int = 5,
+    auc_min_improve: float = 1e-4,
+    auc_verbose: bool = True,
 ):
     must_keep = must_keep or ["Is_Home_Team_Bet", "Is_Favorite_Bet"]
     families = families or {
@@ -2381,37 +2510,49 @@ def select_features_auto(
     # 1) SHAP stability (with safe fallback to permutation AUC)
     try:
         sel, shap_summary = shap_stability_select(
-            model_proto, X_df_train, y_train, folds,
-            topk_per_fold=topk_per_fold, min_presence=min_presence, max_keep=None, must_keep=must_keep
+            model_proto,
+            X_df_train,
+            y_train,
+            folds,
+            topk_per_fold=topk_per_fold,
+            min_presence=min_presence,
+            max_keep=None,
+            must_keep=must_keep,
         )
         rank_df = shap_summary
     except Exception:
         # SHAP failed → fallback: fit on all train then perm importance
         mdl = clone(model_proto).fit(X_df_train, y_train)
-        perm = perm_auc_importance(mdl, X_df_train, y_train)
+        _, perm = perm_auc_importance(mdl, X_df_train, y_train)
         perm["presence"] = 1.0
         perm["avg_abs_shap"] = perm["perm_auc_drop_mean"].clip(lower=0)
         perm["avg_rank"] = (-perm["avg_abs_shap"]).rank()
         perm["sign_flip_rate"] = 0.0
         perm["shap_cv"] = 0.0
         rank_df = perm
-        sel = list(perm.sort_values("avg_abs_shap", ascending=False).head(topk_per_fold).index)
-    # after you build rank_df (from SHAP or perm fallback), apply stability filter
-    # rank_df index = features, columns include: avg_abs_shap, presence, sign_flip_rate, shap_cv
+        sel = (
+            perm.sort_values("avg_abs_shap", ascending=False)
+            .head(topk_per_fold)
+            .index.tolist()
+        )
+
+    # 1b) stability filter
     filt = pd.Series(True, index=rank_df.index)
     if "sign_flip_rate" in rank_df.columns:
-        filt &= (rank_df["sign_flip_rate"].fillna(1.0) <= float(sign_flip_max))
+        filt &= rank_df["sign_flip_rate"].fillna(1.0) <= float(sign_flip_max)
     if "shap_cv" in rank_df.columns:
-        filt &= (rank_df["shap_cv"].fillna(1.0) <= float(shap_cv_max))
+        filt &= rank_df["shap_cv"].fillna(1.0) <= float(shap_cv_max)
 
-    # keep at least the top-K by |SHAP| even if they barely miss stability, to avoid over-pruning
-    top_by_abs = rank_df.sort_values("avg_abs_shap", ascending=False).head(25).index
+    # keep at least the top-K by |SHAP| even if they barely miss stability
+    top_by_abs = (
+        rank_df.sort_values("avg_abs_shap", ascending=False)
+        .head(25)
+        .index
+    )
     filt.loc[top_by_abs] = True
 
-    # apply
     rank_df = rank_df.loc[filt].copy()
     sel = [c for c in sel if c in rank_df.index]
-    # ensure list, stable dedupe, intersect with columns
     sel = [c for c in dict.fromkeys(sel) if c in X_df_train.columns]
 
     # 2) family-wise prune, then global prune
@@ -2420,33 +2561,83 @@ def select_features_auto(
         return [f for f in sel if any(tok in f for tok in toks)]
 
     keep_all = []
-    for fam in ("move","timing","resist","xmarket"):
+    for fam in ("move", "timing", "resist", "xmarket"):
         fam_feats = _family(fam)
         if fam_feats:
-            keep_f = greedy_corr_prune(X_df_train, fam_feats, rank_df, corr_thresh=corr_within, must_keep=None)
+            keep_f = greedy_corr_prune(
+                X_df_train,
+                fam_feats,
+                rank_df,
+                corr_thresh=corr_within,
+                must_keep=None,
+            )
             keep_all.extend(keep_f)
 
     other = [f for f in sel if f not in set(keep_all)]
     candidates = list(dict.fromkeys(keep_all + other))
-    final = greedy_corr_prune(X_df_train, candidates, rank_df, corr_thresh=corr_global, must_keep=must_keep)
 
-    # 3) cap by league size
-    is_small = str(sport_key).upper() in {"NBA","MLB"}  # tweak if you treat these as SMALL/MAJOR differently
-    cap = (max_feats_small if is_small else max_feats_major)
+    final = greedy_corr_prune(
+        X_df_train,
+        candidates,
+        rank_df,
+        corr_thresh=corr_global,
+        must_keep=must_keep,
+    )
+
+    # 3) league-size cap (upper bound for AUC scan)
+    is_small = str(sport_key).upper() in {"NBA", "MLB"}  # tweak if needed
+    cap = max_feats_small if is_small else max_feats_major
+
     cols_in_summary = [c for c in final if c in rank_df.index]
-    if len(final) > cap and cols_in_summary:
-        keep_order = (rank_df.loc[cols_in_summary]
-                      .assign(_presence=rank_df.get("presence", pd.Series(1.0, index=rank_df.index))
-                              .reindex(cols_in_summary).fillna(0.0))
-                      .sort_values(["avg_abs_shap","_presence"], ascending=[False, False])
-                      .index.tolist())
-        final = keep_order[:cap]
+    if cols_in_summary:
+        keep_order = (
+            rank_df.loc[cols_in_summary]
+            .assign(
+                _presence=rank_df.get(
+                    "presence",
+                    pd.Series(1.0, index=rank_df.index),
+                )
+                .reindex(cols_in_summary)
+                .fillna(0.0)
+            )
+            .sort_values(["avg_abs_shap", "_presence"], ascending=[False, False])
+            .index.tolist()
+        )
+    else:
+        keep_order = list(final)
+
+    # ensure must_keep are present and at the front
+    mk_in = [m for m in must_keep if m in X_df_train.columns]
+    keep_order = list(dict.fromkeys(mk_in + keep_order))
+
+    if len(keep_order) > cap:
+        keep_order = keep_order[:cap]
+
+    # 3b) AUC-driven auto-selection of best prefix size
+    if use_auc_auto and keep_order:
+        y_arr = np.asarray(y_train)
+        best_k, _ = _auto_select_k_by_auc(
+            model_proto,
+            X_df_train,
+            y_arr,
+            folds,
+            keep_order,
+            min_k=min(auc_min_k, len(keep_order)),
+            max_k=len(keep_order),
+            patience=auc_patience,
+            min_improve=auc_min_improve,
+            verbose=auc_verbose,
+        )
+        final_feats = keep_order[:best_k]
+    else:
+        final_feats = keep_order
 
     # 4) build final matrices
-    feature_cols = list(final)
-    summary = rank_df.loc[[c for c in feature_cols if c in rank_df.index]].copy()
+    feature_cols = list(final_feats)
+    summary = rank_df.loc[
+        [c for c in feature_cols if c in rank_df.index]
+    ].copy()
 
-    
     return feature_cols, summary
 
 
@@ -5373,7 +5564,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
             MAX_OVERFIT_GAP = 0.10
         else:  # h2h / others
             MIN_AUC         = 0.58
-            MAX_OVERFIT_GAP = 0.10
+            MAX_OVERFIT_GAP = 0.08
 
     # ---- NBA ----
     elif s == "NBA":
