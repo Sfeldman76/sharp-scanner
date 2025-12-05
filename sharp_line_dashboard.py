@@ -1430,147 +1430,181 @@ import pandas as pd
 
 def add_book_path_reliability_features(
     df: pd.DataFrame,
+    closers: pd.DataFrame,
     *,
-    eps_open: float = 0.5,          # "good open" threshold (points from close)
+    eps_open: float = 0.5,
     prior_strength_open: float = 200.0,
     prior_strength_speed: float = 200.0,
     min_trials_for_stats: int = 5,
     early_tiers: set[str] | None = None,
 ) -> pd.DataFrame:
-    """
-    Add book-level path reliability features:
-      - Book_OpenAcc_Score / Book_OpenAcc_Lift:
-          How often this (Sport, Market, Bookmaker) opens close to the closing consensus.
-      - Book_MoveSpeed_Score / Book_MoveSpeed_Lift:
-          How often its dominant sharp move timing is in an 'early' tier.
-
-    Uses ONLY price-path info:
-      - First_Line_Value (book's open)
-      - Value (book's line at final snapshot used for training)
-      - SharpMove_Timing_Dominant (timing bucket)
-    No label usage => no outcome leakage.
-
-    Expected columns in df:
-      Sport, Market, Game_Key, Outcome, Bookmaker, Value,
-      First_Line_Value, SharpMove_Timing_Dominant
-    """
+    out = df.copy()
 
     if early_tiers is None:
-        # You can tweak these if your timing buckets change
+        # use your hybrid timing labels for “early”
         early_tiers = {
             "Overnight_VeryEarly",
             "Overnight_MidRange",
             "Early_VeryEarly",
             "Early_MidRange",
+            "Midday_VeryEarly",
         }
 
-    out = df.copy()
-
-    # --- Normalize keys (defensive) ---
-    out["Sport"] = out["Sport"].astype(str).str.upper()
+    # --- normalize + merge closers ---
+    out["Game_Key"] = out["Game_Key"].astype(str).str.lower().str.strip()
+    out["Bookmaker"] = out["Bookmaker"].astype(str).str.lower().str.strip()
     out["Market"] = out["Market"].astype(str).str.lower().str.strip()
 
-    # Handle Bookmaker vs Book for safety
-    if "Bookmaker" not in out.columns and "Book" in out.columns:
-        out["Bookmaker"] = out["Book"]
-    out["Bookmaker"] = out["Bookmaker"].astype(str).str.lower().str.strip()
+    clos = closers.copy()
+    clos["Game_Key"] = clos["Game_Key"].astype(str).str.lower().str.strip()
 
-    # --- 1) Compute closing consensus per game/market/outcome ---
-    # Value is your final line at the scored snapshot
-    closing = (
-        out.groupby(["Sport", "Market", "Game_Key", "Outcome"])["Value"]
-           .median()
-           .rename("Closing_Consensus")
+    # expect: clos has close_spread / close_total / p_ml_fav
+    out = out.merge(clos[["Game_Key", "close_spread", "close_total", "p_ml_fav"]],
+                    on="Game_Key", how="left")
+
+    # --- per-snapshot distance to closer ---
+    is_spread = out["Market"].eq("spreads")
+    is_total  = out["Market"].eq("totals")
+    is_ml     = out["Market"].eq("h2h")
+
+    val = pd.to_numeric(out["Value"], errors="coerce")
+
+    out["close_line"] = np.where(
+        is_spread, out["close_spread"],
+        np.where(is_total, out["close_total"], np.nan)
+    )
+    out["Path_Line_Error"] = (val - out["close_line"]).abs()
+
+    def _amer_to_prob_vec(s):
+        x = pd.to_numeric(s, errors="coerce")
+        return np.where(
+            x >= 0,
+            100.0 / (x + 100.0),
+            (-x) / ((-x) + 100.0),
+        )
+
+    out["Imp_Prob"] = _amer_to_prob_vec(out["Odds_Price"])
+    out["Path_Prob_Error"] = np.where(
+        is_ml,
+        (out["Imp_Prob"] - out["p_ml_fav"]).abs(),
+        np.nan,
+    )
+
+    # --- collapse to 1 row per (Sport, Market, Bookmaker, Game_Key) for stats ---
+    out["Snapshot_Timestamp"] = pd.to_datetime(
+        out["Snapshot_Timestamp"], errors="coerce", utc=True
+    )
+    if "Game_Start" in out.columns:
+        out["Game_Start"] = pd.to_datetime(out["Game_Start"], errors="coerce", utc=True)
+    else:
+        out["Game_Start"] = out["Snapshot_Timestamp"]
+
+    out = out.sort_values(
+        ["Sport", "Market", "Bookmaker", "Game_Key", "Snapshot_Timestamp"]
+    )
+
+    tier_col = "SharpMove_Timing_Dominant" if "SharpMove_Timing_Dominant" in out.columns else None
+
+    def _per_game_stats(g: pd.DataFrame) -> pd.Series:
+        # first snapshot for this game/book
+        first = g.iloc[0]
+        open_err = first["Path_Line_Error"]
+
+        # good open if within eps_open of closer (for spreads/totals only)
+        open_good = int(
+            pd.notna(open_err)
+            and (open_err <= eps_open)
+        )
+
+        # “fast” = ever get within eps_open while in an early tier
+        fast_good = 0
+        if tier_col is not None:
+            m_band = g["Path_Line_Error"] <= eps_open
+            m_early = g[tier_col].isin(early_tiers) if tier_col in g.columns else False
+            fast_good = int((m_band & m_early).any())
+
+        return pd.Series(
+            {
+                "Game_Start": first["Game_Start"],
+                "Open_Good_Game": open_good,
+                "Fast_Good_Game": fast_good,
+            }
+        )
+
+    game_stats = (
+        out.groupby(["Sport", "Market", "Bookmaker", "Game_Key"], sort=False)
+           .apply(_per_game_stats)
            .reset_index()
     )
 
-    out = out.merge(
-        closing,
-        on=["Sport", "Market", "Game_Key", "Outcome"],
+    # --- leak-safe cumulative Beta posteriors per (Sport, Market, Bookmaker) ---
+    game_stats = game_stats.sort_values(
+        ["Sport", "Market", "Bookmaker", "Game_Start"]
+    )
+
+    g = game_stats.groupby(["Sport", "Market", "Bookmaker"], sort=False)
+
+    idx = g.cumcount()
+
+    # exclude current game via shift
+    cum_games = idx
+    cum_open_hits = g["Open_Good_Game"].cumsum() - game_stats["Open_Good_Game"]
+    cum_fast_hits = g["Fast_Good_Game"].cumsum() - game_stats["Fast_Good_Game"]
+
+    # Open quality posterior
+    alpha0_open = prior_strength_open * 0.5
+    beta0_open  = prior_strength_open * 0.5
+
+    trials_open = cum_games
+    post_open = (cum_open_hits + alpha0_open) / (
+        trials_open + alpha0_open + beta0_open
+    )
+    post_open = np.where(trials_open >= min_trials_for_stats, post_open, 0.5)
+
+    # Speed posterior
+    alpha0_speed = prior_strength_speed * 0.5
+    beta0_speed  = prior_strength_speed * 0.5
+
+    trials_speed = cum_games
+    post_speed = (cum_fast_hits + alpha0_speed) / (
+        trials_speed + alpha0_speed + beta0_speed
+    )
+    post_speed = np.where(trials_speed >= min_trials_for_stats, post_speed, 0.5)
+
+    game_stats["Book_Path_Open_Score"] = post_open
+    game_stats["Book_Path_Speed_Score"] = post_speed
+
+    # convert to lifts if you want log-odds style
+    game_stats["Book_Path_Open_Lift"] = np.log(
+        np.clip(game_stats["Book_Path_Open_Score"], 0.01, 0.99)
+        / (1 - np.clip(game_stats["Book_Path_Open_Score"], 0.01, 0.99))
+    )
+    game_stats["Book_Path_Speed_Lift"] = np.log(
+        np.clip(game_stats["Book_Path_Speed_Score"], 0.01, 0.99)
+        / (1 - np.clip(game_stats["Book_Path_Speed_Score"], 0.01, 0.99))
+    )
+
+    # --- merge back to every row of df by (Sport, Market, Bookmaker, Game_Key) ---
+    merged = df.merge(
+        game_stats[
+            [
+                "Sport",
+                "Market",
+                "Bookmaker",
+                "Game_Key",
+                "Book_Path_Open_Score",
+                "Book_Path_Speed_Score",
+                "Book_Path_Open_Lift",
+                "Book_Path_Speed_Lift",
+            ]
+        ],
+        on=["Sport", "Market", "Bookmaker", "Game_Key"],
         how="left",
+        validate="many_to_one",
     )
 
-    # --- 2) Per-row open accuracy & fast-move flags ---
+    return merged
 
-    # Opening error vs closing consensus
-    out["Open_Close_Error"] = (
-        out["First_Line_Value"] - out["Closing_Consensus"]
-    ).abs()
-
-    # Good opener if within eps_open points of close
-    out["Open_Close_Good"] = (out["Open_Close_Error"] <= float(eps_open)).astype(int)
-
-    # Fast move flag: dominant timing in an "early" tier
-    smt = out.get("SharpMove_Timing_Dominant")
-    if smt is not None:
-        out["Fast_Move_Flag"] = smt.astype(str).isin(early_tiers).astype(int)
-    else:
-        # If timing not available, fall back to 0 (no speed signal)
-        out["Fast_Move_Flag"] = 0
-
-    # --- 3) Aggregate to (Sport, Market, Bookmaker) level ---
-
-    g = out.groupby(["Sport", "Market", "Bookmaker"], sort=False)
-
-    open_trials = g["Open_Close_Good"].count()
-    open_hits   = g["Open_Close_Good"].sum()
-
-    speed_trials = g["Fast_Move_Flag"].count()
-    speed_hits   = g["Fast_Move_Flag"].sum()
-
-    # --- 4) Beta posterior scoring with shrinkage to 0.5 ---
-
-    def _beta_posterior(hits, trials, prior_strength):
-        # shrink towards 0.5 so small books don't go crazy
-        alpha = prior_strength * 0.5 + hits
-        beta  = prior_strength * 0.5 + (trials - hits)
-        return alpha / (alpha + beta)
-
-    open_score  = _beta_posterior(open_hits,  open_trials,  prior_strength_open)
-    speed_score = _beta_posterior(speed_hits, speed_trials, prior_strength_speed)
-
-    def _logit(p):
-        p = np.clip(p, 0.01, 0.99)
-        return np.log(p / (1.0 - p))
-
-    open_lift  = _logit(open_score)
-    speed_lift = _logit(speed_score)
-
-    # Build book-level stats frame
-    book_stats = (
-        pd.DataFrame({
-            "Book_OpenAcc_Trials": open_trials,
-            "Book_OpenAcc_Hits":   open_hits,
-            "Book_OpenAcc_Score":  open_score,
-            "Book_OpenAcc_Lift":   open_lift,
-            "Book_Speed_Trials":   speed_trials,
-            "Book_Speed_Hits":     speed_hits,
-            "Book_MoveSpeed_Score": speed_score,
-            "Book_MoveSpeed_Lift":  speed_lift,
-        })
-        .reset_index()
-    )
-
-    # Optionally blank out books with too few trials (to avoid noise)
-    mask_few = (book_stats["Book_OpenAcc_Trials"] < min_trials_for_stats) | \
-               (book_stats["Book_Speed_Trials"] < min_trials_for_stats)
-
-    # You can either:
-    #  - keep them but shrink (already shrunk by prior), or
-    #  - set to NaN so model learns "no signal" for tiny books.
-    # Here I leave scores but you could uncomment this if you prefer NaNs:
-    # for col in ["Book_OpenAcc_Score","Book_OpenAcc_Lift",
-    #             "Book_MoveSpeed_Score","Book_MoveSpeed_Lift"]:
-    #     book_stats.loc[mask_few, col] = np.nan
-
-    # --- 5) Merge book stats back to every row ---
-    out = out.merge(
-        book_stats,
-        on=["Sport", "Market", "Bookmaker"],
-        how="left",
-    )
-
-    return out
 
 def add_book_reliability_features(
     df: pd.DataFrame,
@@ -6119,17 +6153,15 @@ def train_sharp_model_from_bq(
     hist_df = (closers_game
                .merge(key_map, on="Game_Key",  how="left")
                .merge(finals_slim, on="Merge_Key_Short", how="left"))
+
     with tmr("book path reliability"):
         df_bt = add_book_path_reliability_features(
             df=df_bt,
-            closers=closers_game,        # game-level close_spread / close_total / p_ml_fav
-            sport_col="Sport",
-            market_col="Market",
-            book_col="Bookmaker",
-            game_col="Game_Key",
-            ts_col="Snapshot_Timestamp",
-            line_col="Value",
-            odds_col="Odds_Price",
+            closers=closers_game,
+            eps_open=0.5,
+            prior_strength_open=200.0,
+            prior_strength_speed=200.0,
+            early_tiers=None,   # or a set of your hybrid tiers, see below
         )
     # Label outcomes
     margin    = pd.to_numeric(hist_df["Home_Score"], errors="coerce") - pd.to_numeric(hist_df["Away_Score"], errors="coerce")
@@ -7426,11 +7458,11 @@ def train_sharp_model_from_bq(
             'Book_Reliability_Lift',#'Book_Reliability_x_Sharp',
             'Book_Reliability_x_Magnitude',
             'Book_Reliability_x_PROB_SHIFT',
-            'Book_Path_Spread_Error',
-            'Book_Path_Total_Error',
-            'Book_Path_Reaction_Speed',
-            'Book_Path_Lead_Edge',
-        
+            "Book_Path_Open_Score",
+            "Book_Path_Speed_Score",
+            "Book_Path_Open_Lift",
+            "Book_Path_Speed_Lift",
+
             # Power ratings / edges
             'PR_Team_Rating','PR_Opp_Rating',
             'PR_Rating_Diff',#'PR_Abs_Rating_Diff',
