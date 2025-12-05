@@ -2421,7 +2421,7 @@ def _auto_select_k_by_auc(
     folds,
     ordered_features,
     *,
-    min_k=10,
+    min_k=30,
     max_k=None,
     patience=5,
     min_improve=1e-4,
