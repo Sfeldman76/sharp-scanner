@@ -5,22 +5,30 @@ from streamlit_autorefresh import st_autorefresh
 
 # === Page Config ===
 st.set_page_config(layout="wide")
+
 st.title("Betting Line Scanner")
-st.markdown("""F
-<style>
-.scrollable-dataframe-container {
-    max-height: 600px;
-    overflow-y: auto;
-    overflow-x: auto;
-    border: 1px solid #444;
-    padding: 0.5rem;
-    margin-bottom: 1rem;
-}
-div[data-testid="stDataFrame"] > div {
-    width: 100% !important;
-}
-</style>
-""", unsafe_allow_html=True)
+
+# --- Custom CSS for scrollable DataFrames ---
+st.markdown(
+    """
+    <style>
+    .scrollable-dataframe-container {
+        max-height: 600px;
+        overflow-y: auto;
+        overflow-x: auto;
+        border: 1px solid #444;
+        padding: 0.5rem;
+        margin-bottom: 1rem;
+    }
+
+    /* Force DataFrame elements to full width */
+    div[data-testid="stDataFrame"] > div {
+        width: 100% !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 
