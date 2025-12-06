@@ -5823,7 +5823,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     elif s in {"NCAAF", "CFB"}:
         # Crazy tails, more variance; allow a bit more gap
         if m == "spreads":
-            MIN_AUC         = 0.60
+            MIN_AUC         = 0.65
             MAX_OVERFIT_GAP = 0.12
         else:
             MIN_AUC         = 0.58
