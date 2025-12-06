@@ -6,7 +6,7 @@ from streamlit_autorefresh import st_autorefresh
 # === Page Config ===
 st.set_page_config(layout="wide")
 st.title("Betting Line Scanner")
-st.markdown("""
+st.markdown("""F
 <style>
 .scrollable-dataframe-container {
     max-height: 600px;
@@ -5773,7 +5773,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     m = (market or "").lower()
 
     # Defaults (conservative, generic binary)
-    MIN_AUC           = 0.58     # minimum useful AUC
+    MIN_AUC           = 0.56     # minimum useful AUC
     MAX_LOGLOSS       = 0.693    # ~coinflip baseline
     MAX_OVERFIT_GAP   = 0.12     # AUC_train - AUC_val
     MIN_AUC_THRESHOLD = 0.58
@@ -5784,10 +5784,10 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
             MIN_AUC         = 0.60
             MAX_OVERFIT_GAP = 0.12    # what you're using now
         elif m == "totals":
-            MIN_AUC         = 0.58
+            MIN_AUC         = 0.56
             MAX_OVERFIT_GAP = 0.10
         else:  # h2h / others
-            MIN_AUC         = 0.58
+            MIN_AUC         = 0.56
             MAX_OVERFIT_GAP = 0.08
 
     # ---- NBA ----
