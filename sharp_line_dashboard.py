@@ -2684,7 +2684,7 @@ def select_features_auto(
     min_presence=0.6,
     # AUC-driven auto-K controls
     use_auc_auto: bool = True,
-    auc_min_k: int = 10,
+    auc_min_k: int = 30,
     auc_patience: int = 5,
     auc_min_improve: float = 1e-4,
     auc_verbose: bool = True,
@@ -2850,8 +2850,8 @@ def select_features_auto(
                 f"(full-set AUC unavailable)"
             )
 
-        log_func("[AUTO-FEAT] Top chosen features (up to 10):")
-        for f in final_feats[:10]:
+        log_func("[AUTO-FEAT] Top chosen features (up to 30):")
+        for f in final_feats[:30]:
             if f in rank_df.index:
                 row = rank_df.loc[f]
                 avg_abs = row.get("avg_abs_shap", np.nan)
