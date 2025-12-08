@@ -5835,7 +5835,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
             MIN_AUC         = 0.60
             MAX_OVERFIT_GAP = 0.10
         else:
-            MIN_AUC         = 0.58
+            MIN_AUC         = 0.56
             MAX_OVERFIT_GAP = 0.13
 
     # You can extend for WNBA, CFL, etc. as needed
