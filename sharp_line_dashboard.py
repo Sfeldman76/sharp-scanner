@@ -6077,8 +6077,8 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     # ---- NCAAB ----
     elif s in {"NCAAB", "NCAAM"}:
         if m == "spreads":
-            MIN_AUC         = 0.60
-            MAX_OVERFIT_GAP = 0.10
+            MIN_AUC         = 0.67
+            MAX_OVERFIT_GAP = 0.09
         else:
             MIN_AUC         = 0.56
             MAX_OVERFIT_GAP = 0.13
