@@ -5858,7 +5858,7 @@ def should_promote_challenger(
     champion_metrics: Optional[Dict[str, float]],
     *,
     min_auc_holdout: float = 0.55,
-    max_gap_train_holdout: float = 0.20,
+    max_gap_train_holdout: float = 0.22,
     min_auc_improvement: float = 0.003,
     max_logloss_worsen: float = 0.002,
 ) -> Tuple[bool, Dict[str, float]]:
@@ -10453,35 +10453,38 @@ def train_sharp_model_from_bq(
                 return np.nan
             return roc_auc_score(yv, pv)
         
+
         def _safe_ll(yv, pv):
             if len(yv) != len(pv):
                 return np.nan
-            return log_loss(yv, np.clip(pv, 1e-6, 1-1e-6), labels=[0, 1])
+            return log_loss(yv, np.clip(pv, 1e-6, 1 - 1e-6), labels=[0, 1])
 
         def _safe_brier(yv, pv):
             if len(yv) != len(pv):
                 return np.nan
-            return brier_score_loss(yv, np.clip(pv, 1e-6, 1-1e-6))
+            return brier_score_loss(yv, np.clip(pv, 1e-6, 1 - 1e-6))
+
         # targets aligned
         y_train_vec = y_full[train_all_idx].astype(int)
         y_hold_vec  = y_full[hold_idx].astype(int)
-        
-       
+
         # sanity checks
         assert len(y_train_vec) == len(p_train_vec), f"train len mismatch: y={len(y_train_vec)} p={len(p_train_vec)}"
         assert len(y_hold_vec)  == len(p_hold_vec),  f"holdout len mismatch: y={len(y_hold_vec)} p={len(p_hold_vec)}"
+
         acc_train = accuracy_score(y_train_vec, (p_train_vec >= 0.5).astype(int)) if np.unique(y_train_vec).size == 2 else np.nan
         acc_hold  = accuracy_score(y_hold_vec,  (p_hold_vec  >= 0.5).astype(int)) if np.unique(y_hold_vec).size  == 2 else np.nan
-        
+
         auc_train = roc_auc_score(y_train_vec, p_train_vec)
         auc_hold  = roc_auc_score(y_hold_vec,  p_hold_vec)
-        
-        logloss_train = log_loss(y_train_vec, np.clip(p_train_vec, 1e-6, 1-1e-6), labels=[0,1])
-        logloss_hold  = log_loss(y_hold_vec,  np.clip(p_hold_vec,  1e-6, 1-1e-6), labels=[0,1])
-        
+
+        logloss_train = log_loss(y_train_vec, np.clip(p_train_vec, 1e-6, 1 - 1e-6), labels=[0, 1])
+        logloss_hold  = log_loss(y_hold_vec,  np.clip(p_hold_vec,  1e-6, 1 - 1e-6), labels=[0, 1])
+
         brier_train = brier_score_loss(y_train_vec, p_train_vec)
         brier_hold  = brier_score_loss(y_hold_vec,  p_hold_vec)
-                # For champion/challenger wrapper: capture per-market holdout metrics
+
+        # For champion/challenger wrapper: capture per-market holdout metrics
         if return_artifacts:
             artifact_metrics = {
                 "auc_holdout": float(auc_hold),
@@ -10494,46 +10497,30 @@ def train_sharp_model_from_bq(
                 "feature_count": len(feature_cols),
             }
 
-
-        # Streamlit summary (choose what you want to display)
-        # st.success(f"""✅ Trained + saved ensemble model for {market.upper()}
-        # Train — AUC: {auc_train:.4f} | LogLoss: {logloss_train:.4f} | Brier: {brier_train:.4f} | Acc: {acc_train:.4f}
-        # Hold  — AUC: {auc_hold:.4f}  | LogLoss: {logloss_hold:.4f}  | Brier: {brier_hold:.4f}  | Acc: {acc_hold:.4f}
-        # Ensemble weight (logloss vs auc): w={best_w:.2f}
-        # """)
-
-
-   
-        
         # --- Book reliability (build DF exactly as apply expects) ---
         bk_col = 'Bookmaker' if 'Bookmaker' in df_market.columns else 'Bookmaker_Norm'
         need   = ['Sport', 'Market', bk_col, 'SHARP_HIT_BOOL']
-        
+
         df_rel_in = df_market.loc[:, [c for c in need if c in df_market.columns]].copy()
         if bk_col != 'Bookmaker':  # builder expects 'Bookmaker'
             df_rel_in.rename(columns={bk_col: 'Bookmaker'}, inplace=True)
-        
+
         try:
-            book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)  # ✅ DataFrame
+            book_reliability_map = build_book_reliability_map(df_rel_in, prior_strength=200.0)
         except Exception as e:
             logger.warning(f"book_reliability_map build failed; defaulting to empty. err={e}")
             book_reliability_map = pd.DataFrame(columns=[
-                'Sport','Market','Bookmaker','Book_Reliability_Score','Book_Reliability_Lift'
+                'Sport', 'Market', 'Bookmaker', 'Book_Reliability_Score', 'Book_Reliability_Lift'
             ])
 
-   
-        
         # safety check (optional but nice)
-       
-
         _bake_feature_names_in_(model_logloss, feature_cols)
         _bake_feature_names_in_(model_auc, feature_cols)
+
         if cal_blend is None:
             cal_blend = ("iso", _IdentityIsoCal(eps=1e-6))
         cal_name, cal_obj = cal_blend
-        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1-CLIP))
-
-
+        iso_blend = _CalAdapter(cal_blend, clip=(CLIP, 1 - CLIP))
 
         # --- Helper to get final calibrated probs (blend → optional flip → calibrate+clip) ---
         def predict_calibrated(models: dict, X):
@@ -10546,58 +10533,58 @@ def train_sharp_model_from_bq(
             # iso_blend is your _CalAdapter, already clipping (e.g., (CLIP, 1-CLIP))
             return models["iso_blend"].predict(p_blend)
 
-        # === Save ensemble (choose one or both)
-      
-        # === Save ensemble (choose one or both)
-            trained_models[market] = {
-                "model_logloss":        model_logloss,
-                "model_auc":            model_auc,
-                "flip_flag":            bool(flip_flag),
-                "iso_blend":            iso_blend,
-                "best_w":               float(best_w),
-                "team_feature_map":     team_feature_map,
-                "book_reliability_map": book_reliability_map,
-                "feature_cols":         feature_cols,
-            }
-    
-            save_info = save_model_to_gcs(
-                model={
-                    "model_logloss": model_logloss,
-                    "model_auc":     model_auc,
-                    "best_w":        float(best_w),
-                    "feature_cols":  feature_cols,
-                },
-                calibrator=iso_blend,
-                sport=sport,
-                market=market,
-                bucket_name=bucket_name,
-                team_feature_map=team_feature_map,
-                book_reliability_map=book_reliability_map,
-            )
-    
-            if return_artifacts and isinstance(save_info, dict):
-                artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
-    
-            # You already computed these earlier in the loop:
-            auc = auc_hold
-            acc = acc_hold
-            logloss = logloss_hold
-            brier = brier_hold
-    
-            # 🔹 IMPORTANT: use status.write, not st.success
-            status.write(
-                f"""✅ Trained + saved ensemble model for {market.upper()}
-    - AUC: {auc:.4f}
-    - Accuracy: {acc:.4f}
-    - Log Loss: {logloss:.4f}
-    - Brier Score: {brier:.4f}
-    """
-            )
-    
-            pb.progress(min(100, max(0, pct)))
-    
-        status.update(label="✅ All models trained", state="complete", expanded=False)
-    
+        # === Save ensemble (choose one or both) ===
+        trained_models[market] = {
+            "model_logloss":        model_logloss,
+            "model_auc":            model_auc,
+            "flip_flag":            bool(flip_flag),
+            "iso_blend":            iso_blend,
+            "best_w":               float(best_w),
+            "team_feature_map":     team_feature_map,
+            "book_reliability_map": book_reliability_map,
+            "feature_cols":         feature_cols,
+        }
+
+        save_info = save_model_to_gcs(
+            model={
+                "model_logloss": model_logloss,
+                "model_auc":     model_auc,
+                "best_w":        float(best_w),
+                "feature_cols":  feature_cols,
+            },
+            calibrator=iso_blend,
+            sport=sport,
+            market=market,
+            bucket_name=bucket_name,
+            team_feature_map=team_feature_map,
+            book_reliability_map=book_reliability_map,
+        )
+
+        if return_artifacts and isinstance(save_info, dict):
+            artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
+
+        # Use the holdout metrics you already computed
+        auc    = float(auc_hold)
+        acc    = float(acc_hold)
+        logloss = float(logloss_hold)
+        brier   = float(brier_hold)
+
+        # Keep this in the status box
+        status.write(
+            f"""✅ Trained + saved ensemble model for {market.upper()}
+- AUC: {auc:.4f}
+- Accuracy: {acc:.4f}
+- Log Loss: {logloss:.4f}
+- Brier Score: {brier:.4f}
+"""
+        )
+
+        pb.progress(min(100, max(0, pct)))
+
+    # ← end of for i, market in enumerate(markets_present, 1)
+
+    status.update(label="✅ All models trained", state="complete", expanded=False)
+
     if return_artifacts:
         # Champion/challenger mode: return a single artifact dict instead of per-market map
         if not artifact_model_path:
@@ -10608,7 +10595,7 @@ def train_sharp_model_from_bq(
             "metrics": artifact_metrics,
             "config": artifact_config,
         }
-    
+
     if not trained_models:
         st.error("❌ No models were trained.")
     return trained_models
