@@ -6649,22 +6649,43 @@ def train_sharp_model_from_bq(
     context_cols = [c for c in df_bt_context.columns if c not in ['Game_Key','Team']]
 
     before = len(df_bt)
+    before = len(df_bt)
     df_bt = df_bt.drop_duplicates(subset=dedup_cols, keep='last')
     after = len(df_bt)
 
+    # Container for full multi-market training (legacy path)
+    trained_models: Dict[str, Any] = {}
 
-    
-        
-    trained_models = {}
-    
+    # Containers used only when return_artifacts=True (champion/challenger mode)
+    artifact_metrics: Dict[str, float] = {}
+    artifact_model_path: Optional[str] = None
+    artifact_config: Dict[str, Any] = {}
+
     # derive markets present (filter to the 3 you care about)
     allowed = {'spreads', 'totals', 'h2h'}
-    markets_present = [m for m in df_bt['Market'].astype(str).str.lower().unique() if m in allowed]
-    
+    if return_artifacts:
+        # Champion/challenger mode trains exactly one requested market
+        requested = str(market).lower()
+        if requested not in allowed:
+            st.error(f"Unsupported market '{market}'. Must be one of {sorted(allowed)}.")
+            return None
+
+        df_bt = df_bt[df_bt['Market'].astype(str).str.lower() == requested].copy()
+        if df_bt.empty:
+            st.error(f"No training rows found for {sport} {requested}.")
+            return None
+
+        markets_present = [requested]
+    else:
+        markets_present = [
+            m for m in df_bt['Market'].astype(str).str.lower().unique()
+            if m in allowed
+        ]
+
     n_markets = max(1, len(markets_present))
     pb = st.progress(0)  # 0–100
     status = st.status("🔄 Training in progress...", expanded=True)
-    
+
     for i, market in enumerate(markets_present, 1):
         pct = int(round(i / n_markets * 100))
         status.write(f"🚧 Training model for `{market.upper()}`...")
@@ -10460,6 +10481,18 @@ def train_sharp_model_from_bq(
         
         brier_train = brier_score_loss(y_train_vec, p_train_vec)
         brier_hold  = brier_score_loss(y_hold_vec,  p_hold_vec)
+                # For champion/challenger wrapper: capture per-market holdout metrics
+        if return_artifacts:
+            artifact_metrics = {
+                "auc_holdout": float(auc_hold),
+                "logloss_holdout": float(logloss_hold),
+                "auc_gap_train_holdout": float(auc_train - auc_hold),
+            }
+            artifact_config = {
+                "sport": sport,
+                "market": market,
+                "feature_count": len(feature_cols),
+            }
 
 
         # Streamlit summary (choose what you want to display)
@@ -10515,32 +10548,37 @@ def train_sharp_model_from_bq(
 
         # === Save ensemble (choose one or both)
         trained_models[market] = {
-                "model_logloss": model_logloss,
-                "model_auc":     model_auc,
-                "flip_flag":     bool(flip_flag),
-                "iso_blend":     iso_blend,
-                "best_w":        float(best_w),
-                "team_feature_map": team_feature_map,
+        trained_models[market] = {
+                "model_logloss":        model_logloss,
+                "model_auc":            model_auc,
+                "flip_flag":            bool(flip_flag),
+                "iso_blend":            iso_blend,
+                "best_w":               float(best_w),
+                "team_feature_map":     team_feature_map,
                 "book_reliability_map": book_reliability_map,
-                "feature_cols":  feature_cols,
-            
+                "feature_cols":         feature_cols,
         }
-        save_model_to_gcs(
+
+        save_info = save_model_to_gcs(
             model={"model_logloss": model_logloss, "model_auc": model_auc,
                    "best_w": float(best_w), "feature_cols": feature_cols},
             calibrator=iso_blend,
-            sport=sport, market=market, bucket_name=GCS_BUCKET,
+            sport=sport,
+            market=market,
+            bucket_name=bucket_name,  # <- use the function arg, not GCS_BUCKET
             team_feature_map=team_feature_map,
             book_reliability_map=book_reliability_map,
         )
-           
-        
+
+        if return_artifacts and isinstance(save_info, dict):
+            artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
 
         auc = auc_hold
         acc = acc_hold
         logloss = logloss_hold
         brier = brier_hold
         
+        st.success(
         st.success(
             f"""✅ Trained + saved ensemble model for {market.upper()}
         - AUC: {auc:.4f}
@@ -10549,10 +10587,22 @@ def train_sharp_model_from_bq(
         - Brier Score: {brier:.4f}
         """
         )
-       
-       
+
         pb.progress(min(100, max(0, pct)))
+
     status.update(label="✅ All models trained", state="complete", expanded=False)
+
+    if return_artifacts:
+        # Champion/challenger mode: return a single artifact dict instead of per-market map
+        if not artifact_model_path:
+            st.error("❌ Challenger training did not produce a model artifact.")
+            return None
+        return {
+            "model_path": artifact_model_path,
+            "metrics": artifact_metrics,
+            "config": artifact_config,
+        }
+
     if not trained_models:
         st.error("❌ No models were trained.")
     return trained_models
@@ -12922,14 +12972,20 @@ else:
     label = sport  # e.g., "WNBA"
     sport_key = SPORTS[sport]  # e.g., "basketball_wnba"
 
-    if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
-        train_timing_opportunity_model(sport=label)
+
     
-        # 🚫 no outer expander here
-        train_sharp_model_from_bq(
-            sport=label,
-            log_func=st.write,   # logs still go to Streamlit, just not inside an expander
-        )
+    if st.button(f"📈 Train {sport} Sharp Model", key=f"train_{sport}_btn"):
+        # Still train the timing-opportunity model as before
+        train_timing_opportunity_model(sport=label)
+
+        # Champion/challenger flow: train per-market challengers and promote only if better
+        for mkt in ("spreads", "totals", "h2h"):
+            train_with_champion_wrapper(
+                sport=label,
+                market=mkt,
+                bucket_name=GCS_BUCKET,
+                log_func=st.write,  # passed through to train_sharp_model_from_bq
+            )
             
     # Prevent multiple scanners from running
     conflicting = [
