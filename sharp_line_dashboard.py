@@ -5769,6 +5769,251 @@ def hyperparam_search_until_good(
         "status": "no_optimal_solution",
     }
 
+import json
+from dataclasses import dataclass, asdict
+from typing import Any, Dict, Optional
+from google.cloud import storage
+
+CHAMPION_META_VERSION = 1
+
+
+@dataclass
+class ChampionMeta:
+    sport: str
+    market: str
+    model_path: str              # GCS path to pickle
+    created_at: str              # ISO8601 timestamp
+    metrics: Dict[str, float]    # holdout + CV metrics
+    config: Dict[str, Any]       # any training config you want (search space, seeds, etc.)
+    version: int = CHAMPION_META_VERSION
+
+
+def _champion_meta_blob_name(sport: str, market: str) -> str:
+    # e.g. "models/NFL/spreads/champion_meta.json"
+    return f"models/{sport}/{market}/champion_meta.json"
+
+
+def load_champion_meta(
+    bucket_name: str,
+    sport: str,
+    market: str,
+    client: Optional[storage.Client] = None,
+) -> Optional[ChampionMeta]:
+    if client is None:
+        client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob_name = _champion_meta_blob_name(sport, market)
+    blob = bucket.blob(blob_name)
+    if not blob.exists():
+        return None
+    data = json.loads(blob.download_as_text())
+    return ChampionMeta(**data)
+
+
+def save_champion_meta(
+    bucket_name: str,
+    meta: ChampionMeta,
+    client: Optional[storage.Client] = None,
+) -> None:
+    if client is None:
+        client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob_name = _champion_meta_blob_name(meta.sport, meta.market)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_string(json.dumps(asdict(meta), indent=2))
+
+
+from typing import Tuple
+
+
+def _score_model_for_promotion(metrics: Dict[str, float]) -> float:
+    """
+    Build a scalar score that prefers:
+      - higher holdout AUC
+      - lower holdout LogLoss
+      - smaller train–holdout AUC gap (less overfit)
+
+    You can tweak weights per sport/market if needed.
+    """
+    auc_h  = float(metrics.get("auc_holdout", float("nan")))
+    ll_h   = float(metrics.get("logloss_holdout", float("nan")))
+    gap_th = float(metrics.get("auc_gap_train_holdout", float("nan")))
+
+    # Soft penalties
+    if not np.isfinite(auc_h) or not np.isfinite(ll_h):
+        return float("-inf")
+
+    # Normalize logloss to roughly similar scale as AUC (not perfect, but ok)
+    # Higher is better for this score.
+    score = (
+        1.0 * auc_h            # main driver
+        - 0.5 * ll_h           # want lower logloss
+        - 0.10 * max(gap_th, 0.0)  # penalize big overfit gaps
+    )
+    return float(score)
+
+
+def should_promote_challenger(
+    challenger_metrics: Dict[str, float],
+    champion_metrics: Optional[Dict[str, float]],
+    *,
+    min_auc_holdout: float = 0.58,
+    max_gap_train_holdout: float = 0.18,
+    min_auc_improvement: float = 0.003,
+    max_logloss_worsen: float = 0.002,
+) -> Tuple[bool, Dict[str, float]]:
+    """
+    Decide whether to promote challenger vs champion.
+
+    Returns:
+      (promote_flag, debug_dict)
+    """
+    dbg: Dict[str, float] = {}
+
+    auc_h_c = float(challenger_metrics.get("auc_holdout", float("nan")))
+    ll_h_c  = float(challenger_metrics.get("logloss_holdout", float("nan")))
+    gap_c   = float(challenger_metrics.get("auc_gap_train_holdout", float("nan")))
+
+    dbg["challenger_auc_holdout"] = auc_h_c
+    dbg["challenger_logloss_holdout"] = ll_h_c
+    dbg["challenger_gap_train_holdout"] = gap_c
+
+    # 1) Basic sanity: challenger must meet absolute thresholds
+    if (not np.isfinite(auc_h_c)) or (auc_h_c < min_auc_holdout):
+        dbg["reason"] = "challenger_auc_below_min"
+        return False, dbg
+
+    if np.isfinite(gap_c) and (gap_c > max_gap_train_holdout):
+        dbg["reason"] = "challenger_gap_too_large"
+        return False, dbg
+
+    # 2) No existing champion → auto-promote if challenger passes thresholds
+    if not champion_metrics:
+        dbg["reason"] = "no_champion_auto_promote"
+        return True, dbg
+
+    auc_h_champ = float(champion_metrics.get("auc_holdout", float("nan")))
+    ll_h_champ  = float(champion_metrics.get("logloss_holdout", float("nan")))
+    gap_champ   = float(champion_metrics.get("auc_gap_train_holdout", float("nan")))
+
+    dbg["champ_auc_holdout"] = auc_h_champ
+    dbg["champ_logloss_holdout"] = ll_h_champ
+    dbg["champ_gap_train_holdout"] = gap_champ
+
+    # 3) Require challenger holdout AUC to beat champion by some epsilon
+    if np.isfinite(auc_h_champ):
+        auc_improve = auc_h_c - auc_h_champ
+        dbg["auc_improvement"] = auc_improve
+        if auc_improve < min_auc_improvement:
+            dbg["reason"] = "auc_improvement_too_small"
+            return False, dbg
+
+    # 4) Ensure logloss is not meaningfully worse
+    if np.isfinite(ll_h_champ):
+        ll_delta = ll_h_c - ll_h_champ  # challenger - champ (we want <= small)
+        dbg["logloss_delta"] = ll_delta
+        if ll_delta > max_logloss_worsen:
+            dbg["reason"] = "logloss_worse_too_much"
+            return False, dbg
+
+    # 5) Optionally, compare scalar scores as a final check
+    score_challenger = _score_model_for_promotion(challenger_metrics)
+    score_champion   = _score_model_for_promotion(champion_metrics)
+    dbg["score_challenger"] = score_challenger
+    dbg["score_champion"] = score_champion
+
+    if score_challenger <= score_champion:
+        dbg["reason"] = "scalar_score_not_better"
+        return False, dbg
+
+    dbg["reason"] = "challenger_better"
+    return True, dbg
+from datetime import datetime, timezone
+
+
+def train_with_champion_wrapper(
+    sport: str,
+    market: str,
+    *,
+    bucket_name: str,
+    # pass whatever config you usually pass into train_sharp_model_from_bq
+    **train_kwargs,
+) -> None:
+    """
+    High-level entrypoint: trains a challenger model, compares it to
+    the existing champion (if any), and promotes only if better.
+    """
+
+    logger = logging.getLogger(__name__)
+
+    # 1) Train challenger with full pipeline (CV, ES, OOF, calibration, etc.)
+    logger.info("🏁 Training challenger for %s %s ...", sport, market)
+    challenger = train_sharp_model_from_bq(
+        sport=sport,
+        market=market,
+        bucket_name=bucket_name,
+        return_artifacts=True,
+        **train_kwargs,
+    )
+    if challenger is None:
+        logger.error("Challenger training returned None for %s %s", sport, market)
+        return
+
+    challenger_metrics = challenger.get("metrics", {}) or {}
+    challenger_model_path = challenger.get("model_path", "")
+
+    # 2) Load current champion metadata (if exists)
+    champion_meta = load_champion_meta(bucket_name, sport, market)
+    champion_metrics = champion_meta.metrics if champion_meta else None
+
+    # 3) Decide promotion
+    promote, dbg = should_promote_challenger(
+        challenger_metrics=challenger_metrics,
+        champion_metrics=champion_metrics,
+    )
+
+    # Streamlit-friendly logging
+    try:
+        st.subheader(f"Champion vs Challenger — {sport} {market}")
+        st.json(
+            {
+                "promote": promote,
+                "decision_debug": dbg,
+                "challenger_metrics": challenger_metrics,
+                "champion_metrics": champion_metrics,
+            }
+        )
+    except Exception:
+        pass
+
+    if not promote:
+        logger.info(
+            "👑 Champion retained for %s %s. Reason: %s",
+            sport,
+            market,
+            dbg.get("reason"),
+        )
+        return
+
+    # 4) Promote challenger: mark as champion in metadata
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    new_meta = ChampionMeta(
+        sport=sport,
+        market=market,
+        model_path=challenger_model_path,
+        created_at=now_iso,
+        metrics={k: float(v) for k, v in challenger_metrics.items()
+                 if np.isfinite(v) or isinstance(v, (int, float))},
+        config=challenger.get("config", {}),
+    )
+    save_champion_meta(bucket_name, new_meta)
+    logger.info(
+        "✅ Challenger PROMOTED to champion for %s %s. AUC_holdout=%.4f, LogLoss_holdout=%.4f",
+        sport,
+        market,
+        challenger_metrics.get("auc_holdout", float("nan")),
+        challenger_metrics.get("logloss_holdout", float("nan")),
+    )
 
 def get_quality_thresholds(sport: str, market: str) -> dict:
     """
@@ -5849,13 +6094,18 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
 
 
 # Use it in training
+from typing import Optional, Dict, Any
+
 def train_sharp_model_from_bq(
-    sport: str = "NBA",
-    days_back: int = 35,
     *,
-    log_func=print,     # 👈 NEW
-    **kwargs            # optional safety to absorb extra args
-):
+    sport: str = "NBA",
+    market: str,
+    days_back: int = 35,
+    log_func=print,
+    bucket_name: str,
+    return_artifacts: bool = False,
+    **kwargs: Any,
+) -> Optional[Dict[str, Any]]:
     SPORT_DAYS_BACK = {"NBA": 365, "NFL": 365, "CFL": 45, "WNBA": 45, "MLB": 60, "NCAAF": 365, "NCAAB": 365}
     days_back = SPORT_DAYS_BACK.get(sport.upper(), days_back)
 
