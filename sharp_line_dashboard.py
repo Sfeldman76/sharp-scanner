@@ -10578,7 +10578,7 @@ def train_sharp_model_from_bq(
         logloss = logloss_hold
         brier = brier_hold
         
-        st.success(
+     
         st.success(
             f"""✅ Trained + saved ensemble model for {market.upper()}
         - AUC: {auc:.4f}
