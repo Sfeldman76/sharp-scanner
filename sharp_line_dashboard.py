@@ -10547,7 +10547,7 @@ def train_sharp_model_from_bq(
             return models["iso_blend"].predict(p_blend)
 
         # === Save ensemble (choose one or both)
-        trained_models[market] = {
+      
         trained_models[market] = {
                 "model_logloss":        model_logloss,
                 "model_auc":            model_auc,
