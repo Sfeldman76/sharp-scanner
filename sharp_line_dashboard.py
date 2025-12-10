@@ -8724,6 +8724,7 @@ def train_sharp_model_from_bq(
                 )
             return rs_ll, rs_auc
         
+
         
         # ======= multi-round search with overfit / quality guards =======
         best_ll_params     = None
@@ -8746,6 +8747,7 @@ def train_sharp_model_from_bq(
         
             rs_ll, rs_auc = _make_search_objects(seed_ll, seed_auc)
         
+            # Fit with 1 thread inside search to avoid nested parallelism issues
             with threadpool_limits(limits=1):
                 rs_ll.fit(X_train, y_train, groups=g_train, **fit_params_search)
                 rs_auc.fit(X_train, y_train, groups=g_train, **fit_params_search)
@@ -8909,10 +8911,12 @@ def train_sharp_model_from_bq(
         assert X_tr_es_df.shape[0] == len(y_tr_es) == len(w_tr_es)
         assert X_va_es_df.shape[0] == len(y_va_es) == len(w_va_es)
         u_tr = set(np.unique(y_tr_es)); u_va = set(np.unique(y_va_es))
-        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), "ES fold single-class; widen min_val_size or choose different fold."
+        assert {0,1}.issubset(u_tr) and {0,1}.issubset(u_va), \
+            "ES fold single-class; widen min_val_size or choose different fold."
         
         # -------- Median-impute (from TRAIN) + low-variance drop (critical) --------
-        num_cols = [c for c in feature_cols if c in X_tr_es_df.columns and is_numeric_dtype(X_tr_es_df[c])]
+        num_cols = [c for c in feature_cols
+                    if c in X_tr_es_df.columns and is_numeric_dtype(X_tr_es_df[c])]
         
         if num_cols:
             med = X_tr_es_df[num_cols].median(numeric_only=True)
@@ -8920,7 +8924,8 @@ def train_sharp_model_from_bq(
             X_va_es_df.loc[:, num_cols] = X_va_es_df[num_cols].fillna(med)
         
             var = X_tr_es_df[num_cols].var(numeric_only=True)
-            keep_cols = [c for c in num_cols if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
+            keep_cols = [c for c in num_cols
+                         if np.isfinite(var.get(c, 0.0)) and var.get(c, 0.0) > 1e-10]
             drop_cols = [c for c in num_cols if c not in keep_cols]
         else:
             keep_cols, drop_cols = [], []
@@ -8943,8 +8948,28 @@ def train_sharp_model_from_bq(
         # Sanity: both train/val must now match the cleaned feature set
         assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
             f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
+        # --- Align global design matrices to ES feature subset so widths match everywhere ---
+        if len(feature_cols_es) < len(feature_cols):
+            drop_lowvar_global = [c for c in feature_cols if c not in feature_cols_es]
+            try:
+                st.info({
+                    "global_lowvar_drop": drop_lowvar_global[:25],
+                    "n_drop_global": len(drop_lowvar_global),
+                })
+            except Exception:
+                pass
         
+            # Rebuild X_train using only the ES-safe feature set
+            X_train_df_global = pd.DataFrame(X_train, columns=list(feature_cols))
+            X_train = X_train_df_global.loc[:, feature_cols_es].to_numpy(np.float32)
         
+            # Rebuild X_full likewise so final scoring uses the same features
+            X_full_df_global = pd.DataFrame(X_full, columns=list(feature_cols))
+            X_full = X_full_df_global.loc[:, feature_cols_es].to_numpy(np.float32)
+        
+            # Make ES feature list the new master list
+            feature_cols = list(feature_cols_es)
+
         # threads for refit
         refit_threads = max(1, min(VCPUS, 6))
         pos_tr = float((y_tr_es == 1).sum()); neg_tr = float((y_tr_es == 0).sum())
@@ -8986,7 +9011,8 @@ def train_sharp_model_from_bq(
         extreme_frac_raw = float(((p_va_raw < 0.35) | (p_va_raw > 0.65)).mean())
         best_iter        = getattr(deep_auc, "best_iteration", None)
         cap_hit          = bool(best_iter is not None and best_iter >= 0.7 * DEEP_N_EST)
-        learning_rate    = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)), 0.008, 0.04))
+        learning_rate    = float(np.clip(float(best_auc_params.get("learning_rate", 0.02)),
+                                         0.008, 0.04))
         
         # If ES found a peak, set a tight cap around it; else conservative
         if best_iter is not None and best_iter >= 50:
@@ -9016,7 +9042,12 @@ def train_sharp_model_from_bq(
             "best_iter": best_iter,
             "n_estimators": int(deep_auc.get_xgb_params().get("n_estimators", 0)),
             "cap_hit": bool(cap_hit),
-            "raw": {"spread_std": spread_std_raw, "extreme_frac": extreme_frac_raw, "y_bar": y_bar, "p_bar": p_bar},
+            "raw": {
+                "spread_std": spread_std_raw,
+                "extreme_frac": extreme_frac_raw,
+                "y_bar": y_bar,
+                "p_bar": p_bar,
+            },
             "auc_va_es": auc_va,
         })
         
@@ -9055,10 +9086,12 @@ def train_sharp_model_from_bq(
             out = {}
             try:
                 var = X_tr_df.var(numeric_only=True).abs().sort_values(ascending=False)
-                cols = [c for c in var.index if np.issubdtype(X_tr_df[c].dtype, np.number)][:top_k]
+                cols = [c for c in var.index
+                        if np.issubdtype(X_tr_df[c].dtype, np.number)][:top_k]
                 for c in cols:
                     try:
-                        out[c] = _psi(X_tr_df[c].to_numpy(), X_va_df[c].to_numpy(), bins=10)
+                        out[c] = _psi(X_tr_df[c].to_numpy(),
+                                      X_va_df[c].to_numpy(), bins=10)
                     except Exception:
                         pass
             except Exception:
@@ -9096,9 +9129,10 @@ def train_sharp_model_from_bq(
             pass
         
         ES_SUSPECT = (
-            (np.isfinite(report_auc_va_shuffle) and abs(report_auc_va - report_auc_va_shuffle) < 0.03)  # looks random vs shuffle
-            or (report_auc_va < 0.52 and report_auc_va_flip > 0.55)                                     # possible label polarity
-            or (psi_max >= 0.25)                                                                        # heavy drift
+            (np.isfinite(report_auc_va_shuffle) and
+             abs(report_auc_va - report_auc_va_shuffle) < 0.03)     # looks random vs shuffle
+            or (report_auc_va < 0.52 and report_auc_va_flip > 0.55) # possible label polarity
+            or (psi_max >= 0.25)                                    # heavy drift
         )
         
         if ES_SUSPECT:
@@ -9155,7 +9189,7 @@ def train_sharp_model_from_bq(
             "scale_pos_weight": float(scale_pos_weight),
             "max_bin": int(np.clip(DEEP_MAX_BIN, 128, 256)),
         }
-
+        
         
         # ---------------- Apply monotone constraints ONCE --------------------------
         FEATS_FOR_ES = list(feature_cols_es)  # must correspond to X_tr_es / X_va_es matrices
@@ -9174,13 +9208,10 @@ def train_sharp_model_from_bq(
         
         # Only attach if there is at least one non-zero constraint
         if any(m != 0 for m in mono_vec):
-            # XGBoost accepts either a Python list or a "(...)" string.
-            # Using the string keeps broad version compatibility.
             mono_str = "(" + ",".join(map(str, mono_vec)) + ")"
             params_ll_final['monotone_constraints']  = mono_str
             params_auc_final['monotone_constraints'] = mono_str
         else:
-            # No constraints worth applying
             params_ll_final.pop('monotone_constraints',  None)
             params_auc_final.pop('monotone_constraints', None)
         
@@ -9196,7 +9227,7 @@ def train_sharp_model_from_bq(
         # --- Instantiate & fit finals ---------------------------------------------
         model_logloss = XGBClassifier(**params_ll_final)
         model_auc     = XGBClassifier(**params_auc_final)
-
+        
         
         model_logloss.fit(
             X_tr_es, y_tr_es,
@@ -9227,14 +9258,8 @@ def train_sharp_model_from_bq(
         if n_trees_auc > 0:
             model_auc.set_params(n_estimators=n_trees_auc)
             model_auc.fit(X_train, y_train, sample_weight=w_train, verbose=False)
-        try:
-            model_auc.feature_names_in_ = np.array(feature_cols)
-            model_logloss.feature_names_in_ = np.array(feature_cols)
-        except Exception:
-            pass
-        # Metric tails (compact) — auc may be None since we trained with logloss only
+        
         # ---- Stamp feature names on the models so we don't get f0,f1,... ----
-        # Stamp real names if and only if lengths match the fitted model
         try:
             n_model = int(getattr(model_auc, "n_features_in_", X_train.shape[1]))
             if len(feature_cols) == n_model:
@@ -9247,9 +9272,8 @@ def train_sharp_model_from_bq(
                 except Exception: pass
         except Exception:
             pass
-
         
-    
+        
         def _safe_metric_tail(clf, prefer):
             ev = getattr(clf, "evals_result_", {}) or {}
             ds = next((k for k in ("validation_0","eval","valid_0") if k in ev), None)
@@ -9260,7 +9284,9 @@ def train_sharp_model_from_bq(
             if not key:
                 return None, {"dataset": ds, "metrics_available": list(metrics.keys())}
             arr = metrics[key]
-            return (arr[-10:] if len(arr) >= 10 else arr), {"dataset": ds, "metric_key": key, "len": len(arr)}
+            return (arr[-10:] if len(arr) >= 10 else arr), {
+                "dataset": ds, "metric_key": key, "len": len(arr)
+            }
         
         val_logloss_last10, info_log = _safe_metric_tail(model_logloss, "logloss")
         val_auc_last10,     info_auc = _safe_metric_tail(model_auc,     "auc")  # may be None
@@ -9271,8 +9297,7 @@ def train_sharp_model_from_bq(
             "val_logloss_last10": val_logloss_last10,
             "val_auc_last10": val_auc_last10,
         })
-        # ================= end refactor ======================================================
-
+        
         # ================== Lightweight interpretation (optional, guarded) ==================
         DEBUG_INTERP = True
         if DEBUG_INTERP:
@@ -9283,14 +9308,11 @@ def train_sharp_model_from_bq(
                 try: st.warning("Permutation importance skipped: ES validation fold has a single class.")
                 except Exception: pass
             else:
-                # Make sure arrays align to ES feature set
                 assert X_tr_es.shape[1] == X_va_es.shape[1] == len(feature_cols_es), \
                     f"Width mismatch: tr={X_tr_es.shape[1]}, va={X_va_es.shape[1]}, feats={len(feature_cols_es)}"
         
-                # Build a DF with proper column names (XGB likes real names for debugging)
                 X_va_es_df_perm = pd.DataFrame(X_va_es, columns=feature_cols_es)
         
-                # Pick a fitted model available at this point
                 perm_model = None
                 for cand in ("deep_auc", "model_auc", "deep_ll", "model_logloss"):
                     if cand in locals() and hasattr(locals()[cand], "predict_proba"):
@@ -9301,7 +9323,6 @@ def train_sharp_model_from_bq(
                     try: st.warning("Permutation importance skipped: no fitted model available at this point.")
                     except Exception: pass
                 else:
-                    # Some versions of helper don’t support 'stratify'
                     kwargs = dict(n_repeats=50, random_state=42)
                     try:
                         import inspect
@@ -9320,22 +9341,18 @@ def train_sharp_model_from_bq(
                     except Exception: pass
         
                     if perm_df is not None and not perm_df.empty:
-                        # Ensure a 'feature' column exists for labels
                         if "feature" not in perm_df.columns:
                             perm_df = perm_df.reset_index().rename(columns={"index": "feature"})
                         perm_df = perm_df.sort_values("perm_auc_drop_mean", ascending=False)
                         perm_df["significant"] = perm_df["ci_lo"] > 0.001
         
-            # ---- Render only if we actually have results ----
             if perm_df is not None and not perm_df.empty:
                 st.subheader("Permutation AUC importance with 95% CI")
                 st.dataframe(perm_df.head(25))
         
-                # (Optional) show only significant ones on top
                 sig_top = perm_df.loc[perm_df["significant"]].head(20)
                 if not sig_top.empty:
                     try:
-                     
                         fig, ax = plt.subplots(figsize=(8, 6))
                         y_pos = np.arange(len(sig_top))
                         ax.errorbar(
@@ -9355,26 +9372,20 @@ def train_sharp_model_from_bq(
                         st.pyplot(fig, clear_figure=True)
                     except Exception as e:
                         st.info(f"(Optional plot skipped: {e})")
-
         
-            # --- SHAP on fixed, time-correct slice ---
             # --- SHAP on fixed, time-correct ES slice ---
             ns = int(min(4000, X_va_es.shape[0]))
-            if ns >= 10:  # small guard
+            if ns >= 10:
                 ns = max(1, min(200, X_va_es.shape[0]))
-            
-                # ES width must match ES feature list
+        
                 assert X_va_es.shape[1] == len(feature_cols_es), \
                     f"ES val width {X_va_es.shape[1]} != len(feature_cols_es) {len(feature_cols_es)}"
-            
-                # Build ES-scoped frame
+        
                 X_shap_df = pd.DataFrame(X_va_es[:ns], columns=list(feature_cols_es))
-            
-                # Helper to read expected feature names from a fitted xgboost.sklearn model
+        
                 def _expected_features(m):
                     names = None
                     try:
-                        # Prefer scikit wrapper's names if present
                         names = getattr(m, "feature_names_in_", None)
                         if names is not None:
                             names = list(map(str, list(names)))
@@ -9382,60 +9393,53 @@ def train_sharp_model_from_bq(
                         pass
                     if not names:
                         try:
-                            # Fallback: booster feature names
                             names = list(m.get_booster().feature_names)
                         except Exception:
                             names = None
                     return names
-            
-                # Try to use the most “final” AUC model first
+        
                 shap_model = None
                 for cand in ("model_auc", "deep_auc", "model_logloss", "deep_ll"):
                     if cand in locals() and hasattr(locals()[cand], "predict_proba"):
                         shap_model = locals()[cand]
                         break
-            
+        
                 if shap_model is None:
                     try: st.warning("SHAP skipped: no fitted model available at this point.")
                     except Exception: pass
                 else:
                     exp_feats = _expected_features(shap_model)
-            
+        
                     def _align(df, exp):
                         if not exp:
-                            # No expectation available → assume ES set is fine
                             return df, df.columns.tolist()
-                        # Add any missing expected columns as zeros
                         missing = [c for c in exp if c not in df.columns]
                         if missing:
                             for c in missing:
                                 df[c] = 0.0
-                        # Keep only expected columns and order them
                         df = df[exp]
                         return df, exp
-            
-                    # First attempt: align ES DataFrame to the model's expected schema
+        
                     X_shap_df, used_cols = _align(X_shap_df.copy(), exp_feats)
-            
-                    # If we still have a size mismatch at predict time, try the ES-trained model
+        
                     try:
-                        # Prefer TreeExplainer, fallback to generic
                         try:
-                            expl = shap.TreeExplainer(shap_model, feature_perturbation="tree_path_dependent")
+                            expl = shap.TreeExplainer(
+                                shap_model, feature_perturbation="tree_path_dependent"
+                            )
                         except Exception:
                             expl = shap.Explainer(shap_model)
-            
                         sv = expl.shap_values(X_shap_df)
                     except Exception as e_pred:
-                        # Try deep_auc (generally fit on ES DF) as a fallback
-                        fallback_model = None
+                        sv = None
                         if "deep_auc" in locals() and hasattr(deep_auc, "predict_proba"):
                             exp2 = _expected_features(deep_auc)
-                            # Rebuild from ES frame (already ES columns); align to deep_auc if needed
                             X_shap_df2, used_cols2 = _align(X_shap_df.copy(), exp2)
                             try:
                                 try:
-                                    expl = shap.TreeExplainer(deep_auc, feature_perturbation="tree_path_dependent")
+                                    expl = shap.TreeExplainer(
+                                        deep_auc, feature_perturbation="tree_path_dependent"
+                                    )
                                 except Exception:
                                     expl = shap.Explainer(deep_auc)
                                 sv = expl.shap_values(X_shap_df2)
@@ -9452,12 +9456,12 @@ def train_sharp_model_from_bq(
                             try: st.warning(f"SHAP skipped: {e_pred}")
                             except Exception: pass
                             sv = None
-            
+        
                     if sv is not None:
-                        if isinstance(sv, list):  # binary models sometimes return [class0, class1]
+                        if isinstance(sv, list):
                             sv = sv[1]
                         sv = np.asarray(sv)
-            
+        
                         shap_mean = np.abs(sv).mean(0)
                         shap_top = (
                             pd.DataFrame({"feature": used_cols, "mean|SHAP|": shap_mean})
@@ -9465,13 +9469,14 @@ def train_sharp_model_from_bq(
                         )
                         st.subheader("SHAP (AUC model, ES fold)")
                         st.dataframe(shap_top.head(25))
-            
-                        # PDP/ICE for top features (ensure names exist in the DataFrame)
+        
                         try:
                             from sklearn.inspection import PartialDependenceDisplay
-                            import matplotlib.pyplot as plt
-            
-                            top_feats = [f for f in shap_top["feature"].head(6).tolist() if f in X_shap_df.columns]
+        
+                            top_feats = [
+                                f for f in shap_top["feature"].head(6).tolist()
+                                if f in X_shap_df.columns
+                            ]
                             if top_feats:
                                 fig = plt.figure(figsize=(10, 8))
                                 ax = plt.gca()
@@ -9492,30 +9497,20 @@ def train_sharp_model_from_bq(
                                 st.info("PDP/ICE skipped: no top features available in SHAP frame.")
                         except Exception as e:
                             st.warning(f"PDP/ICE rendering skipped: {e}")
-
-
-
-        # Example:
-        # Example (guarded):
-        if "feat_idx" in locals() and feat_idx and "X_va_es_df" in locals():
-            PartialDependenceDisplay.from_estimator(
-                model_auc, X_va_es_df, features=feat_idx,
-                kind="both", grid_resolution=20, response_method="predict_proba"
-            )
-
+        
+        
         # -----------------------------------------
         # OOF predictions (train-only) + blending
         # -----------------------------------------
-        
-        SMALL = (sport_key in SMALL_LEAGUES) or (np.unique(g_train).size < 30) or (len(y_train) < 500)
+        SMALL = ((sport_key in SMALL_LEAGUES) or
+                 (np.unique(g_train).size < 30) or
+                 (len(y_train) < 500))
         MIN_OOF = 40 if SMALL else 120
         RUN_LOGLOSS = True  # keep on; you can tie to SMALL if desired
         
-        # Preallocate
         oof_pred_auc = np.full(len(y_train), np.nan, dtype=np.float64)
-        oof_pred_logloss = np.full(len(y_train), np.nan, dtype=np.float64) if RUN_LOGLOSS else None
-        
-       
+        oof_pred_logloss = (np.full(len(y_train), np.nan, dtype=np.float64)
+                            if RUN_LOGLOSS else None)
         
         def _maybe_flip(p, flip):
             p = np.asarray(p, float)
@@ -9530,21 +9525,28 @@ def train_sharp_model_from_bq(
         
         # --- Make OOFs with safe proba + per-fold flip only for AUC semantics ----------
         for tr_rel, va_rel in folds:
-            # AUC stream
-            m_auc = XGBClassifier(**{**base_kwargs, **best_auc_params, "n_estimators": int(n_trees_auc), "n_jobs": 1})
-            m_auc.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
+            m_auc = XGBClassifier(
+                **{**base_kwargs, **best_auc_params,
+                   "n_estimators": int(n_trees_auc), "n_jobs": 1}
+            )
+            m_auc.fit(X_train[tr_rel], y_train[tr_rel],
+                      sample_weight=w_train[tr_rel], verbose=False)
             pa, _ = pos_proba_safe(m_auc, X_train[va_rel], positive=1)
-            _, pa_fixed, _ = auc_with_flip(y_train[va_rel].astype(int), pa, w_train[va_rel])
+            _, pa_fixed, _ = auc_with_flip(
+                y_train[va_rel].astype(int), pa, w_train[va_rel]
+            )
             oof_pred_auc[va_rel] = np.clip(pa_fixed, eps, 1 - eps)
         
-            # Logloss stream (no flipping semantically)
             if RUN_LOGLOSS:
-                m_ll = XGBClassifier(**{**base_kwargs, **best_ll_params, "n_estimators": int(n_trees_ll), "n_jobs": 1})
-                m_ll.fit(X_train[tr_rel], y_train[tr_rel], sample_weight=w_train[tr_rel], verbose=False)
+                m_ll = XGBClassifier(
+                    **{**base_kwargs, **best_ll_params,
+                       "n_estimators": int(n_trees_ll), "n_jobs": 1}
+                )
+                m_ll.fit(X_train[tr_rel], y_train[tr_rel],
+                         sample_weight=w_train[tr_rel], verbose=False)
                 pl, _ = pos_proba_safe(m_ll, X_train[va_rel], positive=1)
                 oof_pred_logloss[va_rel] = np.clip(pl.astype(np.float64), eps, 1 - eps)
         
-        # Primary mask & coverage
         mask_auc = np.isfinite(oof_pred_auc)
         mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
         mask_oof = mask_auc & mask_log
@@ -9561,7 +9563,8 @@ def train_sharp_model_from_bq(
             if RUN_LOGLOSS and (oof_pred_logloss is not None):
                 miss_ll = ~np.isfinite(oof_pred_logloss)
                 if miss_ll.any():
-                    pl_fill, _ = pos_proba_safe(model_logloss, X_train[miss_ll], positive=1)
+                    pl_fill, _ = pos_proba_safe(model_logloss,
+                                                X_train[miss_ll], positive=1)
                     oof_pred_logloss[miss_ll] = np.clip(pl_fill, eps, 1 - eps)
         
             mask_log = np.isfinite(oof_pred_logloss) if RUN_LOGLOSS else mask_auc
@@ -9574,27 +9577,34 @@ def train_sharp_model_from_bq(
                 _, va_es_rel = folds[-1]
                 y_oof = y_train[va_es_rel].astype(int)
                 pa_es, _ = pos_proba_safe(model_auc, X_train[va_es_rel], positive=1)
-                _, p_oof_auc, _ = auc_with_flip(y_oof, pa_es, w_train[va_es_rel])
+                _, p_oof_auc, _ = auc_with_flip(
+                    y_oof, pa_es, w_train[va_es_rel]
+                )
                 p_oof_auc = np.clip(p_oof_auc.astype(np.float64), eps, 1 - eps)
                 if RUN_LOGLOSS:
-                    pl_es, _ = pos_proba_safe(model_logloss, X_train[va_es_rel], positive=1)
+                    pl_es, _ = pos_proba_safe(model_logloss,
+                                              X_train[va_es_rel], positive=1)
                     p_oof_log = np.clip(pl_es, eps, 1 - eps).astype(np.float64)
                 else:
                     p_oof_log = None
-                st.info(f"Small-league fallback: using last-fold validation only (n={len(va_es_rel)}) for blend weight.")
+                st.info(
+                    f"Small-league fallback: using last-fold validation only "
+                    f"(n={len(va_es_rel)}) for blend weight."
+                )
             else:
                 y_oof = y_train[mask_auc].astype(int)
                 p_oof_auc = np.clip(oof_pred_auc[mask_auc], eps, 1 - eps).astype(np.float64)
                 p_oof_log = None
-                st.warning(f"OOF coverage low ({n_oof}); proceeding with AUC-only blend source.")
+                st.warning(
+                    f"OOF coverage low ({n_oof}); proceeding with AUC-only blend source."
+                )
         else:
             y_oof = y_train[mask_oof].astype(int)
             p_oof_auc = np.clip(oof_pred_auc[mask_oof], eps, 1 - eps).astype(np.float64)
-            p_oof_log = (np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64) if RUN_LOGLOSS else None)
+            p_oof_log = (np.clip(oof_pred_logloss[mask_oof], eps, 1 - eps).astype(np.float64)
+                         if RUN_LOGLOSS else None)
         
         # --- Choose blend weight ------------------------------------------------------
-        # If coverage is still thin, use discrete weight grid for stability;
-        # else, delegate to pick_blend_weight_on_oof as before.
         use_discrete_grid = (n_oof < MIN_OOF) and RUN_LOGLOSS and (p_oof_log is not None)
         if use_discrete_grid:
             CAND = [0.35, 0.50, 0.65] if not SMALL else [0.35, 0.50]
@@ -9604,15 +9614,20 @@ def train_sharp_model_from_bq(
                 ll = log_loss(y_oof, mix, labels=[0,1])
                 if ll < best_ll:
                     best_ll, best_w = ll, w
-            p_oof_blend = np.clip(best_w * (p_oof_log if p_oof_log is not None else p_oof_auc)
-                                  + (1 - best_w) * p_oof_auc, 1e-6, 1 - 1e-6)
+            p_oof_blend = np.clip(
+                best_w * (p_oof_log if p_oof_log is not None else p_oof_auc)
+                + (1 - best_w) * p_oof_auc,
+                1e-6, 1 - 1e-6
+            )
         else:
             best_w, p_oof_blend, _ = pick_blend_weight_on_oof(
-                y_oof=y_oof, p_oof_auc=p_oof_auc, p_oof_log=p_oof_log if RUN_LOGLOSS else None,
-                eps=eps, metric="logloss"
+                y_oof=y_oof,
+                p_oof_auc=p_oof_auc,
+                p_oof_log=p_oof_log if RUN_LOGLOSS else None,
+                eps=eps,
+                metric="logloss",
             )
         
-        # Final safety
         p_oof_blend = np.asarray(p_oof_blend, dtype=np.float64)
         if not np.isfinite(p_oof_blend).all():
             keep2 = np.isfinite(p_oof_blend)
@@ -9628,22 +9643,19 @@ def train_sharp_model_from_bq(
         
         assert np.isfinite(p_oof_blend).all(), "NaNs in p_oof_blend"
         
+        
         def _prior_correct(p, train_pos, hold_pos, clip=1e-6):
-   
             p = np.clip(p, clip, 1-clip)
             def logit(x): return np.log(x/(1-x))
             def sigmoid(z): return 1.0/(1.0+np.exp(-z))
-            # logit shift by prior odds ratio
             shift = np.log((hold_pos/(1-hold_pos)) / (train_pos/(1-train_pos)))
             return sigmoid(logit(p) + shift)
         
         # --- Choose priors for calibration context ---
-        # OOF "train" prior:
         oof_pos = float(np.mean(y_oof == 1))
-        # Deployment/hold prior estimate. Use your true hold labels if available,
-        # or a rolling/ES estimate if you prefer. Here we use the actual hold split:
         deploy_pos = float(np.mean(y_full[hold_idx] == 1))
         
+        # ---------------- Calibration ----------------
         # ---------------- Calibration ----------------
 
         
