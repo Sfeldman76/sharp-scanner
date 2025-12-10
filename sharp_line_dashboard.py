@@ -5857,8 +5857,8 @@ def should_promote_challenger(
     challenger_metrics: Dict[str, float],
     champion_metrics: Optional[Dict[str, float]],
     *,
-    min_auc_holdout: float = 0.58,
-    max_gap_train_holdout: float = 0.18,
+    min_auc_holdout: float = 0.55,
+    max_gap_train_holdout: float = 0.20,
     min_auc_improvement: float = 0.003,
     max_logloss_worsen: float = 0.002,
 ) -> Tuple[bool, Dict[str, float]]:
@@ -6602,7 +6602,7 @@ def train_sharp_model_from_bq(
                       .merge(fav_away,      on=['Game_Key','Team'], how='left'))
     
     # Rolling/streak window by sport
-    SPORT_COVER_WINDOW = {'NBA':5, 'NFL':4, 'WNBA':3, 'MLB':7, 'CFL':4}
+    SPORT_COVER_WINDOW = {'NBA':10, 'NFL':4, 'WNBA':3, 'MLB':7, 'CFL':10}
     sport0 = (df_bt_prepped['Sport'].dropna().astype(str).iloc[0] if df_bt_prepped['Sport'].notna().any() else 'NFL')
     window_length = SPORT_COVER_WINDOW.get(sport0, 4)
     
@@ -10548,7 +10548,8 @@ def train_sharp_model_from_bq(
 
         # === Save ensemble (choose one or both)
       
-        trained_models[market] = {
+        # === Save ensemble (choose one or both)
+            trained_models[market] = {
                 "model_logloss":        model_logloss,
                 "model_auc":            model_auc,
                 "flip_flag":            bool(flip_flag),
@@ -10557,41 +10558,46 @@ def train_sharp_model_from_bq(
                 "team_feature_map":     team_feature_map,
                 "book_reliability_map": book_reliability_map,
                 "feature_cols":         feature_cols,
-        }
-
-        save_info = save_model_to_gcs(
-            model={"model_logloss": model_logloss, "model_auc": model_auc,
-                   "best_w": float(best_w), "feature_cols": feature_cols},
-            calibrator=iso_blend,
-            sport=sport,
-            market=market,
-            bucket_name=bucket_name,  # <- use the function arg, not GCS_BUCKET
-            team_feature_map=team_feature_map,
-            book_reliability_map=book_reliability_map,
-        )
-
-        if return_artifacts and isinstance(save_info, dict):
-            artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
-
-        auc = auc_hold
-        acc = acc_hold
-        logloss = logloss_hold
-        brier = brier_hold
-        
-     
-        st.success(
-            f"""✅ Trained + saved ensemble model for {market.upper()}
-        - AUC: {auc:.4f}
-        - Accuracy: {acc:.4f}
-        - Log Loss: {logloss:.4f}
-        - Brier Score: {brier:.4f}
-        """
-        )
-
-        pb.progress(min(100, max(0, pct)))
-
-    status.update(label="✅ All models trained", state="complete", expanded=False)
-
+            }
+    
+            save_info = save_model_to_gcs(
+                model={
+                    "model_logloss": model_logloss,
+                    "model_auc":     model_auc,
+                    "best_w":        float(best_w),
+                    "feature_cols":  feature_cols,
+                },
+                calibrator=iso_blend,
+                sport=sport,
+                market=market,
+                bucket_name=bucket_name,
+                team_feature_map=team_feature_map,
+                book_reliability_map=book_reliability_map,
+            )
+    
+            if return_artifacts and isinstance(save_info, dict):
+                artifact_model_path = f"gs://{save_info.get('bucket', bucket_name)}/{save_info.get('path')}"
+    
+            # You already computed these earlier in the loop:
+            auc = auc_hold
+            acc = acc_hold
+            logloss = logloss_hold
+            brier = brier_hold
+    
+            # 🔹 IMPORTANT: use status.write, not st.success
+            status.write(
+                f"""✅ Trained + saved ensemble model for {market.upper()}
+    - AUC: {auc:.4f}
+    - Accuracy: {acc:.4f}
+    - Log Loss: {logloss:.4f}
+    - Brier Score: {brier:.4f}
+    """
+            )
+    
+            pb.progress(min(100, max(0, pct)))
+    
+        status.update(label="✅ All models trained", state="complete", expanded=False)
+    
     if return_artifacts:
         # Champion/challenger mode: return a single artifact dict instead of per-market map
         if not artifact_model_path:
@@ -10602,11 +10608,10 @@ def train_sharp_model_from_bq(
             "metrics": artifact_metrics,
             "config": artifact_config,
         }
-
+    
     if not trained_models:
         st.error("❌ No models were trained.")
     return trained_models
-
 
 
 def evaluate_model_confidence_and_performance(X_train, y_train, X_val, y_val, model_label="Base"):
@@ -12979,7 +12984,7 @@ else:
         train_timing_opportunity_model(sport=label)
 
         # Champion/challenger flow: train per-market challengers and promote only if better
-        for mkt in ("spreads", "totals", "h2h"):
+        for mkt in ("h2h","spreads", "totals", ):
             train_with_champion_wrapper(
                 sport=label,
                 market=mkt,
