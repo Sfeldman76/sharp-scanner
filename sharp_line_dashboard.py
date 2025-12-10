@@ -36,7 +36,7 @@ st.markdown("""
 <style>
 .scrollable-table-container {
     max-height: 600px;
-    ovlow-y: auto;
+    overflow-y: auto;
     border: 1px solid #444;
     margin-bottom: 1rem;
 }
@@ -53,7 +53,7 @@ st.markdown("""
     white-space: normal;
     max-width: 220px;  /* or whatever max width fits your layout */
 }
-}
+
 .custom-table th {
     background-color: #1f2937;
     color: white;
