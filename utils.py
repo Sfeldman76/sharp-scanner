@@ -6334,14 +6334,9 @@ def apply_blended_sharp_score(
         ).astype(float)
     except Exception as e:
         logging.warning(f"⚠️ Failed to compute sharp move diagnostic columns: {e}")
-
-    # --- Restore: simple map lookup from  bundles (do this BEFORE enrichment log) ---
-    team_feature_map = None
-    book_reliability_map = None
-   
     # --- Restore: map lookup from bundles (do this BEFORE enrichment log) ---
-    
     def _norm_market(m: str) -> str:
+        
         m = (m or "").lower().strip()
         if m in ("spread", "spreads", "ats"): return "spreads"
         if m in ("total", "totals", "ou", "overunder"): return "totals"
@@ -6361,14 +6356,30 @@ def apply_blended_sharp_score(
                     bundle = b
                     break
     
-    team_feature_map = bundle.get("team_feature_map") if isinstance(bundle, dict) else None
-    book_reliability_map = bundle.get("book_reliability_map") if isinstance(bundle, dict) else None
+    team_feature_map      = bundle.get("team_feature_map") if isinstance(bundle, dict) else None
+    book_reliability_map  = bundle.get("book_reliability_map") if isinstance(bundle, dict) else None
     
     # hard defaults so merges never explode
     if not isinstance(team_feature_map, pd.DataFrame):
         team_feature_map = pd.DataFrame()
     if not isinstance(book_reliability_map, pd.DataFrame):
         book_reliability_map = pd.DataFrame()
+    
+    # normalize keys ONLY after load
+    if not team_feature_map.empty:
+        if "Team" in team_feature_map.columns:
+            team_feature_map["Team"] = team_feature_map["Team"].astype(str).str.lower().str.strip()
+        if "Sport" in team_feature_map.columns:
+            team_feature_map["Sport"] = team_feature_map["Sport"].astype(str).str.upper().str.strip()
+    
+    if not book_reliability_map.empty:
+        if "Bookmaker" in book_reliability_map.columns:
+            book_reliability_map["Bookmaker"] = book_reliability_map["Bookmaker"].astype(str).str.lower().str.strip()
+        if "Sport" in book_reliability_map.columns:
+            book_reliability_map["Sport"] = book_reliability_map["Sport"].astype(str).str.upper().str.strip()
+        if "Market" in book_reliability_map.columns:
+            book_reliability_map["Market"] = book_reliability_map["Market"].astype(str).str.lower().str.strip()
+
 
       # === Cross-Market Pivots (Value + Odds) with guaranteed columns ===
     MARKETS = ["spreads","totals","h2h"]
