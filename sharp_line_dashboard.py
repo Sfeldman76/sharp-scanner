@@ -6602,7 +6602,7 @@ def train_sharp_model_from_bq(
                       .merge(fav_away,      on=['Game_Key','Team'], how='left'))
     
     # Rolling/streak window by sport
-    SPORT_COVER_WINDOW = {'NBA':10, 'NFL':4, 'WNBA':3, 'MLB':7, 'CFL':10}
+    SPORT_COVER_WINDOW = {'NBA':10, 'NFL':5, 'WNBA':10, 'MLB':7, 'CFL':10, 'NCAAB': 10, 'NCAAF': 5}
     sport0 = (df_bt_prepped['Sport'].dropna().astype(str).iloc[0] if df_bt_prepped['Sport'].notna().any() else 'NFL')
     window_length = SPORT_COVER_WINDOW.get(sport0, 4)
     
@@ -7749,8 +7749,8 @@ def train_sharp_model_from_bq(
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
-            'TOT_Proj_Total_Baseline',#'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
-            'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
+            'TOT_Proj_Total_Baseline','TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
+            'TOT_GT_H','TOT_GT_A','TOT_LgAvg_Total',
             'TOT_Mispricing', 
             'ATS_EB_Rate',
             'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
@@ -7774,6 +7774,10 @@ def train_sharp_model_from_bq(
             "Dist_to_3",
             "Dist_to_7",
             "Dist_to_10",
+            'Team_Recent_Cover_Streak','Team_Recent_Cover_Streak_Home','Team_Recent_Cover_Streak_Away',
+            'Team_Recent_Cover_Streak_Fav','Team_Recent_Cover_Streak_Home_Fav','Team_Recent_Cover_Streak_Away_Fav',
+            'On_Cover_Streak','On_Cover_Streak_Home','On_Cover_Streak_Away',
+            'On_Cover_Streak_Fav','On_Cover_Streak_Home_Fav','On_Cover_Streak_Away_Fav'
             
         ]
         
@@ -7800,8 +7804,8 @@ def train_sharp_model_from_bq(
                 'Late_VeryEarly','Late_MidRange','Late_LateGame','Late_Urgent'
             ]
         ]
-        #extend_unique(features, hybrid_timing_features)
-        #extend_unique(features, hybrid_odds_timing_features)
+        extend_unique(features, hybrid_timing_features)
+        extend_unique(features, hybrid_odds_timing_features)
         timing_cols = build_timing_aggregates_inplace(df_bt)
 
         # extend your feature list with timing_cols (and remove the 32 originals)
