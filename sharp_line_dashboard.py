@@ -10380,17 +10380,18 @@ def train_sharp_model_from_bq(
         
         # Start with Game_Key/Team unique combos
         # --- 0) one row per (Game_Key, Team) to merge everything onto
+        # --- 0) one row per (Game_Key, Team) base
         df_team_base = df_bt_prepped[['Game_Key','Team']].drop_duplicates()
         
-        # --- 1) LOO stats (already built above as df_bt_loostats)
+        # --- 1) LOO stats (per game/team)
         df_team_base = df_team_base.merge(df_bt_loostats, on=['Game_Key','Team'], how='left')
         
-        # --- 2) Streaks: ensure dfb has Game_Key, then merge
-        # If dfb doesn't already have Game_Key, add it from df_bt_prepped (safe merge)
+        # --- 2) Streaks: ensure dfb has Game_Key, then merge (snapshot-safe)
         if 'Game_Key' not in dfb.columns:
             dfb = dfb.merge(
-                df_bt_prepped[['Game_Key','Team','Snapshot_Timestamp']].drop_duplicates(),
-                on=['Team','Snapshot_Timestamp'],
+                df_bt_prepped[['Game_Key', 'Team', 'Snapshot_Timestamp']]
+                  .drop_duplicates(['Team', 'Snapshot_Timestamp']),
+                on=['Team', 'Snapshot_Timestamp'],
                 how='left'
             )
         
@@ -10401,47 +10402,58 @@ def train_sharp_model_from_bq(
             'On_Cover_Streak_Fav','On_Cover_Streak_Home_Fav','On_Cover_Streak_Away_Fav'
         ]
         
+        # One row per (Game_Key, Team) from dfb; keep last snapshot for that game/team
+        dfb_streak = (
+            dfb[['Game_Key', 'Team', 'Snapshot_Timestamp'] + streak_cols]
+            .dropna(subset=['Game_Key'])
+            .sort_values('Snapshot_Timestamp')
+            .drop_duplicates(['Game_Key', 'Team'], keep='last')
+        )
+        
+        # Merge streaks + Snapshot_Timestamp onto df_team_base
         df_team_base = df_team_base.merge(
-            dfb[['Game_Key','Team'] + streak_cols].drop_duplicates(),
-            on=['Game_Key','Team'],
+            dfb_streak[['Game_Key', 'Team', 'Snapshot_Timestamp'] + streak_cols],
+            on=['Game_Key', 'Team'],
             how='left'
         )
         
-        # --- 3) collapse to one row per Team (final team_feature_map)
+        # --- 3) Collapse to one row per Team:
+        # Means for long-run priors; LAST for stateful streaks (based on Snapshot_Timestamp)
+        LOO_PRIOR_COLS = [
+            'Team_Past_Avg_Model_Prob',
+            'Team_Past_Hit_Rate',
+            'Team_Past_Avg_Model_Prob_Home',
+            'Team_Past_Hit_Rate_Home',
+            'Team_Past_Avg_Model_Prob_Away',
+            'Team_Past_Hit_Rate_Away',
+            'Team_Past_Avg_Model_Prob_Fav',
+            'Team_Past_Hit_Rate_Fav',
+            'Team_Past_Avg_Model_Prob_Home_Fav',
+            'Team_Past_Hit_Rate_Home_Fav',
+            'Team_Past_Avg_Model_Prob_Away_Fav',
+            'Team_Past_Hit_Rate_Away_Fav',
+        ]
+        
+        STATE_COLS = streak_cols
+        
+        # Sort so "last" means latest snapshot
+        df_team_base = df_team_base.sort_values('Snapshot_Timestamp')
+        
+        agg_spec = {c: 'mean' for c in LOO_PRIOR_COLS if c in df_team_base.columns}
+        agg_spec.update({c: 'last' for c in STATE_COLS if c in df_team_base.columns})
+        
         team_feature_map = (
-            df_team_base.groupby('Team', as_index=False)
-            .agg({
-                # LOO stats
-                'Team_Past_Avg_Model_Prob': 'mean',
-                'Team_Past_Hit_Rate': 'mean',
-                'Team_Past_Avg_Model_Prob_Home': 'mean',
-                'Team_Past_Hit_Rate_Home': 'mean',
-                'Team_Past_Avg_Model_Prob_Away': 'mean',
-                'Team_Past_Hit_Rate_Away': 'mean',
-                'Team_Past_Avg_Model_Prob_Fav': 'mean',
-                'Team_Past_Hit_Rate_Fav': 'mean',
-                'Team_Past_Avg_Model_Prob_Home_Fav': 'mean',
-                'Team_Past_Hit_Rate_Home_Fav': 'mean',
-                'Team_Past_Avg_Model_Prob_Away_Fav': 'mean',
-                'Team_Past_Hit_Rate_Away_Fav': 'mean',
-        
-                # Streak metrics
-                'Team_Recent_Cover_Streak': 'mean',
-                'Team_Recent_Cover_Streak_Home': 'mean',
-                'Team_Recent_Cover_Streak_Away': 'mean',
-                'Team_Recent_Cover_Streak_Fav': 'mean',
-                'Team_Recent_Cover_Streak_Home_Fav': 'mean',
-                'Team_Recent_Cover_Streak_Away_Fav': 'mean',
-                'On_Cover_Streak': 'mean',
-                'On_Cover_Streak_Home': 'mean',
-                'On_Cover_Streak_Away': 'mean',
-                'On_Cover_Streak_Fav': 'mean',
-                'On_Cover_Streak_Home_Fav': 'mean',
-                'On_Cover_Streak_Away_Fav': 'mean',
-            })
+            df_team_base
+            .groupby('Team', as_index=False)
+            .agg(agg_spec)
         )
-
         
+        # Harden numeric types for streaks
+        for c in STATE_COLS:
+            if c in team_feature_map.columns:
+                team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors='coerce')
+        
+                
         # --- aliases from the blended/calibrated step ---
        
 
