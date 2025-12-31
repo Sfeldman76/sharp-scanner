@@ -6820,7 +6820,7 @@ def train_sharp_model_from_bq(
     
         mkt = _norm_market(market)
 
-        df_market = df_bt[df_bt["Market"].astype(str).str.lower().str.strip() == mkt].copy() ✅ DEFINE THIS
+        df_market = df_bt[df_bt["Market"].astype(str).str.lower().str.strip() == mkt].copy()
     
       
     
