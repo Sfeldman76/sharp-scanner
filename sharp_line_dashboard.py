@@ -6895,11 +6895,7 @@ def train_sharp_model_from_bq(
             if c in team_feature_map.columns:
                 team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors="coerce")
 
-        # --- normalize merge keys consistently
-        df_market["Sport"]   = df_market["Sport"].astype(str).str.upper().str.strip()
-        df_market["Market"]  = df_market["Market"].astype(str).str.lower().map(_norm_market)
-        df_market["Team"]    = df_market["Team"].astype(str).str.lower().str.strip()
-        
+      
         team_feature_map["Sport"]  = team_feature_map["Sport"].astype(str).str.upper().str.strip()
         team_feature_map["Market"] = team_feature_map["Market"].astype(str).str.lower().map(_norm_market)
         team_feature_map["Team"]   = team_feature_map["Team"].astype(str).str.lower().str.strip()
