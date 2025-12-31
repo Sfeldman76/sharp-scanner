@@ -7166,11 +7166,7 @@ def train_sharp_model_from_bq(
         # --- guard selected columns
         #keep_ctx = ['Game_Key','Team'] + [c for c in context_cols if c in df_bt_context.columns]
         
-        # --- merge
-        before = len(df_market)
-        df_market = df_market.merge(df_bt_context[keep_ctx], on=['Game_Key','Team'], how='left')
-        hit = df_market['Team'].notna() & df_market[keep_ctx[2]].notna() if len(keep_ctx) > 2 else df_market['Team'].notna()
-        miss_rate = 1 - (hit.sum() / max(len(df_market), 1))
+   
         
         
         # === Ensure minimal normalization BEFORE canonical side filter ===
