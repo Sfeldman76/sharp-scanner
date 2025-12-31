@@ -6769,62 +6769,9 @@ def train_sharp_model_from_bq(
     )
     
   
+
     
-    # --- 0) base at (Sport, Market, Game_Key, Team)
-    df_team_base = df_bt_prepped[["Sport","Market","Game_Key","Team"]].drop_duplicates()
-    
-    # --- 1) attach LOO stats (must be keyed by Sport+Market+Game_Key+Team)
-    df_team_base = df_team_base.merge(
-        df_bt_loostats,
-        on=["Sport","Market","Game_Key","Team"],
-        how="left",
-        validate="1:1"
-    )
-    
-    # --- 2) attach streaks (market-aware, game-grain)
-    df_bt_streaks = build_cover_streaks_game_level(df_bt_prepped, sport=sport, market=mkt)
-    
-    df_team_base = df_team_base.merge(
-        df_bt_streaks.drop(columns=["Game_Start"]),
-        on=["Sport","Market","Game_Key","Team"],
-        how="left",
-        validate="m:1"
-    ).merge(
-        df_bt_streaks[["Sport","Market","Game_Key","Team","Game_Start"]],
-        on=["Sport","Market","Game_Key","Team"],
-        how="left",
-        validate="m:1"
-    )
-    
-    # --- 3) collapse to one row per (Sport, Market, Team)
-    LOO_PRIOR_COLS = [
-        "Team_Past_Avg_Model_Prob","Team_Past_Hit_Rate",
-        "Team_Past_Avg_Model_Prob_Home","Team_Past_Hit_Rate_Home",
-        "Team_Past_Avg_Model_Prob_Away","Team_Past_Hit_Rate_Away",
-        "Team_Past_Avg_Model_Prob_Fav","Team_Past_Hit_Rate_Fav",
-        "Team_Past_Avg_Model_Prob_Home_Fav","Team_Past_Hit_Rate_Home_Fav",
-        "Team_Past_Avg_Model_Prob_Away_Fav","Team_Past_Hit_Rate_Away_Fav",
-    ]
-    
-    STATE_COLS = [
-        c for c in df_bt_streaks.columns
-        if c not in ["Sport","Market","Game_Key","Team","Game_Start"]
-    ]
-    
-    df_team_base = df_team_base.sort_values(["Sport","Market","Team","Game_Start"])
-    
-    agg_spec = {c: "mean" for c in LOO_PRIOR_COLS if c in df_team_base.columns}
-    agg_spec.update({c: "last" for c in STATE_COLS if c in df_team_base.columns})
-    
-    team_feature_map = (
-        df_team_base
-          .groupby(["Sport","Market","Team"], as_index=False)
-          .agg(agg_spec)
-    )
-    
-    for c in STATE_COLS:
-        if c in team_feature_map.columns:
-            team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors="coerce")
+   
     
     context_cols = [c for c in df_bt_context.columns if c not in ['Game_Key','Team']]
     
@@ -6866,40 +6813,85 @@ def train_sharp_model_from_bq(
     pb = st.progress(0)  # 0–100
     status = st.status("🔄 Training in progress...", expanded=True)
 
+    
     for i, market in enumerate(markets_present, 1):
         pct = int(round(i / n_markets * 100))
-        status.write(f"🚧 Training model for `{market.upper()}`...")
+        status.write(f"🚧 Training model for `{str(market).upper()}`...")
+    
+        mkt = _norm_market(market)
 
-        df_market = df_bt[df_bt["Market"].astype(str).str.lower() == market].copy()
-
-        # --- Canonical side filter (EARLY to reduce noise/compute) ---
-        if market == "totals":
-            df_market = df_market[
-                df_market["Outcome"].astype(str).str.lower().str.strip() == "over"
-            ]
-        else:  # spreads + h2h
+        df_market = df_bt[df_bt["Market"].astype(str).str.lower().str.strip() == mkt].copy() ✅ DEFINE THIS
+    
+      
+    
+        # --- Canonical side filter ---
+        if mkt == "totals":
+            df_market = df_market[df_market["Outcome"].astype(str).str.lower().str.strip() == "over"]
+        else:
             df_market["Value"] = pd.to_numeric(df_market["Value"], errors="coerce")
             df_market = df_market[df_market["Value"] < 0]
-
+    
         if df_market.empty:
             pb.progress(min(100, max(0, pct)))
             continue
-
+    
         df_market = (
             df_market.sort_values("Snapshot_Timestamp")
                      .drop_duplicates(subset=["Game_Key", "Market", "Outcome", "Bookmaker"], keep="last")
         )
-
-        if df_market.empty:
-            status.warning(f"⚠️ No data for {market.upper()} — skipping.")
-            pb.progress(min(100, max(0, pct)))
-            continue
-
-        # Defuse categoricals that can raise setitem errors
-        for col in ("Sport", "Market", "Bookmaker"):
-            if col in df_market.columns and str(df_market[col].dtype).startswith("category"):
-                df_market[col] = df_market[col].astype(str)
-
+    
+        # ---- PREPPED slice (this market only) ----
+        df_prepped_mkt = df_bt_prepped[df_bt_prepped["Market"] == mkt].copy()
+    
+        # --- 0) base at (Sport, Market, Game_Key, Team) for THIS market
+        df_team_base = df_prepped_mkt[["Sport","Market","Game_Key","Team"]].drop_duplicates()
+    
+        # --- 1) attach LOO stats (already keyed by Sport+Market+Game_Key+Team)
+        df_team_base = df_team_base.merge(
+            df_bt_loostats,
+            on=["Sport","Market","Game_Key","Team"],
+            how="left",
+            validate="1:1"
+        )
+    
+        # --- 2) attach streaks (market-aware, game-grain)
+        df_bt_streaks = build_cover_streaks_game_level(df_prepped_mkt, sport=sport, market=mkt)
+    
+        df_team_base = df_team_base.merge(
+            df_bt_streaks.drop(columns=["Game_Start"]),
+            on=["Sport","Market","Game_Key","Team"],
+            how="left",
+            validate="1:1"
+        ).merge(
+            df_bt_streaks[["Sport","Market","Game_Key","Team","Game_Start"]],
+            on=["Sport","Market","Game_Key","Team"],
+            how="left",
+            validate="1:1"
+        )
+    
+        # --- 3) collapse to one row per (Sport, Market, Team)
+        LOO_PRIOR_COLS = [
+            "Team_Past_Avg_Model_Prob","Team_Past_Hit_Rate",
+            "Team_Past_Avg_Model_Prob_Home","Team_Past_Hit_Rate_Home",
+            "Team_Past_Avg_Model_Prob_Away","Team_Past_Hit_Rate_Away",
+            "Team_Past_Avg_Model_Prob_Fav","Team_Past_Hit_Rate_Fav",
+            "Team_Past_Avg_Model_Prob_Home_Fav","Team_Past_Hit_Rate_Home_Fav",
+            "Team_Past_Avg_Model_Prob_Away_Fav","Team_Past_Hit_Rate_Away_Fav",
+        ]
+        STATE_COLS = [c for c in df_bt_streaks.columns if c not in ["Sport","Market","Game_Key","Team","Game_Start"]]
+    
+        df_team_base = df_team_base.sort_values(["Sport","Market","Team","Game_Start"])
+    
+        agg_spec = {c: "mean" for c in LOO_PRIOR_COLS if c in df_team_base.columns}
+        agg_spec.update({c: "last" for c in STATE_COLS if c in df_team_base.columns})
+    
+        team_feature_map = (
+            df_team_base.groupby(["Sport","Market","Team"], as_index=False).agg(agg_spec)
+        )
+    
+        for c in STATE_COLS:
+            if c in team_feature_map.columns:
+                team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors="coerce")
         def _amer_to_prob_vec(s):
             s = pd.to_numeric(s, errors="coerce")
             return np.where(
