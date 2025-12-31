@@ -10497,58 +10497,6 @@ def train_sharp_model_from_bq(
 
 
 
-        
-       
-        # --- 0) base at (Sport, Game_Key, Team)
-        df_team_base = df_bt_prepped[["Sport","Game_Key","Team"]].drop_duplicates()
-        
-        # --- 1) LOO stats (per game/team)
-        df_team_base = df_team_base.merge(df_bt_loostats, on=["Game_Key","Team"], how="left", validate="m:1")
-        
-        # --- 2) Streaks at GAME grain (sport-specific, no snapshot leakage)
-        df_bt_streaks = build_cover_streaks_game_level(df_bt_prepped, sport=sport)
-        
-        df_team_base = df_team_base.merge(
-            df_bt_streaks.drop(columns=["Game_Start"]),
-            on=["Sport","Game_Key","Team"],
-            how="left",
-            validate="m:1"
-        )
-        
-        # attach Game_Start for correct "last"
-        df_team_base = df_team_base.merge(
-            df_bt_streaks[["Sport","Game_Key","Team","Game_Start"]],
-            on=["Sport","Game_Key","Team"],
-            how="left",
-            validate="m:1"
-        )
-        
-        # --- 3) collapse to one row per (Sport, Team)
-        LOO_PRIOR_COLS = [
-            "Team_Past_Avg_Model_Prob","Team_Past_Hit_Rate",
-            "Team_Past_Avg_Model_Prob_Home","Team_Past_Hit_Rate_Home",
-            "Team_Past_Avg_Model_Prob_Away","Team_Past_Hit_Rate_Away",
-            "Team_Past_Avg_Model_Prob_Fav","Team_Past_Hit_Rate_Fav",
-            "Team_Past_Avg_Model_Prob_Home_Fav","Team_Past_Hit_Rate_Home_Fav",
-            "Team_Past_Avg_Model_Prob_Away_Fav","Team_Past_Hit_Rate_Away_Fav",
-        ]
-        STATE_COLS = [c for c in df_bt_streaks.columns if c not in ["Sport","Game_Key","Team","Game_Start"]]
-        
-        df_team_base = df_team_base.sort_values(["Sport","Team","Game_Start"])
-        
-        agg_spec = {c: "mean" for c in LOO_PRIOR_COLS if c in df_team_base.columns}
-        agg_spec.update({c: "last" for c in STATE_COLS if c in df_team_base.columns})
-        
-        team_feature_map = (
-            df_team_base
-              .groupby(["Sport","Team"], as_index=False)
-              .agg(agg_spec)
-        )
-        
-        for c in STATE_COLS:
-            team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors="coerce")
-
-        
                 
         # --- aliases from the blended/calibrated step ---
        
