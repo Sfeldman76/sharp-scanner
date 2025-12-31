@@ -6343,7 +6343,7 @@ def apply_blended_sharp_score(
         if m in ("h2h", "ml", "moneyline", "money_line"): return "h2h"
         return m
     
-    mkey = _norm_market(market)
+  
     
     bundle = None
     if isinstance(trained_models_norm, dict):
