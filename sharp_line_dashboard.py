@@ -6773,7 +6773,7 @@ def train_sharp_model_from_bq(
     
    
     
-    context_cols = [c for c in df_bt_context.columns if c not in ['Game_Key','Team']]
+    
     
 
     before = len(df_bt)
@@ -7160,11 +7160,11 @@ def train_sharp_model_from_bq(
         df_market['Is_Home'] = np.where(is_totals, 1, (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)).astype(int)
         
         # --- make sure context keys are normalized the same way
-        df_bt_context['Game_Key'] = df_bt_context['Game_Key'].astype(str).str.lower().str.strip()
-        df_bt_context['Team']     = df_bt_context['Team'].astype(str).str.lower().str.strip()
+        #df_bt_context['Game_Key'] = df_bt_context['Game_Key'].astype(str).str.lower().str.strip()
+        #df_bt_context['Team']     = df_bt_context['Team'].astype(str).str.lower().str.strip()
         
         # --- guard selected columns
-        keep_ctx = ['Game_Key','Team'] + [c for c in context_cols if c in df_bt_context.columns]
+        #keep_ctx = ['Game_Key','Team'] + [c for c in context_cols if c in df_bt_context.columns]
         
         # --- merge
         before = len(df_market)
