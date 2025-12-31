@@ -6093,60 +6093,129 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     )
 
 
-# Use it in training
-from typing import Optional, Dict, Any
-SPORT_STREAK_CFG = {
-    "NFL":   {"window": 5,  "on_threshold": 3},
-    "NCAAF": {"window": 5,  "on_threshold": 3},
-    "NBA":   {"window": 10, "on_threshold": 6},
-    "NCAAB": {"window": 10, "on_threshold": 6},
-    "WNBA":  {"window": 8,  "on_threshold": 5},
-    "MLB":   {"window": 15, "on_threshold": 9},
-    "NHL":   {"window": 10, "on_threshold": 6},  # if you ever add it
-    "CFL":   {"window": 5,  "on_threshold": 3},
+# -----------------------------
+# Sport × Market streak config
+# -----------------------------
+SPORT_MARKET_STREAK_CFG = {
+    # Football
+    ("NFL",   "spreads"): {"window": 5,  "on_threshold": 3},
+    ("NFL",   "h2h"):     {"window": 5,  "on_threshold": 3},
+    ("NFL",   "totals"):  {"window": 5,  "on_threshold": 3},
+
+    ("NCAAF", "spreads"): {"window": 5,  "on_threshold": 3},
+    ("NCAAF", "h2h"):     {"window": 5,  "on_threshold": 3},
+    ("NCAAF", "totals"):  {"window": 5,  "on_threshold": 3},
+
+    ("CFL",   "spreads"): {"window": 5,  "on_threshold": 3},
+    ("CFL",   "h2h"):     {"window": 5,  "on_threshold": 3},
+    ("CFL",   "totals"):  {"window": 5,  "on_threshold": 3},
+
+    # Basketball
+    ("NBA",   "spreads"): {"window": 10, "on_threshold": 6},
+    ("NBA",   "h2h"):     {"window": 10, "on_threshold": 6},
+    ("NBA",   "totals"):  {"window": 10, "on_threshold": 6},
+
+    ("NCAAB", "spreads"): {"window": 10, "on_threshold": 6},
+    ("NCAAB", "h2h"):     {"window": 10, "on_threshold": 6},
+    ("NCAAB", "totals"):  {"window": 10, "on_threshold": 6},
+
+    ("WNBA",  "spreads"): {"window": 8,  "on_threshold": 5},
+    ("WNBA",  "h2h"):     {"window": 8,  "on_threshold": 5},
+    ("WNBA",  "totals"):  {"window": 8,  "on_threshold": 5},
+
+    # Baseball
+    ("MLB",   "spreads"): {"window": 15, "on_threshold": 9},
+    ("MLB",   "h2h"):     {"window": 15, "on_threshold": 9},
+    ("MLB",   "totals"):  {"window": 15, "on_threshold": 9},
+
+    # Hockey if you add it
+    ("NHL",   "spreads"): {"window": 10, "on_threshold": 6},
+    ("NHL",   "h2h"):     {"window": 10, "on_threshold": 6},
+    ("NHL",   "totals"):  {"window": 10, "on_threshold": 6},
 }
+
 DEFAULT_CFG = {"window": 8, "on_threshold": 5}
 
 
-def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, sport: str) -> pd.DataFrame:
-    cfg = SPORT_STREAK_CFG.get(str(sport).upper().strip(), DEFAULT_CFG)
+def _norm_market(m: str) -> str:
+    m = (m or "").lower().strip()
+    if m in ("spread", "spreads", "ats"): return "spreads"
+    if m in ("total", "totals", "ou", "overunder"): return "totals"
+    if m in ("h2h", "ml", "moneyline", "money_line"): return "h2h"
+    return m
+
+
+def _get_streak_cfg(sport: str, market: str) -> dict:
+    s = str(sport).upper().strip()
+    m = _norm_market(market)
+    return SPORT_MARKET_STREAK_CFG.get((s, m), DEFAULT_CFG)
+
+
+def build_cover_streaks_game_level(
+    df_bt_prepped: pd.DataFrame,
+    *,
+    sport: str,
+    market: str,
+) -> pd.DataFrame:
+    """
+    Market-aware, game-grain streaks (no snapshot leakage).
+    Returns one row per (Sport, Market, Team, Game_Key).
+    """
+    cfg = _get_streak_cfg(sport, market)
     window_length = int(cfg["window"])
     on_thresh     = int(cfg["on_threshold"])
 
-    need = ["Sport","Game_Key","Team","Game_Start","SHARP_HIT_BOOL","Is_Home","Is_Favorite_Context"]
+    need = [
+        "Sport","Market","Game_Key","Team","Game_Start",
+        "SHARP_HIT_BOOL","Is_Home","Is_Favorite_Context"
+    ]
     missing = [c for c in need if c not in df_bt_prepped.columns]
     if missing:
         raise ValueError(f"build_cover_streaks_game_level missing cols: {missing}")
 
-    # filter to sport, and go to game-grain
-    d = df_bt_prepped.loc[df_bt_prepped["Sport"].astype(str).str.upper().str.strip() == str(sport).upper().strip(), need].copy()
+    sport_u  = str(sport).upper().strip()
+    market_l = _norm_market(market)
+
+    # filter to sport+market, and go to game-grain
+    d = df_bt_prepped.loc[
+        (df_bt_prepped["Sport"].astype(str).str.upper().str.strip() == sport_u) &
+        (df_bt_prepped["Market"].astype(str).str.lower().str.strip().map(_norm_market) == market_l),
+        need
+    ].copy()
 
     g = (
         d.dropna(subset=["Game_Key","Team","Game_Start"])
-         .sort_values(["Team","Game_Start"])
-         .drop_duplicates(["Team","Game_Key"], keep="last")
+         .sort_values(["Sport","Market","Team","Game_Start"])
+         .drop_duplicates(["Sport","Market","Team","Game_Key"], keep="last")
          .copy()
     )
 
+    # these are optional "contexts" — you can keep them or drop them
     g["Cover_Home_Only"] = g["SHARP_HIT_BOOL"].where(g["Is_Home"] == 1)
     g["Cover_Away_Only"] = g["SHARP_HIT_BOOL"].where(g["Is_Home"] == 0)
     g["Cover_Fav_Only"]  = g["SHARP_HIT_BOOL"].where(g["Is_Favorite_Context"] == 1)
 
     def _roll_sum_shift_by_game(s: pd.Series) -> pd.Series:
-        s1 = s.groupby(g["Team"]).shift(1)  # previous GAME (no leakage)
+        # shift 1 GAME within (Sport, Market, Team) so current game never leaks into its own features
+        grp_keys = [g["Sport"], g["Market"], g["Team"]]
+        s1 = s.groupby(grp_keys, sort=False).shift(1)
         return (
-            s1.groupby(g["Team"])
+            s1.groupby(grp_keys, sort=False)
               .rolling(window=window_length, min_periods=1)
               .sum()
-              .reset_index(level=0, drop=True)
+              .reset_index(level=[0,1,2], drop=True)
         )
 
     g["Team_Recent_Cover_Streak"]          = _roll_sum_shift_by_game(g["SHARP_HIT_BOOL"])
     g["Team_Recent_Cover_Streak_Home"]     = _roll_sum_shift_by_game(g["Cover_Home_Only"])
     g["Team_Recent_Cover_Streak_Away"]     = _roll_sum_shift_by_game(g["Cover_Away_Only"])
     g["Team_Recent_Cover_Streak_Fav"]      = _roll_sum_shift_by_game(g["Cover_Fav_Only"])
-    g["Team_Recent_Cover_Streak_Home_Fav"] = _roll_sum_shift_by_game(g["Cover_Home_Only"].where(g["Is_Favorite_Context"] == 1))
-    g["Team_Recent_Cover_Streak_Away_Fav"] = _roll_sum_shift_by_game(g["Cover_Away_Only"].where(g["Is_Favorite_Context"] == 1))
+    g["Team_Recent_Cover_Streak_Home_Fav"] = _roll_sum_shift_by_game(
+        g["Cover_Home_Only"].where(g["Is_Favorite_Context"] == 1)
+    )
+    g["Team_Recent_Cover_Streak_Away_Fav"] = _roll_sum_shift_by_game(
+        g["Cover_Away_Only"].where(g["Is_Favorite_Context"] == 1)
+    )
 
     g["On_Cover_Streak"]          = (g["Team_Recent_Cover_Streak"]          >= on_thresh).astype(int)
     g["On_Cover_Streak_Home"]     = (g["Team_Recent_Cover_Streak_Home"]     >= on_thresh).astype(int)
@@ -6162,7 +6231,7 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, sport: str) -> p
         "On_Cover_Streak_Fav","On_Cover_Streak_Home_Fav","On_Cover_Streak_Away_Fav"
     ]
 
-    return g[["Sport","Game_Key","Team","Game_Start"] + streak_cols]
+    return g[["Sport","Market","Game_Key","Team","Game_Start"] + streak_cols]
 
 
 
@@ -6626,71 +6695,60 @@ def train_sharp_model_from_bq(
         df_bt_prepped['Model_Sharp_Win_Prob'] = pd.to_numeric(df_bt_prepped[prob_col], errors='coerce')
 
 
-   
+       
     def compute_loo_stats_by_game(df, home_filter=None, favorite_filter=None, col_suffix=""):
         df = df.copy()
     
         if home_filter is not None:
-            df = df[df['Is_Home'] == home_filter]
+            df = df[df["Is_Home"] == home_filter]
         if favorite_filter is not None:
-            df = df[df['Is_Favorite_Context'] == favorite_filter]
+            df = df[df["Is_Favorite_Context"] == favorite_filter]
     
         if df.empty:
             return pd.DataFrame(columns=[
-                'Sport','Game_Key','Team',
-                f'Team_Past_Avg_Model_Prob{col_suffix}',
-                f'Team_Past_Hit_Rate{col_suffix}'
+                "Sport","Market","Game_Key","Team",
+                f"Team_Past_Avg_Model_Prob{col_suffix}",
+                f"Team_Past_Hit_Rate{col_suffix}",
             ])
     
-        # ---- Require stable time ordering ----
-        if 'Game_Start' in df.columns:
-            df['Game_Start'] = pd.to_datetime(df['Game_Start'], errors='coerce', utc=True)
-        if 'Snapshot_Timestamp' in df.columns:
-            df['Snapshot_Timestamp'] = pd.to_datetime(df['Snapshot_Timestamp'], errors='coerce', utc=True)
+        # timestamps for ordering
+        df["Game_Start"] = pd.to_datetime(df.get("Game_Start"), errors="coerce", utc=True)
+        df["Snapshot_Timestamp"] = pd.to_datetime(df.get("Snapshot_Timestamp"), errors="coerce", utc=True)
+        df["_t"] = df["Game_Start"].fillna(df["Snapshot_Timestamp"])
     
-        # Prefer Game_Start; fall back to Snapshot_Timestamp; last resort keep as NaT
-        df['_t'] = df['Game_Start'] if 'Game_Start' in df.columns else pd.NaT
-        if 'Snapshot_Timestamp' in df.columns:
-            df['_t'] = df['_t'].fillna(df['Snapshot_Timestamp'])
+        # numeric
+        df["Model_Sharp_Win_Prob"] = pd.to_numeric(df.get("Model_Sharp_Win_Prob"), errors="coerce")
+        df["SHARP_HIT_BOOL"] = pd.to_numeric(df.get("SHARP_HIT_BOOL"), errors="coerce")
     
-        # ---- Collapse to ONE row per (Sport, Team, Game_Key) BEFORE LOO ----
-        # Use mean of Model prob across any duplicates; use max/mean for hit (should be constant anyway)
-        key_cols = ['Team', 'Game_Key']
-        if 'Sport' in df.columns:
-            key_cols = ['Sport'] + key_cols
-    
-        # Make sure these exist and are numeric
-        df['Model_Sharp_Win_Prob'] = pd.to_numeric(df.get('Model_Sharp_Win_Prob'), errors='coerce')
-        df['SHARP_HIT_BOOL'] = pd.to_numeric(df.get('SHARP_HIT_BOOL'), errors='coerce')
-    
+        # collapse to ONE row per (Sport, Market, Team, Game_Key)
+        key_cols = ["Sport","Market","Team","Game_Key"]
         df_game = (
-            df.sort_values(key_cols + ['_t'])
+            df.dropna(subset=["Game_Key","Team","_t"])
+              .sort_values(key_cols + ["_t"])
               .groupby(key_cols, as_index=False)
               .agg(
-                  _t=(' _t'.replace(' ', ''), 'min') if False else ('_t', 'min'),  # keeps earliest time for ordering
-                  Model_Sharp_Win_Prob=('Model_Sharp_Win_Prob', 'mean'),
-                  SHARP_HIT_BOOL=('SHARP_HIT_BOOL', 'max'),
+                  _t=(" _t".replace(" ", ""), "min") if False else ("_t","min"),   # harmless, but we'll simplify next line
+                  Model_Sharp_Win_Prob=("Model_Sharp_Win_Prob","mean"),
+                  SHARP_HIT_BOOL=("SHARP_HIT_BOOL","max"),
               )
         )
+        # simplify the _t agg line:
+        df_game["_t"] = df_game["_t"]
     
-        # ---- LOO over prior games ----
-        df_game = df_game.sort_values(key_cols[:1] + ['_t'] if 'Sport' in df_game.columns else ['Team','_t'])
+        # LOO per (Sport, Market, Team)
+        group_keys = ["Sport","Market","Team"]
+        df_game = df_game.sort_values(group_keys + ["_t"])
     
-        group_keys = ['Team']
-        if 'Sport' in df_game.columns:
-            group_keys = ['Sport','Team']
+        df_game["cum_model_prob"] = df_game.groupby(group_keys)["Model_Sharp_Win_Prob"].cumsum().shift(1)
+        df_game["cum_hit"]        = df_game.groupby(group_keys)["SHARP_HIT_BOOL"].cumsum().shift(1)
+        df_game["cum_count"]      = df_game.groupby(group_keys).cumcount()
     
-        df_game['cum_model_prob'] = df_game.groupby(group_keys)['Model_Sharp_Win_Prob'].cumsum().shift(1)
-        df_game['cum_hit']        = df_game.groupby(group_keys)['SHARP_HIT_BOOL'].cumsum().shift(1)
-        df_game['cum_count']      = df_game.groupby(group_keys).cumcount()
+        avg_col = f"Team_Past_Avg_Model_Prob{col_suffix}"
+        hit_col = f"Team_Past_Hit_Rate{col_suffix}"
+        df_game[avg_col] = df_game["cum_model_prob"] / df_game["cum_count"].replace(0, np.nan)
+        df_game[hit_col] = df_game["cum_hit"] / df_game["cum_count"].replace(0, np.nan)
     
-        avg_col = f'Team_Past_Avg_Model_Prob{col_suffix}'
-        hit_col = f'Team_Past_Hit_Rate{col_suffix}'
-        df_game[avg_col] = df_game['cum_model_prob'] / df_game['cum_count'].replace(0, np.nan)
-        df_game[hit_col] = df_game['cum_hit']        / df_game['cum_count'].replace(0, np.nan)
-    
-        out_cols = (['Sport'] if 'Sport' in df_game.columns else []) + ['Game_Key','Team', avg_col, hit_col]
-        return df_game[out_cols]
+        return df_game[["Sport","Market","Game_Key","Team", avg_col, hit_col]]
 
     
   
@@ -6704,38 +6762,45 @@ def train_sharp_model_from_bq(
     
     # LOO map at (Game_Key, Team)
     df_bt_loostats = (
-        df_bt_prepped[['Game_Key','Team']].drop_duplicates()
-          .merge(overall_stats, on=['Game_Key','Team'], how='left')
-          .merge(home_stats,    on=['Game_Key','Team'], how='left')
-          .merge(away_stats,    on=['Game_Key','Team'], how='left')
-          .merge(fav_overall,   on=['Game_Key','Team'], how='left')
-          .merge(fav_home,      on=['Game_Key','Team'], how='left')
-          .merge(fav_away,      on=['Game_Key','Team'], how='left')
+        df_bt_prepped[["Sport","Market","Game_Key","Team"]].drop_duplicates()
+          .merge(overall_stats, on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
+          .merge(home_stats,    on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
+          .merge(away_stats,    on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
+          .merge(fav_overall,   on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
+          .merge(fav_home,      on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
+          .merge(fav_away,      on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
     )
     
     # --- 0) base at (Sport, Game_Key, Team)
-    df_team_base = df_bt_prepped[["Sport","Game_Key","Team"]].drop_duplicates()
+    df_team_base = df_bt_prepped[["Sport","Market","Game_Key","Team"]].drop_duplicates()
     
-    # --- 1) attach LOO stats (once)
-    df_team_base = df_team_base.merge(df_bt_loostats, on=["Game_Key","Team"], how="left", validate="m:1")
+    df_team_base = df_team_base.merge(
+        df_bt_loostats,
+        on=["Sport","Market","Game_Key","Team"],
+        how="left",
+        validate="1:1"
+    )
     
-    # --- 2) Streaks at GAME grain (sport-specific window, no snapshot leakage)
-    df_bt_streaks = build_cover_streaks_game_level(df_bt_prepped, sport=sport)
+    df_bt_streaks = build_cover_streaks_game_level(df_bt_prepped, sport=sport, market=mkt)
     
-    # merge streak features (no Game_Start yet)
     df_team_base = df_team_base.merge(
         df_bt_streaks.drop(columns=["Game_Start"]),
-        on=["Sport","Game_Key","Team"],
+        on=["Sport","Market","Game_Key","Team"],
+        how="left",
+        validate="m:1"
+    ).merge(
+        df_bt_streaks[["Sport","Market","Game_Key","Team","Game_Start"]],
+        on=["Sport","Market","Game_Key","Team"],
         how="left",
         validate="m:1"
     )
     
-    # attach Game_Start for ordering "last"
-    df_team_base = df_team_base.merge(
-        df_bt_streaks[["Sport","Game_Key","Team","Game_Start"]],
-        on=["Sport","Game_Key","Team"],
-        how="left",
-        validate="m:1"
+    df_team_base = df_team_base.sort_values(["Sport","Market","Team","Game_Start"])
+    
+    team_feature_map = (
+        df_team_base
+          .groupby(["Sport","Market","Team"], as_index=False)
+          .agg(agg_spec)
     )
     
     # --- 3) collapse to one row per (Sport, Team)
