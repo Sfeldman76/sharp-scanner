@@ -6347,7 +6347,10 @@ def apply_blended_sharp_score(
     
        
     # ---- determine market key for bundle lookup ----
-    mkey = _norm_market(Market)   # <-- IMPORTANT: use Market (or define market = Market)
+    if 'Market' in df.columns and df['Market'].notna().any():
+        mkey = _norm_market(df['Market'].dropna().iloc[0])
+    else:
+        mkey = None
     
     bundle = None
     if isinstance(trained_models_norm, dict):
