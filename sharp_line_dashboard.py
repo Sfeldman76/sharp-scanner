@@ -6841,7 +6841,9 @@ def train_sharp_model_from_bq(
         )
     
         # ---- PREPPED slice (this market only) ----
-        df_prepped_mkt = df_bt_prepped[df_bt_prepped["Market"] == mkt].copy()
+        df_prepped_mkt = df_bt_prepped[
+            df_bt_prepped["Market"].astype(str).str.lower().map(_norm_market) == mkt
+        ].copy()
     
         # --- 0) base at (Sport, Market, Game_Key, Team) for THIS market
         df_team_base = df_prepped_mkt[["Sport","Market","Game_Key","Team"]].drop_duplicates()
@@ -6892,6 +6894,24 @@ def train_sharp_model_from_bq(
         for c in STATE_COLS:
             if c in team_feature_map.columns:
                 team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors="coerce")
+
+        # --- normalize merge keys consistently
+        df_market["Sport"]   = df_market["Sport"].astype(str).str.upper().str.strip()
+        df_market["Market"]  = df_market["Market"].astype(str).str.lower().map(_norm_market)
+        df_market["Team"]    = df_market["Team"].astype(str).str.lower().str.strip()
+        
+        team_feature_map["Sport"]  = team_feature_map["Sport"].astype(str).str.upper().str.strip()
+        team_feature_map["Market"] = team_feature_map["Market"].astype(str).str.lower().map(_norm_market)
+        team_feature_map["Team"]   = team_feature_map["Team"].astype(str).str.lower().str.strip()
+        
+        # --- merge priors/streak state onto every training row
+        df_market = df_market.merge(
+            team_feature_map,
+            on=["Sport", "Market", "Team"],
+            how="left",
+            validate="many_to_one",
+        )
+
         def _amer_to_prob_vec(s):
             s = pd.to_numeric(s, errors="coerce")
             return np.where(
