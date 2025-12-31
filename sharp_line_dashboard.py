@@ -6890,23 +6890,40 @@ def train_sharp_model_from_bq(
         team_feature_map = (
             df_team_base.groupby(["Sport","Market","Team"], as_index=False).agg(agg_spec)
         )
-    
         for c in STATE_COLS:
             if c in team_feature_map.columns:
                 team_feature_map[c] = pd.to_numeric(team_feature_map[c], errors="coerce")
-
-      
+        
         team_feature_map["Sport"]  = team_feature_map["Sport"].astype(str).str.upper().str.strip()
         team_feature_map["Market"] = team_feature_map["Market"].astype(str).str.lower().map(_norm_market)
         team_feature_map["Team"]   = team_feature_map["Team"].astype(str).str.lower().str.strip()
         
-        # --- merge priors/streak state onto every training row
+        # ---- ensure these exist on df_market ----
+        df_market["Outcome_Norm"]   = df_market["Outcome"].astype(str).str.lower().str.strip()
+        df_market["Home_Team_Norm"] = df_market["Home_Team_Norm"].astype(str).str.lower().str.strip()
+        df_market["Away_Team_Norm"] = df_market["Away_Team_Norm"].astype(str).str.lower().str.strip()
+        df_market["Sport"]          = df_market["Sport"].astype(str).str.upper().str.strip()
+        df_market["Market"]         = df_market["Market"].astype(str).str.lower().str.strip().map(_norm_market)
+        
+        is_totals = df_market["Market"].eq("totals")
+        
+        df_market["Team"] = (
+            df_market["Outcome_Norm"].where(~is_totals, df_market["Home_Team_Norm"])
+        ).astype(str).str.strip().str.lower()
+        
+        df_market["Is_Home"] = np.where(
+            is_totals, 1,
+            (df_market["Team"] == df_market["Home_Team_Norm"]).astype(int)
+        ).astype(int)
+        
         df_market = df_market.merge(
             team_feature_map,
             on=["Sport", "Market", "Team"],
             how="left",
             validate="many_to_one",
         )
+
+      
 
         def _amer_to_prob_vec(s):
             s = pd.to_numeric(s, errors="coerce")
@@ -7170,11 +7187,7 @@ def train_sharp_model_from_bq(
         
         # --- Team / Is_Home (totals anchor to home)
         is_totals = df_market['Market'].eq('totals')
-        df_market['Team'] = (
-            df_market['Outcome_Norm'].where(~is_totals, df_market['Home_Team_Norm'])
-        ).astype(str).str.strip().str.lower()
-        df_market['Is_Home'] = np.where(is_totals, 1, (df_market['Team'] == df_market['Home_Team_Norm']).astype(int)).astype(int)
-        
+
         # --- make sure context keys are normalized the same way
         #df_bt_context['Game_Key'] = df_bt_context['Game_Key'].astype(str).str.lower().str.strip()
         #df_bt_context['Team']     = df_bt_context['Team'].astype(str).str.lower().str.strip()
