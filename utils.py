@@ -6338,18 +6338,38 @@ def apply_blended_sharp_score(
     # --- Restore: simple map lookup from  bundles (do this BEFORE enrichment log) ---
     team_feature_map = None
     book_reliability_map = None
-    if isinstance(trained_models_norm, dict):
-        for bundle in trained_models_norm.values():
-            if isinstance(bundle, dict):
-                if team_feature_map is None:
-                    team_feature_map = bundle.get('team_feature_map')
-                if book_reliability_map is None:
-                    book_reliability_map = bundle.get('book_reliability_map')
-                if team_feature_map is not None and book_reliability_map is not None:
-                    break
-
-
    
+    # --- Restore: map lookup from bundles (do this BEFORE enrichment log) ---
+    
+    def _norm_market(m: str) -> str:
+        m = (m or "").lower().strip()
+        if m in ("spread", "spreads", "ats"): return "spreads"
+        if m in ("total", "totals", "ou", "overunder"): return "totals"
+        if m in ("h2h", "ml", "moneyline", "money_line"): return "h2h"
+        return m
+    
+    mkey = _norm_market(market)
+    
+    bundle = None
+    if isinstance(trained_models_norm, dict):
+        bundle = trained_models_norm.get(mkey)
+    
+        # fallback: search bundles by meta.market if dict keys are inconsistent
+        if bundle is None:
+            for b in trained_models_norm.values():
+                if isinstance(b, dict) and _norm_market((b.get("meta") or {}).get("market")) == mkey:
+                    bundle = b
+                    break
+    
+    team_feature_map = bundle.get("team_feature_map") if isinstance(bundle, dict) else None
+    book_reliability_map = bundle.get("book_reliability_map") if isinstance(bundle, dict) else None
+    
+    # hard defaults so merges never explode
+    if not isinstance(team_feature_map, pd.DataFrame):
+        team_feature_map = pd.DataFrame()
+    if not isinstance(book_reliability_map, pd.DataFrame):
+        book_reliability_map = pd.DataFrame()
+
       # === Cross-Market Pivots (Value + Odds) with guaranteed columns ===
     MARKETS = ["spreads","totals","h2h"]
     
