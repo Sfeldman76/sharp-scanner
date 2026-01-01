@@ -4379,19 +4379,17 @@ def totals_features_for_upcoming(df_scores: pd.DataFrame,
 # =========================
 # 4) Attach to scoring DF (adds TOT_* and TOT_Mispricing)
 # =========================
-def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
-                                   df_scores_history: pd.DataFrame,
-                                   *,
-                                   sport: str | None = None,
-                                   key_col: str = "Merge_Key_Short",
-                                   window_games: int = 30,
-                                   shrink: float = 0.30,
-                                   compute_mispricing: bool = True
-                                   ) -> pd.DataFrame:
-    """
-    Adds TOT_* baselines to df_scoring by {key_col},
-    plus TOT_Mispricing = TOT_Proj_Total_Baseline - Total_Line_Current (if available).
-    """
+def enrich_df_with_totals_features(
+    df_scoring: pd.DataFrame,
+    df_scores_history: pd.DataFrame,
+    *,
+    sport: str | None = None,
+    key_col: str = "Merge_Key_Short",
+    window_games: int = 30,
+    shrink: float = 0.30,
+    compute_mispricing: bool = True
+) -> pd.DataFrame:
+
     if key_col not in df_scoring.columns:
         raise ValueError(f"Expected '{key_col}' in df_scoring")
 
@@ -4409,15 +4407,19 @@ def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
 
     df_sc = df_sc.merge(tot_feats, on=key_col, how="left")
 
-    
     if compute_mispricing:
-    if ("Market" in df_scoring.columns) or ("Market_Norm" in df_scoring.columns):
-        cur_line = _current_total_line_by_key(df_scoring, key_col=key_col)
-        df_sc = df_sc.merge(cur_line, on=key_col, how="left")
-        df_sc["TOT_Mispricing"] = df_sc["TOT_Proj_Total_Baseline"] - df_sc["Total_Line_Current"]
-    else:
-        df_sc["Total_Line_Current"] = np.nan
-        df_sc["TOT_Mispricing"] = np.nan
+        if ("Market" in df_sc.columns) or ("Market_Norm" in df_sc.columns):
+            cur_line = _current_total_line_by_key(df_sc, key_col=key_col)
+            df_sc = df_sc.merge(cur_line, on=key_col, how="left")
+            df_sc["TOT_Mispricing"] = (
+                df_sc["TOT_Proj_Total_Baseline"] - df_sc["Total_Line_Current"]
+            )
+        else:
+            df_sc["Total_Line_Current"] = np.nan
+            df_sc["TOT_Mispricing"] = np.nan
+
+    return df_sc
+
 
 
 
