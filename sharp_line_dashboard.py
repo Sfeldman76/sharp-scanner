@@ -6098,35 +6098,35 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
 # -----------------------------
 SPORT_MARKET_STREAK_CFG = {
     # Football
-    ("NFL",   "spreads"): {"window": 5,  "on_threshold": 3},
-    ("NFL",   "h2h"):     {"window": 5,  "on_threshold": 3},
-    ("NFL",   "totals"):  {"window": 5,  "on_threshold": 3},
+    ("NFL",   "spreads"): {"window": 7,  "on_threshold": 3},
+    ("NFL",   "h2h"):     {"window": 7,  "on_threshold": 3},
+    ("NFL",   "totals"):  {"window": 7,  "on_threshold": 3},
 
-    ("NCAAF", "spreads"): {"window": 5,  "on_threshold": 3},
-    ("NCAAF", "h2h"):     {"window": 5,  "on_threshold": 3},
-    ("NCAAF", "totals"):  {"window": 5,  "on_threshold": 3},
+    ("NCAAF", "spreads"): {"window": 7,  "on_threshold": 3},
+    ("NCAAF", "h2h"):     {"window": 7,  "on_threshold": 3},
+    ("NCAAF", "totals"):  {"window": 7,  "on_threshold": 3},
 
     ("CFL",   "spreads"): {"window": 5,  "on_threshold": 3},
     ("CFL",   "h2h"):     {"window": 5,  "on_threshold": 3},
     ("CFL",   "totals"):  {"window": 5,  "on_threshold": 3},
 
     # Basketball
-    ("NBA",   "spreads"): {"window": 10, "on_threshold": 6},
-    ("NBA",   "h2h"):     {"window": 10, "on_threshold": 6},
-    ("NBA",   "totals"):  {"window": 10, "on_threshold": 6},
+    ("NBA",   "spreads"): {"window": 15, "on_threshold": 6},
+    ("NBA",   "h2h"):     {"window": 15, "on_threshold": 6},
+    ("NBA",   "totals"):  {"window": 15, "on_threshold": 6},
 
-    ("NCAAB", "spreads"): {"window": 10, "on_threshold": 6},
-    ("NCAAB", "h2h"):     {"window": 10, "on_threshold": 6},
-    ("NCAAB", "totals"):  {"window": 10, "on_threshold": 6},
+    ("NCAAB", "spreads"): {"window": 15, "on_threshold": 6},
+    ("NCAAB", "h2h"):     {"window": 15, "on_threshold": 6},
+    ("NCAAB", "totals"):  {"window": 15, "on_threshold": 6},
 
     ("WNBA",  "spreads"): {"window": 8,  "on_threshold": 5},
     ("WNBA",  "h2h"):     {"window": 8,  "on_threshold": 5},
     ("WNBA",  "totals"):  {"window": 8,  "on_threshold": 5},
 
     # Baseball
-    ("MLB",   "spreads"): {"window": 15, "on_threshold": 9},
-    ("MLB",   "h2h"):     {"window": 15, "on_threshold": 9},
-    ("MLB",   "totals"):  {"window": 15, "on_threshold": 9},
+    ("MLB",   "spreads"): {"window": 20, "on_threshold": 9},
+    ("MLB",   "h2h"):     {"window": 20, "on_threshold": 9},
+    ("MLB",   "totals"):  {"window": 20, "on_threshold": 9},
 
     # Hockey if you add it
     ("NHL",   "spreads"): {"window": 10, "on_threshold": 6},
