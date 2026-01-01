@@ -12416,9 +12416,26 @@ def render_scanner_tab(label, sport_key, container, force_reload=False):
                     df_summary_base[col] = df_summary_base[col].fillna("⚠️ Missing")
             
             # === 9) (Optional) merge team features and small-book liquidity AFTER the dedupe ===
+            # === 9) (Optional) merge team features AFTER the dedupe ===
             if team_feature_map is not None and not team_feature_map.empty:
-                df_summary_base['Team'] = df_summary_base['Outcome'].astype(str).str.strip().str.lower()
-                df_summary_base = df_summary_base.merge(team_feature_map, on='Team', how='left')
+                # normalize keys
+                df_summary_base["Sport"]  = df_summary_base["Sport"].astype(str).str.upper().str.strip()
+                df_summary_base["Market"] = df_summary_base["Market"].astype(str).str.lower().str.strip()
+                df_summary_base["Team"]   = df_summary_base["Outcome"].astype(str).str.lower().str.strip()
+            
+                team_feature_map = team_feature_map.copy()
+                team_feature_map["Sport"]  = team_feature_map["Sport"].astype(str).str.upper().str.strip()
+                team_feature_map["Market"] = team_feature_map["Market"].astype(str).str.lower().str.strip()
+                team_feature_map["Team"]   = team_feature_map["Team"].astype(str).str.lower().str.strip()
+            
+                # merge at the intended grain
+                df_summary_base = df_summary_base.merge(
+                    team_feature_map,
+                    on=["Sport", "Market", "Team"],
+                    how="left",
+                    validate="many_to_one",
+                )
+
             
             df_pre = compute_small_book_liquidity_features(df_pre)
             sb_cols = [
