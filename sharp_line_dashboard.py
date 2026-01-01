@@ -9140,7 +9140,7 @@ def train_sharp_model_from_bq(
 
         MIN_AUC           = thr["MIN_AUC"]
         MAX_LOGLOSS       = thr["MAX_LOGLOSS"]
-        MAX_ROUNDS        = 100  # still global
+        MAX_ROUNDS        = 30  # still global
         MAX_OVERFIT_GAP   = thr["MAX_OVERFIT_GAP"]
         MIN_AUC_THRESHOLD = thr["MIN_AUC_THRESHOLD"]
         
@@ -9226,12 +9226,17 @@ def train_sharp_model_from_bq(
         
 
         
+    
         # ======= multi-round search with overfit / quality guards =======
         best_ll_params     = None
         best_auc_params    = None
         best_auc_score     = -np.inf
         best_ll_score      = np.inf
         best_round_metrics = None
+        
+        # NEW: capture best estimators too (more robust than params-only)
+        best_auc_estimator = None
+        best_ll_estimator  = None
         
         found_good = False
         
@@ -9292,6 +9297,11 @@ def train_sharp_model_from_bq(
                     best_ll_score   = logloss_cv
                     best_auc_params = rs_auc.best_params_.copy()
                     best_ll_params  = rs_ll.best_params_.copy()
+        
+                    # NEW: store best estimators (already include best params + fitted state)
+                    best_auc_estimator = deepcopy(rs_auc.best_estimator_)
+                    best_ll_estimator  = deepcopy(rs_ll.best_estimator_)
+        
                     best_round_metrics = dict(
                         round_no    = round_no,
                         auc_cv      = auc_cv,
@@ -9311,33 +9321,57 @@ def train_sharp_model_from_bq(
                     f"(AUC={auc_cv:.4f}, LL={logloss_cv:.4f}, "
                     f"gap={overfit_gap:.4f} ≤ {MAX_OVERFIT_GAP:.4f})."
                 )
-                found_good      = True
+                found_good = True
+        
+                # keep the accepted round's params + estimators (so downstream uses winner)
                 best_auc_params = rs_auc.best_params_.copy()
                 best_ll_params  = rs_ll.best_params_.copy()
+                best_auc_estimator = deepcopy(rs_auc.best_estimator_)
+                best_ll_estimator  = deepcopy(rs_ll.best_estimator_)
+        
                 break
         
+        
+        # NEW: if nothing met constraints, proceed with best-so-far instead of returning
         if not found_good:
             if best_round_metrics is not None:
                 logger.warning(
                     "⚠️ No config met all constraints for %s %s after %d rounds. "
-                    "Best round=%d, AUC=%.4f, LogLoss=%.4f, TrainAUC=%.4f, OverfitGap=%.4f.",
-                    sport,
-                    market,
-                    MAX_ROUNDS,
+                    "Proceeding with best-so-far. Best round=%d, AUC=%.4f, LogLoss=%.4f, "
+                    "TrainAUC=%.4f, OverfitGap=%.4f.",
+                    sport, market, MAX_ROUNDS,
                     best_round_metrics["round_no"],
                     best_round_metrics["auc_cv"],
                     best_round_metrics["logloss_cv"],
                     best_round_metrics["train_auc"],
                     best_round_metrics["overfit_gap"],
                 )
+            else:
+                logger.error(
+                    "❌ All rounds failed for %s %s (no successful search results). "
+                    "Cannot train a model for this market.",
+                    sport, market
+                )
+                return  # only bail if literally nothing ran successfully
         
-            logger.error(
-                f"❌ No optimal solution found for {sport} {market} after {MAX_ROUNDS} rounds. "
-                f"Best CV AUC={best_auc_score:.4f}, LogLoss={best_ll_score:.4f}. "
-                "Keeping existing champion model (no overwrite)."
-            )
-            # Bail out of training for this market without saving a new model
+        
+        # NEW: hard guard — must have something to proceed
+        if best_auc_params is None or best_ll_params is None:
+            logger.error("❌ No params selected for %s %s; cannot continue.", sport, market)
             return
+        
+        # Optional: warn if you didn't capture estimators (shouldn't happen now)
+        if best_auc_estimator is None or best_ll_estimator is None:
+            logger.warning("⚠️ Best estimators not captured; downstream should refit from params.")
+        
+        # At this point:
+        # - if found_good: best_* are from the accepted round
+        # - else: best_* are best-so-far across rounds
+        # You can now either:
+        #   (A) use best_auc_estimator / best_ll_estimator directly, OR
+        #   (B) refit fresh on full train set using best_*_params.
+
+
         
         # At this point best_*_params are the ones from the accepted round
         assert best_auc_params is not None and best_ll_params is not None
