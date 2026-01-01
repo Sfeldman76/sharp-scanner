@@ -4324,6 +4324,15 @@ def _current_total_line_by_key(df_any_market: pd.DataFrame,
         raise ValueError(f"Expected '{key_col}' in df")
 
     df_tot = df_any_market.copy()
+
+    # --- HARDEN: Market may be missing depending on upstream slice ---
+    if "Market" not in df_tot.columns:
+        if "Market_Norm" in df_tot.columns:
+            df_tot["Market"] = df_tot["Market_Norm"]
+        else:
+            # Can't identify totals rows; don't crash the pipeline
+            return pd.DataFrame({key_col: [], "Total_Line_Current": []})
+
     df_tot["Market"] = df_tot["Market"].astype(str).str.strip().str.lower()
     df_tot[key_col]  = df_tot[key_col].astype(str).str.strip().str.lower()
 
@@ -4400,12 +4409,16 @@ def enrich_df_with_totals_features(df_scoring: pd.DataFrame,
 
     df_sc = df_sc.merge(tot_feats, on=key_col, how="left")
 
+    
     if compute_mispricing:
+    if ("Market" in df_scoring.columns) or ("Market_Norm" in df_scoring.columns):
         cur_line = _current_total_line_by_key(df_scoring, key_col=key_col)
         df_sc = df_sc.merge(cur_line, on=key_col, how="left")
         df_sc["TOT_Mispricing"] = df_sc["TOT_Proj_Total_Baseline"] - df_sc["Total_Line_Current"]
+    else:
+        df_sc["Total_Line_Current"] = np.nan
+        df_sc["TOT_Mispricing"] = np.nan
 
-    return df_sc
 
 
 PHASES  = ["Overnight","Early","Midday","Late"]
