@@ -5857,10 +5857,10 @@ def should_promote_challenger(
     challenger_metrics: Dict[str, float],
     champion_metrics: Optional[Dict[str, float]],
     *,
-    min_auc_holdout: float = 0.55,
-    max_gap_train_holdout: float = 0.22,
-    min_auc_improvement: float = 0.003,
-    max_logloss_worsen: float = 0.002,
+    min_auc_holdout: float = 0.52,
+    max_gap_train_holdout: float = 0.50,
+    min_auc_improvement: float = 0.03,
+    max_logloss_worsen: float = 0.02,
 ) -> Tuple[bool, Dict[str, float]]:
     """
     Decide whether to promote challenger vs champion.
