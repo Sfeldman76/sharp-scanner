@@ -6482,19 +6482,36 @@ def apply_blended_sharp_score(
             labels=["Close", "Medium", "Large", "Huge"],
         )
 
+      
         # Total size bucket: per-sport quantiles (Low / Medium / High / Very High)
         game_vals["Total_Size_Bucket"] = ""
         for sport_val, g in game_vals.groupby("Sport"):
-            # need a few games to get sensible quantiles
             if g["Total_Game"].notna().sum() < 5:
                 continue
+        
             qs = g["Total_Game"].quantile([0.25, 0.50, 0.75]).values
-            bins = [-np.inf, qs[0], qs[1], qs[2], np.inf]
-            labels = ["Low", "Medium", "High", "Very_High"]
+            bins_raw = np.array([-np.inf, qs[0], qs[1], qs[2], np.inf], dtype="float64")
+        
+            # --- HARDEN: quantiles can tie -> duplicate bin edges ---
+            bins = np.unique(bins_raw)  # keeps sorted order for numeric arrays
+        
+            # need at least 3 edges to form >=2 intervals
+            if len(bins) < 3:
+                # too flat / too many ties; leave as "" for this sport
+                continue
+        
+            # labels must be exactly (#intervals) = (len(bins)-1)
+            base_labels = ["Low", "Medium", "High", "Very_High"]
+            labels = base_labels[: len(bins) - 1]
+        
             mask = game_vals["Sport"].eq(sport_val)
             game_vals.loc[mask, "Total_Size_Bucket"] = pd.cut(
-                game_vals.loc[mask, "Total_Game"], bins=bins, labels=labels
+                game_vals.loc[mask, "Total_Game"],
+                bins=bins,
+                labels=labels,
+                include_lowest=True,
             ).astype(str)
+
 
         # Interactions / volatility proxies
         game_vals["Spread_x_Total"] = game_vals["Spread_Abs_Game"] * game_vals["Total_Game"]
