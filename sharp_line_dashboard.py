@@ -6180,46 +6180,62 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     )
 
     g["SHARP_HIT_BOOL"] = pd.to_numeric(g["SHARP_HIT_BOOL"], errors="coerce")
+
+    # Eligible-only series (NaN when not eligible => denom counts eligible games only)
+    g["Cover_All"]       = g["SHARP_HIT_BOOL"]
     g["Cover_Home_Only"] = g["SHARP_HIT_BOOL"].where(g["Is_Home"] == 1)
     g["Cover_Away_Only"] = g["SHARP_HIT_BOOL"].where(g["Is_Home"] == 0)
     g["Cover_Fav_Only"]  = g["SHARP_HIT_BOOL"].where(g["Is_Favorite_Context"] == 1)
+    g["Cover_Home_Fav"]  = g["SHARP_HIT_BOOL"].where((g["Is_Home"] == 1) & (g["Is_Favorite_Context"] == 1))
+    g["Cover_Away_Fav"]  = g["SHARP_HIT_BOOL"].where((g["Is_Home"] == 0) & (g["Is_Favorite_Context"] == 1))
 
     grp = ["Sport","Market","Team"]
 
-    def _roll_sum_shift_by_game(col: str) -> pd.Series:
-        s1 = g.groupby(grp, sort=False)[col].shift(1)
+    def _roll_sum_shift(col: str) -> pd.Series:
+        s_prev = g.groupby(grp, sort=False)[col].shift(1)
         return (
-            s1.groupby([g[k] for k in grp], sort=False)
-              .rolling(window=window_length, min_periods=1)
-              .sum()
-              .reset_index(level=[0,1,2], drop=True)
+            s_prev.groupby([g[k] for k in grp], sort=False)
+                  .rolling(window=window_length, min_periods=1).sum()
+                  .reset_index(level=[0,1,2], drop=True)
         )
 
-    g["Team_Recent_Cover_Streak"]          = _roll_sum_shift_by_game("SHARP_HIT_BOOL")
-    g["Team_Recent_Cover_Streak_Home"]     = _roll_sum_shift_by_game("Cover_Home_Only")
-    g["Team_Recent_Cover_Streak_Away"]     = _roll_sum_shift_by_game("Cover_Away_Only")
-    g["Team_Recent_Cover_Streak_Fav"]      = _roll_sum_shift_by_game("Cover_Fav_Only")
+    def _roll_games_shift(col: str) -> pd.Series:
+        s_prev = g.groupby(grp, sort=False)[col].shift(1)
+        return (
+            s_prev.notna().astype(int)
+                  .groupby([g[k] for k in grp], sort=False)
+                  .rolling(window=window_length, min_periods=1).sum()
+                  .reset_index(level=[0,1,2], drop=True)
+        )
 
-    g["Team_Recent_Cover_Streak_Home_Fav"] = (
-        g["Cover_Home_Only"].where(g["Is_Favorite_Context"] == 1)
-    )
-    g["Team_Recent_Cover_Streak_Home_Fav"] = (
-        g.groupby(grp, sort=False)["Team_Recent_Cover_Streak_Home_Fav"].shift(1)
-         .groupby([g[k] for k in grp], sort=False)
-         .rolling(window=window_length, min_periods=1).sum()
-         .reset_index(level=[0,1,2], drop=True)
-    )
+    def _rate(wins: pd.Series, games: pd.Series) -> pd.Series:
+        return wins / games.replace(0, np.nan)
 
-    g["Team_Recent_Cover_Streak_Away_Fav"] = (
-        g["Cover_Away_Only"].where(g["Is_Favorite_Context"] == 1)
-    )
-    g["Team_Recent_Cover_Streak_Away_Fav"] = (
-        g.groupby(grp, sort=False)["Team_Recent_Cover_Streak_Away_Fav"].shift(1)
-         .groupby([g[k] for k in grp], sort=False)
-         .rolling(window=window_length, min_periods=1).sum()
-         .reset_index(level=[0,1,2], drop=True)
-    )
+    # ---- sums ("streaks") ----
+    g["Team_Recent_Cover_Streak"]          = _roll_sum_shift("Cover_All")
+    g["Team_Recent_Cover_Streak_Home"]     = _roll_sum_shift("Cover_Home_Only")
+    g["Team_Recent_Cover_Streak_Away"]     = _roll_sum_shift("Cover_Away_Only")
+    g["Team_Recent_Cover_Streak_Fav"]      = _roll_sum_shift("Cover_Fav_Only")
+    g["Team_Recent_Cover_Streak_Home_Fav"] = _roll_sum_shift("Cover_Home_Fav")
+    g["Team_Recent_Cover_Streak_Away_Fav"] = _roll_sum_shift("Cover_Away_Fav")
 
+    # ---- denominators (eligible games) ----
+    g["Team_Recent_Cover_Games"]           = _roll_games_shift("Cover_All")
+    g["Team_Recent_Cover_Games_Home"]      = _roll_games_shift("Cover_Home_Only")
+    g["Team_Recent_Cover_Games_Away"]      = _roll_games_shift("Cover_Away_Only")
+    g["Team_Recent_Cover_Games_Fav"]       = _roll_games_shift("Cover_Fav_Only")
+    g["Team_Recent_Cover_Games_Home_Fav"]  = _roll_games_shift("Cover_Home_Fav")
+    g["Team_Recent_Cover_Games_Away_Fav"]  = _roll_games_shift("Cover_Away_Fav")
+
+    # ---- rates (wins/games) ----
+    g["Team_Recent_Cover_Rate"]            = _rate(g["Team_Recent_Cover_Streak"],          g["Team_Recent_Cover_Games"])
+    g["Team_Recent_Cover_Rate_Home"]       = _rate(g["Team_Recent_Cover_Streak_Home"],     g["Team_Recent_Cover_Games_Home"])
+    g["Team_Recent_Cover_Rate_Away"]       = _rate(g["Team_Recent_Cover_Streak_Away"],     g["Team_Recent_Cover_Games_Away"])
+    g["Team_Recent_Cover_Rate_Fav"]        = _rate(g["Team_Recent_Cover_Streak_Fav"],      g["Team_Recent_Cover_Games_Fav"])
+    g["Team_Recent_Cover_Rate_Home_Fav"]   = _rate(g["Team_Recent_Cover_Streak_Home_Fav"], g["Team_Recent_Cover_Games_Home_Fav"])
+    g["Team_Recent_Cover_Rate_Away_Fav"]   = _rate(g["Team_Recent_Cover_Streak_Away_Fav"], g["Team_Recent_Cover_Games_Away_Fav"])
+
+    # Keep your original "on streak" flags (count-based)
     g["On_Cover_Streak"]          = (g["Team_Recent_Cover_Streak"]          >= on_thresh).astype(int)
     g["On_Cover_Streak_Home"]     = (g["Team_Recent_Cover_Streak_Home"]     >= on_thresh).astype(int)
     g["On_Cover_Streak_Away"]     = (g["Team_Recent_Cover_Streak_Away"]     >= on_thresh).astype(int)
@@ -6228,13 +6244,20 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     g["On_Cover_Streak_Away_Fav"] = (g["Team_Recent_Cover_Streak_Away_Fav"] >= on_thresh).astype(int)
 
     streak_cols = [
+        # sums
         "Team_Recent_Cover_Streak","Team_Recent_Cover_Streak_Home","Team_Recent_Cover_Streak_Away",
         "Team_Recent_Cover_Streak_Fav","Team_Recent_Cover_Streak_Home_Fav","Team_Recent_Cover_Streak_Away_Fav",
+        # denoms
+        "Team_Recent_Cover_Games","Team_Recent_Cover_Games_Home","Team_Recent_Cover_Games_Away",
+        "Team_Recent_Cover_Games_Fav","Team_Recent_Cover_Games_Home_Fav","Team_Recent_Cover_Games_Away_Fav",
+        # rates
+        "Team_Recent_Cover_Rate","Team_Recent_Cover_Rate_Home","Team_Recent_Cover_Rate_Away",
+        "Team_Recent_Cover_Rate_Fav","Team_Recent_Cover_Rate_Home_Fav","Team_Recent_Cover_Rate_Away_Fav",
+        # flags
         "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
         "On_Cover_Streak_Fav","On_Cover_Streak_Home_Fav","On_Cover_Streak_Away_Fav"
     ]
     return g[["Sport","Market","Game_Key","Team","Game_Start"] + streak_cols]
-
 
 def train_sharp_model_from_bq(
     *,
@@ -6768,12 +6791,9 @@ def train_sharp_model_from_bq(
           .merge(fav_away,      on=["Sport","Market","Game_Key","Team"], how="left", validate="1:1")
     )
     
-  
-
     
    
-    
-    
+  
     
 
     before = len(df_bt)
@@ -7971,10 +7991,18 @@ def train_sharp_model_from_bq(
             "Dist_to_3",
             "Dist_to_7",
             "Dist_to_10",
-            'Team_Recent_Cover_Streak','Team_Recent_Cover_Streak_Home','Team_Recent_Cover_Streak_Away',
-            'Team_Recent_Cover_Streak_Fav','Team_Recent_Cover_Streak_Home_Fav','Team_Recent_Cover_Streak_Away_Fav',
-            'On_Cover_Streak','On_Cover_Streak_Home','On_Cover_Streak_Away',
-            'On_Cover_Streak_Fav','On_Cover_Streak_Home_Fav','On_Cover_Streak_Away_Fav'
+                    # sums
+            "Team_Recent_Cover_Streak","Team_Recent_Cover_Streak_Home","Team_Recent_Cover_Streak_Away",
+            "Team_Recent_Cover_Streak_Fav","Team_Recent_Cover_Streak_Home_Fav","Team_Recent_Cover_Streak_Away_Fav",
+            # denoms
+            "Team_Recent_Cover_Games","Team_Recent_Cover_Games_Home","Team_Recent_Cover_Games_Away",
+            "Team_Recent_Cover_Games_Fav","Team_Recent_Cover_Games_Home_Fav","Team_Recent_Cover_Games_Away_Fav",
+            # rates
+            "Team_Recent_Cover_Rate","Team_Recent_Cover_Rate_Home","Team_Recent_Cover_Rate_Away",
+            "Team_Recent_Cover_Rate_Fav","Team_Recent_Cover_Rate_Home_Fav","Team_Recent_Cover_Rate_Away_Fav",
+            # flags
+            "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
+            "On_Cover_Streak_Fav","On_Cover_Streak_Home_Fav","On_Cover_Streak_Away_Fav"
             
         ]
         
