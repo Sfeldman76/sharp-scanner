@@ -5750,46 +5750,45 @@ def apply_blended_sharp_score(
     scored_all = []
     # ---------- models presence ----------
     # ---------- models presence ----------
-
-    def _norm_market_key(m) -> str | None:
-    if m is None:
-        return None
-    s = str(m).strip().lower()
-    if not s or s in ("nan", "<na>", "none"):
-        return None
-
-    # collapse common variants + "contains" patterns
-    if ("spread" in s) or (s in ("ats",)):
-        return "spreads"
-    if ("total" in s) or ("overunder" in s) or (s in ("ou", "o/u")):
-        return "totals"
-    if ("money" in s) or (s in ("ml", "moneyline")) or ("h2h" in s) or ("headtohead" in s):
-        return "h2h"
-
-    # leave unknowns as-is (but trimmed)
-    return s
-
-
-    # normalize trained_models keys too (VERY IMPORTANT)
-    trained_models = trained_models or {}
-    trained_models_norm_raw = {str(k).strip().lower(): v for k, v in trained_models.items()}
+    # ------------------ HARD BACKFILL: Market ------------------
+    def _norm_market(m: str) -> str:
+        m = ("" if m is None else str(m)).lower().strip()
+        if m in ("spread", "spreads", "ats") or ("spread" in m): return "spreads"
+        if m in ("total", "totals", "ou", "overunder") or ("total" in m): return "totals"
+        if m in ("h2h", "ml", "moneyline", "money_line") or ("money" in m) or ("h2h" in m): return "h2h"
+        return m
     
-    trained_models_norm = {}
-    for k, v in trained_models_norm_raw.items():
-        kk = _norm_market_key(k)
-        if kk is None:
-            continue
-        trained_models_norm[kk] = v
+    if 'Market' not in df.columns:
+        df['Market'] = ""
     
-    def _has_any_model(bundle):
-        if isinstance(bundle, dict):
-            return any(k in bundle for k in (
-                "model","calibrator",
-                "model_logloss","model_auc",
-                "calibrator_logloss","calibrator_auc"
-            ))
-        return bundle is not None
+    m_raw = df['Market'].astype('string').fillna("").str.lower().str.strip()
     
+    # If Market_Norm exists and is usable, use it
+    if 'Market_Norm' in df.columns:
+        mn = df['Market_Norm'].astype('string').fillna("").str.lower().str.strip()
+        m_raw = m_raw.where(m_raw.ne(""), mn)
+    
+    # Infer for rows still blank
+    blank = (m_raw == "")
+    if blank.any():
+        v = pd.to_numeric(df.loc[blank, 'Value'], errors='coerce')
+        o = pd.to_numeric(df.loc[blank, 'Odds_Price'], errors='coerce') if 'Odds_Price' in df.columns else pd.Series(np.nan, index=v.index)
+    
+        # Heuristics:
+        # - H2H: Value often equals Odds_Price (american odds) and magnitude is large
+        is_h2h = v.notna() & o.notna() & (v.abs() >= 80) & (o.abs() >= 80) & ((v - o).abs() < 1e-6)
+        # - Spreads: point line magnitude usually <= ~40
+        is_spreads = v.notna() & (v.abs() <= 40) & (~is_h2h)
+        # - Totals: point line magnitude typically > 40 and < 400
+        is_totals = v.notna() & (v.abs() > 40) & (v.abs() < 400) & (~is_h2h)
+    
+        m_raw.loc[is_h2h.index[is_h2h]] = "h2h"
+        m_raw.loc[is_spreads.index[is_spreads]] = "spreads"
+        m_raw.loc[is_totals.index[is_totals]] = "totals"
+    
+    df['Market'] = m_raw.map(_norm_market)
+    df['Market_norm'] = df['Market'].astype('string').map(_norm_market)
+        
     HAS_MODELS = any(_has_any_model(v) for v in trained_models_norm.values())
     logger.info("📦 HAS_MODELS=%s; model markets: %s", HAS_MODELS, sorted(trained_models_norm.keys()))
     
