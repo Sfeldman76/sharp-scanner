@@ -7902,9 +7902,10 @@ def train_sharp_model_from_bq(
         features = [
             # 🔹 Core sharp signals
             'Sharp_Move_Signal',
-            'Sharp_Limit_Jump','Sharp_Time_Score','Book_lift_x_Sharp',
-            'Book_lift_x_Magnitude',
-            'Book_lift_x_PROB_SHIFT','Sharp_Limit_Total',
+            'Sharp_Limit_Jump','Sharp_Time_Score',#'Book_lift_x_Sharp',
+            #'Book_lift_x_Magnitude',
+            #'Book_lift_x_PROB_SHIFT',
+            'Sharp_Limit_Total',
             'Is_Reinforced_MultiMarket','Market_Leader',#'LimitUp_NoMove_Flag',
         
             # 🔹 Market response
