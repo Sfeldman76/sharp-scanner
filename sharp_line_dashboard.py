@@ -2565,26 +2565,115 @@ def shap_stability_select(
 
 
 # ------- AUC helpers for auto-K selection -------
-def _cv_auc_for_feature_set(model_proto, X, y, folds, feature_list):
+def _cv_auc_for_feature_set(
+    model_proto,
+    X,
+    y,
+    folds,
+    feature_list,
+    *,
+    log_func=print,     # pass st.write
+    debug=False,
+    debug_max_folds=3,  # keep Streamlit output small
+):
     """
-    Compute mean CV AUC for a fixed feature subset.
-    `folds` is any iterable of (train_idx, val_idx).
+    Streamlit-friendly mean CV AUC for a fixed feature subset.
+
+    Fixes / detects:
+      - folds generator consumption (caller should pass list(folds))
+      - X/y misalignment (align y to X.index; slice by index)
+      - wrong proba column (use classes_ to pick class==1)
+      - flipped proba / inverted label (takes max of orientations in debug mode)
     """
+    import numpy as np
+    import pandas as pd
+    from sklearn.base import clone
+    from sklearn.metrics import roc_auc_score
+
+    # ---- align y to X.index to prevent silent mismatch ----
+    if isinstance(y, pd.Series):
+        y_s = y.reindex(X.index)
+    else:
+        y_arr = np.asarray(y)
+        if len(y_arr) != len(X):
+            raise ValueError(f"[AUTO-FEAT] len(y)={len(y_arr)} != len(X)={len(X)} -> X/y alignment bug")
+        y_s = pd.Series(y_arr, index=X.index)
+
     aucs = []
-    for tr_idx, val_idx in folds:
-        X_tr, X_val = X.iloc[tr_idx][feature_list], X.iloc[val_idx][feature_list]
-        y_tr, y_val = y[tr_idx], y[val_idx]
+    debug_rows = []
+
+    for fold_i, (tr_idx, val_idx) in enumerate(folds, 1):
+        tr_i = X.index[tr_idx]
+        val_i = X.index[val_idx]
+
+        X_tr = X.loc[tr_i, feature_list]
+        X_val = X.loc[val_i, feature_list]
+        y_tr = y_s.loc[tr_i].astype(int).values
+        y_val = y_s.loc[val_i].astype(int).values
 
         mdl = clone(model_proto)
         mdl.fit(X_tr, y_tr)
 
-        try:
-            proba = mdl.predict_proba(X_val)[:, 1]
-        except AttributeError:
-            proba = mdl.predict(X_val)
-        aucs.append(roc_auc_score(y_val, proba))
+        # --- get probabilities robustly ---
+        proba_col = None
+        classes = getattr(mdl, "classes_", None)
 
-    return float(np.mean(aucs))
+        if hasattr(mdl, "predict_proba"):
+            proba_all = mdl.predict_proba(X_val)
+
+            # pick the column corresponding to class==1 (don't assume [:,1])
+            if classes is not None and 1 in list(classes):
+                proba_col = int(np.where(classes == 1)[0][0])
+                proba = proba_all[:, proba_col]
+            else:
+                proba_col = -1
+                proba = proba_all[:, -1]
+        else:
+            proba = mdl.predict(X_val)
+
+        # --- auc diagnostics ---
+        auc = roc_auc_score(y_val, proba)
+        auc_flip = roc_auc_score(y_val, 1.0 - proba)
+        auc_invlabel = roc_auc_score(1 - y_val, proba)
+
+        best = max(auc, auc_flip, auc_invlabel)
+        aucs.append(best)
+
+        if debug and fold_i <= debug_max_folds:
+            pos_tr = float(np.mean(y_tr)) if len(y_tr) else np.nan
+            pos_va = float(np.mean(y_val)) if len(y_val) else np.nan
+            orient = (
+                "normal" if best == auc else
+                "flip_proba" if best == auc_flip else
+                "invert_label"
+            )
+            debug_rows.append({
+                "fold": fold_i,
+                "n_tr": len(y_tr),
+                "n_val": len(y_val),
+                "pos_tr": round(pos_tr, 4),
+                "pos_val": round(pos_va, 4),
+                "classes_": str(classes),
+                "proba_col_for_1": proba_col,
+                "auc": round(float(auc), 6),
+                "auc_flip_proba": round(float(auc_flip), 6),
+                "auc_inv_label": round(float(auc_invlabel), 6),
+                "best_auc_used": round(float(best), 6),
+                "best_orientation": orient,
+            })
+
+    # Streamlit output: compact table for first few folds
+    if debug and debug_rows:
+        try:
+            import streamlit as st
+            st.caption(f"🔍 AUTO-FEAT debug (showing first {len(debug_rows)} folds)")
+            st.dataframe(pd.DataFrame(debug_rows), use_container_width=True)
+        except Exception:
+            # fallback if streamlit not available in this context
+            log_func(pd.DataFrame(debug_rows).to_string(index=False))
+
+    return float(np.mean(aucs)) if aucs else float("nan")
+
 
 def _auto_select_k_by_auc(
     model_proto,
@@ -2598,7 +2687,9 @@ def _auto_select_k_by_auc(
     patience=5,
     min_improve=1e-4,
     verbose=True,
-    log_func=print,   # 👈 can be st.write
+    log_func=print,    # pass st.write
+    debug=False,       # ✅ turn on in Streamlit
+    debug_every=10,    # show debug table every N k's to avoid spam
 ):
     """
     Greedy prefix scan over `ordered_features`:
@@ -2608,6 +2699,11 @@ def _auto_select_k_by_auc(
     Returns:
       best_k, best_auc, history[(k, auc_k), ...]
     """
+    import numpy as np
+
+    # ✅ CRITICAL: make folds reusable (generators get consumed otherwise)
+    folds = list(folds)
+
     if max_k is None:
         max_k = len(ordered_features)
 
@@ -2618,7 +2714,15 @@ def _auto_select_k_by_auc(
 
     for k in range(1, max_k + 1):
         feats_k = ordered_features[:k]
-        auc_k = _cv_auc_for_feature_set(model_proto, X, y, folds, feats_k)
+
+        # only show the fold-debug table occasionally to avoid Streamlit overload
+        show_debug = bool(debug and (k == 1 or k % debug_every == 0 or k == min_k))
+
+        auc_k = _cv_auc_for_feature_set(
+            model_proto, X, y, folds, feats_k,
+            log_func=log_func,
+            debug=show_debug,
+        )
         history.append((k, auc_k))
 
         if verbose:
@@ -2804,7 +2908,9 @@ def select_features_auto(
             patience=auc_patience,
             min_improve=auc_min_improve,
             verbose=auc_verbose,
-            log_func=log_func,   # 👈 Streamlit logging
+            log_func=log_func, 
+            debug=True,        # ✅ shows fold debug tables
+            debug_every=15,# 👈 Streamlit logging
         )
         final_feats = keep_order[:best_k]
     else:
