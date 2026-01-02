@@ -7679,7 +7679,27 @@ def apply_blended_sharp_score(
                 try:
                     if team_feature_map is not None and not team_feature_map.empty:
                         df_inverse['Team'] = df_inverse['Outcome_Norm'].astype(str).str.lower().str.strip()
-                        df_inverse = df_inverse.merge(team_feature_map, on='Team', how='left')
+                        # --- SAFE team_feature_map merge (prevents Sport_x/Market_y, etc.) ---
+                        if team_feature_map is not None and hasattr(team_feature_map, "empty") and not team_feature_map.empty:
+                            tfm = team_feature_map.copy()
+                        
+                            # Normalize Team key
+                            tfm["Team"] = tfm["Team"].astype(str).str.lower().str.strip()
+                            df_inverse["Team"] = df_inverse["Team"].astype(str).str.lower().str.strip()
+                        
+                            # IMPORTANT: do NOT bring Sport/Market from tfm (df already has them)
+                            drop_ctx = [c for c in ["Sport", "Market", "Market_norm", "Market_Norm", "Sport_Norm"] if c in tfm.columns]
+                            tfm = tfm.drop(columns=drop_ctx, errors="ignore")
+                        
+                            # Deduplicate map on Team to avoid row explosion
+                            tfm = tfm.drop_duplicates(subset=["Team"], keep="last")
+                        
+                            # Only merge columns that won't collide
+                            tfm_cols = [c for c in tfm.columns if c == "Team" or c not in df_inverse.columns]
+                            tfm_use = tfm[tfm_cols]
+                        
+                            df_inverse = df_inverse.merge(tfm_use, on="Team", how="left", validate="m:1")
+
                         logger.info("🔁 Re-merged team-level features for %d inverse rows.", len(df_inverse))
                 except Exception as e:
                     logger.error("❌ Failed to re-merge team-level features for inverse rows: %s", e)
