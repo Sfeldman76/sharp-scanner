@@ -6807,45 +6807,100 @@ def apply_blended_sharp_score(
         del df_sp_enriched, df_sp
         # import gc; gc.collect()
     
-    # ===== Team features (per-market map → merge onto canon) =====
-    if team_feature_map is not None and hasattr(team_feature_map, 'empty') and not team_feature_map.empty:
-        # make sure the map is 1-row per team to avoid row multiplication
-        tfm = team_feature_map.copy()
-        tfm['Team'] = tfm['Team'].astype(str).str.lower().str.strip()
-        tfm = tfm.drop_duplicates(subset=['Team'], keep='last')
-    
-        df['Team'] = df['Outcome_Norm'].astype(str).str.strip().str.lower()
-        df = df.merge(tfm, on='Team', how='left')
-        df.drop(columns=['Team'], inplace=True, errors='ignore')
-    
-    # ---- Ensure Market_norm (and keep it compact) ----
-    if 'Market_norm' not in df.columns:
-        if 'Market' in df.columns and not df.empty:
-            m = df['Market'].astype('string')
-            df['Market_norm'] = m.str.lower().str.strip().astype('category')
-        else:
-            df['Market_norm'] = pd.Series(pd.NA, index=df.index, dtype='category')
-         # ---- Ensure Market_norm (and Outcome_Norm) exist before use ----
-   
-    
-    # Outcome_Norm: safe normalized outcome for downstream keys
+ 
+    # ---- Ensure Outcome_Norm first ----
     if 'Outcome_Norm' not in df.columns:
         if 'Outcome' in df.columns and not df.empty:
-            df['Outcome_Norm'] = (
-                df['Outcome'].astype('string')
-                              .str.lower()
-                              .str.strip()
-            )
+            df['Outcome_Norm'] = df['Outcome'].astype('string').str.lower().str.strip()
         else:
-            df['Outcome_Norm'] = pd.Series(pd.Categorical([None] * len(df)), index=df.index)
-    _mem("Precanon") 
-    # 4) Determine markets present to score (only those we actually have trained bundles for)
+            df['Outcome_Norm'] = pd.Series(pd.NA, index=df.index, dtype='string')
+    
+    # ---- Ensure Market_norm (canonical to spreads/totals/h2h) BEFORE team merge ----
+    MARKET_KEY_MAP = {
+        "spread": "spreads", "spreads": "spreads", "ats": "spreads",
+        "total": "totals",   "totals": "totals",   "ou": "totals", "overunder": "totals",
+        "moneyline": "h2h",  "ml": "h2h", "h2h": "h2h", "money_line": "h2h",
+    }
+    if 'Market' in df.columns and not df.empty:
+        m_raw = df['Market'].astype('string').fillna("").str.lower().str.strip()
+        df['Market_norm'] = m_raw.map(lambda s: MARKET_KEY_MAP.get(s, s)).astype('category')
+    else:
+        df['Market_norm'] = pd.Series(pd.NA, index=df.index, dtype='category')
+    
+    # ===== Team features (SAFE merge; cannot wipe Sport/Market) =====
+    if team_feature_map is not None and hasattr(team_feature_map, 'empty') and not team_feature_map.empty:
+    
+        tfm = team_feature_map.copy()
+    
+        # normalize map keys
+        if 'Sport' in tfm.columns:
+            tfm['Sport'] = tfm['Sport'].astype(str).str.upper().str.strip()
+        if 'Market' in tfm.columns:
+            tfm['Market'] = tfm['Market'].astype(str).str.lower().str.strip()
+        if 'Team' in tfm.columns:
+            tfm['Team'] = tfm['Team'].astype(str).str.lower().str.strip()
+    
+        # must be unique on join keys to avoid row explosion
+        key_cols = [c for c in ['Sport', 'Market', 'Team'] if c in tfm.columns]
+        if key_cols:
+            tfm = tfm.drop_duplicates(subset=key_cols, keep='last')
+        else:
+            tfm = tfm.drop_duplicates(subset=['Team'], keep='last')
+    
+        # only apply to team-like markets (spreads + h2h). totals outcomes are over/under.
+        mask_teamlike = df['Market_norm'].astype(str).isin(['spreads', 'h2h'])
+    
+        if mask_teamlike.any():
+            cols = ['Sport', 'Market_norm', 'Outcome_Norm']
+            if 'Team_For_Join' in df.columns:
+                cols.append('Team_For_Join')
+            df_team = df.loc[mask_teamlike, cols].copy()
+    
+            # build Team join key (prefer Team_For_Join; fallback Outcome_Norm)
+            if 'Team_For_Join' in df_team.columns:
+                df_team['Team'] = df_team['Team_For_Join'].astype(str).str.lower().str.strip()
+            else:
+                df_team['Team'] = df_team['Outcome_Norm'].astype(str).str.lower().str.strip()
+    
+            # normalize df_team join keys
+            df_team['Sport'] = df_team['Sport'].astype(str).str.upper().str.strip()
+            df_team['Market'] = df_team['Market_norm'].astype(str).str.lower().str.strip()
+    
+            # choose join keys based on what exists in tfm
+            join_left = []
+            join_right = []
+            if 'Sport' in tfm.columns:
+                join_left.append('Sport');  join_right.append('Sport')
+            if 'Market' in tfm.columns:
+                join_left.append('Market'); join_right.append('Market')
+            join_left.append('Team');      join_right.append('Team')
+    
+            merged = df_team.merge(
+                tfm,
+                left_on=join_left,
+                right_on=join_right,
+                how='left',
+                validate='m:1'   # 🔥 prevents the blow-up
+            )
+    
+            # write back ONLY non-protected columns
+            protected = {'Sport', 'Market', 'Market_norm', 'Outcome_Norm', 'Team', 'Team_For_Join'}
+            fill_cols = [c for c in tfm.columns if c not in protected]  # only map-provided cols
+    
+            for c in fill_cols:
+                if c not in df.columns:
+                    df[c] = pd.NA
+                df.loc[mask_teamlike, c] = merged[c].values
+    
+    # ---- NOW determine markets_present ----
     if HAS_MODELS and not df.empty:
         markets_present = [
-            mk for mk in df['Market_norm'].dropna().unique().tolist()
+            mk for mk in df['Market_norm'].dropna().astype(str).unique().tolist()
             if mk in model_markets_lower
         ]
     else:
+        markets_present = []
+
         markets_present = []
     _suffix_snapshot(df, "before canon ")
     # ---------- NO-MODEL / NO-ELIGIBLE-MARKETS EARLY EXIT ----------
