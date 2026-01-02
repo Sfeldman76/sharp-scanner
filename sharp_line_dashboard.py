@@ -2585,10 +2585,7 @@ def _cv_auc_for_feature_set(
       - wrong proba column (use classes_ to pick class==1)
       - flipped proba / inverted label (takes max of orientations in debug mode)
     """
-    import numpy as np
-    import pandas as pd
-    from sklearn.base import clone
-    from sklearn.metrics import roc_auc_score
+    
 
     # ---- align y to X.index to prevent silent mismatch ----
     if isinstance(y, pd.Series):
@@ -2699,7 +2696,7 @@ def _auto_select_k_by_auc(
     Returns:
       best_k, best_auc, history[(k, auc_k), ...]
     """
-    import numpy as np
+  
 
     # ✅ CRITICAL: make folds reusable (generators get consumed otherwise)
     folds = list(folds)
