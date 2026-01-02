@@ -5750,14 +5750,37 @@ def apply_blended_sharp_score(
     scored_all = []
     # ---------- models presence ----------
     # ---------- models presence ----------
+
+    def _norm_market_key(m) -> str | None:
+    if m is None:
+        return None
+    s = str(m).strip().lower()
+    if not s or s in ("nan", "<na>", "none"):
+        return None
+
+    # collapse common variants + "contains" patterns
+    if ("spread" in s) or (s in ("ats",)):
+        return "spreads"
+    if ("total" in s) or ("overunder" in s) or (s in ("ou", "o/u")):
+        return "totals"
+    if ("money" in s) or (s in ("ml", "moneyline")) or ("h2h" in s) or ("headtohead" in s):
+        return "h2h"
+
+    # leave unknowns as-is (but trimmed)
+    return s
+
+
+    # normalize trained_models keys too (VERY IMPORTANT)
     trained_models = trained_models or {}
+    trained_models_norm_raw = {str(k).strip().lower(): v for k, v in trained_models.items()}
     
-    # normalize keys but don’t filter out tuples/objects
-    trained_models_norm = {str(k).strip().lower(): v for k, v in trained_models.items()}
-    # --- Back-compat aliases for older code paths ---
-    trained_models_lc = trained_models_norm
-    trained_models_by_market = trained_models_norm
-    model_markets_lower = sorted(trained_models_norm.keys())
+    trained_models_norm = {}
+    for k, v in trained_models_norm_raw.items():
+        kk = _norm_market_key(k)
+        if kk is None:
+            continue
+        trained_models_norm[kk] = v
+    
     def _has_any_model(bundle):
         if isinstance(bundle, dict):
             return any(k in bundle for k in (
@@ -5765,11 +5788,29 @@ def apply_blended_sharp_score(
                 "model_logloss","model_auc",
                 "calibrator_logloss","calibrator_auc"
             ))
-        return bundle is not None  # accept tuples or single models too
+        return bundle is not None
     
     HAS_MODELS = any(_has_any_model(v) for v in trained_models_norm.values())
-    logger.info("📦 HAS_MODELS=%s; model markets: %s",
-                HAS_MODELS, sorted(trained_models_norm.keys()))
+    logger.info("📦 HAS_MODELS=%s; model markets: %s", HAS_MODELS, sorted(trained_models_norm.keys()))
+    
+    # normalize df markets
+    if 'Market' in df.columns and not df.empty:
+        df['_Market_raw'] = df['Market'].astype('string')
+        df['Market_norm'] = df['_Market_raw'].map(_norm_market_key).astype('string')
+        logger.info("🧭 Raw Market uniques: %s", sorted(df['_Market_raw'].dropna().astype(str).str.lower().str.strip().unique().tolist())[:50])
+        logger.info("🧭 Norm Market uniques: %s", sorted(df['Market_norm'].dropna().unique().tolist()))
+    else:
+        df['Market_norm'] = pd.Series(pd.NA, index=df.index, dtype='string')
+    
+    # intersection of markets present and markets modeled
+    if HAS_MODELS and not df.empty:
+        df_mkts = set(df['Market_norm'].dropna().unique().tolist())
+        model_mkts = set(trained_models_norm.keys())
+        markets_present = sorted(df_mkts.intersection(model_mkts))
+    else:
+        markets_present = []
+    
+    logger.info("✅ Eligible markets to score: %s", markets_present)
     # ---------- frame guard ----------
     if df is None or len(df) == 0:
         df = pd.DataFrame()
