@@ -7896,8 +7896,12 @@ def train_sharp_model_from_bq(
 
      
         
-
-        
+        if "st" in globals():
+            st.write(
+                "📋 df_market columns BEFORE feature selection:",
+                sorted(df_market.columns.tolist())
+            )
+            
         # --- start with your manual core list ---
         features = [
             # 🔹 Core sharp signals
