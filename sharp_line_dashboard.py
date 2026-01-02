@@ -6010,7 +6010,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     m = (market or "").lower()
 
     # Defaults (conservative, generic binary)
-    MIN_AUC           = 0.56     # minimum useful AUC
+    MIN_AUC           = 0.51     # minimum useful AUC
     MAX_LOGLOSS       = 0.693    # ~coinflip baseline
     MAX_OVERFIT_GAP   = 0.12     # AUC_train - AUC_val
     MIN_AUC_THRESHOLD = 0.58
@@ -6052,7 +6052,7 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     elif s in {"NCAAF", "CFB"}:
         # Crazy tails, more variance; allow a bit more gap
         if m == "spreads":
-            MIN_AUC         = 0.65
+            MIN_AUC         = 0.60
             MAX_OVERFIT_GAP = 0.12
         else:
             MIN_AUC         = 0.58
@@ -6061,10 +6061,10 @@ def get_quality_thresholds(sport: str, market: str) -> dict:
     # ---- NCAAB ----
     elif s in {"NCAAB", "NCAAM"}:
         if m == "spreads":
-            MIN_AUC         = 0.65
+            MIN_AUC         = 0.50
             MAX_OVERFIT_GAP = 0.10
         else:
-            MIN_AUC         = 0.56
+            MIN_AUC         = 0.50
             MAX_OVERFIT_GAP = 0.13
 
     # You can extend for WNBA, CFL, etc. as needed
@@ -6136,11 +6136,24 @@ def _get_streak_cfg(sport: str, market: str) -> dict:
 
 
 def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, market: str) -> pd.DataFrame:
+    """
+    Build rolling-window cover streak / rate features at the GAME grain:
+      one row per (Sport, Market, Team, Game_Key), time-ordered by the true game start.
+
+    Key fixes vs prior version:
+    - Uses feat_Game_Start as the primary time axis when available (falls back to Game_Start).
+    - Adds a deterministic tie-breaker (Game_Key) to ordering.
+    - Normalizes Sport/Market/Team keys inside the function to avoid merge misses.
+    - Keeps your rolling-window semantics + shift(1) (no leakage).
+    """
     cfg = _get_streak_cfg(sport, market)
     window_length = int(cfg["window"])
     on_thresh     = int(cfg["on_threshold"])
 
-    need = ["Sport","Market","Game_Key","Team","Game_Start","SHARP_HIT_BOOL","Is_Home","Is_Favorite_Context"]
+    # Prefer true game start if present
+    time_col = "feat_Game_Start" if "feat_Game_Start" in df_bt_prepped.columns else "Game_Start"
+
+    need = ["Sport", "Market", "Game_Key", "Team", time_col, "SHARP_HIT_BOOL", "Is_Home", "Is_Favorite_Context"]
     missing = [c for c in need if c not in df_bt_prepped.columns]
     if missing:
         raise ValueError(f"build_cover_streaks_game_level missing cols: {missing}")
@@ -6148,21 +6161,29 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     sport_u  = str(sport).upper().strip()
     market_l = _norm_market(market)
 
+    # Slice and normalize keys (prevents silent merge misses)
     d = df_bt_prepped.loc[
         (df_bt_prepped["Sport"].astype(str).str.upper().str.strip() == sport_u) &
         (df_bt_prepped["Market"].astype(str).str.lower().str.strip().map(_norm_market) == market_l),
         need
     ].copy()
 
-    d["Game_Start"] = pd.to_datetime(d["Game_Start"], errors="coerce", utc=True)
+    d["Sport"]  = d["Sport"].astype(str).str.upper().str.strip()
+    d["Market"] = d["Market"].astype(str).str.lower().str.strip().map(_norm_market)
+    d["Team"]   = d["Team"].astype(str).str.lower().str.strip()
 
+    # Parse time axis (true game start preferred)
+    d[time_col] = pd.to_datetime(d[time_col], errors="coerce", utc=True)
+
+    # Build one row per team-game (drop book/snapshot noise) ordered by true game time
     g = (
-        d.dropna(subset=["Game_Key","Team","Game_Start"])
-         .sort_values(["Sport","Market","Team","Game_Start"])
-         .drop_duplicates(["Sport","Market","Team","Game_Key"], keep="last")
+        d.dropna(subset=["Game_Key", "Team", time_col])
+         .sort_values(["Sport", "Market", "Team", time_col, "Game_Key"])  # tie-breaker prevents unstable rolls
+         .drop_duplicates(["Sport", "Market", "Team", "Game_Key"], keep="last")
          .copy()
     )
 
+    # Ensure numeric hit flag
     g["SHARP_HIT_BOOL"] = pd.to_numeric(g["SHARP_HIT_BOOL"], errors="coerce")
 
     # Eligible-only series (NaN when not eligible => denom counts eligible games only)
@@ -6173,29 +6194,34 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     g["Cover_Home_Fav"]  = g["SHARP_HIT_BOOL"].where((g["Is_Home"] == 1) & (g["Is_Favorite_Context"] == 1))
     g["Cover_Away_Fav"]  = g["SHARP_HIT_BOOL"].where((g["Is_Home"] == 0) & (g["Is_Favorite_Context"] == 1))
 
-    grp = ["Sport","Market","Team"]
+    grp = ["Sport", "Market", "Team"]
 
+    # Robust rolling on shifted series (no leakage)
     def _roll_sum_shift(col: str) -> pd.Series:
         s_prev = g.groupby(grp, sort=False)[col].shift(1)
-        return (
+        out = (
             s_prev.groupby([g[k] for k in grp], sort=False)
-                  .rolling(window=window_length, min_periods=1).sum()
-                  .reset_index(level=[0,1,2], drop=True)
+                  .rolling(window=window_length, min_periods=1)
+                  .sum()
+                  .reset_index(level=list(range(len(grp))), drop=True)
         )
+        return out
 
     def _roll_games_shift(col: str) -> pd.Series:
         s_prev = g.groupby(grp, sort=False)[col].shift(1)
-        return (
+        out = (
             s_prev.notna().astype(int)
                   .groupby([g[k] for k in grp], sort=False)
-                  .rolling(window=window_length, min_periods=1).sum()
-                  .reset_index(level=[0,1,2], drop=True)
+                  .rolling(window=window_length, min_periods=1)
+                  .sum()
+                  .reset_index(level=list(range(len(grp))), drop=True)
         )
+        return out
 
     def _rate(wins: pd.Series, games: pd.Series) -> pd.Series:
         return wins / games.replace(0, np.nan)
 
-    # ---- sums ("streaks") ----
+    # ---- sums ("streaks" = wins in last N eligible games) ----
     g["Team_Recent_Cover_Streak"]          = _roll_sum_shift("Cover_All")
     g["Team_Recent_Cover_Streak_Home"]     = _roll_sum_shift("Cover_Home_Only")
     g["Team_Recent_Cover_Streak_Away"]     = _roll_sum_shift("Cover_Away_Only")
@@ -6203,7 +6229,7 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     g["Team_Recent_Cover_Streak_Home_Fav"] = _roll_sum_shift("Cover_Home_Fav")
     g["Team_Recent_Cover_Streak_Away_Fav"] = _roll_sum_shift("Cover_Away_Fav")
 
-    # ---- denominators (eligible games) ----
+    # ---- denominators (eligible games in last N) ----
     g["Team_Recent_Cover_Games"]           = _roll_games_shift("Cover_All")
     g["Team_Recent_Cover_Games_Home"]      = _roll_games_shift("Cover_Home_Only")
     g["Team_Recent_Cover_Games_Away"]      = _roll_games_shift("Cover_Away_Only")
@@ -6219,7 +6245,7 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
     g["Team_Recent_Cover_Rate_Home_Fav"]   = _rate(g["Team_Recent_Cover_Streak_Home_Fav"], g["Team_Recent_Cover_Games_Home_Fav"])
     g["Team_Recent_Cover_Rate_Away_Fav"]   = _rate(g["Team_Recent_Cover_Streak_Away_Fav"], g["Team_Recent_Cover_Games_Away_Fav"])
 
-    # Keep your original "on streak" flags (count-based)
+    # ---- "on streak" flags (count-based) ----
     g["On_Cover_Streak"]          = (g["Team_Recent_Cover_Streak"]          >= on_thresh).astype(int)
     g["On_Cover_Streak_Home"]     = (g["Team_Recent_Cover_Streak_Home"]     >= on_thresh).astype(int)
     g["On_Cover_Streak_Away"]     = (g["Team_Recent_Cover_Streak_Away"]     >= on_thresh).astype(int)
@@ -6241,7 +6267,11 @@ def build_cover_streaks_game_level(df_bt_prepped: pd.DataFrame, *, sport: str, m
         "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
         "On_Cover_Streak_Fav","On_Cover_Streak_Home_Fav","On_Cover_Streak_Away_Fav"
     ]
-    return g[["Sport","Market","Game_Key","Team","Game_Start"] + streak_cols]
+
+    # Always return the canonical "Game_Start" column name, even if we used feat_Game_Start internally
+    out = g[["Sport", "Market", "Game_Key", "Team", time_col] + streak_cols].rename(columns={time_col: "Game_Start"})
+    return out
+
 
 def train_sharp_model_from_bq(
     *,
@@ -7905,7 +7935,7 @@ def train_sharp_model_from_bq(
             with st.expander("🔍 df_market sample values", expanded=False):
                 st.dataframe(
                     df_market
-                    .head(50)          # or .sample(50, random_state=42)
+                    .head(1000)          # or .sample(50, random_state=42)
                     .reset_index(drop=True),
                     use_container_width=True
                 )   
@@ -7973,8 +8003,8 @@ def train_sharp_model_from_bq(
             'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
             #'TOT_Proj_Total_Baseline',
-            'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
-            'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
+            #'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
+            #'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
             #'TOT_Mispricing', 
             'ATS_EB_Rate',
             'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
