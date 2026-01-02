@@ -7961,9 +7961,10 @@ def train_sharp_model_from_bq(
             'Outcome_Spread_Edge',
             'Outcome_Cover_Prob',
             'model_fav_vs_market_fav_agree',
-            'TOT_Proj_Total_Baseline','TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
-            'TOT_GT_H','TOT_GT_A','TOT_LgAvg_Total',
-            'TOT_Mispricing', 
+            #'TOT_Proj_Total_Baseline',
+            'TOT_Off_H','TOT_Def_H','TOT_Off_A','TOT_Def_A',
+            'TOT_GT_H','TOT_GT_A',#'TOT_LgAvg_Total',
+            #'TOT_Mispricing', 
             'ATS_EB_Rate',
             'ATS_EB_Margin',            # Optional: only if cover_margin_col was set
             'ATS_Roll_Margin_Decay',    # Optional: only if cover_margin_col was set
