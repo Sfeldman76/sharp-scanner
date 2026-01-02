@@ -6793,8 +6793,6 @@ def train_sharp_model_from_bq(
     
     
    
-  
-    
 
     before = len(df_bt)
     df_bt = df_bt.drop_duplicates(subset=dedup_cols, keep='last')
@@ -8056,17 +8054,7 @@ def train_sharp_model_from_bq(
         ])
 
         # add recent team model performance stats
-        extend_unique(features, [
-            'Team_Past_Avg_Model_Prob',
-            'Team_Past_Hit_Rate',
-            'Team_Past_Avg_Model_Prob_Home',
-            'Team_Past_Hit_Rate_Home',
-            'Team_Past_Avg_Model_Prob_Away',
-            'Team_Past_Hit_Rate_Away',
-            
-            'Avg_Recent_Cover_Streak','Avg_Recent_Cover_Streak_Home',
-            'Avg_Recent_Cover_Streak_Away'
-        ])
+       
         
         # add time-context flags
         extend_unique(features, ['Is_Night_Game','Is_PrimeTime','DOW_Sin'])
