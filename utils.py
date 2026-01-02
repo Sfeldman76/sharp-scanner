@@ -5815,13 +5815,13 @@ def apply_blended_sharp_score(
     df['Market'] = m_raw.map(_norm_market)
     df['Market_norm'] = df['Market'].astype('string').map(_norm_market)
         
-    HAS_MODELS = any(_has_any_model(v) for v in trained_models_norm.values())
-    logger.info("📦 HAS_MODELS=%s; model markets: %s", HAS_MODELS, sorted(trained_models_norm.keys()))
+
     
     # normalize df markets
     if 'Market' in df.columns and not df.empty:
         df['_Market_raw'] = df['Market'].astype('string')
-        df['Market_norm'] = df['_Market_raw'].map(_norm_market_key).astype('string')
+        df['Market_norm'] = df['_Market_raw'].map(_norm_market).astype('string')
+
         logger.info("🧭 Raw Market uniques: %s", sorted(df['_Market_raw'].dropna().astype(str).str.lower().str.strip().unique().tolist())[:50])
         logger.info("🧭 Norm Market uniques: %s", sorted(df['Market_norm'].dropna().unique().tolist()))
     else:
