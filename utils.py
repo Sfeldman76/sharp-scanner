@@ -6427,50 +6427,87 @@ def apply_blended_sharp_score(
   
     
        
-    # ---- determine market key for bundle lookup ----
-    if 'Market' in df.columns and df['Market'].notna().any():
-        mkey = _norm_market(df['Market'].dropna().iloc[0])
+  
+    # ---- determine which markets are present in df (robust; no iloc[0]) ----
+    if "Market_norm" in df.columns and df["Market_norm"].notna().any():
+        markets_present = (
+            df["Market_norm"].astype(str).str.lower().str.strip().map(_norm_market).dropna().unique().tolist()
+        )
+    elif "Market" in df.columns and df["Market"].notna().any():
+        markets_present = (
+            df["Market"].astype(str).str.lower().str.strip().map(_norm_market).dropna().unique().tolist()
+        )
     else:
-        mkey = None
+        markets_present = []
     
-    bundle = None
+    # ---- normalize trained_models into a dict keyed by market_norm ----
+    trained_models_by_market = {}
     if isinstance(trained_models_norm, dict):
-        bundle = trained_models_norm.get(mkey)
+        for k, b in trained_models_norm.items():
+            mk = _norm_market(k) if k else None
+            if mk is None and isinstance(b, dict):
+                meta = b.get("meta") or {}
+                mk2 = meta.get("market") or b.get("market")
+                mk = _norm_market(mk2) if mk2 else None
+            if mk:
+                trained_models_by_market[mk] = b
     
-        if bundle is None:
-            for b in trained_models_norm.values():
-                if isinstance(b, dict) and _norm_market((b.get("meta") or {}).get("market")) == mkey:
-                    bundle = b
-                    break
+    # ---- load maps for ALL markets present (or fallback to ALL bundles) ----
+    bundles = []
+    if markets_present:
+        for mk in markets_present:
+            b = trained_models_by_market.get(mk)
+            if isinstance(b, dict):
+                bundles.append(b)
+    else:
+        # if df doesn't tell us the market yet, at least don't fail:
+        bundles = [b for b in trained_models_by_market.values() if isinstance(b, dict)]
     
-    team_feature_map     = bundle.get("team_feature_map") if isinstance(bundle, dict) else None
-    book_reliability_map = bundle.get("book_reliability_map") if isinstance(bundle, dict) else None
+    # ---- pull maps, concat, and dedupe ----
+    tfm_list = []
+    brm_list = []
     
-    # hard defaults so merges never explode
-    if not isinstance(team_feature_map, pd.DataFrame):
-        team_feature_map = pd.DataFrame()
-    if not isinstance(book_reliability_map, pd.DataFrame):
-        book_reliability_map = pd.DataFrame()
+    for b in bundles:
+        tfm = b.get("team_feature_map")
+        if isinstance(tfm, pd.DataFrame) and not tfm.empty:
+            tfm_list.append(tfm)
     
-    # normalize keys ONLY after load
+        brm = b.get("book_reliability_map")
+        if isinstance(brm, pd.DataFrame) and not brm.empty:
+            brm_list.append(brm)
+    
+    team_feature_map = pd.concat(tfm_list, ignore_index=True) if tfm_list else pd.DataFrame()
+    book_reliability_map = pd.concat(brm_list, ignore_index=True) if brm_list else pd.DataFrame()
+    
+    # ---- normalize keys ONLY after load, then DEDUPE ----
     if not team_feature_map.empty:
         if "Team" in team_feature_map.columns:
             team_feature_map["Team"] = team_feature_map["Team"].astype(str).str.lower().str.strip()
         if "Sport" in team_feature_map.columns:
             team_feature_map["Sport"] = team_feature_map["Sport"].astype(str).str.upper().str.strip()
         if "Market" in team_feature_map.columns:
-            team_feature_map["Market"] = team_feature_map["Market"].astype(str).str.lower().str.strip()
-            # optional: normalize synonyms
-            team_feature_map["Market"] = team_feature_map["Market"].map(_norm_market)
+            team_feature_map["Market"] = (
+                team_feature_map["Market"].astype(str).str.lower().str.strip().map(_norm_market)
+            )
     
+        # ✅ critical: prevent row explosion + prevent Market_x/Market_y cascades
+        need_cols = [c for c in ["Sport", "Market", "Team"] if c in team_feature_map.columns]
+        if len(need_cols) == 3:
+            team_feature_map = team_feature_map.drop_duplicates(["Sport", "Market", "Team"], keep="last").copy()
+        elif "Team" in team_feature_map.columns:
+            team_feature_map = team_feature_map.drop_duplicates(["Team"], keep="last").copy()
+    
+    # book map: normalize lightly (dedupe optional, depends on its schema)
     if not book_reliability_map.empty:
-        if "Bookmaker" in book_reliability_map.columns:
-            book_reliability_map["Bookmaker"] = book_reliability_map["Bookmaker"].astype(str).str.lower().str.strip()
-        if "Sport" in book_reliability_map.columns:
-            book_reliability_map["Sport"] = book_reliability_map["Sport"].astype(str).str.upper().str.strip()
-        if "Market" in book_reliability_map.columns:
-            book_reliability_map["Market"] = book_reliability_map["Market"].astype(str).str.lower().str.strip()
-            book_reliability_map["Market"] = book_reliability_map["Market"].map(_norm_market)
+        for col in ["Sport", "Market", "Bookmaker", "Bookmaker_Norm", "Book"]:
+            if col in book_reliability_map.columns:
+                if col == "Sport":
+                    book_reliability_map[col] = book_reliability_map[col].astype(str).str.upper().str.strip()
+                elif col == "Market":
+                    book_reliability_map[col] = book_reliability_map[col].astype(str).str.lower().str.strip().map(_norm_market)
+                else:
+                    book_reliability_map[col] = book_reliability_map[col].astype(str).str.lower().str.strip()
+
 
       # === Cross-Market Pivots (Value + Odds) with guaranteed columns ===
     MARKETS = ["spreads","totals","h2h"]
