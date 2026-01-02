@@ -7988,16 +7988,16 @@ def train_sharp_model_from_bq(
             "Dist_to_10",
                     # sums
             "Team_Recent_Cover_Streak","Team_Recent_Cover_Streak_Home","Team_Recent_Cover_Streak_Away",
-            "Team_Recent_Cover_Streak_Fav","Team_Recent_Cover_Streak_Home_Fav","Team_Recent_Cover_Streak_Away_Fav",
+           
             # denoms
             "Team_Recent_Cover_Games","Team_Recent_Cover_Games_Home","Team_Recent_Cover_Games_Away",
-            "Team_Recent_Cover_Games_Fav","Team_Recent_Cover_Games_Home_Fav","Team_Recent_Cover_Games_Away_Fav",
+            
             # rates
             "Team_Recent_Cover_Rate","Team_Recent_Cover_Rate_Home","Team_Recent_Cover_Rate_Away",
-            "Team_Recent_Cover_Rate_Fav","Team_Recent_Cover_Rate_Home_Fav","Team_Recent_Cover_Rate_Away_Fav",
+           
             # flags
             "On_Cover_Streak","On_Cover_Streak_Home","On_Cover_Streak_Away",
-            "On_Cover_Streak_Fav","On_Cover_Streak_Home_Fav","On_Cover_Streak_Away_Fav"
+       
             
         ]
         
